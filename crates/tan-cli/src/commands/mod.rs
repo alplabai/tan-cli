@@ -1,11 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Command dispatch root for the `tan` CLI: declares the per-command sub-modules
 //! and the shared `CommandRun` result every command's `run` returns.
-//!
-//! DRAFT SEED (ADR-0020 Phase 2): only the SDK-interacting commands are ported
-//! here. The rest of `cli-rs`'s surface (init/scaffold/examples/completion/diff/
-//! presets/pinmux/explain/inspect/trace/debug-config/support-bundle) is dropped
-//! from this snapshot and lands in the history-preserving extraction later.
 use crate::exit::ExitCode;
 
 /// Uniform outcome of running a command: exit code plus the human/JSON output split.
@@ -22,11 +17,35 @@ pub struct CommandRun {
 pub mod bootstrap;
 /// `tan build` (and `image`/`flash`/`clean`/`renode`) — `west` build workflows.
 pub mod build;
+/// `tan completion` — shell completion script generation.
+pub mod completion;
+/// `tan debug-config` — debug/launch configuration drafting.
+pub mod debug_config;
+/// `tan diff` — show how `board.yaml` normalization changes the effective config.
+pub mod diff;
 /// `tan doctor` — diagnose debug readiness (`--build` runs the build-readiness preflight).
 pub mod doctor;
+/// `tan examples` — list the SDK's ready-made example projects (for `init --from-example`).
+pub mod examples;
+/// `tan explain` — explain a project/module template or a generation target.
+pub mod explain;
 /// `tan generate` — Zephyr conf / DTS overlay / CMake args / Yocto conf codegen.
 pub mod generate;
+/// `tan init` — new-project scaffolding (including heterogeneous cores).
+pub mod init;
+/// `tan inspect` — inspect resolved project/debug context values.
+pub mod inspect;
+/// `tan pinmux` — the E1M pinmux capability table (E1M pad → silicon function) for a SoM family.
+pub mod pinmux;
+/// `tan presets` — list SDK presets (SKUs/SoMs, carriers) + built-in catalogue defaults.
+pub mod presets;
+/// `tan scaffold` — scaffold a module into an existing project.
+pub mod scaffold;
 /// `tan sdk` — SDK release listing/management.
 pub mod sdk;
+/// `tan support-bundle` — collect a diagnostics support bundle.
+pub mod support_bundle;
+/// `tan trace` — trace the generation decisions a build would make.
+pub mod trace;
 /// `tan validate` — schema-aware `board.yaml` validation.
 pub mod validate;
