@@ -10,4 +10,5 @@ the workspace README for the three-repo model.
 Ported commands: `validate`, `generate`, `init`, `scaffold`, `examples`,
 `doctor`, `completion`, `diff`, `presets`, `pinmux`, `explain`, `inspect`,
 `trace`, `debug-config`, `support-bundle`, `sdk`, `bootstrap`, `build`
-(and its `image`/`flash`/`clean`/`renode` west-forwarding wrappers).
+(and its `image`/`flash`/`clean`/`renode`/`size`/`migrate`/`lock`/`quality`
+west-forwarding wrappers).

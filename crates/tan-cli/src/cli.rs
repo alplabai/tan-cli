@@ -131,6 +131,14 @@ pub enum Command {
     Clean(WestForwardArgs),
     /// Boot the system manifest in Renode (`west alp-renode`).
     Renode(WestForwardArgs),
+    /// Report firmware footprint vs the SoM memory budget (`west alp-size`).
+    Size(WestForwardArgs),
+    /// Migrate board.yaml to the current schema (`west alp-migrate`).
+    Migrate(WestForwardArgs),
+    /// Pin/lock library dependencies (`west alp-lock`).
+    Lock(WestForwardArgs),
+    /// Run the board.yaml quality checks (`west alp-quality`).
+    Quality(WestForwardArgs),
 }
 
 /// Args for `pinmux`: the family target, resolved from an explicit `--family`
@@ -145,7 +153,8 @@ pub struct PinmuxArgs {
     pub family: Option<String>,
 }
 
-/// Args for commands that forward verbatim to a `west alp-*` subcommand (`image`/`flash`/`clean`/`renode`).
+/// Args for commands that forward verbatim to a `west alp-*` subcommand
+/// (`image`/`flash`/`clean`/`renode`/`size`/`migrate`/`lock`/`quality`).
 #[derive(Debug, Args)]
 pub struct WestForwardArgs {
     /// Arguments forwarded verbatim to the underlying `west alp-*` command

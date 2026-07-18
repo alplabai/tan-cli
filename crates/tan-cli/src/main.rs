@@ -41,6 +41,10 @@ fn main() {
         Command::Flash(args) => commands::build::run(&global, "flash", &args.args),
         Command::Clean(args) => commands::build::run(&global, "clean", &args.args),
         Command::Renode(args) => commands::build::run(&global, "renode", &args.args),
+        Command::Size(args) => commands::build::run(&global, "size", &args.args),
+        Command::Migrate(args) => commands::build::run(&global, "migrate", &args.args),
+        Command::Lock(args) => commands::build::run(&global, "lock", &args.args),
+        Command::Quality(args) => commands::build::run(&global, "quality", &args.args),
     };
 
     emit(&global.format, run.json.as_deref(), &run.text);
