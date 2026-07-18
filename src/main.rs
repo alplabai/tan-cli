@@ -10,6 +10,11 @@
 //! DRAFT SKELETON — subcommands are stubs. Real implementations land in
 //! Phase 2, reconciled with alp-sdk-vscode's `cli-rs`. See README.md.
 
+// Draft skeleton: the build-plan consumer structs (src/build_plan.rs) are the
+// contract, but their fields aren't consumed until the executor lands in
+// Phase 2 — allow them to be unread so `clippy -D warnings` stays green.
+#![allow(dead_code)]
+
 mod build_plan;
 mod commands;
 
