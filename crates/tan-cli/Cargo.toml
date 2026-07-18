@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "tan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository = "https://github.com/alplabai/tan-cli"
+rust-version.workspace = true
+readme = "README.md"
+description = "The native `tan` CLI for Alp Lab embedded projects: board.yaml validate/generate, toolchain bootstrap, and plan-driven build/flash with a stable JSON envelope."
+
+[[bin]]
+name = "tan"
+path = "src/main.rs"
+
+[dependencies]
+tan-core = { path = "../tan-core", version = "0.0.0" }
+clap.workspace = true
+inquire.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+anyhow.workspace = true
+owo-colors.workspace = true
+indicatif.workspace = true
