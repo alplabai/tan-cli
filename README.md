@@ -47,7 +47,7 @@ crates/
   tan-cli/                     # the `tan` binary — argument parsing, IO, subprocess exec
     src/main.rs
     src/cli.rs
-    src/commands/{build,sdk,doctor,validate,generate,bootstrap}.rs
+    src/commands/{build,sdk,doctor,validate,generate,bootstrap,init,…}.rs
     …
 ```
 
@@ -56,14 +56,14 @@ crate name and cosmetic `alp`-branding changed). `build_plan.rs` additionally
 carries the newer ADR-0020 fields the SDK now emits — per-slice
 `envAppendPath` and the top-level `executionPolicy`.
 
-## What's ported (this snapshot)
+## What's ported
 
 - **tan-core** — the full domain crate (verbatim from `alp-core`).
-- **tan-cli** — `validate`, `generate`, `doctor`, `sdk`, `bootstrap`, and
-  `build` (with its `image` / `flash` / `clean` / `renode` west-forwarding
-  wrappers). The other 13 `cli-rs` commands (init/scaffold/examples/completion/
-  diff/presets/pinmux/explain/inspect/trace/debug-config/support-bundle) are
-  **dropped** from this snapshot; they return in the full extraction.
+- **tan-cli** — the full `cli-rs` command surface: `validate`, `generate`,
+  `init`, `scaffold`, `examples`, `doctor`, `completion`, `diff`, `presets`,
+  `pinmux`, `explain`, `inspect`, `trace`, `debug-config`, `support-bundle`,
+  `sdk`, `bootstrap`, and `build` (with its `image` / `flash` / `clean` /
+  `renode` west-forwarding wrappers).
 
 ## The seam: the build-plan
 
