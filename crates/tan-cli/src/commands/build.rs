@@ -16,8 +16,9 @@ use std::process::Command;
 
 use serde::Serialize;
 use tan_core::ProjectContext;
-use tan_core::build_plan::{BuildPlan, parse_build_plan, summarize_plan};
+use tan_core::build_plan::{BuildPlan, PolicyAction, parse_build_plan, summarize_plan};
 use tan_core::debug::{DoctorCheck, DoctorStatus};
+use tan_core::plan_exec::{assemble_slice_env, resolve_action};
 use tan_core::preflight::{
     PreflightInput, build_preflight_checks, preflight_blocked, preflight_next_steps,
     preflight_summary,
@@ -395,14 +396,22 @@ struct BuildRunData {
     slices: Vec<SliceResult>,
 }
 
-/// Environment overrides that let `tan build` run a plan slice with no manual
-/// setup: `ZEPHYR_BASE` (the resolved workspace's zephyr) and
-/// `EXTRA_ZEPHYR_MODULES` (the alp-sdk checkout, so `west build -b <alp-board>`
-/// finds the SDK's boards). Never overrides a key the plan's slice env pins.
+/// Consumer-mechanism env the plan deliberately does NOT carry, filled in as a
+/// gap-filler so `tan build` runs a plan slice with no manual setup:
+///   * `ZEPHYR_BASE` — the resolved workspace's zephyr. Per ADR-0020 the plan
+///     never emits this; it is pure consumer mechanism, always hand-derived.
+///   * `EXTRA_ZEPHYR_MODULES` — the alp-sdk checkout, so `west build -b
+///     <alp-board>` finds the SDK's boards. This now comes FROM the plan's
+///     `env_append_path`; the hand-derived value is only a FALLBACK for an older
+///     plan that carries neither the slice-env pin nor the `env_append_path`
+///     entry (plan wins / CLI fills gaps).
+///
+/// Never overrides a key the plan's slice env pins.
 fn zephyr_env_overrides(
     zephyr_base: Option<&Path>,
     sdk_root: Option<&Path>,
     slice_env: &std::collections::BTreeMap<String, String>,
+    env_append_path: &std::collections::BTreeMap<String, Vec<String>>,
 ) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     if !slice_env.contains_key("ZEPHYR_BASE") {
@@ -410,7 +419,11 @@ fn zephyr_env_overrides(
             out.push(("ZEPHYR_BASE", base.to_string_lossy().into_owned()));
         }
     }
-    if !slice_env.contains_key("EXTRA_ZEPHYR_MODULES") {
+    // Plan wins: skip the hand-derived value when the plan carries
+    // EXTRA_ZEPHYR_MODULES (as a slice-env pin or an env_append_path entry).
+    if !slice_env.contains_key("EXTRA_ZEPHYR_MODULES")
+        && !env_append_path.contains_key("EXTRA_ZEPHYR_MODULES")
+    {
         if let Some(sdk) = sdk_root {
             out.push(("EXTRA_ZEPHYR_MODULES", sdk.to_string_lossy().into_owned()));
         }
@@ -441,19 +454,30 @@ fn execute_slices(g: &GlobalArgs, project: Project, plan: &BuildPlan, base: &str
     for slice in &plan.slices {
         let backend = slice.backend.as_str().to_string();
         let Some(cmd) = &slice.command else {
+            // `null_command` policy: Skip (default / older plan) vs Fail.
+            let fail = resolve_action(
+                plan.execution_policy.as_ref(),
+                |p| p.null_command,
+                PolicyAction::Skip,
+            ) == PolicyAction::Fail;
             if text_mode {
+                let (ds, tail) = if fail {
+                    (DoctorStatus::Fail, "no command")
+                } else {
+                    (DoctorStatus::Warn, "no command, skipped")
+                };
                 eprintln!(
                     "{}",
-                    theme.slice_result(
-                        DoctorStatus::Warn,
-                        &format!("{} [{}] — no command, skipped", slice.core_id, backend)
-                    )
+                    theme.slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, tail))
                 );
+            }
+            if fail {
+                any_failed = true;
             }
             results.push(SliceResult {
                 core_id: slice.core_id.clone(),
                 backend,
-                status: "skipped".to_string(),
+                status: if fail { "failed" } else { "skipped" }.to_string(),
                 rc: None,
                 reason: Some(SKIP_REASON_NO_COMMAND.to_string()),
             });
@@ -505,32 +529,60 @@ fn execute_slices(g: &GlobalArgs, project: Project, plan: &BuildPlan, base: &str
             // with `is_file()`).
             let reason =
                 format!("{tool} not found in PATH; this is normal on non-{backend} dev hosts");
+            // `missing_tool` policy: Skip (default / older plan) vs Fail.
+            let fail = resolve_action(
+                plan.execution_policy.as_ref(),
+                |p| p.missing_tool,
+                PolicyAction::Skip,
+            ) == PolicyAction::Fail;
             if text_mode {
+                let ds = if fail {
+                    DoctorStatus::Fail
+                } else {
+                    DoctorStatus::Warn
+                };
                 eprintln!(
                     "{}",
-                    theme.slice_result(
-                        DoctorStatus::Warn,
-                        &format!("{} [{}] — {}", slice.core_id, backend, reason)
-                    )
+                    theme
+                        .slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, reason))
                 );
+            }
+            if fail {
+                any_failed = true;
             }
             results.push(SliceResult {
                 core_id: slice.core_id.clone(),
                 backend,
-                status: "skipped".to_string(),
+                status: if fail { "failed" } else { "skipped" }.to_string(),
                 rc: None,
                 reason: Some(reason),
             });
             continue;
         }
 
+        // Assemble the slice subprocess env (pure, in tan-core): slice env +
+        // plan `env_append_path` (append/de-dup, seeded from the inherited
+        // process env) + the CLI's pre-gated consumer-mechanism gap-fillers
+        // (ZEPHYR_BASE always; EXTRA_ZEPHYR_MODULES only when the plan didn't
+        // carry it — "plan wins / CLI fills gaps").
+        let gap_fillers = zephyr_env_overrides(
+            zephyr_base.as_deref(),
+            sdk_root.as_deref(),
+            &slice.env,
+            &slice.env_append_path,
+        );
+        let env = assemble_slice_env(
+            &slice.env,
+            &slice.env_append_path,
+            |k| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned()),
+            &gap_fillers,
+        );
+
         let mut command = Command::new(&tool);
-        command.args(&cmd.args).current_dir(&cwd).envs(&slice.env);
-        for (key, value) in
-            zephyr_env_overrides(zephyr_base.as_deref(), sdk_root.as_deref(), &slice.env)
-        {
-            command.env(key, value);
-        }
+        command
+            .args(&cmd.args)
+            .current_dir(&cwd)
+            .envs(env.iter().map(|(k, v)| (k, v)));
         with_venv_on_path(&mut command, &tool);
 
         let (status, rc) = if text_mode {
@@ -1192,12 +1244,20 @@ mod tests {
             .collect()
     }
 
+    fn append_map(pairs: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, vs)| (k.to_string(), vs.iter().map(|s| s.to_string()).collect()))
+            .collect()
+    }
+
     #[test]
     fn env_overrides_set_base_and_modules_when_absent() {
         let got = zephyr_env_overrides(
             Some(Path::new("/ws/zephyr")),
             Some(Path::new("/sdk")),
             &slice_env(&[("ALP_SDK_ROOT", "/sdk")]),
+            &append_map(&[]),
         );
         assert_eq!(
             got,
@@ -1218,13 +1278,28 @@ mod tests {
                 ("ZEPHYR_BASE", "/pinned"),
                 ("EXTRA_ZEPHYR_MODULES", "/pinned-mod"),
             ]),
+            &append_map(&[]),
         );
         assert!(got.is_empty());
     }
 
     #[test]
+    fn env_overrides_skip_extra_modules_when_plan_appends_it() {
+        // Plan wins / CLI fills gaps: the plan carries EXTRA_ZEPHYR_MODULES in
+        // env_append_path, so the CLI must NOT hand-derive it — but ZEPHYR_BASE
+        // (which the plan never carries) is still filled in.
+        let got = zephyr_env_overrides(
+            Some(Path::new("/ws/zephyr")),
+            Some(Path::new("/sdk")),
+            &slice_env(&[]),
+            &append_map(&[("EXTRA_ZEPHYR_MODULES", &["/plan/sdk"])]),
+        );
+        assert_eq!(got, vec![("ZEPHYR_BASE", "/ws/zephyr".to_string())]);
+    }
+
+    #[test]
     fn env_overrides_empty_when_nothing_resolved() {
-        assert!(zephyr_env_overrides(None, None, &slice_env(&[])).is_empty());
+        assert!(zephyr_env_overrides(None, None, &slice_env(&[]), &append_map(&[])).is_empty());
     }
 
     #[test]
@@ -1391,6 +1466,49 @@ mod tests {
             "got: {reason}"
         );
         assert!(env["issues"].as_array().unwrap().is_empty());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_fails_missing_tool_when_policy_says_fail() {
+        // execution_policy.missingTool = "fail" flips the default skip: a slice
+        // whose tool isn't on this host now FAILS the run (exit 1), instead of
+        // the None-policy skip covered by the test above.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let json = r#"{
+          "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+          "slices": [
+            { "coreId": "a32_cluster", "backend": "yocto", "buildDir": "build/a32",
+              "command": { "tool": "alp-missing-tool-e114", "args": [], "cwd": "build/a32" } }
+          ],
+          "executionPolicy": { "missingTool": "fail" },
+          "sharedArtefacts": []
+        }"#;
+        let plan = parse_build_plan(json).unwrap();
+        let base = unique_temp_dir("alp-exec-missing-tool-fail");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(&g, project, &plan, base.to_str().unwrap());
+        assert_eq!(run.exit.code(), 1);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], false);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "failed");
+        // The reason string the CLI shows is unchanged (only skip->fail routing).
+        let reason = slices[0]["reason"].as_str().unwrap();
+        assert!(
+            reason.contains("not found in PATH; this is normal on non-"),
+            "got: {reason}"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }

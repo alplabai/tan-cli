@@ -15,6 +15,7 @@ pub mod diff;
 pub mod loader;
 pub mod model;
 pub mod pinmux;
+pub mod plan_exec;
 pub mod preflight;
 pub mod presets;
 pub mod preview;
