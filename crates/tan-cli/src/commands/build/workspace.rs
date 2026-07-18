@@ -55,6 +55,14 @@ pub(super) fn invoke_sdk_emit(
         context.sdk_root.as_deref().map(Path::new),
     )
     .unwrap_or_else(|| context.python_binary.clone());
+    // Same guard `validate`/`generate` apply: a Python < 3.10 dies the moment an
+    // SDK script imports (`@dataclass(slots=True)`) with a cryptic
+    // `TypeError: dataclass() got an unexpected keyword argument 'slots'`.
+    // Surface an actionable message instead of that traceback — the build/emit
+    // path previously lacked this guard (found via the tan↔alp-sdk e2e run).
+    if let Some(message) = crate::util::python_too_old(&planner_python) {
+        return Err((err_code, message));
+    }
     let scripts_dir = Path::new(sdk_root).join("scripts");
     // Invoke the planner as a module (`python -m alp_orchestrate`) with scripts/
     // on PYTHONPATH — the same way the SDK's own west_commands do. That resolves
