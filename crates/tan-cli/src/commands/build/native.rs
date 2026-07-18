@@ -95,5 +95,5 @@ pub(super) fn native_build(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
         );
     }
 
-    execute_slices(g, project, &plan, &base)
+    execute_slices(g, &context, project, &plan, &base)
 }

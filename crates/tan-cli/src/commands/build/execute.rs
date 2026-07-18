@@ -4,21 +4,25 @@
 //! (text). Also the consumer-mechanism env gap-filler (`ZEPHYR_BASE` /
 //! `EXTRA_ZEPHYR_MODULES`).
 
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::Command;
 
 use serde::Serialize;
+use tan_core::ProjectContext;
 use tan_core::build_plan::{BuildPlan, PolicyAction};
 use tan_core::debug::{DoctorCheck, DoctorStatus};
 use tan_core::plan_exec::{assemble_slice_env, resolve_action};
 use tan_core::preflight::preflight_summary;
+use tan_core::system_manifest::{
+    overlay_run_results, parse_system_manifest, serialize_system_manifest,
+};
 
 use super::CommandRun;
 use crate::cli::GlobalArgs;
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 
-use super::workspace::{west_program, west_workspace_dir, with_venv_on_path};
+use super::workspace::{invoke_sdk_emit, west_program, west_workspace_dir, with_venv_on_path};
 
 /// `SliceResult.reason` for a plan slice that carries no command. The recap
 /// keys its `(no command)` rendering off this exact string — keep producer and
@@ -98,6 +102,7 @@ fn zephyr_env_overrides(
 /// Runs all slices (does not abort early) and exits non-zero if any failed.
 pub(super) fn execute_slices(
     g: &GlobalArgs,
+    context: &ProjectContext,
     project: Project,
     plan: &BuildPlan,
     base: &str,
@@ -297,6 +302,11 @@ pub(super) fn execute_slices(
         });
     }
 
+    // Output seam: write the post-build system-manifest.yaml (the contract
+    // `tan flash`/`size`/`image` read) reflecting this run's per-slice status.
+    // Best-effort — a fetch/parse/write failure warns but never fails the build.
+    write_post_build_manifest(context, plan, base, &results, text_mode);
+
     let exit = if any_failed {
         ExitCode::RuntimeFailure
     } else {
@@ -373,10 +383,83 @@ pub(super) fn execute_slices(
     }
 }
 
+/// Write `<build_root>/system-manifest.yaml` after a `--native` run: fetch the
+/// plan-time projection from the SDK (`--emit system-manifest`), overlay this
+/// run's per-slice status (identity mapping — both use `ok`/`failed`/`skipped`),
+/// serialize, and write under the plan's build root. Best-effort: the manifest
+/// is a post-build convenience, so any failure (no SDK, emit error, unsafe
+/// build_root, unwritable dir) warns (text mode only) and returns — it never
+/// changes the build's exit result.
+fn write_post_build_manifest(
+    context: &ProjectContext,
+    plan: &BuildPlan,
+    base: &str,
+    results: &[SliceResult],
+    warn_enabled: bool,
+) {
+    let warn = |msg: String| {
+        if warn_enabled {
+            eprintln!("note: skipped writing system-manifest.yaml — {msg}");
+        }
+    };
+
+    // Confine the write under the build tree (mirrors materialise_plan): a plan
+    // build_root that's absolute or escapes via `..` is refused.
+    let rel = Path::new(&plan.build_root);
+    if rel.is_absolute() || rel.components().any(|c| matches!(c, Component::ParentDir)) {
+        warn(format!("unsafe build_root `{}`", plan.build_root));
+        return;
+    }
+
+    let yaml = match invoke_sdk_emit(context, "system-manifest", "build.manifest-unavailable") {
+        Ok(y) => y,
+        Err((_, msg)) => return warn(msg),
+    };
+    let mut manifest = match parse_system_manifest(&yaml) {
+        Ok(m) => m,
+        Err(e) => return warn(e.to_string()),
+    };
+
+    let overlay: Vec<(String, String, Option<String>)> = results
+        .iter()
+        // The executor doesn't resolve artefact paths yet; pass None so the
+        // plan-time output_artefact (if any) is preserved.
+        .map(|r| (r.core_id.clone(), r.status.clone(), None))
+        .collect();
+    overlay_run_results(&mut manifest, &overlay);
+
+    let out = match serialize_system_manifest(&manifest) {
+        Ok(s) => s,
+        Err(e) => return warn(e),
+    };
+
+    let dest = Path::new(base).join(rel).join("system-manifest.yaml");
+    if let Some(parent) = dest.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            return warn(e.to_string());
+        }
+    }
+    if let Err(e) = std::fs::write(&dest, out) {
+        warn(e.to_string());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tan_core::build_plan::parse_build_plan;
+
+    /// A context with no SDK — `invoke_sdk_emit` errs, exercising the graceful
+    /// degrade in `write_post_build_manifest` without a real planner.
+    fn no_sdk_context() -> ProjectContext {
+        ProjectContext {
+            workspace_root: None,
+            sdk_root: None,
+            board_yaml_path: None,
+            west_cwd: None,
+            python_binary: "python3".to_string(),
+        }
+    }
 
     fn slice_env(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
         pairs
@@ -479,7 +562,13 @@ mod tests {
             root: None,
             board_yaml: None,
         };
-        let run = execute_slices(&g, project, &plan, base.to_str().unwrap());
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
         assert_eq!(run.exit.code(), 0);
 
         let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
@@ -521,7 +610,13 @@ mod tests {
             root: None,
             board_yaml: None,
         };
-        let run = execute_slices(&g, project, &plan, base.to_str().unwrap());
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
         assert_eq!(run.exit.code(), 0);
 
         let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
@@ -564,7 +659,13 @@ mod tests {
             root: None,
             board_yaml: None,
         };
-        let run = execute_slices(&g, project, &plan, base.to_str().unwrap());
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
         assert_eq!(run.exit.code(), 1);
 
         let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
@@ -612,7 +713,13 @@ mod tests {
             root: None,
             board_yaml: None,
         };
-        let run = execute_slices(&g, project, &plan, base.to_str().unwrap());
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
         assert_eq!(run.exit.code(), 1);
 
         let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
