@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "tan"
+version = "0.0.0"
+edition = "2021"
+description = "The standalone Alp Lab build CLI — consumes the alp-sdk build-plan and executes it."
+license = "Apache-2.0"
+repository = "https://github.com/alplabai/tan-cli"
+
+[[bin]]
+name = "tan"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
