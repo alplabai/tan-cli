@@ -4,7 +4,10 @@
 //! (text). Also the consumer-mechanism env gap-filler (`ZEPHYR_BASE` /
 //! `EXTRA_ZEPHYR_MODULES`).
 
-use std::path::{Component, Path};
+mod env;
+mod manifest;
+
+use std::path::Path;
 use std::process::Command;
 
 use serde::Serialize;
@@ -13,16 +16,13 @@ use tan_core::build_plan::{BuildPlan, PolicyAction};
 use tan_core::debug::{DoctorCheck, DoctorStatus};
 use tan_core::plan_exec::{assemble_slice_env, resolve_action};
 use tan_core::preflight::preflight_summary;
-use tan_core::system_manifest::{
-    overlay_run_results, parse_system_manifest, serialize_system_manifest,
-};
 
 use super::CommandRun;
 use crate::cli::GlobalArgs;
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 
-use super::workspace::{invoke_sdk_emit, west_program, west_workspace_dir, with_venv_on_path};
+use super::workspace::{west_program, west_workspace_dir, with_venv_on_path};
 
 /// `SliceResult.reason` for a plan slice that carries no command. The recap
 /// keys its `(no command)` rendering off this exact string — keep producer and
@@ -68,41 +68,6 @@ struct BuildRunData {
     base_dir: String,
     /// Outcome of each slice, in plan order.
     slices: Vec<SliceResult>,
-}
-
-/// Consumer-mechanism env the plan deliberately does NOT carry, filled in as a
-/// gap-filler so `tan build` runs a plan slice with no manual setup:
-///   * `ZEPHYR_BASE` — the resolved workspace's zephyr. Per ADR-0020 the plan
-///     never emits this; it is pure consumer mechanism, always hand-derived.
-///   * `EXTRA_ZEPHYR_MODULES` — the alp-sdk checkout, so `west build -b
-///     <alp-board>` finds the SDK's boards. This now comes FROM the plan's
-///     `env_append_path`; the hand-derived value is only a FALLBACK for an older
-///     plan that carries neither the slice-env pin nor the `env_append_path`
-///     entry (plan wins / CLI fills gaps).
-///
-/// Never overrides a key the plan's slice env pins.
-fn zephyr_env_overrides(
-    zephyr_base: Option<&Path>,
-    sdk_root: Option<&Path>,
-    slice_env: &std::collections::BTreeMap<String, String>,
-    env_append_path: &std::collections::BTreeMap<String, Vec<String>>,
-) -> Vec<(&'static str, String)> {
-    let mut out = Vec::new();
-    if !slice_env.contains_key("ZEPHYR_BASE") {
-        if let Some(base) = zephyr_base {
-            out.push(("ZEPHYR_BASE", base.to_string_lossy().into_owned()));
-        }
-    }
-    // Plan wins: skip the hand-derived value when the plan carries
-    // EXTRA_ZEPHYR_MODULES (as a slice-env pin or an env_append_path entry).
-    if !slice_env.contains_key("EXTRA_ZEPHYR_MODULES")
-        && !env_append_path.contains_key("EXTRA_ZEPHYR_MODULES")
-    {
-        if let Some(sdk) = sdk_root {
-            out.push(("EXTRA_ZEPHYR_MODULES", sdk.to_string_lossy().into_owned()));
-        }
-    }
-    out
 }
 
 /// Run each slice's `ToolStep` sequentially under `base`. Text mode streams each
@@ -251,7 +216,7 @@ pub(super) fn execute_slices(
         // process env) + the CLI's pre-gated consumer-mechanism gap-fillers
         // (ZEPHYR_BASE always; EXTRA_ZEPHYR_MODULES only when the plan didn't
         // carry it — "plan wins / CLI fills gaps").
-        let gap_fillers = zephyr_env_overrides(
+        let gap_fillers = env::zephyr_env_overrides(
             zephyr_base.as_deref(),
             sdk_root.as_deref(),
             &slice.env,
@@ -311,7 +276,7 @@ pub(super) fn execute_slices(
         // On success, resolve the real on-disk artefact west produced so the
         // post-build manifest points the consumers at the elf that exists.
         let (output_artefact, build_dir) = if status == "ok" {
-            resolve_zephyr_artefact(&cwd)
+            manifest::resolve_zephyr_artefact(&cwd)
         } else {
             (None, None)
         };
@@ -329,7 +294,7 @@ pub(super) fn execute_slices(
     // Output seam: write the post-build system-manifest.yaml (the contract
     // `tan flash`/`size`/`image` read) reflecting this run's per-slice status.
     // Best-effort — a fetch/parse/write failure warns but never fails the build.
-    write_post_build_manifest(context, plan, base, &results, text_mode);
+    manifest::write_post_build_manifest(context, plan, base, &results, text_mode);
 
     let exit = if any_failed {
         ExitCode::RuntimeFailure
@@ -407,107 +372,6 @@ pub(super) fn execute_slices(
     }
 }
 
-/// Write `<build_root>/system-manifest.yaml` after a `--native` run: fetch the
-/// plan-time projection from the SDK (`--emit system-manifest`), overlay this
-/// run's per-slice status (identity mapping — both use `ok`/`failed`/`skipped`),
-/// serialize, and write under the plan's build root. Best-effort: the manifest
-/// is a post-build convenience, so any failure (no SDK, emit error, unsafe
-/// build_root, unwritable dir) warns (text mode only) and returns — it never
-/// changes the build's exit result.
-fn write_post_build_manifest(
-    context: &ProjectContext,
-    plan: &BuildPlan,
-    base: &str,
-    results: &[SliceResult],
-    warn_enabled: bool,
-) {
-    let warn = |msg: String| {
-        if warn_enabled {
-            eprintln!("note: skipped writing system-manifest.yaml — {msg}");
-        }
-    };
-
-    // Confine the write under the build tree (mirrors materialise_plan): a plan
-    // build_root that's absolute or escapes via `..` is refused.
-    let rel = Path::new(&plan.build_root);
-    if rel.is_absolute() || rel.components().any(|c| matches!(c, Component::ParentDir)) {
-        warn(format!("unsafe build_root `{}`", plan.build_root));
-        return;
-    }
-
-    let yaml = match invoke_sdk_emit(context, "system-manifest", "build.manifest-unavailable") {
-        Ok(y) => y,
-        Err((_, msg)) => return warn(msg),
-    };
-    let mut manifest = match parse_system_manifest(&yaml) {
-        Ok(m) => m,
-        Err(e) => return warn(e.to_string()),
-    };
-
-    let overlay: Vec<(String, String, Option<String>, Option<String>)> = results
-        .iter()
-        // Carry the real artefact/build_dir the run resolved; None preserves the
-        // plan-time value (e.g. for a skipped or non-zephyr slice).
-        .map(|r| {
-            (
-                r.core_id.clone(),
-                r.status.clone(),
-                r.output_artefact.clone(),
-                r.build_dir.clone(),
-            )
-        })
-        .collect();
-    overlay_run_results(&mut manifest, &overlay);
-
-    let out = match serialize_system_manifest(&manifest) {
-        Ok(s) => s,
-        Err(e) => return warn(e),
-    };
-
-    let dest = Path::new(base).join(rel).join("system-manifest.yaml");
-    if let Some(parent) = dest.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return warn(e.to_string());
-        }
-    }
-    if let Err(e) = std::fs::write(&dest, out) {
-        warn(e.to_string());
-    }
-}
-
-/// After a slice builds `ok`, resolve the real `zephyr.elf` west produced and
-/// its build dir. West's default output is a nested `build/` under the slice's
-/// run cwd, so the elf lands at `<cwd>/build/zephyr/zephyr.elf`. Returned
-/// ABSOLUTE so every consumer (`size`/`renode`/`flash`/`image`) uses the paths
-/// verbatim without re-anchoring under its own build_root. `(None, None)` when
-/// no elf is there — a non-Zephyr backend, or a build that wrote elsewhere — so
-/// the manifest keeps its plan-time values.
-///
-/// ponytail: assumes west's default nested `build/` dir; a slice that passes
-/// `-d <other>` isn't matched here — the `is_file` gate then falls back to the
-/// plan-time paths (no regression), upgrade to parse `-d` from the argv if a
-/// custom build dir ever ships in a plan command.
-fn resolve_zephyr_artefact(slice_cwd: &Path) -> (Option<String>, Option<String>) {
-    let west_build = slice_cwd.join("build");
-    let elf = west_build.join("zephyr").join("zephyr.elf");
-    if elf.is_file() {
-        (abs_string(&elf), abs_string(&west_build))
-    } else {
-        (None, None)
-    }
-}
-
-/// Absolute, lossy-string form of a path (no filesystem round-trip beyond
-/// `std::path::absolute`; falls back to the path as-is if that fails).
-fn abs_string(p: &Path) -> Option<String> {
-    Some(
-        std::path::absolute(p)
-            .unwrap_or_else(|_| p.to_path_buf())
-            .to_string_lossy()
-            .into_owned(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,73 +389,8 @@ mod tests {
         }
     }
 
-    fn slice_env(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
-
-    fn append_map(pairs: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
-        pairs
-            .iter()
-            .map(|(k, vs)| (k.to_string(), vs.iter().map(|s| s.to_string()).collect()))
-            .collect()
-    }
-
     fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("{tag}-{}", std::process::id()))
-    }
-
-    #[test]
-    fn env_overrides_set_base_and_modules_when_absent() {
-        let got = zephyr_env_overrides(
-            Some(Path::new("/ws/zephyr")),
-            Some(Path::new("/sdk")),
-            &slice_env(&[("ALP_SDK_ROOT", "/sdk")]),
-            &append_map(&[]),
-        );
-        assert_eq!(
-            got,
-            vec![
-                ("ZEPHYR_BASE", "/ws/zephyr".to_string()),
-                ("EXTRA_ZEPHYR_MODULES", "/sdk".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn env_overrides_respect_plan_pinned_keys() {
-        // The plan already pins both -> nothing is overridden.
-        let got = zephyr_env_overrides(
-            Some(Path::new("/ws/zephyr")),
-            Some(Path::new("/sdk")),
-            &slice_env(&[
-                ("ZEPHYR_BASE", "/pinned"),
-                ("EXTRA_ZEPHYR_MODULES", "/pinned-mod"),
-            ]),
-            &append_map(&[]),
-        );
-        assert!(got.is_empty());
-    }
-
-    #[test]
-    fn env_overrides_skip_extra_modules_when_plan_appends_it() {
-        // Plan wins / CLI fills gaps: the plan carries EXTRA_ZEPHYR_MODULES in
-        // env_append_path, so the CLI must NOT hand-derive it — but ZEPHYR_BASE
-        // (which the plan never carries) is still filled in.
-        let got = zephyr_env_overrides(
-            Some(Path::new("/ws/zephyr")),
-            Some(Path::new("/sdk")),
-            &slice_env(&[]),
-            &append_map(&[("EXTRA_ZEPHYR_MODULES", &["/plan/sdk"])]),
-        );
-        assert_eq!(got, vec![("ZEPHYR_BASE", "/ws/zephyr".to_string())]);
-    }
-
-    #[test]
-    fn env_overrides_empty_when_nothing_resolved() {
-        assert!(zephyr_env_overrides(None, None, &slice_env(&[]), &append_map(&[])).is_empty());
     }
 
     #[test]
