@@ -5,6 +5,14 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- `zephyr_west_flash`: `flash_args.runner` is now **optional**. When absent,
+  `--runner` is omitted and `west flash` defers to the board.cmake default
+  runner (e.g. AEN801's `alif_flash`) instead of hard-erroring. Mirrors the
+  SDK backend contract; fixes `tan flash` on AEN801.
+
 ## [0.1.0] — 2026-07-19
 
 First public release of the `tan` executor CLI (alp-sdk ADR-0020 end-state B):
