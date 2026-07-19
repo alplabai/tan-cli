@@ -26,6 +26,11 @@ owo-colors = "4"
 # Spinners for captured network/IO commands (sdk list/install). Auto-hides on
 # non-TTY; we additionally gate on --quiet/--ci/--non-interactive/JSON.
 indicatif = "0.17"
+# `tan image` only: tar+gzip each built slice's build_dir + sha256 the archive.
+# The one command that needs an archiver; IO layer (tan-cli), never tan-core.
+tar = "0.4"
+flate2 = "1"
+sha2 = "0.10"
 
 [profile.release]
 opt-level = "z"

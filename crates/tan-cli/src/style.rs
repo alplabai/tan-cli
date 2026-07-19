@@ -29,6 +29,11 @@ impl Theme {
         Theme { color }
     }
 
+    /// Whether ANSI styling is on for this invocation.
+    pub fn color(&self) -> bool {
+        self.color
+    }
+
     /// `s` rendered bold when color is on, else returned unchanged.
     fn bold(&self, s: &str) -> String {
         if self.color {

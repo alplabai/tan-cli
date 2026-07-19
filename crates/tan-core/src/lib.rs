@@ -8,10 +8,13 @@ pub const DEFAULT_SOM_SKU: &str = "E1M-AEN701";
 
 pub mod build_plan;
 pub mod build_readiness;
+pub mod clean;
 pub mod clock;
 pub mod debug;
 pub mod debug_launch;
 pub mod diff;
+pub mod flash;
+pub mod image_bundle;
 pub mod loader;
 pub mod model;
 pub mod pinmux;
@@ -22,6 +25,7 @@ pub mod preview;
 pub mod project;
 pub mod sdk;
 pub mod sdk_catalogue;
+pub mod size;
 pub mod system_manifest;
 pub mod validate;
 pub mod wizard;
@@ -33,6 +37,7 @@ pub use build_plan::{
 pub use build_readiness::{
     BuildOs, BuildReadinessReport, BuildToolProbe, board_os_set, build_readiness_report,
 };
+pub use clean::{CleanAction, classify as clean_classify, clean_targets, is_under};
 pub use clock::format_iso8601_utc;
 pub use debug::{
     DebugGenerationTraceDecision, DebugResolvedValue, DebugRuntimeCapabilities, DebugServerKind,
@@ -47,6 +52,17 @@ pub use debug_launch::{
     launch_preview_document, launch_preview_notes,
 };
 pub use diff::{DiffEntry, DiffKind, collect_diff_entries, prune_nulls};
+pub use flash::{
+    BackendKind, FlashBackendMeta, FlashInputs, FlashKind, FlashPlan, FlashTarget, ToolGate,
+    backend_for, jlink_commander_script, plan_baremetal_cmake_flash, plan_cc3501e_usb_bootloader,
+    plan_flash_targets, plan_swd_probe, plan_xspi_flashwriter, plan_yocto_wic,
+    plan_zephyr_west_flash, registry_keys, resolve_artefact_path, tool_gate,
+};
+pub use image_bundle::{
+    BundleHelperEntry, BundleManifest, BundleSliceEntry, assemble_bundle_manifest,
+    helper_artefact_rel, raw_passthrough, slice_archive_name, slice_artefact_rel,
+    slice_should_bundle,
+};
 pub use loader::{
     ALL_EMIT_MODES, GenerationTargetSupport, LoaderPlan, create_loader_plan,
     generation_target_support, list_generation_target_support,
@@ -72,6 +88,11 @@ pub use sdk_catalogue::{
     boards_for_som, chip_defaults, chip_family_for_sku, chips_for_som, core_ids_for_som,
     effective_chip_choices, effective_populated, parse_board_preset, parse_chip_def,
     parse_soc_spec, parse_som_preset,
+};
+pub use size::{
+    MemoryBudget, SliceSize, SocVariant, WARN_FRACTION, build_size_report, classify, core_token,
+    footprint_total, human_bytes, over_budget_rows, parse_berkeley_size, region_cell, region_json,
+    render_table_lines, resolve_budget, resolve_variant, round1, unknown_budget_rows,
 };
 pub use validate::{
     Outcome, ParseError, Severity, ValidationIssue, ValidationResult, ValidatorExecution,

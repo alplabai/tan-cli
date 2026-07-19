@@ -292,7 +292,8 @@ pub(super) fn with_venv_on_path(command: &mut Command, tool: &str) {
     }
 }
 
-/// `subcommand` is the bare tan verb (`build`/`image`/`flash`/`clean`/`renode`).
+/// `subcommand` is the bare tan verb (`build`/`flash`/`renode`); `image` is
+/// native now (`commands::image`) and no longer routes here.
 pub fn run(g: &GlobalArgs, subcommand: &str, passthrough: &[String]) -> CommandRun {
     let context = resolve_cli_project_context(g);
     let west_cwd = context
@@ -420,7 +421,7 @@ mod west_argv_tests {
             ),
             vec!["alp-build", "examples/uart-echo", "--core", "m55_hp"]
         );
-        assert_eq!(west_argv("image", &[]), vec!["alp-image"]);
+        assert_eq!(west_argv("renode", &[]), vec!["alp-renode"]);
         assert_eq!(
             west_argv("flash", &["--sequential".to_string()]),
             vec!["alp-flash", "--sequential"]

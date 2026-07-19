@@ -123,16 +123,17 @@ pub enum Command {
     /// Build the project. `--plan` consumes the SDK's emitted build plan;
     /// otherwise fans board.yaml into per-core slices via `west alp-build`.
     Build(BuildArgs),
-    /// Assemble a flashable image (`west alp-image`).
-    Image(WestForwardArgs),
-    /// Flash the assembled image to the device (`west alp-flash`).
-    Flash(WestForwardArgs),
-    /// Remove build dirs + orchestrator cache (`west alp-clean`).
-    Clean(WestForwardArgs),
+    /// Assemble a flashable-image bundle from `build/system-manifest.yaml` (native).
+    Image(ImageArgs),
+    /// Flash every slice + helper MCU from `build/system-manifest.yaml` onto the
+    /// device in `boot_order` (native).
+    Flash(FlashArgs),
+    /// Remove the per-project build dir + orchestrator state cache (native).
+    Clean(CleanArgs),
     /// Boot the system manifest in Renode (`west alp-renode`).
     Renode(WestForwardArgs),
-    /// Report firmware footprint vs the SoM memory budget (`west alp-size`).
-    Size(WestForwardArgs),
+    /// Report per-slice firmware footprint vs the SoM memory budget (native).
+    Size(SizeArgs),
     /// Migrate board.yaml to the current schema (`west alp-migrate`).
     Migrate(WestForwardArgs),
     /// Pin/lock library dependencies (`west alp-lock`).
@@ -161,9 +162,98 @@ pub struct PinmuxArgs {
     pub family: Option<String>,
 }
 
+/// Args for `clean`: build-root override + dry-run. Native — mirrors the retired
+/// `west alp-clean` flags (`--build-root`, `--dry-run`); root comes from the
+/// global `--project` (tan convention), not a positional `app_path`.
+#[derive(Debug, Args)]
+pub struct CleanArgs {
+    /// Override the build root to remove (default: `<project_root>/build`).
+    #[arg(long = "build-root", value_name = "PATH")]
+    pub build_root: Option<String>,
+    /// List the paths that would be removed; delete nothing.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+}
+
+/// Args for `size`: report per-slice FLASH/RAM footprint vs the SoM memory
+/// budget. Native — mirrors the retired `west alp-size` flags (positional
+/// `app_path`, `--build-root`, `--board`, `--fail-over-budget`). The Python
+/// `--json` flag is dropped in favour of the global `--format json`.
+#[derive(Debug, Args)]
+pub struct SizeArgs {
+    /// Application source directory (default: `.`). `build_root` defaults to
+    /// `<app_path>/build`. Overrides the global `--project` when not `.`.
+    #[arg(value_name = "APP_PATH", default_value = ".")]
+    pub app_path: String,
+    /// Override the build root holding `system-manifest.yaml`
+    /// (default: `<app_path>/build`).
+    #[arg(long = "build-root", value_name = "PATH")]
+    pub build_root: Option<String>,
+    /// Override the SoM SKU used to resolve the memory budget
+    /// (default: `hw_info.sku` from the manifest). Distinct from `--board-yaml`.
+    #[arg(long, value_name = "SKU")]
+    pub board: Option<String>,
+    /// Exit non-zero if any slice exceeds its resolved budget (slices with an
+    /// unknown budget are skipped + reported, never guessed).
+    #[arg(long = "fail-over-budget")]
+    pub fail_over_budget: bool,
+}
+
+/// Args for `flash`: walk `build/system-manifest.yaml` and program every slice
+/// and helper MCU in `boot_order`. Native — mirrors the retired `west alp-flash`
+/// flags verbatim (required positional `app_path` plus build-root/dry-run/core/
+/// helper/skip-missing-tools) so existing callers don't break. The Python JSON
+/// flag has no analogue — the global `--format json` emits the standard tan
+/// Envelope.
+#[derive(Debug, Args)]
+pub struct FlashArgs {
+    /// Application source directory. `build_root` defaults to `<app_path>/build`.
+    /// Required positional (faithful to `west alp-flash`; not folded into
+    /// `--project`).
+    #[arg(value_name = "APP_PATH")]
+    pub app_path: String,
+    /// Override the build root holding `system-manifest.yaml`
+    /// (default: `<app_path>/build`).
+    #[arg(long = "build-root", value_name = "PATH")]
+    pub build_root: Option<String>,
+    /// Print the flash command each backend WOULD run and return ok without
+    /// spawning; also bypasses the required-tool PATH gate.
+    #[arg(long = "dry-run")]
+    pub dry_run: bool,
+    /// Flash only the slice with this `core_id` (skips every other slice AND all
+    /// helpers).
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
+    /// Flash only the helper MCU with this name (skips ALL slices and every
+    /// other helper).
+    #[arg(long, value_name = "NAME")]
+    pub helper: Option<String>,
+    /// When a backend's required tools are all absent from PATH, warn + skip the
+    /// entry instead of failing it. No effect under `--dry-run`.
+    #[arg(long = "skip-missing-tools")]
+    pub skip_missing_tools: bool,
+}
+
+/// Args for `image`: bundle the built slices + helper firmware from
+/// `build/system-manifest.yaml` into `image-bundle/`. Native — mirrors the
+/// retired `west alp-image` flags (positional `app_path`, `--build-root`); the
+/// positional is optional and folds into the global `--project` workspace.
+#[derive(Debug, Args)]
+pub struct ImageArgs {
+    /// Application source directory (default: the resolved `--project`
+    /// workspace). `build_root` defaults to `<app_path>/build`. An explicit
+    /// positional overrides `--project`.
+    #[arg(value_name = "APP_PATH")]
+    pub app_path: Option<String>,
+    /// Override the build root holding `system-manifest.yaml`
+    /// (default: `<app_path>/build`).
+    #[arg(long = "build-root", value_name = "PATH")]
+    pub build_root: Option<String>,
+}
+
 /// Args for commands that forward their tail verbatim to an underlying
 /// subprocess — either a `west alp-*` extension
-/// (`image`/`flash`/`clean`/`renode`/`size`/`migrate`/`lock`/`quality`) or the
+/// (`flash`/`renode`/`migrate`/`lock`/`quality`) or the
 /// SDK `alp` CLI (`model`/`monitor`/`new-som`/`faultdecode`).
 #[derive(Debug, Args)]
 pub struct WestForwardArgs {

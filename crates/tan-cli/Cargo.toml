@@ -23,3 +23,6 @@ ureq.workspace = true
 anyhow.workspace = true
 owo-colors.workspace = true
 indicatif.workspace = true
+tar.workspace = true
+flate2.workspace = true
+sha2.workspace = true

@@ -15,8 +15,10 @@ pub struct CommandRun {
 
 /// `tan bootstrap` — per-OS toolchain/SDK bootstrap orchestration.
 pub mod bootstrap;
-/// `tan build` (and `image`/`flash`/`clean`/`renode`) — `west` build workflows.
+/// `tan build` (and `image`/`flash`/`renode`) — `west` build workflows.
 pub mod build;
+/// `tan clean` — natively remove the per-project build dir + orchestrator cache.
+pub mod clean;
 /// `tan completion` — shell completion script generation.
 pub mod completion;
 /// `tan debug-config` — debug/launch configuration drafting.
@@ -29,8 +31,12 @@ pub mod doctor;
 pub mod examples;
 /// `tan explain` — explain a project/module template or a generation target.
 pub mod explain;
+/// `tan flash` — natively program every slice + helper MCU from the system manifest.
+pub mod flash;
 /// `tan generate` — Zephyr conf / DTS overlay / CMake args / Yocto conf codegen.
 pub mod generate;
+/// `tan image` — assemble a flashable-image bundle from the system manifest (native).
+pub mod image;
 /// `tan init` — new-project scaffolding (including heterogeneous cores).
 pub mod init;
 /// `tan inspect` — inspect resolved project/debug context values.
@@ -45,6 +51,8 @@ pub mod scaffold;
 pub mod sdk;
 /// `tan model`/`monitor`/`new-som`/`faultdecode` — forwarders to the SDK `alp` CLI.
 pub mod sdk_cli;
+/// `tan size` — per-slice FLASH/RAM footprint vs the SoM memory budget (native).
+pub mod size;
 /// `tan support-bundle` — collect a diagnostics support bundle.
 pub mod support_bundle;
 /// `tan trace` — trace the generation decisions a build would make.

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `tan build` / `image` / `flash` / `clean` / `renode` — the build workflow.
+//! `tan build` / `flash` / `renode` — the build workflow.
 //!
 //! Each is the single user-facing entry that **hides `west`**: `tan build` runs
-//! `west alp-build`, `tan flash` runs `west alp-flash`, etc. The per-core /
+//! `west alp-build`, `tan flash` runs `west alp-flash`, etc. (`tan image` is
+//! native now — see `commands::image` — and no longer forwards to `west
+//! alp-image`.) The per-core /
 //! per-platform routing (Zephyr→`west build`, Yocto→`bitbake`, baremetal→CMake +
 //! vendor toolchain) stays in the SDK's orchestrator (`alp_orchestrate.py`); the
 //! CLI never re-decides the backend. Args after the subcommand are forwarded
@@ -26,7 +28,7 @@ use crate::cli::{BuildArgs, GlobalArgs};
 use native::native_build;
 use plan_modes::{manifest_command, plan_command};
 
-// `run` is the legacy `west`-delegating entry (`image`/`flash`/`clean`/`renode`)
+// `run` is the legacy `west`-delegating entry (`flash`/`renode`)
 // and `probe_build_preflight` is shared with `tan doctor --build`; both stay
 // importable at `crate::commands::build::*` for `main.rs` / `doctor.rs`.
 pub(crate) use preflight::probe_build_preflight;

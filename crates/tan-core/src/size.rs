@@ -1,0 +1,656 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Pure footprint model for `tan size` — the deterministic half of the native
+//! port of `west alp-size` (`scripts/west_commands/alp_size.py`). Measurement
+//! source selection, budget resolution, classification, and rendering all live
+//! here as IO-free functions; the subprocess + filesystem wiring is in
+//! `tan-cli/src/commands/size.rs`.
+//!
+//! FLASH = text+data (everything in the flashed image); RAM = data+bss
+//! (everything live at runtime) — the Berkeley `size` model, where binutils
+//! folds .rodata into text and .noinit (NOBITS) into bss.
+
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+/// A slice at/above this fraction of its budget is flagged `warn` even though it
+/// still fits — a pre-flight "you're close" nudge.
+pub const WARN_FRACTION: f64 = 0.90;
+
+// colorama Fore/Style literals, so the color path matches the retired command's
+// bytes. tan-core has no owo-colors dep; these are the same ANSI codes.
+const GREEN: &str = "\x1b[32m";
+const YELLOW: &str = "\x1b[33m";
+const RED: &str = "\x1b[31m";
+const CYAN: &str = "\x1b[36m";
+const RESET: &str = "\x1b[0m";
+
+/// Parse Berkeley-format `size` output into `(flash, ram)` bytes. Columns are
+/// `text data bss dec hex filename`; the first row whose first three
+/// whitespace-split fields all parse as ints wins (header/noise rows skipped).
+/// `FLASH = text+data`, `RAM = data+bss`. `None` when no data row is found.
+pub fn parse_berkeley_size(text: &str) -> Option<(u64, u64)> {
+    for line in text.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let (Ok(text_b), Ok(data_b), Ok(bss_b)) = (
+            parts[0].parse::<u64>(),
+            parts[1].parse::<u64>(),
+            parts[2].parse::<u64>(),
+        ) else {
+            continue; // header row ("text data bss ...") or noise
+        };
+        return Some((text_b + data_b, data_b + bss_b));
+    }
+    None
+}
+
+/// Total bytes from a Zephyr `rom.json` / `ram.json` footprint document. The
+/// footprint root is `{"symbols": {"size": <total>, ...}}`; older layouts put
+/// the total at the top level. `None` when the JSON is malformed or neither
+/// shape yields an integer.
+pub fn footprint_total(json_text: &str) -> Option<u64> {
+    let data: Value = serde_json::from_str(json_text).ok()?;
+    if let Some(size) = data.get("symbols").and_then(|s| s.get("size")) {
+        if let Some(n) = size.as_u64() {
+            return Some(n);
+        }
+    }
+    data.get("size").and_then(Value::as_u64)
+}
+
+/// Round to 1 decimal to match Python `round(x, 1)` so the emitted `pct` values
+/// stay byte-identical with the retired command. Formatting to one decimal place
+/// rounds the TRUE binary value of `x` (both CPython's `round` and Rust's `{:.1}`
+/// use correctly-rounded shortest-decimal), so the X.X5 tie cases agree — e.g.
+/// 0.35 (actually 0.34999…) → 0.3, not the 0.4 a `(x*10).round()/10` multiply
+/// yields. This also matches the text-cell path (`region_cell`), which already
+/// format-rounds.
+pub fn round1(x: f64) -> f64 {
+    format!("{x:.1}").parse::<f64>().unwrap_or(x)
+}
+
+/// A `{used, total, pct}` region object. `pct = round1(used/total*100)` when
+/// `used` is present and `total` is present + non-zero, else `null`.
+pub fn region_json(used: Option<u64>, total: Option<u64>) -> Value {
+    let pct = match (used, total) {
+        (Some(u), Some(t)) if t != 0 => Some(round1(u as f64 / t as f64 * 100.0)),
+        _ => None,
+    };
+    json!({ "used": used, "total": total, "pct": pct })
+}
+
+/// `m55_hp` -> `M55_HP` — the token embedded in `sram_banks_kb` keys like
+/// `SRAM3_M55_HP_DTCM`.
+pub fn core_token(core_id: &str) -> String {
+    core_id.to_uppercase()
+}
+
+/// `ok` / `warn` / `over` from the worst of the two regions. A region with a
+/// missing `used`, or a `total` that is missing or zero, is ignored (no
+/// div-by-zero, no guess).
+pub fn classify(
+    flash_used: Option<u64>,
+    flash_total: Option<u64>,
+    ram_used: Option<u64>,
+    ram_total: Option<u64>,
+) -> &'static str {
+    let mut worst = "ok";
+    for (used, total) in [(flash_used, flash_total), (ram_used, ram_total)] {
+        let (Some(u), Some(t)) = (used, total) else {
+            continue;
+        };
+        if t == 0 {
+            continue;
+        }
+        let frac = u as f64 / t as f64;
+        if frac > 1.0 {
+            return "over";
+        }
+        if frac >= WARN_FRACTION {
+            worst = "warn";
+        }
+    }
+    worst
+}
+
+/// A resolved per-slice FLASH/RAM budget in bytes, plus a human note when a
+/// coarser fallback was used.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MemoryBudget {
+    /// On-die program flash budget in bytes, if resolved.
+    pub flash_total: Option<u64>,
+    /// Per-core data RAM budget in bytes, if resolved.
+    pub ram_total: Option<u64>,
+    /// Human note when a coarser fallback source was used (`;`-joined).
+    pub note: Option<String>,
+}
+
+/// One SoC-JSON `variants[]` entry — only the fields the budget needs. Ordering
+/// of `sram_banks_kb` is preserved (serde_json `preserve_order`) so the
+/// first-matching-bank rule is deterministic.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SocVariant {
+    /// The variant's order code (matched against a preset's `silicon_variant`).
+    #[serde(default)]
+    pub order_code: Option<String>,
+    /// Module SKUs this variant backs (reverse-match key).
+    #[serde(default)]
+    pub alp_module_skus: Vec<String>,
+    /// On-die MRAM in megabytes, when declared.
+    #[serde(default)]
+    pub mram_mb: Option<f64>,
+    /// SRAM banks keyed by name (e.g. `SRAM3_M55_HP_DTCM`), in KiB.
+    #[serde(default)]
+    pub sram_banks_kb: serde_json::Map<String, Value>,
+}
+
+impl SocVariant {
+    /// The `sram_banks_kb` map as ordered `(name, kib)` pairs, dropping
+    /// non-numeric entries.
+    pub fn sram_banks(&self) -> Vec<(String, f64)> {
+        self.sram_banks_kb
+            .iter()
+            .filter_map(|(k, v)| v.as_f64().map(|f| (k.clone(), f)))
+            .collect()
+    }
+}
+
+/// Resolve a SoM preset to its matching SoC-JSON variant: forward via
+/// `silicon_variant == order_code` (skipping empty / `TBD`), then reverse via
+/// `sku ∈ alp_module_skus`. `None` when neither path resolves.
+pub fn resolve_variant<'a>(
+    silicon_variant: Option<&str>,
+    sku: Option<&str>,
+    variants: &'a [SocVariant],
+) -> Option<&'a SocVariant> {
+    if let Some(declared) = silicon_variant {
+        if !declared.is_empty() && declared != "TBD" {
+            if let Some(v) = variants
+                .iter()
+                .find(|v| v.order_code.as_deref() == Some(declared))
+            {
+                return Some(v);
+            }
+            // Forward declared but not found — fall through to reverse lookup.
+        }
+    }
+    let sku = sku?;
+    variants
+        .iter()
+        .find(|v| v.alp_module_skus.iter().any(|s| s == sku))
+}
+
+/// The FLASH/RAM budget for one core, from values already read out of the SoM
+/// preset + SoC JSON. FLASH: variant `mram_mb`, else SoC `soc_flash_mb` (with a
+/// note); RAM: the `*_DTCM` bank whose name contains the core token, else the
+/// core's `tcm_kb` (with a note). Any field that can't be resolved stays `None`
+/// — the caller renders `unknown`, never a guessed number. Pure.
+pub fn resolve_budget(
+    core_id: &str,
+    mram_mb: Option<f64>,
+    soc_flash_mb: Option<f64>,
+    sram_banks_kb: &[(String, f64)],
+    soc_cores: &[(String, Option<f64>)],
+) -> MemoryBudget {
+    let mut notes: Vec<String> = Vec::new();
+
+    // FLASH: on-die program flash.
+    let flash_total = if let Some(mb) = mram_mb {
+        Some((mb * 1024.0 * 1024.0) as u64)
+    } else if let Some(mb) = soc_flash_mb {
+        notes.push("flash=soc_flash_mb".to_string());
+        Some((mb * 1024.0 * 1024.0) as u64)
+    } else {
+        None
+    };
+
+    // RAM: per-core data RAM.
+    let token = core_token(core_id);
+    let mut ram_total = sram_banks_kb
+        .iter()
+        .find(|(name, _)| name.contains(&token) && name.contains("DTCM"))
+        .map(|(_, kib)| (*kib * 1024.0) as u64);
+    if ram_total.is_none() {
+        for (id, tcm_kb) in soc_cores {
+            if id == core_id {
+                if let Some(tcm) = tcm_kb {
+                    ram_total = Some((*tcm * 1024.0) as u64);
+                    notes.push("ram=core tcm_kb (ITCM+DTCM)".to_string());
+                }
+                break;
+            }
+        }
+    }
+
+    let note = if notes.is_empty() {
+        None
+    } else {
+        Some(notes.join("; "))
+    };
+    MemoryBudget {
+        flash_total,
+        ram_total,
+        note,
+    }
+}
+
+/// One slice's measured footprint vs its resolved budget. `status` is one of
+/// `ok`/`over`/`warn`/`not-built`/`n/a`/`no-budget`.
+#[derive(Debug, Clone)]
+pub struct SliceSize {
+    /// Core id this slice targets.
+    pub core_id: String,
+    /// Resolved runtime (`zephyr`, `yocto`, …).
+    pub os: String,
+    /// Row status vocabulary term.
+    pub status: String,
+    /// Measured FLASH bytes, when a source yielded a measurement.
+    pub flash_used: Option<u64>,
+    /// FLASH budget bytes, when resolved.
+    pub flash_total: Option<u64>,
+    /// Measured RAM bytes, when a source yielded a measurement.
+    pub ram_used: Option<u64>,
+    /// RAM budget bytes, when resolved.
+    pub ram_total: Option<u64>,
+    /// Measurement source label (`size-tool`, `pyelftools`, `rom/ram.json`).
+    pub source: Option<String>,
+    /// Budget/`n/a` note surfaced as `budget_note` in JSON + the table detail.
+    pub note: Option<String>,
+    /// Additional notes (e.g. the missing-footprint path for a not-built slice).
+    pub notes: Vec<String>,
+}
+
+impl SliceSize {
+    /// True when at least one region budget resolved.
+    pub fn budget_known(&self) -> bool {
+        self.flash_total.is_some() || self.ram_total.is_some()
+    }
+
+    /// True when this slice is over its budget.
+    pub fn over_budget(&self) -> bool {
+        self.status == "over"
+    }
+
+    /// This slice's `alp-size/1` JSON entry (preserve_order: core_id, os,
+    /// status, flash, ram, source, then optional budget_note + notes).
+    pub fn to_json_entry(&self) -> Value {
+        let mut entry = json!({
+            "core_id": self.core_id,
+            "os": self.os,
+            "status": self.status,
+            "flash": region_json(self.flash_used, self.flash_total),
+            "ram": region_json(self.ram_used, self.ram_total),
+            "source": self.source,
+        });
+        if let Some(note) = self.note.as_deref().filter(|n| !n.is_empty()) {
+            entry["budget_note"] = json!(note);
+        }
+        if !self.notes.is_empty() {
+            entry["notes"] = json!(self.notes);
+        }
+        entry
+    }
+}
+
+/// The full `alp-size/1` report payload (the `data` sub-shape wrapped verbatim
+/// in the tan Envelope): `{schema, slices, summary{over_budget, unknown_budget}}`.
+pub fn build_size_report(rows: &[SliceSize]) -> Value {
+    let slices: Vec<Value> = rows.iter().map(SliceSize::to_json_entry).collect();
+
+    let mut over: Vec<String> = rows
+        .iter()
+        .filter(|r| r.over_budget())
+        .map(|r| r.core_id.clone())
+        .collect();
+    over.sort();
+
+    let mut unknown: Vec<String> = rows
+        .iter()
+        .filter(|r| r.os == "zephyr" && r.status != "not-built" && !r.budget_known())
+        .map(|r| r.core_id.clone())
+        .collect();
+    unknown.sort();
+
+    json!({
+        "schema": "alp-size/1",
+        "slices": slices,
+        "summary": {
+            "over_budget": over,
+            "unknown_budget": unknown,
+        },
+    })
+}
+
+/// Slices that are over budget.
+pub fn over_budget_rows(rows: &[SliceSize]) -> Vec<&SliceSize> {
+    rows.iter().filter(|r| r.over_budget()).collect()
+}
+
+/// Zephyr slices that were measured but whose budget couldn't be resolved —
+/// the ones `--fail-over-budget` skips.
+pub fn unknown_budget_rows(rows: &[SliceSize]) -> Vec<&SliceSize> {
+    rows.iter()
+        .filter(|r| r.os == "zephyr" && r.status == "no-budget")
+        .collect()
+}
+
+/// Bytes -> a compact KiB/MiB string, or `?` for unknown.
+pub fn human_bytes(n: Option<u64>) -> String {
+    match n {
+        None => "?".to_string(),
+        Some(n) if n >= 1024 * 1024 => format!("{:.2}M", n as f64 / (1024.0 * 1024.0)),
+        Some(n) if n >= 1024 => format!("{:.1}K", n as f64 / 1024.0),
+        Some(n) => format!("{n}B"),
+    }
+}
+
+/// A `used/total pct%` table cell.
+pub fn region_cell(used: Option<u64>, total: Option<u64>) -> String {
+    let pct = match (used, total) {
+        (Some(u), Some(t)) if t != 0 => format!("{:5.1}%", u as f64 / t as f64 * 100.0),
+        _ => "   -  ".to_string(),
+    };
+    format!("{:>8}/{:<8} {}", human_bytes(used), human_bytes(total), pct)
+}
+
+/// Status hue + label for the table. Unknown statuses render plain with the raw
+/// status text.
+fn status_hue(status: &str) -> (&'static str, &str) {
+    match status {
+        "ok" => (GREEN, "OK"),
+        "warn" => (YELLOW, "WARN"),
+        "over" => (RED, "OVER"),
+        "not-built" => (YELLOW, "not built"),
+        "n/a" => (CYAN, "n/a"),
+        "no-budget" => (CYAN, "no budget"),
+        other => ("", other),
+    }
+}
+
+/// Render the per-slice table as lines: the `CORE / OS / FLASH / RAM / STATUS`
+/// header, a separator, one row per slice, and a `-> <detail>` continuation for
+/// any slice carrying a note. `use_color` gates the ANSI status coloring.
+pub fn render_table_lines(rows: &[SliceSize], use_color: bool) -> Vec<String> {
+    let head = format!(
+        "{:<14} {:<10} {:<24} {:<24} STATUS",
+        "CORE", "OS", "FLASH used/total", "RAM used/total"
+    );
+    let mut lines = vec![head.clone(), "-".repeat(head.len())];
+    for r in rows {
+        let (hue, label) = status_hue(&r.status);
+        let status = if use_color && !hue.is_empty() {
+            format!("{hue}{label}{RESET}")
+        } else {
+            label.to_string()
+        };
+        lines.push(format!(
+            "{:<14} {:<10} {:<24} {:<24} {}",
+            r.core_id,
+            r.os,
+            region_cell(r.flash_used, r.flash_total),
+            region_cell(r.ram_used, r.ram_total),
+            status
+        ));
+        let detail = r
+            .note
+            .as_deref()
+            .or_else(|| r.notes.first().map(|s| s.as_str()));
+        if let Some(detail) = detail {
+            lines.push(format!("{:<14} {:<10} -> {}", "", "", detail));
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn variant(json_text: &str) -> SocVariant {
+        serde_json::from_str(json_text).unwrap()
+    }
+
+    #[test]
+    fn parse_berkeley_size_skips_header_and_sums_columns() {
+        let out = "   text\t   data\t    bss\t    dec\t    hex\tfilename\n  12345\t    678\t   9012\t  22035\t   5613\tzephyr.elf\n";
+        assert_eq!(parse_berkeley_size(out), Some((12345 + 678, 678 + 9012)));
+        assert_eq!(parse_berkeley_size(""), None);
+        // Header-only: no numeric data row.
+        assert_eq!(parse_berkeley_size("text data bss dec hex filename"), None);
+        assert_eq!(parse_berkeley_size("garbage line here"), None);
+    }
+
+    #[test]
+    fn footprint_total_reads_symbols_then_top_level() {
+        assert_eq!(footprint_total(r#"{"symbols":{"size":4096}}"#), Some(4096));
+        assert_eq!(footprint_total(r#"{"size":2048}"#), Some(2048));
+        assert_eq!(footprint_total(r#"{"symbols":{"size":"x"}}"#), None);
+        assert_eq!(footprint_total("{not json"), None);
+    }
+
+    #[test]
+    fn classify_ranks_worst_region() {
+        // over: any region fraction > 1.0
+        assert_eq!(
+            classify(Some(1100), Some(1000), Some(10), Some(1000)),
+            "over"
+        );
+        // warn: 0.90 <= frac <= 1.0
+        assert_eq!(classify(Some(900), Some(1000), None, None), "warn");
+        assert_eq!(classify(Some(1000), Some(1000), None, None), "warn");
+        // ok: below warn
+        assert_eq!(classify(Some(100), Some(1000), None, None), "ok");
+        // used None / total None|0 ignored
+        assert_eq!(classify(Some(10), None, None, None), "ok");
+        assert_eq!(classify(Some(10), Some(0), None, None), "ok");
+    }
+
+    #[test]
+    fn round1_and_region_json_pct() {
+        assert_eq!(round1(91.5), 91.5);
+        // 915/1000*100 = 91.5 exactly.
+        let r = region_json(Some(915), Some(1000));
+        assert_eq!(r["pct"], json!(91.5));
+        assert_eq!(r["used"], json!(915));
+        assert_eq!(r["total"], json!(1000));
+        // total 0 => pct null; used None => pct null.
+        assert_eq!(region_json(Some(10), Some(0))["pct"], Value::Null);
+        assert_eq!(region_json(None, Some(1000))["pct"], Value::Null);
+        // Matches CPython round(x,1), which rounds the TRUE binary value (not a
+        // scaled x10 multiply): 0.35 is actually 0.34999... -> 0.3; 0.25 -> 0.2.
+        assert_eq!(round1(0.25), 0.2);
+        assert_eq!(round1(0.35), 0.3);
+    }
+
+    #[test]
+    fn resolve_budget_flash_and_ram_sources() {
+        // mram_mb wins, no note.
+        let b = resolve_budget("m55_hp", Some(5.5), Some(4.0), &[], &[]);
+        assert_eq!(b.flash_total, Some(5_767_168));
+        assert_eq!(b.note, None);
+
+        // soc_flash_mb fallback carries a note.
+        let b = resolve_budget("m55_hp", None, Some(5.5), &[], &[]);
+        assert_eq!(b.flash_total, Some(5_767_168));
+        assert_eq!(b.note.as_deref(), Some("flash=soc_flash_mb"));
+
+        // DTCM bank matched by core token.
+        let banks = vec![
+            ("SRAM2_M55_HP_ITCM".to_string(), 256.0),
+            ("SRAM3_M55_HP_DTCM".to_string(), 1024.0),
+        ];
+        let b = resolve_budget("m55_hp", Some(5.5), None, &banks, &[]);
+        assert_eq!(b.ram_total, Some(1_048_576));
+        assert_eq!(b.note, None);
+
+        // tcm_kb fallback carries a note.
+        let cores = vec![("m55_hp".to_string(), Some(1280.0))];
+        let b = resolve_budget("m55_hp", None, None, &[], &cores);
+        assert_eq!(b.ram_total, Some(1_310_720));
+        assert_eq!(b.note.as_deref(), Some("ram=core tcm_kb (ITCM+DTCM)"));
+
+        // both absent.
+        let b = resolve_budget("m55_hp", None, None, &[], &[]);
+        assert_eq!(b, MemoryBudget::default());
+    }
+
+    #[test]
+    fn resolve_variant_forward_reverse_and_tbd() {
+        let variants = vec![
+            variant(r#"{"order_code":"AAA","alp_module_skus":["E1M-X"]}"#),
+            variant(r#"{"order_code":"BBB","alp_module_skus":["E1M-Y"]}"#),
+        ];
+        // forward on order_code
+        assert_eq!(
+            resolve_variant(Some("BBB"), None, &variants)
+                .unwrap()
+                .order_code
+                .as_deref(),
+            Some("BBB")
+        );
+        // TBD ignored -> reverse via sku
+        assert_eq!(
+            resolve_variant(Some("TBD"), Some("E1M-X"), &variants)
+                .unwrap()
+                .order_code
+                .as_deref(),
+            Some("AAA")
+        );
+        // reverse via sku when no variant declared
+        assert_eq!(
+            resolve_variant(None, Some("E1M-Y"), &variants)
+                .unwrap()
+                .order_code
+                .as_deref(),
+            Some("BBB")
+        );
+        // no match
+        assert!(resolve_variant(Some("ZZZ"), Some("E1M-Z"), &variants).is_none());
+    }
+
+    fn zephyr_row(core: &str, status: &str) -> SliceSize {
+        SliceSize {
+            core_id: core.to_string(),
+            os: "zephyr".to_string(),
+            status: status.to_string(),
+            flash_used: Some(1000),
+            flash_total: Some(2000),
+            ram_used: Some(500),
+            ram_total: Some(1000),
+            source: Some("size-tool".to_string()),
+            note: None,
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn json_entry_key_order_and_optional_fields() {
+        // n/a slice: note surfaces as budget_note; no source measurement.
+        let na = SliceSize {
+            core_id: "a32".to_string(),
+            os: "yocto".to_string(),
+            status: "n/a".to_string(),
+            flash_used: None,
+            flash_total: None,
+            ram_used: None,
+            ram_total: None,
+            source: None,
+            note: Some("no Zephyr image (Yocto/baremetal)".to_string()),
+            notes: Vec::new(),
+        };
+        let entry = na.to_json_entry();
+        let keys: Vec<&str> = entry
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "core_id",
+                "os",
+                "status",
+                "flash",
+                "ram",
+                "source",
+                "budget_note"
+            ]
+        );
+        assert_eq!(
+            entry["budget_note"],
+            json!("no Zephyr image (Yocto/baremetal)")
+        );
+
+        // not-built slice: notes present.
+        let mut nb = zephyr_row("m55_he", "not-built");
+        nb.flash_used = None;
+        nb.ram_used = None;
+        nb.source = None;
+        nb.notes = vec!["no footprint source at /x/zephyr.elf".to_string()];
+        let entry = nb.to_json_entry();
+        assert_eq!(
+            entry["notes"],
+            json!(["no footprint source at /x/zephyr.elf"])
+        );
+
+        // ok slice with a source, no optional fields.
+        let entry = zephyr_row("m55_hp", "ok").to_json_entry();
+        assert_eq!(entry["source"], json!("size-tool"));
+        assert!(entry.get("budget_note").is_none());
+        assert!(entry.get("notes").is_none());
+    }
+
+    #[test]
+    fn report_summary_sorts_and_filters() {
+        let mut over = zephyr_row("m55_hp", "over");
+        over.flash_used = Some(3000); // over its 2000 budget
+        let over_a = {
+            let mut r = zephyr_row("a55", "over");
+            r.flash_used = Some(3000);
+            r
+        };
+        // no-budget zephyr slice -> unknown_budget
+        let no_budget = SliceSize {
+            flash_total: None,
+            ram_total: None,
+            status: "no-budget".to_string(),
+            ..zephyr_row("m55_he", "no-budget")
+        };
+        // not-built excluded from unknown_budget even without a budget
+        let not_built = SliceSize {
+            flash_total: None,
+            ram_total: None,
+            status: "not-built".to_string(),
+            ..zephyr_row("m55_lp", "not-built")
+        };
+        let report = build_size_report(&[over, over_a, no_budget, not_built]);
+        assert_eq!(report["schema"], json!("alp-size/1"));
+        assert_eq!(report["summary"]["over_budget"], json!(["a55", "m55_hp"]));
+        assert_eq!(report["summary"]["unknown_budget"], json!(["m55_he"]));
+    }
+
+    #[test]
+    fn render_table_lines_deterministic_and_plain() {
+        let mut row = zephyr_row("m55_hp", "over");
+        row.note = Some("flash=soc_flash_mb".to_string());
+        let lines = render_table_lines(&[row], false);
+        assert!(lines[0].starts_with("CORE"));
+        assert!(lines[0].contains("FLASH used/total"));
+        assert!(lines[1].chars().all(|c| c == '-'));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("m55_hp") && l.contains("OVER"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.trim_start().starts_with("-> flash=soc_flash_mb"))
+        );
+        // color off => no ANSI escapes
+        assert!(lines.iter().all(|l| !l.contains('\u{1b}')));
+    }
+}
