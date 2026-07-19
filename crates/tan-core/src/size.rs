@@ -9,8 +9,13 @@
 //! (everything live at runtime) — the Berkeley `size` model, where binutils
 //! folds .rodata into text and .noinit (NOBITS) into bss.
 
+use object::{Object, ObjectSection, SectionFlags, SectionKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
+
+/// ELF `sh_flags` bits used to classify a section (`SHF_WRITE` / `SHF_ALLOC`).
+const SHF_WRITE: u64 = 0x1;
+const SHF_ALLOC: u64 = 0x2;
 
 /// A slice at/above this fraction of its budget is flagged `warn` even though it
 /// still fits — a pre-flight "you're close" nudge.
@@ -44,6 +49,42 @@ pub fn parse_berkeley_size(text: &str) -> Option<(u64, u64)> {
         return Some((text_b + data_b, data_b + bss_b));
     }
     None
+}
+
+/// Sum ELF section sizes into `(flash, ram)` bytes with Berkeley-`size`
+/// semantics, straight from the section headers — the middle rung between the
+/// external size tool and the `rom/ram.json` fallback, so a present `elf` is
+/// measured even with no `arm-zephyr-eabi-size` on PATH.
+///
+/// FLASH = every allocated section that occupies the image (`SHF_ALLOC` &&
+/// PROGBITS: `.text` + `.rodata` + `.data`) — binutils' `text`+`data` columns.
+/// RAM = every allocated writable section, NOBITS included (`SHF_ALLOC` &&
+/// `SHF_WRITE`: `.data` + `.bss` + `.noinit`) — binutils' `data`+`bss` columns.
+/// So the pair matches what `arm-zephyr-eabi-size` reports for the same elf.
+/// `None` when the bytes don't parse as an object file. Handles ELF32/ELF64 and
+/// either endianness (whatever the SoM core emits). Pure.
+pub fn sizes_from_elf_sections(elf_bytes: &[u8]) -> Option<(u64, u64)> {
+    let file = object::File::parse(elf_bytes).ok()?;
+    let mut flash = 0u64;
+    let mut ram = 0u64;
+    for section in file.sections() {
+        let SectionFlags::Elf { sh_flags } = section.flags() else {
+            continue; // not an ELF section (shouldn't happen for a parsed ELF)
+        };
+        if sh_flags & SHF_ALLOC == 0 {
+            continue; // non-allocated (.symtab, .debug_*, .comment, …) — neither region
+        }
+        let size = section.size();
+        // NOBITS (.bss/.noinit) occupies RAM but not the image; PROGBITS (.text/
+        // .rodata/.data) occupies both the image and, when writable, RAM.
+        if section.kind() != SectionKind::UninitializedData {
+            flash += size;
+        }
+        if sh_flags & SHF_WRITE != 0 {
+            ram += size;
+        }
+    }
+    Some((flash, ram))
 }
 
 /// Total bytes from a Zephyr `rom.json` / `ram.json` footprint document. The
@@ -420,6 +461,33 @@ mod tests {
         // Header-only: no numeric data row.
         assert_eq!(parse_berkeley_size("text data bss dec hex filename"), None);
         assert_eq!(parse_berkeley_size("garbage line here"), None);
+    }
+
+    #[test]
+    fn sizes_from_elf_sections_sums_berkeley_columns() {
+        use object::write::{Object as WObject, StandardSection};
+        use object::{Architecture, BinaryFormat, Endianness};
+
+        let mut obj = WObject::new(BinaryFormat::Elf, Architecture::Arm, Endianness::Little);
+        // .text 100 (ALLOC|EXECINSTR, PROGBITS) -> FLASH only.
+        let text = obj.section_id(StandardSection::Text);
+        obj.append_section_data(text, &[0u8; 100], 1);
+        // .rodata 20 (ALLOC, PROGBITS) -> FLASH only.
+        let rodata = obj.section_id(StandardSection::ReadOnlyData);
+        obj.append_section_data(rodata, &[0u8; 20], 1);
+        // .data 40 (ALLOC|WRITE, PROGBITS) -> FLASH + RAM.
+        let data = obj.section_id(StandardSection::Data);
+        obj.append_section_data(data, &[0u8; 40], 1);
+        // .bss 200 (ALLOC|WRITE, NOBITS) -> RAM only.
+        let bss = obj.section_id(StandardSection::UninitializedData);
+        obj.append_section_bss(bss, 200, 1);
+
+        let bytes = obj.write().unwrap();
+        // FLASH = text+rodata+data = 160 (binutils text+data column);
+        // RAM = data+bss = 240 (binutils data+bss column).
+        assert_eq!(sizes_from_elf_sections(&bytes), Some((160, 240)));
+        // Non-object bytes -> None, never a panic.
+        assert_eq!(sizes_from_elf_sections(b"not an elf"), None);
     }
 
     #[test]

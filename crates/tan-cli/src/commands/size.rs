@@ -15,9 +15,11 @@
 //!     the budget just resolves `unknown`, measurement still runs. ponytail:
 //!     the port spec's exit-code contract lists only manifest + over-budget as
 //!     exit 1, and measurement is useful without metadata.
-//!   - the middle `pyelftools` ELF-section fallback is dropped — no ELF-reader
-//!     dep. ponytail: size-tool + rom/ram.json cover a real Zephyr build env;
-//!     add the `object` crate only if a no-size-tool env proves common.
+//!   - the middle ELF-section rung is `tan_core::size::sizes_from_elf_sections`
+//!     (the `object` crate reads section headers directly), inserted after the
+//!     size tool and before rom/ram.json so a present elf is always measured
+//!     even with no `arm-zephyr-eabi-size` on PATH. Its `source` label stays
+//!     `pyelftools` for parity with the retired command's JSON.
 
 use std::path::{Path, PathBuf};
 
@@ -25,7 +27,7 @@ use tan_core::parse_som_preset;
 use tan_core::size::{
     MemoryBudget, SliceSize, SocVariant, build_size_report, classify, footprint_total,
     over_budget_rows, parse_berkeley_size, render_table_lines, resolve_budget, resolve_variant,
-    unknown_budget_rows,
+    sizes_from_elf_sections, unknown_budget_rows,
 };
 use tan_core::system_manifest::{Slice, parse_system_manifest};
 
@@ -145,7 +147,7 @@ pub fn run(g: &GlobalArgs, args: &SizeArgs) -> CommandRun {
         if size_bin.is_none() {
             text.push(
                 "size: no size tool on PATH (arm-zephyr-eabi-size / llvm-size / size); \
-                 fell back to rom.json+ram.json."
+                 measured from ELF section headers (or rom.json+ram.json)."
                     .to_string(),
             );
         }
@@ -302,9 +304,10 @@ fn measure_slice(
     }
 }
 
-/// Resolve `(flash, ram)` bytes via the best available source: the size tool
-/// (only if the elf exists), else the `rom.json` + `ram.json` footprint files.
-/// Returns the sizes and the source label, or `(None, None)` when neither
+/// Resolve `(flash, ram)` bytes via the best available source, in order: the
+/// size tool (only if the elf exists), then the elf's own section headers
+/// (`sizes_from_elf_sections`), then the `rom.json` + `ram.json` footprint
+/// files. Returns the sizes and the source label, or `(None, None)` when none
 /// yields a measurement.
 fn extract_sizes(
     elf: &Path,
@@ -315,6 +318,14 @@ fn extract_sizes(
         if let Some(bin) = size_bin {
             if let Some(sizes) = sizes_from_size_tool(bin, elf) {
                 return (Some(sizes), Some("size-tool".to_string()));
+            }
+        }
+        // Middle rung: no size tool (or it failed to parse) — read the elf's
+        // section headers directly so a present elf is still measured. `pyelftools`
+        // keeps the retired command's source label for this rung (JSON parity).
+        if let Ok(bytes) = std::fs::read(elf) {
+            if let Some(sizes) = sizes_from_elf_sections(&bytes) {
+                return (Some(sizes), Some("pyelftools".to_string()));
             }
         }
     }

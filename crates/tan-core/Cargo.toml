@@ -14,3 +14,10 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
+# `tan size` ELF-section fallback rung: read section headers directly so a real
+# elf is measured even with no `arm-zephyr-eabi-size` on PATH. Read-only ELF.
+object = { version = "0.36", default-features = false, features = ["read", "std"] }
+
+[dev-dependencies]
+# The section-sum unit test synthesises a tiny ELF in-memory (writer feature).
+object = { version = "0.36", default-features = false, features = ["read", "write", "std"] }
