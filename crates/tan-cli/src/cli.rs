@@ -163,12 +163,17 @@ pub struct PinmuxArgs {
     pub family: Option<String>,
 }
 
-/// Args for `clean`: build-root override + dry-run. Native — mirrors the retired
-/// `west alp-clean` flags (`--build-root`, `--dry-run`); root comes from the
-/// global `--project` (tan convention), not a positional `app_path`.
+/// Args for `clean`: app-path + build-root override + dry-run. Native — mirrors
+/// the retired `west alp-clean` flags (`--build-root`, `--dry-run`). Takes the
+/// unified OPTIONAL positional `app_path` (default `.`): a non-`.` value roots
+/// the removal at that app dir; `.` falls back to the global `--project`.
 #[derive(Debug, Args)]
 pub struct CleanArgs {
-    /// Override the build root to remove (default: `<project_root>/build`).
+    /// Application source directory (default: `.`). `build_root` defaults to
+    /// `<app_path>/build`; a non-`.` value overrides the global `--project`.
+    #[arg(value_name = "APP_PATH", default_value = ".")]
+    pub app_path: String,
+    /// Override the build root to remove (default: `<app_path>/build`).
     #[arg(long = "build-root", value_name = "PATH")]
     pub build_root: Option<String>,
     /// List the paths that would be removed; delete nothing.
@@ -248,10 +253,11 @@ pub struct RenodeArgs {
 /// Envelope.
 #[derive(Debug, Args)]
 pub struct FlashArgs {
-    /// Application source directory. `build_root` defaults to `<app_path>/build`.
-    /// Required positional (faithful to `west alp-flash`; not folded into
-    /// `--project`).
-    #[arg(value_name = "APP_PATH")]
+    /// Application source directory (default: `.`, the current directory).
+    /// `build_root` defaults to `<app_path>/build`. Optional positional (the
+    /// unified app-path convention: `tan flash` from the app dir needs no
+    /// argument, matching the retired Python `app_path` default).
+    #[arg(value_name = "APP_PATH", default_value = ".")]
     pub app_path: String,
     /// Override the build root holding `system-manifest.yaml`
     /// (default: `<app_path>/build`).

@@ -174,9 +174,13 @@ pub fn select_sku(
 /// Filters `os == "zephyr"`; a slice is runnable when its `status` is NOT in
 /// `{blocked, skipped}`; the pool is the runnable set, or the full zephyr set
 /// when none are runnable (a single blocked zephyr slice still boots). Errors
-/// `NoZephyrSlice` (empty) / `MultipleZephyrSlices` (>1). The build_dir is used
-/// as-is when absolute, joined to `build_root` when relative, and falls back to
-/// `build_root/<core_id>-<os>` when absent; the ELF is `<that>/zephyr/zephyr.elf`.
+/// `NoZephyrSlice` (empty) / `MultipleZephyrSlices` (>1).
+///
+/// A post-build `output_artefact` (the real elf the build wrote) is PREFERRED
+/// when present — used as-is when absolute, joined to `build_root` when
+/// relative. Otherwise the `build_dir` is used as-is when absolute, joined to
+/// `build_root` when relative, falling back to `build_root/<core_id>-<os>` when
+/// absent; the ELF is then `<that>/zephyr/zephyr.elf`.
 pub fn zephyr_elf_from_manifest(
     manifest: &SystemManifest,
     build_root: &Path,
@@ -205,6 +209,15 @@ pub fn zephyr_elf_from_manifest(
         });
     }
     let s = pool[0];
+    // Prefer the real artefact the build recorded, over re-deriving from build_dir.
+    if let Some(artefact) = s.output_artefact.as_deref().filter(|a| !a.is_empty()) {
+        let p = Path::new(artefact);
+        return Ok(if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            build_root.join(p)
+        });
+    }
     let build_dir = match s.build_dir.as_deref().filter(|b| !b.is_empty()) {
         Some(bd) => {
             let p = Path::new(bd);
@@ -341,6 +354,36 @@ mod tests {
             elf,
             PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
         );
+    }
+
+    #[test]
+    fn output_artefact_is_preferred_over_build_dir() {
+        // A post-build manifest carrying the real elf: it wins over re-deriving
+        // `<build_dir>/zephyr/zephyr.elf`. Relative anchors to build_root.
+        let m = parse_system_manifest(
+            "schema_version: 1\nhw_info:\n  sku: E1M-AEN801\nslices:\n\
+             - core_id: m55_hp\n  os: zephyr\n  status: ok\n  \
+             build_dir: m55_hp-zephyr\n  \
+             output_artefact: m55_hp-zephyr/build/zephyr/zephyr.elf\n",
+        )
+        .unwrap();
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        assert_eq!(
+            elf,
+            PathBuf::from("/p/build/m55_hp-zephyr/build/zephyr/zephyr.elf")
+        );
+    }
+
+    #[test]
+    fn absolute_output_artefact_used_verbatim() {
+        let m = parse_system_manifest(
+            "schema_version: 1\nhw_info:\n  sku: E1M-AEN801\nslices:\n\
+             - core_id: m55_hp\n  os: zephyr\n  status: ok\n  \
+             output_artefact: /abs/out/build/zephyr/zephyr.elf\n",
+        )
+        .unwrap();
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        assert_eq!(elf, PathBuf::from("/abs/out/build/zephyr/zephyr.elf"));
     }
 
     #[test]

@@ -200,6 +200,16 @@ fn join_core_ids(rows: &[&SliceSize]) -> String {
         .join(", ")
 }
 
+/// Anchor a manifest path string: absolute as-is, relative under `build_root`.
+fn anchor_under(path: &str, build_root: &Path) -> PathBuf {
+    let p = Path::new(path);
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        build_root.join(p)
+    }
+}
+
 /// Resolve a slice's build directory: the manifest `build_dir` (anchored to
 /// `build_root` when relative) else the canonical `<core_id>-<os>`.
 fn slice_build_dir(slice: &Slice, build_root: &Path) -> PathBuf {
@@ -243,7 +253,11 @@ fn measure_slice(
     }
 
     let build_dir = slice_build_dir(slice, build_root);
-    let elf = build_dir.join("zephyr").join("zephyr.elf");
+    // Prefer the real artefact the build recorded; else re-derive from build_dir.
+    let elf = match slice.output_artefact.as_deref().filter(|s| !s.is_empty()) {
+        Some(art) => anchor_under(art, build_root),
+        None => build_dir.join("zephyr").join("zephyr.elf"),
+    };
     let (sizes, source) = extract_sizes(&elf, &build_dir, size_bin);
     let budget = resolve_slice_budget(sku, &core_id, metadata_root);
 

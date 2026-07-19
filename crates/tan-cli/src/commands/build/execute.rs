@@ -46,6 +46,15 @@ struct SliceResult {
     /// Why the slice was skipped (verbatim, e.g. the missing-tool reason).
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
+    /// Real on-disk `zephyr.elf` path after a successful build (absolute), fed
+    /// into the post-build manifest so `size`/`renode`/`flash` find the artefact
+    /// west actually produced. Internal plumbing — kept out of the JSON envelope.
+    #[serde(skip)]
+    output_artefact: Option<String>,
+    /// Real on-disk build directory (west's nested `<cwd>/build`, absolute) —
+    /// what `image` tars. Internal plumbing — kept out of the JSON envelope.
+    #[serde(skip)]
+    build_dir: Option<String>,
 }
 
 /// Envelope `data` for a `--native` build: the base dir plus each slice result.
@@ -151,6 +160,8 @@ pub(super) fn execute_slices(
                 status: if fail { "failed" } else { "skipped" }.to_string(),
                 rc: None,
                 reason: Some(SKIP_REASON_NO_COMMAND.to_string()),
+                output_artefact: None,
+                build_dir: None,
             });
             continue;
         };
@@ -180,6 +191,8 @@ pub(super) fn execute_slices(
                 status: "failed".to_string(),
                 rc: None,
                 reason: None,
+                output_artefact: None,
+                build_dir: None,
             });
             continue;
         }
@@ -227,6 +240,8 @@ pub(super) fn execute_slices(
                 status: if fail { "failed" } else { "skipped" }.to_string(),
                 rc: None,
                 reason: Some(reason),
+                output_artefact: None,
+                build_dir: None,
             });
             continue;
         }
@@ -293,12 +308,21 @@ pub(super) fn execute_slices(
             };
             eprintln!("{}", theme.slice_result(ds, &note));
         }
+        // On success, resolve the real on-disk artefact west produced so the
+        // post-build manifest points the consumers at the elf that exists.
+        let (output_artefact, build_dir) = if status == "ok" {
+            resolve_zephyr_artefact(&cwd)
+        } else {
+            (None, None)
+        };
         results.push(SliceResult {
             core_id: slice.core_id.clone(),
             backend,
             status: status.to_string(),
             rc,
             reason: None,
+            output_artefact,
+            build_dir,
         });
     }
 
@@ -420,11 +444,18 @@ fn write_post_build_manifest(
         Err(e) => return warn(e.to_string()),
     };
 
-    let overlay: Vec<(String, String, Option<String>)> = results
+    let overlay: Vec<(String, String, Option<String>, Option<String>)> = results
         .iter()
-        // The executor doesn't resolve artefact paths yet; pass None so the
-        // plan-time output_artefact (if any) is preserved.
-        .map(|r| (r.core_id.clone(), r.status.clone(), None))
+        // Carry the real artefact/build_dir the run resolved; None preserves the
+        // plan-time value (e.g. for a skipped or non-zephyr slice).
+        .map(|r| {
+            (
+                r.core_id.clone(),
+                r.status.clone(),
+                r.output_artefact.clone(),
+                r.build_dir.clone(),
+            )
+        })
         .collect();
     overlay_run_results(&mut manifest, &overlay);
 
@@ -442,6 +473,39 @@ fn write_post_build_manifest(
     if let Err(e) = std::fs::write(&dest, out) {
         warn(e.to_string());
     }
+}
+
+/// After a slice builds `ok`, resolve the real `zephyr.elf` west produced and
+/// its build dir. West's default output is a nested `build/` under the slice's
+/// run cwd, so the elf lands at `<cwd>/build/zephyr/zephyr.elf`. Returned
+/// ABSOLUTE so every consumer (`size`/`renode`/`flash`/`image`) uses the paths
+/// verbatim without re-anchoring under its own build_root. `(None, None)` when
+/// no elf is there — a non-Zephyr backend, or a build that wrote elsewhere — so
+/// the manifest keeps its plan-time values.
+///
+/// ponytail: assumes west's default nested `build/` dir; a slice that passes
+/// `-d <other>` isn't matched here — the `is_file` gate then falls back to the
+/// plan-time paths (no regression), upgrade to parse `-d` from the argv if a
+/// custom build dir ever ships in a plan command.
+fn resolve_zephyr_artefact(slice_cwd: &Path) -> (Option<String>, Option<String>) {
+    let west_build = slice_cwd.join("build");
+    let elf = west_build.join("zephyr").join("zephyr.elf");
+    if elf.is_file() {
+        (abs_string(&elf), abs_string(&west_build))
+    } else {
+        (None, None)
+    }
+}
+
+/// Absolute, lossy-string form of a path (no filesystem round-trip beyond
+/// `std::path::absolute`; falls back to the path as-is if that fails).
+fn abs_string(p: &Path) -> Option<String> {
+    Some(
+        std::path::absolute(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .into_owned(),
+    )
 }
 
 #[cfg(test)]

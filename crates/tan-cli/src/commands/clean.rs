@@ -66,12 +66,19 @@ fn is_dangerous_root(p: &Path) -> bool {
 /// `tan clean` entry. See the module docs for the faithful-plus behaviour.
 pub fn run(g: &GlobalArgs, args: &CleanArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
-    let project_root = PathBuf::from(
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // App base: a non-`.` positional roots the removal at that app dir; `.`
+    // falls back to tan's resolved workspace (which already folded in
+    // `--project`), else the current directory.
+    let project_root = if args.app_path == "." {
         context
             .workspace_root
             .clone()
-            .unwrap_or_else(|| ".".to_string()),
-    );
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cwd.clone())
+    } else {
+        cwd.join(&args.app_path)
+    };
     let project = Project {
         root: context.workspace_root.clone(),
         board_yaml: context.board_yaml_path.clone(),
@@ -327,6 +334,7 @@ mod tests {
         let run = run(
             &g,
             &CleanArgs {
+                app_path: ".".to_string(),
                 build_root: None,
                 dry_run: true,
             },
@@ -347,6 +355,7 @@ mod tests {
         populate(&root);
         let g = global(&root, Format::Text);
         let args = CleanArgs {
+            app_path: ".".to_string(),
             build_root: None,
             dry_run: false,
         };
@@ -373,6 +382,7 @@ mod tests {
         let run = run(
             &g,
             &CleanArgs {
+                app_path: ".".to_string(),
                 build_root: None,
                 dry_run: false,
             },
@@ -393,6 +403,30 @@ mod tests {
     }
 
     #[test]
+    fn positional_app_path_roots_removal() {
+        // A non-`.` positional roots the removal at that app dir, overriding
+        // `--project`. Using an absolute positional makes it cwd-independent.
+        let sdk = tmp("posarg-sdk"); // carries the SDK marker
+        let app = tmp("posarg-app");
+        populate(&app);
+        let mut g = global(&app, Format::Text);
+        g.project = Some(sdk.to_string_lossy().into_owned()); // --project points elsewhere
+        g.sdk_root = Some(sdk.to_string_lossy().into_owned());
+        let run = run(
+            &g,
+            &CleanArgs {
+                app_path: app.to_string_lossy().into_owned(),
+                build_root: None,
+                dry_run: false,
+            },
+        );
+        assert_eq!(run.exit, ExitCode::Success);
+        assert!(!app.join("build").exists(), "positional app build/ removed");
+        std::fs::remove_dir_all(&sdk).unwrap();
+        std::fs::remove_dir_all(&app).unwrap();
+    }
+
+    #[test]
     fn missing_sdk_root_exits_one() {
         // A project dir WITHOUT the SDK marker and no --sdk-root override.
         let root = std::env::temp_dir().join(format!("tan-clean-nosdk-{}", std::process::id()));
@@ -406,6 +440,7 @@ mod tests {
             let run = run(
                 &g,
                 &CleanArgs {
+                    app_path: ".".to_string(),
                     build_root: None,
                     dry_run: false,
                 },

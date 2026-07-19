@@ -205,23 +205,29 @@ pub fn parse_system_manifest(yaml: &str) -> Result<SystemManifest, SystemManifes
 
 /// Overlay this run's per-slice outcomes onto a plan-time manifest so the
 /// written `system-manifest.yaml` reflects what actually built. Each result is
-/// `(core_id, status, output_artefact)`; slices are matched by `core_id` and
-/// slices with no matching result (e.g. `off` cores) are left untouched.
+/// `(core_id, status, output_artefact, build_dir)`; slices are matched by
+/// `core_id` and slices with no matching result (e.g. `off` cores) are left
+/// untouched.
 ///
 /// No status remap is needed: the executor's vocabulary (`ok`/`failed`/
 /// `skipped`) is already a subset of the manifest schema's status enum
 /// (`pending`/`ok`/`failed`/`skipped` — `system-manifest-v1.schema.json`), so
-/// the status is copied verbatim. `output_artefact` is written only when the
-/// result carries one — a `None` never wipes a plan-time value. Pure: no IO.
+/// the status is copied verbatim. `output_artefact` and `build_dir` are each
+/// written only when the result carries one — a `None` never wipes a plan-time
+/// value, so a slice the executor could not resolve keeps whatever the planner
+/// emitted. Pure: no IO.
 pub fn overlay_run_results(
     manifest: &mut SystemManifest,
-    results: &[(String, String, Option<String>)],
+    results: &[(String, String, Option<String>, Option<String>)],
 ) {
-    for (core_id, status, output_artefact) in results {
+    for (core_id, status, output_artefact, build_dir) in results {
         if let Some(slice) = manifest.slices.iter_mut().find(|s| &s.core_id == core_id) {
             slice.status = status.clone();
             if output_artefact.is_some() {
                 slice.output_artefact = output_artefact.clone();
+            }
+            if build_dir.is_some() {
+                slice.build_dir = build_dir.clone();
             }
         }
     }
@@ -366,11 +372,12 @@ boot_order: []
                 (
                     "m55_hp".to_string(),
                     "ok".to_string(),
-                    Some("build/m55_hp-zephyr/zephyr/zephyr.elf".to_string()),
+                    Some("build/m55_hp-zephyr/build/zephyr/zephyr.elf".to_string()),
+                    Some("build/m55_hp-zephyr/build".to_string()),
                 ),
-                ("m55_he".to_string(), "failed".to_string(), None),
+                ("m55_he".to_string(), "failed".to_string(), None, None),
                 // A result for a core not in the manifest is a no-op.
-                ("ghost".to_string(), "ok".to_string(), None),
+                ("ghost".to_string(), "ok".to_string(), None, None),
             ],
         );
 
@@ -378,8 +385,9 @@ boot_order: []
         assert_eq!(hp.status, "ok");
         assert_eq!(
             hp.output_artefact.as_deref(),
-            Some("build/m55_hp-zephyr/zephyr/zephyr.elf")
+            Some("build/m55_hp-zephyr/build/zephyr/zephyr.elf")
         );
+        assert_eq!(hp.build_dir.as_deref(), Some("build/m55_hp-zephyr/build"));
 
         // failed with no artefact: status flips, artefact stays as the plan had it (None).
         let he = m.slice_for_core("m55_he").unwrap();
@@ -397,7 +405,7 @@ boot_order: []
         // Seed a plan-time artefact, then overlay a status-only result (None).
         m.slices[1].output_artefact = Some("build/plan-time.elf".to_string());
         let core = m.slices[1].core_id.clone();
-        overlay_run_results(&mut m, &[(core, "ok".to_string(), None)]);
+        overlay_run_results(&mut m, &[(core, "ok".to_string(), None, None)]);
         assert_eq!(
             m.slices[1].output_artefact.as_deref(),
             Some("build/plan-time.elf")
@@ -408,7 +416,10 @@ boot_order: []
     #[test]
     fn overlaid_manifest_serializes_and_reparses() {
         let mut m = parse_system_manifest(AEN701).unwrap();
-        overlay_run_results(&mut m, &[("m55_hp".to_string(), "ok".to_string(), None)]);
+        overlay_run_results(
+            &mut m,
+            &[("m55_hp".to_string(), "ok".to_string(), None, None)],
+        );
         let yaml = serialize_system_manifest(&m).expect("serialize");
         let reparsed = parse_system_manifest(&yaml).expect("reparse");
         assert_eq!(reparsed.slice_for_core("m55_hp").unwrap().status, "ok");
