@@ -139,6 +139,14 @@ pub enum Command {
     Lock(WestForwardArgs),
     /// Run the board.yaml quality checks (`west alp-quality`).
     Quality(WestForwardArgs),
+    /// Compile + package board.yaml `models:` into `.alpmodel` (`alp model`).
+    Model(WestForwardArgs),
+    /// Open a serial console to the board (`alp monitor`).
+    Monitor(WestForwardArgs),
+    /// Scaffold a new SoM's metadata skeleton (`alp new-som`).
+    NewSom(WestForwardArgs),
+    /// Decode an ARM Cortex-M (ARMv8-M) fault dump (`alp faultdecode`).
+    Faultdecode(WestForwardArgs),
 }
 
 /// Args for `pinmux`: the family target, resolved from an explicit `--family`
@@ -153,12 +161,14 @@ pub struct PinmuxArgs {
     pub family: Option<String>,
 }
 
-/// Args for commands that forward verbatim to a `west alp-*` subcommand
-/// (`image`/`flash`/`clean`/`renode`/`size`/`migrate`/`lock`/`quality`).
+/// Args for commands that forward their tail verbatim to an underlying
+/// subprocess — either a `west alp-*` extension
+/// (`image`/`flash`/`clean`/`renode`/`size`/`migrate`/`lock`/`quality`) or the
+/// SDK `alp` CLI (`model`/`monitor`/`new-som`/`faultdecode`).
 #[derive(Debug, Args)]
 pub struct WestForwardArgs {
-    /// Arguments forwarded verbatim to the underlying `west alp-*` command
-    /// (e.g. app path, `--core <id>`, `--sequential`, `-b <board>`).
+    /// Arguments forwarded verbatim to the underlying command (e.g. app path,
+    /// `--core <id>`, `--sequential`, `-b <board>`, `--port COM7`, `--cfsr 0x…`).
     #[arg(
         trailing_var_arg = true,
         allow_hyphen_values = true,

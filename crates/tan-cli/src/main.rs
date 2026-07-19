@@ -45,6 +45,10 @@ fn main() {
         Command::Migrate(args) => commands::build::run(&global, "migrate", &args.args),
         Command::Lock(args) => commands::build::run(&global, "lock", &args.args),
         Command::Quality(args) => commands::build::run(&global, "quality", &args.args),
+        Command::Model(args) => commands::sdk_cli::run(&global, "model", &args.args),
+        Command::Monitor(args) => commands::sdk_cli::run(&global, "monitor", &args.args),
+        Command::NewSom(args) => commands::sdk_cli::run(&global, "new-som", &args.args),
+        Command::Faultdecode(args) => commands::sdk_cli::run(&global, "faultdecode", &args.args),
     };
 
     emit(&global.format, run.json.as_deref(), &run.text);

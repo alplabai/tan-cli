@@ -63,7 +63,9 @@ carries the newer ADR-0020 fields the SDK now emits — per-slice
   `init`, `scaffold`, `examples`, `doctor`, `completion`, `diff`, `presets`,
   `pinmux`, `explain`, `inspect`, `trace`, `debug-config`, `support-bundle`,
   `sdk`, `bootstrap`, and `build` (with its `image` / `flash` / `clean` /
-  `renode` west-forwarding wrappers).
+  `renode` / `size` / `migrate` / `lock` / `quality` west-forwarding
+  wrappers), plus `model` / `monitor` / `new-som` / `faultdecode` — thin
+  forwarders to the SDK `alp` CLI (`python -m alp_cli <sub>`).
 
 ## The seam: the build-plan
 

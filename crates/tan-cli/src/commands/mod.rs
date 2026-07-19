@@ -43,6 +43,8 @@ pub mod presets;
 pub mod scaffold;
 /// `tan sdk` — SDK release listing/management.
 pub mod sdk;
+/// `tan model`/`monitor`/`new-som`/`faultdecode` — forwarders to the SDK `alp` CLI.
+pub mod sdk_cli;
 /// `tan support-bundle` — collect a diagnostics support bundle.
 pub mod support_bundle;
 /// `tan trace` — trace the generation decisions a build would make.

@@ -11,4 +11,5 @@ Ported commands: `validate`, `generate`, `init`, `scaffold`, `examples`,
 `doctor`, `completion`, `diff`, `presets`, `pinmux`, `explain`, `inspect`,
 `trace`, `debug-config`, `support-bundle`, `sdk`, `bootstrap`, `build`
 (and its `image`/`flash`/`clean`/`renode`/`size`/`migrate`/`lock`/`quality`
-west-forwarding wrappers).
+west-forwarding wrappers), plus `model`/`monitor`/`new-som`/`faultdecode`
+forwarders to the SDK `alp` CLI (`python -m alp_cli <sub>`).
