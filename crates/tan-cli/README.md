@@ -9,7 +9,8 @@ the workspace README for the three-repo model.
 
 Ported commands: `validate`, `generate`, `init`, `scaffold`, `examples`,
 `doctor`, `completion`, `diff`, `presets`, `pinmux`, `explain`, `inspect`,
-`trace`, `debug-config`, `support-bundle`, `sdk`, `bootstrap`, `build`
-(and its `image`/`flash`/`clean`/`renode`/`size`/`migrate`/`lock`/`quality`
-west-forwarding wrappers), plus `model`/`monitor`/`new-som`/`faultdecode`
-forwarders to the SDK `alp` CLI (`python -m alp_cli <sub>`).
+`trace`, `debug-config`, `support-bundle`, `sdk`, `bootstrap`, `build`.
+`build`/`size`/`image`/`flash`/`clean`/`renode` are native Rust; only
+`migrate`/`lock`/`quality` still forward to `west alp-*`. Plus
+`model`/`monitor`/`new-som`/`faultdecode` forwarders to the SDK `alp` CLI
+(`python -m alp_cli <sub>`).

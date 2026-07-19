@@ -14,7 +14,7 @@ name = "tan"
 path = "src/main.rs"
 
 [dependencies]
-tan-core = { path = "../tan-core", version = "0.0.0" }
+tan-core = { path = "../tan-core", version = "0.1.0" }
 clap.workspace = true
 inquire.workspace = true
 serde.workspace = true

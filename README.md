@@ -5,13 +5,12 @@
 executes it — it is the single executor and the user command surface for
 building, flashing, and inspecting Alp Lab E1M / E1M-X firmware.
 
-> **Status: PRIVATE DRAFT SEED.** This repo seeds **Phase 2 of alp-sdk ADR-0020**.
-> It is a *snapshot port* of the Rust CLI (`cli-rs`) that currently lives in
-> `alp-sdk-vscode` — **not** the history-preserving extraction (that lands
-> later). Only the SDK-interacting slice is ported so far (see "What's ported").
-> Private until the architecture is co-signed. **Before going public:** add the
-> full `LICENSE` file (Apache-2.0; the SPDX identifier is set in each
-> `Cargo.toml` and source header meanwhile).
+> **Status: public.** `tan` is the released executor CLI of **alp-sdk ADR-0020**:
+> it consumes the alp-sdk *build-plan* and executes it. `build` / `size` /
+> `image` / `flash` / `clean` / `renode` are native Rust; only `migrate` / `lock`
+> / `quality` still forward to `west alp-*`. Licensed **Apache-2.0** (see
+> [`LICENSE`](LICENSE); the SPDX identifier is also set in each `Cargo.toml` and
+> source header).
 
 ## Where it sits (three repos, one executor)
 
@@ -62,10 +61,11 @@ carries the newer ADR-0020 fields the SDK now emits — per-slice
 - **tan-cli** — the full `cli-rs` command surface: `validate`, `generate`,
   `init`, `scaffold`, `examples`, `doctor`, `completion`, `diff`, `presets`,
   `pinmux`, `explain`, `inspect`, `trace`, `debug-config`, `support-bundle`,
-  `sdk`, `bootstrap`, and `build` (with its `image` / `flash` / `clean` /
-  `renode` / `size` / `migrate` / `lock` / `quality` west-forwarding
-  wrappers), plus `model` / `monitor` / `new-som` / `faultdecode` — thin
-  forwarders to the SDK `alp` CLI (`python -m alp_cli <sub>`).
+  `sdk`, `bootstrap`, and `build`. `build` / `size` / `image` / `flash` /
+  `clean` / `renode` are **native Rust**; only `migrate` / `lock` / `quality`
+  still forward to the surviving `west alp-*` extension commands. Plus
+  `model` / `monitor` / `new-som` / `faultdecode` — thin forwarders to the SDK
+  `alp` CLI (`python -m alp_cli <sub>`).
 
 ## The seam: the build-plan
 

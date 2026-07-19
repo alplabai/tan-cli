@@ -1,52 +1,45 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-# alp-core
+# tan-core
 
-[![crates.io](https://img.shields.io/crates/v/alp-core.svg)](https://crates.io/crates/alp-core)
-[![docs.rs](https://img.shields.io/docsrs/alp-core)](https://docs.rs/alp-core)
-[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/alplabai/alp-sdk-vscode/blob/main/LICENSE)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/alplabai/tan-cli/blob/main/LICENSE)
 
-Pure, **I/O-free** domain logic for the [ALP SDK](https://github.com/alplabai/alp-sdk-vscode)
-embedded toolchain — the shared engine behind the
-[`alp`](https://crates.io/crates/alp-cli) CLI.
+Pure, **I/O-free** domain logic for [`tan`](https://github.com/alplabai/tan-cli) —
+the standalone Alp Lab build CLI that consumes the alp-sdk *build-plan* and
+executes it. This crate is the shared engine behind the `tan` binary
+(`crates/tan-cli`).
 
-This crate is the Rust home of the `board.yaml` model, parsing, and validation, plus the
-build-plan / system-manifest contracts, the SoM/SKU catalogue, and the debug/doctor
-reports. It contains **no** terminal, filesystem-walking, or process logic — only
-deterministic, serde-based transforms — so the same logic can be reused by the CLI today
-and bridged to the TypeScript extension/LSP (via napi-rs or WASM) later.
+`tan-core` is the Rust home of the build-plan / system-manifest **consumer**
+contracts plus the pure decision logic for the native commands. It contains
+**no** terminal, filesystem-walking, or process code — only deterministic,
+serde-based transforms — so the same logic stays testable in isolation and could
+later be bridged elsewhere (napi-rs / WASM).
 
 ## What's inside
 
 | Module | Responsibility |
 | --- | --- |
-| `model` | The `board.yaml` data model + `normalize_board_model`. |
-| `validate` | Schema + semantic validation; outcome classification. |
-| `loader` | Generation-target planning (Zephyr conf / DTS overlay / CMake args / Yocto conf). |
-| `build_plan` | Parse + summarize the SDK's build-plan contract. |
-| `system_manifest` | The post-build system-manifest v1 contract (per-core slices, ipc, helper MCUs). |
+| `build_plan` | Parse the SDK's build-plan contract (consumer structs, `envAppendPath`, `executionPolicy`) + the version-skew guard. |
+| `system_manifest` | The post-build system-manifest contract — `parse_system_manifest` / `overlay_run_results` / `serialize_system_manifest`. |
+| `plan_exec` | **Pure** env-append + skip/fail-policy decisions (`apply_env_append`, `assemble_slice_env`, `resolve_action`). |
+| `size` | `tan size` measurement logic + SoM-preset → SoC-variant budget resolution. |
+| `flash` | `tan flash` boot-order / artefact planning. |
+| `renode` | `tan renode` headless-smoke command planning. |
+| `clean` | `tan clean` build-tree selection. |
+| `image_bundle` | `tan image` bundle shape + forward-slash artefact paths. |
 | `build_readiness` | Per-OS build-toolchain readiness reports. |
 | `presets`, `sdk_catalogue` | SoM/SKU catalogue, chip/board presets, topology. |
-| `project` | Workspace / project / `board.yaml` resolution. |
-| `sdk` | SDK release listing + active-SDK resolution + readiness. |
-| `debug`, `debug_launch` | Debug-doctor reports + `launch.json` drafting. |
-| `diff`, `preview` | Model-vs-normalized diff; effective-config preview. |
+| `loader`, `project` | Generation-target planning + workspace / project resolution. |
 | `wizard` | Project / module scaffolding plans. |
 | `clock` | Deterministic ISO-8601 UTC timestamps (`SOURCE_DATE_EPOCH`-aware). |
 
-## Usage
+## Design
 
-```toml
-[dependencies]
-alp-core = "0.1"
-```
-
-The full API reference is on [docs.rs/alp-core](https://docs.rs/alp-core).
-
-> **Stability.** `alp-core` is published primarily as the implementation crate for the
-> `alp` CLI. It is pre-1.0 — the public API may change between minor versions. If you
-> depend on it directly, pin a minor range.
+`tan-core` is where the keep-files-small / pure-logic-in-core convention lands:
+every non-IO decision for a native command lives here with unit tests, while the
+IO/executor shell stays in `crates/tan-cli`. Reading SDK internals goes through
+exactly one seam — the build-plan JSON — modelled on the consumer side here.
 
 ## License
 
-[Apache-2.0](https://github.com/alplabai/alp-sdk-vscode/blob/main/LICENSE).
+[Apache-2.0](https://github.com/alplabai/tan-cli/blob/main/LICENSE).
