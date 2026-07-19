@@ -139,23 +139,24 @@ pub fn plan_swd_probe(
     })
 }
 
-/// `zephyr_west_flash`: `west flash --build-dir <d> --runner <r> [--erase]
-/// [--hex-file <h>]`. `runner` is required.
+/// `zephyr_west_flash`: `west flash --build-dir <d> [--runner <r>] [--erase]
+/// [--hex-file <h>]`. `runner` is OPTIONAL — when absent, `--runner` is omitted
+/// and `west flash` falls back to the board.cmake default runner (e.g. AEN's
+/// `alif_flash`). Mirrors the SDK `zephyr_west_flash` backend contract.
 pub fn plan_zephyr_west_flash(inp: &FlashInputs) -> Result<FlashPlan, String> {
     let fa = inp.flash_args;
-    let runner = fa_str(fa, "runner").ok_or_else(|| {
-        "zephyr_west_flash: flash_args.runner is required (e.g. openocd, jlink, pyocd, nrfjprog)."
-            .to_string()
-    })?;
+    let runner = fa_str(fa, "runner");
     let build_dir = fa_str(fa, "build_dir").unwrap_or_else(|| zephyr_build_dir(inp.artefact));
     let mut argv = vec![
         "west".to_string(),
         "flash".to_string(),
         "--build-dir".to_string(),
         build_dir,
-        "--runner".to_string(),
-        runner.clone(),
     ];
+    if let Some(runner) = &runner {
+        argv.push("--runner".to_string());
+        argv.push(runner.clone());
+    }
     if fa_bool(fa, "erase", false) {
         argv.push("--erase".to_string());
     }
@@ -166,8 +167,9 @@ pub fn plan_zephyr_west_flash(inp: &FlashInputs) -> Result<FlashPlan, String> {
     Ok(FlashPlan {
         argv,
         ok_message: format!(
-            "zephyr_west_flash[{}]: programmed via {runner}",
-            inp.core_id
+            "zephyr_west_flash[{}]: programmed via {}",
+            inp.core_id,
+            runner.as_deref().unwrap_or("board-default runner")
         ),
         planning_only: false,
         jlink_script: None,
@@ -369,15 +371,14 @@ mod tests {
     }
 
     #[test]
-    fn zephyr_runner_required_and_build_dir_fallback() {
+    fn zephyr_runner_optional_and_build_dir_fallback() {
         let art = Path::new("/b/m33_sm-zephyr/zephyr/zephyr.elf");
+        // runner absent -> succeeds, omits --runner, defers to board default.
         let no_runner = Value::Null;
         let inp = inputs(art, &no_runner, false);
-        assert!(
-            plan_zephyr_west_flash(&inp)
-                .unwrap_err()
-                .contains("runner is required")
-        );
+        let plan = plan_zephyr_west_flash(&inp).unwrap();
+        assert!(!plan.argv.contains(&"--runner".to_string()));
+        assert!(plan.argv.contains(&"flash".to_string()));
 
         let fa = yaml_val("runner: openocd\nerase: true\nhex_file: signed.hex");
         let inp = inputs(art, &fa, false);
