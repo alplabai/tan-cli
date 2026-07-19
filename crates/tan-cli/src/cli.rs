@@ -130,8 +130,9 @@ pub enum Command {
     Flash(FlashArgs),
     /// Remove the per-project build dir + orchestrator state cache (native).
     Clean(CleanArgs),
-    /// Boot the system manifest in Renode (`west alp-renode`).
-    Renode(WestForwardArgs),
+    /// Boot the built system manifest's single Zephyr slice in headless Renode
+    /// as a no-hardware smoke test (native).
+    Renode(RenodeArgs),
     /// Report per-slice firmware footprint vs the SoM memory budget (native).
     Size(SizeArgs),
     /// Migrate board.yaml to the current schema (`west alp-migrate`).
@@ -199,6 +200,46 @@ pub struct SizeArgs {
     pub fail_over_budget: bool,
 }
 
+/// Args for `renode`: boot the built system-manifest's single Zephyr slice in
+/// headless Renode. Native — mirrors the retired `west alp-renode` flags
+/// (positional `app_path`, `--build-root`, `--board`, `--image-bundle`, `--log`,
+/// `--timeout`, `--expect`, `--sim-mode`). `--sim-mode` is wired for surface
+/// stability but errors "not yet ported" (studio sim gateway, issue #674).
+#[derive(Debug, Args)]
+pub struct RenodeArgs {
+    /// Application source directory (default: `.`). Used to derive the default
+    /// build root (`<app_path>/build`) and the Envelope project context.
+    #[arg(value_name = "APP_PATH", default_value = ".")]
+    pub app_path: String,
+    /// Override the build root holding `system-manifest.yaml`
+    /// (default: `<app_path>/build`).
+    #[arg(long = "build-root", value_name = "DIR")]
+    pub build_root: Option<String>,
+    /// Override the SoM SKU used to pick the Renode platform descriptor
+    /// (default: `hw_info.sku` from the manifest).
+    #[arg(long, value_name = "SKU")]
+    pub board: Option<String>,
+    /// Directory of pre-built per-slice artefacts. Accepted for parity with the
+    /// dual-OS flow; unused by the single-Zephyr-slice smoke.
+    #[arg(long = "image-bundle", value_name = "DIR")]
+    pub image_bundle: Option<String>,
+    /// Tee the Renode UART/console output to this file
+    /// (default: `<build_root>/renode.log`).
+    #[arg(long, value_name = "FILE")]
+    pub log: Option<String>,
+    /// Wall-clock cap for the Renode run, in seconds.
+    #[arg(long, value_name = "SECS", default_value_t = 120)]
+    pub timeout: u64,
+    /// If set, stop early (exit 0) when this substring appears in any console
+    /// line; exit 1 if the run ends without it.
+    #[arg(long, value_name = "STR")]
+    pub expect: Option<String>,
+    /// DEFERRED studio hardware-simulator mode (issue #674): wired for surface
+    /// stability but errors "not yet ported" until studio is repointed to `tan`.
+    #[arg(long = "sim-mode")]
+    pub sim_mode: bool,
+}
+
 /// Args for `flash`: walk `build/system-manifest.yaml` and program every slice
 /// and helper MCU in `boot_order`. Native — mirrors the retired `west alp-flash`
 /// flags verbatim (required positional `app_path` plus build-root/dry-run/core/
@@ -253,7 +294,7 @@ pub struct ImageArgs {
 
 /// Args for commands that forward their tail verbatim to an underlying
 /// subprocess — either a `west alp-*` extension
-/// (`flash`/`renode`/`migrate`/`lock`/`quality`) or the
+/// (`migrate`/`lock`/`quality`) or the
 /// SDK `alp` CLI (`model`/`monitor`/`new-som`/`faultdecode`).
 #[derive(Debug, Args)]
 pub struct WestForwardArgs {

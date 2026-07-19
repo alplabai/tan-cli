@@ -40,7 +40,7 @@ fn main() {
         Command::Image(args) => commands::image::run(&global, &args),
         Command::Flash(args) => commands::flash::run(&global, &args),
         Command::Clean(args) => commands::clean::run(&global, &args),
-        Command::Renode(args) => commands::build::run(&global, "renode", &args.args),
+        Command::Renode(args) => commands::renode::run(&global, &args),
         Command::Size(args) => commands::size::run(&global, &args),
         Command::Migrate(args) => commands::build::run(&global, "migrate", &args.args),
         Command::Lock(args) => commands::build::run(&global, "lock", &args.args),

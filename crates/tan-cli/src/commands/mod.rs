@@ -45,6 +45,8 @@ pub mod inspect;
 pub mod pinmux;
 /// `tan presets` — list SDK presets (SKUs/SoMs, carriers) + built-in catalogue defaults.
 pub mod presets;
+/// `tan renode` — boot the manifest's single Zephyr slice in headless Renode (native).
+pub mod renode;
 /// `tan scaffold` — scaffold a module into an existing project.
 pub mod scaffold;
 /// `tan sdk` — SDK release listing/management.

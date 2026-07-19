@@ -1,0 +1,450 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Pure pre-flight logic for `tan renode` — the deterministic half of the native
+//! port of `west alp-renode` (`scripts/west_commands/alp_renode.py`), retired
+//! under ADR-0020 Phase 4. No IO: SKU→platform-descriptor mapping, single-Zephyr-
+//! slice selection, and the headless Renode argv all live here as IO-free
+//! functions; the subprocess + filesystem wiring is in `tan-cli`'s
+//! `commands/renode.rs`.
+//!
+//! SCOPE: the PLAIN (non-sim) headless smoke only. The Python `--sim-mode` studio
+//! gateway (sockets / RamConsole bridge, issue #674) is deferred; none of its
+//! helpers live here yet.
+
+use std::path::{Path, PathBuf};
+
+use crate::system_manifest::SystemManifest;
+
+/// SoM-family token → Renode platform-descriptor stem under
+/// `metadata/renode/<stem>.repl` + `<stem>.resc`. Mirrors
+/// `alp_renode._FAMILY_TOKEN_TO_PLATFORM` — the ONLY two wired stems today. The
+/// stems ARE on-disk filenames (contract): keep them verbatim.
+pub const FAMILY_TOKEN_TO_PLATFORM: &[(&str, &str)] = &[
+    ("alif_ensemble", "alif_ensemble_e8"),
+    ("renesas_rzv2n", "renesas_rzv2n"),
+];
+
+/// Why a `tan renode` pre-flight failed. Every variant maps to
+/// `ExitCode::RuntimeFailure` (faithful to the Python `log.die` = exit 1 for all
+/// of these); the CLI adds the one new `schema_version != 1` guard separately.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum RenodeError {
+    /// SKU didn't match `^E1M-(AEN|V2N|V2M|NX9)` (mirrors `_sku_family`'s
+    /// `ValueError`).
+    #[error("unrecognised SoM SKU pattern: {sku}")]
+    UnrecognisedSku {
+        /// The offending SKU string.
+        sku: String,
+    },
+    /// The SKU's family resolves, but no Renode descriptor is wired for it yet
+    /// (e.g. `imx93`/`nxp_imx9`).
+    #[error(
+        "no Renode platform descriptor for SoM family '{family}' (token={token:?}) \
+         of SKU {sku}; wired families: {wired:?}. Add metadata/renode/<stem>.repl \
+         + .resc and a FAMILY_TOKEN_TO_PLATFORM entry to extend coverage."
+    )]
+    NoDescriptorForFamily {
+        /// The resolved family (e.g. `imx93`).
+        family: String,
+        /// The soc-family token, when one exists (e.g. `nxp_imx9`).
+        token: Option<String>,
+        /// The originating SKU.
+        sku: String,
+        /// The wired source tokens (sorted), for the "extend coverage" hint.
+        wired: Vec<String>,
+    },
+    /// The manifest carries no `os: zephyr` slice to boot.
+    #[error("system-manifest.yaml has no os: zephyr slice to boot in Renode.")]
+    NoZephyrSlice,
+    /// More than one runnable Zephyr slice — the smoke boots a single one.
+    #[error(
+        "system-manifest.yaml has {} zephyr slices (cores {cores:?}); the Renode \
+         smoke boots a single-Zephyr-slice system. Multi-slice dual-OS boot is a \
+         separate target.",
+        cores.len()
+    )]
+    MultipleZephyrSlices {
+        /// The core ids of the competing zephyr slices.
+        cores: Vec<String>,
+    },
+    /// Neither `hw_info.sku` nor `--board` gave a SKU.
+    #[error("could not determine SoM SKU: manifest has no hw_info.sku and --board was not given.")]
+    SkuUnresolved,
+}
+
+/// SKU → SoM family directory name. Mirrors `alp_project_loader._sku_family`:
+/// `^E1M-(AEN|V2N|V2M|NX9)` → `aen`/`v2n`/`v2n-m1`/`imx93`. No regex dep — a
+/// bare `E1M-` prefix + token match is the same match at string start.
+pub fn sku_family(sku: &str) -> Result<&'static str, RenodeError> {
+    let unrecognised = || RenodeError::UnrecognisedSku {
+        sku: sku.to_string(),
+    };
+    let rest = sku.strip_prefix("E1M-").ok_or_else(unrecognised)?;
+    for (token, family) in [
+        ("AEN", "aen"),
+        ("V2N", "v2n"),
+        ("V2M", "v2n-m1"),
+        ("NX9", "imx93"),
+    ] {
+        if rest.starts_with(token) {
+            return Ok(family);
+        }
+    }
+    Err(unrecognised())
+}
+
+/// SoM family → soc-family token. Mirrors `west_libs._SOC_FAMILY_TOKEN`.
+pub fn soc_family_token(family: &str) -> Option<&'static str> {
+    match family {
+        "aen" => Some("alif_ensemble"),
+        "v2n" => Some("renesas_rzv2n"),
+        "v2n-m1" => Some("renesas_rzv2n"),
+        "imx93" => Some("nxp_imx9"),
+        _ => None,
+    }
+}
+
+/// The wired source tokens (keys of [`FAMILY_TOKEN_TO_PLATFORM`]), sorted —
+/// mirrors Python's `sorted(_FAMILY_TOKEN_TO_PLATFORM)` for the error hint.
+fn wired_tokens() -> Vec<String> {
+    let mut v: Vec<String> = FAMILY_TOKEN_TO_PLATFORM
+        .iter()
+        .map(|(tok, _)| tok.to_string())
+        .collect();
+    v.sort();
+    v
+}
+
+/// Full SKU → Renode platform stem chain: SKU → family → token → stem. Errors
+/// `NoDescriptorForFamily` when the family has no wired descriptor yet.
+pub fn platform_stem_for_sku(sku: &str) -> Result<String, RenodeError> {
+    let family = sku_family(sku)?;
+    let token = soc_family_token(family);
+    let stem = token.and_then(|t| {
+        FAMILY_TOKEN_TO_PLATFORM
+            .iter()
+            .find(|(tok, _)| *tok == t)
+            .map(|(_, stem)| *stem)
+    });
+    match stem {
+        Some(s) => Ok(s.to_string()),
+        None => Err(RenodeError::NoDescriptorForFamily {
+            family: family.to_string(),
+            token: token.map(str::to_string),
+            sku: sku.to_string(),
+            wired: wired_tokens(),
+        }),
+    }
+}
+
+/// `(repl_path, resc_path)` under `<sdk_root>/metadata/renode/` for the SKU's
+/// family. No existence check — the caller validates.
+pub fn platform_files_for_sku(
+    sku: &str,
+    sdk_root: &Path,
+) -> Result<(PathBuf, PathBuf), RenodeError> {
+    let stem = platform_stem_for_sku(sku)?;
+    let base = sdk_root.join("metadata").join("renode");
+    Ok((
+        base.join(format!("{stem}.repl")),
+        base.join(format!("{stem}.resc")),
+    ))
+}
+
+/// The SKU to drive descriptor selection: `--board` override, else the
+/// manifest's non-empty `hw_info.sku`, else `SkuUnresolved`.
+pub fn select_sku(
+    manifest: &SystemManifest,
+    board_override: Option<&str>,
+) -> Result<String, RenodeError> {
+    if let Some(board) = board_override {
+        let board = board.trim();
+        if !board.is_empty() {
+            return Ok(board.to_string());
+        }
+    }
+    let sku = manifest.hw_info.sku.trim();
+    if sku.is_empty() {
+        Err(RenodeError::SkuUnresolved)
+    } else {
+        Ok(sku.to_string())
+    }
+}
+
+/// Resolve the single runnable Zephyr slice's `zephyr.elf` from the manifest.
+/// Filters `os == "zephyr"`; a slice is runnable when its `status` is NOT in
+/// `{blocked, skipped}`; the pool is the runnable set, or the full zephyr set
+/// when none are runnable (a single blocked zephyr slice still boots). Errors
+/// `NoZephyrSlice` (empty) / `MultipleZephyrSlices` (>1). The build_dir is used
+/// as-is when absolute, joined to `build_root` when relative, and falls back to
+/// `build_root/<core_id>-<os>` when absent; the ELF is `<that>/zephyr/zephyr.elf`.
+pub fn zephyr_elf_from_manifest(
+    manifest: &SystemManifest,
+    build_root: &Path,
+) -> Result<PathBuf, RenodeError> {
+    let zephyr: Vec<&crate::system_manifest::Slice> = manifest
+        .slices
+        .iter()
+        .filter(|s| s.os == "zephyr")
+        .collect();
+    let runnable: Vec<&crate::system_manifest::Slice> = zephyr
+        .iter()
+        .copied()
+        .filter(|s| s.status != "blocked" && s.status != "skipped")
+        .collect();
+    let pool: &[&crate::system_manifest::Slice] = if runnable.is_empty() {
+        &zephyr
+    } else {
+        &runnable
+    };
+    if pool.is_empty() {
+        return Err(RenodeError::NoZephyrSlice);
+    }
+    if pool.len() > 1 {
+        return Err(RenodeError::MultipleZephyrSlices {
+            cores: pool.iter().map(|s| s.core_id.clone()).collect(),
+        });
+    }
+    let s = pool[0];
+    let build_dir = match s.build_dir.as_deref().filter(|b| !b.is_empty()) {
+        Some(bd) => {
+            let p = Path::new(bd);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                build_root.join(p)
+            }
+        }
+        None => build_root.join(format!("{}-{}", s.core_id, s.os)),
+    };
+    Ok(build_dir.join("zephyr").join("zephyr.elf"))
+}
+
+/// The headless Renode command line. Injects the `.resc`'s `$repl` / `$elf`
+/// variables by value and includes the script. This ordering + flags is a
+/// machine contract — VERBATIM: `--console --disable-xwt --hide-monitor --plain`
+/// then `-e $repl=@… -e $elf=@… -e i @…`.
+pub fn build_renode_argv(renode_bin: &str, repl: &Path, resc: &Path, elf: &Path) -> Vec<String> {
+    vec![
+        renode_bin.to_string(),
+        "--console".to_string(),
+        "--disable-xwt".to_string(),
+        "--hide-monitor".to_string(),
+        "--plain".to_string(),
+        "-e".to_string(),
+        format!("$repl=@{}", repl.display()),
+        "-e".to_string(),
+        format!("$elf=@{}", elf.display()),
+        "-e".to_string(),
+        format!("i @{}", resc.display()),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system_manifest::parse_system_manifest;
+
+    #[test]
+    fn platform_stem_for_the_wired_skus() {
+        assert_eq!(
+            platform_stem_for_sku("E1M-AEN801").unwrap(),
+            "alif_ensemble_e8"
+        );
+        assert_eq!(
+            platform_stem_for_sku("E1M-V2N101").unwrap(),
+            "renesas_rzv2n"
+        );
+        // V2M reuses the V2N descriptor via family v2n-m1.
+        assert_eq!(
+            platform_stem_for_sku("E1M-V2M101").unwrap(),
+            "renesas_rzv2n"
+        );
+    }
+
+    #[test]
+    fn nx9_has_no_descriptor_yet() {
+        let err = platform_stem_for_sku("E1M-NX901").unwrap_err();
+        match err {
+            RenodeError::NoDescriptorForFamily {
+                family,
+                token,
+                wired,
+                ..
+            } => {
+                assert_eq!(family, "imx93");
+                assert_eq!(token.as_deref(), Some("nxp_imx9"));
+                assert_eq!(wired, vec!["alif_ensemble", "renesas_rzv2n"]);
+            }
+            other => panic!("expected NoDescriptorForFamily, got {other:?}"),
+        }
+        // The message names the wired families.
+        let msg = platform_stem_for_sku("E1M-NX901").unwrap_err().to_string();
+        assert!(msg.contains("alif_ensemble"), "{msg}");
+        assert!(msg.contains("renesas_rzv2n"), "{msg}");
+    }
+
+    #[test]
+    fn bogus_sku_is_unrecognised() {
+        assert_eq!(
+            platform_stem_for_sku("BOGUS").unwrap_err(),
+            RenodeError::UnrecognisedSku {
+                sku: "BOGUS".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn sku_family_and_token_maps() {
+        assert_eq!(sku_family("E1M-AEN801").unwrap(), "aen");
+        assert_eq!(sku_family("E1M-V2N101").unwrap(), "v2n");
+        assert_eq!(sku_family("E1M-V2M101").unwrap(), "v2n-m1");
+        assert_eq!(sku_family("E1M-NX901").unwrap(), "imx93");
+        assert_eq!(soc_family_token("aen"), Some("alif_ensemble"));
+        assert_eq!(soc_family_token("v2n"), Some("renesas_rzv2n"));
+        assert_eq!(soc_family_token("v2n-m1"), Some("renesas_rzv2n"));
+        assert_eq!(soc_family_token("imx93"), Some("nxp_imx9"));
+    }
+
+    #[test]
+    fn platform_files_paths() {
+        let (repl, resc) = platform_files_for_sku("E1M-AEN801", Path::new("/sdk")).unwrap();
+        assert_eq!(
+            repl,
+            PathBuf::from("/sdk/metadata/renode/alif_ensemble_e8.repl")
+        );
+        assert_eq!(
+            resc,
+            PathBuf::from("/sdk/metadata/renode/alif_ensemble_e8.resc")
+        );
+    }
+
+    /// A manifest with the given zephyr slices, each `(core_id, status,
+    /// build_dir)`; `build_dir` empty → the slice omits the key.
+    fn manifest_with(slices: &[(&str, &str, &str)]) -> SystemManifest {
+        let mut yaml = String::from("schema_version: 1\nhw_info:\n  sku: E1M-AEN801\nslices:\n");
+        for (core, status, bd) in slices {
+            yaml.push_str(&format!(
+                "- core_id: {core}\n  os: zephyr\n  status: {status}\n"
+            ));
+            if !bd.is_empty() {
+                yaml.push_str(&format!("  build_dir: {bd}\n"));
+            }
+        }
+        parse_system_manifest(&yaml).expect("valid test manifest")
+    }
+
+    #[test]
+    fn relative_build_dir_joins_build_root() {
+        let m = manifest_with(&[("m55_hp", "pending", "m55_hp-zephyr")]);
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        assert_eq!(
+            elf,
+            PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
+        );
+    }
+
+    #[test]
+    fn absolute_build_dir_used_verbatim() {
+        let m = manifest_with(&[("m55_hp", "pending", "/abs/out")]);
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        assert_eq!(elf, PathBuf::from("/abs/out/zephyr/zephyr.elf"));
+    }
+
+    #[test]
+    fn absent_build_dir_falls_back_to_core_os_stem() {
+        let m = manifest_with(&[("m55_hp", "pending", "")]);
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        assert_eq!(
+            elf,
+            PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
+        );
+    }
+
+    #[test]
+    fn blocked_slice_ignored_boots_the_runnable_one() {
+        let m = manifest_with(&[("m55_he", "blocked", ""), ("m55_hp", "pending", "")]);
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        assert_eq!(
+            elf,
+            PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
+        );
+    }
+
+    #[test]
+    fn zero_zephyr_slices_errors() {
+        let m = parse_system_manifest("schema_version: 1\nslices: []\n").unwrap();
+        assert_eq!(
+            zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap_err(),
+            RenodeError::NoZephyrSlice
+        );
+    }
+
+    #[test]
+    fn two_runnable_zephyr_slices_error_lists_cores() {
+        let m = manifest_with(&[("m55_hp", "pending", ""), ("m55_he", "pending", "")]);
+        match zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap_err() {
+            RenodeError::MultipleZephyrSlices { cores } => {
+                assert_eq!(cores, vec!["m55_hp", "m55_he"]);
+            }
+            other => panic!("expected MultipleZephyrSlices, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn all_blocked_falls_back_and_boots_the_blocked_slice() {
+        // pool = runnable OR all-zephyr; one blocked zephyr slice still boots.
+        let m = manifest_with(&[("m55_hp", "blocked", "")]);
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        assert_eq!(
+            elf,
+            PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
+        );
+        // …but a blocked + another blocked still errors on count.
+        let m2 = manifest_with(&[("m55_hp", "blocked", ""), ("m55_he", "skipped", "")]);
+        assert!(matches!(
+            zephyr_elf_from_manifest(&m2, Path::new("/p/build")).unwrap_err(),
+            RenodeError::MultipleZephyrSlices { .. }
+        ));
+    }
+
+    #[test]
+    fn build_renode_argv_is_the_exact_contract() {
+        let argv = build_renode_argv(
+            "renode",
+            Path::new("/m/x.repl"),
+            Path::new("/m/x.resc"),
+            Path::new("/b/zephyr.elf"),
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "renode",
+                "--console",
+                "--disable-xwt",
+                "--hide-monitor",
+                "--plain",
+                "-e",
+                "$repl=@/m/x.repl",
+                "-e",
+                "$elf=@/b/zephyr.elf",
+                "-e",
+                "i @/m/x.resc",
+            ]
+        );
+        assert_eq!(argv.len(), 11);
+    }
+
+    #[test]
+    fn select_sku_prefers_override_then_manifest() {
+        let m = manifest_with(&[("m55_hp", "pending", "")]); // hw_info.sku = E1M-AEN801
+        assert_eq!(select_sku(&m, Some("E1M-V2N101")).unwrap(), "E1M-V2N101");
+        assert_eq!(select_sku(&m, None).unwrap(), "E1M-AEN801");
+        assert_eq!(select_sku(&m, Some("  ")).unwrap(), "E1M-AEN801");
+
+        let bare = parse_system_manifest("schema_version: 1\nslices: []\n").unwrap();
+        assert_eq!(
+            select_sku(&bare, None).unwrap_err(),
+            RenodeError::SkuUnresolved
+        );
+    }
+}
