@@ -1,14 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `tan build` / `flash` / `renode` — the build workflow.
+//! `tan build` — the build workflow entry.
 //!
-//! Each is the single user-facing entry that **hides `west`**: `tan build` runs
-//! `west alp-build`, `tan flash` runs `west alp-flash`, etc. (`tan image` is
-//! native now — see `commands::image` — and no longer forwards to `west
-//! alp-image`.) The per-core /
+//! `tan build` is native now: it consumes the SDK's `--emit build-plan`,
+//! materialises the per-slice files, and runs each slice's command directly
+//! (`native_build`) — no `west alp-build` extension command involved. `tan flash`
+//! and `tan renode` are likewise their own native commands (`commands::flash` /
+//! `commands::renode`), as is `tan image` (`commands::image`). The per-core /
 //! per-platform routing (Zephyr→`west build`, Yocto→`bitbake`, baremetal→CMake +
 //! vendor toolchain) stays in the SDK's orchestrator (`alp_orchestrate.py`); the
-//! CLI never re-decides the backend. Args after the subcommand are forwarded
-//! verbatim to the `west alp-*` command.
+//! CLI never re-decides the backend.
+//!
+//! `run` (aka `commands::build::run`) is the remaining `west`-delegating entry —
+//! now used ONLY by `Command::{Migrate,Lock,Quality}` (→ `west alp-migrate` /
+//! `alp-lock` / `alp-quality`, which survive ADR-0020 Phase 4). `west alp-build`
+//! itself is deleted under Phase 4, so `tan build` no longer routes through `run`.
 //!
 //! Text mode inherits stdio so the build streams live in the caller's terminal;
 //! JSON mode captures + emits a single envelope.
@@ -28,7 +33,7 @@ use crate::cli::{BuildArgs, GlobalArgs};
 use native::native_build;
 use plan_modes::{manifest_command, plan_command};
 
-// `run` is the legacy `west`-delegating entry (`flash`/`renode`)
+// `run` is the `west`-delegating entry (now only `migrate`/`lock`/`quality`)
 // and `probe_build_preflight` is shared with `tan doctor --build`; both stay
 // importable at `crate::commands::build::*` for `main.rs` / `doctor.rs`.
 pub(crate) use preflight::probe_build_preflight;
@@ -51,21 +56,17 @@ struct BuildData {
     args: Vec<String>,
 }
 
-/// `tan build` entry. `--native` runs the CLI-native build (consume plan →
-/// materialise → execute); `--plan` / `--materialise` consume + show/write the
-/// plan; otherwise delegate to `west alp-build` (the Wave A2 behavior).
+/// `tan build` entry. `--manifest` shows the system manifest; `--plan` /
+/// `--materialise` consume + show/write the plan; otherwise (and with `--native`)
+/// run the CLI-native build: consume the plan, materialise its files, then run
+/// each slice's command directly, so no `west alp-build` extension command is
+/// needed.
 pub fn run_build(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
     if args.manifest || args.manifest_from.is_some() {
         manifest_command(g, args)
-    } else if args.west {
-        // Legacy escape hatch: delegate to `west alp-build` (needs alp-sdk as the
-        // west manifest topdir). The default build no longer requires that.
-        run(g, "build", &args.args)
     } else if args.plan || args.plan_from.is_some() || args.materialise {
         plan_command(g, args)
     } else {
-        // Default (and `--native`): consume the SDK build-plan and run each slice's
-        // command directly, so no `west alp-build` extension command is needed.
         native_build(g, args)
     }
 }

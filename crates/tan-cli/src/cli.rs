@@ -120,8 +120,8 @@ pub enum Command {
     Sdk(SdkArgs),
     /// Set up the SDK build environment (west + Zephyr workspace + Python deps).
     Bootstrap(BootstrapArgs),
-    /// Build the project. `--plan` consumes the SDK's emitted build plan;
-    /// otherwise fans board.yaml into per-core slices via `west alp-build`.
+    /// Build the project natively: consume the SDK's emitted build plan,
+    /// materialise its files, then run each per-core slice's command directly.
     Build(BuildArgs),
     /// Assemble a flashable-image bundle from `build/system-manifest.yaml` (native).
     Image(ImageArgs),
@@ -314,7 +314,7 @@ pub struct WestForwardArgs {
     pub args: Vec<String>,
 }
 
-/// Args for `build`: plan/manifest inspection, materialisation, native build, and forwarded `west alp-build` args.
+/// Args for `build`: plan/manifest inspection, materialisation, and native build.
 #[derive(Debug, Args)]
 pub struct BuildArgs {
     /// Show the build plan (consumed from the SDK's `--emit build-plan`) and
@@ -332,8 +332,8 @@ pub struct BuildArgs {
     #[arg(long)]
     pub materialise: bool,
     /// Build natively: consume the plan, materialise its files, then run each
-    /// slice's command (`west` / `bitbake` / `cmake`) sequentially — instead of
-    /// delegating to `west alp-build`.
+    /// slice's command (`west` / `bitbake` / `cmake`) sequentially. This is the
+    /// default; the flag is kept as an explicit opt-in.
     #[arg(long)]
     pub native: bool,
     /// Show the system manifest — the post-build IDE/tool contract
@@ -347,19 +347,6 @@ pub struct BuildArgs {
     /// `--manifest`.
     #[arg(long = "manifest-from", value_name = "FILE")]
     pub manifest_from: Option<String>,
-    /// Legacy path: delegate to the SDK's `west alp-build` extension instead of
-    /// the default plan-driven native build. Requires a workspace where alp-sdk
-    /// is the west manifest topdir; the default build no longer needs that.
-    #[arg(long)]
-    pub west: bool,
-    /// Arguments forwarded verbatim to `west alp-build` (app path, `--core <id>`,
-    /// `--sequential`, `-b <board>`) when not using `--plan`.
-    #[arg(
-        trailing_var_arg = true,
-        allow_hyphen_values = true,
-        value_name = "ARGS"
-    )]
-    pub args: Vec<String>,
 }
 
 /// Args for `bootstrap`: toggles for the pip/west steps and an env-only dry run.
