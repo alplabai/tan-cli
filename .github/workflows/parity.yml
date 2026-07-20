@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# ADR-0020 (alp-sdk#855 amendment) two-seam parity gate + cross-repo trigger.
+# See tests/parity/README.md for the full rationale (oracle SHA, the
+# checkout-root/sdkCommit normalization, the allowed debug.probe delta).
+#
+#   seam1-plan-shape : live `--emit build-plan` vs. the frozen oracle,
+#                       toolchain-free. Implemented.
+#   seam2            : materialise byte-check + real build + Renode smoke.
+#                       Documented placeholder -- needs a Linux toolchain
+#                       runner (west / Zephyr SDK / Renode). Does not run a
+#                       fake check; does not report success for unverified
+#                       work.
+#
+# Triggers on every PR (self-check against a pinned alp-sdk ref) and on the
+# repository_dispatch alp-sdk CI fires for every planner change, so a
+# drifting emit surfaces on the alp-sdk PR itself, not discovered later.
+
+name: parity
+
+on:
+  pull_request:
+  repository_dispatch:
+    types: [alp-sdk-planner-change]
+
+env:
+  # Fallback alp-sdk ref for a plain `pull_request` run (no dispatch payload
+  # naming a ref). This is the last RELEASED alp-sdk tag as of this writing.
+  # NOTE: v0.11.1 predates df312cec (#848, ADR-0020 Phase 4) -- against this
+  # ref seam1 will see ZERO diffs (not even the allowed debug.probe one); the
+  # allowed-delta path is exercised by dispatch runs naming a post-#848
+  # sdk_ref. Bump this once alp-sdk cuts a release tag that includes #848
+  # (blocked on this gate landing -- alp-sdk ADR-0020 Amendment, alp-sdk#855).
+  PINNED_SDK_TAG: v0.11.1
+
+jobs:
+  seam1-plan-shape:
+    name: "seam1 -- plan-shape parity"
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout tan-cli
+        uses: actions/checkout@v4
+
+      - name: resolve alp-sdk ref
+        id: sdk_ref
+        shell: bash
+        run: |
+          ref="${{ github.event.client_payload.sdk_ref }}"
+          if [ -z "$ref" ]; then
+            ref="${{ env.PINNED_SDK_TAG }}"
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "::notice::comparing against alp-sdk ref: $ref"
+
+      - name: clone alp-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.sdk_ref.outputs.ref }}
+          path: alp-sdk
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: seam1 field diff (live emit vs. frozen oracle)
+        run: >
+          python3 tests/parity/seam1_field_diff.py
+          --sdk alp-sdk
+          --oracle tests/parity/oracle
+
+  seam2:
+    name: "seam2 -- materialise + real build + Renode smoke (TODO)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: not yet implemented
+        run: |
+          echo "::warning::seam2 is a documented placeholder, not a real check."
+          echo "It needs a Linux runner with the toolchain installed (west, the"
+          echo "Zephyr SDK, the AEN/E1M-X modules, Renode) to materialise each"
+          echo "slice, run a real build, and Renode-smoke the result. See"
+          echo "tests/parity/README.md and alp-sdk ADR-0020 (alp-sdk#855) for"
+          echo "the full seam definition. This job intentionally does no"
+          echo "verification and must not be read as one."
