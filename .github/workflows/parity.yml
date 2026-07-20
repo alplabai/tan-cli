@@ -72,12 +72,12 @@ jobs:
         with:
           python-version: "3.x"
 
-      # alp_orchestrate's emit path hard-requires PyYAML (it aborts with
-      # "PyYAML is required" otherwise). setup-python ships a bare interpreter,
-      # so install it explicitly — without this, seam1 fails every example with
-      # an emit error, not a real plan-shape diff.
+      # alp_orchestrate's emit path hard-requires PyYAML and jsonschema (it
+      # aborts with "<pkg> is required" otherwise). setup-python ships a bare
+      # interpreter, so install them explicitly — without this, seam1 fails
+      # every example with an emit error, not a real plan-shape diff.
       - name: install SDK emit deps
-        run: python3 -m pip install --upgrade pip pyyaml
+        run: python3 -m pip install --upgrade pip pyyaml jsonschema
 
       - name: seam1 field diff (live emit vs. frozen oracle)
         run: >
