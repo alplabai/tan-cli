@@ -5,10 +5,9 @@
 //!
 //! The CLI *consumes* this plan; it does **not** compute it. The planner — the
 //! fast-moving, vendor-heavy part (partition allocation, sysbuild, TF-M) — stays
-//! the SDK's single source of truth (see `docs/BUILD_ORCHESTRATION.md` and
-//! `docs/PROPOSAL-alp-build-core.md`). This module is pure: it only models +
+//! the SDK's single source of truth. This module is pure: it only models +
 //! parses the plan JSON. Materialise / execute / schedule live in the CLI
-//! (`alp-cli`).
+//! (`tan-cli`).
 //!
 //! Contract notes (ADR 0014, mirrored here so the types stay honest):
 //!   * camelCase keys; `schemaVersion` independent of board.yaml's version.
@@ -240,7 +239,8 @@ impl BuildPlan {
     /// Every generated file the consumer must materialise, in a deterministic
     /// order: shared artefacts first, then each slice's config artefacts in
     /// slice order. Pure — the CLI does the byte-writes. The SDK guarantees
-    /// these `contents` match what `west alp-build` would write itself, so
+    /// these `contents` match what the SDK's own on-disk materialise step
+    /// writes (same `_shared_artefacts`/`_slice_config_artefact` helpers), so
     /// materialising them cannot drift from the on-disk build.
     pub fn all_artefacts(&self) -> Vec<&GeneratedFile> {
         let mut out: Vec<&GeneratedFile> = self.shared_artefacts.iter().collect();
@@ -336,7 +336,7 @@ pub fn parse_build_plan(json: &str) -> Result<BuildPlan, BuildPlanError> {
     Ok(plan)
 }
 
-/// Human-readable, deterministic summary lines for `alp build --plan` (text
+/// Human-readable, deterministic summary lines for `tan build --plan` (text
 /// mode). Pure so it is unit-testable without the CLI.
 pub fn summarize_plan(plan: &BuildPlan) -> Vec<String> {
     let mut lines = Vec::new();

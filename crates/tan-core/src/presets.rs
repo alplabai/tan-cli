@@ -30,7 +30,7 @@ pub fn empty_preset_catalogue() -> PresetCatalogueDefaults {
             "cmsis_dsp",
             "littlefs",
         ]),
-        inference_backends: owned(&["auto", "cpu", "ethos_u", "drpai", "deepx_dx"]),
+        inference_backends: owned(&["auto", "cpu", "ethos_u", "drpai", "deepx_dxm1"]),
         log_levels: owned(&["error", "warn", "info", "debug", "trace"]),
         os_choices: owned(&["zephyr", "yocto", "baremetal"]),
     }

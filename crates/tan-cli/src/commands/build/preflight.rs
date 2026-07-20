@@ -65,11 +65,12 @@ fn read_sdk_zephyr_pin(sdk_root: Option<&Path>) -> Option<String> {
     tan_core::preflight::parse_west_zephyr_pin(&body)
 }
 
-/// Text-mode build pre-flight: run the shared checks and, if any block the build,
-/// return a colorful readiness report to short-circuit with; `None` means all
-/// clear — proceed.
-pub(super) fn preflight_gate(g: &GlobalArgs, context: &ProjectContext) -> Option<CommandRun> {
-    let checks = probe_build_preflight(g, context);
+/// Text-mode build pre-flight gate over an already-probed set of checks — split
+/// out from probing so the warm `tan build` path can reuse a single
+/// [`probe_build_preflight`] call instead of probing twice (once here, once in
+/// [`maybe_auto_bootstrap`]). If any check blocks the build, returns a colorful
+/// readiness report to short-circuit with; `None` means all clear — proceed.
+pub(super) fn gate_from_checks(g: &GlobalArgs, checks: Vec<DoctorCheck>) -> Option<CommandRun> {
     if !preflight_blocked(&checks) {
         return None;
     }
@@ -96,9 +97,8 @@ pub(super) fn preflight_gate(g: &GlobalArgs, context: &ProjectContext) -> Option
 /// summary is intentionally discarded.
 pub(super) fn maybe_auto_bootstrap(
     g: &GlobalArgs,
-    context: &ProjectContext,
+    checks: &[DoctorCheck],
 ) -> Option<ProjectContext> {
-    let checks = probe_build_preflight(g, context);
     let is_fail = |name: &str| {
         checks
             .iter()
@@ -135,7 +135,7 @@ pub(super) fn maybe_auto_bootstrap(
     // `bootstrap::run` returns early on Windows with the ONLY actionable
     // message the user gets ("not supported on native Windows... use WSL2 /
     // docs §4"). The old `let _ =` discarded that `CommandRun` entirely, so
-    // the readiness gate below fell through to its generic `run \`alp
+    // the readiness gate below fell through to its generic `run \`tan
     // bootstrap\`` hint — an instruction that can never succeed on this host.
     // This is text-mode-only (the JSON path never calls `maybe_auto_bootstrap`
     // — see the `!g.is_json()` gate at the call site), so printing here is the

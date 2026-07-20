@@ -43,7 +43,7 @@ pub mod init;
 pub mod inspect;
 /// `tan pinmux` — the E1M pinmux capability table (E1M pad → silicon function) for a SoM family.
 pub mod pinmux;
-/// `tan presets` — list SDK presets (SKUs/SoMs, carriers) + built-in catalogue defaults.
+/// `tan presets` — list SDK presets (SKUs/SoMs) + built-in catalogue defaults.
 pub mod presets;
 /// `tan renode` — boot the manifest's single Zephyr slice in headless Renode (native).
 pub mod renode;

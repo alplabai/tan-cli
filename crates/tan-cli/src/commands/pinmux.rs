@@ -5,11 +5,15 @@
 //! explicit `--family` or a `--sku` prefix map, reads the capability table, and
 //! emits it in the envelope. Fail-soft: an unresolved SDK root, an unknown SKU,
 //! or a family with no generated table each surface a warning + empty pads, not
-//! a hard failure.
+//! a hard failure. A table that DOES exist but fails to parse as
+//! `pinmux-capability-v1` (schema-version skew) or that parses successfully
+//! into zero pads (the schema requires `minItems: 1`) is not fail-soft: both
+//! surface an `error`-severity issue and exit [`ExitCode::ValidationFailure`].
 
 use std::path::Path;
 
-use tan_core::{PinmuxPad, parse_pinmux_table, pinmux_family_for_sku};
+use tan_core::pinmux::parse_pinmux_table_checked;
+use tan_core::{PinmuxPad, pinmux_family_for_sku};
 
 use super::CommandRun;
 use crate::cli::{GlobalArgs, PinmuxArgs};
@@ -41,8 +45,10 @@ struct PinmuxData {
 }
 
 /// Entry point for `tan pinmux`. Resolves the family, reads the capability table
-/// from the SDK root, and emits the text or JSON envelope (always exit 0; the
-/// unresolved cases are warnings).
+/// from the SDK root, and emits the text or JSON envelope. Unresolved-target
+/// cases (no SDK root, unknown SKU, no table on disk) are warnings that exit 0;
+/// a table that exists but fails schema-version or ends up with zero pads
+/// exits [`ExitCode::ValidationFailure`].
 pub fn run(g: &GlobalArgs, args: &PinmuxArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
     let mut issues = Vec::new();
@@ -71,6 +77,8 @@ pub fn run(g: &GlobalArgs, args: &PinmuxArgs) -> CommandRun {
         }
     };
 
+    let mut exit = ExitCode::Success;
+
     let (display_name, pads) = match (&context.sdk_root, &family) {
         (Some(root), Some(fam)) => {
             let path = Path::new(root)
@@ -78,10 +86,34 @@ pub fn run(g: &GlobalArgs, args: &PinmuxArgs) -> CommandRun {
                 .join("pinmux")
                 .join(format!("{fam}.yaml"));
             match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    let table = parse_pinmux_table(&text);
-                    (table.display_name, table.pads)
-                }
+                Ok(text) => match parse_pinmux_table_checked(&text) {
+                    Ok(table) if table.pads.is_empty() => {
+                        // `pinmux-capability-v1.schema.json` requires
+                        // `minItems: 1` on `pads`: a successful parse of a
+                        // real v1 table is never legitimately empty.
+                        issues.push(Issue {
+                            code: "pinmux.table-empty".to_string(),
+                            severity: "error".to_string(),
+                            message: format!(
+                                "Pinmux capability table for family '{fam}' parsed with zero pads (metadata/pinmux/{fam}.yaml)."
+                            ),
+                        });
+                        exit = ExitCode::ValidationFailure;
+                        (table.display_name, table.pads)
+                    }
+                    Ok(table) => (table.display_name, table.pads),
+                    Err(e) => {
+                        issues.push(Issue {
+                            code: "pinmux.schema-version-unsupported".to_string(),
+                            severity: "error".to_string(),
+                            message: format!(
+                                "Pinmux capability table for family '{fam}' failed to parse (metadata/pinmux/{fam}.yaml): {e}"
+                            ),
+                        });
+                        exit = ExitCode::ValidationFailure;
+                        (None, Vec::new())
+                    }
+                },
                 Err(_) => {
                     issues.push(Issue {
                         code: "pinmux.table-not-found".to_string(),
@@ -129,13 +161,9 @@ pub fn run(g: &GlobalArgs, args: &PinmuxArgs) -> CommandRun {
         root: context.workspace_root.clone(),
         board_yaml: context.board_yaml_path.clone(),
     };
-    let json = g.is_json().then(|| {
-        Envelope::new("pinmux", project, data, issues, ExitCode::Success.code()).to_json()
-    });
+    let json = g
+        .is_json()
+        .then(|| Envelope::new("pinmux", project, data, issues, exit.code()).to_json());
 
-    CommandRun {
-        exit: ExitCode::Success,
-        text,
-        json,
-    }
+    CommandRun { exit, text, json }
 }

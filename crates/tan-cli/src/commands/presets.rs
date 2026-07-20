@@ -1,31 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `tan presets` — list SDK presets (SKUs, carriers) plus built-in defaults.
+//! `tan presets` — list SDK presets (SKUs) plus built-in defaults.
 //!
 //! Mirrors TS `runPresetsCommand`: built-in library/inference/log/os defaults
-//! come from `empty_preset_catalogue`; SKUs and carriers are discovered from
-//! `<sdk>/metadata/e1m_modules` and `<sdk>/metadata/carriers`. An unresolved
-//! SDK root is a warning (not a failure) — defaults are still returned.
+//! come from `empty_preset_catalogue`; SKUs are discovered from
+//! `<sdk>/metadata/e1m_modules`. An unresolved SDK root is a warning (not a
+//! failure) — defaults are still returned.
+//!
+//! There is no `<sdk>/metadata/carriers` tree in alp-sdk (board.yaml has no
+//! `carrier:` block either — see `board.schema.json`'s `additionalProperties:
+//! false`), so this command no longer discovers/reports carrier presets.
 
 use std::path::Path;
 
-use tan_core::{empty_preset_catalogue, parse_board_model, parse_som_preset};
+use tan_core::{empty_preset_catalogue, parse_som_preset};
 
 use super::CommandRun;
 use crate::cli::GlobalArgs;
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 use crate::util::resolve_cli_project_context;
-
-/// One carrier preset discovered under `<sdk>/metadata/carriers`: its directory
-/// name and the sorted keys populated in its `carrier.populated` map.
-#[derive(serde::Serialize)]
-struct CarrierEntry {
-    /// Carrier directory name (the entry under `metadata/carriers`).
-    name: String,
-    /// Sorted keys present in the carrier's `carrier.populated` map.
-    #[serde(rename = "populatedKeys")]
-    populated_keys: Vec<String>,
-}
 
 /// One SoM preset discovered under `<sdk>/metadata/e1m_modules`: SKU id,
 /// display name, family, and per-core runtime topology.
@@ -52,9 +45,9 @@ struct SomCoreEntry {
     os: String,
 }
 
-/// The `presets` command payload: discovered SDK presets (SKUs/SoMs, carriers)
-/// plus the built-in library/inference/log/os defaults. Serialized as the
-/// envelope `data` field.
+/// The `presets` command payload: discovered SDK presets (SKUs/SoMs) plus the
+/// built-in library/inference/log/os defaults. Serialized as the envelope
+/// `data` field.
 #[derive(serde::Serialize)]
 struct PresetsData {
     /// Payload schema version (currently `"1"`).
@@ -67,8 +60,6 @@ struct PresetsData {
     skus: Vec<String>,
     /// Rich SoM presets discovered from `<sdk>/metadata/e1m_modules/*.yaml`.
     soms: Vec<SomEntry>,
-    /// Carrier presets discovered from `<sdk>/metadata/carriers`.
-    carriers: Vec<CarrierEntry>,
     /// Built-in library defaults from `empty_preset_catalogue` (the per-core
     /// `cores.<id>.libraries` token set).
     libraries: Vec<String>,
@@ -90,19 +81,15 @@ struct PresetsData {
 }
 
 /// Entry point for `tan presets`. Resolves the project context, discovers SoMs
-/// and carriers from the SDK root (empty + a warning issue when unresolved),
-/// merges in built-in defaults, and emits the text or JSON envelope.
+/// from the SDK root (empty + a warning issue when unresolved), merges in
+/// built-in defaults, and emits the text or JSON envelope.
 pub fn run(g: &GlobalArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
     let defaults = empty_preset_catalogue();
 
-    let (soms, carriers, board_libraries) = match &context.sdk_root {
-        Some(root) => (
-            read_soms(root),
-            read_carriers(root),
-            read_board_libraries(root),
-        ),
-        None => (Vec::new(), Vec::new(), Vec::new()),
+    let (soms, board_libraries) = match &context.sdk_root {
+        Some(root) => (read_soms(root), read_board_libraries(root)),
+        None => (Vec::new(), Vec::new()),
     };
     let skus: Vec<String> = soms.iter().map(|s| s.sku.clone()).collect();
 
@@ -122,7 +109,6 @@ pub fn run(g: &GlobalArgs) -> CommandRun {
         sdk_root: context.sdk_root.clone(),
         skus,
         soms,
-        carriers,
         libraries: defaults.libraries,
         board_libraries,
         inference_backends: defaults.inference_backends,
@@ -206,43 +192,6 @@ fn read_soms(sdk_root: &str) -> Vec<SomEntry> {
     soms
 }
 
-/// Discover carrier presets from `<sdk>/metadata/carriers`. Each subdirectory's
-/// `board.yaml` is parsed for its `carrier.populated` keys; malformed presets
-/// are skipped (matches TS). Result is sorted by carrier name.
-fn read_carriers(sdk_root: &str) -> Vec<CarrierEntry> {
-    let dir = Path::new(sdk_root).join("metadata").join("carriers");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return Vec::new();
-    };
-    let mut carriers: Vec<CarrierEntry> = Vec::new();
-    for entry in entries.filter_map(Result::ok) {
-        let name = entry.file_name().to_string_lossy().to_string();
-        let board = dir.join(&name).join("board.yaml");
-        if !board.exists() {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&board) else {
-            continue;
-        };
-        // Ignore malformed carrier presets in listing mode (matches TS).
-        let Ok(model) = parse_board_model(&text) else {
-            continue;
-        };
-        let mut populated_keys: Vec<String> = model
-            .carrier
-            .and_then(|c| c.populated)
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
-        populated_keys.sort();
-        carriers.push(CarrierEntry {
-            name,
-            populated_keys,
-        });
-    }
-    carriers.sort_by(|a, b| a.name.cmp(&b.name));
-    carriers
-}
-
 /// Discover the ADR-0018 curated libraries from `<sdk>/metadata/libraries`: the
 /// stem of each `<name>.yaml` manifest (`README*` + non-yaml entries skipped),
 /// sorted + de-duplicated. These are the values a board.yaml top-level
@@ -269,21 +218,17 @@ fn read_board_libraries(sdk_root: &str) -> Vec<String> {
 }
 
 /// Render the human-readable (non-JSON) output lines: a summary count line,
-/// plus per-SKU and per-carrier lines when `g.verbose` is set.
+/// plus per-SKU lines when `g.verbose` is set.
 fn presets_text(data: &PresetsData, g: &GlobalArgs) -> Vec<String> {
     let mut lines = vec![format!(
-        "presets: skus={} carriers={} libraries={} boardLibraries={}",
+        "presets: skus={} libraries={} boardLibraries={}",
         data.skus.len(),
-        data.carriers.len(),
         data.libraries.len(),
         data.board_libraries.len()
     )];
     if g.verbose {
         for sku in &data.skus {
             lines.push(format!("sku: {sku}"));
-        }
-        for carrier in &data.carriers {
-            lines.push(format!("carrier: {}", carrier.name));
         }
     }
     lines

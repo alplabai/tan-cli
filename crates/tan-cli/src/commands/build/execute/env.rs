@@ -159,7 +159,9 @@ mod tests {
             &append_map(&[]),
             |k| (k == "EXTRA_ZEPHYR_MODULES").then(|| "/home/u/my-module".to_string()),
         );
-        let sep = if cfg!(windows) { ';' } else { ':' };
+        // EXTRA_ZEPHYR_MODULES is a Zephyr CMake list: apply_env_append joins
+        // it with ';' on EVERY platform (plan_exec, finding H13), not os.pathsep.
+        let sep = ';';
         assert_eq!(
             got,
             vec![(

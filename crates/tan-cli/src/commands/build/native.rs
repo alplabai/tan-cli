@@ -16,11 +16,11 @@ use crate::util::resolve_cli_project_context;
 use super::execute::{NativeBuildOutcome, execute_slices_outcome};
 use super::materialise::materialise_plan;
 use super::plan_modes::plan_error_run;
-use super::preflight::{maybe_auto_bootstrap, preflight_gate};
+use super::preflight::{gate_from_checks, maybe_auto_bootstrap, probe_build_preflight};
 use super::workspace::invoke_sdk_emit;
 
-/// The project build tree base (where `build/<core>-<os>/` lives) — the same
-/// place `west alp-build` would run.
+/// The project build tree base (where `build/<core>-<os>/` lives) — the
+/// directory `tan build` runs each slice's command from.
 pub(super) fn base_dir(context: &ProjectContext) -> String {
     context
         .west_cwd
@@ -73,10 +73,14 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
     // a raw west/CMake error. JSON mode keeps its stable envelope; the same
     // errors surface from acquire_plan.
     if !g.is_json() {
-        if let Some(updated) = maybe_auto_bootstrap(g, &context) {
+        // Probe once; only re-probe if a bootstrap actually ran (it can change
+        // the workspace/west readiness), instead of always probing twice.
+        let mut checks = probe_build_preflight(g, &context);
+        if let Some(updated) = maybe_auto_bootstrap(g, &checks) {
             context = updated;
+            checks = probe_build_preflight(g, &context);
         }
-        if let Some(blocked) = preflight_gate(g, &context) {
+        if let Some(blocked) = gate_from_checks(g, checks) {
             return NativeBuildOutcome {
                 run: blocked,
                 manifest_written: false,

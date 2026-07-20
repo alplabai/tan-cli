@@ -102,7 +102,7 @@ pub enum Command {
     Completion(CompletionArgs),
     /// Show how board.yaml normalization changes the effective config.
     Diff,
-    /// List SDK presets (SKUs, carriers) and built-in catalogue defaults.
+    /// List SDK presets (SKUs) and built-in catalogue defaults.
     Presets,
     /// Show the E1M pinmux capability table (E1M pad → silicon function) for a SoM family.
     Pinmux(PinmuxArgs),
@@ -345,12 +345,12 @@ pub struct BuildArgs {
     pub plan: bool,
     /// Read the build plan from a JSON file instead of invoking the SDK. Implies
     /// `--plan`. Use this to consume `alp_orchestrate.py --emit build-plan`
-    /// output (Wave C; the live emit is pending on the SDK side).
+    /// output instead of the live emit (which is the default plan source).
     #[arg(long = "plan-from", value_name = "FILE")]
     pub plan_from: Option<String>,
     /// Materialise the plan: write its generated files (shared artefacts +
     /// per-slice config) to disk under the build root, instead of just showing
-    /// the plan. Requires a plan source (`--plan` / `--plan-from`).
+    /// the plan. With no `--plan-from`, the plan is fetched live from the SDK.
     #[arg(long)]
     pub materialise: bool,
     /// Build natively: consume the plan, materialise its files, then run each

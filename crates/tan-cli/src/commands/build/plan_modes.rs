@@ -6,7 +6,8 @@
 use std::path::Path;
 
 use serde::Serialize;
-use tan_core::build_plan::{BuildPlan, summarize_plan};
+use tan_core::ProjectContext;
+use tan_core::build_plan::{BuildPlan, parse_build_plan, summarize_plan};
 use tan_core::system_manifest::{parse_system_manifest, summarize_manifest};
 
 use super::CommandRun;
@@ -16,15 +17,16 @@ use crate::exit::ExitCode;
 use crate::util::resolve_cli_project_context;
 
 use super::materialise::materialise_plan;
-use super::native::{acquire_plan, base_dir};
+use super::native::base_dir;
 use super::workspace::invoke_sdk_emit;
 
 /// `tan build --manifest [--manifest-from FILE]` — the post-build IDE/tool
 /// contract (`build/system-manifest.yaml`). With `--manifest-from` we read a
-/// local manifest (e.g. one `west alp-build` already wrote); otherwise we ask
-/// the SDK for the projection (`alp_orchestrate.py --emit system-manifest`,
-/// status: pending). Either way we parse + version-guard it and emit the
-/// manifest in the envelope (the IDE reads this instead of shelling python).
+/// local manifest (the one `tan build --native` already wrote); otherwise we
+/// ask the SDK for the projection (`alp_orchestrate --emit system-manifest`,
+/// registered in `emit-registry-v1.json`). Either way we parse + version-guard
+/// it and emit the manifest in the envelope (the IDE reads this instead of
+/// shelling python).
 pub(super) fn manifest_command(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
     let project = Project {
@@ -97,15 +99,27 @@ pub(super) fn plan_command(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
         board_yaml: context.board_yaml_path.clone(),
     };
 
-    let plan = match acquire_plan(&context, args) {
-        Ok(plan) => plan,
+    let json = match acquire_plan_json(&context, args) {
+        Ok(json) => json,
         Err((code, message)) => {
             return plan_error_run(g, project, code, message, ExitCode::RuntimeFailure);
         }
     };
+    let plan = match parse_build_plan(&json) {
+        Ok(plan) => plan,
+        Err(e) => {
+            return plan_error_run(
+                g,
+                project,
+                "build.plan-invalid",
+                e.to_string(),
+                ExitCode::RuntimeFailure,
+            );
+        }
+    };
 
     if !args.materialise {
-        return show_plan_run(g, project, &plan);
+        return show_plan_run(g, project, &plan, &json);
     }
 
     let base = base_dir(&context);
@@ -121,12 +135,46 @@ pub(super) fn plan_command(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
     }
 }
 
-/// Render the acquired build plan without executing: JSON emits the plan in an
-/// envelope; text emits `summarize_plan`.
-fn show_plan_run(g: &GlobalArgs, project: Project, plan: &BuildPlan) -> CommandRun {
+/// Acquire the plan's raw JSON — from `--plan-from <FILE>` if given, else the
+/// SDK's `--emit build-plan` — mirroring `native::acquire_plan`'s sourcing but
+/// keeping the unparsed `serde_json::Value`, not just the typed `BuildPlan`.
+/// `--plan --format json` needs the raw JSON: the SDK's per-slice schema
+/// requires fields (`appDir`, `toolchain`, `artifacts`, `debug`, `sdkVersion`,
+/// `sdkCommit`, …) that `BuildPlan` doesn't model yet, so re-serialising the
+/// typed struct would drop them and emit a schema-invalid plan.
+fn acquire_plan_json(
+    context: &ProjectContext,
+    args: &BuildArgs,
+) -> Result<String, (&'static str, String)> {
+    match &args.plan_from {
+        Some(path) => std::fs::read_to_string(path).map_err(|e| {
+            (
+                "build.plan-unavailable",
+                format!("failed to read plan file `{path}`: {e}"),
+            )
+        }),
+        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable"),
+    }
+}
+
+/// Render the acquired build plan without executing: JSON passes the raw
+/// SDK-emitted `raw_json` straight through in the envelope (so schema-required
+/// fields the typed `BuildPlan` doesn't model survive verbatim, per ADR 0014);
+/// text emits `summarize_plan` off the parsed `plan`.
+fn show_plan_run(g: &GlobalArgs, project: Project, plan: &BuildPlan, raw_json: &str) -> CommandRun {
     if g.is_json() {
-        let json =
-            Envelope::new("build", project, plan, Vec::new(), ExitCode::Success.code()).to_json();
+        // `raw_json` was already parsed once by `parse_build_plan` (the caller),
+        // so re-parsing to a generic `Value` here cannot fail.
+        let value: serde_json::Value =
+            serde_json::from_str(raw_json).expect("raw_json already validated by parse_build_plan");
+        let json = Envelope::new(
+            "build",
+            project,
+            value,
+            Vec::new(),
+            ExitCode::Success.code(),
+        )
+        .to_json();
         CommandRun {
             exit: ExitCode::Success,
             text: Vec::new(),
@@ -224,5 +272,69 @@ pub(super) fn plan_error_run(
             text: vec![format!("build: {message}")],
             json: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod show_plan_run_tests {
+    use super::*;
+
+    fn json_args() -> GlobalArgs {
+        GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: crate::cli::Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: true,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    // The SDK's per-slice schema requires fields (e.g. `appDir`) that
+    // `BuildSlice` doesn't model. `--plan --format json` must pass the raw
+    // emitted JSON through verbatim, not re-serialise the typed `BuildPlan` —
+    // else a required field silently disappears from the plan tan hands back.
+    #[test]
+    fn json_envelope_preserves_fields_the_typed_plan_does_not_model() {
+        let raw_json = r#"{
+          "schemaVersion": 1,
+          "boardYaml": "/proj/board.yaml",
+          "sku": "E1M-AEN701",
+          "buildRoot": "build",
+          "slices": [
+            {
+              "coreId": "m55_hp",
+              "backend": "zephyr",
+              "buildDir": "build/m55_hp-zephyr",
+              "appDir": "app",
+              "toolchain": "zephyr-0.16",
+              "artifacts": ["zephyr.elf"],
+              "debug": { "gdbPort": 3333 },
+              "sdkVersion": "0.11.0",
+              "sdkCommit": "deadbeef",
+              "command": { "tool": "west", "args": ["build"], "cwd": "build/m55_hp-zephyr" },
+              "env": {}
+            }
+          ],
+          "sharedArtefacts": [],
+          "warnings": []
+        }"#;
+        let plan = parse_build_plan(raw_json).expect("sample plan must parse");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+
+        let run = show_plan_run(&json_args(), project, &plan, raw_json);
+        let json = run.json.expect("json mode must emit a json body");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["data"]["slices"][0]["appDir"], "app");
+        assert_eq!(value["data"]["slices"][0]["sdkVersion"], "0.11.0");
+        assert_eq!(value["data"]["slices"][0]["sdkCommit"], "deadbeef");
     }
 }

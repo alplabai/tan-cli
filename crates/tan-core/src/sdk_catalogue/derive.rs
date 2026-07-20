@@ -71,10 +71,10 @@ pub fn effective_chip_choices(
 }
 
 /// Availability of the known accelerators for `som`, derived from its preferred
-/// backend and `deepx_dx` capability; `cpu` is always available.
+/// backend and `deepx_dxm1` capability; `cpu` is always available.
 pub fn accelerator_availability(som: &SomPreset) -> Vec<AcceleratorAvail> {
     let preferred_backend = som.preferred_backend.as_deref();
-    let has_deepx = som.capabilities.get("deepx_dx").copied().unwrap_or(false);
+    let has_deepx = som.capabilities.get("deepx_dxm1").copied().unwrap_or(false);
     vec![
         AcceleratorAvail {
             id: "ethos_u".to_string(),
@@ -144,7 +144,7 @@ mod tests {
                     silicon: "alif-e7".to_string(),
                     silicon_variant: None,
                     preferred_backend: Some("ethos_u".to_string()),
-                    capabilities: BTreeMap::from([("deepx_dx".to_string(), true)]),
+                    capabilities: BTreeMap::from([("deepx_dxm1".to_string(), true)]),
                     default_board: None,
                     topology_core_ids: vec!["m55_hp".to_string()],
                     topology: vec![],

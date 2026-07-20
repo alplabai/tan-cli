@@ -489,7 +489,7 @@ mod tests {
         std::fs::create_dir_all(&modules).unwrap();
         std::fs::write(
             modules.join(format!("{sku}.yaml")),
-            format!("sku: {sku}\nsilicon: test:fam:part\n"),
+            format!("schema_version: 1\nsku: {sku}\nsilicon: test:fam:part\n"),
         )
         .unwrap();
         let soc_dir = root.join("metadata").join("socs").join("test").join("fam");

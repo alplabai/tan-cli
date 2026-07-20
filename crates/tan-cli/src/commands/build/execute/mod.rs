@@ -273,14 +273,9 @@ pub(crate) fn execute_slices_outcome(
         let cwd = base_path.join(&cmd.cwd);
         // The build dir must exist before the tool runs (west/cmake build there).
         if let Err(e) = std::fs::create_dir_all(&cwd) {
+            let reason = format!("cannot create build dir {}: {e}", cwd.display());
             if text_mode {
-                eprintln!(
-                    "{}",
-                    theme.slice_result(
-                        DoctorStatus::Fail,
-                        &format!("cannot create build dir {}: {e}", cwd.display())
-                    )
-                );
+                eprintln!("{}", theme.slice_result(DoctorStatus::Fail, &reason));
             }
             any_failed = true;
             results.push(SliceResult {
@@ -288,7 +283,7 @@ pub(crate) fn execute_slices_outcome(
                 backend,
                 status: "failed".to_string(),
                 rc: None,
-                reason: None,
+                reason: Some(reason),
                 output_artefact: None,
                 build_dir: None,
             });
@@ -1081,6 +1076,53 @@ mod tests {
                 .any(|i| i["code"] == "build.manifest-write-failed" && i["severity"] == "warning"),
             "expected a manifest-write-failed warning issue, got: {issues:?}"
         );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_reports_build_dir_creation_failure_as_reason_in_json() {
+        // Regression: a failed `create_dir_all` for the slice's build dir used
+        // to print via `eprintln!` gated on `text_mode` only, leaving JSON
+        // mode's `reason` as `None` — a bare `{"status":"failed"}` with no
+        // diagnostic. The reason string must be populated in JSON mode too.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let json = r#"{
+          "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+          "slices": [
+            { "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+              "command": { "tool": "true", "args": [], "cwd": "build/c1" } }
+          ],
+          "sharedArtefacts": []
+        }"#;
+        let plan = parse_build_plan(json).unwrap();
+        let base = unique_temp_dir("alp-exec-build-dir-create-fail");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // Pre-create a plain FILE at "build" so `create_dir_all("build/c1")`
+        // fails: a path component exists and is not a directory.
+        std::fs::write(base.join("build"), b"not a dir").unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 1);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "failed");
+        let reason = slices[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("cannot create build dir"), "got: {reason}");
 
         std::fs::remove_dir_all(&base).ok();
     }
