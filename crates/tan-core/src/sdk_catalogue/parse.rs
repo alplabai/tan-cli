@@ -85,13 +85,7 @@ pub fn parse_chip_def(text: &str) -> Result<ChipDef, serde_yaml::Error> {
             zephyr: str_clean(yget(kc, "zephyr")),
             baremetal: str_clean(yget(kc, "baremetal")),
         })
-        .and_then(|k| {
-            if k.zephyr.is_some() || k.baremetal.is_some() {
-                Some(k)
-            } else {
-                None
-            }
-        });
+        .filter(|k| k.zephyr.is_some() || k.baremetal.is_some());
 
     Ok(ChipDef {
         chip_id,
