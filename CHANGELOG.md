@@ -7,6 +7,8 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-07-20
+
 A full adversarially-verified codebase review found data-loss and
 hardware-programming defects in the 0.1.0 surface; this section is the fix set.
 The unifying cause: external file content (`board.yaml`, the build plan, the
