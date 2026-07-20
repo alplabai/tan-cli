@@ -13,15 +13,19 @@ set -eu
 REPO="alplabai/tan-cli"
 VERSION="latest"
 INSTALL_DIR="${TAN_INSTALL_DIR:-$HOME/.local/bin}"
+MODIFY_PATH=1
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--version) VERSION="${2:?--version needs a value}"; shift 2 ;;
 	--dir) INSTALL_DIR="${2:?--dir needs a value}"; shift 2 ;;
 	--system) INSTALL_DIR="/usr/local/bin"; shift ;;
+	--no-modify-path) MODIFY_PATH=0; shift ;;
 	-h | --help)
-		echo "usage: install.sh [--version vX.Y.Z] [--dir <path>] [--system]"
+		echo "usage: install.sh [--version vX.Y.Z] [--dir <path>] [--system] [--no-modify-path]"
 		echo "  default install dir: \$HOME/.local/bin (no sudo). --system uses /usr/local/bin (sudo)."
+		echo "  if the install dir is not already on PATH, the login shell's rc file is updated"
+		echo "  (with a printed notice) so 'tan' works in any shell; --no-modify-path opts out."
 		exit 0
 		;;
 	*) echo "install.sh: unknown argument: $1" >&2; exit 2 ;;
@@ -80,7 +84,32 @@ trap - EXIT
 
 echo "install.sh: installed tan -> ${dest}"
 case ":${PATH}:" in
-*":${INSTALL_DIR}:"*) ;;
-*) echo "install.sh: ${INSTALL_DIR} is not on PATH — add:  export PATH=\"${INSTALL_DIR}:\$PATH\"" ;;
+*":${INSTALL_DIR}:"*)
+	: # already on PATH — 'tan' works from any shell
+	;;
+*)
+	if [ "$MODIFY_PATH" = "1" ]; then
+		# Pick the login shell's rc file, append the PATH line (idempotent), and
+		# announce it — never edit a dotfile silently. This is what makes a
+		# no-sudo user-local install usable globally (notably on macOS, where
+		# ~/.local/bin is not on the default PATH).
+		case "$(basename "${SHELL:-/bin/sh}")" in
+		zsh) rc="$HOME/.zshrc" ;;
+		bash)
+			if [ "$(uname -s)" = "Darwin" ]; then rc="$HOME/.bash_profile"; else rc="$HOME/.bashrc"; fi
+			;;
+		*) rc="$HOME/.profile" ;;
+		esac
+		if [ -f "$rc" ] && grep -qF "$INSTALL_DIR" "$rc" 2>/dev/null; then
+			echo "install.sh: ${INSTALL_DIR} already referenced in ${rc} — not modified."
+		else
+			printf '\n%s\n' "export PATH=\"${INSTALL_DIR}:\$PATH\"  # added by tan install.sh" >>"$rc"
+			echo "install.sh: added ${INSTALL_DIR} to PATH in ${rc}."
+			echo "install.sh: open a NEW shell (or run:  . \"${rc}\") to use 'tan' anywhere. Undo: delete that line."
+		fi
+	else
+		echo "install.sh: ${INSTALL_DIR} is not on PATH — add:  export PATH=\"${INSTALL_DIR}:\$PATH\"  (or re-run without --no-modify-path)"
+	fi
+	;;
 esac
 "$dest" --version 2>/dev/null || echo "install.sh: run 'tan --version' to verify (once on PATH)."

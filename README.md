@@ -27,6 +27,13 @@ The install scripts detect your platform, download the matching binary, and put
 Windows). Add `--system` / `-System` for a system-wide install (that path needs
 elevated permission).
 
+On Unix, if the install dir is not already on PATH, the script appends one line
+to your login shell's rc (`~/.zshrc` / `~/.bash_profile` / `~/.profile`) — with a
+printed notice, idempotently — so `tan` works in a new shell (this is what makes a
+no-sudo install global on macOS, where `~/.local/bin` isn't on the default PATH).
+Pass `--no-modify-path` to skip it. On Windows the script already updates your
+user PATH.
+
 ```sh
 # Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh
