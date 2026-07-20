@@ -9,9 +9,13 @@
 //! The flow mirrors `alp_flash.dispatch` + `_flash_entry`: walk the manifest's
 //! `boot_order` (or the sorted slice `core_id`s when empty), map each step to its
 //! slice, append the helper MCUs after, then dispatch each entry's `flash_method`
-//! to a backend plan-builder. `flash_args` sub-keys are read tolerantly — a
-//! non-mapping value (the AEN701 helper's `flash_args: TBD` string) reads as an
-//! empty map.
+//! to a backend plan-builder. A whole `flash_args` that is not a mapping (the
+//! AEN701 helper's `flash_args: TBD` string) reads as an empty map — but a
+//! sub-key that IS present is read STRICTLY: every behaviour-affecting bool/int
+//! (`erase`, `use_openocd`, `reset`, `base`, `baud`, …) goes through a `_checked`
+//! accessor that hard-errors on a wrong-type scalar rather than silently
+//! defaulting, since a wrong flash is worse than a refused one. Do not
+//! reintroduce a tolerant bool/int reader here.
 
 use std::path::{Path, PathBuf};
 
@@ -69,22 +73,32 @@ pub struct FlashTarget {
     pub firmware_path: Option<String>,
 }
 
-/// Build the ordered flash target list + any `boot_order` warnings, mirroring
-/// `alp_flash.dispatch`'s step-building. Pure.
+/// Build the ordered flash target list + any `boot_order` warnings/refusals,
+/// mirroring `alp_flash.dispatch`'s step-building. Pure.
 ///
 /// - Empty `boot_order`: one step per slice `core_id`, sorted ascending.
 /// - Non-empty `boot_order`: walked in order; a step referencing a `core_id`
 ///   not in `slices` is dropped and surfaced as a warning string.
+/// - A slice whose `status` isn't `ok` (build failed, was skipped, or never
+///   ran) is REFUSED rather than flashed or silently dropped — see the third
+///   return value.
 /// - Helpers always come AFTER all slices.
 /// - `core = Some` flashes only that slice and skips every helper.
 /// - `helper = Some` skips every slice and flashes only that helper.
+///
+/// Returns `(targets, boot_order_warnings, status_refusals)`. Callers must
+/// surface `status_refusals` as an error (not a warning) — the entries never
+/// enter `targets`, but a caller that only logs `targets`/`warnings` would
+/// otherwise report a clean run while a stale artefact stayed unflashed with
+/// no explanation.
 pub fn plan_flash_targets(
     m: &SystemManifest,
     core: Option<&str>,
     helper: Option<&str>,
-) -> (Vec<FlashTarget>, Vec<String>) {
+) -> (Vec<FlashTarget>, Vec<String>, Vec<String>) {
     let mut targets = Vec::new();
     let mut warnings = Vec::new();
+    let mut refused = Vec::new();
 
     // Slice lookup by non-empty core_id (drop empties, matching the Python dict
     // comprehension guard).
@@ -118,6 +132,24 @@ pub fn plan_flash_targets(
             .collect()
     };
 
+    // A slice present in `slices` but never named by a `boot_order` step is
+    // the mirror image of the "step references a core not in slices"
+    // warning below, but was previously dropped with NO warning at all --
+    // a heterogeneous system silently flashed a strict subset of its cores
+    // and reported success. Only warn in the unfiltered default run:
+    // `--core` deliberately narrows the slice set, and `--helper`
+    // deliberately suppresses every slice, so neither should warn here.
+    if !m.boot_order.is_empty() && helper.is_none() && core.is_none() {
+        for s in &m.slices {
+            if !s.core_id.is_empty() && !steps.iter().any(|cid| cid == &s.core_id) {
+                warnings.push(format!(
+                    "flash: slice '{}' has no boot_order entry; not flashed",
+                    s.core_id
+                ));
+            }
+        }
+    }
+
     // ---- slices (skipped entirely when --helper is set) ----
     if helper.is_none() {
         for cid in &steps {
@@ -127,14 +159,39 @@ pub fn plan_flash_targets(
                 }
             }
             match find_slice(cid) {
-                Some(s) => targets.push(FlashTarget {
-                    kind: FlashKind::Slice,
-                    id: s.core_id.clone(),
-                    flash_method: s.flash_method.clone(),
-                    flash_args: s.flash_args.clone().unwrap_or(Value::Null),
-                    output_artefact: s.output_artefact.clone(),
-                    firmware_path: None,
-                }),
+                Some(s) => {
+                    // `plan_flash_targets` used to select purely by
+                    // boot_order/core_id and never looked at build `status`.
+                    // `overlay_run_results` (system_manifest.rs) preserves the
+                    // PLAN-TIME `output_artefact` whenever a run's result for
+                    // this core is absent/artefact-less — so a run-1 success
+                    // followed by a run-2 build that fails or gets skipped
+                    // (e.g. `executionPolicy.missingTool: skip` when `west`
+                    // drops off PATH) leaves run-1's elf on disk under a
+                    // manifest now reporting a broken/skipped slice. Silently
+                    // flashing that stale elf, or silently dropping the slice
+                    // with no explanation, are the same silent-failure class
+                    // (crates/tan-cli build/execute/mod.rs's own comment
+                    // admits the manifest can't be trusted blindly) — refuse
+                    // and let the caller surface it as an error.
+                    if !crate::image_bundle::slice_should_bundle(&s.status) {
+                        refused.push(format!(
+                            "flash: slice '{}' build status is '{}' (not 'ok'); refusing to \
+                             flash its artefact -- it may be stale from a previous successful \
+                             build. Rebuild it first.",
+                            s.core_id, s.status
+                        ));
+                        continue;
+                    }
+                    targets.push(FlashTarget {
+                        kind: FlashKind::Slice,
+                        id: s.core_id.clone(),
+                        flash_method: s.flash_method.clone(),
+                        flash_args: s.flash_args.clone().unwrap_or(Value::Null),
+                        output_artefact: s.output_artefact.clone(),
+                        firmware_path: None,
+                    });
+                }
                 None => warnings.push(format!(
                     "flash: boot_order references core '{cid}' not in slices; skipping"
                 )),
@@ -164,7 +221,7 @@ pub fn plan_flash_targets(
         }
     }
 
-    (targets, warnings)
+    (targets, warnings, refused)
 }
 
 /// Resolve a manifest artefact string to a path. Absolute strings pass through;
@@ -253,12 +310,14 @@ slices:
 - core_id: m33_sm
   os: zephyr
   output_artefact: build/m33_sm-zephyr/zephyr/zephyr.elf
+  status: ok
   flash_method: zephyr_west_flash
   flash_args:
     runner: openocd
 - core_id: a55_cluster
   os: yocto
   output_artefact: build/a55.wic
+  status: ok
   flash_method: yocto_wic_to_sd_or_emmc
   flash_args:
     target: /dev/sdb
@@ -274,8 +333,9 @@ boot_order: []
     #[test]
     fn empty_boot_order_sorts_core_ids_helpers_last() {
         let m = manifest(MULTI);
-        let (targets, warnings) = plan_flash_targets(&m, None, None);
+        let (targets, warnings, refused) = plan_flash_targets(&m, None, None);
         assert!(warnings.is_empty());
+        assert!(refused.is_empty());
         let ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
         // a55_cluster < m33_sm ascending; helper last.
         assert_eq!(ids, vec!["a55_cluster", "m33_sm", "gd32_bridge"]);
@@ -289,18 +349,35 @@ boot_order: []
             "boot_order:\n- core: m33_sm\n- core: ghost\n- core: a55_cluster",
         );
         let m = manifest(&yaml);
-        let (targets, warnings) = plan_flash_targets(&m, None, None);
+        let (targets, warnings, refused) = plan_flash_targets(&m, None, None);
         let ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
         // boot_order order preserved; ghost dropped; helper appended after.
         assert_eq!(ids, vec!["m33_sm", "a55_cluster", "gd32_bridge"]);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("ghost") && warnings[0].contains("not in slices"));
+        assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn boot_order_missing_a_slice_warns_instead_of_silently_dropping_it() {
+        // Non-empty boot_order names only m33_sm; a55_cluster is a real
+        // slice with a valid flash_method that would otherwise be flashed
+        // by the empty-boot_order (sorted-core-ids) path -- it must not
+        // vanish with zero warning and `failed: 0` / `ok: true`.
+        let yaml = MULTI.replace("boot_order: []", "boot_order:\n- core: m33_sm");
+        let m = manifest(&yaml);
+        let (targets, warnings, refused) = plan_flash_targets(&m, None, None);
+        let ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["m33_sm", "gd32_bridge"]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("a55_cluster") && warnings[0].contains("not flashed"));
+        assert!(refused.is_empty());
     }
 
     #[test]
     fn core_filter_selects_only_that_slice_no_helpers() {
         let m = manifest(MULTI);
-        let (targets, _) = plan_flash_targets(&m, Some("m33_sm"), None);
+        let (targets, _, _) = plan_flash_targets(&m, Some("m33_sm"), None);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, "m33_sm");
         assert_eq!(targets[0].kind, FlashKind::Slice);
@@ -309,7 +386,7 @@ boot_order: []
     #[test]
     fn helper_filter_selects_only_that_helper_no_slices() {
         let m = manifest(MULTI);
-        let (targets, _) = plan_flash_targets(&m, None, Some("gd32_bridge"));
+        let (targets, _, _) = plan_flash_targets(&m, None, Some("gd32_bridge"));
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, "gd32_bridge");
         assert_eq!(targets[0].kind, FlashKind::Helper);
@@ -318,9 +395,48 @@ boot_order: []
     #[test]
     fn core_matches_nothing_yields_empty() {
         let m = manifest(MULTI);
-        let (targets, warnings) = plan_flash_targets(&m, Some("nope"), None);
+        let (targets, warnings, refused) = plan_flash_targets(&m, Some("nope"), None);
         assert!(targets.is_empty());
         assert!(warnings.is_empty());
+        assert!(refused.is_empty());
+    }
+
+    #[test]
+    fn slice_status_not_ok_is_refused_not_flashed_or_silently_skipped() {
+        // A run-2 build that fails/gets skipped overlays `status` but
+        // PRESERVES run-1's `output_artefact` (system_manifest::
+        // overlay_run_results) -- flashing it here would silently reprogram
+        // stale firmware after a broken build reported success.
+        for bad_status in ["failed", "skipped", "pending", ""] {
+            let yaml = MULTI.replace(
+                "status: ok\n  flash_method: zephyr_west_flash",
+                &format!("status: {bad_status}\n  flash_method: zephyr_west_flash"),
+            );
+            let m = manifest(&yaml);
+            let (targets, _warnings, refused) = plan_flash_targets(&m, None, None);
+            let ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
+            assert!(
+                !ids.contains(&"m33_sm"),
+                "status {bad_status:?}: m33_sm must not be flashed, got {ids:?}"
+            );
+            // still flashes the other (ok) slice + helper -- refusal is per-slice.
+            assert!(ids.contains(&"a55_cluster"));
+            assert_eq!(refused.len(), 1, "status {bad_status:?}");
+            assert!(refused[0].contains("m33_sm") && refused[0].contains(bad_status));
+        }
+    }
+
+    #[test]
+    fn core_filter_on_a_refused_slice_yields_no_targets_and_a_refusal() {
+        let yaml = MULTI.replace(
+            "status: ok\n  flash_method: zephyr_west_flash",
+            "status: failed\n  flash_method: zephyr_west_flash",
+        );
+        let m = manifest(&yaml);
+        let (targets, _warnings, refused) = plan_flash_targets(&m, Some("m33_sm"), None);
+        assert!(targets.is_empty());
+        assert_eq!(refused.len(), 1);
+        assert!(refused[0].contains("m33_sm") && refused[0].contains("failed"));
     }
 
     #[test]

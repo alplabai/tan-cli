@@ -2,7 +2,7 @@
 //! `tan init --from-example` path plus the shared `finish` step (diff, guard
 //! overwrites, preview, write) used by both the template and example paths.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use tan_core::wizard::{
     ExampleReadError, WizardFileChangeKind, WizardPlannedFile, collect_wizard_file_changes,
@@ -14,8 +14,9 @@ use crate::commands::CommandRun;
 use crate::envelope::{Envelope, Issue};
 use crate::exit::ExitCode;
 
+use super::resolve::ResolveErr::{BadArg, Cancelled};
 use super::resolve::{resolve_destination, resolve_name};
-use super::response::{empty_data, error_run, make_project, runtime_failure_run};
+use super::response::{empty_data, error_run, make_project, runtime_failure_run, write_error_run};
 use super::{FileChangeSer, InitData};
 
 /// From-example path: resolve name/destination, locate the example under the SDK
@@ -39,14 +40,7 @@ pub(super) fn run_from_example(
     // Reject absolute paths and `..` traversal — the source must stay under the
     // SDK examples/ directory.
     let src_path = Path::new(src);
-    if src_path.is_absolute()
-        || src_path.components().any(|c| {
-            matches!(
-                c,
-                Component::ParentDir | Component::Prefix(_) | Component::RootDir
-            )
-        })
-    {
+    if is_unsafe_example_source(src_path) {
         return error_run(
             g,
             ExitCode::ValidationFailure,
@@ -60,9 +54,9 @@ pub(super) fn run_from_example(
     // Resolve name + destination + project root (same as the template path).
     let name = match resolve_name(args.name.as_deref(), is_interactive) {
         Ok(n) => n,
-        Err(_) => {
-            eprintln!("Cancelled.");
-            return runtime_failure_run();
+        Err(Cancelled) => return runtime_failure_run(g),
+        Err(BadArg(msg)) => {
+            return error_run(g, ExitCode::ValidationFailure, "init.invalid-name", &msg);
         }
     };
     let destination = match resolve_destination(
@@ -71,10 +65,7 @@ pub(super) fn run_from_example(
         is_interactive,
     ) {
         Ok(d) => d,
-        Err(_) => {
-            eprintln!("Cancelled.");
-            return runtime_failure_run();
-        }
+        Err(_) => return runtime_failure_run(g),
     };
     let dest_path = PathBuf::from(&destination);
     let project_root = if name.is_empty() {
@@ -99,11 +90,7 @@ pub(super) fn run_from_example(
     // inside examples/. Defeats directory-symlink escapes and rooted-but-driveless
     // paths (e.g. `/foo` on Windows) that the lexical check above can miss — both
     // would otherwise resolve outside the SDK tree and get copied verbatim.
-    let contained = match (examples_root.canonicalize(), example_dir.canonicalize()) {
-        (Ok(root), Ok(dir)) => dir.starts_with(&root),
-        _ => false,
-    };
-    if !contained {
+    if !is_contained(&examples_root, &example_dir) {
         return error_run(
             g,
             ExitCode::ValidationFailure,
@@ -158,8 +145,85 @@ pub(super) fn run_from_example(
         None => files,
     };
 
+    // Honor --board-yaml: emit the caller's board.yaml verbatim instead of the
+    // example's own. The template path (mod.rs) does this before calling
+    // `finish`; this path used to skip straight to `finish` and drop the
+    // caller's file entirely — the exact silent no-op the template path's
+    // `--board-yaml` handling exists to refuse instead of committing. Every
+    // discovered example ships a board.yaml (discover_examples requires it),
+    // so `applied` failing here would mean a hand-typed --from-example path
+    // pointed at a non-example directory, not a template gap.
+    let files: Vec<WizardPlannedFile> = match g.board_yaml.as_deref() {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(content) => {
+                let mut applied = false;
+                let files: Vec<WizardPlannedFile> = files
+                    .into_iter()
+                    .map(|f| {
+                        if f.relative_path == "board.yaml" {
+                            applied = true;
+                            WizardPlannedFile {
+                                content: content.clone(),
+                                ..f
+                            }
+                        } else {
+                            f
+                        }
+                    })
+                    .collect();
+                if !applied {
+                    return error_run(
+                        g,
+                        ExitCode::ValidationFailure,
+                        "init.board-yaml-unsupported",
+                        &format!(
+                            "--board-yaml was given but example '{src}' has no board.yaml to override."
+                        ),
+                    );
+                }
+                files
+            }
+            Err(err) => {
+                return error_run(
+                    g,
+                    ExitCode::ValidationFailure,
+                    "init.board-yaml-unreadable",
+                    &format!("--board-yaml '{path}' could not be read: {err}"),
+                );
+            }
+        },
+        None => files,
+    };
+
     let template_id = format!("example:{src}");
     finish(g, args, &template_id, &destination, &project_root, &files)
+}
+
+/// True when `src_path` is a syntactically safe example source: relative, no
+/// `..`, no absolute/drive-rooted/root-relative components, no bare `.`.
+/// Pulled out of `run_from_example` so the lexical traversal guard — the
+/// source must stay under the SDK `examples/` tree — has direct unit coverage
+/// instead of only living inline, untested, in the CLI entry point.
+///
+/// Delegates to `tan_core::is_plain_relative` — the hand-rolled
+/// `is_absolute() || any(ParentDir|Prefix|RootDir)` check this replaced let a
+/// `CurDir` (`.`) component through, so `tan init --from-example .` cleared
+/// this guard, `examples_root.join(".")` canonicalized right back to
+/// `examples_root`, and `is_contained` passed too — copying the SDK's entire
+/// `examples/` tree into the user's project as one "example".
+fn is_unsafe_example_source(src_path: &Path) -> bool {
+    !tan_core::is_plain_relative(src_path)
+}
+
+/// True when `dir`, once canonicalized, stays inside canonicalized `root`.
+/// Defeats directory-symlink escapes and rooted-but-driveless paths (e.g.
+/// `/foo` on Windows) that the lexical `is_unsafe_example_source` check above
+/// can miss; a missing/unreadable path on either side is never "contained".
+fn is_contained(root: &Path, dir: &Path) -> bool {
+    match (root.canonicalize(), dir.canonicalize()) {
+        (Ok(root), Ok(dir)) => dir.starts_with(&root),
+        _ => false,
+    }
 }
 
 /// Diff the planned `files` against `project_root`, then guard overwrites,
@@ -187,6 +251,30 @@ pub(super) fn finish(
         .iter()
         .any(|c| c.kind == WizardFileChangeKind::Update);
 
+    // Preview mode — show plan, no writes. Checked BEFORE the overwrite guard:
+    // `--preview` never touches disk, so it has nothing to be guarded against,
+    // but the guard used to run first and reject it with `init.would-overwrite`
+    // (exit 3) for a project that has local edits — the read-only operation
+    // failed instead of showing the plan.
+    if args.preview {
+        let tree = create_scaffold_tree_preview(files);
+        let project = make_project(destination);
+        let data = empty_data(template_id, destination, true, file_changes_ser);
+        let text = if g.is_json() {
+            vec![]
+        } else {
+            vec![format!("init: preview for template '{template_id}'"), tree]
+        };
+        let json = g.is_json().then(|| {
+            Envelope::new("init", project, data, vec![], ExitCode::Success.code()).to_json()
+        });
+        return CommandRun {
+            exit: ExitCode::Success,
+            text,
+            json,
+        };
+    }
+
     // Guard against unforced overwrites.
     if has_updates && !args.force {
         let project = make_project(destination);
@@ -207,26 +295,6 @@ pub(super) fn finish(
         });
         return CommandRun {
             exit: ExitCode::WriteFailure,
-            text,
-            json,
-        };
-    }
-
-    // Preview mode — show plan, no writes.
-    if args.preview {
-        let tree = create_scaffold_tree_preview(files);
-        let project = make_project(destination);
-        let data = empty_data(template_id, destination, true, file_changes_ser);
-        let text = if g.is_json() {
-            vec![]
-        } else {
-            vec![format!("init: preview for template '{template_id}'"), tree]
-        };
-        let json = g.is_json().then(|| {
-            Envelope::new("init", project, data, vec![], ExitCode::Success.code()).to_json()
-        });
-        return CommandRun {
-            exit: ExitCode::Success,
             text,
             json,
         };
@@ -270,11 +338,70 @@ pub(super) fn finish(
                 json,
             }
         }
-        Err(e) => error_run(
-            g,
-            ExitCode::WriteFailure,
-            "init.write-failed",
-            &format!("Failed to write files: {e}"),
-        ),
+        Err(e) => {
+            // `e.partial` lists the files that landed before the failure —
+            // reporting `written: []` here (what a bare `error_run` does)
+            // would contradict a project that is actually half on disk.
+            let message = format!("Failed to write files: {}", e.error);
+            write_error_run(g, &message, e.partial)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The traversal/containment guards below had zero test coverage: a future
+    // refactor that swapped the canonicalize-containment check for a cheaper
+    // `starts_with`, or that dropped the `Prefix`/`RootDir` arm while keeping
+    // `ParentDir`, would still pass every other test in the suite while
+    // `tan init --from-example` copied files from outside the SDK tree.
+
+    #[test]
+    fn unsafe_example_source_rejects_traversal_and_absolute() {
+        assert!(is_unsafe_example_source(Path::new("../escape")));
+        assert!(is_unsafe_example_source(Path::new("a/../../b")));
+        assert!(is_unsafe_example_source(Path::new("/etc/passwd")));
+        // Bare `.` — the hand-rolled check this delegated to `is_plain_relative`
+        // missed this: `.` is neither absolute nor a ParentDir/Prefix/RootDir
+        // component, yet `examples_root.join(".")` canonicalizes right back to
+        // `examples_root`, so `--from-example .` copied the whole examples/ tree.
+        assert!(is_unsafe_example_source(Path::new(".")));
+        // A leading `./` keeps an explicit CurDir component too — same class
+        // of gap, one directory deeper.
+        assert!(is_unsafe_example_source(Path::new("./audio/i2s-tone")));
+        assert!(!is_unsafe_example_source(Path::new("audio/i2s-tone")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unsafe_example_source_rejects_windows_rooted_and_drive_relative() {
+        // Driveless-rooted (`\x`) and drive-relative (`C:x`) paths are NOT
+        // `is_absolute()` on Windows, yet still escape a `join`.
+        assert!(is_unsafe_example_source(Path::new(r"\windows\x")));
+        assert!(is_unsafe_example_source(Path::new(r"C:x")));
+        assert!(is_unsafe_example_source(Path::new(r"C:\x")));
+    }
+
+    #[test]
+    fn contained_accepts_nested_and_rejects_sibling_and_missing() {
+        let tag = format!("init-from-example-contain-{}", std::process::id());
+        let base = std::env::temp_dir().join(tag);
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("examples");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("audio/i2s-tone")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        assert!(is_contained(&root, &root.join("audio/i2s-tone")));
+        // A directory that exists but sits outside root — the shape a
+        // symlink escape or a rooted-but-driveless join would produce.
+        assert!(!is_contained(&root, &outside));
+        // A path that doesn't exist can't be canonicalized — must not be
+        // treated as contained by default.
+        assert!(!is_contained(&root, &root.join("does-not-exist")));
+
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

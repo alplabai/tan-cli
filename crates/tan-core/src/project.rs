@@ -84,7 +84,16 @@ fn collect_sdk_candidates(
     for folder in workspace_folders {
         // Check both the workspace root and the conventional sibling alp-sdk folder.
         if contains_loader_script(folder, path_exists) {
-            push_unique(folder.clone(), &mut candidates);
+            // Normalize before dedup: the sibling probe below always pushes a
+            // `to_posix`'d string, but this pushed `folder` raw. On Windows a
+            // workspace root spelled with backslashes (e.g. from
+            // `normalize_path`) and its `parent().join("alp-sdk")` sibling can
+            // name the SAME directory yet compare unequal as strings (`C:\..\
+            // alp-sdk` vs `C:/../alp-sdk`), so `push_unique` failed to dedup
+            // them -> candidates.len() == 2 -> "ambiguous" -> None, even
+            // though only one SDK root exists. Normalize both sides the same
+            // way before comparing.
+            push_unique(to_posix(Path::new(folder)), &mut candidates);
         }
 
         if let Some(parent) = Path::new(folder).parent() {
@@ -292,6 +301,22 @@ mod tests {
                     || p == "/work/alp-sdk/scripts/alp_project.py"
             });
         assert_eq!(ctx.sdk_root, None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_workspace_root_that_is_the_sdk_is_not_ambiguous() {
+        // Pins the premise of the defect: the workspace root itself contains
+        // the loader script (folder self-check), AND folder's parent + "alp-sdk"
+        // (the sibling probe) resolve to the exact same directory -- just
+        // spelled with backslashes vs `to_posix`'d forward slashes. Before the
+        // fix these compared as two different candidates and resolution
+        // reported "ambiguous" (None) for a perfectly unambiguous single SDK.
+        let ctx = resolve_project_context(
+            &input(&["C:\\dev\\alp-sdk"], ProjectSettings::default()),
+            |p| p == "C:/dev/alp-sdk/scripts/alp_project.py",
+        );
+        assert_eq!(ctx.sdk_root.as_deref(), Some("C:/dev/alp-sdk"));
     }
 
     #[test]

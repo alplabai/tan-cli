@@ -11,8 +11,9 @@
 //! (an out-of-tree Yocto tmp dir, say). Slice dirs already under the build root
 //! are subsumed by the recursive build-root removal, so they add nothing.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
+use crate::path_guard::{is_unsafe_removal_target, normalize};
 use crate::system_manifest::SystemManifest;
 
 /// The disposition of one removal target once its filesystem type is known.
@@ -53,23 +54,6 @@ pub fn classify(is_dir: bool, is_file: bool, dry_run: bool) -> CleanAction {
     }
 }
 
-/// Lexically normalize a path (collapse `.` and `..`) without touching the
-/// filesystem. Duplicated from `tan-cli`'s `util::normalize_path` to keep this
-/// module pure and dependency-free.
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
 /// Pure lexical containment: is `path` `base` itself or below it? Uses
 /// component-wise `starts_with` on normalized paths, so `/p/build` contains
 /// `/p/build/x` but NOT the sibling `/p/build2` nor a `..`-escape like
@@ -94,14 +78,24 @@ pub fn is_under(base: &Path, path: &Path) -> bool {
 /// A relative slice `build_dir` is resolved against `project_root`; an absolute
 /// one is taken as-is. Duplicates (by lexical normalization) are dropped,
 /// preserving first-seen order (build_root stays first).
+///
+/// **Every** candidate — the build root included — is then screened by
+/// [`is_unsafe_removal_target`]. The manifest is unvalidated file content, and
+/// `build_dir: ""`, `.`, `/` or `../..` each resolve to the project root or
+/// above; before this screen they were appended verbatim and recursively
+/// deleted. A rejected candidate is NOT silently dropped — it is returned in
+/// [`CleanPlan::rejected`] so the caller can surface it and fail.
 pub fn clean_targets(
     project_root: &Path,
     build_root: &Path,
     manifest: Option<&SystemManifest>,
-) -> Vec<PathBuf> {
+) -> CleanPlan {
     let mut candidates = vec![
-        build_root.to_path_buf(),
-        project_root.join(".alp-build-state.json"),
+        (build_root.to_path_buf(), TargetOrigin::BuildRoot),
+        (
+            project_root.join(".alp-build-state.json"),
+            TargetOrigin::StateFile,
+        ),
     ];
 
     if let Some(m) = manifest {
@@ -113,24 +107,90 @@ pub fn clean_targets(
                     project_root.join(build_dir)
                 };
                 if !is_under(build_root, &resolved) {
-                    candidates.push(resolved);
+                    candidates.push((
+                        resolved,
+                        TargetOrigin::SliceBuildDir {
+                            core_id: slice.core_id.clone(),
+                            raw: build_dir.to_string(),
+                        },
+                    ));
                 }
             }
         }
     }
 
-    dedup_by_normalized(candidates)
+    let mut plan = CleanPlan::default();
+    for (path, origin) in dedup_by_normalized(candidates) {
+        // The state file is a single unlink, never a recursive removal, and it
+        // is always `project_root/.alp-build-state.json` — not attacker-shaped.
+        if matches!(origin, TargetOrigin::StateFile)
+            || !is_unsafe_removal_target(project_root, &path)
+        {
+            plan.targets.push(path);
+        } else {
+            plan.rejected.push(RejectedTarget { path, origin });
+        }
+    }
+    plan
+}
+
+/// The removal targets for one `tan clean`, plus everything refused as unsafe.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct CleanPlan {
+    /// Paths cleared for removal, in order (build root first).
+    pub targets: Vec<PathBuf>,
+    /// Candidates refused by [`is_unsafe_removal_target`]. Non-empty means the
+    /// command must report and fail, never quietly clean less than asked.
+    pub rejected: Vec<RejectedTarget>,
+}
+
+/// A candidate refused as too dangerous to remove, with where it came from so
+/// the message can name the culprit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedTarget {
+    pub path: PathBuf,
+    pub origin: TargetOrigin,
+}
+
+/// Provenance of a removal candidate — drives the user-facing message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetOrigin {
+    /// The resolved `--build-root` / `<app_path>/build`.
+    BuildRoot,
+    /// `project_root/.alp-build-state.json`.
+    StateFile,
+    /// A `build_dir` read from a system-manifest slice.
+    SliceBuildDir { core_id: String, raw: String },
+}
+
+impl RejectedTarget {
+    /// One-line explanation naming the source, for the issue/message text.
+    pub fn reason(&self) -> String {
+        match &self.origin {
+            TargetOrigin::BuildRoot => format!(
+                "refusing to remove build root {} — it is the project root, an ancestor of it, or a filesystem root",
+                self.path.display()
+            ),
+            TargetOrigin::StateFile => {
+                format!("refusing to remove state file {}", self.path.display())
+            }
+            TargetOrigin::SliceBuildDir { core_id, raw } => format!(
+                "refusing to remove slice '{core_id}' build_dir {raw:?} (resolves to {}) — it is the project root, an ancestor of it, or a filesystem root; fix build/system-manifest.yaml",
+                self.path.display()
+            ),
+        }
+    }
 }
 
 /// Drop duplicates by lexical-normalized comparison, preserving first-seen order.
-fn dedup_by_normalized(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+fn dedup_by_normalized(paths: Vec<(PathBuf, TargetOrigin)>) -> Vec<(PathBuf, TargetOrigin)> {
     let mut seen: Vec<PathBuf> = Vec::new();
-    let mut out: Vec<PathBuf> = Vec::new();
-    for p in paths {
+    let mut out: Vec<(PathBuf, TargetOrigin)> = Vec::new();
+    for (p, origin) in paths {
         let key = normalize(&p);
         if !seen.contains(&key) {
             seen.push(key);
-            out.push(p);
+            out.push((p, origin));
         }
     }
     out
@@ -141,31 +201,41 @@ mod tests {
     use super::*;
     use crate::system_manifest::parse_system_manifest;
 
-    /// A minimal manifest with slices carrying the given `build_dir`s (a `None`
-    /// slice for any empty string).
+    /// A minimal manifest whose slices carry the given `build_dir`s, each
+    /// emitted as an explicit quoted scalar — so `""` tests `build_dir: ""`
+    /// (present but empty), NOT the absent-key case. The previous helper
+    /// omitted the key for an empty string, which is why the empty-`build_dir`
+    /// project-root deletion went uncaught.
     fn manifest_with(build_dirs: &[&str]) -> SystemManifest {
         let mut yaml = String::from("schema_version: 1\nslices:\n");
         for (i, bd) in build_dirs.iter().enumerate() {
             yaml.push_str(&format!(
-                "- core_id: c{i}\n  os: zephyr\n  status: pending\n"
+                "- core_id: c{i}\n  os: zephyr\n  status: pending\n  build_dir: \"{bd}\"\n"
             ));
-            if !bd.is_empty() {
-                yaml.push_str(&format!("  build_dir: {bd}\n"));
-            }
         }
         parse_system_manifest(&yaml).expect("valid test manifest")
+    }
+
+    /// A manifest whose slice omits `build_dir` entirely (the `None` case the
+    /// old helper actually exercised).
+    fn manifest_without_build_dir() -> SystemManifest {
+        parse_system_manifest(
+            "schema_version: 1\nslices:\n- core_id: c0\n  os: zephyr\n  status: pending\n",
+        )
+        .expect("valid test manifest")
     }
 
     #[test]
     fn no_manifest_yields_build_root_then_state_file() {
         let got = clean_targets(Path::new("/p"), Path::new("/p/build"), None);
         assert_eq!(
-            got,
+            got.targets,
             vec![
                 PathBuf::from("/p/build"),
                 PathBuf::from("/p/.alp-build-state.json"),
             ]
         );
+        assert!(got.rejected.is_empty());
     }
 
     #[test]
@@ -174,42 +244,115 @@ mod tests {
         let m = manifest_with(&["build/m55_hp-zephyr"]);
         let got = clean_targets(Path::new("/p"), Path::new("/p/build"), Some(&m));
         assert_eq!(
-            got,
+            got.targets,
             vec![
                 PathBuf::from("/p/build"),
                 PathBuf::from("/p/.alp-build-state.json"),
             ]
         );
+        assert!(got.rejected.is_empty());
     }
 
     #[test]
     fn absolute_slice_build_dir_escaping_build_root_is_appended() {
+        // Out-of-tree build dirs stay supported — the guard blocks catastrophic
+        // targets, not merely outside ones.
         let m = manifest_with(&["/var/tmp/yocto"]);
         let got = clean_targets(Path::new("/p"), Path::new("/p/build"), Some(&m));
-        assert_eq!(got.last(), Some(&PathBuf::from("/var/tmp/yocto")));
-        assert_eq!(got.len(), 3);
+        assert_eq!(got.targets.last(), Some(&PathBuf::from("/var/tmp/yocto")));
+        assert_eq!(got.targets.len(), 3);
+        assert!(got.rejected.is_empty());
     }
 
     #[test]
-    fn dotdot_escape_is_appended_and_duplicates_collapse() {
-        // Two slices escaping to the same place -> one extra target.
+    fn shallow_dotdot_escape_is_appended_and_duplicates_collapse() {
+        // Two slices escaping to the same sibling dir -> one extra target. The
+        // parent of the project is NOT an ancestor of it here because the
+        // escape lands beside the project, not above it.
         let m = manifest_with(&["../out-of-tree", "../out-of-tree"]);
-        let got = clean_targets(Path::new("/p"), Path::new("/p/build"), Some(&m));
+        let got = clean_targets(
+            Path::new("/home/u/p"),
+            Path::new("/home/u/p/build"),
+            Some(&m),
+        );
         assert_eq!(
-            got,
+            got.targets,
             vec![
-                PathBuf::from("/p/build"),
-                PathBuf::from("/p/.alp-build-state.json"),
-                PathBuf::from("/p/../out-of-tree"),
+                PathBuf::from("/home/u/p/build"),
+                PathBuf::from("/home/u/p/.alp-build-state.json"),
+                PathBuf::from("/home/u/p/../out-of-tree"),
             ]
         );
+        assert!(got.rejected.is_empty());
     }
 
     #[test]
     fn slice_without_build_dir_contributes_nothing() {
-        let m = manifest_with(&[""]);
+        let m = manifest_without_build_dir();
         let got = clean_targets(Path::new("/p"), Path::new("/p/build"), Some(&m));
-        assert_eq!(got.len(), 2);
+        assert_eq!(got.targets.len(), 2);
+        assert!(got.rejected.is_empty());
+    }
+
+    /// The critical data-loss case: a present-but-empty `build_dir` resolves to
+    /// the project root itself. Before the guard this was appended and
+    /// `remove_dir_all`'d, deleting the user's sources at exit 0.
+    #[test]
+    fn empty_slice_build_dir_is_rejected_not_removed() {
+        let m = manifest_with(&[""]);
+        let got = clean_targets(
+            Path::new("/home/u/myapp"),
+            Path::new("/home/u/myapp/build"),
+            Some(&m),
+        );
+        assert_eq!(
+            got.targets,
+            vec![
+                PathBuf::from("/home/u/myapp/build"),
+                PathBuf::from("/home/u/myapp/.alp-build-state.json"),
+            ]
+        );
+        assert_eq!(got.rejected.len(), 1);
+        assert!(got.rejected[0].reason().contains("refusing to remove"));
+    }
+
+    #[test]
+    fn catastrophic_slice_build_dirs_are_all_rejected() {
+        for raw in [".", "/", "../../..", "../.."] {
+            let m = manifest_with(&[raw]);
+            let got = clean_targets(
+                Path::new("/home/u/myapp"),
+                Path::new("/home/u/myapp/build"),
+                Some(&m),
+            );
+            assert_eq!(
+                got.targets.len(),
+                2,
+                "build_dir {raw:?} must not add a removal target"
+            );
+            assert_eq!(got.rejected.len(), 1, "build_dir {raw:?} must be reported");
+        }
+    }
+
+    /// The `rm -rf $UNSET_VAR` shape: `--build-root ""` resolves to the project
+    /// root, which used to pass every guard and get recursively removed.
+    #[test]
+    fn build_root_equal_to_project_root_is_rejected() {
+        let project = Path::new("/home/u/myapp");
+        for build_root in [project.to_path_buf(), project.join("."), project.join("..")] {
+            let got = clean_targets(project, &build_root, None);
+            assert!(
+                !got.targets.iter().any(|t| t == &build_root),
+                "{} must not be a removal target",
+                build_root.display()
+            );
+            assert_eq!(
+                got.rejected.len(),
+                1,
+                "{} must be reported",
+                build_root.display()
+            );
+        }
     }
 
     #[test]

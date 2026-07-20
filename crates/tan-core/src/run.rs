@@ -5,14 +5,31 @@
 //! subprocess spawn + the filesystem probe live in `tan-cli`'s `commands/run`.
 //!
 //! `run` never re-derives the build/flash engines — it orchestrates
-//! `build::run_build` then, based on this decision, `native_sim` exec or the
-//! native `flash` path. The host-vs-hardware discriminator is the presence of a
-//! runnable `native_sim` binary: a project whose `board.yaml` targets
-//! `native_sim` produces one, located from the post-build `system-manifest.yaml`
-//! (the same contract `flash`/`size`/`image` read). Flashing real silicon is the
-//! dangerous path (the AEN wrong-runner history), so it is NEVER the default: a
-//! hardware target flashes only on an explicit `--flash`; without it `run`
-//! builds and reports, leaving the board untouched.
+//! `build::run_build_native_outcome` then, based on this decision, `native_sim`
+//! exec or the native `flash` path. Flashing real silicon is the dangerous path
+//! (the AEN wrong-runner history), so it is NEVER the default: a hardware
+//! target flashes only on an explicit `--flash`; without it `run` builds and
+//! reports, leaving the board untouched.
+//!
+//! **Root cause this module fixes (third attempt):** the host-vs-hardware
+//! discriminator (`native_sim_target`) and the manifest-write outcome
+//! (`manifest_written`) both come from the build `tan run` JUST RAN, in
+//! memory — never from re-reading `system-manifest.yaml` off disk afterward.
+//! `write_post_build_manifest` (`tan-cli`'s `build/execute/manifest.rs`) is a
+//! best-effort file write that can fail independently of the SDK's
+//! `--emit system-manifest` projection it fetched first (a Windows sharing
+//! violation, a `create_dir_all` failure — not the emit itself), so an
+//! EARLIER run's manifest (a different, possibly hardware, target) can still
+//! be sitting in `build/` when THIS run's file write silently fails. Two
+//! earlier attempts at this fix kept re-reading that file and then belted the
+//! staleness with an mtime "freshness" check — mtime is leaky (a sub-2s
+//! inter-invocation window slips through) and a no-`--flash` arm still read
+//! (and could execute) a stale host binary regardless of freshness. Deciding
+//! from the in-memory build outcome instead removes the stale-read
+//! possibility entirely, rather than adding another belt on top of it.
+//! `native_sim_target: Option<bool>` is `None` exactly when this run's build
+//! could not establish a target at all (the SDK emit itself failed to
+//! produce/parse) — treated as unconfirmed, not as "not native_sim".
 
 use crate::system_manifest::{Slice, SystemManifest};
 
@@ -34,35 +51,76 @@ pub enum RunAction {
     BuildFailed,
     /// A host target — execute the produced `native_sim` binary.
     ExecuteNative,
-    /// A hardware target with an explicit `--flash` — flash the built image.
+    /// A hardware target with an explicit `--flash`, and THIS run's manifest
+    /// write is confirmed to have succeeded — flash the built image.
     Flash,
     /// A hardware target WITHOUT `--flash` — build succeeded, but programming the
     /// board needs explicit consent: report + stop, leave the hardware untouched.
     BuildOnly,
+    /// `--flash` was requested, but this run's OWN build outcome does not
+    /// confirm it is safe to flash: either the target could not be
+    /// established at all (`native_sim_target == None`, the SDK emit failed),
+    /// or it is hardware but THIS run's manifest file write failed
+    /// (`manifest_written == false`). Refuse rather than flash from a build
+    /// that can't vouch for itself. Board untouched, same as `BuildOnly`, but
+    /// reported as an error: the caller explicitly asked to flash and that
+    /// request could not be honored safely.
+    ManifestStale,
 }
 
-/// Decide what `tan run` does once the build step finished. Flashing hardware is
-/// opt-in (`flash_requested`), never the default.
+/// Decide what `tan run` does once the build step finished — entirely from
+/// signals THIS build produced in memory, never from a post-hoc disk read (see
+/// the module doc for why that used to be the actual defect).
 ///
-/// - build failed              -> [`RunAction::BuildFailed`] (never run/flash)
-/// - a `native_sim` binary      -> [`RunAction::ExecuteNative`] (host target)
-/// - hardware + `--flash`       -> [`RunAction::Flash`]
-/// - hardware, no `--flash`     -> [`RunAction::BuildOnly`] (report; do NOT flash)
+/// - `native_sim_target` is `Some(true)`/`Some(false)` when this run's build
+///   established a target (from the SDK's freshly-emitted system-manifest
+///   projection, independent of whether the on-disk file write then
+///   succeeded), or `None` when it could not (the emit itself failed/didn't
+///   parse) — an unconfirmed target, not "not native_sim".
+/// - `manifest_written` is whether THIS run's `system-manifest.yaml` file
+///   write actually succeeded — the "write definitely succeeded" signal that
+///   gates `--flash` for a confirmed hardware target (a failed write means
+///   `flash` would next read a stale/wrong file).
+///
+/// Rules:
+/// - build failed                                -> [`RunAction::BuildFailed`]
+/// - host target (`Some(true)`)                   -> [`RunAction::ExecuteNative`]
+///   (never `Flash`: native_sim is not flashable, regardless of `--flash`/
+///   `manifest_written`)
+/// - hardware (`Some(false)`) + `--flash` + write ok -> [`RunAction::Flash`]
+/// - hardware (`Some(false)`) + `--flash`, write failed -> [`RunAction::ManifestStale`]
+/// - hardware (`Some(false)`), no `--flash`          -> [`RunAction::BuildOnly`]
+/// - unknown (`None`) + `--flash`                    -> [`RunAction::ManifestStale`] (refuse)
+/// - unknown (`None`), no `--flash`                  -> [`RunAction::BuildOnly`]
 pub fn decide_run_action(
     build_ok: bool,
-    native_sim_present: bool,
+    native_sim_target: Option<bool>,
     flash_requested: bool,
+    manifest_written: bool,
 ) -> RunAction {
     if !build_ok {
         return RunAction::BuildFailed;
     }
-    if native_sim_present {
-        return RunAction::ExecuteNative;
+    match native_sim_target {
+        // A host target is never flashable — settled by THIS run's own build
+        // outcome, so a failed/absent manifest FILE write can't flip a host
+        // build into `Flash` (the actual A1 defect: an earlier attempt's
+        // re-read of a stale on-disk manifest let exactly that happen).
+        Some(true) => RunAction::ExecuteNative,
+        Some(false) if flash_requested => {
+            if manifest_written {
+                RunAction::Flash
+            } else {
+                RunAction::ManifestStale
+            }
+        }
+        Some(false) => RunAction::BuildOnly,
+        // Unknown target: this run's build could not confirm host vs.
+        // hardware at all. Flashing blind is never acceptable; a bare run
+        // still gets to report + stop like any other hardware-shaped build.
+        None if flash_requested => RunAction::ManifestStale,
+        None => RunAction::BuildOnly,
     }
-    if flash_requested {
-        return RunAction::Flash;
-    }
-    RunAction::BuildOnly
 }
 
 /// The `native_sim` slice in a post-build manifest, if any — identified by its
@@ -75,7 +133,18 @@ pub fn native_sim_slice(manifest: &SystemManifest) -> Option<&Slice> {
     manifest
         .slices
         .iter()
-        .find(|s| s.board.as_deref() == Some(NATIVE_SIM_BOARD))
+        .find(|s| s.board.as_deref().is_some_and(is_native_sim_board))
+}
+
+/// True for the bare `native_sim` board AND Zephyr's qualified board form
+/// (`native_sim/native/64`, SoC/variant-qualified). Exact-matching only the
+/// bare name let a qualified board name defeat the host-vs-hardware
+/// discriminator on a perfectly fresh manifest, routing a genuine host target
+/// into `RunAction::Flash`. `"native_simulated_foo"` deliberately does NOT
+/// match — the required `/` after the prefix anchors it to Zephyr's actual
+/// board-qualifier syntax instead of an arbitrary substring.
+fn is_native_sim_board(board: &str) -> bool {
+    board == NATIVE_SIM_BOARD || board.starts_with("native_sim/")
 }
 
 #[cfg(test)]
@@ -87,38 +156,140 @@ mod tests {
     fn build_failure_short_circuits_before_run_or_flash() {
         // A failed build never reaches native exec or flash, whatever the rest.
         assert_eq!(
-            decide_run_action(false, false, false),
+            decide_run_action(false, Some(false), false, true),
             RunAction::BuildFailed
         );
-        assert_eq!(decide_run_action(false, true, true), RunAction::BuildFailed);
-    }
-
-    #[test]
-    fn native_sim_binary_present_executes() {
-        // A host target (native_sim binary produced) runs it — regardless of
-        // the flash flag (native_sim is not flashable).
         assert_eq!(
-            decide_run_action(true, true, false),
-            RunAction::ExecuteNative
+            decide_run_action(false, Some(true), true, true),
+            RunAction::BuildFailed
         );
         assert_eq!(
-            decide_run_action(true, true, true),
-            RunAction::ExecuteNative
+            decide_run_action(false, None, true, false),
+            RunAction::BuildFailed
         );
     }
 
     #[test]
-    fn hardware_flashes_only_with_explicit_flag() {
-        // No native_sim binary + `--flash` -> flash. This is the ONLY path that
-        // programs hardware, and it demands the explicit opt-in.
-        assert_eq!(decide_run_action(true, false, true), RunAction::Flash);
+    fn native_sim_target_executes_regardless_of_flash_or_manifest_written() {
+        // A host target (this run's build says native_sim) runs it —
+        // regardless of the flash flag or whether the manifest FILE write
+        // succeeded (native_sim is not flashable either way).
+        assert_eq!(
+            decide_run_action(true, Some(true), false, true),
+            RunAction::ExecuteNative
+        );
+        assert_eq!(
+            decide_run_action(true, Some(true), true, true),
+            RunAction::ExecuteNative
+        );
+        assert_eq!(
+            decide_run_action(true, Some(true), true, false),
+            RunAction::ExecuteNative
+        );
     }
 
     #[test]
-    fn hardware_without_flash_is_build_only_never_flashes() {
+    fn hardware_flashes_only_with_explicit_flag_and_confirmed_write() {
+        // No native_sim target + `--flash` + a confirmed manifest write -> flash.
+        // This is the ONLY path that programs hardware, and it demands both the
+        // explicit opt-in AND proof this run's own write succeeded.
+        assert_eq!(
+            decide_run_action(true, Some(false), true, true),
+            RunAction::Flash
+        );
+    }
+
+    #[test]
+    fn hardware_without_flash_is_build_only_regardless_of_manifest_written() {
         // The safety default: a bare `tan run` on a hardware project builds and
-        // reports — it must NOT silently program the board.
-        assert_eq!(decide_run_action(true, false, false), RunAction::BuildOnly);
+        // reports — it must NOT silently program the board. Manifest-write
+        // success is irrelevant here: the dangerous action is flashing, not
+        // building/reporting.
+        assert_eq!(
+            decide_run_action(true, Some(false), false, true),
+            RunAction::BuildOnly
+        );
+        assert_eq!(
+            decide_run_action(true, Some(false), false, false),
+            RunAction::BuildOnly
+        );
+    }
+
+    #[test]
+    fn flash_refused_when_hardware_manifest_write_failed() {
+        // A confirmed hardware target, but THIS run's manifest FILE write
+        // failed: refuse rather than let `flash::run` read whatever an
+        // EARLIER run (or nothing) left on disk.
+        assert_eq!(
+            decide_run_action(true, Some(false), true, false),
+            RunAction::ManifestStale
+        );
+    }
+
+    #[test]
+    fn flash_refused_when_target_unknown() {
+        // The SDK emit itself failed/didn't parse this run — no target signal
+        // at all. `--flash` must refuse rather than guess; a bare run still
+        // reports + stops like any other unconfirmed build.
+        assert_eq!(
+            decide_run_action(true, None, true, true),
+            RunAction::ManifestStale
+        );
+        assert_eq!(
+            decide_run_action(true, None, true, false),
+            RunAction::ManifestStale
+        );
+    }
+
+    #[test]
+    fn build_only_when_target_unknown_and_no_flash() {
+        assert_eq!(
+            decide_run_action(true, None, false, true),
+            RunAction::BuildOnly
+        );
+        assert_eq!(
+            decide_run_action(true, None, false, false),
+            RunAction::BuildOnly
+        );
+    }
+
+    /// Root-cause regression (A1 — the third attempt's exact reachable
+    /// failure): `board.yaml` edited to `native_sim`, an EARLIER hardware
+    /// build's manifest still on disk, THIS run's native_sim build succeeds
+    /// but its post-build manifest FILE write fails (`manifest_written =
+    /// false`). `--flash` must never reach `RunAction::Flash` — the in-memory
+    /// `native_sim_target` this run's build already established (`Some(true)`)
+    /// settles it before `manifest_written` is even consulted. The two
+    /// earlier (reverted) attempts re-read the stale on-disk hardware
+    /// manifest here and routed this exact case to `Flash`.
+    #[test]
+    fn a1_native_sim_target_with_failed_manifest_write_never_flashes() {
+        assert_ne!(
+            decide_run_action(true, Some(true), true, false),
+            RunAction::Flash
+        );
+        assert_eq!(
+            decide_run_action(true, Some(true), true, false),
+            RunAction::ExecuteNative
+        );
+    }
+
+    /// Root-cause regression (A2): `board.yaml` edited to a hardware target,
+    /// a stale native_sim manifest + `zephyr.exe` left on disk from an
+    /// earlier run, bare `tan run` (no `--flash`). THIS run's build says
+    /// hardware (`Some(false)`) — the decision must stop at `BuildOnly`,
+    /// never `ExecuteNative`, whatever a stale on-disk file might still
+    /// claim (this layer never reads one).
+    #[test]
+    fn a2_hardware_target_bare_run_never_executes_native() {
+        assert_eq!(
+            decide_run_action(true, Some(false), false, true),
+            RunAction::BuildOnly
+        );
+        assert_ne!(
+            decide_run_action(true, Some(false), false, true),
+            RunAction::ExecuteNative
+        );
     }
 
     const MANIFEST_NATIVE: &str = r#"
@@ -165,6 +336,31 @@ boot_order: []
     #[test]
     fn native_sim_slice_absent_for_a_hardware_manifest() {
         let m = parse_system_manifest(MANIFEST_HARDWARE).unwrap();
+        assert!(native_sim_slice(&m).is_none());
+    }
+
+    /// Fable-found residual: Zephyr's qualified board form (`native_sim/native/64`)
+    /// must still be recognised as the host target on a perfectly fresh
+    /// manifest — the old exact match defeated the discriminator entirely for
+    /// this (real, Zephyr-native) board-name shape.
+    #[test]
+    fn native_sim_slice_found_for_qualified_board_form() {
+        let manifest = "schema_version: 1\nhw_info:\n  sku: S\nslices:\n- core_id: \
+                         native_sim\n  os: zephyr\n  board: native_sim/native/64\n  status: \
+                         ok\nipc: []\nhelper_mcus: []\nboot_order: []\n";
+        let m = parse_system_manifest(manifest).unwrap();
+        assert!(native_sim_slice(&m).is_some());
+    }
+
+    /// A board name that merely starts with the `native_sim` text but isn't
+    /// the real qualifier form must NOT match — the prefix check requires the
+    /// `/` so it can't be defeated by an unrelated substring collision either.
+    #[test]
+    fn native_sim_slice_rejects_unrelated_prefix_collision() {
+        let manifest = "schema_version: 1\nhw_info:\n  sku: S\nslices:\n- core_id: \
+                         c1\n  os: zephyr\n  board: native_simulated_soc\n  status: \
+                         ok\nipc: []\nhelper_mcus: []\nboot_order: []\n";
+        let m = parse_system_manifest(manifest).unwrap();
         assert!(native_sim_slice(&m).is_none());
     }
 }

@@ -56,7 +56,12 @@ struct InitData {
 /// interactive), build the scaffold plan (heterogeneous when `--cores` is given),
 /// then preview or write files — guarding overwrites behind `--force`.
 pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
-    let is_interactive = !g.non_interactive && !g.ci;
+    // `--format json` is the mode the extension always uses and never has a
+    // human at the keyboard to answer a prompt; omitting it here let a JSON
+    // caller with an unset optional flag (e.g. no `--template`) block forever
+    // on an inquire prompt rendered to stderr, or — if stdin was already
+    // closed — cancel it and exit 1 with zero bytes on stdout.
+    let is_interactive = !g.non_interactive && !g.ci && !g.is_json();
 
     // From-example path: copy an existing SDK example verbatim. Short-circuits
     // before template resolution so it never engages the non-interactive
@@ -69,10 +74,7 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
     // 1. Resolve template.
     let template_id = match resolve_template(args.template.as_deref(), is_interactive) {
         Ok(id) => id,
-        Err(Cancelled) => {
-            eprintln!("Cancelled.");
-            return runtime_failure_run();
-        }
+        Err(Cancelled) => return runtime_failure_run(g),
         Err(BadArg(msg)) => {
             return error_run(
                 g,
@@ -86,9 +88,9 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
     // 2. Resolve name (optional).
     let name = match resolve_name(args.name.as_deref(), is_interactive) {
         Ok(n) => n,
-        Err(_) => {
-            eprintln!("Cancelled.");
-            return runtime_failure_run();
+        Err(Cancelled) => return runtime_failure_run(g),
+        Err(BadArg(msg)) => {
+            return error_run(g, ExitCode::ValidationFailure, "init.invalid-name", &msg);
         }
     };
 
@@ -99,10 +101,7 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
         is_interactive,
     ) {
         Ok(d) => d,
-        Err(_) => {
-            eprintln!("Cancelled.");
-            return runtime_failure_run();
-        }
+        Err(_) => return runtime_failure_run(g),
     };
 
     // 4. Compute project root.

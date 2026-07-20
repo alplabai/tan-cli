@@ -232,11 +232,30 @@ pub struct WizardFileChange {
 }
 
 /// Summary of a plan applied to disk: which files were written vs. left untouched.
+#[derive(Debug)]
 pub struct WizardWriteResult {
     /// Relative paths that were created or overwritten.
     pub written: Vec<String>,
     /// Relative paths skipped because their content already matched.
     pub unchanged: Vec<String>,
+}
+
+/// A `write_wizard_files` failure paired with the partial result accumulated
+/// before it. The files listed in `partial.written` really are on disk — a
+/// caller that reports `written: []` on error (as a bare `io::Error` return
+/// forced) leaves the envelope contradicting the filesystem for a
+/// half-created project.
+pub struct WizardWriteError {
+    /// The underlying I/O failure (permission denied, disk full, ...).
+    pub error: std::io::Error,
+    /// Files written/left-unchanged before `error` interrupted the loop.
+    pub partial: WizardWriteResult,
+}
+
+impl fmt::Display for WizardWriteError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.error)
+    }
 }
 
 // ---------------------------------------------------------------------------

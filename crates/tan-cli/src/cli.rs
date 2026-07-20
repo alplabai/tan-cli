@@ -89,7 +89,7 @@ pub enum Command {
     /// Validate schema and semantic rules for the active project.
     Validate(ValidateArgs),
     /// Generate build artifacts from board.yaml (alp.conf, overlay, args, yocto).
-    Generate,
+    Generate(GenerateArgs),
     /// Initialize a new tan project from a template.
     Init(InitArgs),
     /// Scaffold a module into an existing project.
@@ -489,6 +489,15 @@ pub struct CompletionArgs {
     /// Target shell (bash, zsh, or fish). Defaults to bash.
     #[arg(long, value_name = "SHELL")]
     pub shell: Option<String>,
+}
+
+/// Args for `generate`: overwrite toggle for the one target (`native-sim-overlay`)
+/// that writes into the hand-editable app source tree instead of `build/generated/`.
+#[derive(Debug, Args)]
+pub struct GenerateArgs {
+    /// Allow overwriting existing files.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Args for `init`: template, naming, destination, SoM/cores selection, and preview/force toggles.

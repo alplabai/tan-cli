@@ -1,23 +1,83 @@
 # SPDX-License-Identifier: Apache-2.0
+#
+# tan CI — the four cargo gates, plus the two promises nothing else checks:
+# that `tan` still builds and passes on every host platform it ships a release
+# asset for, and that the declared MSRV is real.
 name: ci
 on:
   push:
     branches: [main]
   pull_request:
+  # Called by release.yml so a tag cannot publish binaries the gates never ran
+  # against. Keep this the single definition of the gate set.
+  workflow_call:
+
+# A newer push to a PR supersedes the run in flight. Never cancel a push-to-main
+# run: a rapid second merge would leave the first commit with no CI status.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  # Platform-independent gates — run once, not per-OS.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
+          # The action otherwise exports RUSTFLAGS=-D warnings, which would also
+          # deny warnings in registry deps and diverge from the local gates. The
+          # clippy step below denies warnings explicitly, where it belongs.
+          rustflags: ""
       - name: fmt
         run: cargo fmt --all --check
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+  # tan is a cross-platform CLI whose path handling (os.pathsep env append,
+  # .venv discovery, `.exe` suffixes) differs per host — test all three.
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          rustflags: "" # keep parity with the local gates (see the lint job)
       - name: build
-        run: cargo build --all-targets
+        run: cargo build --all-targets --locked
       - name: test
-        run: cargo test
+        run: cargo test --locked
+
+  # `rust-version` in Cargo.toml is a promise to anyone building from source;
+  # a dependency bump can silently break it. Check, don't hope.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: read rust-version from Cargo.toml
+        id: msrv
+        shell: bash
+        run: |
+          v="$(grep -m1 '^rust-version = ' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          # An unmatched grep exits 0 through the pipe; without this the job would
+          # silently fall back to stable and report green having checked no MSRV.
+          [ -n "$v" ] || { echo "::error::no rust-version found in Cargo.toml"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "declared MSRV: $v"
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          rustflags: "" # keep parity with the local gates (see the lint job)
+      - name: check on MSRV
+        run: cargo check --workspace --all-targets --locked

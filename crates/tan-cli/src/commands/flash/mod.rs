@@ -10,7 +10,10 @@
 //! Per-entry rc convention mirrors `alp_flash._flash_entry` exactly: `0` success
 //! / clean-dry-run / clean-skip-via-flag, `-1` silently skipped (no flash_method
 //! / tools missing under `--skip-missing-tools`), `>0` failed. `failed` counts
-//! only `rc > 0`; skipped entries never count.
+//! only `rc > 0`; skipped entries never count. Within rc 0, `status` further
+//! distinguishes a real/dry-run "ok" from a "planned" entry (the yocto_wic/xspi
+//! confirm gate declining a REAL write — nothing was programmed), so a JSON
+//! consumer can't mistake a no-op for a completed flash.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -45,7 +48,7 @@ struct FlashEntry {
     /// The `flash_method`, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
     method: Option<String>,
-    /// `ok` | `skipped` | `failed`.
+    /// `ok` | `skipped` | `planned` | `failed`.
     status: String,
     /// Internal per-entry rc (`-1` skip / `0` ok / `>0` fail).
     rc: i32,
@@ -141,13 +144,17 @@ pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
 
     let sku = manifest.hw_info.sku.clone();
     let force_confirm = std::env::var("ALP_FLASH_FORCE").as_deref() == Ok("1");
-    let (targets, warnings) =
+    let (targets, warnings, refused) =
         plan_flash_targets(&manifest, args.core.as_deref(), args.helper.as_deref());
 
     let mut text: Vec<String> = Vec::new();
     let mut issues: Vec<Issue> = Vec::new();
     let mut entries: Vec<FlashEntry> = Vec::new();
-    let mut failed = 0usize;
+    // Seeded with the status-refused slices: they never become a
+    // `FlashTarget`/loop iteration below, so they cannot increment `failed`
+    // there -- but a slice `tan build` reports non-`ok` must still fail the
+    // overall run (`ok:false`/exit 1), not disappear into a clean exit.
+    let mut failed = refused.len();
     let mut flashed_anything = false;
 
     for w in &warnings {
@@ -158,11 +165,46 @@ pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
             message: w.clone(),
         });
     }
+    for r in &refused {
+        text.push(r.clone());
+        // error, not warning: `plan_flash_targets` refused to select this
+        // slice's (possibly stale) artefact for flashing at all -- see its
+        // doc comment. Never silent, and `ok` must disagree with a green
+        // exit code here exactly like a spawned flash failure does below.
+        issues.push(Issue {
+            code: "flash.slice-not-built".to_string(),
+            severity: "error".to_string(),
+            message: r.clone(),
+        });
+    }
 
     for t in &targets {
         let (rc, entry, lines) =
             flash_entry(g, t, &sku, &build_root, &sdk_root, force_confirm, args);
         text.extend(lines);
+        // A failed entry used to land only in `data.entries[].message`; `issues`
+        // is the channel `--format json` consumers (the vscode extension) key
+        // error rendering off, and `build` already treats a failed step this
+        // way (`build.slice-failed`) — mirror it so `ok:false` never ships with
+        // an empty issues list.
+        if rc > 0 {
+            issues.push(Issue {
+                code: "flash.entry-failed".to_string(),
+                severity: "error".to_string(),
+                message: entry.message.clone(),
+            });
+        }
+        // A confirm-gated no-op (yocto_wic/xspi, unconfirmed) is reported with
+        // its own "planned" status instead of "ok" (see flash_entry); surface
+        // the reason as a warning issue too, since `status` alone is prose no
+        // automated consumer parses.
+        if entry.status == "planned" {
+            issues.push(Issue {
+                code: "flash.confirm-required".to_string(),
+                severity: "warning".to_string(),
+                message: entry.message.clone(),
+            });
+        }
         entries.push(entry);
         if rc < 0 {
             continue; // silently skipped — not counted, doesn't set flashed_anything
@@ -173,8 +215,22 @@ pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
         }
     }
 
-    if !flashed_anything {
-        text.push("flash: nothing matched the requested filters.".to_string());
+    if !flashed_anything && refused.is_empty() {
+        // A refused (non-`ok`-status) slice DID match the requested filters —
+        // it was refused, not absent — so "nothing matched" would be a
+        // misleading second message on top of the flash.slice-not-built
+        // issue(s) already pushed above.
+        let msg = "flash: nothing matched the requested filters.".to_string();
+        text.push(msg.clone());
+        // Same class of bug as above: a `--core`/`--helper` filter matching
+        // nothing used to warn only in text mode, so `--format json` reported
+        // `ok:true` with an empty `entries`/`issues` for a flash that never
+        // touched a device.
+        issues.push(Issue {
+            code: "flash.nothing-matched".to_string(),
+            severity: "warning".to_string(),
+            message: msg,
+        });
     }
     text.push(format!("flash: {failed} failure(s)."));
 
@@ -311,9 +367,28 @@ fn flash_entry(
     // Planning-only (yocto/xspi confirm gate) or --dry-run: show, don't spawn.
     if plan.planning_only || args.dry_run {
         let display = display_argv(&plan);
-        let msg = format!("would run {display}");
+        if args.dry_run {
+            // The user explicitly asked for a preview — nothing was ever going
+            // to run. rc 0 / status "ok" (alp_flash's "clean-dry-run").
+            let msg = format!("would run {display}");
+            lines.push(format!("  {msg}"));
+            return (0, entry(t, Some(method), "ok", 0, msg), lines);
+        }
+        // `plan.planning_only` without `--dry-run`: the BACKEND itself declined
+        // a real write because the confirm gate isn't armed (yocto_wic/xspi:
+        // `flash_args.confirm` is false and `ALP_FLASH_FORCE` isn't set) —
+        // alp_flash's "clean-skip-via-flag". This used to report byte-identical
+        // to a real write (`status:"ok"`), with the reason thrown away, so a
+        // `--format json` consumer could not tell "nothing was written" from
+        // "programmed the device". Keep rc 0 (the documented rc contract — this
+        // IS a clean, non-error outcome) but give it a distinct status; `run()`
+        // also turns it into a warning Issue.
+        let msg = format!(
+            "would run {display} -- NOT written: flash_args.confirm is false (set \
+             ALP_FLASH_FORCE=1 or flash_args.confirm: true to actually flash)"
+        );
         lines.push(format!("  {msg}"));
-        return (0, entry(t, Some(method), "ok", 0, msg), lines);
+        return (0, entry(t, Some(method), "planned", 0, msg), lines);
     }
 
     // Real spawn.
@@ -441,6 +516,21 @@ fn spawn_pipeline(
         .take()
         .ok_or_else(|| std::io::Error::other("decompressor stdout unavailable"))?;
 
+    // Drain the decompressor's stderr on a background thread for the pipeline's
+    // lifetime. `lc.stderr(Stdio::piped())` above creates the pipe but nobody
+    // was reading it: once the decompressor writes more than the OS pipe
+    // buffer (64 KiB on Linux), its write() blocks forever, it never reaches
+    // EOF on stdout either, `right`'s read() blocks too, and `lchild.wait()`
+    // below never returns — a silent hang mid-write to a real block device.
+    let stderr_drain = lchild.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = Vec::new();
+            let _ = e.read_to_end(&mut buf);
+            buf
+        })
+    });
+
     let mut rc = Command::new(&right[0]);
     rc.args(&right[1..]).stdin(Stdio::from(lout));
     // Capture dd's (the right/sink process) output for the failure tail — it is
@@ -452,6 +542,9 @@ fn spawn_pipeline(
         (rc.status()?.success(), None)
     };
     let left_ok = lchild.wait()?.success();
+    if let Some(handle) = stderr_drain {
+        let _ = handle.join();
+    }
     Ok(ExecOutcome {
         success: right_ok && left_ok,
         captured,
@@ -673,9 +766,9 @@ mod tests {
         std::fs::write(
             build_root.join("system-manifest.yaml"),
             "schema_version: 1\nhw_info:\n  sku: E1M-AEN701\nslices:\n- core_id: m55_hp\n  os: \
-             zephyr\n  output_artefact: m55_hp-zephyr/zephyr/zephyr.elf\n  flash_method: \
-             zephyr_west_flash\n  flash_args:\n    runner: openocd\nhelper_mcus:\n- name: \
-             aen701_helper\n  chip: cc3501e\n  firmware_path: TBD\n  flash_method: TBD\n  \
+             zephyr\n  output_artefact: m55_hp-zephyr/zephyr/zephyr.elf\n  status: ok\n  \
+             flash_method: zephyr_west_flash\n  flash_args:\n    runner: openocd\nhelper_mcus:\n- \
+             name: aen701_helper\n  chip: cc3501e\n  firmware_path: TBD\n  flash_method: TBD\n  \
              flash_args: TBD\nboot_order: []\n",
         )
         .unwrap();
@@ -696,8 +789,183 @@ mod tests {
         );
         let helper = entries.iter().find(|e| e["id"] == "aen701_helper").unwrap();
         assert_eq!(helper["status"], "failed");
+        // A failed entry used to be invisible in `issues` — only `ok:false`
+        // and the free-text `data.entries[].message` said anything went wrong.
+        let issue = doc["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == "flash.entry-failed");
+        assert!(
+            issue.is_some(),
+            "a failed entry must surface a flash.entry-failed issue"
+        );
         std::fs::remove_dir_all(&sdk).unwrap();
         std::fs::remove_dir_all(&app).unwrap();
         std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn core_filter_matches_nothing_in_json_mode_reports_issue() {
+        let sdk = tmp("nomatch-json-sdk");
+        fake_sdk(&sdk);
+        let app = tmp("nomatch-json-app");
+        let build_root = tmp("nomatch-json-build");
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "schema_version: 1\nhw_info:\n  sku: X\nslices:\n- core_id: m33\n  os: zephyr\n  \
+             flash_method: zephyr_west_flash\n  flash_args:\n    runner: openocd\nhelper_mcus: \
+             []\nboot_order: []\n",
+        )
+        .unwrap();
+        let mut a = flash_args(&app, &build_root, true);
+        a.core = Some("does-not-exist".to_string());
+        let g = global(&sdk, Format::Json);
+        let run = run(&g, &a);
+        assert_eq!(run.exit, ExitCode::Success);
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(doc["ok"], true);
+        assert!(doc["data"]["entries"].as_array().unwrap().is_empty());
+        // Before the fix "nothing matched" was a text-only line: `--format
+        // json` discards `text` entirely, so a filter typo that flashed
+        // nothing was byte-identical to a real success in the envelope.
+        let issue = doc["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == "flash.nothing-matched");
+        assert!(issue.is_some(), "expected a flash.nothing-matched issue");
+        std::fs::remove_dir_all(&sdk).unwrap();
+        std::fs::remove_dir_all(&app).unwrap();
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn planning_only_without_confirm_is_reported_planned_not_ok() {
+        let sdk = tmp("plan-sdk");
+        fake_sdk(&sdk);
+        let app = tmp("plan-app");
+        let build_root = tmp("plan-build");
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "schema_version: 1\nhw_info:\n  sku: E1M-V2N101\nslices: []\nhelper_mcus:\n- name: \
+             fip_helper\n  chip: xspi\n  firmware_path: firmware/fip.bin\n  flash_method: \
+             xspi_flashwriter\n  flash_args:\n    flash_partition: mtd1\n    port: COM24\n\
+             boot_order: []\n",
+        )
+        .unwrap();
+        let g = global(&sdk, Format::Json);
+        // dry_run=false: a REAL flash was requested, but xspi_flashwriter's
+        // confirm gate (flash_args.confirm / ALP_FLASH_FORCE) is not armed, so
+        // the backend itself refuses to write. Before this fix the entry
+        // reported status "ok", rc 0 — byte-identical to a real completed write.
+        let run = run(&g, &flash_args(&app, &build_root, false));
+        assert_eq!(run.exit, ExitCode::Success);
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(doc["ok"], true);
+        let entries = doc["data"]["entries"].as_array().unwrap();
+        let helper = entries.iter().find(|e| e["id"] == "fip_helper").unwrap();
+        assert_eq!(helper["status"], "planned");
+        assert!(helper["message"].as_str().unwrap().contains("confirm"));
+        let issue = doc["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == "flash.confirm-required");
+        assert!(
+            issue.is_some(),
+            "a confirm-gated no-op must surface a flash.confirm-required issue"
+        );
+        std::fs::remove_dir_all(&sdk).unwrap();
+        std::fs::remove_dir_all(&app).unwrap();
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn slice_not_built_refuses_to_flash_stale_artefact() {
+        // Fable's exact scenario: run 1 built ok (status: ok, elf on disk);
+        // run 2's `west` resolution breaks and the slice comes back
+        // `status: failed` in the rewritten manifest, but `output_artefact`
+        // still points at run 1's elf (overlay_run_results never wipes it).
+        // Before this fix that elf got silently flashed with `ok:true` and
+        // zero issues.
+        let sdk = tmp("stale-sdk");
+        fake_sdk(&sdk);
+        let app = tmp("stale-app");
+        let build_root = tmp("stale-build");
+        let stale_elf = build_root.join("m55_hp-zephyr").join("zephyr");
+        std::fs::create_dir_all(&stale_elf).unwrap();
+        std::fs::write(stale_elf.join("zephyr.elf"), b"stale-run-1-elf").unwrap();
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "schema_version: 1\nhw_info:\n  sku: E1M-AEN701\nslices:\n- core_id: m55_hp\n  os: \
+             zephyr\n  output_artefact: m55_hp-zephyr/zephyr/zephyr.elf\n  status: failed\n  \
+             flash_method: zephyr_west_flash\n  flash_args:\n    runner: openocd\nhelper_mcus: \
+             []\nboot_order: []\n",
+        )
+        .unwrap();
+        let g = global(&sdk, Format::Json);
+        let run = run(&g, &flash_args(&app, &build_root, false));
+        assert_eq!(run.exit, ExitCode::RuntimeFailure, "must not exit clean");
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(doc["ok"], false, "ok must not disagree with exitCode");
+        // never turned into a FlashTarget, so no spawn/entry for it either.
+        assert!(doc["data"]["entries"].as_array().unwrap().is_empty());
+        let issue = doc["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == "flash.slice-not-built")
+            .unwrap_or_else(|| panic!("expected a flash.slice-not-built issue, got {doc}"));
+        assert_eq!(issue["severity"], "error");
+        assert!(issue["message"].as_str().unwrap().contains("m55_hp"));
+        assert!(issue["message"].as_str().unwrap().contains("failed"));
+        std::fs::remove_dir_all(&sdk).unwrap();
+        std::fs::remove_dir_all(&app).unwrap();
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn pipeline_drains_decompressor_stderr_so_capture_mode_does_not_deadlock() {
+        // Regression for the pipe-buffer deadlock: a decompressor that writes
+        // more than the OS pipe buffer to stderr blocks on write() once nobody
+        // reads it, so it never reaches EOF on stdout either, `right` blocks
+        // reading its stdin, and `lchild.wait()` never returns. Run the
+        // pipeline on a background thread with a bounded wait — a regression
+        // hangs this test instead of hanging the whole suite forever.
+        let scratch = tmp("pipeline-stderr-src");
+        let file = scratch.join("noisy.txt");
+        std::fs::write(&file, vec![b'a'; 300_000]).unwrap();
+
+        let (left, right): (Vec<String>, Vec<String>) = if cfg!(windows) {
+            (
+                vec![
+                    "cmd".to_string(),
+                    "/c".to_string(),
+                    format!("type {} 1>&2", file.display()),
+                ],
+                vec!["findstr".to_string(), "x".to_string()],
+            )
+        } else {
+            (
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    format!("cat {} >&2", file.display()),
+                ],
+                vec!["cat".to_string()],
+            )
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = spawn_pipeline(true, &left, &right);
+            let _ = tx.send(result.is_ok());
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(20)) {
+            Ok(ok) => assert!(ok, "pipeline should complete cleanly"),
+            Err(_) => panic!("spawn_pipeline deadlocked: decompressor stderr not drained"),
+        }
+        std::fs::remove_dir_all(&scratch).unwrap();
     }
 }

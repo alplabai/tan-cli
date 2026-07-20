@@ -124,7 +124,7 @@ pub(super) fn maybe_auto_bootstrap(
         "Reused Zephyr workspace is stale versus the SDK pin"
     };
     eprintln!("{reason} — bootstrapping (reuse a compatible Zephyr, else bootstrap one)…");
-    let _ = crate::commands::bootstrap::run(
+    let bootstrap_run = crate::commands::bootstrap::run(
         g,
         &BootstrapArgs {
             no_pip: false,
@@ -132,5 +132,67 @@ pub(super) fn maybe_auto_bootstrap(
             print_env: false,
         },
     );
+    // `bootstrap::run` returns early on Windows with the ONLY actionable
+    // message the user gets ("not supported on native Windows... use WSL2 /
+    // docs §4"). The old `let _ =` discarded that `CommandRun` entirely, so
+    // the readiness gate below fell through to its generic `run \`alp
+    // bootstrap\`` hint — an instruction that can never succeed on this host.
+    // This is text-mode-only (the JSON path never calls `maybe_auto_bootstrap`
+    // — see the `!g.is_json()` gate at the call site), so printing here is the
+    // full fix; there is no envelope to fold an Issue into.
+    print_bootstrap_failure(&bootstrap_run, std::io::stderr());
     Some(resolve_cli_project_context(g))
+}
+
+/// Print a delegated bootstrap's own diagnostic lines when it failed (e.g. the
+/// Windows "not supported, use WSL2" pointer) instead of silently falling
+/// through to the readiness gate's generic — and here unactionable — hint.
+/// A no-op on success. Takes an explicit writer so this is unit-testable
+/// without capturing real stderr.
+fn print_bootstrap_failure(run: &CommandRun, mut out: impl std::io::Write) {
+    if run.exit.code() != 0 {
+        for line in &run.text {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod print_bootstrap_failure_tests {
+    use super::*;
+
+    #[test]
+    fn prints_the_failed_run_s_lines() {
+        // Regression: this used to be `let _ = crate::commands::bootstrap::run(...)`
+        // — a failed delegate's own diagnostic (e.g. bootstrap's Windows
+        // "not supported" pointer) was thrown away entirely.
+        let run = CommandRun {
+            exit: ExitCode::RuntimeFailure,
+            text: vec![
+                "bootstrap: not supported on native Windows.".to_string(),
+                "Use WSL2 (Ubuntu) or docs/cross-platform-setup.md §4.".to_string(),
+            ],
+            json: None,
+        };
+        let mut buf = Vec::new();
+        print_bootstrap_failure(&run, &mut buf);
+        let printed = String::from_utf8(buf).unwrap();
+        assert!(
+            printed.contains("not supported on native Windows"),
+            "{printed}"
+        );
+        assert!(printed.contains("WSL2"), "{printed}");
+    }
+
+    #[test]
+    fn is_silent_on_a_successful_run() {
+        let run = CommandRun {
+            exit: ExitCode::Success,
+            text: vec!["should never be printed".to_string()],
+            json: None,
+        };
+        let mut buf = Vec::new();
+        print_bootstrap_failure(&run, &mut buf);
+        assert!(buf.is_empty());
+    }
 }

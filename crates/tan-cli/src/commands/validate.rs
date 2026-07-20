@@ -265,12 +265,22 @@ fn spawn_text(
 // ──────────────────────────── offline path ────────────────────────────
 
 /// Resolve the `board.yaml` path for the offline path: explicit `--board-yaml`
-/// if given, else `<--project|.>/board.yaml`.
+/// (joined onto `--project` when relative) if given, else `<--project|.>/board.yaml`.
+///
+/// A relative `--board-yaml` used to resolve against the process CWD instead of
+/// the project root -- the only site in the CLI that did, while `validate`'s
+/// spawn path, `diff` and `generate` all join it onto the workspace root. That
+/// meant `--offline` silently inspected a different file than a non-offline run
+/// of the identical flags whenever `--project` and `--board-yaml` were combined.
 fn resolve_offline_board_path(g: &GlobalArgs) -> PathBuf {
-    if let Some(b) = &g.board_yaml {
-        return PathBuf::from(b);
-    }
     let root = g.project.clone().unwrap_or_else(|| ".".to_string());
+    if let Some(b) = &g.board_yaml {
+        let board_path = PathBuf::from(b);
+        if board_path.is_absolute() {
+            return board_path;
+        }
+        return Path::new(&root).join(board_path);
+    }
     Path::new(&root).join("board.yaml")
 }
 
@@ -335,11 +345,17 @@ fn run_offline(g: &GlobalArgs) -> CommandRun {
                 json,
             }
         }
+        // A malformed board.yaml (wrong-typed field, e.g. `som: <scalar>` instead
+        // of `som: {sku: ...}`) is a validation failure the user needs to fix,
+        // not an internal tan bug -- routing it through InternalFailure (exit 5)
+        // told CI/the extension this was a tan crash, and disagreed with the
+        // spawn path (`run_spawn`), which reports the identical file as exit 2
+        // `schema-violation`.
         Err(e) => offline_failure(
             g,
             project,
-            ExitCode::InternalFailure,
-            "internal-failure",
+            ExitCode::ValidationFailure,
+            "schema-violation",
             &e.to_string(),
             &board_str,
         ),
@@ -419,5 +435,82 @@ mod tests {
         assert!(issues[0].message.contains("outcome 'failed'"));
 
         assert!(to_cli_issues(Outcome::Clean, &[]).is_empty());
+    }
+
+    fn global(
+        project: Option<&str>,
+        board_yaml: Option<&str>,
+        format: crate::cli::Format,
+    ) -> GlobalArgs {
+        GlobalArgs {
+            project: project.map(str::to_string),
+            board_yaml: board_yaml.map(str::to_string),
+            sdk_root: None,
+            target: None,
+            all: false,
+            format,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    #[test]
+    fn offline_board_path_joins_relative_board_yaml_onto_project_root() {
+        // Was: PathBuf::from(b) verbatim, i.e. CWD-relative -- every sibling
+        // (run_spawn, diff, generate) joins relative --board-yaml onto --project.
+        let g = global(Some("app"), Some("custom.yaml"), crate::cli::Format::Text);
+        assert_eq!(
+            resolve_offline_board_path(&g),
+            Path::new("app").join("custom.yaml")
+        );
+    }
+
+    #[test]
+    fn offline_board_path_preserves_absolute_board_yaml() {
+        let g = global(
+            Some("app"),
+            Some("/etc/board.yaml"),
+            crate::cli::Format::Text,
+        );
+        assert_eq!(resolve_offline_board_path(&g), Path::new("/etc/board.yaml"));
+    }
+
+    #[test]
+    fn offline_board_path_defaults_to_project_root_board_yaml() {
+        let g = global(Some("app"), None, crate::cli::Format::Text);
+        assert_eq!(
+            resolve_offline_board_path(&g),
+            Path::new("app").join("board.yaml")
+        );
+    }
+
+    #[test]
+    fn offline_malformed_board_yaml_is_validation_failure_not_internal() {
+        let dir = std::env::temp_dir().join(format!(
+            "tan-validate-offline-malformed-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // `som:` as a scalar instead of a `{sku: ...}` mapping -- a common
+        // authoring slip that parses as YAML but fails to deserialize into
+        // BoardModel; must NOT be reported as an internal tan failure.
+        std::fs::write(dir.join("board.yaml"), "som: E1M-AEN701\n").unwrap();
+
+        let g = global(
+            Some(dir.to_string_lossy().as_ref()),
+            None,
+            crate::cli::Format::Json,
+        );
+        let run = run_offline(&g);
+        assert_eq!(run.exit, ExitCode::ValidationFailure);
+        let json = run.json.expect("json envelope in --format json");
+        assert!(json.contains("\"code\":\"validate.schema-violation\""));
+        assert!(!json.contains("internal-failure"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

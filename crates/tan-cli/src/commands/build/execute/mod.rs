@@ -43,7 +43,10 @@ struct SliceResult {
     /// Process exit code, when the tool actually launched.
     #[serde(skip_serializing_if = "Option::is_none")]
     rc: Option<i32>,
-    /// Why the slice was skipped (verbatim, e.g. the missing-tool reason).
+    /// Why the slice was skipped or failed: the missing-tool reason verbatim,
+    /// or — in JSON mode, where the child's stdio was captured rather than
+    /// inherited — the tail of the captured build output / the launch error,
+    /// so a failed build isn't reduced to a bare rc with no diagnostic.
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<String>,
     /// Real on-disk `zephyr.elf` path after a successful build (absolute), fed
@@ -70,10 +73,36 @@ struct BuildRunData {
     slices: Vec<SliceResult>,
 }
 
-/// Run each slice's `ToolStep` sequentially under `base`. Text mode streams each
-/// build live (inherited stdio) with per-slice headers; JSON mode captures and
-/// folds per-slice results into the envelope. Commandless slices are skipped.
-/// Runs all slices (does not abort early) and exits non-zero if any failed.
+/// The full outcome of a `--native` build run: the envelope `tan build`
+/// reports, PLUS the two in-memory signals `tan run` decides host-vs-hardware
+/// and flash-safety from — never by re-reading `system-manifest.yaml` off
+/// disk afterward (see `tan_core::run`'s module doc for the root cause this
+/// closes). `pub(crate)` because `commands::run` (a sibling of `commands::build`)
+/// consumes it directly via [`crate::commands::build::run_build_native_outcome`].
+pub(crate) struct NativeBuildOutcome {
+    /// The build's own envelope/exit — what `tan build` (and `run_build`'s
+    /// thin wrapper) return unchanged.
+    pub(crate) run: CommandRun,
+    /// Whether THIS run's post-build `system-manifest.yaml` FILE write
+    /// actually succeeded (`manifest::PostBuildManifest::write_failed_reason
+    /// .is_none()`). Gates `RunAction::Flash` for a confirmed hardware
+    /// target — a failed write means `flash` would next read a stale/wrong
+    /// file.
+    pub(crate) manifest_written: bool,
+    /// Whether THIS run's freshly emitted SDK system-manifest projection
+    /// declares a `native_sim` slice — `None` only when the emit itself
+    /// failed/didn't parse (no signal, not "not native_sim"). See
+    /// `tan_core::run::decide_run_action`.
+    pub(crate) native_sim_target: Option<bool>,
+}
+
+/// Thin `CommandRun`-only wrapper around [`execute_slices_outcome`] — kept
+/// for this module's own (pre-existing) tests below, which only assert on the
+/// envelope; every production caller now goes through
+/// [`execute_slices_outcome`] directly (`tan build` via `native.rs`'s
+/// `native_build_outcome` -> `run_build`'s `.run`, `tan run` via
+/// `run_build_native_outcome`), so this has no non-test caller.
+#[cfg(test)]
 pub(super) fn execute_slices(
     g: &GlobalArgs,
     context: &ProjectContext,
@@ -81,11 +110,31 @@ pub(super) fn execute_slices(
     plan: &BuildPlan,
     base: &str,
 ) -> CommandRun {
+    execute_slices_outcome(g, context, project, plan, base).run
+}
+
+/// Run each slice's `ToolStep` sequentially under `base`. Text mode streams each
+/// build live (inherited stdio) with per-slice headers; JSON mode captures and
+/// folds per-slice results into the envelope. Commandless slices are skipped.
+/// Runs all slices (does not abort early) and exits non-zero if any failed.
+pub(crate) fn execute_slices_outcome(
+    g: &GlobalArgs,
+    context: &ProjectContext,
+    project: Project,
+    plan: &BuildPlan,
+    base: &str,
+) -> NativeBuildOutcome {
     let base_path = Path::new(base);
     let text_mode = !g.is_json();
     let theme = crate::style::Theme::from_args(g);
     let mut results: Vec<SliceResult> = Vec::new();
     let mut any_failed = false;
+    // Per-slice `build.unknown-backend` issues (skip=warning / fail=error),
+    // merged into the JSON envelope below. Named per-slice — unlike
+    // null_command/missing_tool, which only ride the generic
+    // `build.slice-failed` issue — because the whole point of this policy is
+    // to name WHICH backend string the plan sent that this CLI doesn't know.
+    let mut backend_issues: Vec<Issue> = Vec::new();
     let sdk_root = crate::util::resolve_sdk_root(g, &crate::util::cli_workspace_root(g));
     // Auto-manage the build env so `tan build` needs no manual
     // `source .venv/activate` / `export ZEPHYR_BASE`: derive ZEPHYR_BASE from the
@@ -98,6 +147,59 @@ pub(super) fn execute_slices(
 
     for slice in &plan.slices {
         let backend = slice.backend.as_str().to_string();
+
+        // `unknown_backend` policy: Fail (default) vs Skip. `Backend::Unknown`
+        // is a catch-all so ONE slice naming a backend this CLI doesn't know
+        // no longer fails the WHOLE plan to parse (build_plan.rs) — but
+        // nothing enforced `executionPolicy.unknownBackend` after that
+        // landed, so an unrecognised backend fell straight into dispatch
+        // unchecked: a net regression versus the old closed-enum
+        // reject-the-plan behavior. Checked before the null-command/
+        // missing-tool branches below: an unrecognised backend is unusable
+        // regardless of whether the slice happens to carry a command.
+        if slice.backend.is_unknown() {
+            let fail = resolve_action(
+                plan.execution_policy.as_ref(),
+                |p| p.unknown_backend,
+                PolicyAction::Fail,
+            ) == PolicyAction::Fail;
+            let reason = format!("unrecognised backend `{backend}`");
+            if text_mode {
+                let ds = if fail {
+                    DoctorStatus::Fail
+                } else {
+                    DoctorStatus::Warn
+                };
+                eprintln!(
+                    "{}",
+                    theme
+                        .slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, reason))
+                );
+            }
+            if fail {
+                any_failed = true;
+            }
+            backend_issues.push(Issue {
+                code: "build.unknown-backend".to_string(),
+                severity: if fail { "error" } else { "warning" }.to_string(),
+                message: format!(
+                    "slice `{}` names unrecognised backend `{backend}`{}",
+                    slice.core_id,
+                    if fail { "" } else { " — skipped" }
+                ),
+            });
+            results.push(SliceResult {
+                core_id: slice.core_id.clone(),
+                backend,
+                status: if fail { "failed" } else { "skipped" }.to_string(),
+                rc: None,
+                reason: Some(reason),
+                output_artefact: None,
+                build_dir: None,
+            });
+            continue;
+        }
+
         let Some(cmd) = &slice.command else {
             // `null_command` policy: Skip (default / older plan) vs Fail.
             let fail = resolve_action(
@@ -136,6 +238,37 @@ pub(super) fn execute_slices(
                 "{}",
                 theme.slice_start(&slice.core_id, &backend, &cmd.display())
             );
+        }
+        // `materialise.rs` and `manifest.rs` both refuse an absolute/`..`-escaping
+        // plan path before touching disk — this executor used to accept ANY
+        // `cmd.cwd` verbatim, so a plan-supplied `../../../scratch` would
+        // `create_dir_all` and build outside the project, then get recorded as
+        // an absolute `build_dir` in system-manifest.yaml (which `tan clean`
+        // later rmtree's without a depth guard). Same shape guard, same seam.
+        if !tan_core::is_plain_relative(Path::new(&cmd.cwd)) {
+            if text_mode {
+                eprintln!(
+                    "{}",
+                    theme.slice_result(
+                        DoctorStatus::Fail,
+                        &format!(
+                            "refusing unsafe cwd `{}` (absolute or escapes the build tree)",
+                            cmd.cwd
+                        )
+                    )
+                );
+            }
+            any_failed = true;
+            results.push(SliceResult {
+                core_id: slice.core_id.clone(),
+                backend,
+                status: "failed".to_string(),
+                rc: None,
+                reason: Some(format!("unsafe cwd `{}`", cmd.cwd)),
+                output_artefact: None,
+                build_dir: None,
+            });
+            continue;
         }
         let cwd = base_path.join(&cmd.cwd);
         // The build dir must exist before the tool runs (west/cmake build there).
@@ -221,6 +354,7 @@ pub(super) fn execute_slices(
             sdk_root.as_deref(),
             &slice.env,
             &slice.env_append_path,
+            |k| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned()),
         );
         let env = assemble_slice_env(
             &slice.env,
@@ -236,10 +370,10 @@ pub(super) fn execute_slices(
             .envs(env.iter().map(|(k, v)| (k, v)));
         with_venv_on_path(&mut command, &tool);
 
-        let (status, rc) = if text_mode {
+        let (status, rc, reason) = if text_mode {
             match command.status() {
-                Ok(s) if s.success() => ("ok", s.code()),
-                Ok(s) => ("failed", s.code()),
+                Ok(s) if s.success() => ("ok", s.code(), None),
+                Ok(s) => ("failed", s.code(), None),
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::NotFound {
                         eprintln!(
@@ -248,14 +382,32 @@ pub(super) fn execute_slices(
                     } else {
                         eprintln!("   launch error: {e}");
                     }
-                    ("failed", None)
+                    ("failed", None, None)
                 }
             }
         } else {
+            // `.output()` captures stdout+stderr — unlike text mode's inherited
+            // stdio, JSON mode has no other way to show the failure. Losing it
+            // used to leave `--format json` (the extension's only mode) with
+            // nothing but a bare rc: no compiler diagnostic, no distinction
+            // between "tool crashed" and "tool not executable". Fold the tail
+            // of the captured output (or the launch error) into `reason`.
             match command.output() {
-                Ok(o) if o.status.success() => ("ok", o.status.code()),
-                Ok(o) => ("failed", o.status.code()),
-                Err(_) => ("failed", None),
+                Ok(o) if o.status.success() => ("ok", o.status.code(), None),
+                Ok(o) => {
+                    let tail = capture_output_tail(&o);
+                    ("failed", o.status.code(), tail)
+                }
+                Err(e) => {
+                    let msg = if e.kind() == std::io::ErrorKind::NotFound {
+                        format!(
+                            "{tool} not found on PATH — install it to build this {backend} slice"
+                        )
+                    } else {
+                        format!("launch error: {e}")
+                    };
+                    ("failed", None, Some(msg))
+                }
             }
         };
         if status == "failed" {
@@ -276,7 +428,7 @@ pub(super) fn execute_slices(
         // On success, resolve the real on-disk artefact west produced so the
         // post-build manifest points the consumers at the elf that exists.
         let (output_artefact, build_dir) = if status == "ok" {
-            manifest::resolve_zephyr_artefact(&cwd)
+            manifest::resolve_zephyr_artefact(&cwd, &cmd.args)
         } else {
             (None, None)
         };
@@ -285,7 +437,7 @@ pub(super) fn execute_slices(
             backend,
             status: status.to_string(),
             rc,
-            reason: None,
+            reason,
             output_artefact,
             build_dir,
         });
@@ -293,8 +445,20 @@ pub(super) fn execute_slices(
 
     // Output seam: write the post-build system-manifest.yaml (the contract
     // `tan flash`/`size`/`image` read) reflecting this run's per-slice status.
-    // Best-effort — a fetch/parse/write failure warns but never fails the build.
-    manifest::write_post_build_manifest(context, plan, base, &results, text_mode);
+    // Best-effort in that a failure here never flips the build's own exit code
+    // (the slices already ran) — but it must not be SILENT: a failed rewrite
+    // leaves the PREVIOUS run's manifest on disk, and `tan flash` doesn't
+    // check `status` before programming whatever artefact it names. Print the
+    // reason in text mode (as before) AND fold it into the JSON envelope as a
+    // warning Issue — dropping the JSON half is exactly how a stale manifest
+    // used to look identical to `ok:true`.
+    let manifest_outcome = manifest::write_post_build_manifest(context, plan, base, &results);
+    let manifest_warning = manifest_outcome.write_failed_reason.clone();
+    if let Some(reason) = &manifest_warning {
+        if text_mode {
+            eprintln!("note: skipped writing system-manifest.yaml — {reason}");
+        }
+    }
 
     let exit = if any_failed {
         ExitCode::RuntimeFailure
@@ -302,8 +466,8 @@ pub(super) fn execute_slices(
         ExitCode::Success
     };
 
-    if g.is_json() {
-        let issues = if any_failed {
+    let run = if g.is_json() {
+        let mut issues = if any_failed {
             vec![Issue {
                 code: "build.slice-failed".to_string(),
                 severity: "error".to_string(),
@@ -312,6 +476,14 @@ pub(super) fn execute_slices(
         } else {
             Vec::new()
         };
+        issues.extend(backend_issues);
+        if let Some(reason) = manifest_warning {
+            issues.push(Issue {
+                code: "build.manifest-write-failed".to_string(),
+                severity: "warning".to_string(),
+                message: format!("system-manifest.yaml was not updated — {reason}"),
+            });
+        }
         let data = BuildRunData {
             schema_version: "1".to_string(),
             base_dir: base.to_string(),
@@ -369,6 +541,41 @@ pub(super) fn execute_slices(
             text,
             json: None,
         }
+    };
+
+    NativeBuildOutcome {
+        manifest_written: manifest_outcome.write_failed_reason.is_none(),
+        native_sim_target: manifest_outcome.native_sim_target,
+        run,
+    }
+}
+
+/// The failure tail from an ALREADY-captured process `Output` (JSON mode) — a
+/// pure read, no second spawn. Returns the last 4 non-empty output lines
+/// joined by " | ", or an rc-only fallback when the captured streams were
+/// empty. `None` only when the process actually succeeded (mirrors flash's
+/// `capture_tail`, which the JSON slice-execution path lacked entirely).
+fn capture_output_tail(out: &std::process::Output) -> Option<String> {
+    if out.status.success() {
+        return None;
+    }
+    let mut text = String::from_utf8_lossy(&out.stderr).into_owned();
+    if text.trim().is_empty() {
+        text = String::from_utf8_lossy(&out.stdout).into_owned();
+    }
+    let tail: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if tail.is_empty() {
+        Some(format!("exited rc={}", out.status.code().unwrap_or(-1)))
+    } else {
+        Some(tail.join(" | "))
     }
 }
 
@@ -448,6 +655,56 @@ mod tests {
     }
 
     #[test]
+    fn native_execute_refuses_a_plan_cwd_that_escapes_the_build_tree() {
+        // Regression: `materialise.rs` and `manifest.rs` both refuse an
+        // absolute/`..`-escaping plan path before touching disk; this executor
+        // used to `base_path.join(&cmd.cwd)` and `create_dir_all` it verbatim,
+        // so a plan-supplied `../../escape` would build (and later get
+        // recorded as an absolute `build_dir`) OUTSIDE the project tree.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let json = r#"{
+          "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+          "slices": [
+            { "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+              "command": { "tool": "true", "args": [], "cwd": "../../escape" } }
+          ],
+          "sharedArtefacts": []
+        }"#;
+        let plan = parse_build_plan(json).unwrap();
+        let base = unique_temp_dir("alp-exec-unsafe-cwd");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 1);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], false);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "failed");
+        assert!(
+            slices[0]["reason"].as_str().unwrap().contains("unsafe cwd"),
+            "got: {slices:?}"
+        );
+        // Nothing was created outside the base dir.
+        assert!(!base.join("../../escape").exists());
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn native_execute_skips_missing_tool_and_exits_zero() {
         // SDK parity (alp-sdk#114): a slice whose build tool isn't on this host
         // (e.g. `bitbake` on a non-Yocto dev box) is skipped, not failed — the
@@ -491,7 +748,15 @@ mod tests {
             reason.contains("not found in PATH; this is normal on non-"),
             "got: {reason}"
         );
-        assert!(env["issues"].as_array().unwrap().is_empty());
+        // The skip itself is issue-free (no error-severity issue): this
+        // no-SDK test harness always fails the post-build manifest write, so
+        // the only issue present is the expected `warning`-severity one — it
+        // must never be `error` (which would flip `ok` to false).
+        let issues = env["issues"].as_array().unwrap();
+        assert!(
+            issues.iter().all(|i| i["severity"] == "warning"),
+            "got: {issues:?}"
+        );
 
         std::fs::remove_dir_all(&base).ok();
     }
@@ -546,6 +811,118 @@ mod tests {
     }
 
     #[test]
+    fn native_execute_fails_unknown_backend_by_default() {
+        // Regression: `Backend::Unknown` was added so ONE unrecognised backend
+        // no longer fails the WHOLE plan to parse (build_plan.rs), but nothing
+        // then enforced `executionPolicy.unknownBackend` — a slice naming an
+        // unrecognised backend flowed straight into dispatch unchecked. The
+        // CONSUMER contract default is Fail (unlike missingTool/nullCommand,
+        // which default Skip).
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let json = r#"{
+          "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+          "slices": [
+            { "coreId": "linux_cluster", "backend": "linux", "buildDir": "build/linux" }
+          ],
+          "sharedArtefacts": []
+        }"#;
+        let plan = parse_build_plan(json).unwrap();
+        let base = unique_temp_dir("alp-exec-unknown-backend-fail");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 1);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], false);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "failed");
+        let reason = slices[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("linux"), "got: {reason}");
+
+        // The raw backend string must be named in the envelope Issue, not
+        // just the per-slice reason.
+        let issues = env["issues"].as_array().unwrap();
+        assert!(
+            issues.iter().any(|i| i["code"] == "build.unknown-backend"
+                && i["severity"] == "error"
+                && i["message"].as_str().unwrap().contains("linux")),
+            "got: {issues:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_skips_unknown_backend_when_policy_says_skip() {
+        // executionPolicy.unknownBackend = "skip" flips the default fail: the
+        // run stays exit 0 and the slice is reported skipped, not failed.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let json = r#"{
+          "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+          "slices": [
+            { "coreId": "linux_cluster", "backend": "linux", "buildDir": "build/linux" }
+          ],
+          "executionPolicy": { "unknownBackend": "skip" },
+          "sharedArtefacts": []
+        }"#;
+        let plan = parse_build_plan(json).unwrap();
+        let base = unique_temp_dir("alp-exec-unknown-backend-skip");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 0);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], true);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "skipped");
+        let reason = slices[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("linux"), "got: {reason}");
+
+        let issues = env["issues"].as_array().unwrap();
+        assert!(
+            issues.iter().any(|i| i["code"] == "build.unknown-backend"
+                && i["severity"] == "warning"
+                && i["message"].as_str().unwrap().contains("linux")),
+            "got: {issues:?}"
+        );
+        // A skip must never carry an error-severity issue (would flip `ok`).
+        assert!(
+            issues.iter().all(|i| i["severity"] != "error"),
+            "got: {issues:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn native_execute_reports_failed_for_a_real_nonzero_exit() {
         // A genuinely present tool that exits nonzero is still "failed" (exit 1)
         // — the missing-tool skip path above must not swallow real failures.
@@ -590,6 +967,173 @@ mod tests {
         let slices = env["data"]["slices"].as_array().unwrap();
         assert_eq!(slices[0]["status"], "failed");
         assert_eq!(slices[0]["rc"], 1);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_captures_failure_output_tail_in_json_mode() {
+        // Regression: JSON mode ran the slice via `Command::output()` (which
+        // CAPTURES stdout+stderr) and then threw the captured bytes away,
+        // leaving `--format json` — the extension's only mode — with a bare
+        // rc and zero diagnostics for a failed build. The tail of the
+        // captured output must land in `reason`.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "echo boom 1>&2 && exit 1"]"#)
+        } else {
+            ("sh", r#"["-c", "echo boom 1>&2; exit 1"]"#)
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/c1" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-captured-output");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 1);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "failed");
+        let reason = slices[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("boom"), "got: {reason}");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_reports_manifest_write_failure_as_warning_issue_in_json() {
+        // Regression (CRITICAL): a failed post-build system-manifest.yaml write
+        // used to be a bare `eprintln!` gated on text mode — invisible in
+        // `--format json`, so `ok:true` looked identical whether or not the
+        // manifest `tan flash` reads next was actually refreshed. It must now
+        // surface as a `warning`-severity Issue without flipping `ok`/exit
+        // (the manifest write is best-effort; the slices already succeeded).
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/c1" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-manifest-warn");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        // no_sdk_context() has no `sdk_root` — `invoke_sdk_emit` inside
+        // `write_post_build_manifest` always errs, exercising the failure path
+        // without a real SDK checkout.
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        // The slice itself succeeded — a best-effort manifest write failure
+        // must not fail the build.
+        assert_eq!(run.exit.code(), 0);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], true);
+        let issues = env["issues"].as_array().unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i["code"] == "build.manifest-write-failed" && i["severity"] == "warning"),
+            "expected a manifest-write-failed warning issue, got: {issues:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn execute_slices_outcome_threads_manifest_write_and_target_signals_out_of_the_build() {
+        // Regression (root cause, third attempt): `tan run` must decide from
+        // THIS build's own in-memory outcome, never from re-reading
+        // `system-manifest.yaml` off disk afterward. This proves the plumbing
+        // exists at all: `execute_slices_outcome` (not just `execute_slices`,
+        // which discards it) surfaces `manifest_written` /
+        // `native_sim_target` from the SAME `write_post_build_manifest` call
+        // the build just made — `no_sdk_context()` has no `sdk_root`, so the
+        // emit itself fails here, which must read as `manifest_written:
+        // false` and `native_sim_target: None` (no signal), not silently
+        // default to some other value.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/c1" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-outcome-threading");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let outcome = execute_slices_outcome(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(outcome.run.exit.code(), 0);
+        assert!(!outcome.manifest_written);
+        assert_eq!(outcome.native_sim_target, None);
 
         std::fs::remove_dir_all(&base).ok();
     }

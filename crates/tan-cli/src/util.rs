@@ -26,15 +26,70 @@ pub fn generated_at_iso() -> String {
     }
 }
 
-/// Whether `command` resolves on PATH, via `which`/`where` (mirrors the TS
-/// CLI's `commandExistsOnPath`). Shared by doctor + support-bundle.
+/// Whether `command` resolves on PATH (mirrors the TS CLI's
+/// `commandExistsOnPath`). Shared by doctor, support-bundle, size, `flash`'s
+/// tool gate and `tool_available` above — every one of those decisions is
+/// only meant to answer "is this on the user's PATH", so the lookup itself
+/// must never consult the current directory.
 pub fn command_on_path(command: &str) -> bool {
-    let resolver = if cfg!(windows) { "where" } else { "which" };
-    Command::new(resolver)
-        .arg(command)
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    if cfg!(windows) {
+        // `where.exe` searches the CURRENT DIRECTORY before %PATH% (Windows'
+        // documented search order), so a project checked out with its own
+        // `openocd.exe`/`renode.exe` at its root would make `where` report it
+        // as "available" — and the flash tool-gate / renode resolver then
+        // spawn exactly that project-controlled binary. Walk PATH by hand
+        // instead so a project directory can never supply the executable.
+        windows_path_lookup(command).is_some()
+    } else {
+        Command::new("which")
+            .arg(command)
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    }
+}
+
+/// PATH-only lookup for `command` on Windows: try each `%PATH%` entry, and for
+/// an extension-less bare name (the normal case — `cmake`, `west`, `renode`)
+/// each `%PATHEXT%` suffix, exactly as `CreateProcess` resolves a program name
+/// once the CWD is excluded. Returns the first match.
+fn windows_path_lookup(command: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let dirs: Vec<PathBuf> = std::env::split_paths(&path).collect();
+    let pathext = std::env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+    find_on_path(command, &dirs, &pathext)
+}
+
+/// Pure search core split out of [`windows_path_lookup`] purely for unit
+/// testing: given an explicit directory list (never the real environment or
+/// CWD), does `command` exist as a file directly under one of them?
+fn find_on_path(command: &str, dirs: &[PathBuf], pathext: &str) -> Option<PathBuf> {
+    let exts: Vec<&str> = pathext.split(';').filter(|e| !e.is_empty()).collect();
+    let has_ext = Path::new(command).extension().is_some();
+    for dir in dirs {
+        // `split_paths` yields an empty PathBuf for `;;` / a trailing `;` in
+        // %PATH% (both routine on Windows). `PathBuf::new().join(x)` == `x`,
+        // a bare relative path whose `is_file()` silently resolves against the
+        // process CWD — reintroducing exactly the CWD hit this function exists
+        // to avoid. Skip it instead of joining onto an empty base.
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        if has_ext {
+            let candidate = dir.join(command);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        } else {
+            for ext in &exts {
+                let candidate = dir.join(format!("{command}{ext}"));
+                if candidate.is_file() {
+                    return Some(candidate);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Whether a build tool resolves on this host: an absolute path (e.g. a venv
@@ -263,6 +318,81 @@ mod tests {
         assert!((3u32, 9u32) < MIN_PYTHON);
         assert!((3u32, 10u32) >= MIN_PYTHON);
         assert!((3u32, 14u32) >= MIN_PYTHON);
+    }
+
+    /// Unique scratch dir per test/tag, matching the pattern used by
+    /// `size.rs`'s tests.
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tan-util-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The regression this guards: `where.exe` searches the CWD before PATH,
+    /// so a naive port of that behavior would report a project-local dropped
+    /// binary as "on PATH". `find_on_path` takes an explicit directory list
+    /// with no CWD concept at all, so a directory holding a same-named file
+    /// that is NOT in that list must never be found — structurally proving
+    /// the lookup is PATH-only.
+    #[test]
+    fn find_on_path_never_finds_a_file_outside_the_given_dirs() {
+        let cwd_like = tmp("cwd");
+        std::fs::write(cwd_like.join("openocd.EXE"), b"").unwrap();
+        let path_dir = tmp("path");
+
+        // `cwd_like` deliberately excluded from `dirs` -> must not resolve.
+        assert!(
+            find_on_path(
+                "openocd",
+                std::slice::from_ref(&path_dir),
+                ".COM;.EXE;.BAT;.CMD"
+            )
+            .is_none()
+        );
+
+        // Once it's an actual PATH entry, the same file resolves.
+        assert!(find_on_path("openocd", &[cwd_like, path_dir], ".COM;.EXE;.BAT;.CMD").is_some());
+    }
+
+    /// `split_paths` on a real `%PATH%` like `C:\Windows;;C:\bar;` yields an
+    /// empty `PathBuf` for each `;;`/trailing `;`. `PathBuf::new().join(name)`
+    /// == bare `name`, whose `is_file()` resolves against the process CWD —
+    /// so without the empty-entry skip, a same-named file sitting in the CWD
+    /// would resolve even though the CWD was never a PATH entry. Drops a
+    /// marker into the real test-process CWD (no `chdir`, so this stays safe
+    /// under the default multi-threaded test runner) to prove it's ignored.
+    /// Pins the fix at util.rs:58.
+    #[test]
+    fn find_on_path_skips_empty_path_entries_and_ignores_cwd() {
+        let name = format!("tan-util-emptyentry-{}", std::process::id());
+        let marker = std::env::current_dir().unwrap().join(format!("{name}.EXE"));
+        std::fs::write(&marker, b"").unwrap();
+
+        // Empty entry (as produced by `;;` / a trailing `;`) plus a real,
+        // unrelated PATH dir that does NOT contain the binary.
+        let path_dir = tmp("emptyentry-path");
+        let result = find_on_path(&name, &[PathBuf::new(), path_dir], ".COM;.EXE;.BAT;.CMD");
+
+        let _ = std::fs::remove_file(&marker);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_on_path_tries_each_pathext_suffix_for_bare_names() {
+        let dir = tmp("pathext");
+        std::fs::write(dir.join("west.BAT"), b"").unwrap();
+        assert!(find_on_path("west", &[dir], ".COM;.EXE;.BAT;.CMD").is_some());
+    }
+
+    #[test]
+    fn find_on_path_uses_exact_name_when_extension_already_given() {
+        let dir = tmp("exact");
+        std::fs::write(dir.join("tool.sh"), b"").unwrap();
+        // Extension is already explicit -> looked up verbatim, not with
+        // another PATHEXT suffix appended.
+        assert!(find_on_path("tool.sh", std::slice::from_ref(&dir), ".COM;.EXE").is_some());
+        assert!(find_on_path("tool", &[dir], ".COM;.EXE").is_none());
     }
 
     #[test]

@@ -56,8 +56,17 @@ jobs:
             exit 1
           fi
 
+  # The tagged commit must pass the same gates a PR does — a tag can be cut from
+  # any commit, so "it was green on main" is an assumption, not a fact.
+  gates:
+    uses: ./.github/workflows/ci.yml
+    # A called workflow inherits the caller's permissions; the gates compile
+    # third-party deps and need no write on the release.
+    permissions:
+      contents: read
+
   build:
-    needs: verify-version
+    needs: [verify-version, gates]
     strategy:
       fail-fast: false
       matrix:
@@ -103,7 +112,9 @@ jobs:
         env:
           # Cross-linker for aarch64 linux; harmless/empty for every other target.
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.linker }}
-        run: cargo build --release --target ${{ matrix.target }} --bin tan
+        # --locked: publish binaries built from the exact dep set CI compiled and
+        # tested, never a re-resolved one.
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin tan
       - name: stage asset
         shell: bash
         run: cp "target/${{ matrix.target }}/release/tan${{ matrix.ext }}" "${{ matrix.asset }}"

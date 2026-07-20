@@ -49,12 +49,27 @@ struct RawPad {
 /// (never errors): a malformed document yields an empty table; a pad missing
 /// `e1m_pad` or `e1m_function` is dropped; other string fields default to "".
 /// Mirrors the extension's `parsePinmuxTable`.
+///
+/// This swallows a genuine YAML syntax error the same way it swallows an
+/// ordinary "some pads dropped" table, which is right for a caller with no
+/// error channel -- but it also means a caller that DOES have one (the CLI
+/// envelope's `issues[]`) can't tell "no pads" from "table failed to parse".
+/// Use [`parse_pinmux_table_checked`] to keep that distinction.
 pub fn parse_pinmux_table(text: &str) -> PinmuxTable {
-    let raw: RawTable = serde_yaml::from_str(text).unwrap_or(RawTable {
-        family: None,
+    parse_pinmux_table_checked(text).unwrap_or_else(|_| PinmuxTable {
+        family: String::new(),
         display_name: None,
-        pads: None,
-    });
+        pads: Vec::new(),
+    })
+}
+
+/// Parse a `pinmux-capability-v1` YAML document, surfacing a genuine YAML
+/// syntax error instead of swallowing it into an empty table. `pads` rows
+/// still fail soft per-row (a row missing `e1m_pad`/`e1m_function` is
+/// dropped, not an `Err`) -- only "the document itself did not parse" is
+/// `Err` here.
+pub fn parse_pinmux_table_checked(text: &str) -> Result<PinmuxTable, serde_yaml::Error> {
+    let raw: RawTable = serde_yaml::from_str(text)?;
     let pads = raw
         .pads
         .unwrap_or_default()
@@ -69,11 +84,11 @@ pub fn parse_pinmux_table(text: &str) -> PinmuxTable {
             })
         })
         .collect();
-    PinmuxTable {
+    Ok(PinmuxTable {
         family: raw.family.unwrap_or_default(),
         display_name: raw.display_name,
         pads,
-    }
+    })
 }
 
 /// Resolve a SoM SKU to its pinmux family stem (the `metadata/pinmux/<stem>.yaml`
@@ -133,6 +148,16 @@ pads:
         let t = parse_pinmux_table(": : not yaml : :");
         assert_eq!(t.family, "");
         assert!(t.pads.is_empty());
+    }
+
+    #[test]
+    fn checked_variant_surfaces_the_parse_error_fail_soft_hides() {
+        // `parse_pinmux_table` collapses "genuinely malformed YAML" and "valid
+        // YAML with a few dropped rows" into the identical empty-table result,
+        // so a caller with an issues[] channel (tan pinmux --format json)
+        // can't warn on one and not the other. The checked variant must Err.
+        assert!(parse_pinmux_table_checked(": : not yaml : :").is_err());
+        assert!(parse_pinmux_table_checked(SAMPLE).is_ok());
     }
 
     #[test]

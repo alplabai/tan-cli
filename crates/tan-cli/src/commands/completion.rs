@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `tan completion` — emit a shell completion script.
 //!
-//! Parity with TS `runCompletionCommand`: the scripts are byte-for-byte copies
-//! of the TS output (captured from the reference CLI and embedded verbatim via
-//! `include_str!`), so the contract envelope's `script` field matches exactly.
+//! Parity with TS `runCompletionCommand`: the scripts are embedded verbatim
+//! via `include_str!` so the contract envelope's `script` field is exact. They
+//! started as byte-for-byte captures of the reference TS CLI's output (12
+//! commands); native-only commands (`build`, `flash`, `run`, …) have since
+//! been added by hand, so `embedded_scripts_list_every_cli_command` below
+//! checks them against `cli::Command` on every test run instead of trusting
+//! them to stay in sync.
 
 use super::CommandRun;
 use crate::cli::{CompletionArgs, GlobalArgs};
@@ -93,11 +97,19 @@ pub fn run(g: &GlobalArgs, args: &CompletionArgs) -> CommandRun {
     };
 
     let script = script_for(shell).to_string();
-    let text = if g.is_json() {
-        Vec::new()
-    } else {
-        script.split('\n').map(str::to_string).collect()
-    };
+    if !g.is_json() {
+        // The script IS the payload (README: "`tan completion --shell zsh`
+        // emits a completion script"), and the only sane way to consume it is
+        // `eval "$(tan completion --shell zsh)"` / `> file` stdout capture.
+        // `main::emit` sends every `CommandRun::text` line to STDERR (correct
+        // for status/diagnostic prose elsewhere), so routing the script
+        // through `text` made both the eval and the redirect capture nothing
+        // while the script scrolled past looking like an error dump. Print
+        // the payload straight to stdout instead, and leave `text` empty so
+        // nothing doubles up on stderr.
+        println!("{script}");
+    }
+    let text = Vec::new();
     let data = CompletionData {
         schema_version: "1".to_string(),
         shell: shell.to_string(),
@@ -124,6 +136,7 @@ pub fn run(g: &GlobalArgs, args: &CompletionArgs) -> CommandRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::Format;
 
     #[test]
     fn resolve_shell_defaults_and_normalizes() {
@@ -140,5 +153,68 @@ mod tests {
         assert!(FISH_SCRIPT.contains("__fish_use_subcommand"));
         // The captured zsh script collapses the `_arguments -C` continuations.
         assert!(ZSH_SCRIPT.contains("_arguments -C     '1:command:->command'"));
+    }
+
+    /// Word-boundary substring check: a bare `.contains` would also match a
+    /// command name that is a fragment of an unrelated token, silently hiding
+    /// a real drift.
+    fn script_lists(script: &str, name: &str) -> bool {
+        script
+            .split(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+            .any(|tok| tok == name)
+    }
+
+    /// The scripts used to be a frozen 12-command capture of the retired TS
+    /// CLI while `cli::Command` grew to 31 variants, so `tan build<TAB>` (and
+    /// every command added since) offered nothing on any shell. Read the
+    /// authoritative command list straight off clap's own command graph
+    /// (never hand-duplicate it here) so this fails the moment a future
+    /// `Command` variant ships without a matching completion entry.
+    #[test]
+    fn embedded_scripts_list_every_cli_command() {
+        use clap::CommandFactory;
+        let root = crate::cli::Cli::command();
+        let missing: Vec<String> = root
+            .get_subcommands()
+            .map(|c| c.get_name().to_string())
+            .filter(|name| {
+                !script_lists(BASH_SCRIPT, name)
+                    || !script_lists(ZSH_SCRIPT, name)
+                    || !script_lists(FISH_SCRIPT, name)
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "completion scripts missing commands: {missing:?}"
+        );
+    }
+
+    fn global(format: Format) -> GlobalArgs {
+        GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format,
+            verbose: false,
+            quiet: false,
+            no_color: true,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    /// Regression for the completion script going to stdout: before the fix,
+    /// a successful text-mode run returned the script split into `text`
+    /// lines, which `main::emit` writes with `eprintln!` — so
+    /// `eval "$(tan completion --shell zsh)"` and `... > file` both captured
+    /// nothing. The payload now goes straight to stdout via `println!`
+    /// inside `run`, so `text` must come back empty.
+    #[test]
+    fn text_mode_success_leaves_text_empty_script_goes_to_stdout() {
+        let run = run(&global(Format::Text), &CompletionArgs { shell: None });
+        assert_eq!(run.exit.code(), 0);
+        assert!(run.text.is_empty());
     }
 }

@@ -17,6 +17,7 @@ pub mod flash;
 pub mod image_bundle;
 pub mod loader;
 pub mod model;
+pub mod path_guard;
 pub mod pinmux;
 pub mod plan_exec;
 pub mod preflight;
@@ -39,7 +40,10 @@ pub use build_plan::{
 pub use build_readiness::{
     BuildOs, BuildReadinessReport, BuildToolProbe, board_os_set, build_readiness_report,
 };
-pub use clean::{CleanAction, classify as clean_classify, clean_targets, is_under};
+pub use clean::{
+    CleanAction, CleanPlan, RejectedTarget, TargetOrigin, classify as clean_classify,
+    clean_targets, is_under,
+};
 pub use clock::format_iso8601_utc;
 pub use debug::{
     DebugGenerationTraceDecision, DebugResolvedValue, DebugRuntimeCapabilities, DebugServerKind,
@@ -70,6 +74,7 @@ pub use loader::{
     generation_target_support, list_generation_target_support,
 };
 pub use model::{BoardModel, normalize_board_model};
+pub use path_guard::{is_plain_relative, is_unsafe_removal_target, normalize as normalize_path};
 pub use pinmux::{PinmuxPad, PinmuxTable, parse_pinmux_table, pinmux_family_for_sku};
 pub use preflight::{
     PreflightInput, build_preflight_checks, preflight_blocked, preflight_next_steps,

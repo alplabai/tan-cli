@@ -31,8 +31,15 @@ use serde::{Deserialize, Serialize};
 pub const BUILD_PLAN_SCHEMA_VERSION: u32 = 1;
 
 /// Per-core build backend. Serialized lowercase to match the emit + `BuildOs`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+///
+/// `Unknown` is a deliberate catch-all: this used to be a closed 3-variant
+/// enum, so ONE slice naming a backend the CLI didn't know (e.g. a future
+/// `linux` A-cluster backend) failed `serde_json::from_str` for the WHOLE
+/// plan document, before `executionPolicy.unknownBackend` (below) could ever
+/// be consulted per-slice. Keeping the raw string lets the executor apply
+/// that policy (skip/fail) and name the offending backend in its message,
+/// instead of the plan being rejected outright as "not valid JSON".
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Backend {
     /// Zephyr RTOS build (`west`).
     Zephyr,
@@ -40,16 +47,56 @@ pub enum Backend {
     Yocto,
     /// Bare-metal build (`cmake`).
     Baremetal,
+    /// A backend string this CLI does not (yet) recognise, preserved verbatim
+    /// so the executor can apply `executionPolicy.unknownBackend` and report
+    /// which backend it was.
+    Unknown(String),
 }
 
 impl Backend {
     /// The lowercase wire string for this backend (matches the serde encoding).
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Backend::Zephyr => "zephyr",
             Backend::Yocto => "yocto",
             Backend::Baremetal => "baremetal",
+            Backend::Unknown(raw) => raw.as_str(),
         }
+    }
+
+    /// True when this backend is not one of the three the executor knows how
+    /// to run. Callers apply `ExecutionPolicy::unknown_backend` off this.
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Backend::Unknown(_))
+    }
+}
+
+// Hand-rolled (not derived): Backend must stay a bare lowercase JSON string
+// on the wire (ADR 0014), which `#[serde(rename_all = "lowercase")]` only
+// gives you for a fieldless enum. `Unknown(String)` carries data, so the
+// derive would switch to `{"Unknown":"linux"}` externally-tagged framing;
+// these impls keep the flat-string contract for every variant.
+impl Serialize for Backend {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Backend {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(match raw.as_str() {
+            "zephyr" => Backend::Zephyr,
+            "yocto" => Backend::Yocto,
+            "baremetal" => Backend::Baremetal,
+            _ => Backend::Unknown(raw),
+        })
     }
 }
 
@@ -202,7 +249,39 @@ impl BuildPlan {
         }
         out
     }
+
+    /// True when `build_root` is the one location every post-build consumer
+    /// reads: `<project>/build`.
+    ///
+    /// The native build writes `system-manifest.yaml` under `build_root`, but
+    /// `tan flash` / `size` / `image` / `renode` each run as a SEPARATE
+    /// invocation with no plan in hand, so they hardcode `<project>/build` as
+    /// where the manifest lives. If a plan ever emitted a different
+    /// `build_root`, the build would write the manifest somewhere those
+    /// consumers never look — leaving them to read a stale manifest still
+    /// sitting under `build/` (and, for `flash`, program it onto silicon). So
+    /// the executor rejects such a plan loudly rather than build into a location
+    /// the rest of the suite cannot find. Every plan the SDK emits today uses
+    /// `"build"`; this pins that shared assumption at the one seam that knows
+    /// the plan. A nested or dotted form that still normalizes to `build`
+    /// (`./build`, `build/.`) is accepted.
+    pub fn build_root_is_consumer_default(&self) -> bool {
+        use std::path::{Component, Path};
+        let p = Path::new(&self.build_root);
+        // A leading `..` normalizes to nothing on an empty accumulator, so
+        // `../build` would lexically collapse to `build` — reject any escape /
+        // rooted form explicitly, then require the remainder to normalize to
+        // exactly `build`.
+        !p.is_absolute()
+            && !p.components().any(|c| matches!(c, Component::ParentDir))
+            && crate::path_guard::normalize(p) == Path::new(CONSUMER_BUILD_ROOT)
+    }
 }
+
+/// The single build-tree directory name every post-build consumer
+/// (`flash`/`size`/`image`/`renode`) reads relative to the project root. See
+/// [`BuildPlan::build_root_is_consumer_default`].
+pub const CONSUMER_BUILD_ROOT: &str = "build";
 
 /// Why a build-plan JSON could not be consumed.
 #[derive(Debug, thiserror::Error)]
@@ -218,8 +297,34 @@ pub enum BuildPlanError {
     UnsupportedSchemaVersion { found: u32, supported: u32 },
 }
 
+/// Just enough of the plan to read `schemaVersion` without requiring every
+/// other v1 field to be present.
+#[derive(Deserialize)]
+struct SchemaVersionProbe {
+    #[serde(rename = "schemaVersion")]
+    schema_version: u32,
+}
+
 /// Parse + version-guard a build-plan JSON document. Pure: no IO.
 pub fn parse_build_plan(json: &str) -> Result<BuildPlan, BuildPlanError> {
+    // Check schemaVersion FIRST, on a minimal probe struct, before the full
+    // typed deserialize. The old order deserialized straight into `BuildPlan`
+    // (every v1 field required, no `#[serde(default)]`), so a genuine v2 plan
+    // that renamed/dropped a required field (e.g. `buildRoot`) failed there
+    // with "missing field `buildRoot`" and never reached the version check --
+    // the user got a generic JSON-parse error instead of the actionable
+    // "upgrade the CLI or the SDK" message this guard exists to give. If the
+    // probe itself can't find/parse `schemaVersion` (malformed JSON, or a
+    // shape where the field is missing/mistyped), fall through to the full
+    // parse so its error message stands on its own.
+    if let Ok(probe) = serde_json::from_str::<SchemaVersionProbe>(json) {
+        if probe.schema_version != BUILD_PLAN_SCHEMA_VERSION {
+            return Err(BuildPlanError::UnsupportedSchemaVersion {
+                found: probe.schema_version,
+                supported: BUILD_PLAN_SCHEMA_VERSION,
+            });
+        }
+    }
     let plan: BuildPlan =
         serde_json::from_str(json).map_err(|e| BuildPlanError::Json(e.to_string()))?;
     if plan.schema_version != BUILD_PLAN_SCHEMA_VERSION {
@@ -355,6 +460,39 @@ mod tests {
     }
 
     #[test]
+    fn build_root_consumer_default_accepts_only_build() {
+        let with_root = |r: &str| {
+            let mut p = parse_build_plan(SAMPLE).unwrap();
+            p.build_root = r.to_string();
+            p.build_root_is_consumer_default()
+        };
+        // The one value the whole flash/size/image/renode suite reads, plus
+        // dotted forms that normalize to it.
+        assert!(with_root("build"));
+        assert!(with_root("./build"));
+        assert!(with_root("build/."));
+        // Anything else would put the manifest where the consumers never look.
+        assert!(!with_root("out"));
+        assert!(!with_root("build/nested"));
+        assert!(!with_root("../build"));
+        assert!(!with_root("/abs/build"));
+        assert!(!with_root(""));
+    }
+
+    #[test]
+    fn a_non_build_build_root_still_parses() {
+        // Tolerant read / validated act: parsing a plan whose buildRoot isn't
+        // `build` succeeds (inspection, `--plan` must still show it); it is the
+        // ACTING path (native_build) that refuses it via
+        // build_root_is_consumer_default, not the parser.
+        let plan =
+            parse_build_plan(&SAMPLE.replace(r#""buildRoot": "build""#, r#""buildRoot": "out""#))
+                .expect("a non-build buildRoot must still parse");
+        assert_eq!(plan.build_root, "out");
+        assert!(!plan.build_root_is_consumer_default());
+    }
+
+    #[test]
     fn command_display_joins_args() {
         let plan = parse_build_plan(SAMPLE).unwrap();
         let cmd = plan.slices[1]
@@ -455,6 +593,48 @@ mod tests {
             }
             other => panic!("expected schema-version error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn schema_version_mismatch_detected_before_structural_fields() {
+        // Regression: the version guard used to run AFTER the full struct
+        // deserialize. A v2 plan that renamed/dropped a v1-required field
+        // (buildRoot, missing here) used to fail with a JSON "missing field"
+        // error instead of the actionable UnsupportedSchemaVersion message.
+        let json = r#"{
+          "schemaVersion": 2,
+          "boardYaml": "/p/board.yaml",
+          "sku": "E1M-X",
+          "slices": []
+        }"#;
+        match parse_build_plan(json) {
+            Err(BuildPlanError::UnsupportedSchemaVersion { found, supported }) => {
+                assert_eq!(found, 2);
+                assert_eq!(supported, BUILD_PLAN_SCHEMA_VERSION);
+            }
+            other => panic!("expected schema-version error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_backend_does_not_reject_whole_plan() {
+        // Regression: Backend used to be a closed 3-variant enum with no
+        // catch-all, so ONE slice naming a not-yet-known backend failed
+        // serde_json::from_str for the WHOLE plan -- executionPolicy's
+        // unknownBackend could never be applied because the plan never
+        // parsed. Unknown(raw) keeps the document parseable per-slice.
+        let json = SAMPLE.replacen("\"backend\": \"baremetal\"", "\"backend\": \"linux\"", 1);
+        let plan = parse_build_plan(&json).expect("unknown backend must not fail the whole plan");
+        assert_eq!(
+            plan.slices[0].backend,
+            Backend::Unknown("linux".to_string())
+        );
+        assert!(plan.slices[0].backend.is_unknown());
+        assert!(!plan.slices[1].backend.is_unknown());
+        // Serializes back to the raw string (flat wire contract), not the
+        // externally-tagged `{"Unknown":"linux"}` a plain derive would give.
+        let round_tripped = serde_json::to_string(&plan).unwrap();
+        assert!(round_tripped.contains("\"backend\":\"linux\""));
     }
 
     #[test]

@@ -55,7 +55,12 @@ struct ScaffoldData {
 /// build the scaffold plan, then guard overwrites, preview, or write files —
 /// returning the `CommandRun` (exit code, human text, optional JSON envelope).
 pub fn run(g: &GlobalArgs, args: &ScaffoldArgs) -> CommandRun {
-    let is_interactive = !g.non_interactive && !g.ci;
+    // `--format json` is the mode the extension always uses and never has a
+    // human at the keyboard to answer a prompt; omitting it here let a JSON
+    // caller with no `--name`/`--template` block forever on an inquire prompt
+    // rendered to stderr, or — if stdin was already closed — cancel it and
+    // exit 1 with zero bytes on stdout (mirrors the identical fix in `init`).
+    let is_interactive = !g.non_interactive && !g.ci && !g.is_json();
 
     // 1. Resolve module name (required).
     let module_name = match resolve_module_name(args.name.as_deref(), is_interactive) {
@@ -63,24 +68,26 @@ pub fn run(g: &GlobalArgs, args: &ScaffoldArgs) -> CommandRun {
         Err(NeedName) => {
             return error_run(
                 g,
+                ExitCode::ValidationFailure,
                 "scaffold.name-required",
                 "Module name is required. Use --name <name> or run interactively.",
             );
         }
-        Err(Cancelled) | Err(BadArg(_)) => {
-            eprintln!("Cancelled.");
-            return runtime_failure_run();
-        }
+        Err(Cancelled) | Err(BadArg(_)) => return runtime_failure_run(g),
     };
 
     // 2. Resolve template.
     let template_id = match resolve_template(args.template.as_deref(), is_interactive) {
         Ok(id) => id,
-        Err(Cancelled) => {
-            eprintln!("Cancelled.");
-            return runtime_failure_run();
+        Err(Cancelled) => return runtime_failure_run(g),
+        Err(BadArg(msg)) => {
+            return error_run(
+                g,
+                ExitCode::ValidationFailure,
+                "scaffold.invalid-template",
+                &msg,
+            );
         }
-        Err(BadArg(msg)) => return error_run(g, "scaffold.invalid-template", &msg),
         Err(NeedName) => unreachable!(),
     };
 
@@ -101,7 +108,7 @@ pub fn run(g: &GlobalArgs, args: &ScaffoldArgs) -> CommandRun {
         destination: destination.clone(),
     }) {
         Ok(p) => p,
-        Err(e) => return error_run(g, "scaffold.invalid-name", &e),
+        Err(e) => return error_run(g, ExitCode::ValidationFailure, "scaffold.invalid-name", &e),
     };
 
     // 5. Collect file changes.
@@ -118,7 +125,45 @@ pub fn run(g: &GlobalArgs, args: &ScaffoldArgs) -> CommandRun {
         .iter()
         .any(|c| c.kind == WizardFileChangeKind::Update);
 
-    // 6. Guard against unforced overwrites.
+    // 6. Preview mode. Checked BEFORE the overwrite guard: `--preview` never
+    // touches disk, so it has nothing to be guarded against, but the guard
+    // used to run first and reject a preview of a project with local edits
+    // with `scaffold.would-overwrite` (exit 3) instead of showing the plan
+    // (same ordering bug as `tan init`, see init/from_example.rs).
+    if args.preview {
+        let tree = create_scaffold_tree_preview(&plan.files);
+        let project = make_project(&destination);
+        let data = empty_data(
+            template_id,
+            &module_name,
+            &plan.normalized_name,
+            &destination,
+            true,
+            file_changes_ser,
+        );
+        let text = if g.is_json() {
+            vec![]
+        } else {
+            vec![
+                format!(
+                    "scaffold: preview for module '{}' (template '{}')",
+                    plan.normalized_name,
+                    template_id.as_str()
+                ),
+                tree,
+            ]
+        };
+        let json = g.is_json().then(|| {
+            Envelope::new("scaffold", project, data, vec![], ExitCode::Success.code()).to_json()
+        });
+        return CommandRun {
+            exit: ExitCode::Success,
+            text,
+            json,
+        };
+    }
+
+    // 7. Guard against unforced overwrites.
     if has_updates && !args.force {
         let project = make_project(&destination);
         let data = empty_data(
@@ -152,40 +197,6 @@ pub fn run(g: &GlobalArgs, args: &ScaffoldArgs) -> CommandRun {
         });
         return CommandRun {
             exit: ExitCode::WriteFailure,
-            text,
-            json,
-        };
-    }
-
-    // 7. Preview mode.
-    if args.preview {
-        let tree = create_scaffold_tree_preview(&plan.files);
-        let project = make_project(&destination);
-        let data = empty_data(
-            template_id,
-            &module_name,
-            &plan.normalized_name,
-            &destination,
-            true,
-            file_changes_ser,
-        );
-        let text = if g.is_json() {
-            vec![]
-        } else {
-            vec![
-                format!(
-                    "scaffold: preview for module '{}' (template '{}')",
-                    plan.normalized_name,
-                    template_id.as_str()
-                ),
-                tree,
-            ]
-        };
-        let json = g.is_json().then(|| {
-            Envelope::new("scaffold", project, data, vec![], ExitCode::Success.code()).to_json()
-        });
-        return CommandRun {
-            exit: ExitCode::Success,
             text,
             json,
         };
@@ -231,11 +242,10 @@ pub fn run(g: &GlobalArgs, args: &ScaffoldArgs) -> CommandRun {
                 json,
             }
         }
-        Err(e) => error_run(
-            g,
-            "scaffold.write-failed",
-            &format!("Failed to write files: {e}"),
-        ),
+        // `e.partial` lists the files that landed before the failure — an
+        // empty `written: []` here (what a plain error_run would report)
+        // would contradict a project that is actually half on disk.
+        Err(e) => write_error_run(g, &format!("Failed to write files: {}", e.error), e.partial),
     }
 }
 
@@ -335,19 +345,28 @@ fn empty_data(
     }
 }
 
-/// `CommandRun` for a silent runtime failure (e.g. interactive cancel): exit
-/// `RuntimeFailure`, no text, no envelope.
-fn runtime_failure_run() -> CommandRun {
-    CommandRun {
-        exit: ExitCode::RuntimeFailure,
-        text: vec![],
-        json: None,
-    }
+/// Build a `RuntimeFailure` `CommandRun` for a cancelled interactive prompt.
+/// Always routes through `error_run` so it carries a real envelope — a bare
+/// `json: None` here meant an interactive prompt reached under `--format json`
+/// (which does not by itself imply non-interactive; see `run()`) could be
+/// cancelled and exit 1 with zero bytes on stdout, unparseable by the extension.
+fn runtime_failure_run(g: &GlobalArgs) -> CommandRun {
+    error_run(
+        g,
+        ExitCode::RuntimeFailure,
+        "scaffold.cancelled",
+        "Cancelled.",
+    )
 }
 
-/// Build a `RuntimeFailure` `CommandRun` carrying a single error `Issue`
-/// (`code` + `message`) — empty `ScaffoldData`, human text or JSON envelope per mode.
-fn error_run(g: &GlobalArgs, code: &str, message: &str) -> CommandRun {
+/// Build an error `CommandRun` carrying a single error `Issue` (and a matching
+/// text/JSON envelope) for the given `exit` code, issue `code`, and `message`.
+/// Every call site used to hardcode `RuntimeFailure` (exit 1) regardless of
+/// failure class — `tan init`'s equivalent returns `ValidationFailure` (2) for
+/// bad input and `WriteFailure` (3) for a failed write, per exit.rs's
+/// documented contract; a caller branching on exit code (CI, the extension)
+/// could not tell "bad --name" from "disk full" from "prompt cancelled".
+fn error_run(g: &GlobalArgs, exit: ExitCode, code: &str, message: &str) -> CommandRun {
     let project = Project {
         root: None,
         board_yaml: None,
@@ -373,19 +392,147 @@ fn error_run(g: &GlobalArgs, code: &str, message: &str) -> CommandRun {
     } else {
         vec![format!("scaffold: {message}")]
     };
+    let json = g
+        .is_json()
+        .then(|| Envelope::new("scaffold", project, data, issues, exit.code()).to_json());
+    CommandRun { exit, text, json }
+}
+
+/// Build a `WriteFailure` `CommandRun` for a failed `write_wizard_files` call,
+/// carrying the partial `written`/`unchanged` lists accumulated before the
+/// failure — `error_run` always reports empty lists, which made a half-created
+/// module report `written: []` even though those files are on disk.
+fn write_error_run(
+    g: &GlobalArgs,
+    message: &str,
+    partial: tan_core::wizard::WizardWriteResult,
+) -> CommandRun {
+    let project = Project {
+        root: None,
+        board_yaml: None,
+    };
+    let issues = vec![Issue {
+        code: "scaffold.write-failed".to_string(),
+        severity: "error".to_string(),
+        message: message.to_string(),
+    }];
+    let data = ScaffoldData {
+        schema_version: "1".to_string(),
+        template_id: String::new(),
+        module_name: String::new(),
+        normalized_module_name: String::new(),
+        destination: String::new(),
+        preview: false,
+        file_changes: vec![],
+        written: partial.written,
+        unchanged: partial.unchanged,
+    };
+    let text = if g.is_json() {
+        vec![]
+    } else {
+        vec![format!("scaffold: {message}")]
+    };
     let json = g.is_json().then(|| {
         Envelope::new(
             "scaffold",
             project,
             data,
             issues,
-            ExitCode::RuntimeFailure.code(),
+            ExitCode::WriteFailure.code(),
         )
         .to_json()
     });
     CommandRun {
-        exit: ExitCode::RuntimeFailure,
+        exit: ExitCode::WriteFailure,
         text,
         json,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Format;
+
+    fn json_globals() -> GlobalArgs {
+        GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: true,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    #[test]
+    fn error_run_exit_code_matches_the_requested_class() {
+        // Pins `error_run` as a passthrough of its `exit` parameter. Not a
+        // regression test by itself — every real call site used to hardcode
+        // `ExitCode::RuntimeFailure` here, and reverting any one of them still
+        // leaves this test green because `exit` never changes on the way
+        // through. See `run_reports_validation_failure_when_name_is_missing`
+        // below, which drives the actual `scaffold.name-required` call site.
+        let validation = error_run(&json_globals(), ExitCode::ValidationFailure, "x", "y");
+        assert_eq!(validation.exit, ExitCode::ValidationFailure);
+        assert_eq!(validation.exit.code(), 2);
+
+        let write = error_run(&json_globals(), ExitCode::WriteFailure, "x", "y");
+        assert_eq!(write.exit, ExitCode::WriteFailure);
+        assert_eq!(write.exit.code(), 3);
+    }
+
+    #[test]
+    fn run_reports_validation_failure_when_name_is_missing() {
+        // Regression: the `scaffold.name-required` call site in `run()` used
+        // to hardcode `ExitCode::RuntimeFailure` (exit 1) instead of
+        // `ValidationFailure` (exit 2) — a CI/extension caller branching on
+        // exit code could not distinguish "bad input" from "prompt cancelled"
+        // from "disk full". `--format json` forces non-interactive (see
+        // `is_interactive` in `run()`), so this hits the missing-name branch
+        // without touching disk or blocking on a prompt.
+        let args = ScaffoldArgs {
+            template: None,
+            name: None,
+            destination: None,
+            preview: false,
+            force: false,
+        };
+        let run = run(&json_globals(), &args);
+        assert_eq!(run.exit, ExitCode::ValidationFailure);
+        assert_eq!(run.exit.code(), 2);
+        let json = run.json.expect("json envelope must be present");
+        assert!(json.contains("scaffold.name-required"));
+    }
+
+    #[test]
+    fn cancelled_prompt_still_emits_a_json_envelope() {
+        // Regression: `runtime_failure_run` used to return `json: None`
+        // unconditionally, so `--format json` produced zero bytes on stdout
+        // on a cancelled prompt.
+        let run = runtime_failure_run(&json_globals());
+        assert_eq!(run.exit, ExitCode::RuntimeFailure);
+        let json = run.json.expect("json envelope must be present on cancel");
+        assert!(json.contains("\"ok\":false"));
+        assert!(json.contains("scaffold.cancelled"));
+    }
+
+    #[test]
+    fn write_error_run_reports_the_partial_written_list() {
+        // Regression: a write failure used to go through `error_run`, which
+        // always reports `written: []` even when files landed before the error.
+        let partial = tan_core::wizard::WizardWriteResult {
+            written: vec!["module.c".to_string()],
+            unchanged: vec![],
+        };
+        let run = write_error_run(&json_globals(), "disk full", partial);
+        assert_eq!(run.exit, ExitCode::WriteFailure);
+        let json = run.json.expect("json envelope must be present");
+        assert!(json.contains("\"written\":[\"module.c\"]"));
     }
 }

@@ -8,7 +8,9 @@ version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/alplabai/tan-cli"
-rust-version = "1.85"
+# Edition 2024 needs 1.85, but the locked `ureq` → `url` → `idna` → `icu_*` tree
+# needs 1.86. Verified by the `msrv` CI job, which reads this exact value.
+rust-version = "1.86"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
