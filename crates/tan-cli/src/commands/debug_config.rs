@@ -113,8 +113,26 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         );
     }
 
+    // `.ok()` here used to collapse a READ error on an EXISTING launch.json
+    // (wrong encoding e.g. UTF-16LE from PowerShell `>` redirection, a denied
+    // ACL, a sharing violation) into the same `None` as "no file yet". That
+    // fed create_launch_json_write_plan(None, ...), which builds a *fresh*
+    // document and the write below then overwrote the user's file wholesale
+    // — silently destroying every hand-written debug configuration at exit 0.
+    // The malformed-JSON case just below is deliberately guarded (no write);
+    // a read error must refuse to write for the same reason.
     let existing = if Path::new(&launch_json_path).exists() {
-        std::fs::read_to_string(&launch_json_path).ok()
+        match std::fs::read_to_string(&launch_json_path) {
+            Ok(content) => Some(content),
+            Err(e) => {
+                return internal_failure(
+                    g,
+                    &generated_at,
+                    format!("Alp: failed to read existing .vscode/launch.json: {e}"),
+                    cwd_launch_path(),
+                );
+            }
+        }
     } else {
         None
     };
@@ -350,4 +368,65 @@ fn debug_config_text(
         }
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Format;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tan-debug-config-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn global(project: &Path) -> GlobalArgs {
+        GlobalArgs {
+            project: Some(project.to_string_lossy().into_owned()),
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: Format::Text,
+            verbose: false,
+            quiet: true,
+            no_color: true,
+            non_interactive: true,
+            ci: false,
+        }
+    }
+
+    // Regression for the data-loss bug: a read error on an EXISTING
+    // launch.json (here, non-UTF-8 bytes as PowerShell `>` redirection would
+    // produce) must refuse to write, exactly like the malformed-JSON case.
+    // Before the fix, `.ok()` turned the read Err into `None`, which was
+    // treated as "no file yet" and the write below overwrote it wholesale.
+    #[test]
+    fn unreadable_existing_launch_json_refuses_to_write() {
+        let dir = tmp("unreadable");
+        let vscode_dir = dir.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        let launch_json = vscode_dir.join("launch.json");
+        let not_utf8: &[u8] = &[0xFF, 0xFE, b'{', 0, b'}', 0];
+        std::fs::write(&launch_json, not_utf8).unwrap();
+
+        let g = global(&dir);
+        let args = DebugConfigArgs {
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            preview: false,
+        };
+        let run_result = run(&g, &args);
+
+        assert_eq!(run_result.exit, ExitCode::InternalFailure);
+        let after = std::fs::read(&launch_json).unwrap();
+        assert_eq!(
+            after, not_utf8,
+            "an unreadable existing launch.json must be left untouched, not overwritten"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

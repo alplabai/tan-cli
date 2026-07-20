@@ -3,7 +3,7 @@
 //! refusing absolute or `..`-escaping paths. The SDK guarantees these contents
 //! match what `west alp-build` would write, so materialising cannot drift.
 
-use std::path::{Component, Path};
+use std::path::Path;
 
 use tan_core::build_plan::BuildPlan;
 
@@ -18,7 +18,12 @@ pub(super) fn materialise_plan(
     let mut written = Vec::new();
     for f in plan.all_artefacts() {
         let rel = Path::new(&f.path);
-        if rel.is_absolute() || rel.components().any(|c| matches!(c, Component::ParentDir)) {
+        // `is_absolute() || has ParentDir` misses Windows-rooted (`\x`) and
+        // drive-relative (`C:x`) shapes — neither is `is_absolute()` nor
+        // carries `..`, yet `base.join(rel)` still discards `base` for both
+        // (see `path_guard` doc). Use the shared shape guard so this site and
+        // `execute/manifest.rs`'s build_root guard can't drift out of sync.
+        if !tan_core::is_plain_relative(rel) {
             return Err(MaterialiseError::UnsafePath(f.path.clone()));
         }
         let dest = base.join(rel);
@@ -112,5 +117,33 @@ mod tests {
         assert!(!base.join("../escape.txt").exists());
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn materialise_refuses_windows_rooted_and_drive_relative_paths() {
+        // Regression: the old `rel.is_absolute() || has ParentDir` guard is
+        // FALSE for both these shapes on Windows (see `path_guard` doc), so it
+        // let `base.join(rel)` discard `base` and write outside the project.
+        for raw in [r"\escape.txt", r"C:escape.txt"] {
+            // JSON-escape the backslash before interpolating into the string
+            // literal below (`\e` alone is not a valid JSON escape).
+            let escaped = raw.replace('\\', "\\\\");
+            let json = format!(
+                r#"{{
+                  "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+                  "slices": [],
+                  "sharedArtefacts": [{{ "path": "{escaped}", "contents": "x" }}]
+                }}"#
+            );
+            let plan = parse_build_plan(&json).unwrap();
+            let base = unique_temp_dir("alp-mat-unsafe-win");
+            let _ = std::fs::remove_dir_all(&base);
+
+            let err = materialise_plan(&plan, &base).expect_err(&format!("must refuse `{raw}`"));
+            assert!(err.message().contains("unsafe"), "got: {}", err.message());
+
+            std::fs::remove_dir_all(&base).ok();
+        }
     }
 }

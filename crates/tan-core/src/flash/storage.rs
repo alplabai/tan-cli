@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::args::{fa_bool, fa_int, fa_str};
+use super::args::{fa_bool_checked, fa_int_checked, fa_str};
 use super::registry::{FlashInputs, FlashPlan};
 
 /// `yocto_wic_to_sd_or_emmc` / `yocto_wic`: bmaptool (preferred) or dd to a raw
@@ -33,7 +33,12 @@ pub fn plan_yocto_wic(
     });
     // Python (yocto_wic.py:146): confirm = bool(flash_args.confirm) OR ALP_FLASH_FORCE.
     // force_confirm carries the env half; fold the per-entry flash_args.confirm here.
-    let confirm = inp.force_confirm || fa_bool(fa, "confirm", false);
+    // `fa_bool_checked`, not a tolerant `fa_bool`: a quoted `confirm: "true"`
+    // reads as "absent" via `Value::as_bool` too, so a tolerant reader would
+    // silently apply the `false` default and decline a real write the
+    // manifest asked for (fail-safe direction, but still not what was
+    // written -- must be a loud refusal, not a silent default).
+    let confirm = inp.force_confirm || fa_bool_checked(fa, "confirm")?.unwrap_or(false);
     let planning_only = inp.dry_run || !confirm;
 
     let bmaptool = which("bmaptool");
@@ -131,7 +136,11 @@ pub fn plan_xspi_flashwriter(inp: &FlashInputs) -> Result<FlashPlan, String> {
     }
     let port = fa_str(fa, "port").unwrap_or_else(|| "<port>".to_string());
     let writer = fa_str(fa, "flash_writer").unwrap_or_else(|| "<flash_writer.mot>".to_string());
-    let baud = fa_int(fa, "baud", 115200);
+    // `fa_int_checked`, not a tolerant `fa_int`: a quoted `baud: "921600"`
+    // reads as "absent" via `Value::as_i64` too, so a tolerant reader would
+    // silently apply the 115200 default -- the Flash Writer session then
+    // runs at the wrong baud with no warning.
+    let baud = fa_int_checked(fa, "baud")?.unwrap_or(115200);
     let artefact_name = inp
         .artefact
         .file_name()
@@ -147,7 +156,9 @@ pub fn plan_xspi_flashwriter(inp: &FlashInputs) -> Result<FlashPlan, String> {
     ];
 
     // Python (xspi_flashwriter.py:61): confirm = bool(flash_args.confirm) OR ALP_FLASH_FORCE.
-    let confirm = inp.force_confirm || fa_bool(inp.flash_args, "confirm", false);
+    // `fa_bool_checked`, not a tolerant `fa_bool`: same quoted-string trap as
+    // `plan_yocto_wic` above -- must not silently default to "not confirmed".
+    let confirm = inp.force_confirm || fa_bool_checked(inp.flash_args, "confirm")?.unwrap_or(false);
     let planning_only = inp.dry_run || !confirm;
     if planning_only {
         let why = if inp.dry_run {
@@ -305,5 +316,41 @@ mod tests {
                 .unwrap_err()
                 .contains("HW-gated")
         );
+    }
+
+    #[test]
+    fn confirm_quoted_string_is_rejected_not_silently_declined() {
+        // Regression: `confirm: "true"` (quoted) used to read as absent via
+        // `Value::as_bool`, so a tolerant `fa_bool` silently applied the
+        // `false` default -- a real yocto_wic/xspi write silently declined
+        // with no warning (fail-safe direction, but still a wrong outcome).
+        let art = Path::new("/b/core.wic");
+        let fa = yaml_val("target: /dev/sdb\nconfirm: \"true\"");
+        let inp = inputs(art, &fa, false);
+        let err = plan_yocto_wic(&inp, |t| t == "dd").unwrap_err();
+        assert!(err.contains("confirm"));
+
+        let fa_x = yaml_val("flash_partition: mtd1\nport: COM24\nconfirm: \"true\"");
+        let inp_x = inputs(Path::new("/b/fip.bin"), &fa_x, false);
+        let err = plan_xspi_flashwriter(&inp_x).unwrap_err();
+        assert!(err.contains("confirm"));
+    }
+
+    #[test]
+    fn baud_quoted_string_is_rejected_not_silently_defaulted() {
+        // Regression: `baud: "921600"` (quoted) used to read as absent via
+        // `Value::as_i64`, so a tolerant `fa_int` silently applied the
+        // 115200 default with no warning.
+        let art = Path::new("/b/fip.bin");
+        let fa = yaml_val("flash_partition: mtd1\nport: COM24\nbaud: \"921600\"");
+        let inp = inputs(art, &fa, true);
+        let err = plan_xspi_flashwriter(&inp).unwrap_err();
+        assert!(err.contains("baud"));
+
+        // a bare (unquoted) int still works and is honoured, not defaulted.
+        let fa = yaml_val("flash_partition: mtd1\nport: COM24\nbaud: 921600");
+        let inp = inputs(art, &fa, true);
+        let plan = plan_xspi_flashwriter(&inp).unwrap();
+        assert!(plan.argv.iter().any(|a| a == "baud=921600"));
     }
 }

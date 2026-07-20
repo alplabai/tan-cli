@@ -5,6 +5,59 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+A full adversarially-verified codebase review found data-loss and
+hardware-programming defects in the 0.1.0 surface; this section is the fix set.
+The unifying cause: external file content (`board.yaml`, the build plan, the
+system manifest) was parsed leniently — correct for reading — but its unvalidated
+strings then flowed into `remove_dir_all`, flash argv, and host-vs-hardware
+decisions. Validated *acting* is now separated from tolerant *reading*.
+
+### Security / data-loss
+- **`tan clean` could delete the entire project tree.** A `--build-root` of `""`
+  (an unset `$VAR`), `.`, or `..`, and a system-manifest slice `build_dir` of
+  `""` / `.` / `/` / `../..`, each resolved to the project root or a filesystem
+  root and were passed to `remove_dir_all`, exiting `0`. New shared guard
+  `tan_core::path_guard::is_unsafe_removal_target` screens **every** removal
+  target (build root and manifest-derived alike); a refused target is reported as
+  a `clean.unsafe-target` error and fails the command, never silently cleaned.
+- **Windows path-escape in the plan/manifest write paths.** The
+  `is_absolute() || has ParentDir` guard missed `/x`, `\x` and `C:x` (none are
+  `is_absolute()` on Windows, yet each makes `base.join()` discard the base).
+  Replaced everywhere with `tan_core::path_guard::is_plain_relative` —
+  materialise, the post-build manifest write, slice `cwd`, image archive names
+  (`slice_archive_name`), `sdk install <version>`, and `init --name`.
+- **`tan flash` could program the wrong address / a stale artefact.** An unquoted
+  YAML `base:` that parsed as a number read as *absent* and silently defaulted to
+  `0x08000000`; a *skipped* slice kept its plan-time artefact and was flashed
+  after a green build. Flash args are now read strictly (a wrong-type scalar
+  hard-errors, naming the key), and a slice whose `status != ok` is refused with
+  a `flash.slice-not-built` error rather than programmed.
+
+### Fixed
+- **`tan run --flash` could program hardware on a host project** (and `tan run`
+  could execute a stale host binary). Host-vs-hardware is now decided from the
+  build that just ran — an in-memory `NativeBuildOutcome` — never by re-reading a
+  post-build `system-manifest.yaml` that a best-effort write may have left stale.
+- **Silent data loss on every successful build.** The post-build manifest rewrite
+  used the typed serializer that drops additive fields (rpmsg IPC carve-outs,
+  `hw_info.eeprom`); it now uses the raw round-trip that preserves them.
+- **`executionPolicy.unknownBackend` is now enforced** per the consumer contract
+  (default fail), and a completion script drift check, JSON-envelope Issues for
+  conditions previously reported only in text mode, and numerous smaller
+  correctness/cross-platform fixes across `sdk`, `doctor`, `size`, `renode`,
+  `image`, `validate`, and `init`.
+
+### Changed
+- **MSRV corrected to 1.86** (was declared 1.85). Edition 2024 needs 1.85, but
+  the locked `ureq` → `url` → `idna` → `icu_*` tree needs 1.86 — building from
+  source on 1.85 already failed. CI now verifies the declared value.
+- **CI** — fmt/clippy run once on Linux; build + test now run on Linux, Windows,
+  **and** macOS (the platforms a release ships assets for); every cargo call in
+  both `ci` and `release` uses `--locked`; in-flight *pull-request* runs are
+  superseded on a new push (a push to `main` is never cancelled).
+
 ## [0.1.0] — 2026-07-20
 
 First public release of the `tan` executor CLI (alp-sdk ADR-0020 end-state B):

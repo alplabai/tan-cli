@@ -2,7 +2,10 @@
 //! `tan init` input resolution: parse `--cores`, and resolve the
 //! template/name/destination from CLI args, interactive prompts, or defaults.
 
+use std::path::Path;
+
 use inquire::{InquireError, Select, Text};
+use tan_core::is_plain_relative;
 use tan_core::wizard::{WizardTemplateId, infer_runtime_for_core_id, list_wizard_templates};
 
 /// Accepted per-core OS values for `--cores` entries (`id:os`).
@@ -55,6 +58,7 @@ pub(super) fn parse_cores(raw: Option<&str>) -> Result<Vec<(String, String)>, St
 }
 
 /// Outcome of resolving an interactive/CLI input that didn't succeed.
+#[derive(Debug)]
 pub(super) enum ResolveErr {
     /// User aborted the prompt (Ctrl-C / Esc) — maps to a runtime failure.
     Cancelled,
@@ -98,14 +102,14 @@ pub(super) fn resolve_template(
 /// empty means scaffold directly into the destination.
 pub(super) fn resolve_name(arg: Option<&str>, interactive: bool) -> Result<String, ResolveErr> {
     if let Some(s) = arg {
-        return Ok(s.to_string());
+        return validate_name(s.to_string());
     }
     if interactive {
         return match Text::new("Project name (optional, leave blank to init in destination):")
             .with_default("")
             .prompt()
         {
-            Ok(s) => Ok(s.trim().to_string()),
+            Ok(s) => validate_name(s.trim().to_string()),
             Err(InquireError::OperationCanceled) | Err(InquireError::OperationInterrupted) => {
                 Err(Cancelled)
             }
@@ -113,6 +117,24 @@ pub(super) fn resolve_name(arg: Option<&str>, interactive: bool) -> Result<Strin
         };
     }
     Ok(String::new())
+}
+
+/// Both callers do `dest_path.join(&name)` unguarded, and `PathBuf::join`
+/// keeps `..` lexically and discards `dest_path` entirely for an absolute (or,
+/// on Windows, drive-relative/root-relative) right-hand side — so an
+/// unchecked `--name` let the project root land anywhere the process can
+/// write, `--force` and all. `--from-example` already gates its source the
+/// same way; `--name` — the one input that decides *where* files land — did
+/// not. Empty is allowed through: it means "scaffold directly into
+/// destination", handled separately by the caller.
+fn validate_name(name: String) -> Result<String, ResolveErr> {
+    if name.is_empty() || is_plain_relative(Path::new(&name)) {
+        Ok(name)
+    } else {
+        Err(BadArg(format!(
+            "Invalid --name '{name}': must be a plain relative path (no '..', absolute, or drive-rooted segments)."
+        )))
+    }
 }
 
 /// Resolve the destination directory, preferring `--destination`, then the
@@ -149,7 +171,7 @@ pub(super) fn resolve_destination(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_cores;
+    use super::{parse_cores, resolve_name};
 
     #[test]
     fn parse_cores_accepts_valid_entries_and_infers_os() {
@@ -171,5 +193,31 @@ mod tests {
         assert!(parse_cores(Some("Weird-ID!:yocto")).is_err());
         assert!(parse_cores(Some("m33_sm:freertos")).is_err());
         assert!(parse_cores(Some("m33_sm,m33_sm:zephyr")).is_err());
+    }
+
+    #[test]
+    fn resolve_name_accepts_plain_relative_and_empty() {
+        assert_eq!(resolve_name(Some("my-app"), false).unwrap(), "my-app");
+        assert_eq!(resolve_name(Some("sub/dir"), false).unwrap(), "sub/dir");
+        assert_eq!(resolve_name(None, false).unwrap(), "");
+    }
+
+    #[test]
+    fn resolve_name_rejects_traversal_and_absolute() {
+        // Regression: `--name` was joined verbatim onto `--destination`
+        // (`dest_path.join(&name)`); an unchecked `..` or absolute name let
+        // the project root — and, with `--force`, an overwrite target — land
+        // outside the destination the caller chose.
+        assert!(resolve_name(Some("../escape"), false).is_err());
+        assert!(resolve_name(Some("/etc/passwd"), false).is_err());
+        assert!(resolve_name(Some("a/../../b"), false).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_name_rejects_windows_rooted_and_drive_relative() {
+        assert!(resolve_name(Some(r"\windows\x"), false).is_err());
+        assert!(resolve_name(Some(r"C:foo"), false).is_err());
+        assert!(resolve_name(Some(r"C:\x"), false).is_err());
     }
 }

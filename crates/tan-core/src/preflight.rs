@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pure build pre-flight: given the CLI's resolved project/workspace state,
-//! report ordered readiness checks so `alp build` (and `alp doctor`) can tell the
+//! report ordered readiness checks so `tan build` (and `tan doctor`) can tell the
 //! user what is missing and how to fix it *before* a build is attempted —
 //! instead of surfacing a raw `west` / CMake error. Filesystem probing happens in
 //! the adapter (the CLI); this module stays pure and unit-testable.
@@ -37,12 +37,16 @@ pub struct PreflightInput {
 pub fn build_preflight_checks(input: &PreflightInput) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
 
+    // Remediation text below names `tan`, not `alp` — RFC #837 retired the `alp`
+    // binary, and these strings land verbatim in issues[].message / nextSteps[]
+    // that the vscode extension renders. Telling a user to run a binary that no
+    // longer exists (`command not found: alp`) is a dead end, not a fix.
     checks.push(match &input.sdk_root {
         Some(root) => pass("sdk", format!("alp-sdk at {root}")),
         None => fail(
             "sdk",
-            "no SDK selected — run `alp sdk switch <path>` or `alp sdk install <ver>`",
-            "alp sdk switch <path>",
+            "no SDK selected — run `tan sdk switch <path>` or `tan sdk install <ver>`",
+            "tan sdk switch <path>",
         ),
     });
 
@@ -51,8 +55,8 @@ pub fn build_preflight_checks(input: &PreflightInput) -> Vec<DoctorCheck> {
     } else {
         fail(
             "boardYaml",
-            "board.yaml not found — run `alp init` or pass `--board-yaml <path>`",
-            "alp init",
+            "board.yaml not found — run `tan init` or pass `--board-yaml <path>`",
+            "tan init",
         )
     });
 
@@ -60,8 +64,8 @@ pub fn build_preflight_checks(input: &PreflightInput) -> Vec<DoctorCheck> {
         Some(dir) => pass("workspace", format!("Zephyr workspace at {dir}")),
         None => fail(
             "workspace",
-            "no Zephyr workspace — run `alp bootstrap` (reuses a compatible Zephyr, else bootstraps one)",
-            "alp bootstrap",
+            "no Zephyr workspace — run `tan bootstrap` (reuses a compatible Zephyr, else bootstraps one)",
+            "tan bootstrap",
         ),
     });
 
@@ -70,8 +74,8 @@ pub fn build_preflight_checks(input: &PreflightInput) -> Vec<DoctorCheck> {
     } else {
         warn(
             "westResolved",
-            "west not found — run `alp bootstrap` to create the workspace venv",
-            "alp bootstrap",
+            "west not found — run `tan bootstrap` to create the workspace venv",
+            "tan bootstrap",
         )
     });
 
@@ -79,7 +83,7 @@ pub fn build_preflight_checks(input: &PreflightInput) -> Vec<DoctorCheck> {
     // reused across sessions can sit on a stale Zephyr after the SDK bumps its
     // west.yml pin — which surfaces as build failures that look like regressions
     // (the v3.7.0-vs-v4.4.0 incident). The MAJOR.MINOR reuse check used to run
-    // only at bootstrap time; do it here too so `alp build`/`alp doctor` stop
+    // only at bootstrap time; do it here too so `tan build`/`tan doctor` stop
     // reporting a clean Pass on a stale workspace. Only emitted when there is a
     // workspace to check AND both versions are known — Warn (advisory), so a
     // mismatch guides re-bootstrap without hard-blocking a workspace that may
@@ -92,9 +96,9 @@ pub fn build_preflight_checks(input: &PreflightInput) -> Vec<DoctorCheck> {
                 warn(
                     "zephyrVersion",
                     &format!(
-                        "reused Zephyr v{ws} != SDK pin v{pin} — run `alp bootstrap` to refresh the workspace"
+                        "reused Zephyr v{ws} != SDK pin v{pin} — run `tan bootstrap` to refresh the workspace"
                     ),
-                    "alp bootstrap",
+                    "tan bootstrap",
                 )
             });
         }
@@ -270,7 +274,7 @@ mod tests {
         assert!(
             preflight_next_steps(&checks)
                 .iter()
-                .any(|s| s == "alp bootstrap")
+                .any(|s| s == "tan bootstrap")
         );
     }
 
@@ -317,11 +321,14 @@ mod tests {
         assert!(preflight_blocked(&checks));
         let sdk = checks.iter().find(|c| c.name == "sdk").unwrap();
         assert_eq!(sdk.status, DoctorStatus::Fail);
-        assert!(sdk.detail.contains("alp sdk switch"));
+        // Regression guard: the `alp` binary was retired (RFC #837) — a
+        // remediation hint pointing at it is a dead end for the user.
+        assert!(sdk.detail.contains("tan sdk switch"));
+        assert!(!sdk.detail.contains("alp sdk switch"));
         assert!(
             preflight_next_steps(&checks)
                 .iter()
-                .any(|s| s.contains("alp sdk switch"))
+                .any(|s| s.contains("tan sdk switch"))
         );
     }
 

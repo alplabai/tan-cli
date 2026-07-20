@@ -18,6 +18,7 @@
 //!   - an IO failure returns WriteFailure(3) (tan idiom) rather than unwinding as
 //!     a Python traceback → rc 1.
 
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -52,6 +53,16 @@ impl FailCtx {
             message,
         }
     }
+}
+
+/// A non-fatal bundle-assembly notice: a slice or helper silently left OUT of
+/// the bundle (missing build_dir, unbuildable archive name, missing firmware).
+/// Carries its own issue code, unlike the plain `String` this replaced, so
+/// `success_run` can promote it into a JSON `Issue` instead of only a text
+/// line — see the fix at `success_run` for why that distinction matters.
+struct Notice {
+    code: &'static str,
+    message: String,
 }
 
 /// `tan image` entry.
@@ -132,7 +143,7 @@ fn assemble_bundle(
     build_root: &Path,
     manifest: &tan_core::system_manifest::SystemManifest,
     yaml: &str,
-) -> Result<(Vec<String>, BundleManifest, PathBuf), FailCtx> {
+) -> Result<(Vec<Notice>, BundleManifest, PathBuf), FailCtx> {
     let bundle_dir = build_root.join(BUNDLE_DIR);
     let slices_dir = bundle_dir.join(SLICES_DIR);
     let helpers_dir = bundle_dir.join(HELPERS_DIR);
@@ -141,28 +152,45 @@ fn assemble_bundle(
             .map_err(|e| FailCtx::write(format!("mkdir {}: {e}", dir.display())))?;
     }
 
-    let mut notices: Vec<String> = Vec::new();
+    let mut notices: Vec<Notice> = Vec::new();
     let mut slice_entries: Vec<BundleSliceEntry> = Vec::new();
     for slice in &manifest.slices {
         if !slice_should_bundle(&slice.status) {
             continue;
         }
         match bundle_slice(slice, build_root, &slices_dir)? {
-            Some(entry) => slice_entries.push(entry),
-            None => notices.push(format!(
-                "image: skipping {} (build_dir missing)",
-                slice.core_id
-            )),
+            SliceOutcome::Bundled(entry) => slice_entries.push(entry),
+            SliceOutcome::BuildDirMissing => notices.push(Notice {
+                code: "image.slice-skipped",
+                message: format!("image: skipping {} (build_dir missing)", slice.core_id),
+            }),
+            // core_id/os failed the shared-seam path guard in
+            // `slice_archive_name` (e.g. `../` or `C:/` from a hand-edited or
+            // third-party manifest) — skip rather than write outside the
+            // bundle. See image_bundle::slice_archive_name for the guard.
+            SliceOutcome::UnsafeName => notices.push(Notice {
+                code: "image.slice-unsafe-name",
+                message: format!(
+                    "image: skipping {} (core_id/os is not a safe archive name)",
+                    slice.core_id
+                ),
+            }),
         }
     }
 
     let mut helper_entries: Vec<BundleHelperEntry> = Vec::new();
+    // Zephyr helper builds routinely share the same firmware basename
+    // (`zephyr.bin`), so two helper_mcus entries commonly flatten to the same
+    // `helpers_dir` destination — see `bundle_helper` for the collision fix
+    // this set enables.
+    let mut used_helper_names: HashSet<String> = HashSet::new();
     for helper in &manifest.helper_mcus {
-        match bundle_helper(helper, build_root, &helpers_dir)? {
+        match bundle_helper(helper, build_root, &helpers_dir, &mut used_helper_names)? {
             HelperOutcome::Bundled(entry) => helper_entries.push(entry),
-            HelperOutcome::NotFound(path) => notices.push(format!(
-                "image: helper-mcu firmware not found at {path}; skipping"
-            )),
+            HelperOutcome::NotFound(path) => notices.push(Notice {
+                code: "image.helper-skipped",
+                message: format!("image: helper-mcu firmware not found at {path}; skipping"),
+            }),
             HelperOutcome::Absent => {}
         }
     }
@@ -179,13 +207,23 @@ fn assemble_bundle(
     Ok((notices, bundle, bundle_dir))
 }
 
-/// Tar+gzip one ok slice's build_dir into `slices/<core>-<os>.tar.gz`. Returns
-/// `None` (skip notice) when the slice's `build_dir` is falsy or not a directory.
+/// The three `bundle_slice` outcomes: bundled, no candidate build_dir (a
+/// faithful skip), or a core_id/os the shared path guard refused to turn into
+/// an archive filename.
+enum SliceOutcome {
+    Bundled(BundleSliceEntry),
+    BuildDirMissing,
+    UnsafeName,
+}
+
+/// Tar+gzip one ok slice's build_dir into `slices/<core>-<os>.tar.gz`. Skips
+/// (with a distinct outcome, not an IO error) when the slice's `build_dir` is
+/// falsy/not a directory, or when `core_id`/`os` fail the archive-name guard.
 fn bundle_slice(
     slice: &Slice,
     build_root: &Path,
     slices_dir: &Path,
-) -> Result<Option<BundleSliceEntry>, FailCtx> {
+) -> Result<SliceOutcome, FailCtx> {
     let build_dir = match slice.build_dir.as_deref().filter(|s| !s.is_empty()) {
         Some(bd) => {
             let p = Path::new(bd);
@@ -195,19 +233,27 @@ fn bundle_slice(
                 build_root.join(p)
             }
         }
-        None => return Ok(None),
+        None => return Ok(SliceOutcome::BuildDirMissing),
     };
     if !build_dir.is_dir() {
-        return Ok(None);
+        return Ok(SliceOutcome::BuildDirMissing);
     }
 
-    let archive = slices_dir.join(slice_archive_name(&slice.core_id, &slice.os));
+    // `slice_archive_name` is the shared seam that rejects a `core_id`/`os`
+    // shaped like `../../x` or `C:/x` — without this, `slices_dir.join(..)`
+    // escaped the bundle dir and `tar_gzip_dir`'s `remove_file` unlinked an
+    // arbitrary `*.tar.gz` outside the build tree. Skip rather than IO-error.
+    let Some(archive_name) = slice_archive_name(&slice.core_id, &slice.os) else {
+        return Ok(SliceOutcome::UnsafeName);
+    };
+    let archive = slices_dir.join(&archive_name);
     tar_gzip_dir(&build_dir, &archive)?;
     let (sha256, size) = sha256_and_size(&archive)?;
-    Ok(Some(BundleSliceEntry {
+    Ok(SliceOutcome::Bundled(BundleSliceEntry {
         core_id: slice.core_id.clone(),
         os: slice.os.clone(),
-        artefact: slice_artefact_rel(&slice.core_id, &slice.os),
+        artefact: slice_artefact_rel(&slice.core_id, &slice.os)
+            .expect("already validated by slice_archive_name above"),
         sha256,
         size,
     }))
@@ -224,10 +270,18 @@ enum HelperOutcome {
 /// Copy one helper's firmware into `helper-mcus/<basename>` when it is an
 /// existing file. A missing/empty `firmware_path` is silently absent; a
 /// present-but-nonexistent one (e.g. the literal `TBD`) is `NotFound`.
+///
+/// `used_names` tracks every destination basename already claimed in this
+/// run: Zephyr's default build layout puts every helper's firmware at the
+/// same basename (`zephyr.bin`), flattened from different `firmware_path`s
+/// by `fw.file_name()`. Without this, the second helper's copy silently
+/// overwrote the first's file on disk, and the first helper's already-hashed
+/// `sha256`/`artefact` entry then pointed at bytes that were no longer there.
 fn bundle_helper(
     helper: &HelperMcu,
     build_root: &Path,
     helpers_dir: &Path,
+    used_names: &mut HashSet<String>,
 ) -> Result<HelperOutcome, FailCtx> {
     let raw = match helper.firmware_path.as_deref().filter(|s| !s.is_empty()) {
         Some(p) => p,
@@ -249,14 +303,24 @@ fn bundle_helper(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "firmware.bin".to_string());
-    let dst = helpers_dir.join(&basename);
+    // Disambiguate on collision (`2-zephyr.bin`, `3-zephyr.bin`, ...) instead
+    // of silently overwriting the previous helper's copy.
+    let mut dest_name = basename.clone();
+    let mut n = 1u32;
+    while used_names.contains(&dest_name) {
+        n += 1;
+        dest_name = format!("{n}-{basename}");
+    }
+    used_names.insert(dest_name.clone());
+
+    let dst = helpers_dir.join(&dest_name);
     std::fs::copy(&fw, &dst)
         .map_err(|e| FailCtx::write(format!("copy {} -> {}: {e}", fw.display(), dst.display())))?;
     let (sha256, size) = sha256_and_size(&dst)?;
     Ok(HelperOutcome::Bundled(BundleHelperEntry {
         name: Some(helper.name.clone()),
         chip: Some(helper.chip.clone()),
-        artefact: helper_artefact_rel(&basename),
+        artefact: helper_artefact_rel(&dest_name),
         sha256,
         size,
     }))
@@ -324,19 +388,33 @@ fn sha256_file(path: &Path) -> io::Result<String> {
 fn success_run(
     g: &GlobalArgs,
     project: Project,
-    notices: Vec<String>,
+    notices: Vec<Notice>,
     bundle: BundleManifest,
     bundle_dir: PathBuf,
 ) -> CommandRun {
     if g.is_json() {
-        let json = Envelope::new("image", project, &bundle, Vec::new(), 0).to_json();
+        // Every notice here is an artefact silently left OUT of the bundle
+        // (missing build_dir, unsafe core_id/os, missing helper firmware).
+        // The old code hard-coded `Vec::new()` on this branch, so `--format
+        // json` (what the vscode extension always uses) reported ok:true /
+        // issues:[] for a bundle missing a slice or helper, with nothing in
+        // the envelope distinguishing that from a complete bundle.
+        let issues: Vec<Issue> = notices
+            .iter()
+            .map(|n| Issue {
+                code: n.code.to_string(),
+                severity: "warning".to_string(),
+                message: n.message.clone(),
+            })
+            .collect();
+        let json = Envelope::new("image", project, &bundle, issues, 0).to_json();
         CommandRun {
             exit: ExitCode::Success,
             text: Vec::new(),
             json: Some(json),
         }
     } else {
-        let mut text = notices;
+        let mut text: Vec<String> = notices.into_iter().map(|n| n.message).collect();
         text.push(format!("image: bundle ready at {}", bundle_dir.display()));
         CommandRun {
             exit: ExitCode::Success,
@@ -585,6 +663,134 @@ boot_order: []
                 .join("gd32_bridge.bin")
                 .is_file()
         );
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn ok_slice_missing_build_dir_gets_skip_issue_in_json() {
+        let build_root = tmp("nobuilddir-json");
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "\
+schema_version: 1
+hw_info: {}
+slices:
+- core_id: m55_hp
+  os: zephyr
+  build_dir: does-not-exist
+  status: ok
+helper_mcus: []
+boot_order: []
+",
+        )
+        .unwrap();
+        let run = run(&global(Format::Json), &image_args(&build_root));
+        assert_eq!(run.exit, ExitCode::Success);
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        // ok:true is still correct -- a missing build_dir is a soft skip, not
+        // a command failure -- but before the fix `issues` was hard-coded
+        // empty on this branch, so an incomplete bundle was indistinguishable
+        // from a complete one in the mode the vscode extension consumes.
+        assert_eq!(doc["ok"], true);
+        assert_eq!(doc["issues"][0]["code"], "image.slice-skipped");
+        assert_eq!(doc["issues"][0]["severity"], "warning");
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn unsafe_core_id_is_skipped_not_written_outside_bundle() {
+        let build_root = tmp("unsafecore");
+        let bd = build_root.join("bd");
+        std::fs::create_dir_all(bd.join("zephyr")).unwrap();
+        std::fs::write(bd.join("zephyr").join("zephyr.elf"), b"ELFDATA").unwrap();
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "\
+schema_version: 1
+hw_info: {}
+slices:
+- core_id: \"../../../../escape\"
+  os: zephyr
+  build_dir: bd
+  status: ok
+helper_mcus: []
+boot_order: []
+",
+        )
+        .unwrap();
+        let run = run(&global(Format::Json), &image_args(&build_root));
+        assert_eq!(run.exit, ExitCode::Success);
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        // Without the `slice_archive_name` guard this core_id would have
+        // `.join()`ed past `image-bundle/slices/` and unlinked/overwritten an
+        // arbitrary `*.tar.gz`. It must not be bundled at all...
+        assert_eq!(doc["data"]["slices"].as_array().unwrap().len(), 0);
+        // ...and the skip must be visible in the JSON envelope, not just text.
+        assert_eq!(doc["issues"][0]["code"], "image.slice-unsafe-name");
+        // Nothing was written into slices/ for it.
+        let slices_dir = build_root.join("image-bundle").join("slices");
+        assert_eq!(std::fs::read_dir(&slices_dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn helper_basename_collision_does_not_overwrite() {
+        let build_root = tmp("helpercollide");
+        std::fs::create_dir_all(build_root.join("gd32")).unwrap();
+        std::fs::create_dir_all(build_root.join("cc35")).unwrap();
+        // Both helpers build to Zephyr's default `zephyr.bin` basename --
+        // the collision this loses without the fix in `bundle_helper`.
+        std::fs::write(build_root.join("gd32").join("zephyr.bin"), b"GD32FIRMWARE").unwrap();
+        std::fs::write(
+            build_root.join("cc35").join("zephyr.bin"),
+            b"CC3501EFIRMWARE",
+        )
+        .unwrap();
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "\
+schema_version: 1
+hw_info: {}
+slices: []
+helper_mcus:
+- name: gd32_bridge
+  chip: gd32g553
+  firmware_path: gd32/zephyr.bin
+- name: cc3501e_otp
+  chip: cc3501e
+  firmware_path: cc35/zephyr.bin
+boot_order: []
+",
+        )
+        .unwrap();
+        let run = run(&global(Format::Json), &image_args(&build_root));
+        assert_eq!(run.exit, ExitCode::Success);
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        let helpers = doc["data"]["helper_mcus"].as_array().unwrap();
+        assert_eq!(helpers.len(), 2);
+        let artefacts: Vec<&str> = helpers
+            .iter()
+            .map(|h| h["artefact"].as_str().unwrap())
+            .collect();
+        // Distinct destinations -- the second helper no longer overwrites the first.
+        assert_ne!(artefacts[0], artefacts[1], "{artefacts:?}");
+        assert_ne!(helpers[0]["sha256"], helpers[1]["sha256"]);
+        // Each recorded sha256 matches the bytes actually on disk at its own
+        // artefact path (the pre-fix bug: the first entry's sha256 matched
+        // nothing once the second copy overwrote it).
+        let bundle_root = build_root.join("image-bundle");
+        for h in helpers {
+            let rel = h["artefact"].as_str().unwrap();
+            let bytes = std::fs::read(bundle_root.join(rel)).unwrap();
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let hex: String = hasher
+                .finalize()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect();
+            assert_eq!(h["sha256"], hex, "artefact {rel}");
+        }
         std::fs::remove_dir_all(&build_root).unwrap();
     }
 }

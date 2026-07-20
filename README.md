@@ -1,16 +1,98 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # tan
 
+[![ci](https://github.com/alplabai/tan-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/alplabai/tan-cli/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/alplabai/tan-cli?sort=semver)](https://github.com/alplabai/tan-cli/releases/latest)
+[![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 **The standalone Alp Lab build CLI.** `tan` consumes the alp-sdk *build-plan* and
 executes it — it is the single executor and the user command surface for
 building, flashing, and inspecting Alp Lab E1M / E1M-X firmware.
 
-> **Status: public.** `tan` is the released executor CLI of **alp-sdk ADR-0020**:
-> it consumes the alp-sdk *build-plan* and executes it. `build` / `size` /
-> `image` / `flash` / `clean` / `renode` are native Rust; only `migrate` / `lock`
-> / `quality` still forward to `west alp-*`. Licensed **Apache-2.0** (see
-> [`LICENSE`](LICENSE); the SPDX identifier is also set in each `Cargo.toml` and
-> source header).
+`build` / `run` / `size` / `image` / `flash` / `clean` / `renode` are native
+Rust; only `migrate` / `lock` / `quality` still forward to `west alp-*`, and
+`model` / `monitor` / `new-som` / `faultdecode` to the SDK `alp` CLI. Licensed
+**Apache-2.0** (see [`LICENSE`](LICENSE); the SPDX identifier is also set in each
+`Cargo.toml` and source header).
+
+## Install
+
+Every version tag publishes a raw, uncompressed binary per platform. Pick the
+asset for your host (full table in [`docs/release-contract.md`](docs/release-contract.md)):
+
+**Linux / macOS**
+
+```sh
+# x86_64 linux; swap the asset name for your platform
+curl -fsSL -o tan https://github.com/alplabai/tan-cli/releases/latest/download/tan-x86_64-unknown-linux-gnu
+chmod +x tan && sudo mv tan /usr/local/bin/tan
+tan --version
+```
+
+**Windows (PowerShell)**
+
+```powershell
+Invoke-WebRequest -Uri https://github.com/alplabai/tan-cli/releases/latest/download/tan-x86_64-pc-windows-msvc.exe -OutFile tan.exe
+.\tan.exe --version
+```
+
+**From source** (Rust **1.86+**, edition 2024):
+
+```sh
+git clone https://github.com/alplabai/tan-cli && cd tan-cli
+cargo install --path crates/tan-cli --locked
+```
+
+`tan` needs an **alp-sdk checkout** to plan against. It is found, in order, from
+`--sdk-root <path>`, the `.alp/sdk-path` pointer `tan sdk switch` writes, or an
+`alp-sdk/` directory beside the project. `tan sdk install <version>` only
+downloads into `~/.alp/sdk-cache` — follow it with `tan sdk switch <version>` to
+select it. No VS Code required.
+
+## Quickstart
+
+```sh
+# Start in a directory holding an alp-sdk checkout — clone one, or
+# `tan sdk install <version> && tan sdk switch <version>`.
+tan bootstrap --sdk-root ./alp-sdk    # west + Zephyr workspace + Python deps
+tan init --template minimal-app --som E1M-AEN701 --name my-app
+cd my-app                             # sibling ../alp-sdk resolves automatically
+
+tan validate                          # schema + semantic checks on board.yaml
+tan build                             # plan → materialise → per-core slice build
+tan size                              # footprint vs the SoM memory budget
+tan run --flash                       # build, then run (host) or program (hardware)
+```
+
+`tan doctor --build --fix` diagnoses (and repairs what it can) a build
+environment that is not ready. `tan completion --shell zsh` emits a completion
+script.
+
+## Commands
+
+| Area | Commands |
+| --- | --- |
+| **Project** | `init` · `scaffold` · `examples` · `explain` · `presets` · `pinmux` |
+| **Configure & verify** | `validate` · `generate` · `diff` · `inspect` · `trace` · `doctor` · `debug-config` · `support-bundle` |
+| **Build & run** (native) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
+| **Environment** | `bootstrap` · `sdk` · `completion` |
+| **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `model` · `monitor` · `new-som` · `faultdecode` → `python -m alp_cli` |
+
+`tan <command> --help` for flags. Global flags apply to every command:
+
+| Flag | Effect |
+| --- | --- |
+| `--project <PATH>` | Project root (default: current directory). |
+| `--board-yaml <PATH>` | Explicit `board.yaml`, overriding project resolution. |
+| `--sdk-root <PATH>` | alp-sdk checkout to plan against. |
+| `--format json` | Machine-readable envelope instead of text. |
+| `--ci` | Implies `--non-interactive` and disables color. |
+| `--quiet` / `--verbose` / `--no-color` | Output volume and styling. |
+
+`--format json` emits the stable envelope
+`{command, ok, exitCode, project, data, issues}` — the contract the
+alp-sdk-vscode extension consumes. Text output is for humans and may change;
+the envelope is the API.
 
 ## Where it sits (three repos, one executor)
 
@@ -31,42 +113,6 @@ Dependency direction is one-way: **extension → tan → alp-sdk.** Installing `
 never drags in the extension. The user-facing command / binary is `tan`, not
 `alp` (RFC #837).
 
-## Workspace layout
-
-A Cargo workspace mirroring `cli-rs`:
-
-```
-Cargo.toml                     # [workspace] + [workspace.dependencies] + [profile.release]
-crates/
-  tan-core/                    # pure domain logic (no IO): build-plan + system-manifest
-    src/build_plan.rs          #   contracts, board.yaml model/validate, presets,
-    src/loader.rs              #   debug/doctor reports, SDK readiness, pinmux, …
-    src/lib.rs
-    …
-  tan-cli/                     # the `tan` binary — argument parsing, IO, subprocess exec
-    src/main.rs
-    src/cli.rs
-    src/commands/{build,sdk,doctor,validate,generate,bootstrap,init,…}.rs
-    …
-```
-
-`tan-core` is `alp-core` ported faithfully (symbol names preserved; only the
-crate name and cosmetic `alp`-branding changed). `build_plan.rs` additionally
-carries the newer ADR-0020 fields the SDK now emits — per-slice
-`envAppendPath` and the top-level `executionPolicy`.
-
-## What's ported
-
-- **tan-core** — the full domain crate (verbatim from `alp-core`).
-- **tan-cli** — the full `cli-rs` command surface: `validate`, `generate`,
-  `init`, `scaffold`, `examples`, `doctor`, `completion`, `diff`, `presets`,
-  `pinmux`, `explain`, `inspect`, `trace`, `debug-config`, `support-bundle`,
-  `sdk`, `bootstrap`, and `build`. `build` / `size` / `image` / `flash` /
-  `clean` / `renode` are **native Rust**; only `migrate` / `lock` / `quality`
-  still forward to the surviving `west alp-*` extension commands. Plus
-  `model` / `monitor` / `new-som` / `faultdecode` — thin forwarders to the SDK
-  `alp` CLI (`python -m alp_cli <sub>`).
-
 ## The seam: the build-plan
 
 `tan` reads SDK internals through exactly one contract — the build-plan JSON
@@ -81,18 +127,57 @@ carries the newer ADR-0020 fields the SDK now emits — per-slice
   resolves those paths itself is not silently overridden ("plan wins / CLI fills
   gaps").
 
-## Build
+A build writes `build/system-manifest.yaml` — the post-build IDE/tool contract
+(per-core slices, IPC, helper MCUs) that `flash` / `image` / `size` / `renode`
+read back.
+
+## Workspace layout
+
+A Cargo workspace; pure logic lives in `tan-core`, all IO and subprocess
+execution in `tan-cli`:
 
 ```
+Cargo.toml                     # [workspace] + [workspace.dependencies] + [profile.release]
+crates/
+  tan-core/                    # pure domain logic (no IO)
+    src/build_plan.rs          #   build-plan consumer contract + version-skew guard
+    src/system_manifest.rs     #   post-build manifest parse/overlay/serialize
+    src/plan_exec.rs           #   pure env-append + skip/fail-policy decisions
+    src/{flash,debug,wizard,sdk_catalogue}/   #   backends, reports, templates, presets
+  tan-cli/                     # the `tan` binary — arg parsing, IO, subprocess exec
+    src/{main,cli,envelope,exit}.rs
+    src/commands/{build,run,flash,init}/          #   module dirs
+    src/commands/{sdk,doctor,validate,…}.rs
+```
+
+`tan-core` is `alp-core` ported faithfully (symbol names preserved; only the
+crate name and cosmetic `alp`-branding changed). `build_plan.rs` additionally
+carries the newer ADR-0020 fields the SDK now emits — per-slice
+`envAppendPath` and the top-level `executionPolicy`.
+
+## Development
+
+Four gates, all of them, before every push. CI runs `fmt` + `clippy` once on
+Linux and matrixes `build` + `test` across Linux, Windows, and macOS:
+
+```sh
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
 cargo build --all-targets
 cargo test
 ```
+
+House rules: keep files small, put pure logic in `tan-core` (with unit tests)
+rather than the executor, and never rename an SDK-contract string
+(`alp-sdk`, `alp_orchestrate`, `board.yaml`, `alp.conf`, `.alp/…`) — only the
+user-facing binary is `tan`.
 
 ## Releases
 
 Version-tag pushes (`v<major>.<minor>.<patch>`) build per-platform `tan`
 binaries and publish them as GitHub release assets for the alp-sdk-vscode
-downloader. The exact tag scheme, per-target asset names, and the vscode
+downloader. The tag must equal the workspace `Cargo.toml` version — CI fails the
+release otherwise. The exact tag scheme, per-target asset names, and the vscode
 `releaseAssetForTarget` mapping are the release-asset contract — see
 [`docs/release-contract.md`](docs/release-contract.md).
 

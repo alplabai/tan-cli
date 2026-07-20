@@ -182,8 +182,107 @@ pub fn create_launch_json_write_plan(
     Ok(LaunchJsonWritePlan { content, replaced })
 }
 
+/// Strip a leading UTF-8 BOM plus `//` / `/* */` comments from JSONC text,
+/// then drop trailing commas before a closing `}`/`]`, so the result parses
+/// as plain JSON. Scans char-by-char and tracks string state so a `//` or
+/// trailing comma *inside* a quoted string value is never touched.
+fn strip_jsonc(input: &str) -> String {
+    let input = input.strip_prefix('\u{feff}').unwrap_or(input);
+
+    let mut no_comments = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escaped = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            no_comments.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                no_comments.push(c);
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                chars.next();
+                for c2 in chars.by_ref() {
+                    if c2 == '\n' {
+                        no_comments.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut prev = '\0';
+                for c2 in chars.by_ref() {
+                    if prev == '*' && c2 == '/' {
+                        break;
+                    }
+                    prev = c2;
+                }
+            }
+            _ => no_comments.push(c),
+        }
+    }
+
+    let chars: Vec<char> = no_comments.chars().collect();
+    let mut out = String::with_capacity(no_comments.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == ',' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j < chars.len() && (chars[j] == '}' || chars[j] == ']') {
+                i += 1;
+                continue; // drop the trailing comma
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 fn parse_launch_json_or_default(content: Option<&str>) -> Result<Value, String> {
-    let trimmed = content.map(str::trim).unwrap_or("");
+    // launch.json is JSONC in the wild, not strict JSON: VS Code's own "Add
+    // Configuration" template opens with `//` comment lines, trailing commas
+    // are common, and a Windows-authored file routinely carries a UTF-8 BOM
+    // (str::trim does not strip U+FEFF). A strict serde_json::from_str used
+    // to reject exactly the file VS Code itself writes, sending the user to
+    // hand-edit a "valid" file. Strip BOM/comments/trailing commas first.
+    let stripped = content.map(strip_jsonc);
+    let trimmed = stripped.as_deref().map(str::trim).unwrap_or("");
     if trimmed.is_empty() {
         return Ok(json!({ "version": "0.2.0", "configurations": [] }));
     }
@@ -317,5 +416,28 @@ mod tests {
         let err =
             create_launch_json_write_plan(Some("{not json"), &json!({"name": "x"})).unwrap_err();
         assert!(err.contains("not valid JSON"));
+    }
+
+    #[test]
+    fn vscode_authored_jsonc_with_bom_and_comments_parses() {
+        // The stock template VS Code's "Add Configuration" writes: a UTF-8
+        // BOM, `//` comment lines, and a trailing comma. A strict
+        // serde_json::from_str used to reject this file outright.
+        let existing = "\u{feff}{\n  // Use IntelliSense to learn about possible attributes.\n  \"version\": \"0.2.0\",\n  \"configurations\": [],\n}\n";
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None).unwrap();
+        let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
+        assert!(!plan.replaced);
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        assert_eq!(doc["configurations"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn block_comment_and_slash_inside_string_are_not_mistaken_for_comments() {
+        let existing = "{\n  /* header */\n  \"version\": \"0.2.0\",\n  \"configurations\": [{\"name\": \"has // slashes /* not a comment */\"}]\n}";
+        let doc = parse_launch_json_or_default(Some(existing)).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0]["name"], "has // slashes /* not a comment */");
     }
 }

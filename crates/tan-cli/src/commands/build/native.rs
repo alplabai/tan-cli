@@ -8,13 +8,12 @@ use std::path::Path;
 use tan_core::ProjectContext;
 use tan_core::build_plan::{BuildPlan, parse_build_plan};
 
-use super::CommandRun;
 use crate::cli::{BuildArgs, GlobalArgs};
 use crate::envelope::Project;
 use crate::exit::ExitCode;
 use crate::util::resolve_cli_project_context;
 
-use super::execute::execute_slices;
+use super::execute::{NativeBuildOutcome, execute_slices_outcome};
 use super::materialise::materialise_plan;
 use super::plan_modes::plan_error_run;
 use super::preflight::{maybe_auto_bootstrap, preflight_gate};
@@ -52,7 +51,17 @@ pub(super) fn acquire_plan(
 /// slice's command sequentially. (Per ADR 0014 the conf→build wiring "C4" is
 /// still settling on the SDK side; we run whatever command the emit gives, so a
 /// build before C4 lands may not yet apply the per-slice config.)
-pub(super) fn native_build(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
+///
+/// Returns the full [`NativeBuildOutcome`] (envelope + the in-memory
+/// manifest-written/native_sim-target signals) — `run_build`'s `.run` thin
+/// wrapper (`build/mod.rs`) is what `tan build` itself uses, but `tan run`
+/// (`commands::run::run`, via `run_build_native_outcome`) needs the rest to
+/// decide host-vs-hardware without re-reading `system-manifest.yaml` off disk
+/// afterward. Every early-return here (no plan / materialise failure)
+/// happened before a build could establish anything, so it reports
+/// `manifest_written: false, native_sim_target: None` — harmless in practice
+/// since `decide_run_action` short-circuits on `build_ok == false` first.
+pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBuildOutcome {
     let mut context = resolve_cli_project_context(g);
 
     // Order-independent pre-flight (text mode only). Before blocking on a missing
@@ -68,7 +77,11 @@ pub(super) fn native_build(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
             context = updated;
         }
         if let Some(blocked) = preflight_gate(g, &context) {
-            return blocked;
+            return NativeBuildOutcome {
+                run: blocked,
+                manifest_written: false,
+                native_sim_target: None,
+            };
         }
     }
 
@@ -80,20 +93,28 @@ pub(super) fn native_build(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
     let plan = match acquire_plan(&context, args) {
         Ok(plan) => plan,
         Err((code, message)) => {
-            return plan_error_run(g, project, code, message, ExitCode::RuntimeFailure);
+            return NativeBuildOutcome {
+                run: plan_error_run(g, project, code, message, ExitCode::RuntimeFailure),
+                manifest_written: false,
+                native_sim_target: None,
+            };
         }
     };
 
     let base = base_dir(&context);
     if let Err(e) = materialise_plan(&plan, Path::new(&base)) {
-        return plan_error_run(
-            g,
-            project,
-            "build.materialise-failed",
-            e.message(),
-            ExitCode::WriteFailure,
-        );
+        return NativeBuildOutcome {
+            run: plan_error_run(
+                g,
+                project,
+                "build.materialise-failed",
+                e.message(),
+                ExitCode::WriteFailure,
+            ),
+            manifest_written: false,
+            native_sim_target: None,
+        };
     }
 
-    execute_slices(g, &context, project, &plan, &base)
+    execute_slices_outcome(g, &context, project, &plan, &base)
 }

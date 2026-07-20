@@ -17,11 +17,22 @@ use std::path::Path;
 ///     entry (plan wins / CLI fills gaps).
 ///
 /// Never overrides a key the plan's slice env pins.
+///
+/// `inherited` is the parent-process env lookup (same shape as the one
+/// `assemble_slice_env` already threads through for `env_append_path`
+/// seeding). The EXTRA_ZEPHYR_MODULES gap-filler used to return the bare SDK
+/// root, and `assemble_slice_env`'s gap-filler merge OVERWRITES rather than
+/// appends — so a developer's own `export EXTRA_ZEPHYR_MODULES=/my/module`
+/// was silently replaced by just the SDK root on any pre-ADR-0020 plan. Seed
+/// from `inherited` and append the SDK root via the same `apply_env_append`
+/// (path-list-separator, de-dup) the plan-driven path uses, so the two paths
+/// no longer disagree on whether an inherited value survives.
 pub(super) fn zephyr_env_overrides(
     zephyr_base: Option<&Path>,
     sdk_root: Option<&Path>,
     slice_env: &std::collections::BTreeMap<String, String>,
     env_append_path: &std::collections::BTreeMap<String, Vec<String>>,
+    inherited: impl Fn(&str) -> Option<String>,
 ) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     if !slice_env.contains_key("ZEPHYR_BASE") {
@@ -35,7 +46,20 @@ pub(super) fn zephyr_env_overrides(
         && !env_append_path.contains_key("EXTRA_ZEPHYR_MODULES")
     {
         if let Some(sdk) = sdk_root {
-            out.push(("EXTRA_ZEPHYR_MODULES", sdk.to_string_lossy().into_owned()));
+            let sdk = sdk.to_string_lossy().into_owned();
+            let mut base: Vec<(String, String)> = inherited("EXTRA_ZEPHYR_MODULES")
+                .filter(|v| !v.is_empty())
+                .map(|v| vec![("EXTRA_ZEPHYR_MODULES".to_string(), v)])
+                .unwrap_or_default();
+            tan_core::plan_exec::apply_env_append(
+                &mut base,
+                &[("EXTRA_ZEPHYR_MODULES".to_string(), vec![sdk])]
+                    .into_iter()
+                    .collect(),
+            );
+            if let Some((_, joined)) = base.into_iter().next() {
+                out.push(("EXTRA_ZEPHYR_MODULES", joined));
+            }
         }
     }
     out
@@ -59,6 +83,12 @@ mod tests {
             .collect()
     }
 
+    /// No ambient env for every existing test — they exercise the "nothing
+    /// inherited" case that already passed before this fix.
+    fn no_inherited(_: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn env_overrides_set_base_and_modules_when_absent() {
         let got = zephyr_env_overrides(
@@ -66,6 +96,7 @@ mod tests {
             Some(Path::new("/sdk")),
             &slice_env(&[("ALP_SDK_ROOT", "/sdk")]),
             &append_map(&[]),
+            no_inherited,
         );
         assert_eq!(
             got,
@@ -87,6 +118,7 @@ mod tests {
                 ("EXTRA_ZEPHYR_MODULES", "/pinned-mod"),
             ]),
             &append_map(&[]),
+            no_inherited,
         );
         assert!(got.is_empty());
     }
@@ -101,12 +133,39 @@ mod tests {
             Some(Path::new("/sdk")),
             &slice_env(&[]),
             &append_map(&[("EXTRA_ZEPHYR_MODULES", &["/plan/sdk"])]),
+            no_inherited,
         );
         assert_eq!(got, vec![("ZEPHYR_BASE", "/ws/zephyr".to_string())]);
     }
 
     #[test]
     fn env_overrides_empty_when_nothing_resolved() {
-        assert!(zephyr_env_overrides(None, None, &slice_env(&[]), &append_map(&[])).is_empty());
+        assert!(
+            zephyr_env_overrides(None, None, &slice_env(&[]), &append_map(&[]), no_inherited)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn env_overrides_extend_rather_than_replace_an_inherited_extra_zephyr_modules() {
+        // Regression: this gap-filler used to return the bare SDK root, and
+        // `assemble_slice_env`'s gap-filler merge OVERWRITES the var outright —
+        // so a developer's own `export EXTRA_ZEPHYR_MODULES=/home/u/my-module`
+        // vanished from the build on any plan that didn't itself pin the key.
+        let got = zephyr_env_overrides(
+            None,
+            Some(Path::new("/sdk")),
+            &slice_env(&[]),
+            &append_map(&[]),
+            |k| (k == "EXTRA_ZEPHYR_MODULES").then(|| "/home/u/my-module".to_string()),
+        );
+        let sep = if cfg!(windows) { ';' } else { ':' };
+        assert_eq!(
+            got,
+            vec![(
+                "EXTRA_ZEPHYR_MODULES",
+                format!("/home/u/my-module{sep}/sdk")
+            )]
+        );
     }
 }

@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use super::models::{WizardFileChange, WizardFileChangeKind, WizardPlannedFile, WizardWriteResult};
+use super::models::{
+    WizardFileChange, WizardFileChangeKind, WizardPlannedFile, WizardWriteError, WizardWriteResult,
+};
 
 /// Classify each planned file as New / Update / Unchanged relative to `project_root`.
 pub fn collect_wizard_file_changes(
@@ -32,10 +34,15 @@ pub fn collect_wizard_file_changes(
 
 /// Write all planned files under `project_root`, creating parent directories as needed.
 /// Files whose content is already identical are skipped (counted as unchanged).
+///
+/// On error, returns the partial `WizardWriteResult` accumulated before the
+/// failure alongside the `io::Error` — plain `?` here discarded `written` on
+/// a mid-scaffold failure, so a caller had no way to report anything but
+/// `written: []` for a project that is actually half on disk.
 pub fn write_wizard_files(
     project_root: &Path,
     files: &[WizardPlannedFile],
-) -> Result<WizardWriteResult, std::io::Error> {
+) -> Result<WizardWriteResult, WizardWriteError> {
     let mut written = Vec::new();
     let mut unchanged = Vec::new();
 
@@ -52,14 +59,61 @@ pub fn write_wizard_files(
         }
 
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+            if let Err(error) = std::fs::create_dir_all(parent) {
+                return Err(WizardWriteError {
+                    error,
+                    partial: WizardWriteResult { written, unchanged },
+                });
+            }
         }
 
-        std::fs::write(&path, &f.content)?;
+        if let Err(error) = std::fs::write(&path, &f.content) {
+            return Err(WizardWriteError {
+                error,
+                partial: WizardWriteResult { written, unchanged },
+            });
+        }
         written.push(f.relative_path.clone());
     }
 
     Ok(WizardWriteResult { written, unchanged })
+}
+
+#[cfg(test)]
+mod write_tests {
+    use super::*;
+
+    #[test]
+    fn failure_on_a_later_file_preserves_the_earlier_written_list() {
+        // Regression: `write_wizard_files` used to propagate the write error
+        // with a plain `?`, discarding the `written` accumulator — a caller
+        // then reported `written: []` for a project that already has "a.txt"
+        // on disk. `WizardWriteError::partial` must carry it.
+        let root =
+            std::env::temp_dir().join(format!("alp-wizard-write-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // Block the SECOND file's write deterministically (cross-platform): a
+        // directory already sits where the file needs to go.
+        std::fs::create_dir_all(root.join("b.txt")).unwrap();
+
+        let files = vec![
+            WizardPlannedFile {
+                relative_path: "a.txt".to_string(),
+                content: "A".to_string(),
+            },
+            WizardPlannedFile {
+                relative_path: "b.txt".to_string(),
+                content: "B".to_string(),
+            },
+        ];
+
+        let err = write_wizard_files(&root, &files).expect_err("blocked write must fail");
+        assert_eq!(err.partial.written, vec!["a.txt".to_string()]);
+        assert!(err.partial.unchanged.is_empty());
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
 
 // ---------------------------------------------------------------------------

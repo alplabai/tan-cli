@@ -12,14 +12,19 @@
 //!     `scripts/alp_orchestrate/__init__.py`.
 //!   - the text prefix is `clean:`, not `alp-clean:` (the binary is `tan`).
 //!   - a manifest-aware sweep of out-of-tree slice build dirs is added.
-//!   - a data-loss guard refuses a build-root with no path depth (a filesystem
-//!     root); the Python had none.
+//!   - a data-loss guard refuses any removal target that is the project root, an
+//!     ancestor of it, or a filesystem root; the Python had none. The guard is
+//!     `tan_core::path_guard::is_unsafe_removal_target` and it screens BOTH the
+//!     resolved build root and every manifest-derived slice dir — an earlier
+//!     version checked only the build root, and only for path depth, so
+//!     `--build-root ""` and a manifest `build_dir: ""` both reached
+//!     `remove_dir_all` on the user's source tree.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tan_core::system_manifest::parse_system_manifest;
-use tan_core::{CleanAction, clean_classify, clean_targets};
+use tan_core::{CleanAction, clean_classify, clean_targets, is_unsafe_removal_target};
 
 use super::CommandRun;
 use crate::cli::{CleanArgs, GlobalArgs};
@@ -54,13 +59,6 @@ struct CleanReport {
     targets: Vec<TargetRecord>,
     /// Count of targets actually removed (0 under `--dry-run`).
     removed: u32,
-}
-
-/// A path with no `Normal` component is a filesystem/drive root (or empty) —
-/// rmtree'ing it would be catastrophic. The Python had no such guard; this is a
-/// deliberate, non-faithful data-loss net.
-fn is_dangerous_root(p: &Path) -> bool {
-    !p.components().any(|c| matches!(c, Component::Normal(_)))
 }
 
 /// `tan clean` entry. See the module docs for the faithful-plus behaviour.
@@ -120,24 +118,26 @@ pub fn run(g: &GlobalArgs, args: &CleanArgs) -> CommandRun {
         None => project_root.join("build"),
     };
 
-    if is_dangerous_root(&build_root) {
+    // Fail fast, before the manifest is even read: `--build-root ""` / `.` /
+    // `..` resolve to the project root or above. The old guard only rejected a
+    // path with no `Normal` component, so all three passed it and were
+    // recursively removed at exit 0 — the `rm -rf $UNSET_VAR` shape.
+    if is_unsafe_removal_target(&project_root, &build_root) {
         let bad = build_root.to_string_lossy().into_owned();
+        let why = format!(
+            "refusing to remove `{bad}`: a build root may not be the project root, an ancestor of it, or a filesystem root"
+        );
         return finish(
             g,
             project,
             CleanReport {
-                build_root: bad.clone(),
+                build_root: bad,
                 dry_run: args.dry_run,
                 targets: Vec::new(),
                 removed: 0,
             },
-            vec![format!(
-                "clean: refusing to remove `{bad}` — build root has no path depth"
-            )],
-            vec![error(
-                "clean.unsafe-build-root",
-                &format!("refusing to remove `{bad}`: build root has no path depth"),
-            )],
+            vec![format!("clean: {why}")],
+            vec![error("clean.unsafe-build-root", &why)],
             ExitCode::RuntimeFailure,
         );
     }
@@ -166,13 +166,28 @@ pub fn run(g: &GlobalArgs, args: &CleanArgs) -> CommandRun {
         Err(_) => None,
     };
 
-    let targets = clean_targets(&project_root, &build_root, manifest.as_ref());
+    let plan = clean_targets(&project_root, &build_root, manifest.as_ref());
 
     let mut records: Vec<TargetRecord> = Vec::new();
     let mut removed = 0u32;
     let mut exit = ExitCode::Success;
 
-    for target in &targets {
+    // A manifest that names a catastrophic build_dir is a broken manifest, not a
+    // reason to quietly clean less than asked. Report every refusal and fail —
+    // silence here is what let an empty `build_dir` delete a project tree.
+    for refused in &plan.rejected {
+        let why = refused.reason();
+        text.push(format!("clean: {why}"));
+        issues.push(error("clean.unsafe-target", &why));
+        records.push(record(
+            &refused.path.to_string_lossy(),
+            "dir",
+            "refused-unsafe",
+        ));
+        exit = ExitCode::RuntimeFailure;
+    }
+
+    for target in &plan.targets {
         let path = target.to_string_lossy().into_owned();
         match clean_classify(target.is_dir(), target.is_file(), args.dry_run) {
             CleanAction::WouldRemoveDir => {
@@ -185,17 +200,25 @@ pub fn run(g: &GlobalArgs, args: &CleanArgs) -> CommandRun {
             }
             CleanAction::RemoveDir => {
                 text.push(format!("clean: removing {path}"));
-                // Best-effort (Python `rmtree(ignore_errors=True)`): a failure is
-                // warned and still counted removed; it does NOT fail the command.
+                // Best-effort (Python `rmtree(ignore_errors=True)`): a failure
+                // does NOT fail the command. It is still REPORTED — as a warning
+                // Issue and the `remove-failed` action, and it is not counted
+                // `removed`. Previously the error was a text-only line (invisible
+                // under `--format json`, the mode the extension consumes) while
+                // the envelope claimed the directory was removed.
                 if let Err(e) = std::fs::remove_dir_all(target) {
-                    if !g.quiet {
-                        text.push(format!(
-                            "clean: warning: could not fully remove {path}: {e}"
-                        ));
-                    }
+                    text.push(format!(
+                        "clean: warning: could not fully remove {path}: {e}"
+                    ));
+                    issues.push(warning(
+                        "clean.remove-failed",
+                        &format!("could not fully remove {path}: {e}"),
+                    ));
+                    records.push(record(&path, "dir", "remove-failed"));
+                } else {
+                    removed += 1;
+                    records.push(record(&path, "dir", "removed"));
                 }
-                removed += 1;
-                records.push(record(&path, "dir", "removed"));
             }
             CleanAction::RemoveFile => {
                 text.push(format!("clean: removing {path}"));
@@ -452,6 +475,79 @@ mod tests {
                     .any(|l| l.contains("Cannot locate alp-sdk root"))
             );
         }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The `rm -rf $UNSET_VAR` shape. `--build-root ""` resolves to the project
+    /// root; before the guard this recursively deleted the whole source tree and
+    /// exited 0.
+    #[test]
+    fn build_root_resolving_to_project_root_is_refused_and_deletes_nothing() {
+        for raw in ["", ".", ".."] {
+            let root = tmp(&format!("unsafe-br-{}", raw.len()));
+            populate(&root);
+            let g = global(&root, Format::Text);
+            let run = run(
+                &g,
+                &CleanArgs {
+                    app_path: ".".to_string(),
+                    build_root: Some(raw.to_string()),
+                    dry_run: false,
+                },
+            );
+            assert_eq!(
+                run.exit,
+                ExitCode::RuntimeFailure,
+                "--build-root {raw:?} must fail"
+            );
+            assert!(
+                run.text.iter().any(|l| l.contains("refusing to remove")),
+                "{:?}",
+                run.text
+            );
+            // The whole point: the sources are still there.
+            assert!(
+                root.join("build").is_dir(),
+                "--build-root {raw:?} deleted the project"
+            );
+            assert!(root.join("scripts").join("alp_project.py").is_file());
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+    }
+
+    /// A manifest slice with an empty `build_dir` resolves to the project root.
+    /// It must be refused and reported, never removed.
+    #[test]
+    fn unsafe_manifest_build_dir_is_refused_and_reported() {
+        let root = tmp("unsafe-slice");
+        populate(&root);
+        std::fs::write(
+            root.join("build").join("system-manifest.yaml"),
+            "schema_version: 1\nslices:\n- core_id: m55_hp\n  os: zephyr\n  status: ok\n  build_dir: \"\"\n",
+        )
+        .unwrap();
+        let g = global(&root, Format::Json);
+        let run = run(
+            &g,
+            &CleanArgs {
+                app_path: ".".to_string(),
+                build_root: None,
+                dry_run: false,
+            },
+        );
+        assert_eq!(run.exit, ExitCode::RuntimeFailure);
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(doc["ok"], false);
+        assert!(
+            doc["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["code"] == "clean.unsafe-target"),
+            "{doc}"
+        );
+        // build/ is legitimately gone; the project root is not.
+        assert!(root.join("scripts").join("alp_project.py").is_file());
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

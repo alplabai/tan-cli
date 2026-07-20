@@ -10,8 +10,8 @@ use std::path::Path;
 
 use serde_json::Value;
 use tan_core::{
-    DiffEntry, DiffKind, collect_diff_entries, normalize_board_model, parse_board_model,
-    prune_nulls,
+    BoardModel, DiffEntry, DiffKind, collect_diff_entries, normalize_board_model,
+    parse_board_model, prune_nulls,
 };
 
 use super::CommandRun;
@@ -80,23 +80,59 @@ pub fn run(g: &GlobalArgs) -> CommandRun {
 
     let model = match parse_board_model(&text) {
         Ok(m) => m,
+        // A malformed board.yaml is a validation failure the user needs to
+        // fix, not an internal tan bug -- matches the offline `validate`
+        // path's identical parse-error remap (exit 2 `schema-violation`,
+        // not exit 5 `internal-failure`).
         Err(e) => {
             return failure(
                 g,
                 project,
-                ExitCode::InternalFailure,
-                "internal-failure",
+                ExitCode::ValidationFailure,
+                "schema-violation",
                 &e.to_string(),
                 board_path.clone(),
-                vec!["diff: internal failure".to_string(), e.to_string()],
+                vec!["diff: validation failure".to_string(), e.to_string()],
             );
         }
     };
 
-    let before = prune_nulls(serde_json::to_value(&model).expect("board model is serializable"));
+    // `.expect("board model is serializable")` used to sit here: BoardModel's
+    // e1m_routes is opaque `serde_yaml::Value`, and serde_json refuses to
+    // serialize a map with a non-string key (a null/sequence/mapping YAML
+    // key). This binary is built `panic = "abort"`, so that `.expect()`
+    // aborted the whole process with no envelope and no in-contract exit
+    // code the moment a board.yaml carried an unusual `e1m_routes` shape.
+    // Report it as an ordinary diff failure instead.
+    let before = match serialize_pruned(&model) {
+        Ok(v) => v,
+        Err(message) => {
+            return failure(
+                g,
+                project,
+                ExitCode::ValidationFailure,
+                "board-model-not-representable",
+                &message,
+                board_path.clone(),
+                vec!["diff: validation failure".to_string(), message.clone()],
+            );
+        }
+    };
     let normalized = normalize_board_model(model);
-    let after =
-        prune_nulls(serde_json::to_value(&normalized).expect("board model is serializable"));
+    let after = match serialize_pruned(&normalized) {
+        Ok(v) => v,
+        Err(message) => {
+            return failure(
+                g,
+                project,
+                ExitCode::ValidationFailure,
+                "board-model-not-representable",
+                &message,
+                board_path.clone(),
+                vec!["diff: validation failure".to_string(), message.clone()],
+            );
+        }
+    };
     let changes = collect_diff_entries(&before, &after);
 
     let data = DiffData {
@@ -121,6 +157,16 @@ pub fn run(g: &GlobalArgs) -> CommandRun {
         text: text_lines,
         json,
     }
+}
+
+/// Serialize a board model to JSON and prune null object entries. Fallible:
+/// `e1m_routes` carries arbitrary opaque `serde_yaml::Value` data, and
+/// serde_json rejects a map with a non-string key (null/sequence/mapping),
+/// which a hand-authored `e1m_routes` can legally contain in YAML.
+fn serialize_pruned(model: &BoardModel) -> Result<Value, String> {
+    serde_json::to_value(model)
+        .map(prune_nulls)
+        .map_err(|e| format!("board.yaml could not be represented as JSON: {e}"))
 }
 
 /// Build a failed `CommandRun` with the given `exit` code, a `diff.{code}` envelope issue,
@@ -205,5 +251,28 @@ fn format_value(value: &Option<Value>) -> String {
                 raw
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serialize_pruned_succeeds_for_an_ordinary_model() {
+        let model = BoardModel::default();
+        assert!(serialize_pruned(&model).is_ok());
+    }
+
+    #[test]
+    fn serialize_pruned_reports_non_string_map_key_instead_of_panicking() {
+        // A complex (sequence) YAML key nested under e1m_routes -- legal YAML,
+        // but serde_json's map-key serializer only accepts strings/ints/bools.
+        // The old `.expect("board model is serializable")` aborted the
+        // (panic=abort) process on input like this; must return Err instead.
+        let yaml = "e1m_routes:\n  usb0:\n    ? [d_p, d_n]\n    : pads\n";
+        let model = parse_board_model(yaml).expect("valid yaml");
+        let err = serialize_pruned(&model).expect_err("non-string map key must be rejected");
+        assert!(err.contains("could not be represented as JSON"));
     }
 }

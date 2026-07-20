@@ -21,7 +21,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -254,14 +254,14 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
     }
 
     // Run — enforce the wall-clock timeout even on a silent child.
-    let found = match run_renode(
+    let (found, natural_exit) = match run_renode(
         &argv,
         &log_path,
         args.timeout,
         args.expect.as_deref(),
         !g.is_json(),
     ) {
-        Ok(found) => found,
+        Ok(outcome) => outcome,
         Err(e) => {
             return fail(
                 g,
@@ -284,6 +284,27 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
                 log_path.display()
             );
             issues.push(issue("renode.expect-not-found", "error", &msg));
+            if !g.is_json() {
+                text.push(msg);
+            }
+        }
+    } else if let Some(status) = natural_exit {
+        // No `--expect` was given, so `found` is always false and can't signal
+        // anything — the ONLY way an instantly-crashing (or otherwise failing)
+        // Renode used to surface was via `--expect`. `natural_exit` is `Some`
+        // only when the child terminated on its own (stdout+stderr both hit
+        // EOF) before we ever had to kill it for the deadline, so a killed-for-
+        // timeout child (still alive, forced exit code from our own kill)
+        // never lands here and is never mistaken for a self-inflicted failure.
+        if !status.success() {
+            exit = ExitCode::RuntimeFailure;
+            let msg = format!(
+                "renode: exited early ({}) before the {}s timeout (see {}).",
+                exit_status_desc(status),
+                args.timeout,
+                log_path.display()
+            );
+            issues.push(issue("renode.exited-nonzero", "error", &msg));
             if !g.is_json() {
                 text.push(msg);
             }
@@ -313,16 +334,21 @@ fn resolve_renode_binary() -> Option<String> {
 /// the `expect` marker appearing, the child exiting (EOF), or `timeout_s`
 /// elapsing — the deadline fires even on a silent child via a reader thread +
 /// `recv_timeout` (the Python `for line in proc.stdout` blocked until EOF).
-/// Returns whether the `expect` marker was seen (always false when `expect` is
-/// `None`). `echo_stdout` tees each line to the CLI's own stdout (text mode
-/// only — in JSON mode it would corrupt the single-line Envelope).
+/// Returns `(expect_found, natural_exit)`: `expect_found` is whether the
+/// `expect` marker was seen (always false when `expect` is `None`);
+/// `natural_exit` is `Some(status)` only when the child terminated ON ITS OWN
+/// (both pipes hit EOF) before the deadline/kill — i.e. a status worth
+/// trusting. A child we had to force-kill for the timeout always reports
+/// `None` here, so a forced-kill exit code is never mistaken for the child's
+/// own failure. `echo_stdout` tees each line to the CLI's own stdout (text
+/// mode only — in JSON mode it would corrupt the single-line Envelope).
 fn run_renode(
     argv: &[String],
     log_path: &Path,
     timeout_s: u64,
     expect: Option<&str>,
     echo_stdout: bool,
-) -> std::io::Result<bool> {
+) -> std::io::Result<(bool, Option<ExitStatus>)> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -340,23 +366,12 @@ fn run_renode(
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
     let tx_err = tx.clone();
-    let h_out = thread::spawn(move || {
-        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    let h_err = thread::spawn(move || {
-        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-            if tx_err.send(line).is_err() {
-                break;
-            }
-        }
-    });
+    let h_out = thread::spawn(move || pump_lossy_lines(BufReader::new(stdout), tx));
+    let h_err = thread::spawn(move || pump_lossy_lines(BufReader::new(stderr), tx_err));
 
     // Read loop in a closure so teardown (kill + reap + join) ALWAYS runs — even
     // if a log write fails mid-run, we must not leak the Renode child + threads.
+    let mut natural_exit: Option<ExitStatus> = None;
     let read_result = (|| -> std::io::Result<bool> {
         let deadline = Instant::now() + Duration::from_secs(timeout_s);
         let mut found = false;
@@ -379,8 +394,21 @@ fn run_renode(
                         }
                     }
                 }
-                // Timeout (silent child) or both readers done (child EOF) — stop.
-                Err(_) => break,
+                // Both readers hit EOF — the child's own pipes closed, which
+                // happens at process exit. Capture the REAL status now, before
+                // the unconditional `kill()` below turns every outcome
+                // (including this one) into an indistinguishable "we killed it".
+                // A blocking `wait()` (not `try_wait()`) is safe and correct
+                // here specifically: the pipes only close as the child exits,
+                // so the process is already reapable (or microseconds from it)
+                // — unlike calling `wait()` before knowing the child exited,
+                // which could block forever on a still-alive process.
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    natural_exit = child.wait().ok();
+                    break;
+                }
+                // Deadline reached; child may still be alive (silent hang).
+                Err(mpsc::RecvTimeoutError::Timeout) => break,
             }
         }
         Ok(found)
@@ -392,7 +420,42 @@ fn run_renode(
     let _ = h_out.join();
     let _ = h_err.join();
 
-    read_result
+    read_result.map(|found| (found, natural_exit))
+}
+
+/// Pump `\n`-delimited lines from `reader` into `tx`, lossily replacing invalid
+/// UTF-8 instead of dying on the first bad line. `BufRead::lines()` yields
+/// `Err(InvalidData)` for a non-UTF-8 line and `map_while(Result::ok)` used to
+/// stop the whole reader thread there — a single stray byte (reset framing
+/// noise, a half-initialised UART; both routine on an emulated console)
+/// permanently truncated the tee log and any later `--expect` match.
+fn pump_lossy_lines(mut reader: impl BufRead, tx: mpsc::Sender<String>) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                while matches!(buf.last(), Some(b'\n') | Some(b'\r')) {
+                    buf.pop();
+                }
+                if tx.send(String::from_utf8_lossy(&buf).into_owned()).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break, // real IO error
+        }
+    }
+}
+
+/// A short `"exit code N"` / `"terminated by signal N"` description for a log
+/// message — `ExitStatus::code()` is `None` on Unix when the process was
+/// killed by a signal rather than exiting normally.
+fn exit_status_desc(status: ExitStatus) -> String {
+    match status.code() {
+        Some(code) => format!("exit code {code}"),
+        None => format!("{status}"),
+    }
 }
 
 /// An issue of the given severity.
@@ -493,7 +556,7 @@ mod tests {
     fn expect_marker_present_returns_found_and_writes_log() {
         let log = tmp_log("hit");
         let argv = echo_argv(&["boot", "[hello] done", "tail"]);
-        let found = run_renode(&argv, &log, 30, Some("[hello] done"), true).unwrap();
+        let (found, _status) = run_renode(&argv, &log, 30, Some("[hello] done"), true).unwrap();
         assert!(found);
         let contents = std::fs::read_to_string(&log).unwrap();
         assert!(contents.contains("[hello] done"), "{contents}");
@@ -504,7 +567,7 @@ mod tests {
     fn expect_marker_absent_returns_not_found() {
         let log = tmp_log("miss");
         let argv = echo_argv(&["boot", "running", "tail"]);
-        let found = run_renode(&argv, &log, 30, Some("[hello] done"), false).unwrap();
+        let (found, _status) = run_renode(&argv, &log, 30, Some("[hello] done"), false).unwrap();
         assert!(!found);
         let _ = std::fs::remove_dir_all(log.parent().unwrap());
     }
@@ -513,10 +576,75 @@ mod tests {
     fn no_expect_always_returns_false_and_still_tees() {
         let log = tmp_log("noexpect");
         let argv = echo_argv(&["one", "two"]);
-        let found = run_renode(&argv, &log, 30, None, false).unwrap();
+        let (found, _status) = run_renode(&argv, &log, 30, None, false).unwrap();
         assert!(!found);
         let contents = std::fs::read_to_string(&log).unwrap();
         assert!(contents.contains("one"), "{contents}");
         let _ = std::fs::remove_dir_all(log.parent().unwrap());
+    }
+
+    /// The core of the fix: an instantly-crashing Renode (no `--expect`, so
+    /// `found` alone can never signal it) must surface via the returned exit
+    /// status instead of the child being `kill()`ed/`wait()`ed with the
+    /// status silently discarded (the pre-fix behaviour — see `run()`, which
+    /// used to leave `exit` at `Success` for every failure mode except a
+    /// missing `renode` binary).
+    #[test]
+    fn child_exit_status_is_surfaced_when_it_exits_on_its_own() {
+        let log = tmp_log("crash");
+        let argv = if cfg!(windows) {
+            vec!["cmd".to_string(), "/C".to_string(), "exit 3".to_string()]
+        } else {
+            vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()]
+        };
+        let (found, status) = run_renode(&argv, &log, 30, None, false).unwrap();
+        assert!(!found);
+        let status = status.expect("child exited on its own before the deadline");
+        assert!(!status.success());
+        let _ = std::fs::remove_dir_all(log.parent().unwrap());
+    }
+
+    /// A child that outlives the (short) timeout is forcibly killed — that
+    /// forced termination must NOT be reported as `natural_exit`, or a plain
+    /// timeout would be indistinguishable from a self-inflicted crash.
+    #[test]
+    fn child_exit_status_is_none_when_killed_for_timeout() {
+        let log = tmp_log("hang");
+        let argv = if cfg!(windows) {
+            vec![
+                "cmd".to_string(),
+                "/C".to_string(),
+                "ping -n 30 127.0.0.1 >NUL".to_string(),
+            ]
+        } else {
+            vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()]
+        };
+        let (found, status) = run_renode(&argv, &log, 1, None, false).unwrap();
+        assert!(!found);
+        assert!(
+            status.is_none(),
+            "a timed-out-and-killed child must not report a natural exit status"
+        );
+        let _ = std::fs::remove_dir_all(log.parent().unwrap());
+    }
+
+    /// `.lines().map_while(Result::ok)` used to stop the reader thread dead at
+    /// the FIRST non-UTF-8 line — everything after it (including a later
+    /// `--expect` match) was lost. `pump_lossy_lines` must keep going, with
+    /// the bad line replaced rather than dropped.
+    #[test]
+    fn pump_lossy_lines_survives_invalid_utf8_instead_of_dying() {
+        use std::io::Cursor;
+
+        let mut data = b"first line\n".to_vec();
+        data.extend_from_slice(&[0xFF, 0xFE, b'\n']); // invalid UTF-8 line
+        data.extend_from_slice(b"Hello World\n"); // must still arrive
+        let (tx, rx) = mpsc::channel();
+        pump_lossy_lines(BufReader::new(Cursor::new(data)), tx);
+        let lines: Vec<String> = rx.try_iter().collect();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        assert_eq!(lines[0], "first line");
+        assert!(lines[1].contains('\u{FFFD}'), "{:?}", lines[1]);
+        assert_eq!(lines[2], "Hello World");
     }
 }

@@ -117,20 +117,41 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
 
     if g.is_json() {
         // Capture the run; emit exactly one envelope on stdout.
-        let code = Command::new("bash")
-            .args(&sh_args)
-            .output()
-            .ok()
-            .and_then(|o| o.status.code());
-        let (exit, issues) = match code {
-            Some(0) => (ExitCode::Success, Vec::new()),
-            _ => (
+        //
+        // Used to be `.output().ok().and_then(|o| o.status.code())`, which
+        // threw away both the `io::Error` from a failed spawn (bash missing
+        // from PATH, sandboxed CI PATH) AND the captured stdout/stderr on any
+        // non-zero exit — every failure collapsed into the same generic
+        // "bootstrap.sh reported a failure; re-run without --format json to
+        // see the log" message, even for a launch error bootstrap.sh never
+        // got the chance to produce. The output was already captured right
+        // here; fold its tail into the issue instead of discarding it.
+        let outcome = Command::new("bash").args(&sh_args).output();
+        let (exit, issues) = match outcome {
+            Ok(o) if o.status.success() => (ExitCode::Success, Vec::new()),
+            Ok(o) => {
+                let tail = capture_tail(&o.stdout, &o.stderr);
+                let message = if tail.is_empty() {
+                    "bootstrap.sh reported a failure; re-run without --format json to see the log."
+                        .to_string()
+                } else {
+                    format!("bootstrap.sh reported a failure: {tail}")
+                };
+                (
+                    ExitCode::RuntimeFailure,
+                    vec![Issue {
+                        code: "bootstrap.failed".to_string(),
+                        severity: "error".to_string(),
+                        message,
+                    }],
+                )
+            }
+            Err(e) => (
                 ExitCode::RuntimeFailure,
                 vec![Issue {
-                    code: "bootstrap.failed".to_string(),
+                    code: "bootstrap.launch-failed".to_string(),
                     severity: "error".to_string(),
-                    message: "bootstrap.sh reported a failure; re-run without --format json to see the log."
-                        .to_string(),
+                    message: format!("failed to launch bash: {e}"),
                 }],
             ),
         };
@@ -160,6 +181,27 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
             json: None,
         }
     }
+}
+
+/// The last few non-empty lines of `bootstrap.sh`'s captured output — a pure
+/// read of bytes JSON mode already captured via `Command::output()` (mirrors
+/// `flash/mod.rs`'s `capture_tail`). Prefers stderr, falling back to stdout
+/// when stderr is empty; returns `""` when there is nothing usable.
+fn capture_tail(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(stderr).into_owned();
+    if text.trim().is_empty() {
+        text = String::from_utf8_lossy(stdout).into_owned();
+    }
+    let tail: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(4)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    tail.join(" | ")
 }
 
 /// Builds a `BootstrapData` for failure paths: empty `sdk_root`/`script_path`,
@@ -201,4 +243,34 @@ fn failure(
         .is_json()
         .then(|| Envelope::new("bootstrap", project, data, issues, exit.code()).to_json());
     CommandRun { exit, text, json }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capture_tail;
+
+    #[test]
+    fn capture_tail_prefers_stderr_and_keeps_last_lines_in_order() {
+        // Regression: JSON-mode bootstrap used to discard the captured
+        // stdout/stderr entirely (`.output().ok().and_then(|o| o.status.code())`),
+        // so the actual failure reason (e.g. a pip traceback, "no such file")
+        // never reached the JSON envelope. `capture_tail` is the read of that
+        // already-captured output the fix now folds into the issue message.
+        let stdout = b"apt-get: installing\nzephyr sdk unpack\n";
+        let stderr = b"line1\nline2\nline3\nline4\nline5\n";
+        let tail = capture_tail(stdout, stderr);
+        assert_eq!(tail, "line2 | line3 | line4 | line5");
+    }
+
+    #[test]
+    fn capture_tail_falls_back_to_stdout_when_stderr_is_empty() {
+        let stdout = b"west init failed: no such file or directory\n";
+        let tail = capture_tail(stdout, b"");
+        assert_eq!(tail, "west init failed: no such file or directory");
+    }
+
+    #[test]
+    fn capture_tail_is_empty_when_nothing_was_captured() {
+        assert_eq!(capture_tail(b"", b""), "");
+    }
 }

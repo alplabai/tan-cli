@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::CommandRun;
-use crate::cli::GlobalArgs;
+use crate::cli::{GenerateArgs, GlobalArgs};
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 
@@ -44,7 +44,7 @@ struct GenerateData {
 
 /// Run `tan generate`: resolve the board and SDK roots, invoke `alp_project.py`
 /// once per emit target, and assemble the text/JSON `CommandRun` result.
-pub fn run(g: &GlobalArgs) -> CommandRun {
+pub fn run(g: &GlobalArgs, args: &GenerateArgs) -> CommandRun {
     let workspace_root = crate::util::cli_workspace_root(g);
     let board_path = resolve_board_path(g, &workspace_root);
 
@@ -99,6 +99,27 @@ pub fn run(g: &GlobalArgs) -> CommandRun {
             );
         }
     };
+
+    // native-sim-overlay is the one target that writes into the hand-editable
+    // app source tree (boards/, not build/generated/ -- see output_path_for_emit).
+    // Every other writer into a user tree (init, scaffold) diffs planned files
+    // against disk and refuses with a would-overwrite issue unless --force; a
+    // bare `tan generate` used to truncate a developer's hand-tuned overlay
+    // with no check at all. Guard just this target the same way.
+    if overlay_would_overwrite(&workspace_root, &targets, args.force) {
+        return failure(
+            g,
+            project,
+            ExitCode::WriteFailure,
+            "would-overwrite",
+            "boards/native_sim_native_64.overlay already exists. Use --force to overwrite.",
+            empty_data(),
+            vec![
+                "generate: boards/native_sim_native_64.overlay already exists; use --force to overwrite."
+                    .to_string(),
+            ],
+        );
+    }
 
     let python = default_python_binary();
     // Guard: the interpreter must be new enough to run `alp_project.py` (the
@@ -242,6 +263,14 @@ fn output_path_for_emit(workspace_root: &Path, emit: &str) -> PathBuf {
         .join(file_name)
 }
 
+/// True when a bare `tan generate` (or `--target native-sim-overlay`) would
+/// truncate an existing `boards/native_sim_native_64.overlay` without `--force`.
+fn overlay_would_overwrite(workspace_root: &Path, targets: &[&str], force: bool) -> bool {
+    !force
+        && targets.contains(&"native-sim-overlay")
+        && output_path_for_emit(workspace_root, "native-sim-overlay").exists()
+}
+
 /// Render `output_path` relative to `workspace_root`, falling back to the full
 /// path when it is not under the root.
 fn relative_or_full(workspace_root: &Path, output_path: &Path) -> String {
@@ -371,5 +400,43 @@ mod tests {
         // it up and native_sim GPIO resolves.
         let path = output_path_for_emit(Path::new("/ws"), "native-sim-overlay");
         assert!(path.ends_with("boards/native_sim_native_64.overlay"));
+    }
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("tan-generate-{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn overlay_would_overwrite_true_only_when_file_exists_and_not_forced() {
+        let ws = unique_temp_dir("overlay-guard");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("boards")).unwrap();
+        std::fs::write(ws.join("boards").join("native_sim_native_64.overlay"), "x").unwrap();
+
+        let targets = vec!["native-sim-overlay"];
+        // Existing file, no --force -> would overwrite (this used to be silently
+        // truncated with no existence check at all).
+        assert!(overlay_would_overwrite(&ws, &targets, false));
+        // --force opts back in, same as init/scaffold.
+        assert!(!overlay_would_overwrite(&ws, &targets, true));
+        // Target not requested -> no guard needed regardless of the file's presence.
+        assert!(!overlay_would_overwrite(&ws, &["cmake-args"], false));
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    #[test]
+    fn overlay_would_overwrite_false_when_no_existing_file() {
+        let ws = unique_temp_dir("overlay-guard-absent");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+
+        assert!(!overlay_would_overwrite(
+            &ws,
+            &["native-sim-overlay"],
+            false
+        ));
+
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

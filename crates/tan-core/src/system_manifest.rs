@@ -236,8 +236,109 @@ pub fn overlay_run_results(
 /// Serialize a manifest back to YAML (the post-build `system-manifest.yaml`
 /// bytes). Kept in tan-core so the CLI needs no direct `serde_yaml` dependency;
 /// the error is stringified for the CLI's best-effort write path.
+///
+/// DO NOT use this on the post-build rewrite path: it goes through the typed
+/// `SystemManifest`, which is a deliberately TOLERANT (lossy-on-write) reader
+/// — it has no field for e.g. an rpmsg `IpcLink`'s carve-out (`shm_addr`,
+/// `shm_size`, ...) beyond `name`/`kind`/`endpoints`/`status`/`reason`, or for
+/// `hw_info.eeprom`. Re-serializing the typed struct silently deletes every
+/// such field from the file on disk. Use `overlay_run_results_raw` +
+/// `serialize_system_manifest_raw` (below) for any write, which round-trip
+/// through `serde_yaml::Value` and so preserve fields this struct doesn't
+/// model. This typed serializer stays only for the read-only round-trip tests
+/// in this module.
 pub fn serialize_system_manifest(manifest: &SystemManifest) -> Result<String, String> {
     serde_yaml::to_string(manifest).map_err(|e| e.to_string())
+}
+
+/// Parse a `system-manifest.yaml` document straight into the RAW
+/// `serde_yaml::Value` form (str-in / `Value`-out), the entry point the write
+/// path must use instead of `parse_system_manifest`. The typed reader is
+/// TOLERANT on read but lossy on write (see `serialize_system_manifest`), so
+/// starting the write path from `parse_system_manifest` already threw away
+/// every additive field (ipc carve-out, `hw_info.eeprom`, ...) before
+/// `overlay_run_results_raw` ever ran — reserializing the typed struct once
+/// was not the only place those fields died. Kept in tan-core (not just the
+/// raw serializer) so a caller never needs its own `serde_yaml` dependency:
+/// the whole raw seam is parse -> `overlay_run_results_raw` ->
+/// `serialize_system_manifest_raw`, all through this module. Still
+/// version-guarded identically to `parse_system_manifest`, so switching a
+/// caller to this pair changes nothing about which documents are accepted.
+pub fn parse_system_manifest_raw(yaml: &str) -> Result<serde_yaml::Value, SystemManifestError> {
+    let raw: serde_yaml::Value =
+        serde_yaml::from_str(yaml).map_err(|e| SystemManifestError::Parse(e.to_string()))?;
+    match raw
+        .get("schema_version")
+        .and_then(serde_yaml::Value::as_u64)
+    {
+        Some(found) if found as u32 == SYSTEM_MANIFEST_SCHEMA_VERSION => Ok(raw),
+        Some(found) => Err(SystemManifestError::UnsupportedSchemaVersion {
+            found: found as u32,
+            supported: SYSTEM_MANIFEST_SCHEMA_VERSION,
+        }),
+        None => Err(SystemManifestError::Parse(
+            "missing or non-numeric schema_version".to_string(),
+        )),
+    }
+}
+
+/// Overlay this run's per-slice outcomes onto the RAW manifest value parsed
+/// from YAML (same semantics as `overlay_run_results`, but operating on
+/// `serde_yaml::Value` instead of the typed `SystemManifest` — see
+/// `serialize_system_manifest_raw` for why the write path must use this pair
+/// instead of the typed one). Slices are matched by `core_id`; a slice not
+/// shaped as a mapping, or with no matching result, is left untouched.
+pub fn overlay_run_results_raw(
+    raw: &mut serde_yaml::Value,
+    results: &[(String, String, Option<String>, Option<String>)],
+) {
+    let Some(slices) = raw
+        .get_mut("slices")
+        .and_then(serde_yaml::Value::as_sequence_mut)
+    else {
+        return;
+    };
+    for slice in slices.iter_mut() {
+        let Some(map) = slice.as_mapping_mut() else {
+            continue;
+        };
+        let Some(core_id) = map.get("core_id").and_then(serde_yaml::Value::as_str) else {
+            continue;
+        };
+        let Some((_, status, output_artefact, build_dir)) =
+            results.iter().find(|(cid, ..)| cid == core_id)
+        else {
+            continue;
+        };
+        map.insert("status".into(), status.clone().into());
+        if let Some(a) = output_artefact {
+            map.insert("output_artefact".into(), a.clone().into());
+        }
+        if let Some(b) = build_dir {
+            map.insert("build_dir".into(), b.clone().into());
+        }
+    }
+}
+
+/// Serialize the RAW manifest value (as returned by `serde_yaml::from_str`,
+/// NOT the typed `SystemManifest`) back to YAML.
+///
+/// THE WRITE PATH MUST USE THIS, not `serialize_system_manifest`: the typed
+/// struct models only the schema fields this CLI currently reads, and the
+/// tolerant-reader policy at the top of this module deliberately treats
+/// everything else as ignorable — safe for a read-only consumer, but the
+/// post-build rewrite in `build/execute/manifest.rs` parses the SDK's
+/// `--emit system-manifest` YAML, overlays this run's results, and OVERWRITES
+/// `system-manifest.yaml` with the result. Going through `SystemManifest`
+/// there deletes every additive field it doesn't model — an rpmsg `IpcLink`'s
+/// shared-memory carve-out, `hw_info.eeprom`, anything a newer SDK adds —
+/// which defeats `tan image`'s `raw_passthrough` (written specifically to
+/// preserve those fields into the bundle manifest, but by the time it runs
+/// `tan build` has already deleted them from the source file). Round-tripping
+/// through `serde_yaml::Value` instead never drops a field it didn't
+/// explicitly overlay.
+pub fn serialize_system_manifest_raw(raw: &serde_yaml::Value) -> Result<String, String> {
+    serde_yaml::to_string(raw).map_err(|e| e.to_string())
 }
 
 /// Deterministic, human-readable summary lines (text-mode `alp build`). Pure.
@@ -423,6 +524,93 @@ boot_order: []
         let yaml = serialize_system_manifest(&m).expect("serialize");
         let reparsed = parse_system_manifest(&yaml).expect("reparse");
         assert_eq!(reparsed.slice_for_core("m55_hp").unwrap().status, "ok");
+    }
+
+    // AEN701 with an rpmsg carve-out (shm_addr/shm_size beyond what `IpcLink`
+    // models) and an `hw_info.eeprom` block (beyond what `HwInfo` models) — the
+    // two additive-field shapes the typed struct silently drops on rewrite.
+    fn manifest_with_additive_fields() -> String {
+        AEN701
+            .replace(
+                "ipc: []\n",
+                "ipc:\n- name: rpmsg0\n  kind: rpmsg\n  endpoints: [a55, m33]\n  shm_addr: 0x48000000\n  shm_size: 0x100000\n",
+            )
+            .replace("hw_info:\n", "hw_info:\n  eeprom:\n    magic: 0xA5\n")
+    }
+
+    #[test]
+    fn typed_reserialize_drops_additive_fields_ipc_carveout_and_eeprom() {
+        // Pins the DEFECT that makes overlay_run_results_raw/
+        // serialize_system_manifest_raw necessary: going through the typed
+        // SystemManifest (tolerant on READ) silently deletes any field it
+        // doesn't model when used to WRITE the file back out.
+        let yaml = manifest_with_additive_fields();
+        let m = parse_system_manifest(&yaml).unwrap();
+        let out = serialize_system_manifest(&m).unwrap();
+        assert!(!out.contains("shm_addr"), "typed reserialize kept shm_addr");
+        assert!(!out.contains("eeprom"), "typed reserialize kept eeprom");
+    }
+
+    #[test]
+    fn overlay_run_results_raw_preserves_additive_fields_ipc_carveout_and_eeprom() {
+        // The fix: overlay+serialize on the raw serde_yaml::Value never goes
+        // through SystemManifest, so fields it doesn't model (an rpmsg carve
+        // -out's shm_addr/shm_size, hw_info.eeprom) survive the write, and
+        // this run's overlay (status/output_artefact/build_dir) still lands.
+        let yaml = manifest_with_additive_fields();
+        let mut raw: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        overlay_run_results_raw(
+            &mut raw,
+            &[(
+                "m55_hp".to_string(),
+                "ok".to_string(),
+                Some("build/m55_hp-zephyr/build/zephyr/zephyr.elf".to_string()),
+                None,
+            )],
+        );
+        let out = serialize_system_manifest_raw(&raw).expect("serialize raw");
+
+        assert!(out.contains("shm_addr"), "raw reserialize dropped shm_addr");
+        assert!(out.contains("eeprom"), "raw reserialize dropped eeprom");
+
+        let reparsed = parse_system_manifest(&out).expect("reparse");
+        let hp = reparsed.slice_for_core("m55_hp").unwrap();
+        assert_eq!(hp.status, "ok");
+        assert_eq!(
+            hp.output_artefact.as_deref(),
+            Some("build/m55_hp-zephyr/build/zephyr/zephyr.elf")
+        );
+        // Untouched slices/fields stay as-is.
+        let a32 = reparsed.slice_for_core("a32_cluster").unwrap();
+        assert_eq!(a32.status, "pending");
+    }
+
+    #[test]
+    fn parse_system_manifest_raw_preserves_additive_fields_ipc_carveout_and_eeprom() {
+        // Regression: the write path (crates/tan-cli/.../manifest.rs) must be
+        // able to reach the raw overlay/serialize pair without ever routing
+        // through the lossy typed SystemManifest. Before this fn existed the
+        // only str-in entry point was parse_system_manifest, which already
+        // drops shm_addr/eeprom at parse time (they aren't modeled), so
+        // starting the raw seam from it would still lose them on write.
+        let yaml = manifest_with_additive_fields();
+        let raw = parse_system_manifest_raw(&yaml).expect("valid manifest");
+        let out = serialize_system_manifest_raw(&raw).expect("serialize raw");
+        assert!(out.contains("shm_addr"), "raw parse dropped shm_addr");
+        assert!(out.contains("eeprom"), "raw parse dropped eeprom");
+    }
+
+    #[test]
+    fn parse_system_manifest_raw_rejects_unsupported_schema_version() {
+        // The raw entry point must enforce the same version guard as the
+        // typed one -- switching a caller to it must not silently start
+        // accepting a schema_version this CLI doesn't consume.
+        let yaml = AEN701.replace("schema_version: 1", "schema_version: 2");
+        let err = parse_system_manifest_raw(&yaml).unwrap_err();
+        assert!(matches!(
+            err,
+            SystemManifestError::UnsupportedSchemaVersion { found: 2, .. }
+        ));
     }
 
     #[test]

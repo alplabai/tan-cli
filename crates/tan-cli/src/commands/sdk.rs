@@ -12,7 +12,7 @@ use std::process::Command;
 use serde::Serialize;
 use tan_core::{
     GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, check_sdk_readiness,
-    parse_remote_sdk_releases, resolve_active_sdk,
+    is_plain_relative, parse_remote_sdk_releases, resolve_active_sdk,
 };
 
 use super::CommandRun;
@@ -121,6 +121,7 @@ fn run_list(g: &GlobalArgs) -> CommandRun {
             releases,
         },
         ExitCode::Success,
+        Vec::new(),
         text,
     )
 }
@@ -158,7 +159,7 @@ fn format_release_table(releases: &[SdkRelease]) -> Vec<String> {
 // ── tan sdk install <version> ────────────────────────────────────────────────
 
 /// Clones the requested SDK version into the cache (unless already present) and reports readiness.
-/// Process exit reflects readiness (`Missing` → failure) while the envelope stays success.
+/// A `Missing` readiness fails both the process exit and the JSON envelope (`ok`/`exitCode`/`issues`).
 fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     let Some(version) = args.arg.clone() else {
         return emit_failure(
@@ -178,6 +179,31 @@ fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
             ],
         );
     };
+
+    // `version` is untrusted CLI/extension input joined onto the cache root
+    // below, not a path itself. `Path::new(&cache_root).join(&version)` with an
+    // unvalidated `version` lets `tan sdk install ../../x` (or an absolute /
+    // UNC value) write the clone outside the cache root entirely — `is_absolute()`
+    // alone also misses Windows-rooted/drive-relative shapes (see
+    // tan_core::path_guard). Reject anything that isn't a single plain path
+    // segment before it ever reaches `Path::join`.
+    if !is_plain_relative(Path::new(&version)) {
+        return emit_failure(
+            g,
+            InstallData {
+                subcommand: "install",
+                version: version.clone(),
+                sdk_path: String::new(),
+                readiness: empty_readiness(""),
+            },
+            ExitCode::RuntimeFailure,
+            "invalid-version",
+            format!("Invalid SDK version: {version:?} (must not be a path)."),
+            vec![format!(
+                "sdk install: invalid version {version:?} — must not contain '/', '\\', '..' or a drive/UNC prefix."
+            )],
+        );
+    }
 
     let cache_root = args.destination.clone().unwrap_or_else(default_cache_root);
     let dest_path = Path::new(&cache_root).join(&version);
@@ -206,13 +232,33 @@ fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     }
 
     let readiness = readiness_for(&dest_str);
-    // Process exit reflects readiness; the envelope field stays success (TS parity).
     let exit = if readiness.state == SdkReadinessState::Missing {
         ExitCode::RuntimeFailure
     } else {
         ExitCode::Success
     };
     let text = format_readiness_block(&format!("SDK {version} installed"), &readiness);
+    // A Missing readiness used to reach the envelope only as this text block,
+    // which `--format json` throws away entirely — the JSON consumer (the
+    // vscode extension) got exitCode 0/ok:true with an empty `issues` array
+    // for an SDK clone that is not actually usable. Surface it as a real Issue
+    // too, not just prose.
+    let issues = if readiness.state == SdkReadinessState::Missing {
+        vec![Issue {
+            code: "sdk.install-not-ready".to_string(),
+            severity: "error".to_string(),
+            message: if readiness.issues.is_empty() {
+                format!("SDK {version} was installed but is not ready to use.")
+            } else {
+                format!(
+                    "SDK {version} was installed but is not ready to use: {}",
+                    readiness.issues.join("; ")
+                )
+            },
+        }]
+    } else {
+        Vec::new()
+    };
     emit_success(
         g,
         InstallData {
@@ -222,6 +268,7 @@ fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
             readiness,
         },
         exit,
+        issues,
         text,
     )
 }
@@ -269,9 +316,14 @@ fn git_clone(version: &str, dest: &Path) -> Result<(), String> {
 
 /// Resolves the active SDK for the current workspace and reports its path + readiness.
 fn run_current(g: &GlobalArgs) -> CommandRun {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Every other reader of `.alp/sdk-path` resolves it under
+    // `cli_workspace_root` (cwd joined with `--project`) — this used to read
+    // from the bare process cwd, so `tan --project ./firmware sdk current`
+    // reported the repo-root pointer instead of the one `build`/`flash`/etc.
+    // actually consult for that project.
+    let workspace_root = crate::util::cli_workspace_root(g);
     let sdk_path = resolve_active_sdk(
-        &cwd.to_string_lossy(),
+        &workspace_root.to_string_lossy(),
         |p| Path::new(p).exists(),
         |p| std::fs::read_to_string(p).ok(),
     );
@@ -292,14 +344,16 @@ fn run_current(g: &GlobalArgs) -> CommandRun {
             readiness,
         },
         ExitCode::Success,
+        Vec::new(),
         text,
     )
 }
 
 // ── tan sdk switch <version|path> ────────────────────────────────────────────
 
-/// Repoints the active SDK to `<version|path>` (absolute path used as-is, else resolved under
-/// `sdk_root`/cache), verifying the path exists and writing the pointer file.
+/// Repoints the active SDK to `<version|path>` (a bare version segment resolves under the SDK
+/// cache root, anything path-shaped resolves under the workspace root — absolute as-is),
+/// verifying the path exists and writing the pointer file.
 fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     let Some(version_or_path) = args.arg.clone() else {
         return emit_failure(
@@ -319,15 +373,35 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
         );
     };
 
-    let sdk_path = if Path::new(&version_or_path).is_absolute() {
-        version_or_path.clone()
+    // `g.sdk_root` (--sdk-root) is an unrelated global flag meaning "the SDK
+    // root other commands should read"; it used to be consulted here via
+    // `unwrap_or_else`, so that closure — and the `version_or_path` argument
+    // the user just typed — never ran whenever --sdk-root was set.
+    // `tan --sdk-root X sdk switch Y` silently re-pinned X and reported
+    // success switching to Y. The positional argument must always resolve.
+    //
+    // The discriminator used to be `Path::new(&version_or_path).is_absolute()`,
+    // which only catches absolute paths and misses the documented
+    // `<version|path>` *relative* path form entirely: `tan sdk switch
+    // ../alp-sdk` fell into the version branch and was joined onto the cache
+    // root as `~/.alp/sdk-cache/../alp-sdk` — the sibling checkout the user
+    // meant was never consulted. On Windows `is_absolute()` is additionally
+    // false for `\some\path` and `C:foo`, which the cache-join branch also
+    // then mangled. `is_plain_relative` is the same "bare version segment"
+    // shape check `run_install` already uses; anything that isn't one plain
+    // segment is a path and is resolved against the workspace root instead —
+    // an absolute argument survives that `join` unchanged (`PathBuf::push`
+    // discards the base for an absolute pushed path), so the two branches
+    // collapse cleanly into one `join` + `normalize_path`.
+    let sdk_path = if is_plain_relative(Path::new(&version_or_path)) {
+        Path::new(&default_cache_root())
+            .join(&version_or_path)
+            .to_string_lossy()
+            .to_string()
     } else {
-        g.sdk_root.clone().unwrap_or_else(|| {
-            Path::new(&default_cache_root())
-                .join(&version_or_path)
-                .to_string_lossy()
-                .to_string()
-        })
+        tan_core::normalize_path(&crate::util::cli_workspace_root(g).join(&version_or_path))
+            .to_string_lossy()
+            .to_string()
     };
 
     if !Path::new(&sdk_path).exists() {
@@ -348,7 +422,33 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
         );
     }
 
-    if let Err(message) = write_active_pointer(&sdk_path) {
+    // The path can exist without being an SDK checkout (wrong nesting level,
+    // an unpacked release archive, a typo'd sibling dir). Pinning it anyway
+    // reported success while `resolve_sdk_root` treats a pointer without the
+    // loader script as best-effort and silently falls through to
+    // auto-discovery — every later command then builds/flashes against a
+    // DIFFERENT SDK than the one the user was just told they switched to.
+    if !crate::util::has_loader_script(Path::new(&sdk_path)) {
+        return emit_failure(
+            g,
+            SwitchData {
+                subcommand: "switch",
+                sdk_path: sdk_path.clone(),
+                version: None,
+            },
+            ExitCode::RuntimeFailure,
+            "not-an-sdk-checkout",
+            format!(
+                "{sdk_path} does not look like an alp-sdk checkout (missing scripts/alp_project.py)."
+            ),
+            vec![
+                format!("sdk switch: {sdk_path} does not look like an alp-sdk checkout."),
+                "Expected scripts/alp_project.py under the given path.".to_string(),
+            ],
+        );
+    }
+
+    if let Err(message) = write_active_pointer(g, &sdk_path) {
         return emit_failure(
             g,
             SwitchData {
@@ -386,14 +486,19 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
             version: readiness.version,
         },
         ExitCode::Success,
+        Vec::new(),
         text,
     )
 }
 
-/// Writes the active-SDK pointer JSON (`sdkPath` + `updatedAt`) to `./.alp/sdk-path`.
-fn write_active_pointer(sdk_path: &str) -> Result<(), String> {
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let dir = cwd.join(".alp");
+/// Writes the active-SDK pointer JSON (`sdkPath` + `updatedAt`) to
+/// `<workspace_root>/.alp/sdk-path`, where `workspace_root` is `cli_workspace_root(g)`
+/// (cwd joined with `--project`) — every reader (`resolve_sdk_root`,
+/// `resolve_cli_project_context`) resolves the pointer under that same root, so
+/// writing at the bare process cwd left `--project` invocations writing a
+/// pointer nothing reads.
+fn write_active_pointer(g: &GlobalArgs, sdk_path: &str) -> Result<(), String> {
+    let dir = crate::util::cli_workspace_root(g).join(".alp");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let pointer = serde_json::json!({ "sdkPath": sdk_path, "updatedAt": generated_at_iso() });
     let content = format!(
@@ -486,27 +591,27 @@ fn null_project() -> Project {
     }
 }
 
-/// Builds a `CommandRun` for the success path: text in non-JSON mode, an envelope (always
-/// `exitCode` 0) in JSON mode; the process `exit` may still differ from the envelope code.
+/// Builds a `CommandRun` for the "success" path (the operation itself ran, but
+/// `exit` may still report a failure — e.g. `install` on a Missing readiness):
+/// text in non-JSON mode, an envelope in JSON mode carrying `issues` and the
+/// SAME `exit` code the process exits with.
 fn emit_success<T: Serialize>(
     g: &GlobalArgs,
     data: T,
     exit: ExitCode,
+    issues: Vec<Issue>,
     text_lines: Vec<String>,
 ) -> CommandRun {
     let text = if g.is_json() { Vec::new() } else { text_lines };
-    // The success-path envelope always carries exitCode 0 (mirrors TS
-    // createEnvelope); the process exit may still differ (install → missing).
-    let json = g.is_json().then(|| {
-        Envelope::new(
-            "sdk",
-            null_project(),
-            data,
-            Vec::new(),
-            ExitCode::Success.code(),
-        )
-        .to_json()
-    });
+    // Used to hardcode `ExitCode::Success.code()` here regardless of `exit`
+    // ("mirrors TS createEnvelope") — so `sdk install` on a Missing readiness
+    // exited the process with 1 while the JSON envelope claimed
+    // `ok:true, exitCode:0, issues:[]`. `Envelope::new` derives `ok` from the
+    // exit code it is given, so passing the real `exit` here keeps `ok` and
+    // `exitCode` in agreement, matching every other command's envelope.
+    let json = g
+        .is_json()
+        .then(|| Envelope::new("sdk", null_project(), data, issues, exit.code()).to_json());
     CommandRun { exit, text, json }
 }
 
@@ -530,4 +635,200 @@ fn emit_failure<T: Serialize>(
         .is_json()
         .then(|| Envelope::new("sdk", null_project(), data, issues, exit.code()).to_json());
     CommandRun { exit, text, json }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Format;
+
+    /// Fresh temp dir for one test, tagged and pid-scoped like the other
+    /// command test suites in this crate (clean.rs, flash/mod.rs, …).
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tan-sdk-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Turns `dir` into a directory `has_loader_script` accepts.
+    fn make_sdk_root(dir: &Path) {
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts").join("alp_project.py"), "").unwrap();
+    }
+
+    /// `project: Some(<absolute path>)` makes `cli_workspace_root` resolve to
+    /// exactly that directory regardless of the real process cwd — `PathBuf::join`
+    /// discards `cwd` when the pushed path is absolute.
+    fn global(project: &Path, sdk_root: Option<&Path>, format: Format) -> GlobalArgs {
+        GlobalArgs {
+            project: Some(project.to_string_lossy().into_owned()),
+            board_yaml: None,
+            sdk_root: sdk_root.map(|p| p.to_string_lossy().into_owned()),
+            target: None,
+            all: false,
+            format,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    fn json_data(run: &CommandRun) -> serde_json::Value {
+        serde_json::from_str(run.json.as_deref().expect("json envelope")).unwrap()
+    }
+
+    #[test]
+    fn install_rejects_path_shaped_version_before_touching_disk() {
+        // Regression for the supply-chain finding: `run_install` used to do
+        // `Path::new(&cache_root).join(&version)` with an unvalidated `version`,
+        // so `tan sdk install ../../x` wrote the clone outside the cache root.
+        let ws = tmp("install-traversal");
+        let g = global(&ws, None, Format::Json);
+        let run = run_install(
+            &g,
+            &SdkArgs {
+                subcommand: Some("install".to_string()),
+                arg: Some("../../evil".to_string()),
+                destination: None,
+            },
+        );
+        assert_eq!(run.exit, ExitCode::RuntimeFailure);
+        let data = json_data(&run);
+        assert_eq!(data["issues"][0]["code"], "sdk.invalid-version");
+        // Nothing was created — the guard fired before any fs/network I/O.
+        assert!(!ws.join("../../evil").exists());
+    }
+
+    #[test]
+    fn switch_uses_the_positional_argument_even_when_sdk_root_is_set() {
+        // Regression: the relative-path branch used to be
+        // `g.sdk_root.clone().unwrap_or_else(|| … version_or_path …)`, so the
+        // positional argument was only used when --sdk-root was ABSENT. With
+        // --sdk-root set, `sdk switch <version>` silently re-pinned the old
+        // root instead of resolving the version the user asked for.
+        let ws = tmp("switch-arg-not-discarded");
+        let other_root = tmp("switch-arg-other-root");
+        make_sdk_root(&other_root);
+        let g = global(&ws, Some(&other_root), Format::Json);
+        let run = run_switch(
+            &g,
+            &SdkArgs {
+                subcommand: Some("switch".to_string()),
+                arg: Some("does-not-exist-anywhere".to_string()),
+                destination: None,
+            },
+        );
+        // Resolves under the cache root and (as expected) doesn't exist —
+        // the important assertion is WHICH path it tried, not that it succeeds.
+        assert_eq!(run.exit, ExitCode::RuntimeFailure);
+        let data = json_data(&run);
+        let sdk_path = data["data"]["sdkPath"].as_str().unwrap();
+        assert!(
+            sdk_path.contains("does-not-exist-anywhere"),
+            "sdk_path should resolve the positional argument, got {sdk_path}"
+        );
+        assert_ne!(sdk_path, other_root.to_string_lossy());
+    }
+
+    #[test]
+    fn switch_resolves_relative_path_form_against_workspace_not_cache_root() {
+        // Regression: the discriminator used to be `Path::new(&version_or_path)
+        // .is_absolute()`, so a relative *path* (as opposed to a bare version
+        // segment) fell into the version branch and was joined onto the SDK
+        // cache root instead of resolved as the sibling checkout it names —
+        // `tan sdk switch ../alp-sdk` pinned `<cache_root>/../alp-sdk`, not the
+        // directory next to the workspace.
+        let ws = tmp("switch-relpath-ws");
+        let sibling = ws.parent().unwrap().join(format!(
+            "tan-sdk-switch-relpath-sibling-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&sibling);
+        make_sdk_root(&sibling);
+        let g = global(&ws, None, Format::Json);
+
+        let run = run_switch(
+            &g,
+            &SdkArgs {
+                subcommand: Some("switch".to_string()),
+                arg: Some(format!(
+                    "../{}",
+                    sibling.file_name().unwrap().to_string_lossy()
+                )),
+                destination: None,
+            },
+        );
+        assert_eq!(run.exit, ExitCode::Success);
+        let data = json_data(&run);
+        let sdk_path = data["data"]["sdkPath"].as_str().unwrap();
+        assert_eq!(
+            Path::new(sdk_path),
+            tan_core::normalize_path(&sibling),
+            "relative path form must resolve the sibling checkout, not join onto the cache root"
+        );
+        assert!(!sdk_path.contains("sdk-cache"));
+
+        let _ = std::fs::remove_dir_all(&sibling);
+    }
+
+    #[test]
+    fn switch_refuses_a_path_that_is_not_an_sdk_checkout() {
+        // Regression: `run_switch` used to gate only on `Path::exists()`, so
+        // pointing it at any existing directory "succeeded" and silently wrote
+        // a pointer that every consumer's `has_loader_script` check then
+        // ignores, falling back to auto-discovery of a DIFFERENT SDK.
+        let ws = tmp("switch-not-sdk-ws");
+        let not_an_sdk = tmp("switch-not-sdk-target");
+        let g = global(&ws, None, Format::Json);
+        let run = run_switch(
+            &g,
+            &SdkArgs {
+                subcommand: Some("switch".to_string()),
+                arg: Some(not_an_sdk.to_string_lossy().into_owned()),
+                destination: None,
+            },
+        );
+        assert_eq!(run.exit, ExitCode::RuntimeFailure);
+        let data = json_data(&run);
+        assert_eq!(data["issues"][0]["code"], "sdk.not-an-sdk-checkout");
+        // No pointer was written.
+        assert!(!ws.join(".alp").join("sdk-path").exists());
+    }
+
+    #[test]
+    fn switch_and_current_use_project_scoped_workspace_root_not_process_cwd() {
+        // Regression: `write_active_pointer`/`run_current` used to resolve
+        // `.alp/sdk-path` from the bare process cwd, while every consumer
+        // (`resolve_sdk_root`, `resolve_cli_project_context`) resolves it under
+        // `cli_workspace_root` (cwd joined with --project). With --project set,
+        // the pointer was written where nothing reads it.
+        let ws = tmp("switch-current-project-scoped");
+        let sdk_root = tmp("switch-current-sdk-root");
+        make_sdk_root(&sdk_root);
+        let g = global(&ws, None, Format::Json);
+
+        let switched = run_switch(
+            &g,
+            &SdkArgs {
+                subcommand: Some("switch".to_string()),
+                arg: Some(sdk_root.to_string_lossy().into_owned()),
+                destination: None,
+            },
+        );
+        assert_eq!(switched.exit, ExitCode::Success);
+        assert!(
+            ws.join(".alp").join("sdk-path").exists(),
+            "pointer should be written under the --project workspace root"
+        );
+
+        let current = run_current(&g);
+        let data = json_data(&current);
+        assert_eq!(
+            data["data"]["sdkPath"].as_str().unwrap(),
+            sdk_root.to_string_lossy()
+        );
+    }
 }

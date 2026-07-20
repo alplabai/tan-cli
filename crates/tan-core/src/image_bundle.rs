@@ -13,7 +13,11 @@
 //!   - artefact paths are built as forward-slash strings here rather than from a
 //!     `PathBuf`, so the machine contract never leaks a Windows `\` separator.
 
+use std::path::Path;
+
 use serde::Serialize;
+
+use crate::path_guard::is_plain_relative;
 
 /// Bundle-manifest `schema_version` (matches the system-manifest v1 line).
 pub const BUNDLE_SCHEMA_VERSION: u32 = 1;
@@ -81,13 +85,29 @@ pub struct BundleManifest {
 }
 
 /// Archive filename for a slice: `<core_id>-<os>.tar.gz`.
-pub fn slice_archive_name(core_id: &str, os: &str) -> String {
-    format!("{core_id}-{os}.tar.gz")
+///
+/// `None` when `core_id`/`os` aren't safe to fold into a filename that will
+/// be `.join()`ed onto the bundle's `slices/` dir. Both fields come straight
+/// off system-manifest.yaml — the parser is a deliberately tolerant reader,
+/// not a validator — and this used to `format!` them in unchecked: a
+/// `core_id` of `../../../../home/u/x` or (Windows) `C:/x` escaped
+/// `image-bundle/slices/` entirely, so the caller's `remove_file` +
+/// `File::create` could unlink/overwrite an arbitrary `*.tar.gz` outside the
+/// build tree. The guard lives here rather than at the call site because
+/// `slice_artefact_rel` below needs the exact same check for the manifest's
+/// `artefact` string — a per-call-site guard is how this class of bug keeps
+/// recurring in this codebase.
+pub fn slice_archive_name(core_id: &str, os: &str) -> Option<String> {
+    if !is_plain_relative(Path::new(core_id)) || !is_plain_relative(Path::new(os)) {
+        return None;
+    }
+    Some(format!("{core_id}-{os}.tar.gz"))
 }
 
 /// Forward-slash relative artefact path for a slice: `slices/<core_id>-<os>.tar.gz`.
-pub fn slice_artefact_rel(core_id: &str, os: &str) -> String {
-    format!("{SLICES_DIR}/{}", slice_archive_name(core_id, os))
+/// `None` for the same unsafe `core_id`/`os` shapes `slice_archive_name` rejects.
+pub fn slice_artefact_rel(core_id: &str, os: &str) -> Option<String> {
+    slice_archive_name(core_id, os).map(|name| format!("{SLICES_DIR}/{name}"))
 }
 
 /// Forward-slash relative artefact path for a helper firmware: `helper-mcus/<basename>`.
@@ -143,7 +163,7 @@ mod tests {
     fn slice_archive_name_joins_core_and_os() {
         assert_eq!(
             slice_archive_name("m55_hp", "zephyr"),
-            "m55_hp-zephyr.tar.gz"
+            Some("m55_hp-zephyr.tar.gz".to_string())
         );
     }
 
@@ -151,10 +171,37 @@ mod tests {
     fn slice_artefact_rel_is_forward_slash() {
         assert_eq!(
             slice_artefact_rel("m55_hp", "zephyr"),
-            "slices/m55_hp-zephyr.tar.gz"
+            Some("slices/m55_hp-zephyr.tar.gz".to_string())
         );
         // No backslash ever, even conceptually on Windows.
-        assert!(!slice_artefact_rel("m55_hp", "zephyr").contains('\\'));
+        assert!(
+            !slice_artefact_rel("m55_hp", "zephyr")
+                .unwrap()
+                .contains('\\')
+        );
+    }
+
+    #[test]
+    fn slice_archive_name_rejects_path_escapes() {
+        // `..` traversal.
+        assert_eq!(slice_archive_name("../../../../home/u/x", "zephyr"), None);
+        assert_eq!(slice_archive_name("m55_hp", "../escape"), None);
+        // POSIX-absolute (also rejected on Windows, unlike raw `is_absolute()`).
+        assert_eq!(slice_archive_name("/etc/passwd", "zephyr"), None);
+        // Same guard reaches the artefact-path builder.
+        assert_eq!(slice_artefact_rel("../escape", "zephyr"), None);
+        // Ordinary identifiers still pass.
+        assert!(slice_archive_name("m55_hp", "zephyr").is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn slice_archive_name_rejects_windows_rooted_and_drive_relative() {
+        // `\x` and `C:x` are NOT `is_absolute()` and carry no `ParentDir` —
+        // exactly the shapes the old `is_absolute() || ParentDir` guard
+        // pattern let through while still escaping a `.join()`ed base.
+        assert_eq!(slice_archive_name(r"\windows\system32", "zephyr"), None);
+        assert_eq!(slice_archive_name("C:foo", "zephyr"), None);
     }
 
     #[test]

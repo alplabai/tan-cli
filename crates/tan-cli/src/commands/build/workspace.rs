@@ -284,7 +284,20 @@ pub(super) fn with_venv_on_path(command: &mut Command, tool: &str) {
     let Some(dir) = bin.parent() else {
         return;
     };
-    let existing = std::env::var_os("PATH").unwrap_or_default();
+    // Read whatever PATH is ALREADY staged on `command` — the plan's own
+    // `env`/`env_append_path` may have pinned one via `.envs(env)` before this
+    // runs — and fall back to the parent process's PATH only when the
+    // assembled env carried none. Reading `std::env::var_os("PATH")`
+    // unconditionally (the old code) discarded a plan-pinned PATH outright:
+    // `Command::envs` had already set it on `command`, and this then
+    // overwrote it with the CLI's own ambient PATH, silently dropping e.g. a
+    // pinned cross-toolchain directory.
+    let existing = command
+        .get_envs()
+        .find(|(k, _)| *k == std::ffi::OsStr::new("PATH"))
+        .and_then(|(_, v)| v.map(|v| v.to_os_string()))
+        .or_else(|| std::env::var_os("PATH"))
+        .unwrap_or_default();
     let mut paths = vec![dir.to_path_buf()];
     paths.extend(std::env::split_paths(&existing));
     if let Ok(joined) = std::env::join_paths(paths) {
@@ -585,5 +598,80 @@ mod west_program_tests {
             Some(workspace)
         );
         std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod with_venv_on_path_tests {
+    use super::with_venv_on_path;
+    use std::process::Command;
+
+    fn path_env(cmd: &Command) -> String {
+        cmd.get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("PATH"))
+            .and_then(|(_, v)| v)
+            .expect("PATH must be set")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    #[test]
+    fn prepends_onto_a_path_already_staged_on_the_command_not_the_process_path() {
+        // Regression: `with_venv_on_path` used to unconditionally read
+        // `std::env::var_os("PATH")` (the CLI's OWN process env), discarding
+        // whatever PATH the plan's `env`/`env_append_path` had already staged
+        // on `command` via `.envs(env)` moments earlier — e.g. a pinned cross
+        // toolchain directory the plan needs ahead of anything else.
+        let mut cmd = Command::new("does-not-matter");
+        cmd.env("PATH", "/plan/toolchain/bin");
+        let venv_west = if cfg!(windows) {
+            r"C:\ws\.venv\Scripts\west.exe"
+        } else {
+            "/ws/.venv/bin/west"
+        };
+        with_venv_on_path(&mut cmd, venv_west);
+
+        let path = path_env(&cmd);
+        let venv_dir = std::path::Path::new(venv_west)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            path.starts_with(&venv_dir),
+            "venv dir must lead PATH, got: {path}"
+        );
+        assert!(
+            path.contains("/plan/toolchain/bin"),
+            "the plan-staged PATH segment must survive, got: {path}"
+        );
+    }
+
+    #[test]
+    fn falls_back_to_process_path_when_command_has_none_staged() {
+        let mut cmd = Command::new("does-not-matter");
+        let venv_west = if cfg!(windows) {
+            r"C:\ws\.venv\Scripts\west.exe"
+        } else {
+            "/ws/.venv/bin/west"
+        };
+        with_venv_on_path(&mut cmd, venv_west);
+        // No panic / no-op when nothing was staged — PATH is still set to at
+        // least the venv dir (plus whatever the test process's own PATH is).
+        let path = path_env(&cmd);
+        let venv_dir = std::path::Path::new(venv_west)
+            .parent()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert!(path.starts_with(&venv_dir), "got: {path}");
+    }
+
+    #[test]
+    fn a_bare_path_tool_is_left_untouched() {
+        let mut cmd = Command::new("does-not-matter");
+        cmd.env("PATH", "/plan/toolchain/bin");
+        with_venv_on_path(&mut cmd, "west"); // not absolute -> no-op
+        assert_eq!(path_env(&cmd), "/plan/toolchain/bin");
     }
 }

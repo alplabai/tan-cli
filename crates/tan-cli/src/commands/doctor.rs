@@ -89,12 +89,21 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
 
     // `--fix`: when no Zephyr workspace is resolved, bootstrap one on demand
     // (reuses a compatible Zephyr, else bootstraps), then re-resolve the context.
+    let mut bootstrap_fix_check: Option<DoctorCheck> = None;
     if fix
         && probe_build_preflight(g, &context)
             .iter()
             .any(|c| c.name == "workspace" && c.status == DoctorStatus::Fail)
     {
-        let _ = crate::commands::bootstrap::run(
+        // `let _ = ...` used to throw away the whole bootstrap CommandRun --
+        // its exit code, its text, and (in --format json, where bootstrap.rs
+        // *captures* rather than streams) its entire envelope including the
+        // `bootstrap.failed` / `windows-unsupported` issue. A failed or
+        // refused `--fix` was then completely invisible: JSON mode reported
+        // nothing at all, and on Windows nothing was printed either, so
+        // `--fix` looked like a silent no-op. Fold the outcome into a doctor
+        // check instead so it survives into the report/envelope.
+        let bootstrap_run = crate::commands::bootstrap::run(
             g,
             &BootstrapArgs {
                 no_pip: false,
@@ -102,6 +111,7 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
                 print_env: false,
             },
         );
+        bootstrap_fix_check = Some(bootstrap_fix_doctor_check(&bootstrap_run));
         context = resolve_cli_project_context(g);
     }
 
@@ -142,6 +152,17 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
             DoctorStatus::Fail => report.summary.fail += 1,
         }
         report.checks.insert(0, check);
+    }
+
+    // Surface the `--fix` bootstrap outcome (see the discarded-CommandRun
+    // comment above) right after the readiness checks it was meant to repair.
+    if let Some(check) = bootstrap_fix_check {
+        match check.status {
+            DoctorStatus::Pass => report.summary.pass += 1,
+            DoctorStatus::Warn => report.summary.warn += 1,
+            DoctorStatus::Fail => report.summary.fail += 1,
+        }
+        report.checks.push(check);
     }
 
     let exit = if report.summary.fail > 0 {
@@ -271,12 +292,59 @@ fn read_board_model(context: &ProjectContext) -> Option<tan_core::BoardModel> {
     parse_board_model(&source).ok()
 }
 
+/// Fold a `bootstrap --fix` `CommandRun` into a `DoctorCheck`. Text mode
+/// carries a one-line summary in `text`; JSON mode captures the whole run and
+/// only puts a message in `json` (see bootstrap.rs), so pull the first issue
+/// message back out of that envelope rather than reporting nothing.
+fn bootstrap_fix_doctor_check(run: &CommandRun) -> DoctorCheck {
+    let status = if run.exit == ExitCode::Success {
+        DoctorStatus::Pass
+    } else {
+        DoctorStatus::Fail
+    };
+    let detail = if !run.text.is_empty() {
+        run.text.join(" ")
+    } else {
+        run.json
+            .as_deref()
+            .and_then(bootstrap_envelope_issue_message)
+            .unwrap_or_else(|| format!("tan bootstrap --fix exited {}", run.exit.code()))
+    };
+    let fix = (status != DoctorStatus::Pass)
+        .then(|| "Run `tan bootstrap` directly to see the full install log.".to_string());
+    DoctorCheck {
+        name: "bootstrapFix".to_string(),
+        status,
+        detail,
+        fix,
+    }
+}
+
+/// Pull the first `issues[].message` out of a serialized bootstrap envelope.
+fn bootstrap_envelope_issue_message(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .get("issues")?
+        .as_array()?
+        .first()?
+        .get("message")?
+        .as_str()
+        .map(str::to_string)
+}
+
 /// Detect a Zephyr SDK install without spawning anything: honor
-/// `ZEPHYR_SDK_INSTALL_DIR`, else look for a `zephyr-sdk-*` directory in the
-/// usual install roots (home + `/opt`).
+/// `ZEPHYR_SDK_INSTALL_DIR` (only when the directory it names still exists --
+/// the variable is exported from a shell profile and routinely outlives the
+/// SDK it once pointed at, e.g. after `rm -rf ~/zephyr-sdk-0.16.5`; trusting
+/// presence alone reported a false Pass here and the real failure surfaced
+/// later as a raw CMake toolchain error, exactly what this preflight exists
+/// to catch early), else look for a `zephyr-sdk-*` directory in the usual
+/// install roots (home + `/opt`).
 fn zephyr_sdk_detected() -> bool {
-    if std::env::var_os("ZEPHYR_SDK_INSTALL_DIR").is_some() {
-        return true;
+    if let Some(dir) = std::env::var_os("ZEPHYR_SDK_INSTALL_DIR") {
+        if env_dir_still_exists(&dir) {
+            return true;
+        }
     }
     let mut roots: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from("/opt")];
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
@@ -294,6 +362,14 @@ fn zephyr_sdk_detected() -> bool {
             })
             .unwrap_or(false)
     })
+}
+
+/// `true` when `env_value` (a raw `ZEPHYR_SDK_INSTALL_DIR` value) names a
+/// directory that is actually present. Split out of `zephyr_sdk_detected` so
+/// the "don't trust a stale env var" guard is unit-testable without mutating
+/// process-global env state (which cargo test's parallel threads would race).
+fn env_dir_still_exists(env_value: &std::ffi::OsStr) -> bool {
+    Path::new(env_value).is_dir()
 }
 
 /// Render the `--build` readiness report as human-readable lines, with the
@@ -572,5 +648,49 @@ mod tests {
         assert!(json.contains("\"checks\":[]"));
         assert!(json.contains("Server 'jlink' is not supported for 'native-host'."));
         assert!(json.contains("Choose a supported server for the selected target-kind."));
+    }
+
+    #[test]
+    fn env_dir_still_exists_requires_the_directory_to_be_present() {
+        let missing =
+            std::env::temp_dir().join(format!("tan-doctor-missing-sdk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&missing);
+        assert!(!env_dir_still_exists(missing.as_os_str()));
+
+        let present =
+            std::env::temp_dir().join(format!("tan-doctor-present-sdk-{}", std::process::id()));
+        std::fs::create_dir_all(&present).unwrap();
+        assert!(env_dir_still_exists(present.as_os_str()));
+        let _ = std::fs::remove_dir_all(&present);
+    }
+
+    #[test]
+    fn bootstrap_fix_check_surfaces_json_mode_failure_instead_of_silence() {
+        // Simulates bootstrap.rs's JSON-mode CommandRun: empty `text`, the
+        // failure captured only inside the serialized envelope. Before the
+        // fix `let _ = bootstrap::run(...)` discarded this whole value, so
+        // `--fix` failing (or refusing to run on Windows) was invisible.
+        let envelope = r#"{"command":"bootstrap","ok":false,"exitCode":1,"project":{"root":null,"boardYaml":null},"data":{},"issues":[{"code":"bootstrap.failed","severity":"error","message":"bootstrap.sh reported a failure; re-run without --format json to see the log."}]}"#;
+        let run = CommandRun {
+            exit: ExitCode::RuntimeFailure,
+            text: Vec::new(),
+            json: Some(envelope.to_string()),
+        };
+        let check = bootstrap_fix_doctor_check(&run);
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert!(check.detail.contains("bootstrap.sh reported a failure"));
+        assert!(check.fix.is_some());
+    }
+
+    #[test]
+    fn bootstrap_fix_check_passes_on_success() {
+        let run = CommandRun {
+            exit: ExitCode::Success,
+            text: vec!["bootstrap: complete.".to_string()],
+            json: None,
+        };
+        let check = bootstrap_fix_doctor_check(&run);
+        assert_eq!(check.status, DoctorStatus::Pass);
+        assert!(check.fix.is_none());
     }
 }
