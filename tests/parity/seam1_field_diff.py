@@ -27,7 +27,11 @@ pure noise for a parity diff -- normalize them before comparing:
   * any string carrying the checkout root as a prefix -> the root prefix is
     replaced with the literal token ``__SDKROOT__`` (root discovered from the
     plan's own ``slices[0].env.ALP_SDK_ROOT`` -- no path is hardcoded);
-  * ``sdkCommit`` -> the literal token ``__SHA__``.
+  * ``sdkCommit`` -> the literal token ``__SHA__``;
+  * the emitting machine's Python interpreter, baked into a
+    ``-DPython3_EXECUTABLE=<abs path>`` cmake arg (Homebrew on the macOS
+    oracle-capture box, the hosted-toolcache on CI) -> ``__PYTHON__`` -- an
+    environment path, not a planner change.
 
 The ONLY semantic delta allowed to pass without failing the gate is
 ``slices[*].debug.probe`` going from ``"openocd"`` (the oracle, at 97ad481b)
@@ -48,6 +52,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -55,6 +60,16 @@ from typing import Any, Iterator
 
 _SDKROOT_TOKEN = "__SDKROOT__"
 _SHA_TOKEN = "__SHA__"
+_PYTHON_TOKEN = "__PYTHON__"
+
+# The emitter bakes the emitting machine's Python interpreter into a
+# `-DPython3_EXECUTABLE=<abs path>` cmake arg (Homebrew's
+# `/opt/homebrew/opt/python@3.14/bin/python3.14` on the macOS oracle-capture
+# box vs. the hosted-toolcache path on CI). That absolute path is environment
+# noise, not a planner change -- the same class as the checkout root -- so it
+# is normalized to a token before comparing. `[^;]*` stops at a `;` so a
+# `;`-joined multi-value arg keeps its other segments.
+_PYTHON_EXE_RE = re.compile(r"-DPython3_EXECUTABLE=[^;]*")
 
 # The one delta ADR-0020 hand-reviewed and allows through the gate:
 # debug.probe "openocd" (oracle, 97ad481b) -> null (df312cec+, #848).
@@ -81,20 +96,25 @@ def _discover_sdk_root(plan: dict) -> str | None:
 
 
 def _normalize_strings(node: Any, sdk_root: str | None) -> Any:
-    """Deep-copy `node`, replacing every checkout-root occurrence in any
-    string.
+    """Deep-copy `node`, replacing environment-specific noise in any string.
 
-    A plain prefix check isn't enough: some fields embed the root
-    mid-string alongside other content (e.g. a sysbuild `-DSB_CONF_FILE=
-    <root>/a;<root>/b` arg carries the root twice, neither at index 0), so
-    this does a global substring replace rather than a prefix-only one.
+    Two normalizations, both applied to every string leaf:
+      * the checkout root -> ``__SDKROOT__``. A plain prefix check isn't
+        enough: some fields embed the root mid-string alongside other content
+        (e.g. a sysbuild `-DSB_CONF_FILE=<root>/a;<root>/b` arg carries the
+        root twice, neither at index 0), so this does a global substring
+        replace rather than a prefix-only one. Skipped when no root was found.
+      * the emitting machine's Python interpreter in `-DPython3_EXECUTABLE=`
+        -> ``__PYTHON__`` (see [`_PYTHON_EXE_RE`]). Applied unconditionally --
+        it is machine noise regardless of whether a checkout root is present.
     """
     if isinstance(node, dict):
         return {k: _normalize_strings(v, sdk_root) for k, v in node.items()}
     if isinstance(node, list):
         return [_normalize_strings(v, sdk_root) for v in node]
-    if isinstance(node, str) and sdk_root:
-        return node.replace(sdk_root, _SDKROOT_TOKEN)
+    if isinstance(node, str):
+        text = node.replace(sdk_root, _SDKROOT_TOKEN) if sdk_root else node
+        return _PYTHON_EXE_RE.sub(f"-DPython3_EXECUTABLE={_PYTHON_TOKEN}", text)
     return node
 
 
