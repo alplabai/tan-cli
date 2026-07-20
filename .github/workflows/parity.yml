@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# ADR-0020 (alp-sdk#855 amendment) two-seam parity gate + cross-repo trigger.
+# See tests/parity/README.md for the full rationale (oracle SHA, the
+# checkout-root/sdkCommit normalization, the allowed debug.probe delta).
+#
+#   seam1-plan-shape : live `--emit build-plan` vs. the frozen oracle,
+#                       toolchain-free. Implemented.
+#   seam2            : materialise byte-check + real build + Renode smoke.
+#                       Documented placeholder -- needs a Linux toolchain
+#                       runner (west / Zephyr SDK / Renode). Does not run a
+#                       fake check; does not report success for unverified
+#                       work.
+#
+# Triggers on every PR (self-check against a pinned alp-sdk ref) and on the
+# repository_dispatch alp-sdk CI fires for every planner change, so a
+# drifting emit surfaces on the alp-sdk PR itself, not discovered later.
+
+name: parity
+
+on:
+  pull_request:
+  repository_dispatch:
+    types: [alp-sdk-planner-change]
+
+env:
+  # Fallback alp-sdk ref for a plain `pull_request` run (no dispatch payload).
+  # It MUST be a ref at or after the oracle SHA (97ad481b) -- an OLDER ref
+  # (e.g. the last release v0.11.1, which predates the Phase-1 fields) lacks
+  # envAppendPath/executionPolicy and would fail seam1 on missing-field diffs,
+  # not real drift. Pinned to df312cec (dev tip at gate-seed time = #848): it
+  # carries the Phase-1 fields AND the one allowed delta (debug.probe
+  # openocd->null), so a green bare-PR run proves the comparator handles the
+  # known-good case. Bump to the v0.12 release tag once alp-sdk cuts one past
+  # #848 (blocked on this gate landing -- alp-sdk ADR-0020 amendment, alp-sdk#855).
+  PINNED_SDK_TAG: df312cec3650bccc5976d31c2ab705f2a8e5f0ef
+
+jobs:
+  seam1-plan-shape:
+    name: "seam1 -- plan-shape parity"
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout tan-cli
+        uses: actions/checkout@v4
+
+      - name: resolve alp-sdk ref
+        id: sdk_ref
+        shell: bash
+        env:
+          # Untrusted dispatch payload -- pass via env, never interpolate a
+          # ${{ }} expression straight into the run body (script-injection).
+          DISPATCH_REF: ${{ github.event.client_payload.sdk_ref }}
+        run: |
+          ref="${DISPATCH_REF:-${{ env.PINNED_SDK_TAG }}}"
+          # A git ref: alnum, dot, slash, dash, underscore only. Reject anything
+          # else so a crafted dispatch payload cannot smuggle shell/ref tricks.
+          if ! printf '%s' "$ref" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            echo "::error::rejected malformed alp-sdk ref"
+            exit 1
+          fi
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "::notice::comparing against alp-sdk ref: $ref"
+
+      - name: clone alp-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.sdk_ref.outputs.ref }}
+          path: alp-sdk
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      # alp_orchestrate's emit path hard-requires PyYAML and jsonschema (it
+      # aborts with "<pkg> is required" otherwise). setup-python ships a bare
+      # interpreter, so install them explicitly — without this, seam1 fails
+      # every example with an emit error, not a real plan-shape diff.
+      - name: install SDK emit deps
+        run: python3 -m pip install --upgrade pip pyyaml jsonschema
+
+      - name: seam1 field diff (live emit vs. frozen oracle)
+        run: >
+          python3 tests/parity/seam1_field_diff.py
+          --sdk alp-sdk
+          --oracle tests/parity/oracle
+
+  seam2:
+    name: "seam2 -- materialise + real build + Renode smoke (TODO)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: not yet implemented
+        run: |
+          echo "::warning::seam2 is a documented placeholder, not a real check."
+          echo "It needs a Linux runner with the toolchain installed (west, the"
+          echo "Zephyr SDK, the AEN/E1M-X modules, Renode) to materialise each"
+          echo "slice, run a real build, and Renode-smoke the result. See"
+          echo "tests/parity/README.md and alp-sdk ADR-0020 (alp-sdk#855) for"
+          echo "the full seam definition. This job intentionally does no"
+          echo "verification and must not be read as one."
