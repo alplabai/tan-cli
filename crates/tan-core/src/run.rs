@@ -1,29 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Pure post-build decision logic for `tan run` — decide, once the build step
 //! has finished, whether to execute the produced `native_sim` binary (a host
-//! target) or flash a hardware target. No IO: the subprocess spawn + the
-//! filesystem probe live in `tan-cli`'s `commands/run`.
+//! target), flash a hardware target, or stop at build-only. No IO: the
+//! subprocess spawn + the filesystem probe live in `tan-cli`'s `commands/run`.
 //!
 //! `run` never re-derives the build/flash engines — it orchestrates
 //! `build::run_build` then, based on this decision, `native_sim` exec or the
 //! native `flash` path. The host-vs-hardware discriminator is the presence of a
-//! `native_sim` binary: a project whose `board.yaml` targets `native_sim`
-//! produces one; a hardware project does not, so `run` flashes it. `--native`
-//! (`force_native`) is a safety guard — it refuses to fall through to a flash
-//! when the caller asked for a host run but none was produced.
+//! runnable `native_sim` binary: a project whose `board.yaml` targets
+//! `native_sim` produces one, located from the post-build `system-manifest.yaml`
+//! (the same contract `flash`/`size`/`image` read). Flashing real silicon is the
+//! dangerous path (the AEN wrong-runner history), so it is NEVER the default: a
+//! hardware target flashes only on an explicit `--flash`; without it `run`
+//! builds and reports, leaving the board untouched.
 
-use std::path::{Path, PathBuf};
+use crate::system_manifest::{Slice, SystemManifest};
 
 /// The literal binary Zephyr's `native_sim` target produces — a fixed name on
-/// every host OS (Zephyr's own native-target naming, not a Windows suffix),
-/// matching the SDK build layout's `build / "zephyr" / "zephyr.exe"`.
+/// every host OS (Zephyr's own native-target naming, not a Windows suffix). It
+/// sits beside `zephyr.elf` in the build's `zephyr/` output dir.
 pub const NATIVE_SIM_EXE: &str = "zephyr.exe";
 
-/// Candidate build-dir names a `native_sim` core's output could land under,
-/// checked in order: the SDK's legacy single-image layout (`native_sim`), then
-/// the per-slice build-plan naming a `native_sim` core gets from `tan build`
-/// (`<core_id>-<backend>`, i.e. `native_sim-zephyr`).
-pub const NATIVE_SIM_BUILD_DIRS: [&str; 2] = ["native_sim", "native_sim-zephyr"];
+/// The Zephyr board target of a `native_sim` slice — the robust discriminator
+/// for the host build (an actual `board` value from the manifest, not a
+/// build-dir-name guess).
+pub const NATIVE_SIM_BOARD: &str = "native_sim";
 
 /// What `tan run` does after its build step — the pure decision, decoupled from
 /// the subprocess/filesystem work so it is unit-testable without a real build.
@@ -33,23 +34,24 @@ pub enum RunAction {
     BuildFailed,
     /// A host target — execute the produced `native_sim` binary.
     ExecuteNative,
-    /// A hardware target — flash the built image.
+    /// A hardware target with an explicit `--flash` — flash the built image.
     Flash,
-    /// `--native` was requested but the build produced no `native_sim` binary —
-    /// report and stop, rather than silently flashing hardware.
-    NoNativeBinary,
+    /// A hardware target WITHOUT `--flash` — build succeeded, but programming the
+    /// board needs explicit consent: report + stop, leave the hardware untouched.
+    BuildOnly,
 }
 
-/// Decide what `tan run` does once the build step finished.
+/// Decide what `tan run` does once the build step finished. Flashing hardware is
+/// opt-in (`flash_requested`), never the default.
 ///
-/// - build failed             -> [`RunAction::BuildFailed`] (never run/flash)
-/// - a `native_sim` binary     -> [`RunAction::ExecuteNative`] (host target)
-/// - `--native`, none produced -> [`RunAction::NoNativeBinary`] (do NOT flash)
-/// - otherwise                 -> [`RunAction::Flash`] (hardware target)
+/// - build failed              -> [`RunAction::BuildFailed`] (never run/flash)
+/// - a `native_sim` binary      -> [`RunAction::ExecuteNative`] (host target)
+/// - hardware + `--flash`       -> [`RunAction::Flash`]
+/// - hardware, no `--flash`     -> [`RunAction::BuildOnly`] (report; do NOT flash)
 pub fn decide_run_action(
     build_ok: bool,
-    force_native: bool,
     native_sim_present: bool,
+    flash_requested: bool,
 ) -> RunAction {
     if !build_ok {
         return RunAction::BuildFailed;
@@ -57,35 +59,33 @@ pub fn decide_run_action(
     if native_sim_present {
         return RunAction::ExecuteNative;
     }
-    if force_native {
-        return RunAction::NoNativeBinary;
+    if flash_requested {
+        return RunAction::Flash;
     }
-    RunAction::Flash
+    RunAction::BuildOnly
 }
 
-/// The candidate `native_sim` executable paths under a build base, in probe
-/// order (see [`NATIVE_SIM_BUILD_DIRS`]). Pure — the caller does the `is_file`
-/// probe; the first candidate that exists is the one to execute.
-///
-/// ponytail: assumes the SDK build layout `<base>/<dir>/zephyr/zephyr.exe`
-/// (mirrors the reference `alp run`); a west build that nests its own `build/`
-/// under the slice cwd would land the binary one level deeper — extend
-/// `NATIVE_SIM_BUILD_DIRS` / the join if a plan ever ships that shape.
-pub fn native_sim_exe_candidates(base: &Path) -> Vec<PathBuf> {
-    NATIVE_SIM_BUILD_DIRS
+/// The `native_sim` slice in a post-build manifest, if any — identified by its
+/// Zephyr board target [`NATIVE_SIM_BOARD`]. The runnable native_sim executable
+/// is a sibling of this slice's built `zephyr.elf` (both land in the build's
+/// `zephyr/` output dir), so the caller resolves the slice's `output_artefact`
+/// through the shared artefact resolver and swaps the filename for
+/// [`NATIVE_SIM_EXE`]. Pure: no IO.
+pub fn native_sim_slice(manifest: &SystemManifest) -> Option<&Slice> {
+    manifest
+        .slices
         .iter()
-        .map(|dir| base.join(dir).join("zephyr").join(NATIVE_SIM_EXE))
-        .collect()
+        .find(|s| s.board.as_deref() == Some(NATIVE_SIM_BOARD))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::system_manifest::parse_system_manifest;
 
     #[test]
     fn build_failure_short_circuits_before_run_or_flash() {
-        // A failed build never reaches native exec or flash, regardless of the
-        // other inputs.
+        // A failed build never reaches native exec or flash, whatever the rest.
         assert_eq!(
             decide_run_action(false, false, false),
             RunAction::BuildFailed
@@ -95,12 +95,12 @@ mod tests {
 
     #[test]
     fn native_sim_binary_present_executes() {
-        // A host target (native_sim binary produced) runs it — not a flash.
+        // A host target (native_sim binary produced) runs it — regardless of
+        // the flash flag (native_sim is not flashable).
         assert_eq!(
-            decide_run_action(true, false, true),
+            decide_run_action(true, true, false),
             RunAction::ExecuteNative
         );
-        // `--native` and a produced binary agree: still execute.
         assert_eq!(
             decide_run_action(true, true, true),
             RunAction::ExecuteNative
@@ -108,39 +108,63 @@ mod tests {
     }
 
     #[test]
-    fn hardware_target_flashes() {
-        // No native_sim binary and no `--native` guard -> hardware -> flash.
-        assert_eq!(decide_run_action(true, false, false), RunAction::Flash);
+    fn hardware_flashes_only_with_explicit_flag() {
+        // No native_sim binary + `--flash` -> flash. This is the ONLY path that
+        // programs hardware, and it demands the explicit opt-in.
+        assert_eq!(decide_run_action(true, false, true), RunAction::Flash);
     }
 
     #[test]
-    fn native_flag_without_binary_refuses_to_flash() {
-        // `--native` asked for a host run but the build produced none: report,
-        // do NOT fall through to flashing hardware.
+    fn hardware_without_flash_is_build_only_never_flashes() {
+        // The safety default: a bare `tan run` on a hardware project builds and
+        // reports — it must NOT silently program the board.
+        assert_eq!(decide_run_action(true, false, false), RunAction::BuildOnly);
+    }
+
+    const MANIFEST_NATIVE: &str = r#"
+schema_version: 1
+hw_info:
+  sku: E1M-AEN701
+slices:
+- core_id: native_sim
+  os: zephyr
+  board: native_sim
+  status: ok
+  output_artefact: build/native_sim-zephyr/build/zephyr/zephyr.elf
+  build_dir: build/native_sim-zephyr/build
+ipc: []
+helper_mcus: []
+boot_order: []
+"#;
+
+    const MANIFEST_HARDWARE: &str = r#"
+schema_version: 1
+hw_info:
+  sku: E1M-AEN701
+slices:
+- core_id: m55_hp
+  os: zephyr
+  board: alp_e1m_aen701_m55_hp
+  status: ok
+ipc: []
+helper_mcus: []
+boot_order: []
+"#;
+
+    #[test]
+    fn native_sim_slice_found_by_board_target() {
+        let m = parse_system_manifest(MANIFEST_NATIVE).unwrap();
+        let slice = native_sim_slice(&m).expect("native_sim slice");
+        assert_eq!(slice.core_id, "native_sim");
         assert_eq!(
-            decide_run_action(true, true, false),
-            RunAction::NoNativeBinary
+            slice.output_artefact.as_deref(),
+            Some("build/native_sim-zephyr/build/zephyr/zephyr.elf")
         );
     }
 
     #[test]
-    fn exe_candidates_cover_both_layouts_in_order() {
-        let base = Path::new("build");
-        let got = native_sim_exe_candidates(base);
-        assert_eq!(got.len(), 2);
-        assert_eq!(
-            got[0],
-            Path::new("build")
-                .join("native_sim")
-                .join("zephyr")
-                .join("zephyr.exe")
-        );
-        assert_eq!(
-            got[1],
-            Path::new("build")
-                .join("native_sim-zephyr")
-                .join("zephyr")
-                .join("zephyr.exe")
-        );
+    fn native_sim_slice_absent_for_a_hardware_manifest() {
+        let m = parse_system_manifest(MANIFEST_HARDWARE).unwrap();
+        assert!(native_sim_slice(&m).is_none());
     }
 }

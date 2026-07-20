@@ -10,10 +10,16 @@
 //! every `tan run` result self-identifies as `run`.
 //!
 //! Target selection is implicit: `board.yaml` (via `--project`) already names
-//! the target, so `run` reads host-vs-hardware from what the build produced (a
-//! `native_sim` binary ⇒ host) rather than from a `--board`/`--flash` flag. In
-//! text mode a host binary streams live (a `native_sim` image is a live
-//! device-simulator loop, not a batch job). JSON mode never spawns it —
+//! the target, so `run` reads host-vs-hardware from the post-build
+//! `system-manifest.yaml` — a slice whose Zephyr board is `native_sim` ⇒ host.
+//! The runnable binary is located through the SAME artefact resolver `flash`
+//! uses (`tan_core::flash::resolve_artefact_path`), so it matches the real build
+//! layout (west's nested `build/` and all) instead of a hardcoded path.
+//!
+//! Flashing real silicon is opt-in: a hardware target flashes only on `--flash`;
+//! a bare `tan run` on a hardware project builds + reports, never programming the
+//! board. In text mode a host binary streams live (a `native_sim` image is a
+//! live device-simulator loop, not a batch job). JSON mode never spawns it —
 //! capturing a process that never closes stdout would hang the
 //! one-envelope-per-invocation contract — and instead reports the skip.
 
@@ -22,13 +28,15 @@ use std::process::Command;
 
 use serde_json::{Value, json};
 use tan_core::ProjectContext;
-use tan_core::run::{RunAction, decide_run_action, native_sim_exe_candidates};
+use tan_core::flash::resolve_artefact_path;
+use tan_core::run::{NATIVE_SIM_EXE, RunAction, decide_run_action, native_sim_slice};
+use tan_core::system_manifest::parse_system_manifest;
 
 use super::CommandRun;
 use super::{build, flash};
 use crate::cli::{BuildArgs, FlashArgs, GlobalArgs, RunArgs};
 use crate::exit::ExitCode;
-use crate::util::resolve_cli_project_context;
+use crate::util::{cli_workspace_root, resolve_cli_project_context, resolve_sdk_root};
 
 /// `tan run` entry point.
 pub fn run(g: &GlobalArgs, args: &RunArgs) -> CommandRun {
@@ -47,14 +55,14 @@ pub fn run(g: &GlobalArgs, args: &RunArgs) -> CommandRun {
 
     let context = resolve_cli_project_context(g);
     let base = PathBuf::from(base_dir(&context));
-    let exe = find_native_sim_exe(&base);
+    let exe = find_native_sim_exe(g, &base);
 
-    match decide_run_action(build_ok, args.native, exe.is_some()) {
+    match decide_run_action(build_ok, exe.is_some(), args.flash) {
         // Build failed: short-circuit, report the build (re-tagged as `run`).
         RunAction::BuildFailed => retag(built, "run"),
         // Host target: execute the produced native_sim binary.
         RunAction::ExecuteNative => exec_native_sim(g, built, &exe.expect("present per decision")),
-        // Hardware target: reuse the native flash path verbatim.
+        // Hardware target + explicit `--flash`: reuse the native flash path.
         RunAction::Flash => {
             let flash_args = FlashArgs {
                 app_path: ".".to_string(),
@@ -66,15 +74,13 @@ pub fn run(g: &GlobalArgs, args: &RunArgs) -> CommandRun {
             };
             retag(flash::run(g, &flash_args), "run")
         }
-        // `--native` asked for a host run but none was produced: report + stop,
-        // never fall through to flashing hardware.
-        RunAction::NoNativeBinary => {
+        // Hardware target, no `--flash`: the build succeeded, but programming the
+        // board is the dangerous path and needs explicit consent — report + stop.
+        RunAction::BuildOnly => {
             let mut run = retag(built, "run");
             if !g.is_json() {
-                run.text.push(format!(
-                    "run: --native given but no native_sim binary under {} — not flashing.",
-                    base.display()
-                ));
+                run.text
+                    .push("run: built; pass --flash to program the board.".to_string());
             }
             run
         }
@@ -93,12 +99,26 @@ fn base_dir(context: &ProjectContext) -> String {
         .unwrap_or_else(|| ".".to_string())
 }
 
-/// Locate the produced `native_sim` executable under a build base dir, probing
-/// the pure candidate list (both build-dir layouts) in order.
-fn find_native_sim_exe(base: &Path) -> Option<PathBuf> {
-    native_sim_exe_candidates(base)
-        .into_iter()
-        .find(|p| p.is_file())
+/// Locate the produced `native_sim` executable from the post-build
+/// `system-manifest.yaml` under `<base>/build`. Finds the native_sim slice by
+/// its Zephyr board target (pure, in tan-core), resolves that slice's real
+/// `output_artefact` (`zephyr.elf`) through the SAME resolver `flash` uses, then
+/// takes the sibling `zephyr.exe` in the build's `zephyr/` dir. `None` when
+/// there's no manifest, no native_sim slice, or the binary isn't on disk — so a
+/// hardware project (or an unbuilt/absent binary) falls through to the flash /
+/// build-only path, never mis-fires an exec.
+fn find_native_sim_exe(g: &GlobalArgs, base: &Path) -> Option<PathBuf> {
+    let build_root = base.join("build");
+    let yaml = std::fs::read_to_string(build_root.join("system-manifest.yaml")).ok()?;
+    let manifest = parse_system_manifest(&yaml).ok()?;
+    let slice = native_sim_slice(&manifest)?;
+    let elf = slice.output_artefact.as_deref().filter(|s| !s.is_empty())?;
+
+    let sdk_root = resolve_sdk_root(g, &cli_workspace_root(g));
+    let elf_path = resolve_artefact_path(elf, &build_root, sdk_root.as_deref(), |p| p.is_file());
+    // The native_sim runnable sits beside its `zephyr.elf` in the `zephyr/` dir.
+    let exe = elf_path.parent()?.join(NATIVE_SIM_EXE);
+    exe.is_file().then_some(exe)
 }
 
 /// After a successful build, execute the `native_sim` binary. Text mode streams
@@ -260,27 +280,69 @@ mod tests {
         assert_eq!(v["data"]["schemaVersion"], "1");
     }
 
+    fn global() -> GlobalArgs {
+        use clap::Parser;
+        crate::cli::Cli::parse_from(["tan", "run"]).global
+    }
+
+    /// Resolves the native_sim exe as the `zephyr.exe` sibling of the manifest
+    /// slice's real built `zephyr.elf` — via the shared artefact resolver, so
+    /// the actual (nested) build layout is honored, not a hardcoded path.
     #[test]
-    fn find_native_sim_exe_checks_both_layouts() {
+    fn find_native_sim_exe_from_manifest_sibling_of_elf() {
         let base = std::env::temp_dir().join(format!("tan-run-nsim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
-        let dir = base.join("native_sim-zephyr").join("zephyr");
-        std::fs::create_dir_all(&dir).unwrap();
-        let exe = dir.join("zephyr.exe");
+        // The real (nested) west layout: <base>/build/native_sim-zephyr/build/zephyr/.
+        let zephyr_dir = base
+            .join("build")
+            .join("native_sim-zephyr")
+            .join("build")
+            .join("zephyr");
+        std::fs::create_dir_all(&zephyr_dir).unwrap();
+        let elf = zephyr_dir.join("zephyr.elf");
+        std::fs::write(&elf, "").unwrap();
+        let exe = zephyr_dir.join("zephyr.exe");
         std::fs::write(&exe, "").unwrap();
 
-        assert_eq!(find_native_sim_exe(&base), Some(exe));
+        // The manifest carries the ABSOLUTE elf path the build resolved.
+        let manifest = format!(
+            "schema_version: 1\nhw_info:\n  sku: S\nslices:\n- core_id: native_sim\n  os: \
+             zephyr\n  board: native_sim\n  status: ok\n  output_artefact: {}\nipc: \
+             []\nhelper_mcus: []\nboot_order: []\n",
+            elf.to_string_lossy().replace('\\', "/")
+        );
+        std::fs::write(base.join("build").join("system-manifest.yaml"), manifest).unwrap();
+
+        assert_eq!(find_native_sim_exe(&global(), &base), Some(exe));
 
         std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
-    fn find_native_sim_exe_none_when_absent() {
+    fn find_native_sim_exe_none_for_hardware_manifest() {
+        let base = std::env::temp_dir().join(format!("tan-run-nsim-hw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("build")).unwrap();
+        std::fs::write(
+            base.join("build").join("system-manifest.yaml"),
+            "schema_version: 1\nhw_info:\n  sku: S\nslices:\n- core_id: m55_hp\n  os: zephyr\n  \
+             board: alp_e1m_aen701_m55_hp\n  status: ok\nipc: []\nhelper_mcus: []\nboot_order: \
+             []\n",
+        )
+        .unwrap();
+
+        assert_eq!(find_native_sim_exe(&global(), &base), None);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn find_native_sim_exe_none_when_manifest_absent() {
         let base = std::env::temp_dir().join(format!("tan-run-nsim-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
 
-        assert_eq!(find_native_sim_exe(&base), None);
+        assert_eq!(find_native_sim_exe(&global(), &base), None);
 
         std::fs::remove_dir_all(&base).ok();
     }

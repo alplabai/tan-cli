@@ -324,13 +324,14 @@ pub struct WestForwardArgs {
 /// selector: `board.yaml` (via `--project`) already names the target.
 #[derive(Debug, Args)]
 pub struct RunArgs {
-    /// Require a host/native_sim run: execute the produced native_sim binary and
-    /// never flash. If the build produced no native_sim binary, report and stop
-    /// (rather than falling through to flashing a hardware target).
+    /// Program the board after building (hardware targets only). Required opt-in:
+    /// without it, `run` on a hardware project builds and reports but never
+    /// flashes. Ignored for a native_sim/host target, which always runs the
+    /// produced binary and never flashes.
     #[arg(long)]
-    pub native: bool,
-    /// For a hardware target, flash only the slice with this `core_id`
-    /// (forwarded verbatim to the native flash path's `--core`).
+    pub flash: bool,
+    /// With `--flash`, flash only the slice with this `core_id` (forwarded
+    /// verbatim to the native flash path's `--core`).
     #[arg(long, value_name = "CORE_ID")]
     pub core: Option<String>,
 }
