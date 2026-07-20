@@ -14,16 +14,12 @@ use std::collections::BTreeMap;
 pub struct BoardModel {
     /// Schema revision. Absent in YAML is treated as v1 (matches TS, where
     /// `model.schema_version >= 2` is false for `undefined`).
-    #[serde(default)]
+    #[serde(default, rename = "schemaVersion")]
     pub schema_version: Option<u32>,
 
     /// System-on-module selection.
     #[serde(default)]
     pub som: Option<Som>,
-
-    /// Carrier board selection and its populated-component flags.
-    #[serde(default)]
-    pub carrier: Option<Carrier>,
 
     /// v1 only. In v2 this moves into a per-core `cores:` block.
     #[serde(default)]
@@ -45,9 +41,11 @@ pub struct BoardModel {
     #[serde(default)]
     pub inference: Option<Inference>,
 
-    /// Enabled library identifiers (v1 top-level).
+    /// Enabled library identifiers (v1 top-level). Each entry is either a
+    /// bare canonical manifest name (project-wide) or a `{name, cores?}`
+    /// object scoping the library to a subset of cores.
     #[serde(default)]
-    pub libraries: Option<Vec<String>>,
+    pub libraries: Option<Vec<LibraryEntry>>,
 
     /// IoT connectivity toggles (v1 top-level).
     #[serde(default)]
@@ -76,18 +74,6 @@ pub struct Som {
     /// SoM part number / SKU.
     #[serde(default)]
     pub sku: Option<String>,
-}
-
-/// Carrier board selection.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct Carrier {
-    /// Carrier board name.
-    #[serde(default)]
-    pub name: Option<String>,
-
-    /// Populated-component flags keyed by component id.
-    #[serde(default)]
-    pub populated: Option<BTreeMap<String, bool>>,
 }
 
 /// Per-core configuration block (schema v2).
@@ -127,10 +113,35 @@ pub struct CoreEntry {
 pub struct IpcCarveOut {
     /// Carve-out name.
     pub name: String,
+    /// IPC channel kind (`rpmsg`, `raw_shmem`, `mailbox_only`).
+    pub kind: String,
     /// Endpoint identifiers attached to this carve-out.
     pub endpoints: Vec<String>,
     /// Size of the carve-out in KiB.
-    pub size_kib: u32,
+    pub carve_out_kb: u32,
+    /// Override the default cacheable hint (default carve-out is non-cacheable).
+    #[serde(default)]
+    pub cacheable: Option<bool>,
+    /// Explicit base address override; normally the orchestrator allocates one.
+    #[serde(default)]
+    pub address: Option<u64>,
+}
+
+/// A single top-level `libraries:` entry: either a bare canonical manifest
+/// name (project-wide) or a `{name, cores?}` object scoping the library to
+/// specific cores.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LibraryEntry {
+    /// Bare canonical manifest name — shorthand for a project-wide entry.
+    Name(String),
+    /// Unified entry: canonical name plus the core ids it's scoped to
+    /// (absent `cores` = project-wide).
+    Scoped {
+        name: String,
+        #[serde(default)]
+        cores: Option<Vec<String>>,
+    },
 }
 
 /// Inference backend and arena configuration.
@@ -216,12 +227,6 @@ pub fn normalize_board_model(mut model: BoardModel) -> BoardModel {
         if model.inference.as_ref().is_some_and(Inference::is_empty) {
             model.inference = None;
         }
-
-        if let Some(carrier) = &mut model.carrier {
-            if carrier.populated.as_ref().is_some_and(BTreeMap::is_empty) {
-                carrier.populated = None;
-            }
-        }
     }
 
     if model.effective_schema_version() >= 2 {
@@ -229,4 +234,54 @@ pub fn normalize_board_model(mut model: BoardModel) -> BoardModel {
     }
 
     model
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `schemaVersion` (camelCase, matching the SDK schema/loader) is the
+    /// wire key; the bare snake_case `schema_version:` is a stale local
+    /// convention the loader never wrote and must not be recognised.
+    #[test]
+    fn schema_version_wire_key_is_camel_case() {
+        let model: BoardModel = serde_yaml::from_str("schemaVersion: 2\n").unwrap();
+        assert_eq!(model.schema_version, Some(2));
+
+        let model: BoardModel = serde_yaml::from_str("schema_version: 2\n").unwrap();
+        assert_eq!(model.schema_version, None);
+    }
+
+    /// `ipc:` entries use the schema's `carve_out_kb` + required `kind`, not
+    /// the old `size_kib` field.
+    #[test]
+    fn ipc_carve_out_uses_schema_keys() {
+        let model: BoardModel = serde_yaml::from_str(
+            "ipc:\n  - kind: rpmsg\n    name: alp_default_rpmsg\n    endpoints: [a, b]\n    carve_out_kb: 512\n",
+        )
+        .unwrap();
+        let entry = &model.ipc.unwrap()[0];
+        assert_eq!(entry.kind, "rpmsg");
+        assert_eq!(entry.carve_out_kb, 512);
+        assert_eq!(entry.cacheable, None);
+        assert_eq!(entry.address, None);
+    }
+
+    /// Top-level `libraries:` accepts a bare name OR a `{name, cores?}` object.
+    #[test]
+    fn libraries_accepts_bare_name_or_scoped_object() {
+        let model: BoardModel = serde_yaml::from_str(
+            "libraries:\n  - mbedtls\n  - name: cmsis-dsp\n    cores: [m33_sm]\n",
+        )
+        .unwrap();
+        let libs = model.libraries.unwrap();
+        assert_eq!(libs[0], LibraryEntry::Name("mbedtls".to_string()));
+        assert_eq!(
+            libs[1],
+            LibraryEntry::Scoped {
+                name: "cmsis-dsp".to_string(),
+                cores: Some(vec!["m33_sm".to_string()]),
+            }
+        );
+    }
 }

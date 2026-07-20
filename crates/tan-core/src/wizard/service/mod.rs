@@ -248,6 +248,7 @@ mod tests {
             "ota",
             "chips",
             "features",
+            "libraries",
         ];
 
         // One per SoM family: the app core must match the family's topology.
@@ -280,14 +281,10 @@ mod tests {
             // Required keys present; pre-v0.6 keys gone.
             assert!(map.contains_key("som"), "missing som:\n{yaml}");
             assert!(map.contains_key("cores"), "missing cores:\n{yaml}");
-            for forbidden in [
-                "schema_version",
-                "carrier",
-                "os",
-                "libraries",
-                "iot",
-                "inference",
-            ] {
+            // `libraries` is a schema-sanctioned TOP-LEVEL key (board.schema.json,
+            // oneOf[string, {name, cores}]); the wizard emits it there, not under
+            // a core (finding H7). It is intentionally absent from this list.
+            for forbidden in ["schema_version", "carrier", "os", "iot", "inference"] {
                 assert!(
                     !map.contains_key(forbidden),
                     "forbidden top-level `{forbidden}`:\n{yaml}"

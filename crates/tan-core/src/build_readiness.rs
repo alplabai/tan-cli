@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Build-readiness preflight — the toolchains a build (and the Yocto `.wic`
 //! flash) needs, keyed off the OSes the active `board.yaml` declares. Used by
-//! `alp doctor --build` (and, later, as `alp build`'s preflight).
+//! `tan doctor --build` (and, later, as `tan build`'s preflight).
 //!
 //! Scope boundary: `board.yaml` alone does not carry each core's *type*
 //! (Cortex-M vs Cortex-A) — that resolves from the SoM topology in the SDK
 //! metadata (owned by `alp_orchestrate.py`, deliberately not reimplemented here,
 //! see EXTENSION_CLI_INTEGRATION.md §9). So we key off cores' explicit `os:`
 //! fields; when none are declared we check all three backends. The authoritative
-//! per-core resolution stays `west alp-build`'s job — this is advisory.
+//! per-core resolution stays the SDK build-plan emit's job — this is advisory.
 
 use std::collections::BTreeSet;
 
@@ -120,7 +120,7 @@ pub fn build_readiness_report(
             "west",
             probe.west,
             "Zephyr",
-            "Install west via `alp bootstrap`.",
+            "Install west via `tan bootstrap`.",
         );
         push_tool(
             &mut checks,
@@ -172,7 +172,7 @@ pub fn build_readiness_report(
                 "Yocto",
                 "Install the Yocto host packages (see docs/getting-started.md).",
             );
-            // Flash prerequisite: `alp flash` writes the Yocto `.wic` to SD/eMMC
+            // Flash prerequisite: `tan flash` writes the Yocto `.wic` to SD/eMMC
             // via `bmaptool` (sparse-aware, preferred) and falls back to `dd`.
             // Warn early so the gap shows at doctor time, not mid-flash.
             let (status, detail, fix) = if probe.bmaptool {
@@ -194,7 +194,7 @@ pub fn build_readiness_report(
             } else {
                 (
                     DoctorStatus::Warn,
-                    "neither bmaptool nor dd on PATH — Yocto .wic flash (`alp flash`) will fail."
+                    "neither bmaptool nor dd on PATH — Yocto .wic flash (`tan flash`) will fail."
                         .to_string(),
                     Some(
                         "Install bmaptool (`apt install bmap-tools`) or dd (coreutils)."
@@ -326,7 +326,7 @@ mod tests {
     #[test]
     fn os_set_from_explicit_core_os() {
         let board = parse_board_model(
-            "schema_version: 2\ncores:\n  m55_hp:\n    os: zephyr\n    app: ./src\n  a32:\n    os: yocto\n    app: ./a\n",
+            "schemaVersion: 2\ncores:\n  m55_hp:\n    os: zephyr\n    app: ./src\n  a32:\n    os: yocto\n    app: ./a\n",
         )
         .unwrap();
         assert_eq!(board_os_set(&board), vec![BuildOs::Zephyr, BuildOs::Yocto]);
@@ -335,7 +335,7 @@ mod tests {
     #[test]
     fn os_set_falls_back_to_all_when_undeclared() {
         let board =
-            parse_board_model("schema_version: 2\ncores:\n  m55_hp:\n    app: ./src\n").unwrap();
+            parse_board_model("schemaVersion: 2\ncores:\n  m55_hp:\n    app: ./src\n").unwrap();
         assert_eq!(
             board_os_set(&board),
             vec![BuildOs::Zephyr, BuildOs::Yocto, BuildOs::Baremetal]

@@ -398,8 +398,7 @@ fn is_hint_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Carrier, Inference, Iot, Som, normalize_board_model};
-    use std::collections::BTreeMap;
+    use crate::model::{Inference, Iot, Som, normalize_board_model};
 
     #[test]
     fn v1_board_passes_without_errors() {
@@ -411,15 +410,14 @@ mod tests {
 
     #[test]
     fn v2_clean_board_passes() {
-        let text =
-            "schema_version: 2\nsom:\n  sku: E1M-AEN701\ncores:\n  m55_hp:\n    app: ./src\n";
+        let text = "schemaVersion: 2\nsom:\n  sku: E1M-AEN701\ncores:\n  m55_hp:\n    app: ./src\n";
         let r = validate_board_yaml_local(text).unwrap();
         assert_eq!(r.outcome, Outcome::Clean);
     }
 
     #[test]
     fn v2_top_level_os_is_rejected() {
-        let text = "schema_version: 2\nos: zephyr\ncores:\n  m55_hp:\n    app: ./src\n";
+        let text = "schemaVersion: 2\nos: zephyr\ncores:\n  m55_hp:\n    app: ./src\n";
         let r = validate_board_yaml_local(text).unwrap();
         assert_eq!(r.outcome, Outcome::SchemaViolation);
         assert_eq!(r.issues.len(), 1);
@@ -427,7 +425,7 @@ mod tests {
 
     #[test]
     fn v2_without_cores_is_rejected() {
-        let text = "schema_version: 2\nsom:\n  sku: E1M-AEN701\n";
+        let text = "schemaVersion: 2\nsom:\n  sku: E1M-AEN701\n";
         let r = validate_board_yaml_local(text).unwrap();
         assert_eq!(r.outcome, Outcome::SchemaViolation);
         assert_eq!(r.issues.len(), 1);
@@ -436,7 +434,7 @@ mod tests {
     #[test]
     fn parse_rich_board_fields() {
         let text = r#"
-schema_version: 2
+schemaVersion: 2
 som:
   sku: E1M-AEN701
 cores:
@@ -452,16 +450,17 @@ cores:
     iot:
       wifi: true
 ipc:
-  - name: telemetry
+  - kind: rpmsg
+    name: telemetry
     endpoints: [m55_hp, a32_cluster]
-    size_kib: 64
+    carve_out_kb: 64
 "#;
         let model = parse_board_model(text).unwrap();
         let core = model.cores.unwrap().remove("m55_hp").unwrap();
         assert_eq!(core.os.as_deref(), Some("zephyr"));
         assert_eq!(core.peripherals.unwrap(), vec!["i2c", "spi"]);
         assert_eq!(core.inference.unwrap().default_arena_kib, Some(256));
-        assert_eq!(model.ipc.unwrap()[0].size_kib, 64);
+        assert_eq!(model.ipc.unwrap()[0].carve_out_kb, 64);
     }
 
     #[test]
@@ -470,10 +469,6 @@ ipc:
             schema_version: Some(1),
             som: Some(Som {
                 sku: Some("E1M-AEN701".to_string()),
-            }),
-            carrier: Some(Carrier {
-                name: Some("e1m-evk".to_string()),
-                populated: Some(BTreeMap::new()),
             }),
             inference: Some(Inference::default()),
             libraries: Some(Vec::new()),
@@ -485,7 +480,6 @@ ipc:
         assert!(normalized.libraries.is_none());
         assert!(normalized.iot.is_none());
         assert!(normalized.inference.is_none());
-        assert!(normalized.carrier.unwrap().populated.is_none());
     }
 
     #[test]

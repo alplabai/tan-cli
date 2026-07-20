@@ -97,7 +97,7 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
         id: WizardTemplateId::EdgeAiStarter,
         label: "Edge AI starter",
         description: "Inference-first starter with arena sizing and backend hints.",
-        libs: &["cmsis_dsp", "etl"],
+        libs: &["cmsis-dsp", "etl"],
         features: None,
         prj_conf_extras: &["CONFIG_CMSIS_DSP=y", "CONFIG_CBPRINTF_FP_SUPPORT=y"],
         feature_files: &[FeatureFileSpec {
