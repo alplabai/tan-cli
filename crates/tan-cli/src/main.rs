@@ -39,6 +39,7 @@ fn main() {
         Command::Build(args) => commands::build::run_build(&global, &args),
         Command::Image(args) => commands::image::run(&global, &args),
         Command::Flash(args) => commands::flash::run(&global, &args),
+        Command::Run(args) => commands::run::run(&global, &args),
         Command::Clean(args) => commands::clean::run(&global, &args),
         Command::Renode(args) => commands::renode::run(&global, &args),
         Command::Size(args) => commands::size::run(&global, &args),

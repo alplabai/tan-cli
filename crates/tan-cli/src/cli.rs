@@ -128,6 +128,9 @@ pub enum Command {
     /// Flash every slice + helper MCU from `build/system-manifest.yaml` onto the
     /// device in `boot_order` (native).
     Flash(FlashArgs),
+    /// Build the project, then run it: execute the produced native_sim binary
+    /// for a host target, or flash a hardware target (native).
+    Run(RunArgs),
     /// Remove the per-project build dir + orchestrator state cache (native).
     Clean(CleanArgs),
     /// Boot the built system manifest's single Zephyr slice in headless Renode
@@ -312,6 +315,25 @@ pub struct WestForwardArgs {
         value_name = "ARGS"
     )]
     pub args: Vec<String>,
+}
+
+/// Args for `run`: build the project, then run it. Thin orchestrator over the
+/// native `build` + `flash` commands — it reuses their engines, never
+/// re-derives them. The host-vs-hardware target is read from what the build
+/// produces (a `native_sim` binary ⇒ host), so `run` needs no `--board`
+/// selector: `board.yaml` (via `--project`) already names the target.
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Program the board after building (hardware targets only). Required opt-in:
+    /// without it, `run` on a hardware project builds and reports but never
+    /// flashes. Ignored for a native_sim/host target, which always runs the
+    /// produced binary and never flashes.
+    #[arg(long)]
+    pub flash: bool,
+    /// With `--flash`, flash only the slice with this `core_id` (forwarded
+    /// verbatim to the native flash path's `--core`).
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
 }
 
 /// Args for `build`: plan/manifest inspection, materialisation, and native build.
