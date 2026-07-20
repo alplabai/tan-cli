@@ -44,10 +44,17 @@ jobs:
       - name: resolve alp-sdk ref
         id: sdk_ref
         shell: bash
+        env:
+          # Untrusted dispatch payload -- pass via env, never interpolate a
+          # ${{ }} expression straight into the run body (script-injection).
+          DISPATCH_REF: ${{ github.event.client_payload.sdk_ref }}
         run: |
-          ref="${{ github.event.client_payload.sdk_ref }}"
-          if [ -z "$ref" ]; then
-            ref="${{ env.PINNED_SDK_TAG }}"
+          ref="${DISPATCH_REF:-${{ env.PINNED_SDK_TAG }}}"
+          # A git ref: alnum, dot, slash, dash, underscore only. Reject anything
+          # else so a crafted dispatch payload cannot smuggle shell/ref tricks.
+          if ! printf '%s' "$ref" | grep -Eq '^[A-Za-z0-9._/-]+$'; then
+            echo "::error::rejected malformed alp-sdk ref"
+            exit 1
           fi
           echo "ref=$ref" >> "$GITHUB_OUTPUT"
           echo "::notice::comparing against alp-sdk ref: $ref"
