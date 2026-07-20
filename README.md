@@ -88,6 +88,14 @@ cargo build --all-targets
 cargo test
 ```
 
+## Releases
+
+Version-tag pushes (`v<major>.<minor>.<patch>`) build per-platform `tan`
+binaries and publish them as GitHub release assets for the alp-sdk-vscode
+downloader. The exact tag scheme, per-target asset names, and the vscode
+`releaseAssetForTarget` mapping are the release-asset contract — see
+[`docs/release-contract.md`](docs/release-contract.md).
+
 ## References
 
 - alp-sdk **ADR-0020** (the decision this implements)
