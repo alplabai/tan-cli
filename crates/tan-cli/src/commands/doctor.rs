@@ -83,7 +83,8 @@ pub fn run(g: &GlobalArgs, args: &DoctorArgs) -> CommandRun {
 /// `tan doctor --build` — build-readiness preflight. Resolves the OS set from
 /// the active `board.yaml` (explicit core `os:` fields; all three when none are
 /// declared), probes host build tools, and reports per-OS toolchain readiness.
-/// Advisory only — the authoritative per-core resolution stays `west alp-build`.
+/// Advisory only — the authoritative per-core resolution stays the SDK
+/// build-plan emit's job.
 fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> CommandRun {
     let mut context = resolve_cli_project_context(g);
 

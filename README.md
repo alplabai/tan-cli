@@ -102,12 +102,16 @@ the envelope is the API.
 ```
 
 - **alp-sdk** — the planner + libraries. Emits the machine-readable *build-plan*
-  (`python -m alp_orchestrate --emit build-plan`). Keeps **zero** user commands.
+  (`python -m alp_orchestrate --emit build-plan`). Ships an `alp` console script
+  (plus `alp-mcp`) and the `west alp-*` commands `tan` forwards to (see
+  Forwarders below) — it is not a user-facing CLI surface in its own right.
 - **tan** — this repo. Consumes the plan and executes each per-core slice
   (`west` / `bitbake` / `cmake`), owns skip-vs-fail, env application, scheduling,
   progress UX, SDK version management, and the manifest it reads back for
   flash/size/image. **What a standalone SDK user installs — no VS Code needed.**
-- **alp-sdk-vscode** — a thin extension that shells `tan`.
+- **alp-sdk-vscode** — a thin extension intended to shell `tan`; as of this
+  writing the extension still resolves/downloads a binary named `alp`
+  (`SUPPORTED_CLI_VERSION` 0.2.0) — the repoint to `tan` is pending.
 
 Dependency direction is one-way: **extension → tan → alp-sdk.** Installing `tan`
 never drags in the extension. The user-facing command / binary is `tan`, not
