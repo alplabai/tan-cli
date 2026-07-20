@@ -599,13 +599,15 @@ mod tests {
 
         use clap::Parser;
         let g = crate::cli::Cli::parse_from(["tan", "run", "--format", "json"]).global;
-        let built = || CommandRun {
+        let built = || {
+            CommandRun {
             exit: ExitCode::Success,
             text: Vec::new(),
             json: Some(
                 r#"{"command":"build","ok":true,"exitCode":0,"project":{"root":null,"boardYaml":null},"data":{"schemaVersion":"1"},"issues":[]}"#
                     .to_string(),
             ),
+        }
         };
 
         // The exe IS resolvable on disk — the only thing that changes the

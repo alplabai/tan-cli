@@ -273,9 +273,7 @@ impl BuildPlan {
         // rooted form explicitly, then require the remainder to normalize to
         // exactly `build`.
         !p.is_absolute()
-            && !p
-                .components()
-                .any(|c| matches!(c, Component::ParentDir))
+            && !p.components().any(|c| matches!(c, Component::ParentDir))
             && crate::path_guard::normalize(p) == Path::new(CONSUMER_BUILD_ROOT)
     }
 }
@@ -487,8 +485,9 @@ mod tests {
         // `build` succeeds (inspection, `--plan` must still show it); it is the
         // ACTING path (native_build) that refuses it via
         // build_root_is_consumer_default, not the parser.
-        let plan = parse_build_plan(&SAMPLE.replace(r#""buildRoot": "build""#, r#""buildRoot": "out""#))
-            .expect("a non-build buildRoot must still parse");
+        let plan =
+            parse_build_plan(&SAMPLE.replace(r#""buildRoot": "build""#, r#""buildRoot": "out""#))
+                .expect("a non-build buildRoot must still parse");
         assert_eq!(plan.build_root, "out");
         assert!(!plan.build_root_is_consumer_default());
     }
