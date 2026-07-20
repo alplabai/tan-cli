@@ -8,7 +8,8 @@ use std::path::Path;
 use tan_core::ProjectContext;
 use tan_core::build_plan::BuildPlan;
 use tan_core::system_manifest::{
-    overlay_run_results_raw, parse_system_manifest_raw, serialize_system_manifest_raw,
+    SliceRunResult, overlay_run_results_raw, parse_system_manifest_raw,
+    serialize_system_manifest_raw,
 };
 
 use super::super::workspace::invoke_sdk_emit;
@@ -83,16 +84,21 @@ pub(super) fn write_post_build_manifest(
     // whether the file write below then succeeds.
     let native_sim_target = native_sim_target_from_yaml(&yaml);
 
-    let overlay: Vec<(String, String, Option<String>, Option<String>)> = results
+    let overlay: Vec<SliceRunResult> = results
         .iter()
-        // Carry the real artefact/build_dir the run resolved; None preserves the
-        // plan-time value (e.g. for a skipped or non-zephyr slice).
+        // Carry the real artefact/build_dir/reason the run resolved; None
+        // preserves the plan-time value (e.g. for a skipped or non-zephyr
+        // slice). `r.reason` is the executor's "no command" / "{tool} not
+        // found in PATH; ..." text — threaded through so a skipped slice
+        // explains itself in the written system-manifest.yaml instead of
+        // silently dropping to a bare status.
         .map(|r| {
             (
                 r.core_id.clone(),
                 r.status.clone(),
                 r.output_artefact.clone(),
                 r.build_dir.clone(),
+                r.reason.clone(),
             )
         })
         .collect();
@@ -150,10 +156,7 @@ fn native_sim_target_from_yaml(yaml: &str) -> Option<bool> {
 /// pair is documented in system_manifest.rs as forbidden on this exact write
 /// path because it silently deletes any field the typed `SystemManifest`
 /// doesn't model.
-fn rewrite_manifest_yaml(
-    yaml: &str,
-    overlay: &[(String, String, Option<String>, Option<String>)],
-) -> Result<String, String> {
+fn rewrite_manifest_yaml(yaml: &str, overlay: &[SliceRunResult]) -> Result<String, String> {
     let mut manifest = parse_system_manifest_raw(yaml).map_err(|e| e.to_string())?;
     overlay_run_results_raw(&mut manifest, overlay);
     serialize_system_manifest_raw(&manifest)
@@ -344,6 +347,7 @@ boot_order: []
             "ok".to_string(),
             Some("build/m55_hp-zephyr/build/zephyr/zephyr.elf".to_string()),
             None,
+            None,
         )];
 
         let out = rewrite_manifest_yaml(yaml, &overlay).expect("rewrite must succeed");
@@ -356,6 +360,46 @@ boot_order: []
         assert!(
             out.contains("build/m55_hp-zephyr/build/zephyr/zephyr.elf"),
             "overlay artefact did not land: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_manifest_yaml_threads_the_skip_reason_into_the_manifest() {
+        // L22 regression: `write_post_build_manifest`'s overlay tuple used to
+        // drop `r.reason` entirely, so a skipped slice's "no command" / "west
+        // not found in PATH; ..." explanation never reached
+        // system-manifest.yaml even though `Slice.reason` and the schema
+        // field both exist for it.
+        let yaml = r#"
+schema_version: 1
+generated_by: scripts/alp_orchestrate.py
+hw_info:
+  sku: E1M-AEN701
+slices:
+- core_id: m55_he
+  os: zephyr
+  status: pending
+ipc: []
+helper_mcus: []
+boot_order: []
+"#;
+        let overlay = vec![(
+            "m55_he".to_string(),
+            "skipped".to_string(),
+            None,
+            None,
+            Some("west not found in PATH; this is normal on non-Zephyr hosts".to_string()),
+        )];
+
+        let out = rewrite_manifest_yaml(yaml, &overlay).expect("rewrite must succeed");
+
+        assert!(
+            out.contains("status: skipped"),
+            "overlay did not land: {out}"
+        );
+        assert!(
+            out.contains("west not found in PATH; this is normal on non-Zephyr hosts"),
+            "reason did not land: {out}"
         );
     }
 

@@ -12,21 +12,36 @@ use crate::build_plan::{ExecutionPolicy, PolicyAction};
 
 /// The OS path-list separator (`;` on Windows, `:` elsewhere) — matches Python's
 /// `os.pathsep`, which the SDK appenders (`_workspace.subprocess_env` /
-/// `_alp_common.env_with_sdk`) use.
+/// `_alp_common.env_with_sdk`) use for a real OS path-list var (`PYTHONPATH`).
 fn path_list_sep() -> char {
     if cfg!(windows) { ';' } else { ':' }
 }
 
-/// Append each value to its env var using the OS path-list separator, skipping a
-/// value already present segment-wise (matches the alp-sdk appenders). Operates
-/// on the materialised `(key, value)` env list: a var absent from `base` is
-/// seeded from the appended values (the plan owns it); a var present has the new
-/// segments appended after de-dup. Pure — the caller seeds `base` (slice env +
-/// inherited process env) so appending preserves rather than replaces an
-/// inherited value like `PYTHONPATH`.
+/// The join separator for one `envAppendPath` var — PER-KEY, not uniformly
+/// `os.pathsep`: `EXTRA_ZEPHYR_MODULES` is a CMake list Zephyr's
+/// `zephyr_module.py` splits on `;` on EVERY platform (never an OS path
+/// list) — joining it with `:` on Linux/WSL fails `west build` configure
+/// with "is not a valid zephyr module". Every other var is a real OS path
+/// list, joined with `path_list_sep()` (matches the SDK appenders'
+/// `os.pathsep`).
+fn sep_for_key(var: &str) -> char {
+    if var == "EXTRA_ZEPHYR_MODULES" {
+        ';'
+    } else {
+        path_list_sep()
+    }
+}
+
+/// Append each value to its env var using that var's join separator
+/// (`sep_for_key`), skipping a value already present segment-wise (matches the
+/// alp-sdk appenders). Operates on the materialised `(key, value)` env list: a
+/// var absent from `base` is seeded from the appended values (the plan owns
+/// it); a var present has the new segments appended after de-dup. Pure — the
+/// caller seeds `base` (slice env + inherited process env) so appending
+/// preserves rather than replaces an inherited value like `PYTHONPATH`.
 pub fn apply_env_append(base: &mut Vec<(String, String)>, append: &BTreeMap<String, Vec<String>>) {
-    let sep = path_list_sep();
     for (var, values) in append {
+        let sep = sep_for_key(var);
         let current = base.iter().find(|(k, _)| k == var).map(|(_, v)| v.clone());
         let mut segments: Vec<String> = match current.as_deref() {
             Some(v) if !v.is_empty() => v.split(sep).map(str::to_string).collect(),
@@ -119,6 +134,19 @@ mod tests {
     }
 
     #[test]
+    fn apply_env_append_extra_zephyr_modules_always_uses_semicolon() {
+        // EXTRA_ZEPHYR_MODULES is a CMake list -- `;`-joined on EVERY
+        // platform, never `path_list_sep()` (which is `:` on Linux/WSL and
+        // would produce a value Zephyr's zephyr_module.py can't split).
+        let mut base = vec![("EXTRA_ZEPHYR_MODULES".to_string(), "/a".to_string())];
+        apply_env_append(&mut base, &append_map(&[("EXTRA_ZEPHYR_MODULES", &["/b"])]));
+        assert_eq!(
+            base,
+            vec![("EXTRA_ZEPHYR_MODULES".to_string(), "/a;/b".to_string())]
+        );
+    }
+
+    #[test]
     fn apply_env_append_seeds_absent_var() {
         // A var absent from base is seeded from the appended values (plan owns it).
         let mut base: Vec<(String, String)> = Vec::new();
@@ -139,8 +167,8 @@ mod tests {
             [("ALP_SDK_ROOT".to_string(), "/sdk".to_string())]
                 .into_iter()
                 .collect();
-        // Plan appends /sdk/scripts to PYTHONPATH (not pinned in slice env) and a
-        // duplicate to EXTRA_ZEPHYR_MODULES.
+        // Plan appends /sdk/scripts to PYTHONPATH (not pinned in slice env) and
+        // seeds EXTRA_ZEPHYR_MODULES (absent from both slice env and inherited).
         let append: BTreeMap<String, Vec<String>> = [
             ("PYTHONPATH".to_string(), vec!["/sdk/scripts".to_string()]),
             (

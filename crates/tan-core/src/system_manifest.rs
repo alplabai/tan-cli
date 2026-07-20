@@ -1,13 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 //! The ALP **system manifest** (`build/system-manifest.yaml`) — the single
-//! derived projection of a `board.yaml` that `west alp-build` emits, and the
-//! IDE/tool CONTRACT for a (possibly multi-image) project. Tools read THIS for
-//! folder layout + build/flash wiring instead of re-deriving from board.yaml +
-//! the SoM presets.
+//! derived projection of a `board.yaml` that the SDK's `alp_orchestrate.py
+//! --emit system-manifest` emits, and the IDE/tool CONTRACT for a (possibly
+//! multi-image) project. Tools read THIS for folder layout + build/flash
+//! wiring instead of re-deriving from board.yaml + the SoM presets.
+//! (ADR-0020 Phase 4 retired the SDK-side `west alp-build` executor —
+//! alp-sdk is plans-only; `tan build` is the executor now.)
 //!
-//! Vendored schema: `schemas/system-manifest-v1.schema.json` (alp-sdk v0.7.0;
-//! verified unchanged through v0.8.0 — the `--emit system-manifest` contract did
-//! not move, so the tolerant reader stays valid).
+//! No vendored schema copy ships in this repo; the shape here was last
+//! diffed against `metadata/schemas/system-manifest-v1.schema.json` at
+//! alp-sdk v0.8.0. Since then the SDK has added at least `slices[].recipe`
+//! and `hw_info.eeprom` — both additive under the v1 tolerant-reader policy
+//! below, so a stale diff doesn't break reads; it only means a typed field
+//! this module doesn't yet model (harmless on read, see the write-path note
+//! on `serialize_system_manifest_raw` below for why that never matters on
+//! write either).
 //!
 //! TOLERANT READER (the stability policy negotiated in alp-sdk#106):
 //! `schema_version` 1 is additive-only; a breaking change ships as v2 through a
@@ -72,7 +79,9 @@ pub struct Slice {
     /// Path to the built firmware/image artefact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_artefact: Option<String>,
-    /// Build/flash status (e.g. `pending`, `built`, `blocked`).
+    /// Build/flash status: `pending` | `ok` | `failed` | `skipped` (per
+    /// `system-manifest-v1.schema.json`'s `slices[].status` enum — `blocked`
+    /// is an `IpcLink` status, not a `Slice` one).
     #[serde(default)]
     pub status: String,
     /// Path to this slice's build log, if produced.
@@ -203,24 +212,31 @@ pub fn parse_system_manifest(yaml: &str) -> Result<SystemManifest, SystemManifes
     Ok(manifest)
 }
 
+/// One slice's post-build outcome as the executor reports it:
+/// `(core_id, status, output_artefact, build_dir, reason)`. A `None` in any
+/// optional position means "leave the plan-time value untouched".
+pub type SliceRunResult = (
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 /// Overlay this run's per-slice outcomes onto a plan-time manifest so the
 /// written `system-manifest.yaml` reflects what actually built. Each result is
-/// `(core_id, status, output_artefact, build_dir)`; slices are matched by
-/// `core_id` and slices with no matching result (e.g. `off` cores) are left
-/// untouched.
+/// a [`SliceRunResult`]; slices are matched by `core_id` and slices with no
+/// matching result (e.g. `off` cores) are left untouched.
 ///
 /// No status remap is needed: the executor's vocabulary (`ok`/`failed`/
 /// `skipped`) is already a subset of the manifest schema's status enum
 /// (`pending`/`ok`/`failed`/`skipped` — `system-manifest-v1.schema.json`), so
-/// the status is copied verbatim. `output_artefact` and `build_dir` are each
-/// written only when the result carries one — a `None` never wipes a plan-time
-/// value, so a slice the executor could not resolve keeps whatever the planner
-/// emitted. Pure: no IO.
-pub fn overlay_run_results(
-    manifest: &mut SystemManifest,
-    results: &[(String, String, Option<String>, Option<String>)],
-) {
-    for (core_id, status, output_artefact, build_dir) in results {
+/// the status is copied verbatim. `output_artefact`, `build_dir`, and `reason`
+/// are each written only when the result carries one — a `None` never wipes a
+/// plan-time value, so a slice the executor could not resolve keeps whatever
+/// the planner emitted. Pure: no IO.
+pub fn overlay_run_results(manifest: &mut SystemManifest, results: &[SliceRunResult]) {
+    for (core_id, status, output_artefact, build_dir, reason) in results {
         if let Some(slice) = manifest.slices.iter_mut().find(|s| &s.core_id == core_id) {
             slice.status = status.clone();
             if output_artefact.is_some() {
@@ -228,6 +244,9 @@ pub fn overlay_run_results(
             }
             if build_dir.is_some() {
                 slice.build_dir = build_dir.clone();
+            }
+            if reason.is_some() {
+                slice.reason = reason.clone();
             }
         }
     }
@@ -288,10 +307,7 @@ pub fn parse_system_manifest_raw(yaml: &str) -> Result<serde_yaml::Value, System
 /// `serialize_system_manifest_raw` for why the write path must use this pair
 /// instead of the typed one). Slices are matched by `core_id`; a slice not
 /// shaped as a mapping, or with no matching result, is left untouched.
-pub fn overlay_run_results_raw(
-    raw: &mut serde_yaml::Value,
-    results: &[(String, String, Option<String>, Option<String>)],
-) {
+pub fn overlay_run_results_raw(raw: &mut serde_yaml::Value, results: &[SliceRunResult]) {
     let Some(slices) = raw
         .get_mut("slices")
         .and_then(serde_yaml::Value::as_sequence_mut)
@@ -305,7 +321,7 @@ pub fn overlay_run_results_raw(
         let Some(core_id) = map.get("core_id").and_then(serde_yaml::Value::as_str) else {
             continue;
         };
-        let Some((_, status, output_artefact, build_dir)) =
+        let Some((_, status, output_artefact, build_dir, reason)) =
             results.iter().find(|(cid, ..)| cid == core_id)
         else {
             continue;
@@ -316,6 +332,9 @@ pub fn overlay_run_results_raw(
         }
         if let Some(b) = build_dir {
             map.insert("build_dir".into(), b.clone().into());
+        }
+        if let Some(r) = reason {
+            map.insert("reason".into(), r.clone().into());
         }
     }
 }
@@ -341,7 +360,7 @@ pub fn serialize_system_manifest_raw(raw: &serde_yaml::Value) -> Result<String, 
     serde_yaml::to_string(raw).map_err(|e| e.to_string())
 }
 
-/// Deterministic, human-readable summary lines (text-mode `alp build`). Pure.
+/// Deterministic, human-readable summary lines (text-mode `tan build`). Pure.
 pub fn summarize_manifest(m: &SystemManifest) -> Vec<String> {
     let mut lines = vec![format!(
         "system-manifest: {} — {} slice(s), {} active, {} ipc, {} helper mcu(s)",
@@ -475,10 +494,11 @@ boot_order: []
                     "ok".to_string(),
                     Some("build/m55_hp-zephyr/build/zephyr/zephyr.elf".to_string()),
                     Some("build/m55_hp-zephyr/build".to_string()),
+                    None,
                 ),
-                ("m55_he".to_string(), "failed".to_string(), None, None),
+                ("m55_he".to_string(), "failed".to_string(), None, None, None),
                 // A result for a core not in the manifest is a no-op.
-                ("ghost".to_string(), "ok".to_string(), None, None),
+                ("ghost".to_string(), "ok".to_string(), None, None, None),
             ],
         );
 
@@ -506,7 +526,7 @@ boot_order: []
         // Seed a plan-time artefact, then overlay a status-only result (None).
         m.slices[1].output_artefact = Some("build/plan-time.elf".to_string());
         let core = m.slices[1].core_id.clone();
-        overlay_run_results(&mut m, &[(core, "ok".to_string(), None, None)]);
+        overlay_run_results(&mut m, &[(core, "ok".to_string(), None, None, None)]);
         assert_eq!(
             m.slices[1].output_artefact.as_deref(),
             Some("build/plan-time.elf")
@@ -519,7 +539,7 @@ boot_order: []
         let mut m = parse_system_manifest(AEN701).unwrap();
         overlay_run_results(
             &mut m,
-            &[("m55_hp".to_string(), "ok".to_string(), None, None)],
+            &[("m55_hp".to_string(), "ok".to_string(), None, None, None)],
         );
         let yaml = serialize_system_manifest(&m).expect("serialize");
         let reparsed = parse_system_manifest(&yaml).expect("reparse");
@@ -566,6 +586,7 @@ boot_order: []
                 "ok".to_string(),
                 Some("build/m55_hp-zephyr/build/zephyr/zephyr.elf".to_string()),
                 None,
+                None,
             )],
         );
         let out = serialize_system_manifest_raw(&raw).expect("serialize raw");
@@ -583,6 +604,49 @@ boot_order: []
         // Untouched slices/fields stay as-is.
         let a32 = reparsed.slice_for_core("a32_cluster").unwrap();
         assert_eq!(a32.status, "pending");
+    }
+
+    #[test]
+    fn overlay_run_results_and_raw_thread_reason_through() {
+        // L22 regression: a skipped/failed slice's `reason` (the executor's
+        // "no command" / "{tool} not found in PATH; ..." text) must land in
+        // both the typed and raw overlay so a skipped slice explains itself
+        // in the written system-manifest.yaml, matching the schema's
+        // `slices[].reason` field.
+        let mut m = parse_system_manifest(AEN701).unwrap();
+        overlay_run_results(
+            &mut m,
+            &[(
+                "m55_he".to_string(),
+                "skipped".to_string(),
+                None,
+                None,
+                Some("no command".to_string()),
+            )],
+        );
+        assert_eq!(
+            m.slice_for_core("m55_he").unwrap().reason.as_deref(),
+            Some("no command")
+        );
+
+        let yaml = manifest_with_additive_fields();
+        let mut raw: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        overlay_run_results_raw(
+            &mut raw,
+            &[(
+                "m55_hp".to_string(),
+                "skipped".to_string(),
+                None,
+                None,
+                Some("west not found in PATH; this is normal on non-Zephyr hosts".to_string()),
+            )],
+        );
+        let out = serialize_system_manifest_raw(&raw).expect("serialize raw");
+        let reparsed = parse_system_manifest(&out).expect("reparse");
+        assert_eq!(
+            reparsed.slice_for_core("m55_hp").unwrap().reason.as_deref(),
+            Some("west not found in PATH; this is normal on non-Zephyr hosts")
+        );
     }
 
     #[test]
