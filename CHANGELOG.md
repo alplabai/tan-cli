@@ -34,6 +34,13 @@ decisions. Validated *acting* is now separated from tolerant *reading*.
   after a green build. Flash args are now read strictly (a wrong-type scalar
   hard-errors, naming the key), and a slice whose `status != ok` is refused with
   a `flash.slice-not-built` error rather than programmed.
+- **Build-root drift could leave `flash` reading a stale manifest.**
+  `flash`/`size`/`image`/`renode` each read `<project>/build/system-manifest.yaml`,
+  but the native build wrote the manifest under the plan's `buildRoot`. A plan
+  emitting `buildRoot != "build"` would write elsewhere while those consumers
+  read a stale one still under `build/`. The native build now refuses such a plan
+  with a `build.unsupported-build-root` error instead of building where the rest
+  of the suite cannot find the result.
 
 ### Fixed
 - **`tan run --flash` could program hardware on a host project** (and `tan run`

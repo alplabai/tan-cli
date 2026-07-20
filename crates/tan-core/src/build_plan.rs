@@ -249,7 +249,41 @@ impl BuildPlan {
         }
         out
     }
+
+    /// True when `build_root` is the one location every post-build consumer
+    /// reads: `<project>/build`.
+    ///
+    /// The native build writes `system-manifest.yaml` under `build_root`, but
+    /// `tan flash` / `size` / `image` / `renode` each run as a SEPARATE
+    /// invocation with no plan in hand, so they hardcode `<project>/build` as
+    /// where the manifest lives. If a plan ever emitted a different
+    /// `build_root`, the build would write the manifest somewhere those
+    /// consumers never look — leaving them to read a stale manifest still
+    /// sitting under `build/` (and, for `flash`, program it onto silicon). So
+    /// the executor rejects such a plan loudly rather than build into a location
+    /// the rest of the suite cannot find. Every plan the SDK emits today uses
+    /// `"build"`; this pins that shared assumption at the one seam that knows
+    /// the plan. A nested or dotted form that still normalizes to `build`
+    /// (`./build`, `build/.`) is accepted.
+    pub fn build_root_is_consumer_default(&self) -> bool {
+        use std::path::{Component, Path};
+        let p = Path::new(&self.build_root);
+        // A leading `..` normalizes to nothing on an empty accumulator, so
+        // `../build` would lexically collapse to `build` — reject any escape /
+        // rooted form explicitly, then require the remainder to normalize to
+        // exactly `build`.
+        !p.is_absolute()
+            && !p
+                .components()
+                .any(|c| matches!(c, Component::ParentDir))
+            && crate::path_guard::normalize(p) == Path::new(CONSUMER_BUILD_ROOT)
+    }
 }
+
+/// The single build-tree directory name every post-build consumer
+/// (`flash`/`size`/`image`/`renode`) reads relative to the project root. See
+/// [`BuildPlan::build_root_is_consumer_default`].
+pub const CONSUMER_BUILD_ROOT: &str = "build";
 
 /// Why a build-plan JSON could not be consumed.
 #[derive(Debug, thiserror::Error)]
@@ -425,6 +459,38 @@ mod tests {
         let json = serde_json::to_string(&plan).unwrap();
         let again = parse_build_plan(&json).unwrap();
         assert_eq!(plan, again);
+    }
+
+    #[test]
+    fn build_root_consumer_default_accepts_only_build() {
+        let with_root = |r: &str| {
+            let mut p = parse_build_plan(SAMPLE).unwrap();
+            p.build_root = r.to_string();
+            p.build_root_is_consumer_default()
+        };
+        // The one value the whole flash/size/image/renode suite reads, plus
+        // dotted forms that normalize to it.
+        assert!(with_root("build"));
+        assert!(with_root("./build"));
+        assert!(with_root("build/."));
+        // Anything else would put the manifest where the consumers never look.
+        assert!(!with_root("out"));
+        assert!(!with_root("build/nested"));
+        assert!(!with_root("../build"));
+        assert!(!with_root("/abs/build"));
+        assert!(!with_root(""));
+    }
+
+    #[test]
+    fn a_non_build_build_root_still_parses() {
+        // Tolerant read / validated act: parsing a plan whose buildRoot isn't
+        // `build` succeeds (inspection, `--plan` must still show it); it is the
+        // ACTING path (native_build) that refuses it via
+        // build_root_is_consumer_default, not the parser.
+        let plan = parse_build_plan(&SAMPLE.replace(r#""buildRoot": "build""#, r#""buildRoot": "out""#))
+            .expect("a non-build buildRoot must still parse");
+        assert_eq!(plan.build_root, "out");
+        assert!(!plan.build_root_is_consumer_default());
     }
 
     #[test]

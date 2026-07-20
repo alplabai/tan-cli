@@ -101,6 +101,31 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
         }
     };
 
+    // Refuse a plan whose build_root isn't the `<project>/build` that
+    // flash/size/image/renode read — building into a different directory would
+    // leave those separate invocations reading a stale (or missing) manifest,
+    // and `tan flash` would program it onto silicon. Checked before materialise
+    // writes anything. Every SDK-emitted plan uses `build` today; this makes a
+    // future drift a loud error instead of a silent wrong-image flash.
+    if !plan.build_root_is_consumer_default() {
+        return NativeBuildOutcome {
+            run: plan_error_run(
+                g,
+                project,
+                "build.unsupported-build-root",
+                format!(
+                    "plan buildRoot `{}` is not `build`; tan's flash/size/image/renode read \
+                     `<project>/build/system-manifest.yaml`, so building elsewhere would leave \
+                     them reading a stale or missing manifest",
+                    plan.build_root
+                ),
+                ExitCode::RuntimeFailure,
+            ),
+            manifest_written: false,
+            native_sim_target: None,
+        };
+    }
+
     let base = base_dir(&context);
     if let Err(e) = materialise_plan(&plan, Path::new(&base)) {
         return NativeBuildOutcome {
