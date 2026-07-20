@@ -24,6 +24,7 @@ pub mod presets;
 pub mod preview;
 pub mod project;
 pub mod renode;
+pub mod run;
 pub mod sdk;
 pub mod sdk_catalogue;
 pub mod size;
@@ -82,6 +83,9 @@ pub use project::{
 pub use renode::{
     FAMILY_TOKEN_TO_PLATFORM, RenodeError, build_renode_argv, platform_files_for_sku,
     platform_stem_for_sku, select_sku, sku_family, soc_family_token, zephyr_elf_from_manifest,
+};
+pub use run::{
+    NATIVE_SIM_BUILD_DIRS, NATIVE_SIM_EXE, RunAction, decide_run_action, native_sim_exe_candidates,
 };
 pub use sdk::{
     GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, check_sdk_readiness,

@@ -47,6 +47,8 @@ pub mod pinmux;
 pub mod presets;
 /// `tan renode` — boot the manifest's single Zephyr slice in headless Renode (native).
 pub mod renode;
+/// `tan run` — build, then execute the native_sim binary (host) or flash (hardware).
+pub mod run;
 /// `tan scaffold` — scaffold a module into an existing project.
 pub mod scaffold;
 /// `tan sdk` — SDK release listing/management.
