@@ -24,14 +24,16 @@ on:
     types: [alp-sdk-planner-change]
 
 env:
-  # Fallback alp-sdk ref for a plain `pull_request` run (no dispatch payload
-  # naming a ref). This is the last RELEASED alp-sdk tag as of this writing.
-  # NOTE: v0.11.1 predates df312cec (#848, ADR-0020 Phase 4) -- against this
-  # ref seam1 will see ZERO diffs (not even the allowed debug.probe one); the
-  # allowed-delta path is exercised by dispatch runs naming a post-#848
-  # sdk_ref. Bump this once alp-sdk cuts a release tag that includes #848
-  # (blocked on this gate landing -- alp-sdk ADR-0020 Amendment, alp-sdk#855).
-  PINNED_SDK_TAG: v0.11.1
+  # Fallback alp-sdk ref for a plain `pull_request` run (no dispatch payload).
+  # It MUST be a ref at or after the oracle SHA (97ad481b) -- an OLDER ref
+  # (e.g. the last release v0.11.1, which predates the Phase-1 fields) lacks
+  # envAppendPath/executionPolicy and would fail seam1 on missing-field diffs,
+  # not real drift. Pinned to df312cec (dev tip at gate-seed time = #848): it
+  # carries the Phase-1 fields AND the one allowed delta (debug.probe
+  # openocd->null), so a green bare-PR run proves the comparator handles the
+  # known-good case. Bump to the v0.12 release tag once alp-sdk cuts one past
+  # #848 (blocked on this gate landing -- alp-sdk ADR-0020 amendment, alp-sdk#855).
+  PINNED_SDK_TAG: df312cec3650bccc5976d31c2ab705f2a8e5f0ef
 
 jobs:
   seam1-plan-shape:
