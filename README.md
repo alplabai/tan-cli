@@ -17,8 +17,31 @@ Rust; only `migrate` / `lock` / `quality` still forward to `west alp-*`, and
 
 ## Install
 
-Every version tag publishes a raw, uncompressed binary per platform. Pick the
-asset for your host (full table in [`docs/release-contract.md`](docs/release-contract.md)):
+Every version tag publishes a raw, uncompressed binary per platform.
+
+### Automatic (recommended)
+
+The install scripts detect your platform, download the matching binary, and put
+`tan` on your PATH. They install **user-local by default — no `sudo`/admin**
+(`~/.local/bin` on Unix; `%LOCALAPPDATA%\Programs\tan` + your user PATH on
+Windows). Add `--system` / `-System` for a system-wide install (that path needs
+elevated permission).
+
+```sh
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh
+# system-wide (/usr/local/bin, uses sudo):   curl -fsSL …/install.sh | sh -s -- --system
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1 | iex
+# system-wide (%ProgramFiles%, run in an elevated PowerShell):   … ; .\install.ps1 -System
+```
+
+### Manual
+
+Pick the asset for your host (full table in [`docs/release-contract.md`](docs/release-contract.md)):
 
 **Linux / macOS**
 
