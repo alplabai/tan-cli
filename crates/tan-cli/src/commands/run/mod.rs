@@ -62,18 +62,15 @@ pub fn run(g: &GlobalArgs, args: &RunArgs) -> CommandRun {
         RunAction::BuildFailed => retag(built, "run"),
         // Host target: execute the produced native_sim binary.
         RunAction::ExecuteNative => exec_native_sim(g, built, &exe.expect("present per decision")),
-        // Hardware target + explicit `--flash`: reuse the native flash path.
-        RunAction::Flash => {
-            let flash_args = FlashArgs {
-                app_path: ".".to_string(),
-                build_root: None,
-                dry_run: false,
-                core: args.core.clone(),
-                helper: None,
-                skip_missing_tools: false,
-            };
-            retag(flash::run(g, &flash_args), "run")
-        }
+        // Hardware target + explicit `--flash`: reuse the native flash path,
+        // targeting the SAME project base that was built + native-detected — not
+        // cwd. `flash::run` resolves its build root from `current_dir()`, so a
+        // bare `app_path: "."` under `--project <dir>` would flash cwd/build (a
+        // stale manifest ⇒ the WRONG image on hardware); pass the resolved base.
+        RunAction::Flash => retag(
+            flash::run(g, &flash_args_for(&base, args.core.clone())),
+            "run",
+        ),
         // Hardware target, no `--flash`: the build succeeded, but programming the
         // board is the dangerous path and needs explicit consent — report + stop.
         RunAction::BuildOnly => {
@@ -97,6 +94,21 @@ fn base_dir(context: &ProjectContext) -> String {
         .clone()
         .or_else(|| context.workspace_root.clone())
         .unwrap_or_else(|| ".".to_string())
+}
+
+/// Build the `FlashArgs` for `run --flash`, anchored on the resolved project
+/// `base` (`flash`'s `app_path` = its project dir, whose `build/` holds the
+/// manifest). Threading `base` — not `"."` — makes `run --flash` program the
+/// same project it built, even under `--project <dir>` where cwd differs.
+fn flash_args_for(base: &Path, core: Option<String>) -> FlashArgs {
+    FlashArgs {
+        app_path: base.to_string_lossy().into_owned(),
+        build_root: None,
+        dry_run: false,
+        core,
+        helper: None,
+        skip_missing_tools: false,
+    }
 }
 
 /// Locate the produced `native_sim` executable from the post-build
@@ -334,6 +346,19 @@ mod tests {
         assert_eq!(find_native_sim_exe(&global(), &base), None);
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Hardware-safety: `run --flash --project <dir>` must flash <dir>, not cwd.
+    /// `flash::run` resolves `build_root = current_dir()/app_path/build`, so
+    /// anchoring `app_path` on the resolved base (not ".") is what keeps a stale
+    /// cwd/build/system-manifest.yaml from being programmed onto the board.
+    #[test]
+    fn flash_args_target_the_project_base_not_cwd() {
+        let base = Path::new("/some/project/dir");
+        let fa = flash_args_for(base, Some("m33".to_string()));
+        assert_eq!(fa.app_path, base.to_string_lossy());
+        assert_ne!(fa.app_path, ".");
+        assert_eq!(fa.core.as_deref(), Some("m33"));
     }
 
     #[test]
