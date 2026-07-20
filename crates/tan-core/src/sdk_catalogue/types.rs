@@ -21,7 +21,7 @@ pub struct SomPreset {
     /// Preferred inference backend id (from `inference.preferred_backend`).
     #[serde(default)]
     pub preferred_backend: Option<String>,
-    /// Capability flags keyed by name (e.g. `deepx_dx`).
+    /// Capability flags keyed by name (e.g. `deepx_dxm1`).
     #[serde(default)]
     pub capabilities: BTreeMap<String, bool>,
     /// Default board `name` to preselect, if any.

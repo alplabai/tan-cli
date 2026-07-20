@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Rust mirror of `packages/alp-core/src/sdkCatalogue/parse.ts`.
 
+use serde::de::Error as _;
 use serde_json::Value as JsonValue;
 use serde_yaml::{Mapping, Value as YamlValue};
 use std::collections::BTreeMap;
@@ -57,6 +58,17 @@ fn str_list(value: Option<&YamlValue>) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Read `dispatch_pin`, which `som-preset-v1.schema.json` allows as either an
+/// integer (mediator-local GPIO index) or a string (pad/bus name) — mirror
+/// the TS loader's `String(r.dispatch_pin)` coercion instead of dropping the
+/// integer form the way a `str_clean`-only read would.
+fn dispatch_pin_str(value: Option<&YamlValue>) -> Option<String> {
+    match value {
+        Some(YamlValue::Number(n)) => Some(n.to_string()),
+        other => str_clean(other),
+    }
+}
+
 /// Parse a single board definition (YAML) into a `BoardPreset`, dropping `TBD` strings.
 pub fn parse_board_preset(text: &str) -> Result<BoardPreset, serde_yaml::Error> {
     let root: YamlValue = serde_yaml::from_str(text)?;
@@ -99,8 +111,23 @@ pub fn parse_chip_def(text: &str) -> Result<ChipDef, serde_yaml::Error> {
 }
 
 /// Parse a single SoC specification (JSON) into a `SocSpec`.
+///
+/// Guards `soc_spec_version` first: `soc-spec-v1.schema.json` pins it
+/// `const: 1`, and this is the only SDK-file consumer that used to skip the
+/// schema-version-skew guard every other consumer (`build_plan`,
+/// `system_manifest`, `renode`, flash) already carries.
 pub fn parse_soc_spec(text: &str) -> Result<SocSpec, serde_json::Error> {
     let root: JsonValue = serde_json::from_str(text)?;
+    let soc_spec_version = root.get("soc_spec_version").and_then(JsonValue::as_i64);
+    if soc_spec_version != Some(1) {
+        return Err(serde_json::Error::custom(format!(
+            "unsupported soc_spec_version {} (this CLI consumes v1); upgrade the CLI or the SDK \
+             so the versions match",
+            soc_spec_version
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "missing".to_string())
+        )));
+    }
     let cores = root
         .get("cores")
         .and_then(JsonValue::as_array)
@@ -158,9 +185,25 @@ pub fn parse_soc_spec(text: &str) -> Result<SocSpec, serde_json::Error> {
 
 /// Parse a single SoM definition (YAML) into a `SomPreset`, flattening topology,
 /// memory, pad routes, and `on_module.i2c_devices`.
+///
+/// Guards `schema_version` first: `som-preset-v1.schema.json` pins it
+/// `const: 1`, and this is the only SDK-file consumer that used to skip the
+/// schema-version-skew guard every other consumer (`build_plan`,
+/// `system_manifest`, `renode`, flash) already carries.
 pub fn parse_som_preset(text: &str) -> Result<SomPreset, serde_yaml::Error> {
     let root: YamlValue = serde_yaml::from_str(text)?;
     let map = root.as_mapping().cloned().unwrap_or_default();
+
+    let schema_version = yget(&map, "schema_version").and_then(YamlValue::as_i64);
+    if schema_version != Some(1) {
+        return Err(serde_yaml::Error::custom(format!(
+            "unsupported schema_version {} (this CLI consumes v1); upgrade the CLI or the SDK so \
+             the versions match",
+            schema_version
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "missing".to_string())
+        )));
+    }
 
     let inference_map = yget(&map, "inference").and_then(YamlValue::as_mapping);
     let topology_map = yget(&map, "topology").and_then(YamlValue::as_mapping);
@@ -190,7 +233,7 @@ pub fn parse_som_preset(text: &str) -> Result<SomPreset, serde_yaml::Error> {
                     Some(PadRoute {
                         e1m,
                         dispatch: str_clean(yget(route, "dispatch")).unwrap_or_default(),
-                        dispatch_pin: str_clean(yget(route, "dispatch_pin")),
+                        dispatch_pin: dispatch_pin_str(yget(route, "dispatch_pin")),
                         doc: str_clean(yget(route, "doc")),
                     })
                 })
@@ -322,15 +365,42 @@ mod tests {
         );
 
         let som = parse_som_preset(
-            "sku: E1M-AEN701\ndisplay_name: E1M AEN701\nfamily: aen\nsilicon: alif-e7\ninference:\n  preferred_backend: ethos_u\ncapabilities: { deepx_dx: true }\ntopology:\n  m55_hp: { app: ./src }\non_module:\n  i2c_devices:\n    i2c0:\n      devices:\n        - chip: ina236\n          role: sensor\n          address_7bit: '0x40'\nstatus:\n  preliminary: true\n",
+            "schema_version: 1\nsku: E1M-AEN701\ndisplay_name: E1M AEN701\nfamily: aen\nsilicon: alif-e7\ninference:\n  preferred_backend: ethos_u\ncapabilities: { deepx_dxm1: true }\ntopology:\n  m55_hp: { app: ./src }\non_module:\n  i2c_devices:\n    i2c0:\n      devices:\n        - chip: ina236\n          role: sensor\n          address_7bit: '0x40'\nstatus:\n  preliminary: true\npad_routes:\n  - { e1m: E1M_GPIO_IO8, dispatch: cc3501e, dispatch_pin: 30 }\n",
         )
         .unwrap();
         assert_eq!(som.topology_core_ids, vec!["m55_hp".to_string()]);
         assert_eq!(som.i2c_devices.len(), 1);
         assert!(som.preliminary);
+        assert_eq!(som.pad_routes[0].dispatch_pin, Some("30".to_string()));
 
-        let soc = parse_soc_spec("{\"ref\":\"soc-ref\",\"vendor\":\"v\",\"family\":\"f\",\"part\":\"p\",\"cores\":[{\"id\":\"m55_hp\",\"type\":\"m55\",\"count\":2,\"freq_mhz\":400}]}").unwrap();
+        let soc = parse_soc_spec("{\"soc_spec_version\":1,\"ref\":\"soc-ref\",\"vendor\":\"v\",\"family\":\"f\",\"part\":\"p\",\"cores\":[{\"id\":\"m55_hp\",\"type\":\"m55\",\"count\":2,\"freq_mhz\":400}]}").unwrap();
         assert_eq!(soc.ref_id, "soc-ref");
         assert_eq!(soc.cores[0].count, 2);
+    }
+
+    #[test]
+    fn rejects_som_preset_schema_version_skew() {
+        let err =
+            parse_som_preset("schema_version: 2\nsku: E1M-AEN701\nfamily: aen\nsilicon: alif-e7\n")
+                .unwrap_err();
+        assert!(err.to_string().contains("unsupported schema_version 2"));
+    }
+
+    #[test]
+    fn rejects_soc_spec_version_skew() {
+        let err = parse_soc_spec(
+            "{\"soc_spec_version\":2,\"ref\":\"r\",\"vendor\":\"v\",\"family\":\"f\",\"part\":\"p\"}",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unsupported soc_spec_version 2"));
+    }
+
+    #[test]
+    fn dispatch_pin_reads_string_form_too() {
+        let som = parse_som_preset(
+            "schema_version: 1\nsku: E1M-V2M101\nfamily: v2n-m1\nsilicon: renesas-rzv2n\npad_routes:\n  - { e1m: E1M_SPI1, dispatch: gd32_bridge, dispatch_pin: \"PA11\" }\n",
+        )
+        .unwrap();
+        assert_eq!(som.pad_routes[0].dispatch_pin, Some("PA11".to_string()));
     }
 }

@@ -29,8 +29,14 @@ pub struct PinmuxTable {
     pub pads: Vec<PinmuxPad>,
 }
 
+/// The only `schemaVersion` this parser accepts. `metadata/pinmux/<family>.yaml`
+/// is gated to this by `pinmux-capability-v1.schema.json`.
+const SCHEMA_VERSION: &str = "pinmux-capability-v1";
+
 #[derive(serde::Deserialize)]
 struct RawTable {
+    #[serde(rename = "schemaVersion")]
+    schema_version: Option<String>,
     family: Option<String>,
     display_name: Option<String>,
     pads: Option<Vec<RawPad>>,
@@ -65,18 +71,37 @@ pub fn parse_pinmux_table(text: &str) -> PinmuxTable {
 
 /// Parse a `pinmux-capability-v1` YAML document, surfacing a genuine YAML
 /// syntax error instead of swallowing it into an empty table. `pads` rows
-/// still fail soft per-row (a row missing `e1m_pad`/`e1m_function` is
-/// dropped, not an `Err`) -- only "the document itself did not parse" is
-/// `Err` here.
+/// still fail soft per-row (a row missing `e1m_pad`/`e1m_function`, or
+/// carrying the `"TBD"` sentinel `e1m_pad`, is dropped, not an `Err`) -- only
+/// "the document itself did not parse" or "`schemaVersion` is not
+/// `pinmux-capability-v1`" is `Err` here. The latter matters because
+/// `pinmux-capability-v1.schema.json` requires `minItems: 1` on `pads`: a real
+/// v1 document is never legitimately empty, so a differently-shaped
+/// `schemaVersion` (a future v2) must not be allowed to silently parse into a
+/// zero-pad table indistinguishable from success.
 pub fn parse_pinmux_table_checked(text: &str) -> Result<PinmuxTable, serde_yaml::Error> {
     let raw: RawTable = serde_yaml::from_str(text)?;
+    if raw.schema_version.as_deref() != Some(SCHEMA_VERSION) {
+        use serde::de::Error as _;
+        return Err(serde_yaml::Error::custom(format!(
+            "unsupported pinmux capability schemaVersion {:?} (expected {SCHEMA_VERSION:?})",
+            raw.schema_version
+        )));
+    }
     let pads = raw
         .pads
         .unwrap_or_default()
         .into_iter()
         .filter_map(|p| {
+            let e1m_pad = p.e1m_pad?;
+            if e1m_pad == "TBD" {
+                // Sentinel row: the source TSV doesn't carry an E1M edge ball
+                // for this silicon pad. Mirrors the extension's loader, which
+                // filters these out rather than surfacing "TBD" as a pad name.
+                return None;
+            }
             Some(PinmuxPad {
-                e1m_pad: p.e1m_pad?,
+                e1m_pad,
                 e1m_function: p.e1m_function?,
                 owner: p.owner.unwrap_or_default(),
                 silicon_peripheral: p.silicon_peripheral.unwrap_or_default(),
@@ -93,13 +118,15 @@ pub fn parse_pinmux_table_checked(text: &str) -> Result<PinmuxTable, serde_yaml:
 
 /// Resolve a SoM SKU to its pinmux family stem (the `metadata/pinmux/<stem>.yaml`
 /// basename). Mirrors the extension's `pinmuxFamilyForSku` prefix table; returns
-/// `None` for an unrecognized SKU.
+/// `None` for an unrecognized SKU. E1M-V2M reuses the base V2N pinout in full
+/// (see `metadata/e1m_modules/v2n-m1/README.md`) -- there is no separate
+/// `v2n-m1.yaml` table, so it maps to `"v2n"` too.
 pub fn pinmux_family_for_sku(sku: &str) -> Option<&'static str> {
     const TABLE: &[(&str, &str)] = &[
         ("E1M-AEN", "aen"),
         ("E1M-NX9", "imx93"),
         ("E1M-V2N", "v2n"),
-        ("E1M-V2M", "v2n-m1"),
+        ("E1M-V2M", "v2n"),
     ];
     TABLE
         .iter()
@@ -135,7 +162,7 @@ pads:
     #[test]
     fn drops_pads_missing_required_keys_and_defaults_strings() {
         let t = parse_pinmux_table(
-            "family: aen\npads:\n  - { e1m_pad: \"A3\" }\n  - { e1m_pad: \"A4\", e1m_function: \"PWM4\" }\n",
+            "schemaVersion: pinmux-capability-v1\nfamily: aen\npads:\n  - { e1m_pad: \"A3\" }\n  - { e1m_pad: \"A4\", e1m_function: \"PWM4\" }\n",
         );
         // first pad has no e1m_function -> dropped; second keeps, owner defaults to "".
         assert_eq!(t.pads.len(), 1);
@@ -161,10 +188,31 @@ pads:
     }
 
     #[test]
+    fn rejects_non_v1_schema_version_as_typed_skew_not_empty_table() {
+        // A `pinmux-capability-v2` (or missing-version) doc must not parse as
+        // a silently-successful zero-pad table: `pads` is `minItems: 1` in the
+        // v1 schema, so an empty table is never a legitimate v1 document.
+        let v2 = "schemaVersion: pinmux-capability-v2\nfamily: aen\npads: []\n";
+        assert!(parse_pinmux_table_checked(v2).is_err());
+        let no_version = "family: aen\npads:\n  - { e1m_pad: \"A3\", e1m_function: \"PWM6\", owner: \"alif\", silicon_peripheral: \"\", silicon_pad: \"P0_0\" }\n";
+        assert!(parse_pinmux_table_checked(no_version).is_err());
+    }
+
+    #[test]
+    fn drops_tbd_sentinel_pads() {
+        let t = parse_pinmux_table(
+            "schemaVersion: pinmux-capability-v1\nfamily: v2n\npads:\n  - { e1m_pad: \"TBD\", e1m_function: \"TBD\", owner: \"renesas\", silicon_peripheral: \"BL_PWM\", silicon_pad: \"PA5\" }\n  - { e1m_pad: \"A3\", e1m_function: \"PWM6\", owner: \"alif\", silicon_peripheral: \"\", silicon_pad: \"P0_0\" }\n",
+        );
+        assert_eq!(t.pads.len(), 1);
+        assert_eq!(t.pads[0].e1m_pad, "A3");
+    }
+
+    #[test]
     fn sku_to_family_prefix_map() {
         assert_eq!(pinmux_family_for_sku("E1M-AEN701"), Some("aen"));
         assert_eq!(pinmux_family_for_sku("E1M-V2N44"), Some("v2n"));
-        assert_eq!(pinmux_family_for_sku("E1M-V2M01"), Some("v2n-m1"));
+        // E1M-V2M reuses the base V2N pinout in full; no separate table.
+        assert_eq!(pinmux_family_for_sku("E1M-V2M01"), Some("v2n"));
         assert_eq!(pinmux_family_for_sku("E1M-NX93"), Some("imx93"));
         assert_eq!(pinmux_family_for_sku("E1M-UNKNOWN"), None);
     }
