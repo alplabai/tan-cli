@@ -9,6 +9,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "alp-tan-cli"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flate2",
+ "indicatif",
+ "inquire",
+ "owo-colors",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tan-core",
+ "tar",
+ "ureq",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1025,24 +1043,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "tan"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "clap",
- "flate2",
- "indicatif",
- "inquire",
- "owo-colors",
- "serde",
- "serde_json",
- "sha2",
- "tan-core",
- "tar",
- "ureq",
 ]
 
 [[package]]

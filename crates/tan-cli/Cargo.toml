@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
-name = "tan"
+# crates.io identity only — the built binary is still named `tan` (see [[bin]]
+# below); `cargo install alp-tan-cli` puts a `tan` command on PATH. Named
+# `alp-tan-cli`, not `tan-cli`: both `tan` and `tan-cli`/`tan_cli` are already
+# registered on crates.io by an unrelated project (github.com/tan-language/tan),
+# so the literal name alp-sdk#855/tan-cli#11 asked for is unavailable.
+name = "alp-tan-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,6 +13,8 @@ repository = "https://github.com/alplabai/tan-cli"
 rust-version.workspace = true
 readme = "README.md"
 description = "The native `tan` CLI for Alp Lab embedded projects: board.yaml validate/generate, toolchain bootstrap, and plan-driven build/flash with a stable JSON envelope."
+keywords = ["cli", "embedded", "firmware", "zephyr", "build"]
+categories = ["command-line-utilities", "embedded", "development-tools::build-utils"]
 
 [[bin]]
 name = "tan"

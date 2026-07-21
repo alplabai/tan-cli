@@ -55,6 +55,19 @@ jobs:
             echo "::error::tag v$tag does not match [workspace.package] version $cargo_version in Cargo.toml"
             exit 1
           fi
+      - name: npm shim version == Cargo version
+        shell: bash
+        # The npm shim pins its download to `v<package.json version>`; if it
+        # drifts from the crate version the shim fetches the wrong release. Fail
+        # the tag before building 6 targets, mirroring the tag==Cargo guard.
+        run: |
+          npm_version="$(node -p "require('./npm-shim/package.json').version")"
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          echo "npm=$npm_version  cargo=$cargo_version"
+          if [ "$npm_version" != "$cargo_version" ]; then
+            echo "::error::npm-shim/package.json version $npm_version does not match [workspace.package] version $cargo_version — bump both in lockstep"
+            exit 1
+          fi
 
   # The tagged commit must pass the same gates a PR does — a tag can be cut from
   # any commit, so "it was green on main" is an assumption, not a fact.
@@ -132,8 +145,90 @@ jobs:
         with:
           path: assets
           merge-multiple: true
+      - name: generate checksums.txt
+        shell: bash
+        working-directory: assets
+        # SHA-256 of every release binary, GNU `sha256sum` format, uploaded as a
+        # release asset. The npm shim (postinstall.js) and the install scripts
+        # pin the downloaded binary against this digest before running it.
+        run: |
+          sha256sum tan-* > checksums.txt
+          cat checksums.txt
       - name: publish release
         uses: softprops/action-gh-release@v2
         with:
           files: assets/*
           fail_on_unmatched_files: true
+
+  # crates.io — `cargo install alp-tan-cli` (the crate is `alp-tan-cli` because
+  # `tan`/`tan-cli` are already taken on crates.io; the built binary is still
+  # `tan`). Publishes tan-core THEN alp-tan-cli (core first — `cargo publish`
+  # waits for it to appear on the index before publishing the crate that
+  # path-depends on it). Gated on
+  # CARGO_REGISTRY_TOKEN; skipped (not failed) when the secret is unset so a
+  # fork/CI run without publish credentials still goes green.
+  publish_crates:
+    name: publish · crates.io
+    needs: release
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          rustflags: "" # keep parity with the local gates (see ci.yml's lint job)
+
+      - name: Publish tan-core then alp-tan-cli
+        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
+        # tan-core first; cargo publish waits for it to hit the index before
+        # alp-tan-cli (which depends on it) is published.
+        run: |
+          cargo publish --package tan-core --locked
+          cargo publish --package alp-tan-cli --locked
+
+      - name: Note when crates.io publish was skipped
+        if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
+        run: echo "::warning::CARGO_REGISTRY_TOKEN not set — skipped crates.io publish. The GitHub release binaries + npm shim still ship."
+
+  # npm shim — `npm i -g @alplabai/tan` / `npx @alplabai/tan`. One release tag
+  # scheme (v*), one workflow. Gated on NPM_TOKEN; skipped (not failed) when
+  # unset, mirroring the crates.io gating above.
+  publish_npm:
+    name: publish · npm shim
+    needs: release
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: npm-shim
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Pack (smoke — confirm the shim packs with its bin + postinstall)
+        run: |
+          npm pack --dry-run
+          node -e "const p=require('./package.json'); if(!p.bin||!p.bin.tan) throw new Error('shim missing bin.tan')"
+
+      - name: Publish to npm
+        if: ${{ env.NPM_TOKEN != '' }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Note when npm publish was skipped
+        if: ${{ env.NPM_TOKEN == '' }}
+        run: echo "::warning::NPM_TOKEN not set — packed the shim but skipped npm publish. Add the NPM_TOKEN repo secret to enable it."
