@@ -62,25 +62,33 @@ impl TokenValues<'_> {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum PlanTokenError {
     /// A `${...}`-shaped token survived substitution — an unknown token (a
-    /// 4th token this CLI doesn't resolve) or a plan bug. Names both the
-    /// field and the leftover token: an old tan on a tokened plan already
-    /// fails at `west` with an unusable directory name, so this fails
-    /// earlier and more clearly, at the one seam that knows the plan.
+    /// 4th token this CLI doesn't resolve), an unterminated `${` (truncation/
+    /// typo), or a plan bug. Names both the field and the leftover token: an
+    /// old tan on a tokened plan already fails at `west` with an unusable
+    /// directory name, so this fails earlier and more clearly, at the one
+    /// seam that knows the plan.
     #[error("plan field `{field}` still contains an unresolved token `{token}` after substitution")]
     LeftoverToken {
         /// Dotted/indexed path to the offending field (e.g.
         /// `slices[0].command.args[3]`).
         field: String,
-        /// The leftover `${...}`-shaped substring found in that field.
+        /// The leftover `${...}`-shaped (or unterminated `${`) substring
+        /// found in that field.
         token: String,
     },
+    /// `planPathMode` is present but isn't the one value this pass knows
+    /// (`"tokened"`). Refusing loudly rather than either silently treating
+    /// it as legacy (no substitution — tokens would ship to `west`/disk
+    /// verbatim) or silently treating it as tokened (wrong values applied).
+    #[error("unknown planPathMode `{0}` (only \"tokened\" is defined)")]
+    UnknownPlanPathMode(String),
 }
 
 /// ONE blind string-substitution pass over every path-bearing string field of
 /// `plan`, swapping the three literal tokens for `values`. A no-op —
-/// byte-identical clone — unless `plan.plan_path_mode` is exactly
-/// `"tokened"` (absent/legacy plans, i.e. every plan the SDK emits today, are
-/// returned untouched).
+/// byte-identical clone — when `plan.plan_path_mode` is absent (legacy plans,
+/// i.e. every plan the SDK emits today). [`PlanTokenError::UnknownPlanPathMode`]
+/// when it's present but not exactly `"tokened"`.
 ///
 /// NO arg-parsing: every `command.args` entry and `cwd`, every slice `env`
 /// value, every `envAppendPath` value, `boardYaml`, and every
@@ -92,8 +100,10 @@ pub fn substitute_plan_tokens(
     plan: &BuildPlan,
     values: &TokenValues,
 ) -> Result<BuildPlan, PlanTokenError> {
-    if plan.plan_path_mode.as_deref() != Some(PLAN_PATH_MODE_TOKENED) {
-        return Ok(plan.clone());
+    match plan.plan_path_mode.as_deref() {
+        None => return Ok(plan.clone()),
+        Some(PLAN_PATH_MODE_TOKENED) => {}
+        Some(other) => return Err(PlanTokenError::UnknownPlanPathMode(other.to_string())),
     }
 
     let mut out = plan.clone();
@@ -173,11 +183,16 @@ fn sub_field(values: &TokenValues, field: &str, raw: &str) -> Result<String, Pla
     Ok(substituted)
 }
 
-/// First `${...}`-shaped substring in `value`, if any.
+/// First `${...}`-shaped substring in `value`, if any. An unterminated `${`
+/// (no closing `}` — truncation or a typo) still counts: it's not one of the
+/// three known tokens either, so it must not ship silently.
 fn find_brace_token(value: &str) -> Option<String> {
     let start = value.find("${")?;
-    let end = value[start..].find('}')? + start;
-    Some(value[start..=end].to_string())
+    let rest = &value[start..];
+    match rest.find('}') {
+        Some(end) => Some(rest[..=end].to_string()),
+        None => Some(rest.to_string()),
+    }
 }
 
 /// The split-brain guard: whether a `--plan-from` plan's `sdkCommit` (when
@@ -194,8 +209,11 @@ pub fn sdk_commit_mismatches(plan_commit: &str, resolved_commit: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }
+    // Byte-slice, not `str` char-boundary slicing: `n` (a byte count) can
+    // land inside a multi-byte UTF-8 char (e.g. a corrupt/non-hex commit
+    // string), which `&a[..n]` panics on but `a.as_bytes()[..n]` never does.
     let n = a.len().min(b.len());
-    !a[..n].eq_ignore_ascii_case(&b[..n])
+    !a.as_bytes()[..n].eq_ignore_ascii_case(&b.as_bytes()[..n])
 }
 
 /// Guard 3: whether `${PROJECT_ROOT}` (the resolved `board.yaml`'s
@@ -206,7 +224,16 @@ pub fn sdk_commit_mismatches(plan_commit: &str, resolved_commit: &str) -> bool {
 /// `${PROJECT_ROOT}` from one and executing slices under the other would
 /// silently build against the wrong tree.
 pub fn project_root_diverges_from_exec_base(project_root: &str, exec_base: &str) -> bool {
-    normalize(Path::new(project_root)) != normalize(Path::new(exec_base))
+    let a = normalize(Path::new(project_root));
+    let b = normalize(Path::new(exec_base));
+    if cfg!(windows) {
+        // Lexical `normalize` doesn't fold drive-letter case (`Prefix::Disk(b'E')
+        // != Disk(b'e')`), so `--board-yaml e:/…` vs `--project E:/…` — the same
+        // NTFS path — would otherwise false-fail this guard.
+        a.to_string_lossy().to_ascii_lowercase() != b.to_string_lossy().to_ascii_lowercase()
+    } else {
+        a != b
+    }
 }
 
 #[cfg(test)]
@@ -328,7 +355,40 @@ mod tests {
                 assert_eq!(field, "boardYaml");
                 assert_eq!(token, "${UNKNOWN}");
             }
+            other => panic!("expected LeftoverToken, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn unterminated_token_is_a_leftover_too() {
+        // A truncated/typo'd `${SDK_ROOT` (missing `}`) is not one of the
+        // three known tokens either — must not ship to disk/west silently.
+        let json = TOKENED_PLAN.replace(
+            r#""boardYaml": "${PROJECT_ROOT}/board.yaml""#,
+            r#""boardYaml": "${SDK_ROOT/board.yaml""#,
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let err =
+            substitute_plan_tokens(&plan, &values()).expect_err("unterminated token must fail");
+        match err {
+            PlanTokenError::LeftoverToken { field, token } => {
+                assert_eq!(field, "boardYaml");
+                assert_eq!(token, "${SDK_ROOT/board.yaml");
+            }
+            other => panic!("expected LeftoverToken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_plan_path_mode_is_a_hard_error() {
+        let json = TOKENED_PLAN.replace(r#""tokened""#, r#""tokened-v2""#);
+        let plan = parse_build_plan(&json).unwrap();
+        let err =
+            substitute_plan_tokens(&plan, &values()).expect_err("unknown mode must be refused");
+        assert_eq!(
+            err,
+            PlanTokenError::UnknownPlanPathMode("tokened-v2".to_string())
+        );
     }
 
     #[test]
@@ -350,6 +410,16 @@ mod tests {
         // git rev-parse unavailable (no .git, no git binary) — never a mismatch.
         assert!(!sdk_commit_mismatches("deadbee", ""));
         assert!(!sdk_commit_mismatches("", ""));
+    }
+
+    #[test]
+    fn sdk_commit_mismatch_does_not_panic_on_a_multi_byte_char_at_the_boundary() {
+        // Regression: byte-length `n` used to slice `&str` directly, which
+        // panics ("not a char boundary") when `n` lands mid-way through a
+        // multi-byte UTF-8 char. Must compare (and return a sensible bool),
+        // never panic — `panic = "abort"` in this workspace's release profile
+        // would take the whole process down.
+        assert!(sdk_commit_mismatches("000000\u{e9}", "0000000"));
     }
 
     #[test]
@@ -375,6 +445,18 @@ mod tests {
         assert!(project_root_diverges_from_exec_base(
             "/work/proj/examples/foo",
             "/work/proj"
+        ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn project_root_diverges_from_exec_base_folds_windows_drive_letter_case() {
+        // Regression: lexical `normalize` doesn't fold `Prefix::Disk` case, so
+        // `e:/work/proj` (--board-yaml) vs `E:/work/proj` (--project) — the
+        // same NTFS path — used to false-fail this guard.
+        assert!(!project_root_diverges_from_exec_base(
+            "e:/work/proj",
+            "E:/work/proj"
         ));
     }
 }

@@ -88,3 +88,139 @@ pub fn run_build(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
         run_build_native_outcome(g, args).run
     }
 }
+
+#[cfg(test)]
+mod plan_from_materialise_e2e_tests {
+    // End-to-end at the actual `main.rs` entry point (`run_build`, parsed
+    // from real argv via clap) — not a direct call into
+    // `token_substitution::apply_plan_token_substitution` with hand-built
+    // args. A direct call is exactly how the routing bug (`--plan-from
+    // --materialise` never reached the substitution pass at all, because
+    // `run_build` sends any `plan_from.is_some()` to `plan_command`, never
+    // `native_build_outcome`) went uncaught: it never exercised the
+    // `if args.plan_from.is_some() { plan_command } ` branch this test does.
+    use clap::Parser;
+
+    use super::run_build;
+    use crate::cli::{Cli, Command};
+
+    fn sdk_root_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tan-build-e2e-sdk-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts").join("alp_project.py"), b"").unwrap();
+        dir
+    }
+
+    fn project_dir(tag: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("tan-build-e2e-proj-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn plan_from_materialise_substitutes_tokens_via_real_cli_routing() {
+        let sdk_root = sdk_root_dir("subst");
+        let project = project_dir("subst");
+
+        let plan_path = project.join("plan.json");
+        let plan_json = r#"{
+          "schemaVersion": 1, "planPathMode": "tokened",
+          "boardYaml": "${PROJECT_ROOT}/board.yaml", "sku": "S", "buildRoot": "build",
+          "slices": [
+            { "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+              "configArtefacts": [
+                { "path": "build/c1/alp.conf", "contents": "SDK=${SDK_ROOT}\n" }
+              ],
+              "command": { "tool": "west", "args": ["build"], "cwd": "build/c1" } }
+          ],
+          "sharedArtefacts": []
+        }"#;
+        std::fs::write(&plan_path, plan_json).unwrap();
+
+        let cli = Cli::parse_from([
+            "tan",
+            "--format",
+            "json",
+            "--project",
+            project.to_str().unwrap(),
+            "--sdk-root",
+            sdk_root.to_str().unwrap(),
+            "build",
+            "--plan-from",
+            plan_path.to_str().unwrap(),
+            "--materialise",
+        ]);
+        let Command::Build(args) = cli.command else {
+            panic!("expected Command::Build");
+        };
+
+        let run = run_build(&cli.global, &args);
+        assert_eq!(run.exit.code(), 0, "run: {:?}", run.json);
+
+        let written = project.join("build/c1/alp.conf");
+        let contents = std::fs::read_to_string(&written)
+            .unwrap_or_else(|e| panic!("materialise did not write {}: {e}", written.display()));
+        assert!(
+            !contents.contains("${SDK_ROOT}"),
+            "unresolved token leaked to disk: {contents}"
+        );
+        assert_eq!(contents, format!("SDK={}\n", sdk_root.to_str().unwrap()));
+
+        std::fs::remove_dir_all(&project).ok();
+        std::fs::remove_dir_all(&sdk_root).ok();
+    }
+
+    #[test]
+    fn plan_from_materialise_refuses_an_unresolvable_tokened_plan() {
+        // Same real routing, but with no `--sdk-root` and a project dir that
+        // isn't itself (or near) an SDK checkout — `${SDK_ROOT}` can't
+        // resolve. Must refuse and write NOTHING, never fall back to
+        // materialising the literal token.
+        let project = project_dir("unresolved");
+        let plan_path = project.join("plan.json");
+        std::fs::write(
+            &plan_path,
+            r#"{
+              "schemaVersion": 1, "planPathMode": "tokened",
+              "boardYaml": "${PROJECT_ROOT}/board.yaml", "sku": "S", "buildRoot": "build",
+              "slices": [
+                { "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                  "configArtefacts": [
+                    { "path": "build/c1/alp.conf", "contents": "SDK=${SDK_ROOT}\n" }
+                  ],
+                  "command": { "tool": "west", "args": ["build"], "cwd": "build/c1" } }
+              ],
+              "sharedArtefacts": []
+            }"#,
+        )
+        .unwrap();
+
+        let cli = Cli::parse_from([
+            "tan",
+            "--format",
+            "json",
+            "--project",
+            project.to_str().unwrap(),
+            "build",
+            "--plan-from",
+            plan_path.to_str().unwrap(),
+            "--materialise",
+        ]);
+        let Command::Build(args) = cli.command else {
+            panic!("expected Command::Build");
+        };
+
+        let run = run_build(&cli.global, &args);
+        assert_ne!(run.exit.code(), 0, "run: {:?}", run.json);
+        assert!(
+            !project.join("build/c1/alp.conf").exists(),
+            "must not materialise an unresolved tokened plan"
+        );
+
+        std::fs::remove_dir_all(&project).ok();
+    }
+}

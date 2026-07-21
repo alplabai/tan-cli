@@ -112,7 +112,7 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
     // SAME exec base every slice actually runs under) for the PROJECT_ROOT/
     // exec-base divergence guard.
     let base = base_dir(&context);
-    let plan = match apply_plan_token_substitution(g, &context, args, &base, &plan) {
+    let plan = match apply_plan_token_substitution(g, &context, &base, &plan) {
         Ok(plan) => plan,
         Err((code, message)) => {
             return NativeBuildOutcome {
