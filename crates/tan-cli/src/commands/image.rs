@@ -17,6 +17,13 @@
 //!   - the vestigial `find_sdk_root()` gate is dropped — image needs no SDK.
 //!   - an IO failure returns WriteFailure(3) (tan idiom) rather than unwinding as
 //!     a Python traceback → rc 1.
+//!   - issue #2: a helper's DECLARED, concrete `firmware_path` that doesn't
+//!     resolve to a file on disk is a hard error (RuntimeFailure(1) / JSON
+//!     `ok:false`), not a silent skip — a downstream consumer keying on
+//!     `ok`/exit code must not see a "complete" bundle that's missing e.g. the
+//!     GD32 supervisor image. The `TBD` pending sentinel (no firmware built
+//!     yet — a legitimate state) and an altogether-undeclared `firmware_path`
+//!     stay non-fatal skips; see `HelperOutcome` in `assemble_bundle` below.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -55,13 +62,22 @@ impl FailCtx {
     }
 }
 
-/// A non-fatal bundle-assembly notice: a slice or helper silently left OUT of
-/// the bundle (missing build_dir, unbuildable archive name, missing firmware).
+/// A bundle-assembly notice: a slice or helper item left OUT of the bundle
+/// (missing build_dir, unbuildable archive name, pending/missing firmware).
 /// Carries its own issue code, unlike the plain `String` this replaced, so
 /// `success_run` can promote it into a JSON `Issue` instead of only a text
 /// line — see the fix at `success_run` for why that distinction matters.
+///
+/// `severity` is almost always `"warning"` (the omission is a legitimate,
+/// already-accounted-for gap: no build_dir yet, an unsafe core_id/os, or a
+/// helper whose firmware is still the `TBD` pending sentinel). The one
+/// `"error"` case is issue #2: a helper's DECLARED, concrete `firmware_path`
+/// that doesn't resolve to a file on disk — the bundle would silently omit a
+/// promised artefact (e.g. the GD32 supervisor image) — and `success_run`
+/// turns that into a non-zero exit / `ok:false` instead of a clean run.
 struct Notice {
     code: &'static str,
+    severity: &'static str,
     message: String,
 }
 
@@ -162,6 +178,7 @@ fn assemble_bundle(
             SliceOutcome::Bundled(entry) => slice_entries.push(entry),
             SliceOutcome::BuildDirMissing => notices.push(Notice {
                 code: "image.slice-skipped",
+                severity: "warning",
                 message: format!("image: skipping {} (build_dir missing)", slice.core_id),
             }),
             // core_id/os failed the shared-seam path guard in
@@ -170,6 +187,7 @@ fn assemble_bundle(
             // bundle. See image_bundle::slice_archive_name for the guard.
             SliceOutcome::UnsafeName => notices.push(Notice {
                 code: "image.slice-unsafe-name",
+                severity: "warning",
                 message: format!(
                     "image: skipping {} (core_id/os is not a safe archive name)",
                     slice.core_id
@@ -187,9 +205,28 @@ fn assemble_bundle(
     for helper in &manifest.helper_mcus {
         match bundle_helper(helper, build_root, &helpers_dir, &mut used_helper_names)? {
             HelperOutcome::Bundled(entry) => helper_entries.push(entry),
-            HelperOutcome::NotFound(path) => notices.push(Notice {
+            // The pending `TBD` sentinel (system_manifest.rs's documented
+            // placeholder, same convention as sdk_catalogue::parse::is_tbd) —
+            // a project whose helper firmware hasn't been built yet is a
+            // legitimate state, so this stays a warning, not a failure.
+            HelperOutcome::Pending(path) => notices.push(Notice {
                 code: "image.helper-skipped",
+                severity: "warning",
                 message: format!("image: helper-mcu firmware not found at {path}; skipping"),
+            }),
+            // Issue #2: a CONCRETE declared firmware_path that does not
+            // resolve to a file on disk is not the same as "not yet built" —
+            // it means the bundle silently omits a promised helper-MCU
+            // artefact (e.g. the GD32 supervisor image). Error severity, and
+            // `success_run` turns its presence into a non-zero exit/ok:false
+            // instead of a clean run.
+            HelperOutcome::NotFound(path) => notices.push(Notice {
+                code: "image.helper-missing",
+                severity: "error",
+                message: format!(
+                    "image: helper-mcu firmware not found at {path}; refusing to produce an \
+                     incomplete bundle"
+                ),
             }),
             HelperOutcome::Absent => {}
         }
@@ -259,17 +296,25 @@ fn bundle_slice(
     }))
 }
 
-/// The three faithful helper-firmware paths: copied, present-but-not-a-file
-/// (skip WITH notice), or absent/empty (silent skip).
+/// The four faithful helper-firmware paths: copied, the pending `TBD`
+/// sentinel (a legitimate not-yet-built state, non-fatal), a CONCRETE
+/// declared path that isn't an existing file (issue #2 — a promised
+/// artefact silently missing, must hard-fail rather than skip), or
+/// absent/empty (silent skip).
 enum HelperOutcome {
     Bundled(BundleHelperEntry),
+    Pending(String),
     NotFound(String),
     Absent,
 }
 
 /// Copy one helper's firmware into `helper-mcus/<basename>` when it is an
-/// existing file. A missing/empty `firmware_path` is silently absent; a
-/// present-but-nonexistent one (e.g. the literal `TBD`) is `NotFound`.
+/// existing file. A missing/empty `firmware_path` is silently absent; the
+/// literal `TBD` sentinel (system_manifest.rs's documented not-yet-built
+/// placeholder — the same convention `sdk_catalogue::parse::is_tbd` reads
+/// elsewhere) is `Pending`, a legitimate non-fatal skip; any OTHER declared
+/// path that doesn't resolve to an existing file is `NotFound` — the issue #2
+/// defect the caller promotes to a hard error.
 ///
 /// `used_names` tracks every destination basename already claimed in this
 /// run: Zephyr's default build layout puts every helper's firmware at the
@@ -287,6 +332,9 @@ fn bundle_helper(
         Some(p) => p,
         None => return Ok(HelperOutcome::Absent),
     };
+    if raw.trim() == "TBD" {
+        return Ok(HelperOutcome::Pending(raw.to_string()));
+    }
     // Absolute as-is, relative anchored to the build root (where the manifest lives).
     let fw = {
         let p = Path::new(raw);
@@ -383,8 +431,13 @@ fn sha256_file(path: &Path) -> io::Result<String> {
         .collect())
 }
 
-/// Success `CommandRun`: text = skip notices + a ready line; JSON = the standard
-/// envelope with the bundle manifest as `data`.
+/// The bundle-assembly-completed `CommandRun`: text = notices + a ready line;
+/// JSON = the standard envelope with the bundle manifest as `data`. Despite
+/// the name, this is not always a green exit: an `"error"`-severity notice
+/// (issue #2 — a helper's concrete, declared `firmware_path` that doesn't
+/// resolve to a file on disk) flips the exit/`ok` to non-zero/false even
+/// though `assemble_bundle` itself completed (mkdir/tar/write all succeeded,
+/// so the manifest and every OTHER artefact are still on disk).
 fn success_run(
     g: &GlobalArgs,
     project: Project,
@@ -392,24 +445,32 @@ fn success_run(
     bundle: BundleManifest,
     bundle_dir: PathBuf,
 ) -> CommandRun {
+    // Every notice here is an artefact silently left OUT of the bundle
+    // (missing build_dir, unsafe core_id/os, pending/missing helper
+    // firmware). The old code hard-coded `Vec::new()`/`ExitCode::Success`
+    // unconditionally on this branch, so `--format json` (what the vscode
+    // extension always uses) reported ok:true / issues:[] for a bundle
+    // missing a slice or helper, with nothing in the envelope distinguishing
+    // that from a complete bundle — and, for a genuinely missing declared
+    // helper firmware, no way to detect the gap short of diffing the bundle
+    // contents (issue #2).
+    let exit = if notices.iter().any(|n| n.severity == "error") {
+        ExitCode::RuntimeFailure
+    } else {
+        ExitCode::Success
+    };
     if g.is_json() {
-        // Every notice here is an artefact silently left OUT of the bundle
-        // (missing build_dir, unsafe core_id/os, missing helper firmware).
-        // The old code hard-coded `Vec::new()` on this branch, so `--format
-        // json` (what the vscode extension always uses) reported ok:true /
-        // issues:[] for a bundle missing a slice or helper, with nothing in
-        // the envelope distinguishing that from a complete bundle.
         let issues: Vec<Issue> = notices
             .iter()
             .map(|n| Issue {
                 code: n.code.to_string(),
-                severity: "warning".to_string(),
+                severity: n.severity.to_string(),
                 message: n.message.clone(),
             })
             .collect();
-        let json = Envelope::new("image", project, &bundle, issues, 0).to_json();
+        let json = Envelope::new("image", project, &bundle, issues, exit.code()).to_json();
         CommandRun {
-            exit: ExitCode::Success,
+            exit,
             text: Vec::new(),
             json: Some(json),
         }
@@ -417,7 +478,7 @@ fn success_run(
         let mut text: Vec<String> = notices.into_iter().map(|n| n.message).collect();
         text.push(format!("image: bundle ready at {}", bundle_dir.display()));
         CommandRun {
-            exit: ExitCode::Success,
+            exit,
             text,
             json: None,
         }
@@ -541,10 +602,16 @@ boot_order: []
         let run = run(&global(Format::Json), &image_args(&build_root));
         assert_eq!(run.exit, ExitCode::Success);
         let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(doc["ok"], true);
         assert_eq!(doc["data"]["schema_version"], 1);
         assert_eq!(doc["data"]["generated_by"], "tan image");
         assert_eq!(doc["data"]["slices"].as_array().unwrap().len(), 0);
         assert_eq!(doc["data"]["helper_mcus"].as_array().unwrap().len(), 0);
+        // The `TBD` pending sentinel is the LEGITIMATE not-yet-built state
+        // (issue #2's fix must not regress this): still a warning, not the
+        // error severity a genuinely missing concrete firmware_path gets.
+        assert_eq!(doc["issues"][0]["code"], "image.helper-skipped");
+        assert_eq!(doc["issues"][0]["severity"], "warning");
         // bundle-manifest.json was still written.
         assert!(
             build_root
@@ -661,6 +728,49 @@ boot_order: []
                 .join("image-bundle")
                 .join("helper-mcus")
                 .join("gd32_bridge.bin")
+                .is_file()
+        );
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn concrete_missing_helper_firmware_is_a_hard_error() {
+        // Issue #2: `firmware_path` is a CONCRETE declared path (not the
+        // `TBD` pending sentinel) and no file was ever written there. This
+        // must hard-fail (non-zero exit / ok:false with an error-severity
+        // issue), not the old silent-skip/ok:true behavior — a downstream
+        // consumer keying on ok/exit code must not see a "complete" bundle
+        // that's silently missing e.g. the GD32 supervisor image.
+        let build_root = tmp("helperfw-missing");
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "\
+schema_version: 1
+hw_info: {}
+slices: []
+helper_mcus:
+- name: gd32_bridge
+  chip: gd32g553
+  firmware_path: firmware/gd32_bridge.bin
+boot_order: []
+",
+        )
+        .unwrap();
+        let run = run(&global(Format::Json), &image_args(&build_root));
+        assert_eq!(run.exit, ExitCode::RuntimeFailure);
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(doc["ok"], false);
+        assert_eq!(doc["issues"][0]["code"], "image.helper-missing");
+        assert_eq!(doc["issues"][0]["severity"], "error");
+        // Not silently bundled: no helper_mcus entry claiming firmware that
+        // isn't actually there.
+        assert_eq!(doc["data"]["helper_mcus"].as_array().unwrap().len(), 0);
+        // bundle-manifest.json is still written (assemble_bundle completed;
+        // only the exit/ok flips) so the rest of the bundle is inspectable.
+        assert!(
+            build_root
+                .join("image-bundle")
+                .join("bundle-manifest.json")
                 .is_file()
         );
         std::fs::remove_dir_all(&build_root).unwrap();

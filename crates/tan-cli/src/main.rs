@@ -68,7 +68,30 @@ fn main() {
     };
 
     emit(&global.format, run.json.as_deref(), &run.text);
-    std::process::exit(run.exit.code());
+    std::process::exit(json_exit_code(
+        &global.format,
+        run.json.as_deref(),
+        run.exit.code(),
+    ));
+}
+
+/// The process exit code must agree with the `exitCode` field of the JSON
+/// envelope actually printed to stdout. `Envelope::to_json`'s
+/// serialize-failure fallback (an unserializable `data`, e.g. a YAML
+/// passthrough with a non-string map key) rewrites the printed envelope's
+/// `exitCode` to `InternalFailure` — but that happens deep inside `to_json`,
+/// long after the command already set `CommandRun.exit` to its own original
+/// (often `Success`) code, and `to_json` has no way back to that field. Trust
+/// the JSON actually on stdout over the command's stale `exit` so a consumer
+/// never sees `exitCode:5` on stdout while the process exits 0. Text mode
+/// prints no envelope, so `run.exit.code()` is unaffected there.
+fn json_exit_code(format: &cli::Format, json: Option<&str>, run_exit_code: i32) -> i32 {
+    if !matches!(format, cli::Format::Json) {
+        return run_exit_code;
+    }
+    json.and_then(|doc| serde_json::from_str::<serde_json::Value>(doc).ok())
+        .and_then(|v| v.get("exitCode")?.as_i64())
+        .map_or(run_exit_code, |code| code as i32)
 }
 
 fn emit(format: &cli::Format, json: Option<&str>, text: &[String]) {
@@ -189,5 +212,41 @@ mod tests {
         assert_eq!(err.exit_code(), 0);
         let code = emit_parse_error(err, true);
         assert_eq!(code, 0);
+    }
+
+    /// Regression for the exit-code/envelope divergence: a command can still
+    /// believe it succeeded (`CommandRun.exit == Success`) at the moment
+    /// `Envelope::to_json` discovers its `data` can't serialize and falls
+    /// back to an `ok:false`/`exitCode:5` envelope. The process exit code
+    /// must follow the envelope actually printed, not the command's now-stale
+    /// `run.exit`.
+    #[test]
+    fn json_exit_code_follows_serialize_failure_fallback_not_stale_run_exit() {
+        use std::collections::BTreeMap;
+
+        let mut data: BTreeMap<Vec<i32>, i32> = BTreeMap::new();
+        data.insert(vec![1, 2], 3);
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let env = Envelope::new("test", project, data, Vec::new(), 0);
+        let json = env.to_json();
+
+        // Stand-in for `CommandRun.exit`: the command's original, now-stale
+        // Success code, set before `to_json` ran into the fallback.
+        let stale_run_exit_code = 0;
+        let code = json_exit_code(&cli::Format::Json, Some(&json), stale_run_exit_code);
+        assert_eq!(code, crate::exit::ExitCode::InternalFailure.code());
+
+        // Core invariant: process exit code == the printed envelope's `exitCode`.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(i64::from(code), parsed["exitCode"].as_i64().unwrap());
+
+        // Text mode never prints the envelope; `run.exit` passes through untouched.
+        assert_eq!(
+            json_exit_code(&cli::Format::Text, Some(&json), stale_run_exit_code),
+            stale_run_exit_code
+        );
     }
 }

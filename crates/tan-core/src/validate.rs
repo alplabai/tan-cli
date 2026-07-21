@@ -208,7 +208,7 @@ fn parse_validation_issues(stderr: &str, severity: Severity) -> Vec<ValidationIs
     while i < lines.len() {
         let line = lines[i];
 
-        if line.trim().is_empty() || is_summary_line(line) {
+        if line.trim().is_empty() {
             i += 1;
             continue;
         }
@@ -263,6 +263,14 @@ fn parse_validation_issues(stderr: &str, severity: Severity) -> Vec<ValidationIs
                 message: line.trim().to_string(),
                 severity: Severity::Suggestion,
             });
+            i += 1;
+            continue;
+        }
+
+        // Non-actionable summary line — only treated as skippable once no
+        // real parser above has claimed it, so a rich/FAIL diagnostic that
+        // happens to inline a `<file>.yaml:` reference is never dropped.
+        if is_summary_line(line) {
             i += 1;
             continue;
         }
@@ -564,6 +572,31 @@ ipc:
         assert_eq!(result.issues.len(), 1);
         assert_eq!(result.issues[0].severity, Severity::Suggestion);
         assert!(result.issues[0].message.starts_with("hint:"));
+    }
+
+    #[test]
+    fn fail_line_inlining_a_yaml_summary_token_is_not_dropped() {
+        // A FAIL line that happens to inline a `<file>.yaml:` reference
+        // followed by a summary keyword (e.g. "capability") must still be
+        // parsed by `parse_fail_warn`, not swallowed by the `is_summary_line`
+        // heuristic before any real parser sees it.
+        let stderr = "FAIL board.yaml: capability 'trng' not supported on E1M-AEN701\n";
+        let execution = ValidatorExecution {
+            status: Some(1),
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        };
+        let result = analyze_validation_result(&execution);
+        assert_eq!(result.outcome, Outcome::SchemaViolation);
+        assert_eq!(
+            result.issues.len(),
+            1,
+            "FAIL diagnostic must not be dropped"
+        );
+        assert_eq!(
+            result.issues[0].message,
+            "board.yaml: capability 'trng' not supported on E1M-AEN701"
+        );
     }
 
     #[test]
