@@ -7,6 +7,18 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **Build-plan token-substitution pass (alp-sdk #865, "hermetic build
+  plans").** `tan_core::plan_tokens::substitute_plan_tokens` swaps
+  `${SDK_ROOT}`/`${PROJECT_ROOT}`/`${PYTHON}` for tan's already-resolved
+  values in every path-bearing plan string, gated on the additive top-level
+  `planPathMode: "tokened"` field — a no-op on every plan the SDK emits
+  today. Guards: a leftover `${...}` token after substitution fails loudly;
+  a `--plan-from` plan's `sdkCommit` is checked against the resolved SDK
+  checkout's actual `git` HEAD (the two-SDK split-brain guard); `${PROJECT_ROOT}`
+  diverging from the executor's actual base dir refuses the build rather than
+  silently building against the wrong tree.
+
 ## [0.1.1] — 2026-07-20
 
 A full adversarially-verified codebase review found data-loss and

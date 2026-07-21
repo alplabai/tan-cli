@@ -20,6 +20,7 @@ pub mod model;
 pub mod path_guard;
 pub mod pinmux;
 pub mod plan_exec;
+pub mod plan_tokens;
 pub mod preflight;
 pub mod presets;
 pub mod preview;
