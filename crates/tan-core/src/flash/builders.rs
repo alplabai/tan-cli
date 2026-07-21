@@ -271,7 +271,7 @@ pub fn plan_swd_probe(
     validate_identifier(&target, "target")?;
     // Same `--dry-run` bypass as the J-Link probe above.
     let openocd = !force_pyocd && (inp.dry_run || which("openocd"));
-    let pyocd = inp.dry_run || which("pyocd");
+    let pyocd = !force_openocd && (inp.dry_run || which("pyocd"));
     let argv = if openocd {
         let mut program = format!("program {artefact} verify");
         if do_reset {
@@ -907,6 +907,21 @@ mod tests {
         let inp = inputs(art, &fa, false);
         let err = plan_swd_probe(&inp, |t| t == "JLinkExe").unwrap_err();
         assert!(err.contains("interface") && err.contains("target"));
+    }
+
+    #[test]
+    fn use_openocd_true_hard_errors_when_only_pyocd_present() {
+        // Regression: `pyocd` was computed without a `!force_openocd` guard
+        // (unlike `openocd`, which has `!force_pyocd`), so `use_openocd:
+        // true` on a host with pyocd present but openocd absent silently
+        // fell through to the pyocd branch and flashed via the WRONG probe
+        // tool instead of hard-erroring like the symmetric `use_pyocd: true`
+        // case does when pyocd is missing.
+        let fa = yaml_val("use_openocd: true\ninterface: cmsis-dap\ntarget: gd32g553");
+        let art = Path::new("/b/fw.bin");
+        let inp = inputs(art, &fa, false);
+        let err = plan_swd_probe(&inp, |t| t == "pyocd").unwrap_err();
+        assert!(err.contains("no flash tool found"), "got {err}");
     }
 
     #[test]

@@ -290,7 +290,7 @@ pub fn parse_system_manifest_raw(yaml: &str) -> Result<serde_yaml::Value, System
         .get("schema_version")
         .and_then(serde_yaml::Value::as_u64)
     {
-        Some(found) if found as u32 == SYSTEM_MANIFEST_SCHEMA_VERSION => Ok(raw),
+        Some(found) if found == u64::from(SYSTEM_MANIFEST_SCHEMA_VERSION) => Ok(raw),
         Some(found) => Err(SystemManifestError::UnsupportedSchemaVersion {
             found: found as u32,
             supported: SYSTEM_MANIFEST_SCHEMA_VERSION,
@@ -674,6 +674,21 @@ boot_order: []
         assert!(matches!(
             err,
             SystemManifestError::UnsupportedSchemaVersion { found: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_system_manifest_raw_rejects_schema_version_beyond_u32() {
+        // 2^32 + 1 is congruent to 1 mod 2^32, so a naive `as u32` truncation
+        // of the guard would wrongly accept it as the supported version. The
+        // raw guard must compare the full u64 and reject it, same as the
+        // typed `parse_system_manifest` (whose serde field is `u32` and
+        // errors on this value at deserialization).
+        let yaml = AEN701.replace("schema_version: 1", "schema_version: 4294967297");
+        let err = parse_system_manifest_raw(&yaml).unwrap_err();
+        assert!(matches!(
+            err,
+            SystemManifestError::UnsupportedSchemaVersion { .. }
         ));
     }
 
