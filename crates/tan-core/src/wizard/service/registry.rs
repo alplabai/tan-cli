@@ -41,7 +41,7 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
         body_line1: "Alp SDK Zephyr app starting",
         body_line2: "add your application logic",
         explanation: &[
-            "Real Zephyr app: find_package(Zephyr) + board.yaml -> alp.conf via OVERLAY_CONFIG.",
+            "Real Zephyr app: find_package(Zephyr) + board.yaml -> alp.conf via EXTRA_CONF_FILE.",
             "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your alp-sdk checkout>`.",
         ],
     },

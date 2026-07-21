@@ -17,6 +17,25 @@ fn fa_get<'a>(v: &'a Value, k: &str) -> Option<&'a Value> {
         .map(|(_, val)| val)
 }
 
+/// Whether `flash_args` carries an unresolved `TBD` value anywhere in it -- a
+/// bare `TBD` scalar, or a mapping/sequence value that trims to `TBD` (e.g.
+/// `mode: TBD`, `device: TBD`). Recurses `Mapping`/`Sequence` directly over
+/// `serde_yaml::Value`; no transcode.
+///
+/// Deliberately broader than `image.rs`'s `firmware_path` check (which only
+/// inspects that single consumed field): a `TBD` ANYWHERE in `flash_args`
+/// means the entry isn't finalised yet under the SDK's `TBD`
+/// pending-placeholder convention, not just an unresolved firmware path. Do
+/// not narrow this back to a single known key.
+pub fn flash_args_has_tbd(v: &Value) -> bool {
+    match v {
+        Value::String(s) => s.trim() == "TBD",
+        Value::Mapping(m) => m.values().any(flash_args_has_tbd),
+        Value::Sequence(a) => a.iter().any(flash_args_has_tbd),
+        _ => false,
+    }
+}
+
 /// A non-empty string sub-key; `None` when absent, empty, or non-string.
 pub(super) fn fa_str(v: &Value, k: &str) -> Option<String> {
     fa_get(v, k)
@@ -121,5 +140,25 @@ mod tests {
         assert_eq!(fa_int_checked(&fa, "jlink_speed").unwrap(), None);
 
         assert_eq!(fa_int_checked(&Value::Null, "jlink_speed").unwrap(), None);
+    }
+
+    #[test]
+    fn flash_args_has_tbd_scans_mapping_sequence_and_bare_scalar() {
+        let mapping: Value = serde_yaml::from_str("mode: TBD\ndevice: usb0").unwrap();
+        assert!(flash_args_has_tbd(&mapping));
+
+        let nested_seq: Value =
+            serde_yaml::from_str("targets:\n- ok\n- nested:\n    val: TBD").unwrap();
+        assert!(flash_args_has_tbd(&nested_seq));
+
+        let no_tbd: Value = serde_yaml::from_str("mode: usb\ndevice: usb0").unwrap();
+        assert!(!flash_args_has_tbd(&no_tbd));
+
+        let bare = Value::String("TBD".to_string());
+        assert!(flash_args_has_tbd(&bare));
+
+        // trims whitespace, matching the trim() == "TBD" comparison.
+        let padded: Value = serde_yaml::from_str("mode: ' TBD '").unwrap();
+        assert!(flash_args_has_tbd(&padded));
     }
 }
