@@ -73,7 +73,7 @@ mod tests {
         let cmake = by_path("CMakeLists.txt").expect("CMakeLists.txt is generated");
         assert!(cmake.contains("find_package(Zephyr REQUIRED"));
         assert!(cmake.contains("--emit zephyr-conf"));
-        assert!(cmake.contains("OVERLAY_CONFIG"));
+        assert!(cmake.contains("EXTRA_CONF_FILE"));
         assert!(cmake.contains("target_sources(app PRIVATE src/main.c)"));
         // Zephyr wires target_sources directly -- no plain-CMake src/CMakeLists.txt.
         assert!(by_path("src/CMakeLists.txt").is_none());

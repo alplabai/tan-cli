@@ -9,7 +9,7 @@ pub(super) fn gen_c_project_files(
     cores: &[(String, String)],
 ) -> Vec<WizardPlannedFile> {
     // The zephyr-app template emits a real, west-buildable Zephyr scaffold
-    // (find_package(Zephyr) + board.yaml -> OVERLAY_CONFIG) instead of the
+    // (find_package(Zephyr) + board.yaml -> EXTRA_CONF_FILE) instead of the
     // plain-CMake starter the other templates share.
     if def.id == WizardTemplateId::ZephyrApp {
         return gen_zephyr_project_files(def, som_sku, cores);
@@ -65,7 +65,7 @@ pub(super) fn gen_c_project_files(
 
 /// Emit the west-buildable Zephyr scaffold for the `zephyr-app` template: a real
 /// Zephyr `CMakeLists.txt` that runs the SDK loader on board.yaml
-/// (`alp_project.py --emit zephyr-conf` -> `OVERLAY_CONFIG`), an intentionally
+/// (`alp_project.py --emit zephyr-conf` -> `EXTRA_CONF_FILE`), an intentionally
 /// empty `prj.conf` (config is declarative in board.yaml), and a hello-world
 /// `src/main.c`. No `src/CMakeLists.txt` / `include/app` (Zephyr wires
 /// `target_sources(app ...)` directly). Mirrors the SDK's curated
@@ -104,7 +104,7 @@ fn gen_zephyr_cmake(app_core: &str) -> String {
     // zephyr-conf` sums Kconfig across every core -- a cross-core leak on a
     // multi-Zephyr-core SoM (every AEN family: the unused M55 defaults to a
     // Zephyr shim slice). Matches the SDK example convention
-    // (examples/**/CMakeLists.txt: `--core`-scoped, layered via OVERLAY_CONFIG).
+    // (examples/**/CMakeLists.txt: `--core`-scoped, layered via EXTRA_CONF_FILE).
     r#"# SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.20)
@@ -133,8 +133,8 @@ if(NOT _alp_rv EQUAL 0)
     message(FATAL_ERROR "alp_project.py failed (rv=${_alp_rv}); check board.yaml.\nstderr: ${_alp_stderr}")
 endif()
 
-# Layer the generated CONFIG_* over prj.conf via OVERLAY_CONFIG.
-list(APPEND OVERLAY_CONFIG ${_alp_generated})
+# Layer the generated CONFIG_* over prj.conf via EXTRA_CONF_FILE.
+list(APPEND EXTRA_CONF_FILE ${_alp_generated})
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(alp_app LANGUAGES C)
@@ -148,7 +148,7 @@ fn gen_zephyr_prj_conf() -> String {
     r#"# SPDX-License-Identifier: Apache-2.0
 #
 # Intentionally empty. Every CONFIG_* this app needs is derived from board.yaml
-# by scripts/alp_project.py and layered in via OVERLAY_CONFIG (see CMakeLists.txt).
+# by scripts/alp_project.py and layered in via EXTRA_CONF_FILE (see CMakeLists.txt).
 # Add app-specific tuning knobs here only when they are NOT feature-selection --
 # everything declarative belongs in board.yaml.
 "#
