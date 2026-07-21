@@ -90,7 +90,7 @@ fn gen_zephyr_project_files(
         },
         WizardPlannedFile {
             relative_path: "CMakeLists.txt".to_string(),
-            content: gen_zephyr_cmake(),
+            content: gen_zephyr_cmake(app_core_for_sku(som_sku.unwrap_or(crate::DEFAULT_SOM_SKU))),
         },
         WizardPlannedFile {
             relative_path: "src/main.c".to_string(),
@@ -99,7 +99,12 @@ fn gen_zephyr_project_files(
     ]
 }
 
-fn gen_zephyr_cmake() -> String {
+fn gen_zephyr_cmake(app_core: &str) -> String {
+    // `--core <id>` scopes the emit to the app core. An unscoped `--emit
+    // zephyr-conf` sums Kconfig across every core -- a cross-core leak on a
+    // multi-Zephyr-core SoM (every AEN family: the unused M55 defaults to a
+    // Zephyr shim slice). Matches the SDK example convention
+    // (examples/**/CMakeLists.txt: `--core`-scoped, layered via OVERLAY_CONFIG).
     r#"# SPDX-License-Identifier: Apache-2.0
 
 cmake_minimum_required(VERSION 3.20)
@@ -119,7 +124,7 @@ set(_alp_generated ${CMAKE_BINARY_DIR}/generated/alp.conf)
 execute_process(
     COMMAND ${Python3_EXECUTABLE} ${ALP_SDK_ROOT}/scripts/alp_project.py
             --input ${CMAKE_CURRENT_SOURCE_DIR}/board.yaml
-            --emit zephyr-conf
+            --emit zephyr-conf --core __ALP_APP_CORE__
             --output ${_alp_generated}
     RESULT_VARIABLE _alp_rv
     ERROR_VARIABLE _alp_stderr
@@ -136,7 +141,7 @@ project(alp_app LANGUAGES C)
 
 target_sources(app PRIVATE src/main.c)
 "#
-    .to_string()
+    .replace("__ALP_APP_CORE__", app_core)
 }
 
 fn gen_zephyr_prj_conf() -> String {
@@ -433,5 +438,49 @@ mod tests {
             !board_yaml.contains("    libraries:"),
             "libraries must not be nested under cores.<core>, got:\n{board_yaml}"
         );
+    }
+
+    /// The wizard's Zephyr `CMakeLists.txt` must scope its `--emit zephyr-conf`
+    /// to the app core (`--core <id>`). An unscoped emit sums Kconfig across
+    /// every core -- a cross-core leak on a multi-Zephyr-core SoM. Regression
+    /// guard for the leak the SDK ADR-0020 addendum fixed in the examples.
+    #[test]
+    fn zephyr_cmake_scopes_emit_to_app_core() {
+        let def = list_wizard_templates()
+            .into_iter()
+            .find(|d| d.id == WizardTemplateId::ZephyrApp)
+            .expect("zephyr-app template registered");
+
+        let assert_scoped = |som_sku: Option<&str>, want_core: &str| {
+            let files = gen_c_project_files(def, som_sku, &[]);
+            let cmake = &files
+                .iter()
+                .find(|f| f.relative_path == "CMakeLists.txt")
+                .expect("CMakeLists.txt planned")
+                .content;
+            let label = som_sku.unwrap_or("<default>");
+
+            assert!(
+                cmake.contains(&format!("--emit zephyr-conf --core {want_core}")),
+                "expected `--core {want_core}` for {label}, got:\n{cmake}"
+            );
+            // Every `--emit zephyr-conf` must be `--core`-scoped (no leak).
+            assert_eq!(
+                cmake.matches("--emit zephyr-conf").count(),
+                cmake.matches("--emit zephyr-conf --core ").count(),
+                "unscoped `--emit zephyr-conf` for {label}, got:\n{cmake}"
+            );
+            // The placeholder must be substituted, never emitted literally.
+            assert!(
+                !cmake.contains("__ALP_APP_CORE__"),
+                "placeholder left unsubstituted for {label}:\n{cmake}"
+            );
+        };
+
+        // Every SKU family + the `--som`-omitted default path (mod.rs:123).
+        assert_scoped(Some("E1M-AEN801"), "m55_hp");
+        assert_scoped(Some("E1M-V2N"), "m33_sm");
+        assert_scoped(Some("E1M-NX9101"), "m33");
+        assert_scoped(None, app_core_for_sku(crate::DEFAULT_SOM_SKU));
     }
 }
