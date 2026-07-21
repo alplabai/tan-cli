@@ -137,3 +137,78 @@ jobs:
         with:
           files: assets/*
           fail_on_unmatched_files: true
+
+  # crates.io — `cargo install alp-tan-cli`. Ported from the retired alp-cli's
+  # `release-cli-rs.yml` publish_crates job (alplabai/alp-sdk-vscode, commit
+  # 56cd786d~1), renamed for tan's crates and tag scheme. Publishes tan-core
+  # THEN alp-tan-cli (core first — `cargo publish` waits for it to appear on
+  # the index before publishing the crate that path-depends on it). Gated on
+  # CARGO_REGISTRY_TOKEN; skipped (not failed) when the secret is unset so a
+  # fork/CI run without publish credentials still goes green.
+  publish_crates:
+    name: publish · crates.io
+    needs: release
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          rustflags: "" # keep parity with the local gates (see ci.yml's lint job)
+
+      - name: Publish tan-core then alp-tan-cli
+        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
+        # tan-core first; cargo publish waits for it to hit the index before
+        # alp-tan-cli (which depends on it) is published.
+        run: |
+          cargo publish --package tan-core --locked
+          cargo publish --package alp-tan-cli --locked
+
+      - name: Note when crates.io publish was skipped
+        if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
+        run: echo "::warning::CARGO_REGISTRY_TOKEN not set — skipped crates.io publish. The GitHub release binaries + npm shim still ship."
+
+  # npm shim — `npm i -g @alplabai/tan` / `npx @alplabai/tan`. Ported from the
+  # retired alp-cli's `release-cli.yml` publish job (same commit as above),
+  # collapsed into this workflow since tan has one release tag scheme (v*)
+  # rather than alp-cli's split cli-rs-v*/cli-v* tags. Gated on NPM_TOKEN;
+  # skipped (not failed) when unset, mirroring the crates.io gating above.
+  publish_npm:
+    name: publish · npm shim
+    needs: release
+    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: npm-shim
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+
+      - name: Pack (smoke — confirm the shim packs with its bin + postinstall)
+        run: |
+          npm pack --dry-run
+          node -e "const p=require('./package.json'); if(!p.bin||!p.bin.tan) throw new Error('shim missing bin.tan')"
+
+      - name: Publish to npm
+        if: ${{ env.NPM_TOKEN != '' }}
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Note when npm publish was skipped
+        if: ${{ env.NPM_TOKEN == '' }}
+        run: echo "::warning::NPM_TOKEN not set — packed the shim but skipped npm publish. Add the NPM_TOKEN repo secret to enable it."

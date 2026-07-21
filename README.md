@@ -73,6 +73,26 @@ git clone https://github.com/alplabai/tan-cli && cd tan-cli
 cargo install --path crates/tan-cli --locked
 ```
 
+### Package managers
+
+**crates.io** (Rust **1.86+**, edition 2024) — the published crate is named
+`alp-tan-cli` (`tan`/`tan-cli` were already taken on crates.io by an unrelated
+project); the installed binary is still `tan`:
+
+```sh
+cargo install alp-tan-cli --locked
+tan --version
+```
+
+**npm** — a shim that downloads the matching platform binary on install (see
+[`npm-shim/`](npm-shim/)); no Rust toolchain needed:
+
+```sh
+npm install -g @alplabai/tan
+# or run without installing:
+npx @alplabai/tan --version
+```
+
 `tan` needs an **alp-sdk checkout** to plan against. It is found, in order, from
 `--sdk-root <path>`, the `.alp/sdk-path` pointer `tan sdk switch` writes, or an
 `alp-sdk/` directory beside the project. `tan sdk install <version>` only
