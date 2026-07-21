@@ -50,11 +50,7 @@ pub(super) fn invoke_sdk_emit(
     // `python3`, which may lack the `west` module entirely (sibling of the #106
     // venv-on-PATH fix for the west child). Fall back to the configured/resolved
     // `context.python_binary` only when no workspace venv resolves.
-    let planner_python = venv_python(
-        &base_dir(context),
-        context.sdk_root.as_deref().map(Path::new),
-    )
-    .unwrap_or_else(|| context.python_binary.clone());
+    let planner_python = resolved_planner_python(context);
     // Same guard `validate`/`generate` apply: a Python < 3.10 dies the moment an
     // SDK script imports (`@dataclass(slots=True)`) with a cryptic
     // `TypeError: dataclass() got an unexpected keyword argument 'slots'`.
@@ -232,6 +228,21 @@ fn venv_python(start: &str, sdk_root: Option<&Path>) -> Option<String> {
             .is_file()
             .then(|| candidate.to_string_lossy().into_owned())
     })
+}
+
+/// The exact interpreter [`invoke_sdk_emit`] runs the planner under (the
+/// west-capable workspace venv's `python`, falling back to
+/// `context.python_binary`) — the `${PYTHON}` build-plan token-substitution
+/// value (alp-sdk #865): since this is the SAME python whose
+/// `sys.executable` the planner bakes into every Zephyr slice command as
+/// `-DPython3_EXECUTABLE=<...>` (alp-sdk#787), substituting anything else
+/// would let the two diverge.
+pub(super) fn resolved_planner_python(context: &ProjectContext) -> String {
+    venv_python(
+        &base_dir(context),
+        context.sdk_root.as_deref().map(Path::new),
+    )
+    .unwrap_or_else(|| context.python_binary.clone())
 }
 
 /// Resolve the west workspace topdir — the directory holding `.west/`. `west alp-*`

@@ -233,6 +233,23 @@ pub struct BuildPlan {
     /// applies its own defaults. A newer top-level block the SDK now emits.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_policy: Option<ExecutionPolicy>,
+    /// Additive top-level field (alp-sdk #865, "hermetic build plans"): marks
+    /// a plan whose path-bearing string fields carry
+    /// `${SDK_ROOT}`/`${PROJECT_ROOT}`/`${PYTHON}` tokens instead of the
+    /// emitting machine's absolute paths, when exactly equal to `"tokened"`
+    /// (`plan_tokens::PLAN_PATH_MODE_TOKENED`). Absent on every plan the SDK
+    /// emits today — `plan_tokens::substitute_plan_tokens` is then a no-op.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_path_mode: Option<String>,
+    /// Short commit SHA of the alp-sdk checkout the plan was emitted from
+    /// (`git rev-parse --short HEAD` in the SDK root at emit time). Absent on
+    /// older plans. The consumer compares it against the resolved SDK
+    /// checkout's own HEAD when building from `--plan-from <FILE>`
+    /// (`plan_tokens::sdk_commit_mismatches`) — the two-SDK split-brain
+    /// guard: a plan captured against one SDK checkout must not silently
+    /// drive a build against a different one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sdk_commit: Option<String>,
 }
 
 impl BuildPlan {
@@ -577,10 +594,27 @@ mod tests {
 
     #[test]
     fn plan_without_new_fields_defaults_them() {
-        // Older plans lack both — env_append_path defaults empty, policy is None.
+        // Older plans lack these — env_append_path defaults empty, the rest None.
         let plan = parse_build_plan(SAMPLE).unwrap();
         assert!(plan.slices[0].env_append_path.is_empty());
         assert!(plan.execution_policy.is_none());
+        assert!(plan.plan_path_mode.is_none());
+        assert!(plan.sdk_commit.is_none());
+    }
+
+    #[test]
+    fn parses_plan_path_mode_and_sdk_commit() {
+        // The alp-sdk #865 additive top-level fields: round-trip intact.
+        let json = SAMPLE.replacen(
+            "\"generatedBy\":",
+            "\"planPathMode\": \"tokened\", \"sdkCommit\": \"deadbee\", \"generatedBy\":",
+            1,
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        assert_eq!(plan.plan_path_mode.as_deref(), Some("tokened"));
+        assert_eq!(plan.sdk_commit.as_deref(), Some("deadbee"));
+        let again = parse_build_plan(&serde_json::to_string(&plan).unwrap()).unwrap();
+        assert_eq!(plan, again);
     }
 
     #[test]

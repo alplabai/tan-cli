@@ -24,6 +24,7 @@ mod materialise;
 mod native;
 mod plan_modes;
 mod preflight;
+mod token_substitution;
 mod workspace;
 
 use serde::Serialize;
