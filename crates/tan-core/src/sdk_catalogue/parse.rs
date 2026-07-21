@@ -447,6 +447,43 @@ mod tests {
     }
 
     #[test]
+    fn rejects_empty_document_root() {
+        // An empty YAML document parses to `Null`, not a mapping -- reject loud
+        // (distinct code path from the sequence-root case above).
+        assert!(
+            parse_board_preset("")
+                .unwrap_err()
+                .to_string()
+                .contains("not a mapping")
+        );
+        assert!(
+            parse_chip_def("")
+                .unwrap_err()
+                .to_string()
+                .contains("not a mapping")
+        );
+    }
+
+    #[test]
+    fn rejects_tbd_identity() {
+        // A `TBD` identity is a pending placeholder, not a loadable entry: an
+        // entry with no usable `name`/`chip_id` can't be looked up. Loud where
+        // the pre-guard code silently produced an empty-string identity.
+        assert!(
+            parse_board_preset("name: TBD\ndisplay_name: E1M EVK\n")
+                .unwrap_err()
+                .to_string()
+                .contains("missing its required `name`")
+        );
+        assert!(
+            parse_chip_def("chip_id: TBD\ndisplay_name: Chip A\n")
+                .unwrap_err()
+                .to_string()
+                .contains("missing its required `chip_id`")
+        );
+    }
+
+    #[test]
     fn dispatch_pin_reads_string_form_too() {
         let som = parse_som_preset(
             "schema_version: 1\nsku: E1M-V2M101\nfamily: v2n-m1\nsilicon: renesas-rzv2n\npad_routes:\n  - { e1m: E1M_SPI1, dispatch: gd32_bridge, dispatch_pin: \"PA11\" }\n",
