@@ -25,9 +25,8 @@ use serde::Serialize;
 
 use tan_core::flash::{
     BackendKind, FlashInputs, FlashPlan, FlashTarget, ToolGate, backend_for, flash_args_has_tbd,
-    plan_baremetal_cmake_flash, plan_cc3501e_usb_bootloader, plan_flash_targets, plan_swd_probe,
-    plan_xspi_flashwriter, plan_yocto_wic, plan_zephyr_west_flash, registry_keys,
-    resolve_artefact_path, tool_gate,
+    plan_baremetal_cmake_flash, plan_flash_targets, plan_swd_probe, plan_xspi_flashwriter,
+    plan_yocto_wic, plan_zephyr_west_flash, registry_keys, resolve_artefact_path, tool_gate,
 };
 use tan_core::system_manifest::parse_system_manifest;
 
@@ -276,11 +275,21 @@ fn flash_entry(
     let id = t.id.as_str();
     let mut lines: Vec<String> = Vec::new();
 
-    // No flash_method -> silent skip (rc -1).
+    // No flash_method -> silent skip (rc -1). A helper carrying
+    // `update_channel` instead (alp-sdk#868: AEN's cc3501e_otp, applied
+    // over the bridge SPI programming OTP) gets a clearer reason than the
+    // generic "no flash_method" -- it was never meant to be a customer
+    // flash target at all, not just one whose wiring isn't finalised yet.
     let method = match t.flash_method.as_deref().filter(|m| !m.is_empty()) {
         Some(m) => m,
         None => {
-            let msg = format!("flash: {kind} '{id}' has no flash_method; skipping");
+            let msg = match t.update_channel.as_deref().filter(|c| !c.is_empty()) {
+                Some(channel) => format!(
+                    "flash: {kind} '{id}' is Alp-OTA-updated (update_channel: {channel}), not a \
+                     customer flash target; skipping"
+                ),
+                None => format!("flash: {kind} '{id}' has no flash_method; skipping"),
+            };
             lines.push(msg.clone());
             return (-1, entry(t, None, "skipped", -1, msg), lines);
         }
@@ -434,7 +443,6 @@ fn dispatch_plan(kind: BackendKind, inp: &FlashInputs) -> Result<FlashPlan, Stri
         BackendKind::Swd => plan_swd_probe(inp, command_on_path),
         BackendKind::Zephyr => plan_zephyr_west_flash(inp),
         BackendKind::Cmake => plan_baremetal_cmake_flash(inp),
-        BackendKind::Cc3501e => plan_cc3501e_usb_bootloader(inp),
         BackendKind::YoctoWic => plan_yocto_wic(inp, command_on_path),
         BackendKind::Xspi => plan_xspi_flashwriter(inp),
     }
@@ -825,15 +833,14 @@ mod tests {
 
     #[test]
     fn tbd_flash_args_on_a_registered_backend_skips_not_fails() {
-        // Regression: the AEN801 e2e had a cc3501e helper with a VALID,
-        // registered `flash_method: cc3501e_usb_bootloader` but unresolved
-        // `flash_args: {mode: TBD, device: TBD}`. `TBD` is the SDK's
-        // documented pending/not-yet-resolved sentinel (issue #2's
-        // convention -- `sdk_catalogue::parse::is_tbd`; `image.rs` already
-        // treats a `TBD` firmware_path as a non-fatal Pending skip), so this
-        // must be a skip, not a hard failure that takes down the whole run
-        // (including the real, resolved m55 zephyr slice) and forces users
-        // to pass `--core` to work around it.
+        // Regression: a helper MCU with a VALID, registered `flash_method`
+        // (`swd_probe`) but unresolved `flash_args: {mode: TBD, device: TBD}`.
+        // `TBD` is the SDK's documented pending/not-yet-resolved sentinel
+        // (issue #2's convention -- `sdk_catalogue::parse::is_tbd`; `image.rs`
+        // already treats a `TBD` firmware_path as a non-fatal Pending skip),
+        // so this must be a skip, not a hard failure that takes down the
+        // whole run (including the real, resolved m55 zephyr slice) and
+        // forces users to pass `--core` to work around it.
         let sdk = tmp("tbd-args-sdk");
         fake_sdk(&sdk);
         let app = tmp("tbd-args-app");
@@ -843,8 +850,8 @@ mod tests {
             "schema_version: 1\nhw_info:\n  sku: E1M-AEN801\nslices:\n- core_id: m55_he\n  os: \
              zephyr\n  output_artefact: m55_he-zephyr/zephyr/zephyr.elf\n  status: ok\n  \
              flash_method: zephyr_west_flash\n  flash_args:\n    runner: openocd\nhelper_mcus:\n- \
-             name: cc3501e_helper\n  chip: cc3501e\n  firmware_path: firmware/cc3501e.bin\n  \
-             flash_method: cc3501e_usb_bootloader\n  flash_args:\n    mode: TBD\n    device: \
+             name: unresolved_helper\n  chip: gd32g553\n  firmware_path: firmware/helper.bin\n  \
+             flash_method: swd_probe\n  flash_args:\n    mode: TBD\n    device: \
              TBD\nboot_order: []\n",
         )
         .unwrap();
@@ -860,7 +867,7 @@ mod tests {
         assert_eq!(zephyr["status"], "ok");
         let helper = entries
             .iter()
-            .find(|e| e["id"] == "cc3501e_helper")
+            .find(|e| e["id"] == "unresolved_helper")
             .unwrap();
         assert_eq!(helper["status"], "skipped");
         assert_eq!(helper["rc"], -1);
@@ -877,7 +884,7 @@ mod tests {
         // scalar TBD, but with an UNREGISTERED `flash_method: TBD` that fails
         // at `backend_for` before the scan ever runs). This one pairs a bare
         // `flash_args: TBD` scalar with a VALID, registered
-        // `flash_method: cc3501e_usb_bootloader` so it actually exercises
+        // `flash_method: swd_probe` so it actually exercises
         // `flash_args_has_tbd` past the backend lookup.
         let sdk = tmp("tbd-bare-sdk");
         fake_sdk(&sdk);
@@ -888,8 +895,8 @@ mod tests {
             "schema_version: 1\nhw_info:\n  sku: E1M-AEN801\nslices:\n- core_id: m55_he\n  os: \
              zephyr\n  output_artefact: m55_he-zephyr/zephyr/zephyr.elf\n  status: ok\n  \
              flash_method: zephyr_west_flash\n  flash_args:\n    runner: openocd\nhelper_mcus:\n- \
-             name: cc3501e_helper\n  chip: cc3501e\n  firmware_path: firmware/cc3501e.bin\n  \
-             flash_method: cc3501e_usb_bootloader\n  flash_args: TBD\nboot_order: []\n",
+             name: unresolved_helper\n  chip: gd32g553\n  firmware_path: firmware/helper.bin\n  \
+             flash_method: swd_probe\n  flash_args: TBD\nboot_order: []\n",
         )
         .unwrap();
         let g = global(&sdk, Format::Json);
@@ -900,11 +907,51 @@ mod tests {
         let entries = doc["data"]["entries"].as_array().unwrap();
         let helper = entries
             .iter()
-            .find(|e| e["id"] == "cc3501e_helper")
+            .find(|e| e["id"] == "unresolved_helper")
             .unwrap();
         assert_eq!(helper["status"], "skipped");
         assert_eq!(helper["rc"], -1);
         assert!(helper["message"].as_str().unwrap().contains("TBD"));
+        std::fs::remove_dir_all(&sdk).unwrap();
+        std::fs::remove_dir_all(&app).unwrap();
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn update_channel_helper_is_skipped_not_failed() {
+        // alp-sdk#868: the AEN CC3501E helper dropped flash_method/flash_args
+        // entirely and gained `update_channel: alp_ota_spi_otp` instead (it is
+        // Alp-OTA-updated over the bridge SPI/OTP, never customer-flashed).
+        // Must be a clean skip (rc -1, status "skipped") with a message that
+        // names the reason, not the generic "no flash_method" -- and it must
+        // not fail the whole run.
+        let sdk = tmp("update-channel-sdk");
+        fake_sdk(&sdk);
+        let app = tmp("update-channel-app");
+        let build_root = tmp("update-channel-build");
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "schema_version: 1\nhw_info:\n  sku: E1M-AEN701\nslices:\n- core_id: m55_hp\n  os: \
+             zephyr\n  output_artefact: m55_hp-zephyr/zephyr/zephyr.elf\n  status: ok\n  \
+             flash_method: zephyr_west_flash\n  flash_args:\n    runner: openocd\nhelper_mcus:\n- \
+             name: cc3501e_otp\n  chip: cc3501e\n  firmware_path: firmware/cc3501e.bin\n  \
+             update_channel: alp_ota_spi_otp\nboot_order: []\n",
+        )
+        .unwrap();
+        let g = global(&sdk, Format::Json);
+        let run = run(&g, &flash_args(&app, &build_root, true));
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(run.exit, ExitCode::Success, "got envelope: {doc}");
+        assert_eq!(doc["ok"], true);
+        let entries = doc["data"]["entries"].as_array().unwrap();
+        let zephyr = entries.iter().find(|e| e["id"] == "m55_hp").unwrap();
+        assert_eq!(zephyr["status"], "ok");
+        let helper = entries.iter().find(|e| e["id"] == "cc3501e_otp").unwrap();
+        assert_eq!(helper["status"], "skipped");
+        assert_eq!(helper["rc"], -1);
+        let msg = helper["message"].as_str().unwrap();
+        assert!(msg.contains("Alp-OTA-updated"), "got: {msg}");
+        assert!(msg.contains("alp_ota_spi_otp"), "got: {msg}");
         std::fs::remove_dir_all(&sdk).unwrap();
         std::fs::remove_dir_all(&app).unwrap();
         std::fs::remove_dir_all(&build_root).unwrap();
