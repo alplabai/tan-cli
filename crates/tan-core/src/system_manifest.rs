@@ -142,6 +142,14 @@ pub struct HelperMcu {
     /// An object, or the string `"TBD"` when the recipe isn't finalized.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flash_args: Option<serde_yaml::Value>,
+    /// Set instead of `flash_method`/`flash_args` when this helper is a
+    /// vendor-OTA-updated coprocessor (e.g. AEN's `cc3501e_otp` via
+    /// `alp_ota_spi_otp`) applied over the bridge link, never customer-flashed
+    /// (alp-sdk#868 `helper_firmware_entry`'s `oneOf {flash_method |
+    /// update_channel}`). Mutually exclusive with `flash_method` per the SDK
+    /// schema, though nothing here enforces that -- see `tan flash`'s skip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_channel: Option<String>,
 }
 
 /// The whole manifest — the deserialization target for `build/system-manifest.yaml`.
@@ -462,6 +470,31 @@ boot_order: []
         // Helper MCU keeps its string flash_args; the undeclared `note` is ignored.
         assert_eq!(m.helper_mcus.len(), 1);
         assert_eq!(m.helper_mcus[0].chip, "cc3501e");
+    }
+
+    #[test]
+    fn parses_a_post_868_ota_helper_with_no_flash_method() {
+        // alp-sdk#868: the AEN CC3501E helper dropped flash_method/flash_args
+        // entirely and gained `update_channel: alp_ota_spi_otp` instead
+        // (helper_firmware_entry's `oneOf {flash_method | update_channel}`).
+        // Must parse cleanly -- no deny_unknown_fields anywhere in this
+        // module -- and `update_channel` must be readable, not just ignored.
+        let yaml = r#"
+schema_version: 1
+hw_info:
+  sku: E1M-AEN701
+slices: []
+helper_mcus:
+- name: cc3501e_otp
+  chip: cc3501e
+  firmware_path: firmware/cc3501e/prebuilt/cc3501e-v0.2.0.bin
+  update_channel: alp_ota_spi_otp
+boot_order: []
+"#;
+        let m = parse_system_manifest(yaml).expect("post-#868 manifest must parse");
+        let helper = &m.helper_mcus[0];
+        assert!(helper.flash_method.is_none());
+        assert_eq!(helper.update_channel.as_deref(), Some("alp_ota_spi_otp"));
     }
 
     #[test]

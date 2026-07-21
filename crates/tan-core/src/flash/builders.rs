@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Probe / build-tool backend plan-builders: `swd_probe` (J-Link / OpenOCD /
-//! pyOCD), `zephyr_west_flash`, `baremetal_cmake_flash`, and the shape-complete
-//! `cc3501e_usb_bootloader`. Each maps an entry's `flash_args` to a `FlashPlan`
-//! argv with no IO; `which` is injected where a backend probes PATH.
+//! pyOCD), `zephyr_west_flash`, and `baremetal_cmake_flash`. Each maps an
+//! entry's `flash_args` to a `FlashPlan` argv with no IO; `which` is injected
+//! where a backend probes PATH.
 
 use std::path::Path;
 
@@ -438,66 +438,6 @@ pub fn plan_baremetal_cmake_flash(inp: &FlashInputs) -> Result<FlashPlan, String
     })
 }
 
-/// `cc3501e_usb_bootloader`: shape-complete but the vendor CLI is not public.
-/// Dry-run returns the provisional argv; the real (non-dry) path is a graceful
-/// failure. `device` + `mode` (`otp_program`|`ram_load`) are required.
-pub fn plan_cc3501e_usb_bootloader(inp: &FlashInputs) -> Result<FlashPlan, String> {
-    let fa = inp.flash_args;
-    let device = fa_str(fa, "device").unwrap_or_default();
-    let mode = fa_str(fa, "mode").unwrap_or_default();
-    if device.is_empty() || mode.is_empty() {
-        return Err(
-            "cc3501e_usb_bootloader: flash_args.device and flash_args.mode are required \
-                    (mode: otp_program | ram_load)."
-                .to_string(),
-        );
-    }
-    if mode != "otp_program" && mode != "ram_load" {
-        return Err(format!(
-            "cc3501e_usb_bootloader: unknown mode '{mode}' -- expected otp_program | ram_load."
-        ));
-    }
-    // `fa_int_checked`/`fa_bool_checked`, not tolerant `fa_int`/`fa_bool_opt`:
-    // a quoted `speed: "921600"` or `verify: "false"` reads as "absent" via
-    // `Value::as_i64`/`as_bool` too, so a tolerant reader would silently
-    // apply the default (comm speed, and whether to verify the write) with
-    // no warning -- both affect what actually lands on the device.
-    let speed = fa_int_checked(fa, "speed")?.unwrap_or(921600);
-    let verify = fa_bool_checked(fa, "verify")?.unwrap_or(mode == "otp_program");
-    // Provisional tool name (preferred candidate); the real path never spawns.
-    let mut argv = vec![
-        "cc3501e-flasher".to_string(),
-        "--device".to_string(),
-        device,
-        "--mode".to_string(),
-        mode,
-        "--speed".to_string(),
-        speed.to_string(),
-        "--image".to_string(),
-        inp.artefact.to_string_lossy().into_owned(),
-    ];
-    if verify {
-        argv.push("--verify".to_string());
-    }
-    if inp.dry_run {
-        Ok(FlashPlan {
-            argv,
-            ok_message: format!(
-                "cc3501e_usb_bootloader[{}]: CLI shape provisional (dry-run)",
-                inp.core_id
-            ),
-            planning_only: false,
-            jlink_script: None,
-        })
-    } else {
-        Err(
-            "cc3501e-flasher CLI is not yet public; this backend lands when the upstream tool \
-             stabilises. Use the bench warm-program recipe in docs/cc3501e-production.md for now."
-                .to_string(),
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -638,44 +578,6 @@ mod tests {
                 .any(|w| w[0] == "--config" && w[1] == "Release")
         );
         assert!(plan.argv.windows(2).any(|w| w[0] == "-j" && w[1] == "4"));
-    }
-
-    #[test]
-    fn cc3501e_validation_and_dry_vs_real() {
-        let art = Path::new("/b/coproc.bin");
-        // device + mode required.
-        let inp = inputs(art, &Value::Null, true);
-        assert!(
-            plan_cc3501e_usb_bootloader(&inp)
-                .unwrap_err()
-                .contains("required")
-        );
-        // unknown mode.
-        let fa = yaml_val("device: /dev/ttyACM0\nmode: bogus");
-        let inp = inputs(art, &fa, true);
-        assert!(
-            plan_cc3501e_usb_bootloader(&inp)
-                .unwrap_err()
-                .contains("unknown mode")
-        );
-        // dry-run otp_program -> ok, verify default true.
-        let fa = yaml_val("device: /dev/ttyACM0\nmode: otp_program");
-        let inp = inputs(art, &fa, true);
-        let plan = plan_cc3501e_usb_bootloader(&inp).unwrap();
-        assert_eq!(plan.argv[0], "cc3501e-flasher");
-        assert!(plan.argv.contains(&"--verify".to_string()));
-        // ram_load default verify false.
-        let fa = yaml_val("device: /dev/ttyACM0\nmode: ram_load");
-        let inp = inputs(art, &fa, true);
-        let plan = plan_cc3501e_usb_bootloader(&inp).unwrap();
-        assert!(!plan.argv.contains(&"--verify".to_string()));
-        // real (non-dry) path -> not-yet-public Err.
-        let inp = inputs(art, &fa, false);
-        assert!(
-            plan_cc3501e_usb_bootloader(&inp)
-                .unwrap_err()
-                .contains("not yet public")
-        );
     }
 
     #[test]
@@ -940,34 +842,5 @@ mod tests {
         let inp = inputs(art, &fa, false);
         let plan = plan_baremetal_cmake_flash(&inp).unwrap();
         assert!(plan.argv.windows(2).any(|w| w[0] == "-j" && w[1] == "4"));
-    }
-
-    #[test]
-    fn cc3501e_speed_and_verify_quoted_values_are_rejected_not_silently_defaulted() {
-        // Regression: `speed: "921600"` / `verify: "false"` (quoted) used to
-        // read as absent via `Value::as_i64`/`as_bool`, so tolerant
-        // `fa_int`/`fa_bool_opt` silently applied their defaults with no
-        // warning -- both affect what actually lands on the device.
-        let art = Path::new("/b/coproc.bin");
-        let fa = yaml_val("device: /dev/ttyACM0\nmode: otp_program\nspeed: \"921600\"");
-        let inp = inputs(art, &fa, true);
-        let err = plan_cc3501e_usb_bootloader(&inp).unwrap_err();
-        assert!(err.contains("speed"));
-
-        let fa = yaml_val("device: /dev/ttyACM0\nmode: otp_program\nverify: \"false\"");
-        let inp = inputs(art, &fa, true);
-        let err = plan_cc3501e_usb_bootloader(&inp).unwrap_err();
-        assert!(err.contains("verify"));
-
-        // bare (unquoted) values still work and are honoured.
-        let fa = yaml_val("device: /dev/ttyACM0\nmode: otp_program\nspeed: 460800\nverify: false");
-        let inp = inputs(art, &fa, true);
-        let plan = plan_cc3501e_usb_bootloader(&inp).unwrap();
-        assert!(
-            plan.argv
-                .windows(2)
-                .any(|w| w[0] == "--speed" && w[1] == "460800")
-        );
-        assert!(!plan.argv.contains(&"--verify".to_string()));
     }
 }

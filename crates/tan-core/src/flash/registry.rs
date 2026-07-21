@@ -17,8 +17,6 @@ pub enum BackendKind {
     Zephyr,
     /// `baremetal_cmake_flash` — `cmake --build --target`.
     Cmake,
-    /// `cc3501e_usb_bootloader` — CC3501E USB-CDC bootloader (shape-complete).
-    Cc3501e,
     /// `yocto_wic_to_sd_or_emmc` / `yocto_wic` — bmaptool / dd to a block device.
     YoctoWic,
     /// `xspi_flashwriter` — Renesas Flash Writer over SCIF (HW-gated).
@@ -49,10 +47,6 @@ pub fn backend_for(method: &str) -> Option<FlashBackendMeta> {
             requires: &["cmake"],
             kind: BackendKind::Cmake,
         },
-        "cc3501e_usb_bootloader" => FlashBackendMeta {
-            requires: &["cc3501e-flasher", "cc3501e-tool"],
-            kind: BackendKind::Cc3501e,
-        },
         "yocto_wic_to_sd_or_emmc" | "yocto_wic" => FlashBackendMeta {
             requires: &["bmaptool", "dd"],
             kind: BackendKind::YoctoWic,
@@ -71,7 +65,6 @@ pub fn backend_for(method: &str) -> Option<FlashBackendMeta> {
 pub fn registry_keys() -> Vec<&'static str> {
     let mut keys = vec![
         "baremetal_cmake_flash",
-        "cc3501e_usb_bootloader",
         "swd_probe",
         "xspi_flashwriter",
         "yocto_wic",
@@ -123,7 +116,7 @@ mod tests {
     #[test]
     fn registry_keys_are_sorted_and_complete() {
         let keys = registry_keys();
-        assert_eq!(keys.len(), 7);
+        assert_eq!(keys.len(), 6);
         let mut sorted = keys.clone();
         sorted.sort_unstable();
         assert_eq!(keys, sorted);

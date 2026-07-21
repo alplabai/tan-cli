@@ -60,9 +60,9 @@ pub use debug_launch::{
 pub use diff::{DiffEntry, DiffKind, collect_diff_entries, prune_nulls};
 pub use flash::{
     BackendKind, FlashBackendMeta, FlashInputs, FlashKind, FlashPlan, FlashTarget, ToolGate,
-    backend_for, jlink_commander_script, plan_baremetal_cmake_flash, plan_cc3501e_usb_bootloader,
-    plan_flash_targets, plan_swd_probe, plan_xspi_flashwriter, plan_yocto_wic,
-    plan_zephyr_west_flash, registry_keys, resolve_artefact_path, tool_gate,
+    backend_for, jlink_commander_script, plan_baremetal_cmake_flash, plan_flash_targets,
+    plan_swd_probe, plan_xspi_flashwriter, plan_yocto_wic, plan_zephyr_west_flash, registry_keys,
+    resolve_artefact_path, tool_gate,
 };
 pub use image_bundle::{
     BundleHelperEntry, BundleManifest, BundleSliceEntry, assemble_bundle_manifest,
