@@ -9,7 +9,8 @@
 //!
 //! Per-entry rc convention mirrors `alp_flash._flash_entry` exactly: `0` success
 //! / clean-dry-run / clean-skip-via-flag, `-1` silently skipped (no flash_method
-//! / tools missing under `--skip-missing-tools`), `>0` failed. `failed` counts
+//! / tools missing under `--skip-missing-tools` / an unresolved `TBD` value in
+//! `flash_args`), `>0` failed. `failed` counts
 //! only `rc > 0`; skipped entries never count. Within rc 0, `status` further
 //! distinguishes a real/dry-run "ok" from a "planned" entry (the yocto_wic/xspi
 //! confirm gate declining a REAL write — nothing was programmed), so a JSON
@@ -23,7 +24,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 
 use tan_core::flash::{
-    BackendKind, FlashInputs, FlashPlan, FlashTarget, ToolGate, backend_for,
+    BackendKind, FlashInputs, FlashPlan, FlashTarget, ToolGate, backend_for, flash_args_has_tbd,
     plan_baremetal_cmake_flash, plan_cc3501e_usb_bootloader, plan_flash_targets, plan_swd_probe,
     plan_xspi_flashwriter, plan_yocto_wic, plan_zephyr_west_flash, registry_keys,
     resolve_artefact_path, tool_gate,
@@ -298,6 +299,23 @@ fn flash_entry(
             return (1, entry(t, Some(method), "failed", 1, msg), lines);
         }
     };
+
+    // A resolved backend with unresolved `flash_args` (the AEN801 cc3501e
+    // helper's `mode: TBD, device: TBD`) is the SDK's documented pending
+    // sentinel (issue #2's `TBD` convention -- see `image.rs`'s `TBD`
+    // firmware_path skip and `sdk_catalogue::parse::is_tbd`), not a flash
+    // failure: one helper whose args aren't finalised must never fail the
+    // whole run and block the resolved slices. Checked before artefact
+    // resolution / dispatch so it skips cleanly under both --dry-run and a
+    // real run.
+    if flash_args_has_tbd(&t.flash_args) {
+        let msg = format!(
+            "flash: {kind} '{id}' has an unresolved 'TBD' flash_arg (e.g. mode/device not \
+             finalised); skipping"
+        );
+        lines.push(msg.clone());
+        return (-1, entry(t, Some(method), "skipped", -1, msg), lines);
+    }
 
     // Artefact resolution: output_artefact (slice) or firmware_path (helper).
     let artefact_str = t
@@ -800,6 +818,93 @@ mod tests {
             issue.is_some(),
             "a failed entry must surface a flash.entry-failed issue"
         );
+        std::fs::remove_dir_all(&sdk).unwrap();
+        std::fs::remove_dir_all(&app).unwrap();
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn tbd_flash_args_on_a_registered_backend_skips_not_fails() {
+        // Regression: the AEN801 e2e had a cc3501e helper with a VALID,
+        // registered `flash_method: cc3501e_usb_bootloader` but unresolved
+        // `flash_args: {mode: TBD, device: TBD}`. `TBD` is the SDK's
+        // documented pending/not-yet-resolved sentinel (issue #2's
+        // convention -- `sdk_catalogue::parse::is_tbd`; `image.rs` already
+        // treats a `TBD` firmware_path as a non-fatal Pending skip), so this
+        // must be a skip, not a hard failure that takes down the whole run
+        // (including the real, resolved m55 zephyr slice) and forces users
+        // to pass `--core` to work around it.
+        let sdk = tmp("tbd-args-sdk");
+        fake_sdk(&sdk);
+        let app = tmp("tbd-args-app");
+        let build_root = tmp("tbd-args-build");
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "schema_version: 1\nhw_info:\n  sku: E1M-AEN801\nslices:\n- core_id: m55_he\n  os: \
+             zephyr\n  output_artefact: m55_he-zephyr/zephyr/zephyr.elf\n  status: ok\n  \
+             flash_method: zephyr_west_flash\n  flash_args:\n    runner: openocd\nhelper_mcus:\n- \
+             name: cc3501e_helper\n  chip: cc3501e\n  firmware_path: firmware/cc3501e.bin\n  \
+             flash_method: cc3501e_usb_bootloader\n  flash_args:\n    mode: TBD\n    device: \
+             TBD\nboot_order: []\n",
+        )
+        .unwrap();
+        let g = global(&sdk, Format::Json);
+        let run = run(&g, &flash_args(&app, &build_root, true));
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        // The resolved m55 slice still plans/would-run; one unresolved helper
+        // must not fail the run.
+        assert_eq!(run.exit, ExitCode::Success, "got envelope: {doc}");
+        assert_eq!(doc["ok"], true);
+        let entries = doc["data"]["entries"].as_array().unwrap();
+        let zephyr = entries.iter().find(|e| e["id"] == "m55_he").unwrap();
+        assert_eq!(zephyr["status"], "ok");
+        let helper = entries
+            .iter()
+            .find(|e| e["id"] == "cc3501e_helper")
+            .unwrap();
+        assert_eq!(helper["status"], "skipped");
+        assert_eq!(helper["rc"], -1);
+        assert!(helper["message"].as_str().unwrap().contains("TBD"));
+        std::fs::remove_dir_all(&sdk).unwrap();
+        std::fs::remove_dir_all(&app).unwrap();
+        std::fs::remove_dir_all(&build_root).unwrap();
+    }
+
+    #[test]
+    fn bare_scalar_tbd_flash_args_on_a_registered_backend_skips_not_fails() {
+        // Companion to `tbd_flash_args_on_a_registered_backend_skips_not_fails`
+        // (mapping TBD) and `dry_run_zephyr_ok_and_tbd_helper_fails` (bare
+        // scalar TBD, but with an UNREGISTERED `flash_method: TBD` that fails
+        // at `backend_for` before the scan ever runs). This one pairs a bare
+        // `flash_args: TBD` scalar with a VALID, registered
+        // `flash_method: cc3501e_usb_bootloader` so it actually exercises
+        // `flash_args_has_tbd` past the backend lookup.
+        let sdk = tmp("tbd-bare-sdk");
+        fake_sdk(&sdk);
+        let app = tmp("tbd-bare-app");
+        let build_root = tmp("tbd-bare-build");
+        std::fs::write(
+            build_root.join("system-manifest.yaml"),
+            "schema_version: 1\nhw_info:\n  sku: E1M-AEN801\nslices:\n- core_id: m55_he\n  os: \
+             zephyr\n  output_artefact: m55_he-zephyr/zephyr/zephyr.elf\n  status: ok\n  \
+             flash_method: zephyr_west_flash\n  flash_args:\n    runner: openocd\nhelper_mcus:\n- \
+             name: cc3501e_helper\n  chip: cc3501e\n  firmware_path: firmware/cc3501e.bin\n  \
+             flash_method: cc3501e_usb_bootloader\n  flash_args: TBD\nboot_order: []\n",
+        )
+        .unwrap();
+        let g = global(&sdk, Format::Json);
+        let run = run(&g, &flash_args(&app, &build_root, true));
+        let doc: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(run.exit, ExitCode::Success, "got envelope: {doc}");
+        assert_eq!(doc["ok"], true);
+        let entries = doc["data"]["entries"].as_array().unwrap();
+        let helper = entries
+            .iter()
+            .find(|e| e["id"] == "cc3501e_helper")
+            .unwrap();
+        assert_eq!(helper["status"], "skipped");
+        assert_eq!(helper["rc"], -1);
+        assert!(helper["message"].as_str().unwrap().contains("TBD"));
         std::fs::remove_dir_all(&sdk).unwrap();
         std::fs::remove_dir_all(&app).unwrap();
         std::fs::remove_dir_all(&build_root).unwrap();
