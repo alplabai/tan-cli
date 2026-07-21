@@ -138,11 +138,11 @@ jobs:
           files: assets/*
           fail_on_unmatched_files: true
 
-  # crates.io — `cargo install alp-tan-cli`. Ported from the retired alp-cli's
-  # `release-cli-rs.yml` publish_crates job (alplabai/alp-sdk-vscode, commit
-  # 56cd786d~1), renamed for tan's crates and tag scheme. Publishes tan-core
-  # THEN alp-tan-cli (core first — `cargo publish` waits for it to appear on
-  # the index before publishing the crate that path-depends on it). Gated on
+  # crates.io — `cargo install alp-tan-cli` (the crate is `alp-tan-cli` because
+  # `tan`/`tan-cli` are already taken on crates.io; the built binary is still
+  # `tan`). Publishes tan-core THEN alp-tan-cli (core first — `cargo publish`
+  # waits for it to appear on the index before publishing the crate that
+  # path-depends on it). Gated on
   # CARGO_REGISTRY_TOKEN; skipped (not failed) when the secret is unset so a
   # fork/CI run without publish credentials still goes green.
   publish_crates:
@@ -173,11 +173,9 @@ jobs:
         if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
         run: echo "::warning::CARGO_REGISTRY_TOKEN not set — skipped crates.io publish. The GitHub release binaries + npm shim still ship."
 
-  # npm shim — `npm i -g @alplabai/tan` / `npx @alplabai/tan`. Ported from the
-  # retired alp-cli's `release-cli.yml` publish job (same commit as above),
-  # collapsed into this workflow since tan has one release tag scheme (v*)
-  # rather than alp-cli's split cli-rs-v*/cli-v* tags. Gated on NPM_TOKEN;
-  # skipped (not failed) when unset, mirroring the crates.io gating above.
+  # npm shim — `npm i -g @alplabai/tan` / `npx @alplabai/tan`. One release tag
+  # scheme (v*), one workflow. Gated on NPM_TOKEN; skipped (not failed) when
+  # unset, mirroring the crates.io gating above.
   publish_npm:
     name: publish · npm shim
     needs: release
