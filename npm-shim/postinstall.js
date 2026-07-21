@@ -8,15 +8,16 @@
 // straight to disk and chmods it: no archive to unpack. Runs as the
 // package's `postinstall` step.
 //
-// No checksum is verified: the `release` workflow does not yet publish a
-// SHA-256 / checksums file alongside the binaries, so there's nothing to pin
-// against. Tracked as a follow-up — see alplabai/tan-cli#11's open question
-// ("should the npm shim verify a release SHA-256, and should the release
-// start publishing a checksums file for both the shim and install.sh to
-// consume?"). Once that lands, verify the digest here before chmod +x.
+// Integrity: the `release` workflow publishes a `checksums.txt` (GNU
+// `sha256sum` output) alongside the binaries. This script fetches it from the
+// same release, verifies the downloaded binary's SHA-256 against the pinned
+// digest, and FAILS CLOSED — a missing checksums.txt, a missing entry, or a
+// mismatch aborts the install — before the binary is ever written and
+// chmod +x'd. It never runs an unverified binary. (Resolves alplabai/tan-cli#11.)
 
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 const pkg = require("./package.json");
 
@@ -64,12 +65,61 @@ async function main() {
       `@alplabai/tan: failed to download ${asset} (HTTP ${response.status}) from ${url}`,
     );
   }
+  const bytes = Buffer.from(await response.arrayBuffer());
+
+  // Verify integrity BEFORE writing an executable to disk. Fail closed: a
+  // missing checksums.txt, a missing entry, or a digest mismatch aborts the
+  // install rather than running an unverified binary.
+  await verifyChecksum(bytes, asset);
+
   // Raw binary asset — write straight to disk, no archive to extract.
-  fs.writeFileSync(binPath, Buffer.from(await response.arrayBuffer()));
+  fs.writeFileSync(binPath, bytes);
 
   if (process.platform !== "win32") {
     fs.chmodSync(binPath, 0o755);
   }
+}
+
+/**
+ * Fetch the release's checksums.txt and verify `bytes` against the pinned
+ * SHA-256 for `asset`. Throws (fails closed) on any fetch error, missing
+ * entry, or mismatch — the caller aborts the install.
+ */
+async function verifyChecksum(bytes, asset) {
+  const url = `https://github.com/${REPO}/releases/download/${TAG}/checksums.txt`;
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(
+      `@alplabai/tan: could not fetch checksums.txt (HTTP ${response.status}) from ${url} — refusing to run an unverified binary.`,
+    );
+  }
+  const expected = parseChecksum(await response.text(), asset);
+  if (!expected) {
+    throw new Error(
+      `@alplabai/tan: no SHA-256 entry for ${asset} in checksums.txt — refusing to run an unverified binary.`,
+    );
+  }
+  const actual = crypto.createHash("sha256").update(bytes).digest("hex");
+  if (actual !== expected) {
+    throw new Error(
+      `@alplabai/tan: checksum mismatch for ${asset} — expected ${expected}, got ${actual}. Aborting install.`,
+    );
+  }
+  console.log(`@alplabai/tan: verified ${asset} (sha256 ${actual}).`);
+}
+
+/**
+ * Parse GNU `sha256sum` output ("<64-hex>  <filename>", optional `*` binary
+ * marker) and return the lowercase hex digest for `asset`, or null if absent.
+ */
+function parseChecksum(text, asset) {
+  for (const line of text.split("\n")) {
+    const m = line.trim().match(/^([0-9a-fA-F]{64})\s+\*?(.+)$/);
+    if (m && m[2] === asset) {
+      return m[1].toLowerCase();
+    }
+  }
+  return null;
 }
 
 main().catch((error) => {

@@ -24,12 +24,12 @@ README](../README.md).
 
 ## How it works
 
-- `postinstall.js` maps the host platform/arch to a release target triple and
+- `postinstall.js` maps the host platform/arch to a release target triple,
   downloads the RAW `tan-<target>[.exe]` binary from
-  `https://github.com/alplabai/tan-cli/releases/download/v<version>/` into
-  `binary/`, then `chmod +x`s it. tan's release ships one uncompressed binary
-  per triple (not a `.tar.gz`), so there is no archive to extract — the
-  download is written straight to disk.
+  `https://github.com/alplabai/tan-cli/releases/download/v<version>/`, verifies
+  its SHA-256 against the release's `checksums.txt`, then writes it into
+  `binary/` and `chmod +x`s it. tan's release ships one uncompressed binary per
+  triple (not a `.tar.gz`), so there is no archive to extract.
 - `bin/tan.js` forwards `tan …` invocations to that native binary.
 
 Prebuilt targets: **Linux x64/arm64**, **macOS x64/arm64** (Intel + Apple
@@ -39,13 +39,13 @@ alp-tan-cli --locked` or build from source instead.
 
 ## Checksum verification
 
-Not yet implemented. The `release` workflow does not currently publish a
-SHA-256 or checksums file alongside the binaries, so there is nothing to pin
-against — adding a verification step now would fake a guarantee the release
-doesn't back. Tracked as a follow-up (see the open question in
-[alplabai/tan-cli#11](https://github.com/alplabai/tan-cli/issues/11)); once
-the release starts publishing checksums, `postinstall.js` should verify the
-downloaded binary's digest before `chmod +x`ing it.
+The `release` workflow publishes a `checksums.txt` (GNU `sha256sum` output)
+alongside the six binaries. `postinstall.js` fetches it from the same release
+and verifies the downloaded binary's SHA-256 against the pinned digest
+**before** writing it to disk and `chmod +x`ing it. It **fails closed** — a
+missing `checksums.txt`, a missing entry for the target asset, or a digest
+mismatch aborts the install rather than running an unverified binary.
+(Resolves [alplabai/tan-cli#11](https://github.com/alplabai/tan-cli/issues/11).)
 
 ## Releasing
 

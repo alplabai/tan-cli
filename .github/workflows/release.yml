@@ -55,6 +55,19 @@ jobs:
             echo "::error::tag v$tag does not match [workspace.package] version $cargo_version in Cargo.toml"
             exit 1
           fi
+      - name: npm shim version == Cargo version
+        shell: bash
+        # The npm shim pins its download to `v<package.json version>`; if it
+        # drifts from the crate version the shim fetches the wrong release. Fail
+        # the tag before building 6 targets, mirroring the tag==Cargo guard.
+        run: |
+          npm_version="$(node -p "require('./npm-shim/package.json').version")"
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          echo "npm=$npm_version  cargo=$cargo_version"
+          if [ "$npm_version" != "$cargo_version" ]; then
+            echo "::error::npm-shim/package.json version $npm_version does not match [workspace.package] version $cargo_version — bump both in lockstep"
+            exit 1
+          fi
 
   # The tagged commit must pass the same gates a PR does — a tag can be cut from
   # any commit, so "it was green on main" is an assumption, not a fact.
@@ -132,6 +145,15 @@ jobs:
         with:
           path: assets
           merge-multiple: true
+      - name: generate checksums.txt
+        shell: bash
+        working-directory: assets
+        # SHA-256 of every release binary, GNU `sha256sum` format, uploaded as a
+        # release asset. The npm shim (postinstall.js) and the install scripts
+        # pin the downloaded binary against this digest before running it.
+        run: |
+          sha256sum tan-* > checksums.txt
+          cat checksums.txt
       - name: publish release
         uses: softprops/action-gh-release@v2
         with:
