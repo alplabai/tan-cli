@@ -69,11 +69,30 @@ fn dispatch_pin_str(value: Option<&YamlValue>) -> Option<String> {
     }
 }
 
+/// A catalogue-entry root MUST be a mapping. A reshaped/renamed SDK catalogue
+/// file (root turned into a list or scalar, or an empty document) fails loudly
+/// here instead of yielding a silently-empty preset — the shape counterpart to
+/// the `schema_version`/`soc_spec_version` guards on the SoM/SoC parsers. See #15.
+fn require_mapping(root: &YamlValue, kind: &str) -> Result<Mapping, serde_yaml::Error> {
+    root.as_mapping().cloned().ok_or_else(|| {
+        serde_yaml::Error::custom(format!(
+            "{} catalogue entry root is not a mapping; the SDK catalogue may have been reshaped \
+             -- upgrade the CLI or the SDK so the shapes match",
+            kind
+        ))
+    })
+}
+
 /// Parse a single board definition (YAML) into a `BoardPreset`, dropping `TBD` strings.
 pub fn parse_board_preset(text: &str) -> Result<BoardPreset, serde_yaml::Error> {
     let root: YamlValue = serde_yaml::from_str(text)?;
-    let map = root.as_mapping().cloned().unwrap_or_default();
-    let name = str_clean(yget(&map, "name")).unwrap_or_default();
+    let map = require_mapping(&root, "board")?;
+    let name = str_clean(yget(&map, "name")).ok_or_else(|| {
+        serde_yaml::Error::custom(
+            "board catalogue entry is missing its required `name`; the SDK catalogue may have been \
+             reshaped -- upgrade the CLI or the SDK so the shapes match",
+        )
+    })?;
     let display_name = str_clean(yget(&map, "display_name")).unwrap_or_else(|| name.clone());
 
     Ok(BoardPreset {
@@ -87,8 +106,13 @@ pub fn parse_board_preset(text: &str) -> Result<BoardPreset, serde_yaml::Error> 
 /// Parse a single chip definition (YAML) into a `ChipDef`; `kconfig` stays `None` when empty.
 pub fn parse_chip_def(text: &str) -> Result<ChipDef, serde_yaml::Error> {
     let root: YamlValue = serde_yaml::from_str(text)?;
-    let map = root.as_mapping().cloned().unwrap_or_default();
-    let chip_id = str_clean(yget(&map, "chip_id")).unwrap_or_default();
+    let map = require_mapping(&root, "chip")?;
+    let chip_id = str_clean(yget(&map, "chip_id")).ok_or_else(|| {
+        serde_yaml::Error::custom(
+            "chip catalogue entry is missing its required `chip_id`; the SDK catalogue may have \
+             been reshaped -- upgrade the CLI or the SDK so the shapes match",
+        )
+    })?;
     let display_name = str_clean(yget(&map, "display_name")).unwrap_or_else(|| chip_id.clone());
 
     let kconfig = yget(&map, "kconfig")
@@ -393,6 +417,33 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("unsupported soc_spec_version 2"));
+    }
+
+    #[test]
+    fn rejects_board_preset_reshaped_root() {
+        // A reshaped catalogue file whose root is a sequence, not a mapping,
+        // must fail loudly instead of yielding an empty preset.
+        let err = parse_board_preset("- e1m-evk\n- e1m-x-evk\n").unwrap_err();
+        assert!(err.to_string().contains("not a mapping"));
+    }
+
+    #[test]
+    fn rejects_board_preset_missing_name() {
+        let err =
+            parse_board_preset("display_name: E1M EVK\nhosts_som_families: [aen]\n").unwrap_err();
+        assert!(err.to_string().contains("missing its required `name`"));
+    }
+
+    #[test]
+    fn rejects_chip_def_reshaped_root() {
+        let err = parse_chip_def("just-a-scalar\n").unwrap_err();
+        assert!(err.to_string().contains("not a mapping"));
+    }
+
+    #[test]
+    fn rejects_chip_def_missing_chip_id() {
+        let err = parse_chip_def("display_name: Chip A\nfamilies: [aen]\n").unwrap_err();
+        assert!(err.to_string().contains("missing its required `chip_id`"));
     }
 
     #[test]
