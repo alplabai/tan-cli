@@ -33,11 +33,19 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 
 VENDORED_ROOT = Path(__file__).resolve().parent.parent.parent / (
     "crates/tan-core/src/wizard/vendored"
 )
+
+# Vendored files that `--emit scaffold` never emits at all -- NOT part of the
+# envelope and NOT in the catalog's `files.user_owned`. `testcase.yaml` is the
+# SDK's own twister harness for the catalog's canonical `example:`; it is
+# vendored alongside the scaffold envelope but compared against that example
+# directory instead of the (absent-from-emit) live output.
+NON_ENVELOPE_EXTRAS = ("testcase.yaml",)
 
 
 class ScaffoldEmitError(RuntimeError):
@@ -98,6 +106,41 @@ def emit_live_scaffold(sdk_root: Path, template: str, sku: str) -> dict[str, str
     return {f["path"]: f["contents"] for f in envelope}
 
 
+def resolve_example_dir(sdk_root: Path, template: str) -> Path | None:
+    """The scaffold catalog's `example:` directory for `template` id --
+    where `NON_ENVELOPE_EXTRAS` are compared against instead of the scaffold
+    envelope. `None` if the catalog or the template entry can't be read (the
+    caller then leaves any such extras undiffed rather than erroring)."""
+    catalog_path = sdk_root / "metadata" / "templates" / "catalog-v1.json"
+    try:
+        catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    for entry in catalog.get("templates", []):
+        if entry.get("id") == template:
+            example = entry.get("example")
+            return (sdk_root / example) if example else None
+    return None
+
+
+def augment_with_example_extras(
+    live: dict[str, str], sdk_root: Path, template: str, vendored_paths: Iterable[str],
+) -> None:
+    """For any `NON_ENVELOPE_EXTRAS` path present in the vendored tree, read
+    its live content from the catalog's example directory and add it to
+    `live` in place -- so `diff_trees` compares it same as every other file,
+    against its real source instead of flagging it as a spurious
+    vendored-only diff."""
+    example_dir = resolve_example_dir(sdk_root, template)
+    if example_dir is None:
+        return
+    for name in NON_ENVELOPE_EXTRAS:
+        if name in vendored_paths and name not in live:
+            extra_path = example_dir / name
+            if extra_path.is_file():
+                live[name] = extra_path.read_text(encoding="utf-8")
+
+
 def read_vendored_tree(tree_root: Path) -> dict[str, str]:
     """Read every file under `tree_root` into {relative_path: contents},
     forward-slash normalized, matching the emit envelope's path style."""
@@ -132,6 +175,7 @@ def run(sdk_root: Path, vendored_root: Path, pairs: list[tuple[str, str]]) -> bo
             print(f"FAIL {template}/{sku}: {e}")
             all_ok = False
             continue
+        augment_with_example_extras(live, sdk_root, template, vendored)
 
         diffs = diff_trees(vendored, live)
         if diffs:
