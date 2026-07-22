@@ -19,6 +19,7 @@ pub use plan::{
     create_wizard_plan_with_cores, normalize_module_name,
 };
 pub use registry::{list_module_templates, list_wizard_templates};
+pub use vendored::vendored_app_core_for_sku;
 
 // ---------------------------------------------------------------------------
 // Tests

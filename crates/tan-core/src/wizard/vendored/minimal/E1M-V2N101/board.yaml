@@ -19,7 +19,7 @@ supported_boards:
   - e1m-evk
   - e1m-x-evk
 cores:
-  m55_hp:
+  m33_sm:
     app: ./src
     # No peripherals -- this example exercises only the boot path
     # and printf, both of which are part of the Zephyr baseline and

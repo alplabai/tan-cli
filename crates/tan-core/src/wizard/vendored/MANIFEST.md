@@ -10,9 +10,12 @@ from an un-revendored SDK change.
 ## Source
 
 - Repo: `alplabai/alp-sdk`
-- Branch: `feat/864-emit-scaffold`
-- Commit: `75ef3b02` (`fix(templates): drop stale SoM comment on --emit
-  scaffold sku substitution`)
+- Branch: `dev`
+- Commit: `a0849e10` (`feat(build-plan): --emit scaffold derives cores per
+  SKU + adapts scaffold content (#864) (#877)`) — re-vendored from this
+  commit (tan-cli#25 had vendored `75ef3b02`, before #877 fixed `--emit
+  scaffold` deriving the wrong, non-buildable Alif `m55_hp` core for every
+  SKU including `E1M-V2N101`; see "App-core disagreement" below).
 - Command: `PYTHONPATH=$SDK/scripts python3 scripts/alp_project.py --emit
   scaffold --template <id> --sku <SKU>`
 
@@ -100,28 +103,42 @@ yet is best-effort and re-checked by `tan validate` once an SDK is available.
 Whether tan should keep a permanent non-vendored fallback generator for NX9,
 or whether the SDK catalog should grow NX9 coverage, is a maintainer call.
 
-## Two-line substitution only — not a full per-SKU re-render
+## Per-SKU substitution (alp-sdk#864/#877) — not a two-line patch
 
-`alp_template.render_to_envelope`'s docstring (alp-sdk `scripts/
-alp_template.py`) is explicit: `--sku` substitutes only the rendered
-`board.yaml`'s `som.sku:` and top-level `preset:` lines against the SKU's own
-`metadata/e1m_modules/<sku>.yaml` `default_board:` — a byte-identical
-passthrough when `sku` already matches the example's own default. Nothing
-else in the tree (the `cores:` topology, the CMakeLists.txt `--core` flag,
-`src/main.c`, `README.md`) changes with `--sku`. Confirmed for `minimal`: the
-`E1M-AEN801` and `E1M-V2N101` vendored trees differ in `board.yaml` only (2
-lines); every other file is byte-identical between the two.
+Earlier (`75ef3b02`, tan-cli#25's original vendor point) `--sku` substituted
+only the rendered `board.yaml`'s `som.sku:`/`preset:` lines, and the
+`cores:` key stayed the template's own canonical SKU's core for every SKU —
+for `minimal` that meant `m55_hp` (Alif) even when `--sku E1M-V2N101` was
+requested, a non-buildable core id on Renesas silicon. alp-sdk#877 fixed
+`--emit scaffold` to derive the real per-SKU app core (`app_core_for_sku`'s
+SDK-side equivalent) and adapt every file that names it: `board.yaml`'s
+`cores:` key, `CMakeLists.txt`'s `--core` flag, and `README.md`'s
+"On real silicon" board-id line (now the fully-qualified Zephyr 4.4 form,
+e.g. `alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33`). Confirmed for `minimal`:
+`E1M-AEN801` and `E1M-V2N101` now differ in `board.yaml`, `CMakeLists.txt`,
+and `README.md`; `prj.conf`, `src/main.c`, and `testcase.yaml` (not part of
+the scaffold envelope, see below) stay byte-identical between the two.
 
-One consequence worth flagging: the vendored `minimal` scaffold's `cores:`
-key is `m55_hp` for **both** vendored SKUs — for `E1M-V2N101` this disagrees
-with `app_core_for_sku("E1M-V2N101")` (`"m33_sm"`). `vendored.rs` sidesteps
-this by deriving the splice target from the vendored `board.yaml`'s own
-`cores:` key (`vendored_app_core_key`), not from `app_core_for_sku`, so
-`--cores` companion-splicing stays correct regardless of SKU. `tan init`'s
-own upfront `--cores` validation (`commands/init/mod.rs`, checked before the
-plan is built) still calls `app_core_for_sku` and would therefore validate
-against `"m33_sm"` for an `E1M-V2N101` `zephyr-app` request even though the
-vendored plan's real core key is `m55_hp` — a pre-existing-shape
-inconsistency this change does not newly introduce (no test exercises
-`zephyr-app` + `--cores` today; `--cores` is undocumented) but a maintainer
-should decide whether that CLI-level check should become vendored-aware too.
+The vendored `minimal` scaffold's `cores:` key is now `m33_sm` for
+`E1M-V2N101`/`E1M-V2M101` and `m55_hp` for `E1M-AEN801` — agreeing with
+`app_core_for_sku`. `vendored.rs` still derives the `--cores` companion-splice
+target from the vendored `board.yaml`'s own `cores:` key
+(`vendored_app_core_key`/`vendored_app_core_for_sku`) rather than calling
+`app_core_for_sku` directly, so a *future* re-vendor that (again) derives a
+different core for a vendored SKU fails `cargo test`
+(`vendored_app_core_matches_each_familys_board_yaml`) instead of silently
+drifting. `tan init`'s upfront `--cores` validation
+(`commands/init/mod.rs`) now calls `vendored_app_core_for_sku` for the
+`zephyr-app` template specifically (every other template still uses
+`app_core_for_sku`, matching its own hand-written `gen_board_yaml`), so the
+CLI-level check can never again independently disagree with what
+`create_wizard_plan_with_cores` actually plans.
+
+`testcase.yaml` is vendored alongside the scaffold envelope but is **not**
+part of `--emit scaffold`'s output — the catalog's `files.user_owned` for
+`minimal` is `board.yaml`/`prj.conf`/`CMakeLists.txt`/`src/main.c`/
+`README.md` only. It's a byte-exact copy of the canonical example's own
+`examples/peripheral-io/hello-world/testcase.yaml` (the SDK's twister
+harness for that example), family-independent like every other
+non-`board.yaml` file. `tests/parity/scaffold_byte_parity.py` diffs it
+against that example directory rather than the live scaffold emit.

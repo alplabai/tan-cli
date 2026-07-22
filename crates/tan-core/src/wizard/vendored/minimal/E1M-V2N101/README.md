@@ -31,13 +31,13 @@ Pin down which one BEFORE moving on to `gpio-button-led` or
 
 ```bash
 # Standalone, native_sim (host binary; no hardware needed):
-west build -b native_sim/native/64 examples/peripheral-io/hello-world \
-    -- -DEXTRA_ZEPHYR_MODULES=$(pwd)
+west build -b native_sim/native/64 . \
+    -- -DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT
 west build -t run
 
 # On real silicon, point -b at the SoM's Zephyr board target.
-# Example for E1M-AEN801:
-west build -b alp_e1m_aen801_m55_hp examples/peripheral-io/hello-world
+# Example for E1M-V2N101:
+west build -b alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33 .
 west flash
 ```
 
@@ -60,7 +60,7 @@ tio -b 115200 <your-serial-device>
 
 Per-OS device naming (and the alternative terminals each OS
 prefers) is documented in
-[`docs/cross-platform-setup.md`](../../../docs/cross-platform-setup.md)
+[`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.11.1/docs/cross-platform-setup.md)
 section 7.7.
 
 <!-- cross-platform-lint:ignore -->
@@ -95,9 +95,9 @@ LPT)").
 
 ## Reference
 
-- [`docs/firmware-quickstart.md`](../../../docs/firmware-quickstart.md)
+- [`docs/firmware-quickstart.md`](https://github.com/alplabai/alp-sdk/blob/v0.11.1/docs/firmware-quickstart.md)
   -- single-OS bring-up walk-through.
-- [`docs/cross-platform-setup.md`](../../../docs/cross-platform-setup.md)
+- [`docs/cross-platform-setup.md`](https://github.com/alplabai/alp-sdk/blob/v0.11.1/docs/cross-platform-setup.md)
   -- Windows/macOS/Linux toolchain + serial-port notes.
-- [`docs/troubleshooting.md`](../../../docs/troubleshooting.md)
+- [`docs/troubleshooting.md`](https://github.com/alplabai/alp-sdk/blob/v0.11.1/docs/troubleshooting.md)
   -- common boot/flash/console failures + fixes.

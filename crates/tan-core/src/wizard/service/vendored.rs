@@ -166,6 +166,22 @@ fn splice_companion_cores(board_yaml: &str, cores: &[(String, String)]) -> Strin
     out
 }
 
+/// The vendored `minimal` scaffold's real app-core id for `sku` — its family
+/// bucket's own `board.yaml` `cores:` key. `tan init`'s upfront `--cores`
+/// validation (`commands/init/mod.rs`) uses this instead of `app_core_for_sku`
+/// for the `zephyr-app` template, so the CLI-level check always agrees with
+/// what `vendored_minimal_files` actually plans — the two independently
+/// derived the wrong core (alp-sdk#864's `m55_hp`-for-V2N bug) until now.
+pub fn vendored_app_core_for_sku(sku: &str) -> &'static str {
+    let board_yaml = family_bucket(sku)
+        .iter()
+        .find(|(path, _)| *path == "board.yaml")
+        .map(|(_, content)| *content)
+        .expect("every vendored tree has a board.yaml entry");
+    vendored_app_core_key(board_yaml)
+        .expect("every vendored board.yaml has a non-empty cores: block")
+}
+
 /// Plan the `zephyr-app` template's files from the vendored SDK `minimal`
 /// scaffold: pick the SKU family's vendored tree, retarget `board.yaml`'s
 /// `som.sku:` line onto the requested `sku` (a byte-exact no-op when `sku` is
@@ -268,11 +284,26 @@ mod tests {
     }
 
     #[test]
-    fn non_board_yaml_files_are_untouched() {
+    fn non_board_yaml_files_are_untouched_by_retargeting() {
+        // vendored_minimal_files only rewrites board.yaml (SKU retarget +
+        // --cores splice); every other file passes through byte-identical
+        // from its own family's vendored tree. CMakeLists.txt's `--core` flag
+        // is per-family (alp-sdk#877 fix), so compare against the SAME family
+        // (MINIMAL_V2N), not across families.
         let files = vendored_minimal_files("E1M-V2N101", &[]);
         let cmake = &files.iter().find(|(p, _)| p == "CMakeLists.txt").unwrap().1;
-        assert_eq!(cmake.as_str(), MINIMAL_AEN[0].1); // family-independent file
+        assert_eq!(cmake.as_str(), MINIMAL_V2N[0].1);
         assert!(cmake.contains("EXTRA_CONF_FILE"));
-        assert!(cmake.contains("--core m55_hp"));
+        assert!(cmake.contains("--core m33_sm"));
+    }
+
+    #[test]
+    fn vendored_app_core_matches_each_familys_board_yaml() {
+        // The ground truth `commands/init/mod.rs`'s upfront --cores check
+        // must agree with for the zephyr-app template (alp-sdk#864/#877).
+        assert_eq!(vendored_app_core_for_sku("E1M-V2N101"), "m33_sm");
+        assert_eq!(vendored_app_core_for_sku("E1M-V2M101"), "m33_sm");
+        assert_eq!(vendored_app_core_for_sku("E1M-AEN801"), "m55_hp");
+        assert_eq!(vendored_app_core_for_sku("E1M-NX9101"), "m55_hp");
     }
 }

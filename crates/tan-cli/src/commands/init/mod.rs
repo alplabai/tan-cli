@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use tan_core::wizard::{WizardPlanInput, app_core_for_sku, create_wizard_plan_with_cores};
+use tan_core::wizard::{WizardPlanInput, create_wizard_plan_with_cores};
 
 use super::CommandRun;
 use crate::cli::{GlobalArgs, InitArgs};
@@ -15,7 +15,9 @@ mod response;
 
 use from_example::{finish, run_from_example};
 use resolve::ResolveErr::{BadArg, Cancelled};
-use resolve::{parse_cores, resolve_destination, resolve_name, resolve_template};
+use resolve::{
+    app_core_for_template, parse_cores, resolve_destination, resolve_name, resolve_template,
+};
 use response::{error_run, runtime_failure_run};
 
 // ---------------------------------------------------------------------------
@@ -119,8 +121,10 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
     };
     // The app core's runtime is fixed (the scaffolded src/ + prj.conf are
     // Zephyr); reject a contradictory --cores request instead of silently
-    // overriding it.
-    let app_core = app_core_for_sku(args.som.as_deref().unwrap_or(tan_core::DEFAULT_SOM_SKU));
+    // overriding it. See `app_core_for_template` for why this must NOT
+    // uniformly call `app_core_for_sku`.
+    let sku = args.som.as_deref().unwrap_or(tan_core::DEFAULT_SOM_SKU);
+    let app_core = app_core_for_template(template_id, sku);
     if let Some((_, os)) = cores
         .iter()
         .find(|(id, os)| id.as_str() == app_core && os.as_str() != "zephyr")
