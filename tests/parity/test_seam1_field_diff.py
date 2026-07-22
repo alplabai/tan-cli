@@ -143,3 +143,40 @@ def test_non_sysbuild_slice_extra_conf_file_still_stripped():
     sl["command"]["args"] = list(sl["command"]["args"]) + [
         "-DEXTRA_CONF_FILE=/some/path/alp.conf"]
     assert not _fails(oracle, mutated)
+
+
+def test_project_relpath_derives_boardyaml_directory():
+    assert s._project_relpath(
+        {"boardYaml": "examples/audio/i2s-tone/board.yaml"}
+    ) == "examples/audio/i2s-tone"
+
+
+def test_tokened_plan_reconciles_with_absolute_oracle_shape():
+    """alp-sdk#865: a live plan emitted with `planPathMode: tokened` carries
+    literal `${SDK_ROOT}`/`${PROJECT_ROOT}` in place of the pre-#865 frozen
+    oracle's absolute checkout-root paths. `normalize_plan` must map both to
+    the SAME normalized shape rather than diff a tokened plan as foreign."""
+    absolute = {
+        "boardYaml": "examples/audio/i2s-tone/board.yaml",
+        "sdkCommit": "97ad481b",
+        "slices": [{
+            "appDir": "/abs/sdk/examples/audio/i2s-tone/zephyr",
+            "env": {"ALP_SDK_ROOT": "/abs/sdk"},
+            "command": {"tool": "cmake", "args": [
+                "-DBOARD=e1m",
+                "-DAPP_DIR=/abs/sdk/examples/audio/i2s-tone/zephyr"]},
+        }],
+    }
+    tokened = {
+        "planPathMode": "tokened",
+        "boardYaml": "examples/audio/i2s-tone/board.yaml",
+        "sdkCommit": "97ad481b",
+        "slices": [{
+            "appDir": "${PROJECT_ROOT}/zephyr",
+            "env": {"ALP_SDK_ROOT": "${SDK_ROOT}"},
+            "command": {"tool": "cmake", "args": [
+                "-DBOARD=e1m", "-DAPP_DIR=${PROJECT_ROOT}/zephyr"]},
+        }],
+    }
+    assert s.normalize_plan(absolute) == s.normalize_plan(tokened)
+    assert not _fails(absolute, tokened)

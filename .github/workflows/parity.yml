@@ -27,12 +27,16 @@ env:
   # It MUST be a ref at or after the oracle SHA (97ad481b) -- an OLDER ref
   # (e.g. the last release v0.11.1, which predates the Phase-1 fields) lacks
   # envAppendPath/executionPolicy and would fail seam1 on missing-field diffs,
-  # not real drift. Pinned to df312cec (dev tip at gate-seed time = #848): it
-  # carries the Phase-1 fields AND the one allowed delta (debug.probe
-  # openocd->null), so a green bare-PR run proves the comparator handles the
-  # known-good case. Bump to the v0.12 release tag once alp-sdk cuts one past
-  # #848 (blocked on this gate landing -- alp-sdk ADR-0020 amendment, alp-sdk#855).
-  PINNED_SDK_TAG: df312cec3650bccc5976d31c2ab705f2a8e5f0ef
+  # not real drift. Pinned to f04ea42e (dev tip at this bump = #848 + #865's
+  # planPathMode:tokened emit + #874's shape-only retune): carries the
+  # Phase-1 fields, the one allowed delta (debug.probe openocd->null), AND
+  # exercises `normalize_plan`'s tokened-plan reconciliation branch -- a
+  # green bare-PR run now actually proves the comparator handles a tokened
+  # emit, not just the pre-#865 absolute-path case. The prior pin
+  # (df312cec) predated #865 and never ran seam1 against a tokened plan at
+  # all. Bump to the v0.12 release tag once alp-sdk cuts one past #848
+  # (blocked on this gate landing -- alp-sdk ADR-0020 amendment, alp-sdk#855).
+  PINNED_SDK_TAG: f04ea42ea152826a12ceeff29d18ff7005e462d6
 
 jobs:
   seam1-plan-shape:
