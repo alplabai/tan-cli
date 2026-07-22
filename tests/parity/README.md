@@ -13,7 +13,7 @@ every planner change.
 
 | Seam | Checks | Status |
 |---|---|---|
-| **1 — plan shape** | Does a live `--emit build-plan` still match a frozen, hand-verified oracle, field for field, over the SoM matrix — command + env + skip/fail-decision equivalence? Toolchain-free; runs on any `ubuntu-latest` runner. | **Implemented here**: `seam1_field_diff.py` + `.github/workflows/parity.yml`'s `seam1-plan-shape` job. |
+| **1 — plan shape** | Does a live `--emit build-plan` still match a frozen, hand-verified oracle's command / env / appDir / skip-fail-decision *shape*, field for field, over the SoM matrix? Deliberately does NOT re-diff the materialised config-artefact content (alp.conf/local.conf/cmake-args.txt/sysbuild-conf bytes) — see "Seam-1 scope" below. Toolchain-free; runs on any `ubuntu-latest` runner. | **Implemented here**: `seam1_field_diff.py` + `.github/workflows/parity.yml`'s `seam1-plan-shape` job. |
 | **2 — real build** | Materialise byte-check, an actual `west`/Zephyr build off the plan, and a Renode smoke test — the thing seam 1 can't catch (a plan that *looks* right but doesn't build). | **Follow-up, not seeded here.** Needs a Linux runner with the Zephyr SDK / toolchain installed (`west`, the AEN/E1M-X Zephyr modules, Renode). Placeholder `seam2` job in `.github/workflows/parity.yml` documents this — it does not run a fake check and does not report success for work it didn't do. |
 
 Yocto/A-core artefact parity is explicitly **out of scope** for both seams —
@@ -43,6 +43,29 @@ frame in which "does the live emit still match what the last real in-repo
 oracle produced" is even an answerable question — freezing it now is
 reconstructing that oracle retroactively, per the Amendment's remediation
 step, not a routine fixture update.
+
+## Seam-1 scope: shape only, not config-artefact content (alp-sdk#874 retune)
+
+Seam-1 used to also byte-diff each slice's materialised config-artefact
+`contents` (the rendered `alp.conf`/`local.conf`/`cmake-args.txt`) and
+`sharedArtefacts[*].contents` (DTS overlays, `system_ipc.h`, sysbuild/TF-M
+conf) against the frozen oracle. That turned *every* intentional emitter
+content change (a Kconfig dependency-gating fix, a new peripheral default)
+into a seam-1 failure that could only be "resolved" by adding another
+hand-reviewed strip to `normalize_plan` — a per-change treadmill that eroded
+the gate instead of doing its stated job (plan *shape* parity). alp-sdk#874's
+follow-up retuned the comparator: `normalize_plan` now drops every
+artefact's `contents` (`_drop_artefact_contents`), keeping only its `path`
+in the shape check. Command, env, appDir, skip/fail decision, and
+`debug.probe` are unaffected — see the sections below.
+
+Content coverage does not go away — it lives on the alp-sdk side, in
+`tests/fixtures/emit-snapshots/*.{build-plan,zephyr-conf}.snap`
+(`scripts/check_emit_snapshots.py`), and eventually in seam-2's real build.
+This vendored twin has no equivalent snapshot mechanism of its own (it only
+ever compared against alp-sdk's own live emit), so it has nothing further to
+add here — this section exists only so the two comparators' scope statement
+stays in lockstep.
 
 ## Why the comparator normalizes two fields
 
@@ -78,10 +101,13 @@ not-claiming, not a hidden capability loss. ADR-0020's Amendment states this
 explicitly: "the only `97ad481b`<->`df312cec` emit delta is `debug.probe`
 `"openocd"->null`, hand-reviewed."
 
-Any other diff anywhere in the plan — a changed command, a changed `env`
+Any other diff in the plan's SHAPE — a changed command, a changed `env`
 value, a changed slice count, a `probe` change to anything other than that
-exact transition — **fails** the gate. See `seam1_field_diff.py`'s module
-docstring for the exact allowed-delta rule the comparator implements.
+exact transition — **fails** the gate. Config-artefact `contents` is dropped
+before the diff runs at all (see "Seam-1 scope" above), so a content-only
+change never reaches this allow-list in the first place. See
+`seam1_field_diff.py`'s module docstring for the exact rule the comparator
+implements.
 
 ## Running it locally
 
