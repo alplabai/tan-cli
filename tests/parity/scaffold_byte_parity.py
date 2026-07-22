@@ -40,11 +40,11 @@ VENDORED_ROOT = Path(__file__).resolve().parent.parent.parent / (
     "crates/tan-core/src/wizard/vendored"
 )
 
-# Vendored files `--emit scaffold`'s envelope never covers (its
-# `files.user_owned` list, per `metadata/templates/catalog-v1.json`) -- the
-# SDK's own twister harness for the catalog's canonical `example:`, vendored
-# alongside the scaffold envelope but compared against that example directory
-# instead of the live emit.
+# Vendored files that `--emit scaffold` never emits at all -- NOT part of the
+# envelope and NOT in the catalog's `files.user_owned`. `testcase.yaml` is the
+# SDK's own twister harness for the catalog's canonical `example:`; it is
+# vendored alongside the scaffold envelope but compared against that example
+# directory instead of the (absent-from-emit) live output.
 NON_ENVELOPE_EXTRAS = ("testcase.yaml",)
 
 
