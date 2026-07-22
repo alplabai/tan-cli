@@ -105,3 +105,23 @@ cross-repo trigger ADR-0020's Amendment requires: alp-sdk CI fires this on
 every planner change so a drifting emit surfaces on the *alp-sdk* PR, not
 discovered later against a stale checkout). The dispatch payload's
 `client_payload.sdk_ref` picks the exact SDK ref under test.
+
+## Scaffold byte-parity (alp-sdk#864)
+
+`scaffold_byte_parity.py` is the equivalent gate for the wizard's *vendored*
+templates (`crates/tan-core/src/wizard/vendored/`, see that directory's
+`MANIFEST.md`): for every vendored (template, sku) pair it re-runs a live
+`alp_project.py --emit scaffold` and asserts byte-identity against the
+vendored tree, so a future SDK scaffold change that isn't re-vendored fails
+loudly instead of silently drifting (the same class of drift seam 1 guards
+against for build-plans). Unlike `seam1_field_diff.py`, it is optionally
+self-skipping — no reachable alp-sdk checkout (`--sdk` / `$ALP_SDK_ROOT` / a
+sibling `alp-sdk` checkout) is a clean no-op, not a failure, since
+`tan-core`'s own `cargo test` already covers the vendored tree's internal
+consistency. Not yet wired into `.github/workflows/parity.yml` — CI wiring
+(a `scaffold-byte-parity` job analogous to `seam1-plan-shape`) is a follow-up
+for whoever owns that workflow.
+
+```
+python3 tests/parity/scaffold_byte_parity.py --sdk /path/to/an/alp-sdk/checkout
+```
