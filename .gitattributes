@@ -1,0 +1,6 @@
+# Vendored `alp-sdk --emit scaffold` output is baked into the binary via
+# include_str! and byte-compared against a fresh LF emit by the cross-repo
+# parity gate. Force LF so a Windows CI checkout (autocrlf=true) cannot
+# CRLF-convert these files and break byte-exactness / the vendored test.
+crates/tan-core/src/wizard/vendored/** text eol=lf
+tests/parity/** text eol=lf
