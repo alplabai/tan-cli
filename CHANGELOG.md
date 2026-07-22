@@ -20,6 +20,43 @@ All notable changes to `tan` are documented here. Format follows
   checkout's actual `git` HEAD (the two-SDK split-brain guard); `${PROJECT_ROOT}`
   diverging from the executor's actual base dir refuses the build rather than
   silently building against the wrong tree.
+- **`tan init`'s `zephyr-app` template now scaffolds from alp-sdk's vendored
+  `--emit scaffold` output** (alp-sdk #864), retiring tan's own hand-rolled
+  Rust scaffold generators — which had regressed a cross-core Kconfig leak.
+  A cross-repo byte-parity gate (`tests/parity/scaffold_byte_parity.py`) holds
+  the vendored `minimal` E1M-AEN801/E1M-V2N101 trees byte-identical to the
+  SDK's emit.
+
+### Changed
+- **Seam-1 parity twin retuned to shape-only comparison** (alp-sdk #874/#879).
+  The vendored comparator no longer diffs each slice's materialised
+  config-artefact contents (`alp.conf`/`local.conf`/`cmake-args.txt`/
+  sysbuild-conf bytes) against the frozen oracle — only command / env /
+  `appDir` / skip-fail-decision shape — so a content-only emitter change no
+  longer needs a hand-reviewed comparator strip to stay green. Test/CI
+  infrastructure only; no change to `tan`'s own runtime behavior.
+- **Seam-1 twin reconciled with alp-sdk #865's tokenized plans**: the
+  comparator now maps a live `planPathMode: "tokened"` plan's
+  `${SDK_ROOT}`/`${PROJECT_ROOT}` tokens onto the same normalized form the
+  frozen (pre-#865, absolute-path) oracle collapses to, instead of diffing
+  them as a foreign shape; the frozen `iot-fleet-ota` oracle fixture was
+  re-synced to alp-sdk's #862-corrected bytes.
+
+### Fixed
+- **Re-vendored the `zephyr-app` scaffold from a corrected `--emit scaffold`**
+  (alp-sdk #877): the E1M-V2N101 tree had shipped the non-buildable Alif
+  `m55_hp` core (corrected to the Renesas `m33_sm` core) and a bare Zephyr
+  board target, now the fully-qualified `board/soc/core` form; the
+  `ALP_SDK_ROOT` CMake resolution now hard-errors instead of silently
+  falling back to a relative-path guess. `tan init --cores` validation now
+  derives the `zephyr-app` template's expected core from the vendored
+  scaffold's own ground truth rather than the SKU-prefix heuristic every
+  other template uses, fixing a latent E1M-NX9101 core mismatch in the
+  process.
+- **`tan build`/`flash`/`renode`'s "not built yet" error hints now say
+  `tan build --project <path>`** — `build` takes no positional path
+  argument, so the previous bare `tan build <path>` hint named an
+  invocation clap rejects.
 
 ## [0.1.1] — 2026-07-20
 
