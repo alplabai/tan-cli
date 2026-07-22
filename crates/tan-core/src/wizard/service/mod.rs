@@ -7,6 +7,7 @@ mod host_tooling;
 mod module_scaffold;
 mod plan;
 mod registry;
+mod vendored;
 
 pub use c_project::{app_core_for_sku, infer_runtime_for_core_id};
 pub use example_catalog::{
@@ -58,6 +59,10 @@ mod tests {
 
     #[test]
     fn zephyr_app_scaffold_is_west_buildable() {
+        // zephyr-app is vendored from the SDK's `minimal` scaffold-catalog
+        // entry (alp-sdk#864) -- board.yaml's `som.sku:` is retargeted onto
+        // the non-canonical SKU below, everything else is the vendored
+        // Alif-Ensemble-family tree byte-for-byte (see wizard/vendored/).
         let plan = create_wizard_plan(&WizardPlanInput {
             template_id: WizardTemplateId::ZephyrApp,
             project_name: "zdemo".to_string(),
@@ -72,13 +77,45 @@ mod tests {
         };
         let cmake = by_path("CMakeLists.txt").expect("CMakeLists.txt is generated");
         assert!(cmake.contains("find_package(Zephyr REQUIRED"));
-        assert!(cmake.contains("--emit zephyr-conf"));
-        assert!(cmake.contains("OVERLAY_CONFIG"));
+        assert!(cmake.contains("--emit zephyr-conf --core"));
+        assert!(cmake.contains("EXTRA_CONF_FILE"));
         assert!(cmake.contains("target_sources(app PRIVATE src/main.c)"));
         // Zephyr wires target_sources directly -- no plain-CMake src/CMakeLists.txt.
         assert!(by_path("src/CMakeLists.txt").is_none());
         assert!(by_path("src/main.c").is_some());
-        assert!(by_path("board.yaml").is_some());
+        assert!(by_path("testcase.yaml").is_some());
+        let board = by_path("board.yaml").expect("board.yaml is generated");
+        assert!(board.contains("sku: E1M-AEN701"));
+    }
+
+    #[test]
+    fn zephyr_app_scaffold_is_byte_exact_for_the_vendored_sku() {
+        // The whole point of alp-sdk#864: for a vendored (template, sku) pair,
+        // `tan init`'s plan must match `alp-sdk --emit scaffold`'s output
+        // byte-for-byte -- no Rust re-derivation. E1M-AEN801 is one of the
+        // two SKUs vendored under wizard/vendored/minimal/ (see MANIFEST.md);
+        // `tests/parity/scaffold_byte_parity.py` re-runs the live SDK emit
+        // and asserts this file tree hasn't drifted.
+        let plan = create_wizard_plan(&WizardPlanInput {
+            template_id: WizardTemplateId::ZephyrApp,
+            project_name: String::new(),
+            destination: ".".to_string(),
+            som_sku: Some("E1M-AEN801".to_string()),
+        });
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        for file in &plan.files {
+            let vendored_path = std::path::Path::new(manifest_dir)
+                .join("src/wizard/vendored/minimal/E1M-AEN801")
+                .join(&file.relative_path);
+            let vendored = std::fs::read_to_string(&vendored_path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", vendored_path.display()));
+            assert_eq!(
+                file.content, vendored,
+                "{} is not byte-identical to the vendored tree",
+                file.relative_path
+            );
+        }
+        assert_eq!(plan.files.len(), 6);
     }
 
     #[test]

@@ -1,0 +1,32 @@
+# board.yaml -- per-app project configuration for the
+# hello-world example.
+#
+# The simplest possible Alp SDK app: no peripherals, no chips, no
+# board-specific wiring.  Just the boot path + a periodic printf
+# loop so customers can confirm their toolchain + flash flow + log
+# console are wired correctly before chasing harder bugs.
+#
+# Customer workflow: copy this directory, change `som.sku` to
+# your MPN, edit the `preset:` (or use an inline board) if you're on a non-EVK board,
+# and `west build`.  CMakeLists.txt invokes
+# scripts/alp_project.py at configure time + layers the
+# generated alp.conf over prj.conf via EXTRA_CONF_FILE.
+som:
+  sku: E1M-V2N101
+
+preset: e1m-x-evk
+supported_boards:
+  - e1m-evk
+  - e1m-x-evk
+cores:
+  m55_hp:
+    app: ./src
+    # No peripherals -- this example exercises only the boot path
+    # and printf, both of which are part of the Zephyr baseline and
+    # need no explicit Kconfig.  When the loader sees an empty
+    # peripherals: list it still emits the SoC + board configs
+    # the SoM topology requires, so the app boots normally.
+    peripherals: []
+
+diagnostics:
+  log_level: info

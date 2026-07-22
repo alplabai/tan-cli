@@ -34,14 +34,18 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
         id: WizardTemplateId::ZephyrApp,
         label: "Zephyr app",
         description: "West-buildable Zephyr application wired to board.yaml via the SDK loader.",
+        // Files are vendored from the SDK's `minimal` scaffold-catalog entry
+        // (alp-sdk#864, see wizard/vendored/MANIFEST.md), not hand-generated
+        // from these fields -- libs/features/prj_conf_extras/feature_files/
+        // body_line* are unread for this template (see gen_c_project_files).
         libs: &[],
         features: None,
         prj_conf_extras: &[],
         feature_files: &[],
-        body_line1: "Alp SDK Zephyr app starting",
-        body_line2: "add your application logic",
+        body_line1: "",
+        body_line2: "",
         explanation: &[
-            "Real Zephyr app: find_package(Zephyr) + board.yaml -> alp.conf via OVERLAY_CONFIG.",
+            "Real Zephyr app vendored from the SDK's `minimal` scaffold: find_package(Zephyr) + board.yaml -> alp.conf via EXTRA_CONF_FILE.",
             "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your alp-sdk checkout>`.",
         ],
     },
