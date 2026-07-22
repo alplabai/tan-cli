@@ -7,6 +7,8 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-22
+
 ### Added
 - **Build-plan token-substitution pass (alp-sdk #865, "hermetic build
   plans").** `tan_core::plan_tokens::substitute_plan_tokens` swaps
