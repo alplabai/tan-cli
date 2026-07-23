@@ -67,7 +67,7 @@ ever compared against alp-sdk's own live emit), so it has nothing further to
 add here — this section exists only so the two comparators' scope statement
 stays in lockstep.
 
-## Why the comparator normalizes two fields
+## Why the comparator normalizes (or drops) three fields
 
 A `build-plan.json` is **not hermetic** — it embeds facts about the checkout
 that emitted it, not just the board it plans for:
@@ -77,15 +77,20 @@ that emitted it, not just the board it plans for:
   embedded mid-string inside `command.args` (`-DSB_CONF_FILE=<root>/a;<root>/b`,
   which isn't a root-prefixed string outright — the comparator does a global
   substring replace, not a prefix check, to catch this);
-- **`sdkCommit`**, the emitting commit's short SHA.
+- **`sdkCommit`**, the emitting commit's short SHA;
+- **`sdkVersion`**, the emitting checkout's SDK release version.
 
-Neither is a real parity break — they differ by construction between the
+None is a real parity break — they differ by construction between the
 oracle's `97ad481b` capture checkout and whatever checkout is emitting the
-live plan under test. `seam1_field_diff.py` normalizes both before diffing:
-the checkout root (discovered from the plan's own
+live plan under test. `seam1_field_diff.py` normalizes the first two before
+diffing: the checkout root (discovered from the plan's own
 `slices[0].env.ALP_SDK_ROOT` — nothing is hardcoded) is replaced everywhere
 with the literal token `__SDKROOT__`, and `sdkCommit` is replaced with
-`__SHA__`.
+`__SHA__`. `sdkVersion` is dropped entirely instead of tokenized (mirrors
+alp-sdk's own comparator fix, alp-sdk#883): unlike `sdkCommit`, whose oracle
+value stays pinned to `97ad481b` forever, `sdkVersion` bumps on every
+version-bump PR with zero shape change, so there is no stable token to
+normalize it to.
 
 ## The one allowed delta: `debug.probe`
 

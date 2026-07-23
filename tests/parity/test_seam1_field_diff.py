@@ -114,6 +114,16 @@ def test_content_only_mutation_passes():
     assert not _fails(oracle, mutated)
 
 
+def test_sdk_version_only_mutation_passes():
+    """alp-sdk#883 (mirrored here): `sdkVersion` bumps on every version-bump
+    PR with zero shape change (e.g. the oracle's 0.11.1 vs. a live 0.13.0
+    emit) and must not, on its own, fail the comparator."""
+    oracle = _load("multicore_rpmsg-aen")
+    mutated = copy.deepcopy(oracle)
+    mutated["sdkVersion"] = "0.13.0"
+    assert not _fails(oracle, mutated)
+
+
 def test_sysbuild_slice_wrongly_gaining_extra_conf_file_fails():
     """The `-DEXTRA_CONF_FILE` strip is scoped to non-sysbuild slices only.
     Both `connectivity_iot-fleet-ota` slices are sysbuild (`--sysbuild` in
