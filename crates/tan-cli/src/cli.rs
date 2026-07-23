@@ -397,6 +397,10 @@ pub struct SdkArgs {
     /// Cache root for `install` (default: ~/.alp/sdk-cache).
     #[arg(long)]
     pub destination: Option<String>,
+    /// With `switch`: pin the machine-global default (`~/.alp/sdk-default`)
+    /// instead of the current project (`.alp/sdk-path`).
+    #[arg(long)]
+    pub global: bool,
 }
 
 /// Args for `doctor`: debug target/server selection and a build-readiness toggle.

@@ -34,8 +34,9 @@ struct FileChangeSer {
 }
 
 /// `data` payload for the `init` envelope: the resolved template/destination,
-/// whether this was a preview, the planned `file_changes`, and post-write
-/// `written`/`unchanged` lists.
+/// whether this was a preview, the planned `file_changes`, post-write
+/// `written`/`unchanged` lists, and the SDK path pinned into the new project
+/// (if any resolved).
 #[derive(serde::Serialize)]
 struct InitData {
     #[serde(rename = "schemaVersion")]
@@ -48,6 +49,12 @@ struct InitData {
     file_changes: Vec<FileChangeSer>,
     written: Vec<String>,
     unchanged: Vec<String>,
+    /// SDK path written to the new project's `.alp/sdk-path` pin, or `None`
+    /// when no SDK resolved (serialized as `sdkPinned`). Only set on the
+    /// actual write path — never during `--preview` or on an error/guard
+    /// response, where no files (and no pin) were written.
+    #[serde(rename = "sdkPinned")]
+    sdk_pinned: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -187,6 +194,12 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
         }
     }
 
+    // Resolve the SDK for the user's actual workspace (cwd honoring
+    // --project — NOT the new, often-nested `project_root`) so `finish` can
+    // pin it into the new project; `--from-example` reuses the SDK root it
+    // already resolved the same way to locate examples/.
+    let sdk_root_for_pin = crate::util::resolve_sdk_root(g, &crate::util::cli_workspace_root(g));
+
     // 6-9. Diff, guard overwrites, preview, write (shared with the from-example path).
     finish(
         g,
@@ -195,5 +208,66 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
         &destination,
         &project_root,
         &plan.files,
+        sdk_root_for_pin.as_deref(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Format;
+
+    #[test]
+    fn init_pins_the_sdk_discovered_at_the_workspace_root_not_the_nested_project_dir() {
+        // Regression: the pin used to re-resolve via `resolve_sdk_tiered(g,
+        // project_root)` — `project_root` is the NEW, nested project dir
+        // (`<ws>/myproj`), which has no SDK of its own and no `alp-sdk`/
+        // `alp-sdk-upstream` sibling either, so a workspace-root-is-the-SDK
+        // (discovery) or project-pin resolution silently produced
+        // `sdkPinned: null` even though `resolve_sdk_root(g,
+        // cli_workspace_root(g))` — what every other command actually uses —
+        // resolves the SDK sitting right at the workspace root.
+        let tag = format!("init-pin-discovery-{}", std::process::id());
+        let ws = std::env::temp_dir().join(tag);
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(ws.join("scripts")).unwrap();
+        std::fs::write(ws.join("scripts").join("alp_project.py"), "").unwrap();
+
+        let g = GlobalArgs {
+            project: Some(ws.to_string_lossy().into_owned()),
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: true,
+            ci: false,
+        };
+        let args = InitArgs {
+            template: None,
+            from_example: None,
+            name: Some("myproj".to_string()),
+            destination: None,
+            som: None,
+            cores: None,
+            preview: false,
+            force: false,
+        };
+
+        let result = run(&g, &args);
+        assert_eq!(result.exit, ExitCode::Success);
+        let json: serde_json::Value =
+            serde_json::from_str(result.json.as_deref().expect("json envelope")).unwrap();
+        assert_eq!(
+            json["data"]["sdkPinned"].as_str(),
+            Some(ws.to_string_lossy().as_ref()),
+            "sdkPinned must be the workspace-root SDK, not null"
+        );
+        assert!(ws.join("myproj").join(".alp").join("sdk-path").exists());
+
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
 }
