@@ -27,22 +27,17 @@ env:
   # It MUST be a ref at or after the oracle SHA (97ad481b) -- an OLDER ref
   # (e.g. the last release v0.11.1, which predates the Phase-1 fields) lacks
   # envAppendPath/executionPolicy and would fail seam1 on missing-field diffs,
-  # not real drift. Pinned to f04ea42e (dev tip at this bump = #848 + #865's
-  # planPathMode:tokened emit + #874's shape-only retune): carries the
-  # Phase-1 fields, the one allowed delta (debug.probe openocd->null), AND
-  # exercises `normalize_plan`'s tokened-plan reconciliation branch -- a
-  # green bare-PR run now actually proves the comparator handles a tokened
-  # emit, not just the pre-#865 absolute-path case. The prior pin
-  # (df312cec) predated #865 and never ran seam1 against a tokened plan at
-  # all. Bump to the v0.12 release tag once alp-sdk cuts one past #848
-  # (blocked on this gate landing -- alp-sdk ADR-0020 amendment, alp-sdk#855).
-  #
-  # ALSO predates alp-sdk#893/#894/#897 (the `--emit kconfig` feature + its
-  # canonical fixture) -- `kconfig_fixture_parity.py` below treats a fixture
-  # missing at this pin as a NOTICE, not a fail, until it is bumped past
-  # #897 (see that script's docstring). Once bumped, a missing fixture there
-  # starts failing for real.
-  PINNED_SDK_TAG: f04ea42ea152826a12ceeff29d18ff7005e462d6
+  # not real drift. Pinned to the v0.13.0 release tag (93ef5726): carries the
+  # Phase-1 fields, the one allowed delta (debug.probe openocd->null), the
+  # tokened-plan reconciliation branch `normalize_plan` exercises, AND
+  # alp-sdk#893/#894/#897 (the `--emit kconfig` feature + its canonical
+  # fixture) -- `kconfig_fixture_parity.py` below now byte-diffs the vendored
+  # `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` for real
+  # instead of soft-NOTICE-skipping (that self-skip only fired for a pin
+  # predating #897; verified locally against a v0.13.0 checkout, PASS, 814
+  # bytes). Re-bump on every alp-sdk release this repo's parity gate should
+  # track.
+  PINNED_SDK_TAG: v0.13.0
 
 jobs:
   seam1-plan-shape:

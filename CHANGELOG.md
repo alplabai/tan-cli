@@ -7,7 +7,17 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-24
+
 ### Added
+- **Zero-flag default-SDK resolution** — a new machine-global SDK default
+  tier sits between the project pin and auto-discovery: `tan sdk switch
+  --global` pins `~/.alp/sdk-default` (same shape as the project pin);
+  `tan init` now resolves the new project's SDK through the full four-tier
+  precedence (`sdkRootFlag` > `projectPin` > `globalDefault` > `discovery`
+  > `none`) and pins it into the new project's `.alp/sdk-path` without a
+  separate `tan sdk switch` step; `tan sdk current --json` reports which
+  tier resolved via the new `sourceTier` field (#32).
 - **`tan kconfig`** — board-scoped Kconfig symbol menu for one core (the
   vscode `prj.conf` LSP's live feed), wrapping the SDK's `alp_orchestrate
   --emit kconfig --core <id>` (alp-sdk #894) in the standard
@@ -21,6 +31,16 @@ All notable changes to `tan` are documented here. Format follows
   naming the board's declared cores (#35).
 
 ### Changed
+- **Release notes** — `release.yml` now slices the matching `## [X.Y.Z]`
+  section out of `CHANGELOG.md` and publishes it as the GitHub Release body
+  instead of an empty one (v0.2.0 shipped with no notes) (#30).
+- **New golden-envelope contract test** (`crates/tan-cli/tests/
+  contract.rs`) pins the JSON envelope shape of the vscode-parsed commands
+  (`init`, `generate`, `validate`, `sdk`) across six offline, deterministic
+  cases plus the `tan --version` format, so an accidental wire-format
+  change fails `cargo test` instead of surfacing as a silent extension
+  regression. Test infrastructure only; no change to `tan`'s own runtime
+  behavior (#7).
 - **Release assets** — the Linux `-gnu` binaries are now cross-built with
   `cargo-zigbuild` against a pinned **glibc 2.31** floor instead of inheriting
   the ubuntu-latest runner's own glibc (2.39, which broke consumers on older
@@ -29,6 +49,22 @@ All notable changes to `tan` are documented here. Format follows
   Alpine/container consumers and arm64 Linux (no arm runner needed). Every
   release asset, plus a new `checksums.txt`, now carries a GitHub
   build-provenance attestation (`gh attestation verify`) (#6, #20).
+
+### Fixed
+- **`tan bootstrap` could silently pull the wrong SDK's west manifest.**
+  After `tan sdk switch` between two cached SDK versions sharing a `.west`
+  topdir, the "already initialised" path ran `west update` without
+  reconciling `.west/config`'s `[manifest] path`, so it kept pulling the
+  FIRST SDK's manifest. `tan bootstrap` (unless `--no-west`) now reconciles
+  `manifest.path` against the resolved SDK root before shelling
+  `bootstrap.sh`, preserving CRLF line endings and rewriting the file
+  atomically (#31).
+- **`tan kconfig`'s symbol deserialization now requires every key the
+  SDK's `--emit kconfig` always emits** (`depends`/`help`/`symbols`)
+  instead of silently defaulting a renamed/missing key to empty; the
+  vendored `tests/fixtures/kconfig-contract/emit-kconfig.golden.json`
+  contract anchor is now byte-diffed against alp-sdk's own canonical
+  fixture by `tests/parity/kconfig_fixture_parity.py` in CI (#40).
 
 ## [0.2.0] — 2026-07-22
 

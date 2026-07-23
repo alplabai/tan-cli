@@ -168,9 +168,10 @@ it self-skips with no reachable alp-sdk checkout (`tan-core`'s own `cargo
 test` already covers the vendored copy's internal consistency); unlike it,
 a fixture simply absent at the *pinned* ref is ALSO not a fail (see
 `PINNED_SDK_TAG`'s comment in `.github/workflows/parity.yml` and the
-script's own docstring) — the pin currently predates alp-sdk#897 landing
-this fixture at all, so "not there yet" isn't drift. A byte MISMATCH
-(fixture present upstream, content differs) always fails.
+script's own docstring) — that branch only fires for a pin predating
+alp-sdk#897 landing this fixture; `PINNED_SDK_TAG` is now `v0.13.0`
+(past #897), so the gate byte-diffs for real. A byte MISMATCH (fixture
+present upstream, content differs) always fails.
 
 ```
 python3 tests/parity/kconfig_fixture_parity.py --sdk /path/to/an/alp-sdk/checkout
