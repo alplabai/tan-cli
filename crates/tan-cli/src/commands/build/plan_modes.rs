@@ -48,7 +48,13 @@ pub(super) fn manifest_command(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
                 );
             }
         },
-        None => match invoke_sdk_emit(&context, "system-manifest", "build.manifest-unavailable") {
+        None => match invoke_sdk_emit(
+            &context,
+            "system-manifest",
+            "build.manifest-unavailable",
+            &[],
+            &[],
+        ) {
             Ok(s) => s,
             Err((code, message)) => {
                 return plan_error_run(g, project, code, message, ExitCode::RuntimeFailure);
@@ -167,7 +173,7 @@ fn acquire_plan_json(
                 format!("failed to read plan file `{path}`: {e}"),
             )
         }),
-        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable"),
+        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable", &[], &[]),
     }
 }
 

@@ -94,10 +94,14 @@ just the one that captured it:
 | `version_first_line_matches_contract` (in `contract.rs`, no fixture dir) | `--version` | 0 | Not a golden diff — `tan MAJOR.MINOR.PATCH` would need editing on every release if pinned literally, so the test asserts the *format* instead. |
 
 Deliberately not covered: `sdk list` (hits the GitHub releases API — network),
-`doctor` (probes the host toolchain — host-dependent). Not exhaustive by
-design — this pins the envelope *shape* + exit-code contract for the
-commands the extension actually parses (validate, init/generate templates,
-sdk), not full command coverage.
+`doctor` (probes the host toolchain — host-dependent), `kconfig` (the SDK's
+`--emit kconfig` needs a bootstrapped `ZEPHYR_BASE` — alp-sdk's one
+workspace-dependent emit, see alp-sdk `docs/cli.md`; `tan kconfig`'s pure
+JSON→`KconfigData`→envelope shaping is unit-tested hermetically in
+`crates/tan-cli/src/commands/kconfig.rs` and `crates/tan-core/src/kconfig.rs`
+instead). Not exhaustive by design — this pins the envelope *shape* +
+exit-code contract for the commands the extension actually parses (validate,
+init/generate templates, sdk), not full command coverage.
 
 ## Regenerating a golden after a *deliberate* envelope change
 

@@ -21,8 +21,10 @@ use super::token_substitution::apply_plan_token_substitution;
 use super::workspace::invoke_sdk_emit;
 
 /// The project build tree base (where `build/<core>-<os>/` lives) — the
-/// directory `tan build` runs each slice's command from.
-pub(super) fn base_dir(context: &ProjectContext) -> String {
+/// directory `tan build` runs each slice's command from. `pub(crate)`
+/// (widened from `pub(super)`) so `commands::kconfig` can derive the SAME
+/// base for its `resolve_zephyr_base` call instead of a second copy.
+pub(crate) fn base_dir(context: &ProjectContext) -> String {
     context
         .west_cwd
         .clone()
@@ -43,7 +45,7 @@ pub(super) fn acquire_plan(
                 format!("failed to read plan file `{path}`: {e}"),
             )
         })?,
-        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable")?,
+        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable", &[], &[])?,
     };
     parse_build_plan(&json).map_err(|e| ("build.plan-invalid", e.to_string()))
 }

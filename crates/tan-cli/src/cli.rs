@@ -123,6 +123,9 @@ pub enum Command {
     /// Build the project natively: consume the SDK's emitted build plan,
     /// materialise its files, then run each per-core slice's command directly.
     Build(BuildArgs),
+    /// Show the board-scoped Kconfig symbol menu for one core (the vscode
+    /// `prj.conf` LSP's live feed). Needs a bootstrapped Zephyr workspace.
+    Kconfig(KconfigArgs),
     /// Assemble a flashable-image bundle from `build/system-manifest.yaml` (native).
     Image(ImageArgs),
     /// Flash every slice + helper MCU from `build/system-manifest.yaml` onto the
@@ -369,6 +372,15 @@ pub struct BuildArgs {
     /// `--manifest`.
     #[arg(long = "manifest-from", value_name = "FILE")]
     pub manifest_from: Option<String>,
+}
+
+/// Args for `kconfig`: scope the board-scoped Kconfig symbol menu to one core.
+#[derive(Debug, Args)]
+pub struct KconfigArgs {
+    /// Core id to scope the Kconfig symbol menu to (default: the board's one
+    /// declared Zephyr core, when unambiguous).
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
 }
 
 /// Args for `bootstrap`: toggles for the pip/west steps and an env-only dry run.

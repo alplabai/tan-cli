@@ -7,6 +7,19 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`tan kconfig`** — board-scoped Kconfig symbol menu for one core (the
+  vscode `prj.conf` LSP's live feed), wrapping the SDK's `alp_orchestrate
+  --emit kconfig --core <id>` (alp-sdk #894) in the standard
+  `Envelope<KconfigData>`. Workspace-dependent — the SDK's one deliberate
+  exception to "every emit is hermetic" — so `tan kconfig` resolves
+  `ZEPHYR_BASE` via the same workspace/venv resolver `tan build` already
+  uses and fails loud (exit 2, `run 'tan bootstrap' first`) when no
+  bootstrapped workspace resolves, instead of spawning the emit for a
+  cryptic Python failure. `--core` defaults to the board's one declared
+  Zephyr core when unambiguous; otherwise it's required, with an error
+  naming the board's declared cores (#35).
+
 ### Changed
 - **Release assets** — the Linux `-gnu` binaries are now cross-built with
   `cargo-zigbuild` against a pinned **glibc 2.31** floor instead of inheriting
