@@ -24,26 +24,46 @@ pub fn get_manifest_path(config: &str) -> Option<String> {
 
 /// Returns `config` with the `[manifest]` section's `path` line rewritten to
 /// `new_rel`, preserving every other line (including comments, blank lines,
-/// other sections, and a same-named `path` key elsewhere) verbatim. Returns
+/// other sections, and a same-named `path` key elsewhere) byte-for-byte —
+/// each line's own terminator (`\r\n`, `\n`, or none for a final newline-less
+/// line) survives untouched, so a CRLF `.west/config` stays CRLF. Returns
 /// `None` when there is no `[manifest] path` line to replace.
 pub fn set_manifest_path(config: &str, new_rel: &str) -> Option<String> {
-    let (line_idx, _) = manifest_path_line(config)?;
-    let target_line = config.lines().nth(line_idx)?;
-    let eq_idx = target_line.find('=')?;
-    let prefix = &target_line[..=eq_idx];
-    let replaced = format!("{prefix} {new_rel}");
-
+    let mut section = String::new();
     let mut out = String::with_capacity(config.len() + new_rel.len());
-    for (i, line) in config.lines().enumerate() {
-        if i > 0 {
-            out.push('\n');
+    let mut rewrote = false;
+    for segment in config.split_inclusive('\n') {
+        let (content, terminator) = split_terminator(segment);
+        if let Some(name) = section_header(content) {
+            section = name.to_string();
+        } else if !rewrote
+            && section == "manifest"
+            && key_value(content).is_some_and(|(key, _)| key == "path")
+        {
+            out.push_str("path = ");
+            out.push_str(new_rel);
+            out.push_str(terminator);
+            rewrote = true;
+            continue;
         }
-        out.push_str(if i == line_idx { &replaced } else { line });
+        out.push_str(segment);
     }
-    if config.ends_with('\n') {
-        out.push('\n');
+    rewrote.then_some(out)
+}
+
+/// Splits a `split_inclusive('\n')` segment into `(content, terminator)`:
+/// `"foo\r\n" -> ("foo", "\r\n")`, `"foo\n" -> ("foo", "\n")`, `"foo" ->
+/// ("foo", "")` (the final, newline-less segment). `.lines()` alone strips
+/// the terminator entirely, which is fine for reading but would silently
+/// flip every line of a CRLF file to LF on a `set_manifest_path` rewrite.
+fn split_terminator(segment: &str) -> (&str, &str) {
+    if let Some(stripped) = segment.strip_suffix("\r\n") {
+        (stripped, "\r\n")
+    } else if let Some(stripped) = segment.strip_suffix('\n') {
+        (stripped, "\n")
+    } else {
+        (segment, "")
     }
-    Some(out)
 }
 
 /// Locates the `[manifest]` section's `path = ` line: `(line index, trimmed
@@ -156,5 +176,15 @@ mod tests {
     fn set_without_trailing_newline_does_not_add_one() {
         let rewritten = set_manifest_path("[manifest]\npath = old", "new").unwrap();
         assert_eq!(rewritten, "[manifest]\npath = new");
+    }
+
+    #[test]
+    fn set_preserves_crlf_on_every_line_including_the_rewritten_one() {
+        // A Windows-primary repo: `.west/config` commonly has `\r\n`.
+        // `.lines()`-then-rejoin-with-`\n` would silently flip the whole
+        // file to LF-only; the rewritten line must keep `\r\n` too.
+        let config = "[manifest]\r\npath = old\r\nfile = west.yml\r\n";
+        let rewritten = set_manifest_path(config, "new").unwrap();
+        assert_eq!(rewritten, "[manifest]\r\npath = new\r\nfile = west.yml\r\n");
     }
 }

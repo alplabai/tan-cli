@@ -390,6 +390,35 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_rewrites_when_the_configured_old_dir_was_pruned_from_the_cache() {
+        // The configured `path = <old>` dir no longer exists on disk (the
+        // old SDK cache entry was pruned) but the new sdk_root does --
+        // exercises `same_directory`'s `normalize_path` fallback branch
+        // (canonicalize fails for the missing side).
+        let topdir = tmp("reconcile-pruned-old");
+        let new_sdk = topdir.join("v0.7.0");
+        std::fs::create_dir_all(&new_sdk).unwrap();
+        // deliberately NOT creating topdir/v0.6.0.
+        let west_dir = topdir.join(".west");
+        std::fs::create_dir_all(&west_dir).unwrap();
+        std::fs::write(
+            west_dir.join("config"),
+            "[manifest]\npath = v0.6.0\nfile = west.yml\n",
+        )
+        .unwrap();
+
+        let (config_path, old_rel, new_rel) =
+            reconcile_west_manifest_path(&new_sdk.to_string_lossy()).expect("expected a rewrite");
+        assert_eq!(config_path, west_dir.join("config"));
+        assert_eq!(old_rel, "v0.6.0");
+        assert_eq!(new_rel, "v0.7.0");
+        assert_eq!(
+            std::fs::read_to_string(&config_path).unwrap(),
+            "[manifest]\npath = v0.7.0\nfile = west.yml\n"
+        );
+    }
+
+    #[test]
     fn reconcile_is_a_no_op_without_a_west_config() {
         let topdir = tmp("reconcile-no-config");
         let sdk = topdir.join("v0.7.0");
