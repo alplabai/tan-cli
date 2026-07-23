@@ -7,6 +7,16 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+### Changed
+- **Release assets** — the Linux `-gnu` binaries are now cross-built with
+  `cargo-zigbuild` against a pinned **glibc 2.31** floor instead of inheriting
+  the ubuntu-latest runner's own glibc (2.39, which broke consumers on older
+  distros with `GLIBC_2.39 not found`); two new fully-static
+  `-unknown-linux-musl` assets (x86_64 + aarch64) ship alongside them for
+  Alpine/container consumers and arm64 Linux (no arm runner needed). Every
+  release asset, plus a new `checksums.txt`, now carries a GitHub
+  build-provenance attestation (`gh attestation verify`) (#6, #20).
+
 ## [0.2.0] — 2026-07-22
 
 ### Added
