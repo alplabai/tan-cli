@@ -1,0 +1,1 @@
+{"command":"validate","ok":true,"exitCode":0,"project":{"root":".","boardYaml":"./board.yaml"},"data":{"schemaVersion":"1","outcome":"clean","issueCount":0,"commandLine":"","boardYamlPath":"./board.yaml"},"issues":[]}
