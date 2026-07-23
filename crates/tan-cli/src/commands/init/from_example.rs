@@ -215,6 +215,20 @@ fn is_unsafe_example_source(src_path: &Path) -> bool {
     !tan_core::is_plain_relative(src_path)
 }
 
+/// Resolve the active SDK for the freshly-written `project_root` (full
+/// four-tier precedence — see [`crate::util::resolve_sdk_tiered`]) and, if a
+/// real checkout (loader script present) resolved, pin it into
+/// `<project_root>/.alp/sdk-path`. Returns the pinned path, or `None` when
+/// nothing resolved or the pin write failed — either way a silent skip, never
+/// a reason to fail `tan init` itself.
+fn pin_resolved_sdk(g: &GlobalArgs, project_root: &Path) -> Option<String> {
+    let (resolved, _tier) = crate::util::resolve_sdk_tiered(g, project_root);
+    let sdk_path = resolved.filter(|p| crate::util::has_loader_script(Path::new(p)))?;
+    crate::commands::sdk::write_sdk_pointer(&project_root.join(".alp").join("sdk-path"), &sdk_path)
+        .ok()?;
+    Some(sdk_path)
+}
+
 /// True when `dir`, once canonicalized, stays inside canonicalized `root`.
 /// Defeats directory-symlink escapes and rooted-but-driveless paths (e.g.
 /// `/foo` on Windows) that the lexical `is_unsafe_example_source` check above
@@ -303,6 +317,14 @@ pub(super) fn finish(
     // Write files.
     match write_wizard_files(project_root, files) {
         Ok(result) => {
+            // Pin the SDK the new project resolves to (full four-tier
+            // precedence: --sdk-root > project pin > global default >
+            // discovery) so it's reproducible without a separate `tan sdk
+            // switch` — silently skipped when nothing with a loader script
+            // resolves. Only reached here (after the files landed), never on
+            // the preview/guard/error paths above.
+            let sdk_pinned = pin_resolved_sdk(g, project_root);
+
             let project = make_project(destination);
             let data = InitData {
                 schema_version: "1".to_string(),
@@ -312,6 +334,7 @@ pub(super) fn finish(
                 file_changes: file_changes_ser,
                 written: result.written.clone(),
                 unchanged: result.unchanged.clone(),
+                sdk_pinned,
             };
             let text = if g.is_json() {
                 vec![]
@@ -401,6 +424,68 @@ mod tests {
         // A path that doesn't exist can't be canonicalized — must not be
         // treated as contained by default.
         assert!(!is_contained(&root, &root.join("does-not-exist")));
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// `GlobalArgs` with only `sdk_root` set — deterministic regardless of the
+    /// real machine's `~/.alp` state, since an explicit `--sdk-root` is
+    /// terminal in `resolve_sdk_tiered`.
+    fn global_with_sdk_root(sdk_root: Option<&Path>) -> GlobalArgs {
+        GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: sdk_root.map(|p| p.to_string_lossy().into_owned()),
+            target: None,
+            all: false,
+            format: crate::cli::Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    #[test]
+    fn pin_resolved_sdk_writes_pointer_when_sdk_root_resolves() {
+        let tag = format!("init-pin-resolved-sdk-{}", std::process::id());
+        let base = std::env::temp_dir().join(tag);
+        let _ = std::fs::remove_dir_all(&base);
+        let project_root = base.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let sdk_root = base.join("sdk");
+        std::fs::create_dir_all(sdk_root.join("scripts")).unwrap();
+        std::fs::write(sdk_root.join("scripts").join("alp_project.py"), "").unwrap();
+
+        let g = global_with_sdk_root(Some(&sdk_root));
+        let pinned = pin_resolved_sdk(&g, &project_root);
+
+        assert_eq!(pinned.as_deref(), Some(sdk_root.to_string_lossy().as_ref()));
+        assert!(project_root.join(".alp").join("sdk-path").exists());
+
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn pin_resolved_sdk_silently_skips_when_sdk_root_is_not_a_checkout() {
+        // A --sdk-root pointing at a real but non-SDK directory is terminal
+        // (per `resolve_sdk_tiered`'s docs) yet fails the caller's own
+        // `has_loader_script` check — `tan init` must skip pinning quietly
+        // rather than erroring out a project that was already written fine.
+        let tag = format!("init-pin-skip-{}", std::process::id());
+        let base = std::env::temp_dir().join(tag);
+        let _ = std::fs::remove_dir_all(&base);
+        let project_root = base.join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let not_sdk = base.join("not-an-sdk");
+        std::fs::create_dir_all(&not_sdk).unwrap();
+
+        let g = global_with_sdk_root(Some(&not_sdk));
+        let pinned = pin_resolved_sdk(&g, &project_root);
+
+        assert_eq!(pinned, None);
+        assert!(!project_root.join(".alp").join("sdk-path").exists());
 
         std::fs::remove_dir_all(&base).unwrap();
     }

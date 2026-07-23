@@ -92,8 +92,9 @@ pub use renode::{
 };
 pub use run::{NATIVE_SIM_BOARD, NATIVE_SIM_EXE, RunAction, decide_run_action, native_sim_slice};
 pub use sdk::{
-    GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, check_sdk_readiness,
-    parse_remote_sdk_releases, resolve_active_sdk,
+    GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
+    check_sdk_readiness, parse_remote_sdk_releases, resolve_active_sdk, resolve_global_default_sdk,
+    resolve_sdk_source_tier,
 };
 pub use sdk_catalogue::{
     AcceleratorAvail, BoardPreset, ChipChoice, ChipDef, ChipKconfig, I2cDevice, MemorySpec,

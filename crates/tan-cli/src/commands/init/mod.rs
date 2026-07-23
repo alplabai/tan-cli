@@ -34,8 +34,9 @@ struct FileChangeSer {
 }
 
 /// `data` payload for the `init` envelope: the resolved template/destination,
-/// whether this was a preview, the planned `file_changes`, and post-write
-/// `written`/`unchanged` lists.
+/// whether this was a preview, the planned `file_changes`, post-write
+/// `written`/`unchanged` lists, and the SDK path pinned into the new project
+/// (if any resolved).
 #[derive(serde::Serialize)]
 struct InitData {
     #[serde(rename = "schemaVersion")]
@@ -48,6 +49,12 @@ struct InitData {
     file_changes: Vec<FileChangeSer>,
     written: Vec<String>,
     unchanged: Vec<String>,
+    /// SDK path written to the new project's `.alp/sdk-path` pin, or `None`
+    /// when no SDK resolved (serialized as `sdkPinned`). Only set on the
+    /// actual write path — never during `--preview` or on an error/guard
+    /// response, where no files (and no pin) were written.
+    #[serde(rename = "sdkPinned")]
+    sdk_pinned: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

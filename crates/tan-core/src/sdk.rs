@@ -175,6 +175,73 @@ pub fn resolve_active_sdk(
         .map(str::to_string)
 }
 
+/// Read the machine-global default-SDK pointer (`<home_alp_dir>/sdk-default`),
+/// if any — same `{sdkPath}` JSON shape as [`resolve_active_sdk`]'s project
+/// pointer, written by `tan sdk switch --global`. `path_exists`/`read_file` are
+/// injected so this stays pure/testable.
+pub fn resolve_global_default_sdk(
+    home_alp_dir: &str,
+    path_exists: impl Fn(&str) -> bool,
+    read_file: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let pointer = join_path(home_alp_dir, "sdk-default");
+    if !path_exists(&pointer) {
+        return None;
+    }
+    let raw = read_file(&pointer)?;
+    let parsed: Value = serde_json::from_str(&raw).ok()?;
+    parsed
+        .get("sdkPath")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+/// Which precedence tier produced the active SDK path — `tan sdk current
+/// --json`'s `sourceTier`, and the precedence `tan init` pins the new project
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SdkSourceTier {
+    /// `--sdk-root` — terminal and returned as-is even when invalid, so the
+    /// caller's own loader-script check fails loudly on a bad path instead of
+    /// silently falling through to a lower tier.
+    SdkRootFlag,
+    /// The workspace pin (`<workspace_root>/.alp/sdk-path`, `tan sdk switch`).
+    ProjectPin,
+    /// The machine-global pin (`~/.alp/sdk-default`, `tan sdk switch --global`).
+    GlobalDefault,
+    /// Sibling/workspace auto-discovery — no explicit flag or pin at all.
+    Discovery,
+    /// Nothing resolved at any tier.
+    None,
+}
+
+/// Resolve the SDK path across the full four-tier precedence chain, given each
+/// tier's already-computed lookup result (`None` when that tier has nothing to
+/// offer — e.g. no pointer file, or a pointer whose target lacks the loader
+/// script). Precedence: `sdk_root_flag` > `project_pin` > `global_default` >
+/// `discovery`. Pure — every input is a plain value, no filesystem access.
+pub fn resolve_sdk_source_tier(
+    sdk_root_flag: Option<&str>,
+    project_pin: Option<&str>,
+    global_default: Option<&str>,
+    discovery: Option<&str>,
+) -> (Option<String>, SdkSourceTier) {
+    if let Some(path) = sdk_root_flag {
+        return (Some(path.to_string()), SdkSourceTier::SdkRootFlag);
+    }
+    if let Some(path) = project_pin {
+        return (Some(path.to_string()), SdkSourceTier::ProjectPin);
+    }
+    if let Some(path) = global_default {
+        return (Some(path.to_string()), SdkSourceTier::GlobalDefault);
+    }
+    if let Some(path) = discovery {
+        return (Some(path.to_string()), SdkSourceTier::Discovery);
+    }
+    (None, SdkSourceTier::None)
+}
+
 /// Join a path with a relative segment, normalizing the separator to the host.
 fn join_path(base: &str, relative: &str) -> String {
     let mut path = std::path::PathBuf::from(base);
@@ -234,5 +301,63 @@ mod tests {
             |_| Some("{\"sdkPath\": \"/cache/v1\"}".to_string()),
         );
         assert_eq!(resolved.as_deref(), Some("/cache/v1"));
+    }
+
+    #[test]
+    fn global_default_pointer_parsed() {
+        let resolved = resolve_global_default_sdk(
+            "/home/.alp",
+            |p| p.ends_with("sdk-default"),
+            |_| Some("{\"sdkPath\": \"/cache/global\"}".to_string()),
+        );
+        assert_eq!(resolved.as_deref(), Some("/cache/global"));
+    }
+
+    #[test]
+    fn global_default_absent_when_no_pointer_file() {
+        let resolved = resolve_global_default_sdk("/home/.alp", |_| false, |_| None);
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn source_tier_sdk_root_flag_wins_over_everything() {
+        let (path, tier) = resolve_sdk_source_tier(
+            Some("/explicit"),
+            Some("/pin"),
+            Some("/global"),
+            Some("/discovered"),
+        );
+        assert_eq!(path.as_deref(), Some("/explicit"));
+        assert_eq!(tier, SdkSourceTier::SdkRootFlag);
+    }
+
+    #[test]
+    fn source_tier_project_pin_wins_over_global_and_discovery() {
+        let (path, tier) =
+            resolve_sdk_source_tier(None, Some("/pin"), Some("/global"), Some("/discovered"));
+        assert_eq!(path.as_deref(), Some("/pin"));
+        assert_eq!(tier, SdkSourceTier::ProjectPin);
+    }
+
+    #[test]
+    fn source_tier_global_default_wins_over_discovery() {
+        let (path, tier) =
+            resolve_sdk_source_tier(None, None, Some("/global"), Some("/discovered"));
+        assert_eq!(path.as_deref(), Some("/global"));
+        assert_eq!(tier, SdkSourceTier::GlobalDefault);
+    }
+
+    #[test]
+    fn source_tier_falls_through_to_discovery() {
+        let (path, tier) = resolve_sdk_source_tier(None, None, None, Some("/discovered"));
+        assert_eq!(path.as_deref(), Some("/discovered"));
+        assert_eq!(tier, SdkSourceTier::Discovery);
+    }
+
+    #[test]
+    fn source_tier_none_when_nothing_resolves() {
+        let (path, tier) = resolve_sdk_source_tier(None, None, None, None);
+        assert_eq!(path, None);
+        assert_eq!(tier, SdkSourceTier::None);
     }
 }
