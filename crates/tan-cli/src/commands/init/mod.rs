@@ -25,7 +25,7 @@ use response::{error_run, runtime_failure_run};
 // ---------------------------------------------------------------------------
 
 /// One planned file change in the JSON envelope: its workspace-relative path and
-/// change kind (`create`/`update`/`unchanged`, from `WizardFileChangeKind`).
+/// change kind (`new`/`update`/`unchanged`, from `WizardFileChangeKind`).
 #[derive(serde::Serialize)]
 struct FileChangeSer {
     #[serde(rename = "relativePath")]

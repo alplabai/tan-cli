@@ -19,16 +19,49 @@ fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contract/envelopes")
 }
 
-/// Recursively normalizes every JSON string leaf so a golden captured on one
-/// OS matches a capture on any other: CI runs this suite on ubuntu/windows/
-/// macos runners, and `PathBuf::to_string_lossy()` renders `./board.yaml` as
-/// `.\board.yaml` on Windows. Goldens are authored with forward slashes; only
-/// the freshly captured side needs normalizing before the diff.
-fn normalize(value: &mut serde_json::Value) {
+/// Envelope field names that are path-shaped (own a `PathBuf::to_string_lossy()`
+/// value somewhere in the CLI) and so need `\`→`/` normalization. Scoped
+/// on purpose: a blanket rewrite over every string leaf would also silently
+/// launder a real drift in `issues[].message` or a `data` value that merely
+/// happens to contain a backslash — the one normalization that could mask
+/// the exact kind of change this gate exists to catch.
+const PATH_KEYS: &[&str] = &[
+    "root",
+    "boardYaml",
+    "boardYamlPath",
+    "destination",
+    "relativePath",
+    "sdkPath",
+    "sdkPinned",
+    "written",
+    "unchanged",
+];
+
+/// Recursively normalizes `\`→`/` on path-shaped fields only (see
+/// `PATH_KEYS`) so a golden captured on one OS matches a capture on any
+/// other: CI runs this suite on ubuntu/windows/macos runners, and
+/// `PathBuf::to_string_lossy()` renders `./board.yaml` as `.\board.yaml` on
+/// Windows. `key` is the enclosing object field name (`None` at the root);
+/// an array inherits its own key so e.g. every string in `written: [...]`
+/// is still recognized. Goldens are authored with forward slashes; only the
+/// freshly captured side needs normalizing before the diff.
+fn normalize(value: &mut serde_json::Value, key: Option<&str>) {
     match value {
-        serde_json::Value::String(s) => *s = s.replace('\\', "/"),
-        serde_json::Value::Array(items) => items.iter_mut().for_each(normalize),
-        serde_json::Value::Object(map) => map.values_mut().for_each(normalize),
+        serde_json::Value::String(s) => {
+            if key.is_some_and(|k| PATH_KEYS.contains(&k)) {
+                *s = s.replace('\\', "/");
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                normalize(item, key);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (k, v) in map.iter_mut() {
+                normalize(v, Some(k.as_str()));
+            }
+        }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
@@ -52,14 +85,23 @@ fn copy_fixture_inputs(case_dir: &Path, work_dir: &Path) {
     }
 }
 
-/// A fresh, empty scratch directory for one case run. Deliberately never
-/// nested inside the repo checkout: `tan`'s sibling-SDK auto-discovery and
-/// `init`'s create/update file diff both read the current directory's
-/// contents, so running inside the checkout could pick up this repo's own
-/// files and make the golden depend on where it happens to be checked out.
+/// A fresh, empty scratch directory for one case run, nested under its own
+/// fresh, uniquely named PARENT — never directly under the shared system
+/// temp root. Two reasons:
+///   - Deliberately never nested inside the repo checkout: `tan`'s
+///     sibling-SDK auto-discovery and `init`'s create/update file diff both
+///     read the current directory's contents, so running inside the
+///     checkout could pick up this repo's own files.
+///   - `discover_workspace_sdk` (tan-core `project.rs`) also probes the
+///     work-dir's PARENT for a sibling `alp-sdk/`. If the parent were the
+///     shared `$TEMP` root, a stray `alp-sdk` checkout dropped there by
+///     something else would flip a golden's `sourceTier`. The extra
+///     `.../tan-contract-<tag>-<pid>/root` nesting level gives every case
+///     its own empty parent that nothing else can plausibly populate.
 fn fresh_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("tan-contract-{tag}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let parent = std::env::temp_dir().join(format!("tan-contract-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&parent);
+    let dir = parent.join("root");
     std::fs::create_dir_all(&dir).expect("create scratch dir");
     dir
 }
@@ -110,8 +152,10 @@ fn run_case(case_name: &str) {
         .output()
         .unwrap_or_else(|e| panic!("{case_name}: failed to spawn tan: {e}"));
 
-    let _ = std::fs::remove_dir_all(&work_dir);
-    let _ = std::fs::remove_dir_all(&home_dir);
+    // Remove each dir's fresh PARENT (see `fresh_dir`), not just the `root`
+    // leaf, so no empty scratch directory is left behind.
+    let _ = std::fs::remove_dir_all(work_dir.parent().unwrap_or(&work_dir));
+    let _ = std::fs::remove_dir_all(home_dir.parent().unwrap_or(&home_dir));
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -128,7 +172,7 @@ fn run_case(case_name: &str) {
 
     let mut actual: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("{case_name}: stdout is not valid JSON: {e}\n---\n{stdout}"));
-    normalize(&mut actual);
+    normalize(&mut actual, None);
     let expected: serde_json::Value = serde_json::from_str(expected_json.trim())
         .unwrap_or_else(|e| panic!("{case_name}: expected.json is not valid JSON: {e}"));
 
@@ -158,6 +202,7 @@ contract_case!(
 );
 contract_case!(sdk_current_no_sdk, "sdk-current-no-sdk");
 contract_case!(sdk_unknown_subcommand, "sdk-unknown-subcommand");
+contract_case!(generate_board_yaml_missing, "generate-board-yaml-missing");
 
 /// Not a golden-diff case: `tan --version`'s first stdout line is its own
 /// small contract (the vscode extension parses it to gate feature
