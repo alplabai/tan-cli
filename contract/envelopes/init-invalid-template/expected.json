@@ -1,0 +1,1 @@
+{"command":"init","ok":false,"exitCode":2,"project":{"root":null,"boardYaml":null},"data":{"schemaVersion":"1","templateId":"","destination":"","preview":false,"fileChanges":[],"written":[],"unchanged":[],"sdkPinned":null},"issues":[{"code":"init.invalid-template","severity":"error","message":"Unknown template 'bogus-template'."}]}

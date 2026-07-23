@@ -1,0 +1,6 @@
+init
+--template
+minimal-app
+--preview
+--format
+json
