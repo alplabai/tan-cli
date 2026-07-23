@@ -65,6 +65,10 @@ struct SwitchData {
     #[serde(rename = "sdkPath")]
     sdk_path: String,
     version: Option<String>,
+    /// Which pointer was written: `"global"` (`~/.alp/sdk-default`, from
+    /// `--global`) or `"project"` (`<workspace>/.alp/sdk-path`). Lets a JSON
+    /// consumer distinguish the scope without parsing the human text line.
+    scope: &'static str,
 }
 
 /// Dispatches `tan sdk` to the matching subcommand handler; unknown subcommands fail.
@@ -359,6 +363,9 @@ fn run_current(g: &GlobalArgs) -> CommandRun {
 /// cache root, anything path-shaped resolves under the workspace root — absolute as-is),
 /// verifying the path exists and writing the pointer file.
 fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
+    // Which pointer this switch targets — echoed in every `SwitchData` envelope
+    // so a JSON consumer can tell a `--global` switch from a project one.
+    let scope = if args.global { "global" } else { "project" };
     let Some(version_or_path) = args.arg.clone() else {
         return emit_failure(
             g,
@@ -366,6 +373,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 subcommand: "switch",
                 sdk_path: String::new(),
                 version: None,
+                scope,
             },
             ExitCode::RuntimeFailure,
             "missing-version",
@@ -415,6 +423,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 subcommand: "switch",
                 sdk_path: sdk_path.clone(),
                 version: None,
+                scope,
             },
             ExitCode::RuntimeFailure,
             "path-not-found",
@@ -439,6 +448,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 subcommand: "switch",
                 sdk_path: sdk_path.clone(),
                 version: None,
+                scope,
             },
             ExitCode::RuntimeFailure,
             "not-an-sdk-checkout",
@@ -466,6 +476,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 subcommand: "switch",
                 sdk_path: sdk_path.clone(),
                 version: None,
+                scope,
             },
             ExitCode::RuntimeFailure,
             "switch-failed",
@@ -478,14 +489,14 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     }
 
     let readiness = readiness_for(&sdk_path);
-    let scope = if args.global {
+    let scope_label = if args.global {
         "machine-global default"
     } else {
         "project"
     };
     let text = vec![
         format!(
-            "Switched {scope} SDK to {}.",
+            "Switched {scope_label} SDK to {}.",
             readiness
                 .version
                 .clone()
@@ -500,6 +511,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
             subcommand: "switch",
             sdk_path,
             version: readiness.version,
+            scope,
         },
         ExitCode::Success,
         Vec::new(),
@@ -856,6 +868,11 @@ mod tests {
             },
         );
         assert_eq!(switched.exit, ExitCode::Success);
+        assert_eq!(
+            json_data(&switched)["data"]["scope"],
+            "project",
+            "a non-global switch must report project scope in the envelope"
+        );
         assert!(
             ws.join(".alp").join("sdk-path").exists(),
             "pointer should be written under the --project workspace root"
