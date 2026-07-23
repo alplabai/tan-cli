@@ -107,6 +107,25 @@ fn collect_sdk_candidates(
     candidates
 }
 
+/// Auto-discover the SDK for a single workspace root using the exact same
+/// candidate set + exactly-one-or-none rule `resolve_project_context` applies
+/// (the workspace root itself, or its sibling `alp-sdk` — **not**
+/// `alp-sdk-upstream`; two or more candidates is ambiguous, not a choice).
+/// Exposed standalone so a caller that only needs "what would build/validate/
+/// doctor/etc. resolve here" (e.g. `tan sdk current`'s `sourceTier`) can ask
+/// without threading a full [`ProjectResolutionInput`] through.
+pub fn discover_workspace_sdk(
+    workspace_root: &str,
+    path_exists: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let candidates = collect_sdk_candidates(&[workspace_root.to_string()], &path_exists);
+    if candidates.len() == 1 {
+        candidates.into_iter().next()
+    } else {
+        None
+    }
+}
+
 fn resolve_sdk_root(
     workspace_folders: &[String],
     configured_sdk_path: &str,
@@ -317,6 +336,34 @@ mod tests {
             |p| p == "C:/dev/alp-sdk/scripts/alp_project.py",
         );
         assert_eq!(ctx.sdk_root.as_deref(), Some("C:/dev/alp-sdk"));
+    }
+
+    #[test]
+    fn discover_workspace_sdk_finds_the_single_candidate() {
+        let found = discover_workspace_sdk("/work/proj", |p| {
+            p == "/work/alp-sdk/scripts/alp_project.py"
+        });
+        assert_eq!(found.as_deref(), Some("/work/alp-sdk"));
+    }
+
+    #[test]
+    fn discover_workspace_sdk_ignores_upstream_only_sibling() {
+        // `alp-sdk-upstream` is a `util::resolve_sdk_root` (CLI, generate/init/
+        // examples) candidate, deliberately NOT one `resolve_project_context`
+        // (and so `discover_workspace_sdk`) considers — a sibling checkout
+        // named `alp-sdk-upstream` must resolve to no SDK here.
+        let found = discover_workspace_sdk("/work/proj", |p| {
+            p == "/work/alp-sdk-upstream/scripts/alp_project.py"
+        });
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn discover_workspace_sdk_two_candidates_is_ambiguous() {
+        let found = discover_workspace_sdk("/work/proj", |p| {
+            p == "/work/proj/scripts/alp_project.py" || p == "/work/alp-sdk/scripts/alp_project.py"
+        });
+        assert_eq!(found, None);
     }
 
     #[test]

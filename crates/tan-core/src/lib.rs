@@ -84,7 +84,8 @@ pub use preflight::{
 pub use presets::{PresetCatalogueDefaults, empty_preset_catalogue};
 pub use preview::{EffectiveConfigPreviewPayload, create_effective_config_preview_payload};
 pub use project::{
-    ProjectContext, ProjectResolutionInput, ProjectSettings, resolve_project_context,
+    ProjectContext, ProjectResolutionInput, ProjectSettings, discover_workspace_sdk,
+    resolve_project_context,
 };
 pub use renode::{
     FAMILY_TOKEN_TO_PLATFORM, RenodeError, build_renode_argv, platform_files_for_sku,

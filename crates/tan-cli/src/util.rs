@@ -293,8 +293,10 @@ pub fn resolve_sdk_root(g: &GlobalArgs, workspace_root: &Path) -> Option<PathBuf
 
 /// Sibling/workspace auto-discovery: the workspace root itself, then sibling
 /// `alp-sdk` / `alp-sdk-upstream` directories, first one with the loader
-/// script wins. The tail of [`resolve_sdk_root`]'s precedence chain, pulled out
-/// so [`resolve_sdk_tiered`]'s discovery tier runs the identical check.
+/// script wins. The tail of [`resolve_sdk_root`]'s precedence chain (the
+/// generate/init/examples family) — deliberately NOT what
+/// [`resolve_sdk_tiered`]'s discovery tier reports; see
+/// [`tan_core::discover_workspace_sdk`] for that.
 fn discover_sdk_root(workspace_root: &Path) -> Option<PathBuf> {
     let parent = workspace_root.parent().map(Path::to_path_buf);
     let candidates = [
@@ -317,8 +319,12 @@ fn discover_sdk_root(workspace_root: &Path) -> Option<PathBuf> {
 /// tier produced it. Unlike [`resolve_sdk_root`], `--sdk-root` is returned
 /// as-is even when it lacks the loader script (terminal, matching
 /// [`effective_sdk_path`]) — callers that need a validated result apply their
-/// own `has_loader_script` check on the returned path. Shared by `tan sdk
-/// current --json`'s `sourceTier` and `tan init`'s post-write SDK pin.
+/// own `has_loader_script` check on the returned path. The discovery tier
+/// uses [`tan_core::discover_workspace_sdk`] — the SAME candidate set +
+/// exactly-one-or-none rule `effective_sdk_path`/`resolve_cli_project_context`
+/// resolve for this workspace (no `alp-sdk-upstream`, ambiguous is `None`) —
+/// so `sourceTier` never claims `discovery` for a path build/validate/doctor
+/// won't actually resolve. Used by `tan sdk current --json`'s `sourceTier`.
 pub fn resolve_sdk_tiered(
     g: &GlobalArgs,
     workspace_root: &Path,
@@ -343,7 +349,9 @@ pub fn resolve_sdk_tiered(
     )
     .filter(|p| has_loader_script(Path::new(p)));
 
-    let discovery = discover_sdk_root(workspace_root).map(|p| p.to_string_lossy().to_string());
+    let discovery = tan_core::discover_workspace_sdk(&workspace_root.to_string_lossy(), |p| {
+        Path::new(p).exists()
+    });
 
     resolve_sdk_source_tier(
         sdk_root_flag,
