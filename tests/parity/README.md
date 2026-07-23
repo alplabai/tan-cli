@@ -151,3 +151,27 @@ for whoever owns that workflow.
 ```
 python3 tests/parity/scaffold_byte_parity.py --sdk /path/to/an/alp-sdk/checkout
 ```
+
+## Kconfig fixture byte-parity (alp-sdk#893/#894/#897)
+
+`kconfig_fixture_parity.py` guards the same class of drift for `tan
+kconfig`'s field contract (`crates/tan-core/src/kconfig.rs`): both that
+crate and `crates/tan-cli/src/commands/kconfig.rs` `include_str!` a vendored
+byte-copy of alp-sdk's canonical `--emit kconfig` contract anchor at
+`tests/fixtures/kconfig-contract/emit-kconfig.golden.json` (same relative
+path in both repos) so `parse_kconfig`/`Envelope<KconfigData>` can be tested
+against the SDK's real field shape without a Zephyr/west workspace. This
+script byte-diffs the vendored copy against the pinned alp-sdk checkout's
+own copy — wired into `seam1-plan-shape` (it reuses that job's `alp-sdk`
+checkout rather than cloning a second time). Like `scaffold_byte_parity.py`
+it self-skips with no reachable alp-sdk checkout (`tan-core`'s own `cargo
+test` already covers the vendored copy's internal consistency); unlike it,
+a fixture simply absent at the *pinned* ref is ALSO not a fail (see
+`PINNED_SDK_TAG`'s comment in `.github/workflows/parity.yml` and the
+script's own docstring) — the pin currently predates alp-sdk#897 landing
+this fixture at all, so "not there yet" isn't drift. A byte MISMATCH
+(fixture present upstream, content differs) always fails.
+
+```
+python3 tests/parity/kconfig_fixture_parity.py --sdk /path/to/an/alp-sdk/checkout
+```

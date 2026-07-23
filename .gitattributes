@@ -4,3 +4,9 @@
 # CRLF-convert these files and break byte-exactness / the vendored test.
 crates/tan-core/src/wizard/vendored/** text eol=lf
 tests/parity/** text eol=lf
+
+# Vendored copy of alp-sdk's `tests/fixtures/kconfig-contract/emit-kconfig.
+# golden.json` (alp-sdk#894), byte-diffed against the pinned alp-sdk checkout
+# by tests/parity/kconfig_fixture_parity.py. Force LF for the same reason as
+# the wizard-template vendoring above.
+tests/fixtures/kconfig-contract/** text eol=lf

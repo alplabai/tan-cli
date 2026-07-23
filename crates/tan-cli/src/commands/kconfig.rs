@@ -254,6 +254,15 @@ mod tests {
         ]
     }"#;
 
+    /// alp-sdk's canonical `--emit kconfig` contract anchor (alp-sdk#893/
+    /// #894), vendored byte-for-byte at `tests/fixtures/kconfig-contract/
+    /// emit-kconfig.golden.json`. Read independently of `tan-core`'s own
+    /// copy of this constant (see that crate's `kconfig.rs` tests) — both
+    /// point at the SAME file on disk, so there is exactly one vendored copy
+    /// to keep in lockstep with upstream, not two.
+    const CANONICAL_EMIT_KCONFIG_FIXTURE: &str =
+        include_str!("../../../../tests/fixtures/kconfig-contract/emit-kconfig.golden.json");
+
     fn no_op_project() -> Project {
         Project {
             root: None,
@@ -290,6 +299,51 @@ mod tests {
         assert_eq!(parsed["data"]["symbols"][0]["name"], "LOG");
         assert_eq!(parsed["data"]["symbols"][0]["type"], "bool");
         assert_eq!(parsed["data"]["symbols"][0]["default"], "n");
+    }
+
+    /// The canonical alp-sdk fixture (alp-sdk#893/#894) deserializes cleanly
+    /// AND round-trips through the real `Envelope<KconfigData>` wire format
+    /// with the expected keys — the cross-repo gate FIX 2 adds, mirroring
+    /// `emit_json_round_trips_into_the_kconfig_envelope` above but against
+    /// the vendored upstream fixture instead of a hand-written sample.
+    #[test]
+    fn canonical_alp_sdk_fixture_round_trips_into_the_kconfig_envelope() {
+        let data = parse_kconfig(CANONICAL_EMIT_KCONFIG_FIXTURE)
+            .expect("the canonical alp-sdk fixture must parse");
+        let json = Envelope::new(
+            "kconfig",
+            no_op_project(),
+            data,
+            Vec::new(),
+            ExitCode::Success.code(),
+        )
+        .to_json();
+
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Envelope wire keys (contract/README.md): command, ok, exitCode,
+        // project, data, issues.
+        assert_eq!(parsed["command"], "kconfig");
+        assert_eq!(parsed["ok"], true);
+        assert_eq!(parsed["exitCode"], 0);
+        assert!(parsed["issues"].as_array().unwrap().is_empty());
+        assert_eq!(parsed["data"]["schemaVersion"], 1);
+        assert_eq!(
+            parsed["data"]["board"],
+            "alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he"
+        );
+        assert_eq!(parsed["data"]["core"], "m55_he");
+        assert_eq!(parsed["data"]["symbols"].as_array().unwrap().len(), 5);
+
+        let symbols = parsed["data"]["symbols"].as_array().unwrap();
+        let tristate = symbols
+            .iter()
+            .find(|s| s["name"] == "SOME_TRISTATE")
+            .expect("fixture must carry SOME_TRISTATE");
+        assert_eq!(tristate["type"], "tristate");
+        // The null default must round-trip as a present, null wire key —
+        // not be dropped by serialization.
+        assert!(tristate["default"].is_null());
+        assert!(json.contains("\"SOME_TRISTATE\""));
     }
 
     #[test]

@@ -14,9 +14,30 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::model::CoreEntry;
+
+/// `deserialize_with` for a field that must be a *present* JSON key but MAY
+/// legally be `null` — e.g. `KconfigSymbol::default`.
+///
+/// A field merely typed `Option<T>` (no attribute at all) is special-cased by
+/// serde's derive: a MISSING key silently deserializes to `None`, exactly
+/// like `#[serde(default)]` would — dropping `#[serde(default)]` alone does
+/// **not** make the key required (verified: `serde_json::from_str::<S>("{}")`
+/// still succeeds for a bare `Option<T>` field). Routing the field through
+/// this function opts it out of that implicit-default special case: with no
+/// `#[serde(default)]` present, a missing key now hits serde's normal
+/// missing-field error, while a present `null` still deserializes to `None`
+/// (`Option::<T>::deserialize` on `null` is `Ok(None)`, same as an ordinary
+/// `Option<T>` field).
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
 
 /// The kconfig emit schema version this CLI knows how to consume.
 pub const KCONFIG_SCHEMA_VERSION: u32 = 1;
@@ -33,13 +54,27 @@ pub struct KconfigSymbol {
     /// The symbol's user-facing prompt text.
     pub prompt: String,
     /// Aggregated `depends on` expression (empty string when there is none).
-    #[serde(default)]
+    ///
+    /// Deliberately NOT `#[serde(default)]`: the SDK's `_project_symbols`
+    /// (alp-sdk#894) sets this key unconditionally (`""` when there is no
+    /// `depends on`), so a missing key is never legitimate input — it means
+    /// the SDK renamed the field. `#[serde(default)]` would silently turn
+    /// that rename into an empty string here instead of a deserialize error.
     pub depends: String,
     /// Resolved default expression, or `None` when the symbol has none.
-    #[serde(default)]
+    ///
+    /// `Option<String>`, routed through `deserialize_present_option` so the
+    /// KEY is required (a missing key is a rename, not "no default") while a
+    /// present JSON `null` still deserializes to `None` — see that
+    /// function's doc comment for why a bare `Option<String>` field alone
+    /// does not achieve this (a missing key silently defaults to `None`
+    /// regardless of `#[serde(default)]`).
+    #[serde(deserialize_with = "deserialize_present_option")]
     pub default: Option<String>,
     /// Help text (empty string when there is none).
-    #[serde(default)]
+    ///
+    /// See `depends`: NOT `#[serde(default)]` for the same reason — the SDK
+    /// always emits this key (`""` when there is no help text).
     pub help: String,
 }
 
@@ -57,7 +92,11 @@ pub struct KconfigData {
     /// The `--core <id>` this menu was scoped to.
     pub core: String,
     /// Promptable symbols, sorted by `name`.
-    #[serde(default)]
+    ///
+    /// NOT `#[serde(default)]`: the SDK always emits this key (`[]` when a
+    /// board/core has no promptable symbols) — see `depends`/`help` above
+    /// for why a missing key must be a loud deserialize error, not a silent
+    /// empty menu.
     pub symbols: Vec<KconfigSymbol>,
 }
 
@@ -129,6 +168,18 @@ pub fn resolve_default_kconfig_core(
 mod tests {
     use super::*;
 
+    // alp-sdk's canonical `--emit kconfig` contract anchor (alp-sdk#893/#894),
+    // vendored byte-for-byte at `tests/fixtures/kconfig-contract/
+    // emit-kconfig.golden.json` — the raw emit payload, not `tan`-wrapped.
+    // `tests/parity/kconfig_fixture_parity.py` byte-diffs this vendored copy
+    // against the pinned alp-sdk checkout's own copy, so an upstream rename
+    // of any field here fails CI instead of silently drifting (see that
+    // script's docstring). `tan-cli::commands::kconfig`'s envelope
+    // round-trip test reads the SAME file independently — one vendored file
+    // on disk, not two copies to keep in lockstep.
+    const CANONICAL_EMIT_KCONFIG_FIXTURE: &str =
+        include_str!("../../../tests/fixtures/kconfig-contract/emit-kconfig.golden.json");
+
     const SAMPLE: &str = r#"{
         "schemaVersion": 1,
         "board": "alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he",
@@ -185,6 +236,69 @@ mod tests {
         ));
     }
 
+    // The SDK always emits `depends`/`help`/`default`/`symbols` (see this
+    // module's doc comment + `_project_symbols`); a missing key here means
+    // the SDK renamed the field, and MUST fail loudly rather than silently
+    // deserializing into an empty/`None` value (the bug these tests guard).
+
+    #[test]
+    fn parse_kconfig_rejects_symbol_missing_depends_key() {
+        let bad = r#"{
+            "schemaVersion": 1, "board": "b", "core": "c",
+            "symbols": [
+                { "name": "LOG", "type": "bool", "prompt": "Logging",
+                  "default": "n", "help": "" }
+            ]
+        }"#;
+        assert!(matches!(parse_kconfig(bad), Err(KconfigError::Json(_))));
+    }
+
+    #[test]
+    fn parse_kconfig_rejects_symbol_missing_help_key() {
+        let bad = r#"{
+            "schemaVersion": 1, "board": "b", "core": "c",
+            "symbols": [
+                { "name": "LOG", "type": "bool", "prompt": "Logging",
+                  "depends": "", "default": "n" }
+            ]
+        }"#;
+        assert!(matches!(parse_kconfig(bad), Err(KconfigError::Json(_))));
+    }
+
+    #[test]
+    fn parse_kconfig_rejects_symbol_missing_default_key() {
+        // `default` stays `Option<String>` (a `null` value is legal — see
+        // `parse_kconfig_accepts_null_default_but_requires_the_key` below)
+        // but the KEY itself must be present.
+        let bad = r#"{
+            "schemaVersion": 1, "board": "b", "core": "c",
+            "symbols": [
+                { "name": "LOG", "type": "bool", "prompt": "Logging",
+                  "depends": "", "help": "" }
+            ]
+        }"#;
+        assert!(matches!(parse_kconfig(bad), Err(KconfigError::Json(_))));
+    }
+
+    #[test]
+    fn parse_kconfig_rejects_missing_symbols_key() {
+        let bad = r#"{ "schemaVersion": 1, "board": "b", "core": "c" }"#;
+        assert!(matches!(parse_kconfig(bad), Err(KconfigError::Json(_))));
+    }
+
+    #[test]
+    fn parse_kconfig_accepts_null_default_but_requires_the_key() {
+        let ok = r#"{
+            "schemaVersion": 1, "board": "b", "core": "c",
+            "symbols": [
+                { "name": "SOME_TRISTATE", "type": "tristate", "prompt": "t",
+                  "depends": "", "default": null, "help": "" }
+            ]
+        }"#;
+        let data = parse_kconfig(ok).unwrap();
+        assert_eq!(data.symbols[0].default, None);
+    }
+
     fn core(os: &str) -> CoreEntry {
         CoreEntry {
             os: Some(os.to_string()),
@@ -223,5 +337,53 @@ mod tests {
     #[test]
     fn resolve_default_core_errs_with_no_cores_declared() {
         assert_eq!(resolve_default_kconfig_core(None), Err(Vec::new()));
+    }
+
+    /// alp-sdk's canonical `--emit kconfig` contract anchor (#893/#894)
+    /// deserializes cleanly and every field lands, including the `null`
+    /// default (`SOME_TRISTATE`) and the `tristate` type it hasn't otherwise
+    /// been exercised for elsewhere in this file's tests.
+    #[test]
+    fn parse_kconfig_accepts_the_canonical_alp_sdk_fixture() {
+        let data = parse_kconfig(CANONICAL_EMIT_KCONFIG_FIXTURE)
+            .expect("the canonical alp-sdk fixture must deserialize");
+        assert_eq!(data.schema_version, 1);
+        assert_eq!(data.board, "alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he");
+        assert_eq!(data.core, "m55_he");
+        assert_eq!(data.symbols.len(), 5);
+
+        let by_name = |name: &str| {
+            data.symbols
+                .iter()
+                .find(|s| s.name == name)
+                .unwrap_or_else(|| panic!("fixture is missing symbol {name}"))
+        };
+
+        let log = by_name("LOG");
+        assert_eq!(log.r#type, "bool");
+        assert_eq!(log.prompt, "Logging");
+        assert_eq!(log.depends, "");
+        assert_eq!(log.default.as_deref(), Some("n"));
+        assert_eq!(log.help, "Enable the logging subsystem.");
+
+        let stack = by_name("MAIN_STACK_SIZE");
+        assert_eq!(stack.r#type, "int");
+        assert_eq!(stack.depends, "MULTITHREADING");
+        assert_eq!(stack.default.as_deref(), Some("1024"));
+
+        let flash = by_name("FLASH_BASE_ADDRESS");
+        assert_eq!(flash.r#type, "hex");
+        assert_eq!(flash.default.as_deref(), Some("0x0"));
+
+        let bt_name = by_name("BT_DEVICE_NAME");
+        assert_eq!(bt_name.r#type, "string");
+        assert_eq!(bt_name.default.as_deref(), Some("\"Zephyr\""));
+
+        let tristate = by_name("SOME_TRISTATE");
+        assert_eq!(tristate.r#type, "tristate");
+        assert_eq!(tristate.depends, "");
+        // The one legal-`null` case: the KEY is present, the VALUE is null.
+        assert_eq!(tristate.default, None);
+        assert_eq!(tristate.help, "");
     }
 }
