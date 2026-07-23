@@ -32,6 +32,7 @@ pub mod sdk_catalogue;
 pub mod size;
 pub mod system_manifest;
 pub mod validate;
+pub mod west_config;
 pub mod wizard;
 
 pub use build_plan::{
@@ -112,3 +113,4 @@ pub use validate::{
     analyze_validation_result, classify_validation_outcome, parse_board_model,
     validate_board_yaml_local,
 };
+pub use west_config::{get_manifest_path, set_manifest_path};
