@@ -36,14 +36,19 @@ and every SDK-side executor, so nothing after it can be diffed against an
 in-repo oracle again -- this is the last frame where that comparison exists.
 
 Build plans are NOT hermetic: they embed the emitting checkout's absolute
-root path (`env.ALP_SDK_ROOT`, `envAppendPath.*`, per-slice `appDir`) and the
-emitting commit (`sdkCommit`). Both fields are real signal for a human but
-pure noise for a parity diff -- normalize them before comparing:
+root path (`env.ALP_SDK_ROOT`, `envAppendPath.*`, per-slice `appDir`), the
+emitting commit (`sdkCommit`), and the emitting checkout's SDK release
+version (`sdkVersion`). All three are real signal for a human but pure noise
+for a parity diff -- normalize them before comparing:
 
   * any string carrying the checkout root as a prefix -> the root prefix is
     replaced with the literal token ``__SDKROOT__`` (root discovered from the
     plan's own ``slices[0].env.ALP_SDK_ROOT`` -- no path is hardcoded);
   * ``sdkCommit`` -> the literal token ``__SHA__``;
+  * ``sdkVersion`` -> dropped entirely (mirrors alp-sdk's own comparator fix,
+    alp-sdk#883: it bumps on every version-bump PR with zero shape change, so
+    unlike `sdkCommit` -- whose oracle value stays pinned to 97ad481b forever
+    -- there is no stable token to normalize it to);
   * the emitting machine's Python interpreter, baked into a
     ``-DPython3_EXECUTABLE=<abs path>`` cmake arg (Homebrew on the macOS
     oracle-capture box, the hosted-toolcache on CI) -> ``__PYTHON__`` -- an
@@ -220,13 +225,13 @@ def normalize_plan(plan: dict) -> dict:
     """Return a checkout-independent, content-free copy of a build-plan
     dict, ready for the seam-1 SHAPE diff.
 
-    Replaces the embedded checkout-root absolute path with ``__SDKROOT__``
-    and ``sdkCommit`` with ``__SHA__`` -- the two fields that legitimately
-    differ between the oracle's capture checkout and whatever checkout the
-    live SDK is emitted from, without being a real parity break. Also drops
-    every artefact's materialised content (``_drop_artefact_contents``) --
-    that's the alp-sdk-side emit-snapshot goldens' job, not this shape
-    check's.
+    Replaces the embedded checkout-root absolute path with ``__SDKROOT__``,
+    ``sdkCommit`` with ``__SHA__``, and drops ``sdkVersion`` entirely --
+    fields that legitimately differ between the oracle's capture checkout
+    and whatever checkout the live SDK is emitted from, without being a real
+    parity break. Also drops every artefact's materialised content
+    (``_drop_artefact_contents``) -- that's the alp-sdk-side emit-snapshot
+    goldens' job, not this shape check's.
 
     alp-sdk issue #865 flipped a LIVE plan's emit to carry literal
     ``${SDK_ROOT}``/``${PROJECT_ROOT}`` tokens instead of this checkout's
@@ -257,6 +262,12 @@ def normalize_plan(plan: dict) -> dict:
         normalized = _normalize_strings(plan, sdk_root)
     if "sdkCommit" in normalized:
         normalized["sdkCommit"] = _SHA_TOKEN
+    # `sdkVersion` is the same class of volatile identity field as
+    # `sdkCommit` above: it names the emitting checkout's SDK release, not
+    # the plan's shape, and bumps on every version-bump PR (e.g. 0.11.1 ->
+    # 0.13.0) with zero shape change -- drop it rather than diff it, mirror
+    # of alp-sdk's own comparator fix (alp-sdk#883).
+    normalized.pop("sdkVersion", None)
     normalized = _strip_863_extra_conf_file_arg(normalized)
     normalized = _drop_artefact_contents(normalized)
     # `planPathMode` is itself a #865 addition the oracle predates (like the
