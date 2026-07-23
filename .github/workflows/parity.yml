@@ -36,6 +36,12 @@ env:
   # (df312cec) predated #865 and never ran seam1 against a tokened plan at
   # all. Bump to the v0.12 release tag once alp-sdk cuts one past #848
   # (blocked on this gate landing -- alp-sdk ADR-0020 amendment, alp-sdk#855).
+  #
+  # ALSO predates alp-sdk#893/#894/#897 (the `--emit kconfig` feature + its
+  # canonical fixture) -- `kconfig_fixture_parity.py` below treats a fixture
+  # missing at this pin as a NOTICE, not a fail, until it is bumped past
+  # #897 (see that script's docstring). Once bumped, a missing fixture there
+  # starts failing for real.
   PINNED_SDK_TAG: f04ea42ea152826a12ceeff29d18ff7005e462d6
 
 jobs:
@@ -76,6 +82,9 @@ jobs:
           python3 tests/parity/seam1_field_diff.py
           --sdk alp-sdk
           --oracle tests/parity/oracle
+
+      - name: kconfig fixture byte-parity (vendored vs. pinned alp-sdk)
+        run: python3 tests/parity/kconfig_fixture_parity.py --sdk alp-sdk
 
   seam2:
     name: "seam2 -- materialise + real build + Renode smoke (TODO)"
