@@ -18,7 +18,7 @@ use std::path::Path;
 use tan_core::{KconfigData, ProjectContext, parse_kconfig, resolve_default_kconfig_core};
 
 use super::CommandRun;
-use super::build::{invoke_sdk_emit, resolve_zephyr_base};
+use super::build::{base_dir, invoke_sdk_emit, resolve_zephyr_base};
 use crate::cli::{GlobalArgs, KconfigArgs};
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
@@ -31,6 +31,23 @@ pub fn run(g: &GlobalArgs, args: &KconfigArgs) -> CommandRun {
     let project = Project {
         root: context.workspace_root.clone(),
         board_yaml: context.board_yaml_path.clone(),
+    };
+
+    // Setup-class check #1: no SDK checkout resolved. `invoke_sdk_emit` would
+    // also catch this (further down, mid-spawn), but only with exit 1 — for
+    // the LSP consumer a missing SDK and a missing Zephyr workspace (below)
+    // are both "not bootstrapped"; pre-check here so every setup-class
+    // failure from `tan kconfig` is uniformly exit 2, never a spawn.
+    let Some(sdk_root) = context.sdk_root.as_deref().map(Path::new) else {
+        return failure(
+            g,
+            project,
+            ExitCode::ValidationFailure,
+            "kconfig.no-sdk-root",
+            "no alp-sdk checkout found — pass `--sdk-root <PATH>`, pin one with `tan sdk \
+             switch <version|path>`, or run `tan bootstrap` first.",
+            None,
+        );
     };
 
     let core = match resolve_core(args, &context) {
@@ -47,8 +64,12 @@ pub fn run(g: &GlobalArgs, args: &KconfigArgs) -> CommandRun {
         }
     };
 
-    let sdk_root = context.sdk_root.as_deref().map(Path::new);
-    let Some(zephyr_base) = resolve_zephyr_base(&context, sdk_root) else {
+    // Setup-class check #2: no bootstrapped Zephyr workspace. `base` is the
+    // SAME exec base `invoke_sdk_emit` effectively runs under (it inherits
+    // the process cwd — see `native::base_dir`'s doc), so `ZEPHYR_BASE` is
+    // derived from the one place, not a base that could diverge from it.
+    let base = base_dir(&context);
+    let Some(zephyr_base) = resolve_zephyr_base(&base, Some(sdk_root)) else {
         return failure(
             g,
             project,
@@ -261,6 +282,10 @@ mod tests {
         assert_eq!(parsed["exitCode"], 0);
         assert_eq!(parsed["data"]["schemaVersion"], 1);
         assert!(parsed["data"]["schemaVersion"].is_number());
+        assert_eq!(
+            parsed["data"]["board"],
+            "alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he"
+        );
         assert_eq!(parsed["data"]["core"], "m55_he");
         assert_eq!(parsed["data"]["symbols"][0]["name"], "LOG");
         assert_eq!(parsed["data"]["symbols"][0]["type"], "bool");

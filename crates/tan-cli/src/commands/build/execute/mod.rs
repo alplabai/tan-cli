@@ -141,7 +141,7 @@ pub(crate) fn execute_slices_outcome(
     // resolved workspace and pass the alp-sdk checkout as an extra Zephyr module,
     // so `west build -b <alp-board>` finds the SDK's boards without the user
     // wiring `-DEXTRA_ZEPHYR_MODULES`. The plan's per-slice env still wins.
-    let zephyr_base = resolve_zephyr_base(context, sdk_root.as_deref());
+    let zephyr_base = resolve_zephyr_base(base, sdk_root.as_deref());
 
     for slice in &plan.slices {
         let backend = slice.backend.as_str().to_string();

@@ -302,21 +302,25 @@ pub(super) fn west_workspace_dir(start: &str, sdk_root: Option<&Path>) -> Option
     None
 }
 
-/// Resolve `ZEPHYR_BASE` — the workspace's `zephyr/` checkout — for a
-/// `context`-scoped invocation: `<west_workspace_dir(base_dir(context),
-/// sdk_root)>/zephyr`, when it actually exists. Per ADR-0020 the build-plan
-/// deliberately omits `ZEPHYR_BASE` (pure CONSUMER mechanism); this is the
-/// ONE derivation for it, shared by `execute_slices_outcome`'s build-env
-/// gap-filler (`execute::env::zephyr_env_overrides`) and `commands::kconfig`
-/// (which needs the SAME value injected into `invoke_sdk_emit`'s child env
-/// for `--emit kconfig`, alp-sdk's one workspace-dependent emit) — see the
+/// Resolve `ZEPHYR_BASE` — the workspace's `zephyr/` checkout —
+/// `<west_workspace_dir(base, sdk_root)>/zephyr`, when it actually exists.
+/// Per ADR-0020 the build-plan deliberately omits `ZEPHYR_BASE` (pure
+/// CONSUMER mechanism); this is the ONE derivation for it, shared by
+/// `execute_slices_outcome`'s build-env gap-filler
+/// (`execute::env::zephyr_env_overrides`) and `commands::kconfig` (which
+/// needs the SAME value injected into `invoke_sdk_emit`'s child env for
+/// `--emit kconfig`, alp-sdk's one workspace-dependent emit) — see the
 /// tan-cli skill's "ZEPHYR_BASE stays CONSUMER mechanism" rule: two
 /// independent derivations is exactly the drift it warns against.
-pub(crate) fn resolve_zephyr_base(
-    context: &ProjectContext,
-    sdk_root: Option<&Path>,
-) -> Option<PathBuf> {
-    west_workspace_dir(&base_dir(context), sdk_root)
+///
+/// `base` is the SAME exec base the caller actually runs/spawns under (e.g.
+/// `native::base_dir(context)`) — taken as a plain parameter rather than
+/// re-derived from `context` internally, so there is exactly one base for
+/// both "where does the command run" and "where does ZEPHYR_BASE come
+/// from"; a caller passing a `base` that diverges from its own exec cwd
+/// would otherwise silently derive `ZEPHYR_BASE` from the wrong root.
+pub(crate) fn resolve_zephyr_base(base: &str, sdk_root: Option<&Path>) -> Option<PathBuf> {
+    west_workspace_dir(base, sdk_root)
         .map(|ws| ws.join("zephyr"))
         .filter(|z| z.is_dir())
 }
