@@ -228,7 +228,20 @@ fn reconcile_west_manifest_path(sdk_root: &str) -> Option<(PathBuf, String, Stri
 
     let new_rel = sdk_root_path.file_name()?.to_string_lossy().into_owned();
     let rewritten = tan_core::set_manifest_path(&contents, &new_rel)?;
-    std::fs::write(&config_path, &rewritten).ok()?;
+    // Atomic replace: write a sibling temp in the same `.west/` dir, then
+    // rename over `config` (`std::fs::rename` replaces an existing dest on both
+    // POSIX and Windows). `.west/config` is the topdir's ONLY manifest pointer,
+    // shared by every SDK version under it — a crash mid-write must not leave it
+    // truncated/corrupt, which would break `west` for all of them.
+    let tmp_path = config_path.with_file_name(format!("config.{}.tan-tmp", std::process::id()));
+    if std::fs::write(&tmp_path, &rewritten).is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return None;
+    }
+    if std::fs::rename(&tmp_path, &config_path).is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return None;
+    }
     Some((config_path, current_rel, new_rel))
 }
 
@@ -370,6 +383,12 @@ mod tests {
             std::fs::read_to_string(&config_path).unwrap(),
             "[manifest]\npath = v0.7.0\nfile = west.yml\n[zephyr]\nbase = zephyr\n"
         );
+        // Atomic temp+rename leaves no stray `config.*.tan-tmp` behind.
+        let leftover = std::fs::read_dir(&west_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|e| e.file_name().to_string_lossy().contains("tan-tmp"));
+        assert!(!leftover, "temp file was not cleaned up after the rename");
     }
 
     #[test]

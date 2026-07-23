@@ -38,7 +38,7 @@ pub fn set_manifest_path(config: &str, new_rel: &str) -> Option<String> {
             section = name.to_string();
         } else if !rewrote
             && section == "manifest"
-            && key_value(content).is_some_and(|(key, _)| key == "path")
+            && key_value(content).is_some_and(|(key, _)| key.eq_ignore_ascii_case("path"))
         {
             out.push_str("path = ");
             out.push_str(new_rel);
@@ -80,7 +80,7 @@ fn manifest_path_line(config: &str) -> Option<(usize, &str)> {
             continue;
         }
         if let Some((key, value)) = key_value(line) {
-            if key == "path" {
+            if key.eq_ignore_ascii_case("path") {
                 return Some((idx, value));
             }
         }
@@ -186,5 +186,16 @@ mod tests {
         let config = "[manifest]\r\npath = old\r\nfile = west.yml\r\n";
         let rewritten = set_manifest_path(config, "new").unwrap();
         assert_eq!(rewritten, "[manifest]\r\npath = new\r\nfile = west.yml\r\n");
+    }
+
+    #[test]
+    fn get_and_set_match_the_path_key_case_insensitively() {
+        // Python's configparser (what `west` parses `.west/config` with)
+        // lowercases option keys, so a hand-edited `Path = ` names the same
+        // key and must be recognized; the rewrite normalizes it to `path`.
+        let config = "[manifest]\nPath = old\nfile = west.yml\n";
+        assert_eq!(get_manifest_path(config), Some("old".to_string()));
+        let rewritten = set_manifest_path(config, "new").unwrap();
+        assert_eq!(rewritten, "[manifest]\npath = new\nfile = west.yml\n");
     }
 }
