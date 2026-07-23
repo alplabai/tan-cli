@@ -128,12 +128,36 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: assets
           merge-multiple: true
+      - name: Slice CHANGELOG section for the release notes
+        shell: bash
+        run: |
+          # The tag is vX.Y.Z; the CHANGELOG header is `## [X.Y.Z]` (no v-prefix,
+          # em-dash date). Extract that one section as the GitHub Release body.
+          VERSION="${GITHUB_REF_NAME#v}"
+          python3 - "$VERSION" <<'PY' > release_notes.md
+          import sys, re
+          version = sys.argv[1]
+          out, capturing = [], False
+          for line in open("CHANGELOG.md", encoding="utf-8"):
+              if re.match(rf"^## \[{re.escape(version)}\]", line):
+                  capturing = True
+                  continue
+              if capturing and line.startswith("## ["):
+                  break
+              if capturing:
+                  out.append(line)
+          body = "".join(out).strip()
+          print(body if body else f"See CHANGELOG.md for {version}.")
+          PY
+          echo "----- release_notes.md -----"; cat release_notes.md
       - name: publish release
         uses: softprops/action-gh-release@v2
         with:
           files: assets/*
           fail_on_unmatched_files: true
+          body_path: release_notes.md
