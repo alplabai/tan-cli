@@ -15,6 +15,7 @@ pub mod debug_launch;
 pub mod diff;
 pub mod flash;
 pub mod image_bundle;
+pub mod kconfig;
 pub mod loader;
 pub mod model;
 pub mod path_guard;
@@ -70,6 +71,10 @@ pub use image_bundle::{
     BundleHelperEntry, BundleManifest, BundleSliceEntry, assemble_bundle_manifest,
     helper_artefact_rel, raw_passthrough, slice_archive_name, slice_artefact_rel,
     slice_should_bundle,
+};
+pub use kconfig::{
+    KCONFIG_SCHEMA_VERSION, KconfigData, KconfigError, KconfigSymbol, parse_kconfig,
+    resolve_default_kconfig_core,
 };
 pub use loader::{
     ALL_EMIT_MODES, GenerationTargetSupport, LoaderPlan, create_loader_plan,

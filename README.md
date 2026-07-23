@@ -103,7 +103,7 @@ script.
 | Area | Commands |
 | --- | --- |
 | **Project** | `init` · `scaffold` · `examples` · `explain` · `presets` · `pinmux` |
-| **Configure & verify** | `validate` · `generate` · `diff` · `inspect` · `trace` · `doctor` · `debug-config` · `support-bundle` |
+| **Configure & verify** | `validate` · `generate` · `diff` · `inspect` · `trace` · `doctor` · `debug-config` · `support-bundle` · `kconfig` |
 | **Build & run** (native) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
 | **Environment** | `bootstrap` · `sdk` · `completion` |
 | **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `model` · `monitor` · `new-som` · `faultdecode` → `python -m alp_cli` |

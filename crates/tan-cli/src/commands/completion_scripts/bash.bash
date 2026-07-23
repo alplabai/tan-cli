@@ -7,7 +7,7 @@ _tan_complete() {
   prev="${COMP_WORDS[COMP_CWORD-1]}"
   cword=${COMP_CWORD}
 
-  local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build image flash run clean renode size migrate lock quality model monitor new-som faultdecode"
+  local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode"
   local global_flags="--project --board-yaml --sdk-root --format --verbose --quiet --no-color --non-interactive --ci --help"
 
   if [[ "$prev" == "--format" ]]; then
@@ -70,6 +70,9 @@ _tan_complete() {
       ;;
     build)
       COMPREPLY=( $(compgen -W "$global_flags --plan --plan-from --materialise --native --manifest --manifest-from" -- "$cur") )
+      ;;
+    kconfig)
+      COMPREPLY=( $(compgen -W "$global_flags --core" -- "$cur") )
       ;;
     image)
       COMPREPLY=( $(compgen -W "$global_flags --build-root" -- "$cur") )

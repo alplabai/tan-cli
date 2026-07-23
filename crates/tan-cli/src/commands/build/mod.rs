@@ -41,6 +41,11 @@ use plan_modes::{manifest_command, plan_command};
 pub(crate) use execute::NativeBuildOutcome;
 pub(crate) use preflight::probe_build_preflight;
 pub use workspace::run;
+// Shared with `commands::kconfig` (#35): the one `--emit` spawn path and the
+// one `ZEPHYR_BASE` resolver, so it drives `alp_orchestrate --emit kconfig
+// --core <id>` through the SAME mechanism `tan build` already uses instead
+// of re-deriving either.
+pub(crate) use workspace::{invoke_sdk_emit, resolve_zephyr_base};
 
 /// Envelope `data` for the `west`-delegating path: the `alp-*` command run, its
 /// cwd, and the forwarded args.

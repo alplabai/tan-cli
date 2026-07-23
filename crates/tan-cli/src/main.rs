@@ -52,6 +52,7 @@ fn main() {
         Command::Sdk(args) => commands::sdk::run(&global, &args),
         Command::Bootstrap(args) => commands::bootstrap::run(&global, &args),
         Command::Build(args) => commands::build::run_build(&global, &args),
+        Command::Kconfig(args) => commands::kconfig::run(&global, &args),
         Command::Image(args) => commands::image::run(&global, &args),
         Command::Flash(args) => commands::flash::run(&global, &args),
         Command::Run(args) => commands::run::run(&global, &args),

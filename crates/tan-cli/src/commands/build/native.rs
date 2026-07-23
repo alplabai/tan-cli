@@ -43,7 +43,7 @@ pub(super) fn acquire_plan(
                 format!("failed to read plan file `{path}`: {e}"),
             )
         })?,
-        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable")?,
+        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable", &[], &[])?,
     };
     parse_build_plan(&json).map_err(|e| ("build.plan-invalid", e.to_string()))
 }

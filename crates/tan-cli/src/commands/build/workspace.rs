@@ -24,13 +24,22 @@ use super::native::base_dir;
 /// `parse_build_plan` rejects an incompatible emit.
 /// Invoke the SDK's `alp_orchestrate --emit <emit>` (module form, scripts/ on
 /// PYTHONPATH) for the project's board.yaml and return its stdout. `emit` is the
-/// emit kind (`build-plan` /
-/// `system-manifest`); `err_code` is the envelope issue code used for every
-/// failure on this path so each caller keeps its own stable code.
-pub(super) fn invoke_sdk_emit(
+/// emit kind (`build-plan` / `system-manifest` / `kconfig`); `err_code` is the
+/// envelope issue code used for every failure on this path so each caller
+/// keeps its own stable code. `extra_args` are appended verbatim after
+/// `--emit <emit>` (e.g. `["--core", "m55_he"]` for `kconfig`); `extra_env` are
+/// set on the child on top of `PYTHONPATH` (e.g. `ZEPHYR_BASE` for `kconfig`,
+/// the SDK's one workspace-dependent emit — see `resolve_zephyr_base`). Both
+/// are empty for the hermetic `build-plan`/`system-manifest` callers, which
+/// keeps this the ONE spawn path every `--emit` caller shares (`tan-cli`
+/// skill: pure logic in `tan-core`, IO/executor here — never re-derive a
+/// second spawn).
+pub(crate) fn invoke_sdk_emit(
     context: &ProjectContext,
     emit: &str,
     err_code: &'static str,
+    extra_args: &[&str],
+    extra_env: &[(&str, String)],
 ) -> Result<String, (&'static str, String)> {
     let sdk_root = context.sdk_root.as_deref().ok_or((
         err_code,
@@ -90,7 +99,8 @@ pub(super) fn invoke_sdk_emit(
             format!("failed to build PYTHONPATH for the SDK planner: {e}"),
         )
     })?;
-    let output = Command::new(&planner_python)
+    let mut command = Command::new(&planner_python);
+    command
         .args([
             "-m",
             "alp_orchestrate",
@@ -99,14 +109,24 @@ pub(super) fn invoke_sdk_emit(
             "--emit",
             emit,
         ])
-        .env("PYTHONPATH", &pythonpath)
-        .output()
-        .map_err(|e| {
-            (
-                err_code,
-                format!("failed to run `{planner_python} -m alp_orchestrate --emit {emit}`: {e}"),
-            )
-        })?;
+        .args(extra_args)
+        .env("PYTHONPATH", &pythonpath);
+    for (key, value) in extra_env {
+        command.env(key, value);
+    }
+    // `--emit kconfig` shells a nested `west build` from inside the planner
+    // (alp-sdk#894's `_load_board_symbols`), which resolves `west` via PATH —
+    // without this, that nested spawn silently falls back to whatever `west`
+    // (if any) is on the ambient PATH instead of the SAME venv the planner
+    // itself is running under. No-op for the other (hermetic, no nested
+    // spawn) callers when `planner_python` is a bare PATH name.
+    with_venv_on_path(&mut command, &planner_python);
+    let output = command.output().map_err(|e| {
+        (
+            err_code,
+            format!("failed to run `{planner_python} -m alp_orchestrate --emit {emit}`: {e}"),
+        )
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stderr = stderr.trim();
@@ -280,6 +300,25 @@ pub(super) fn west_workspace_dir(start: &str, sdk_root: Option<&Path>) -> Option
         }
     }
     None
+}
+
+/// Resolve `ZEPHYR_BASE` — the workspace's `zephyr/` checkout — for a
+/// `context`-scoped invocation: `<west_workspace_dir(base_dir(context),
+/// sdk_root)>/zephyr`, when it actually exists. Per ADR-0020 the build-plan
+/// deliberately omits `ZEPHYR_BASE` (pure CONSUMER mechanism); this is the
+/// ONE derivation for it, shared by `execute_slices_outcome`'s build-env
+/// gap-filler (`execute::env::zephyr_env_overrides`) and `commands::kconfig`
+/// (which needs the SAME value injected into `invoke_sdk_emit`'s child env
+/// for `--emit kconfig`, alp-sdk's one workspace-dependent emit) — see the
+/// tan-cli skill's "ZEPHYR_BASE stays CONSUMER mechanism" rule: two
+/// independent derivations is exactly the drift it warns against.
+pub(crate) fn resolve_zephyr_base(
+    context: &ProjectContext,
+    sdk_root: Option<&Path>,
+) -> Option<PathBuf> {
+    west_workspace_dir(&base_dir(context), sdk_root)
+        .map(|ws| ws.join("zephyr"))
+        .filter(|z| z.is_dir())
 }
 
 /// When `tool` is a resolved venv `west` (an absolute path), prepend its
