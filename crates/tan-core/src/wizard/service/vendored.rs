@@ -15,7 +15,8 @@
 //! SDK emit and asserts these bytes haven't drifted from an unvendored
 //! change.
 //!
-//! Only `WizardTemplateId::ZephyrApp` is mapped today (-> SDK `minimal`); see
+//! `WizardTemplateId::ZephyrApp` (-> SDK `minimal`) and
+//! `WizardTemplateId::SensorStarter` (-> SDK `sensor`) are mapped today; see
 //! the manifest for which tan templates were left on their existing
 //! hand-written generator and why.
 
@@ -25,32 +26,47 @@ use super::example_catalog::retarget_board_yaml_som;
 /// (LF, byte-for-byte) content as emitted by `alp_project.py --emit scaffold`.
 type VendoredFile = (&'static str, &'static str);
 
+/// A mapped template's two SoM-family vendored trees: `(alif_ensemble, renesas_v2n)`.
+type FamilyTrees = (&'static [VendoredFile], &'static [VendoredFile]);
+
 macro_rules! vendored_tree {
-    ($sku:literal) => {
+    ($template:literal, $sku:literal) => {
         &[
             (
                 "CMakeLists.txt",
-                include_str!(concat!("../vendored/minimal/", $sku, "/CMakeLists.txt")),
+                include_str!(concat!(
+                    "../vendored/",
+                    $template,
+                    "/",
+                    $sku,
+                    "/CMakeLists.txt"
+                )),
             ),
             (
                 "README.md",
-                include_str!(concat!("../vendored/minimal/", $sku, "/README.md")),
+                include_str!(concat!("../vendored/", $template, "/", $sku, "/README.md")),
             ),
             (
                 "board.yaml",
-                include_str!(concat!("../vendored/minimal/", $sku, "/board.yaml")),
+                include_str!(concat!("../vendored/", $template, "/", $sku, "/board.yaml")),
             ),
             (
                 "prj.conf",
-                include_str!(concat!("../vendored/minimal/", $sku, "/prj.conf")),
+                include_str!(concat!("../vendored/", $template, "/", $sku, "/prj.conf")),
             ),
             (
                 "src/main.c",
-                include_str!(concat!("../vendored/minimal/", $sku, "/src/main.c")),
+                include_str!(concat!("../vendored/", $template, "/", $sku, "/src/main.c")),
             ),
             (
                 "testcase.yaml",
-                include_str!(concat!("../vendored/minimal/", $sku, "/testcase.yaml")),
+                include_str!(concat!(
+                    "../vendored/",
+                    $template,
+                    "/",
+                    $sku,
+                    "/testcase.yaml"
+                )),
             ),
         ]
     };
@@ -58,35 +74,46 @@ macro_rules! vendored_tree {
 
 /// Vendored `minimal` scaffold for the Alif Ensemble family (captured for
 /// `E1M-AEN801`, the SDK catalog's declared representative AEN SKU).
-const MINIMAL_AEN: &[VendoredFile] = vendored_tree!("E1M-AEN801");
+const MINIMAL_AEN: &[VendoredFile] = vendored_tree!("minimal", "E1M-AEN801");
 
 /// Vendored `minimal` scaffold for the Renesas RZ/V2N family (captured for
 /// `E1M-V2N101`, the SDK catalog's declared representative V2N SKU).
-const MINIMAL_V2N: &[VendoredFile] = vendored_tree!("E1M-V2N101");
+const MINIMAL_V2N: &[VendoredFile] = vendored_tree!("minimal", "E1M-V2N101");
 
-/// Pick the vendored family bucket for `sku`. Mirrors `app_core_for_sku`'s own
-/// family split: V2N/V2M -> the Renesas tree, everything else (including
-/// E1M-NX9* and any SKU the SDK catalog doesn't cover) defaults to the Alif
-/// Ensemble tree — the SDK catalog has no NXP-family scaffold at all today
-/// (flagged in `vendored/MANIFEST.md`); `tan validate` re-checks the real SoM
-/// once an SDK resolves, same caveat `app_core_for_sku` already documents.
-fn family_bucket(sku: &str) -> &'static [VendoredFile] {
+/// Vendored `sensor` scaffold (SDK's real TMP112 `<alp/chips/tmp112.h>`
+/// i2c-master app) for the Alif Ensemble family.
+const SENSOR_AEN: &[VendoredFile] = vendored_tree!("sensor", "E1M-AEN801");
+
+/// Vendored `sensor` scaffold for the Renesas RZ/V2N family.
+const SENSOR_V2N: &[VendoredFile] = vendored_tree!("sensor", "E1M-V2N101");
+
+const MINIMAL: FamilyTrees = (MINIMAL_AEN, MINIMAL_V2N);
+const SENSOR: FamilyTrees = (SENSOR_AEN, SENSOR_V2N);
+
+/// Pick the vendored family bucket for `sku` out of `trees`. Mirrors
+/// `app_core_for_sku`'s own family split: V2N/V2M -> the Renesas tree,
+/// everything else (including E1M-NX9* and any SKU the SDK catalog doesn't
+/// cover) defaults to the Alif Ensemble tree — the SDK catalog has no
+/// NXP-family scaffold at all today (flagged in `vendored/MANIFEST.md`);
+/// `tan validate` re-checks the real SoM once an SDK resolves, same caveat
+/// `app_core_for_sku` already documents.
+fn family_bucket(trees: FamilyTrees, sku: &str) -> &'static [VendoredFile] {
     if sku.starts_with("E1M-V2N") || sku.starts_with("E1M-V2M") {
-        MINIMAL_V2N
+        trees.1
     } else {
-        MINIMAL_AEN
+        trees.0
     }
 }
 
 /// Read the vendored `cores:` block's sole app-core key out of a vendored
-/// board.yaml (e.g. `"m55_hp"`). Every vendored `minimal` board.yaml has
+/// board.yaml (e.g. `"m55_hp"`). Every vendored scaffold's board.yaml has
 /// exactly one core entry before any `--cores` companion is spliced in, so
 /// the first indented child line under the top-level `cores:` key is it. This
 /// reads it from the vendored CONTENT rather than trusting `app_core_for_sku`
-/// — the vendored `minimal` scaffold's `cores:` topology does not change with
-/// `--sku` (the SDK only substitutes `som.sku:`/`preset:`, see
-/// `vendored/MANIFEST.md`), so for a V2N SKU it stays `m55_hp`, not the
-/// `m33_sm` `app_core_for_sku` would guess.
+/// — a vendored scaffold's `cores:` topology does not change with `--sku`
+/// (the SDK only substitutes `som.sku:`/`preset:`, see `vendored/
+/// MANIFEST.md`), so for a V2N SKU it stays whatever the tree's own vendored
+/// SKU declares, not a value `app_core_for_sku` would guess.
 fn vendored_app_core_key(board_yaml: &str) -> Option<&str> {
     let mut after_cores = false;
     for line in board_yaml.lines() {
@@ -166,14 +193,12 @@ fn splice_companion_cores(board_yaml: &str, cores: &[(String, String)]) -> Strin
     out
 }
 
-/// The vendored `minimal` scaffold's real app-core id for `sku` — its family
-/// bucket's own `board.yaml` `cores:` key. `tan init`'s upfront `--cores`
-/// validation (`commands/init/mod.rs`) uses this instead of `app_core_for_sku`
-/// for the `zephyr-app` template, so the CLI-level check always agrees with
-/// what `vendored_minimal_files` actually plans — the two independently
-/// derived the wrong core (alp-sdk#864's `m55_hp`-for-V2N bug) until now.
-pub fn vendored_app_core_for_sku(sku: &str) -> &'static str {
-    let board_yaml = family_bucket(sku)
+/// `trees`' real app-core id for `sku` — its family bucket's own
+/// `board.yaml` `cores:` key, read from `trees` (not guessed) so a re-vendor
+/// that changes it fails the matching unit test instead of silently
+/// drifting from what `vendored_scaffold_files` actually plans.
+fn vendored_app_core_in(trees: FamilyTrees, sku: &str) -> &'static str {
+    let board_yaml = family_bucket(trees, sku)
         .iter()
         .find(|(path, _)| *path == "board.yaml")
         .map(|(_, content)| *content)
@@ -182,15 +207,36 @@ pub fn vendored_app_core_for_sku(sku: &str) -> &'static str {
         .expect("every vendored board.yaml has a non-empty cores: block")
 }
 
-/// Plan the `zephyr-app` template's files from the vendored SDK `minimal`
-/// scaffold: pick the SKU family's vendored tree, retarget `board.yaml`'s
-/// `som.sku:` line onto the requested `sku` (a byte-exact no-op when `sku` is
-/// the tree's own vendored SKU), and splice in any `--cores` companions.
-pub(super) fn vendored_minimal_files(
+/// The vendored `minimal` scaffold's real app-core id for `sku`. `tan init`'s
+/// upfront `--cores` validation (`commands/init/resolve.rs`) uses this
+/// instead of `app_core_for_sku` for the `zephyr-app` template, so the
+/// CLI-level check always agrees with what `vendored_minimal_files` actually
+/// plans — the two independently derived the wrong core (alp-sdk#864's
+/// `m55_hp`-for-V2N bug) until now.
+pub fn vendored_app_core_for_sku(sku: &str) -> &'static str {
+    vendored_app_core_in(MINIMAL, sku)
+}
+
+/// The vendored `sensor` scaffold's real app-core id for `sku` — same
+/// derivation as `vendored_app_core_for_sku`, off the `sensor` tree instead
+/// of `minimal`. Values happen to match `minimal`'s today (`E1M-AEN801` ->
+/// `m55_hp`, `E1M-V2N101` -> `m33_sm`) but are read from `sensor`'s own
+/// vendored `board.yaml` so a future `sensor`-only re-vendor can't silently
+/// disagree with what `vendored_sensor_files` plans.
+pub fn vendored_sensor_app_core_for_sku(sku: &str) -> &'static str {
+    vendored_app_core_in(SENSOR, sku)
+}
+
+/// Plan a mapped template's files from its vendored SDK scaffold tree: pick
+/// the SKU family's vendored tree, retarget `board.yaml`'s `som.sku:` line
+/// onto the requested `sku` (a byte-exact no-op when `sku` is the tree's own
+/// vendored SKU), and splice in any `--cores` companions.
+fn vendored_scaffold_files(
+    trees: FamilyTrees,
     sku: &str,
     cores: &[(String, String)],
 ) -> Vec<(String, String)> {
-    family_bucket(sku)
+    family_bucket(trees, sku)
         .iter()
         .map(|(path, content)| {
             let content = if *path == "board.yaml" {
@@ -201,6 +247,22 @@ pub(super) fn vendored_minimal_files(
             (path.to_string(), content)
         })
         .collect()
+}
+
+/// Plan the `zephyr-app` template's files from the vendored SDK `minimal` scaffold.
+pub(super) fn vendored_minimal_files(
+    sku: &str,
+    cores: &[(String, String)],
+) -> Vec<(String, String)> {
+    vendored_scaffold_files(MINIMAL, sku, cores)
+}
+
+/// Plan the `sensor-starter` template's files from the vendored SDK `sensor` scaffold.
+pub(super) fn vendored_sensor_files(
+    sku: &str,
+    cores: &[(String, String)],
+) -> Vec<(String, String)> {
+    vendored_scaffold_files(SENSOR, sku, cores)
 }
 
 #[cfg(test)]
@@ -299,11 +361,44 @@ mod tests {
 
     #[test]
     fn vendored_app_core_matches_each_familys_board_yaml() {
-        // The ground truth `commands/init/mod.rs`'s upfront --cores check
+        // The ground truth `commands/init/resolve.rs`'s upfront --cores check
         // must agree with for the zephyr-app template (alp-sdk#864/#877).
         assert_eq!(vendored_app_core_for_sku("E1M-V2N101"), "m33_sm");
         assert_eq!(vendored_app_core_for_sku("E1M-V2M101"), "m33_sm");
         assert_eq!(vendored_app_core_for_sku("E1M-AEN801"), "m55_hp");
         assert_eq!(vendored_app_core_for_sku("E1M-NX9101"), "m55_hp");
+    }
+
+    #[test]
+    fn canonical_sensor_skus_are_a_byte_exact_passthrough() {
+        let aen = vendored_sensor_files("E1M-AEN801", &[]);
+        let aen_board = &aen.iter().find(|(p, _)| p == "board.yaml").unwrap().1;
+        assert_eq!(aen_board.as_str(), SENSOR_AEN[2].1);
+
+        let v2n = vendored_sensor_files("E1M-V2N101", &[]);
+        let v2n_board = &v2n.iter().find(|(p, _)| p == "board.yaml").unwrap().1;
+        assert_eq!(v2n_board.as_str(), SENSOR_V2N[2].1);
+    }
+
+    #[test]
+    fn sensor_family_bucket_picks_the_right_tree_and_retargets_sku() {
+        let files = vendored_sensor_files("E1M-V2M101", &[]);
+        let board = &files.iter().find(|(p, _)| p == "board.yaml").unwrap().1;
+        assert!(board.contains("sku: E1M-V2M101"));
+        assert!(board.contains("preset: e1m-x-evk"));
+
+        let files = vendored_sensor_files("E1M-NX9101", &[]);
+        let board = &files.iter().find(|(p, _)| p == "board.yaml").unwrap().1;
+        assert!(board.contains("preset: e1m-evk"));
+    }
+
+    #[test]
+    fn vendored_sensor_app_core_matches_each_familys_board_yaml() {
+        // The ground truth `commands/init/resolve.rs`'s upfront --cores check
+        // must agree with for the sensor-starter template.
+        assert_eq!(vendored_sensor_app_core_for_sku("E1M-V2N101"), "m33_sm");
+        assert_eq!(vendored_sensor_app_core_for_sku("E1M-V2M101"), "m33_sm");
+        assert_eq!(vendored_sensor_app_core_for_sku("E1M-AEN801"), "m55_hp");
+        assert_eq!(vendored_sensor_app_core_for_sku("E1M-NX9101"), "m55_hp");
     }
 }

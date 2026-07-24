@@ -19,7 +19,7 @@ pub use plan::{
     create_wizard_plan_with_cores, normalize_module_name,
 };
 pub use registry::{list_module_templates, list_wizard_templates};
-pub use vendored::vendored_app_core_for_sku;
+pub use vendored::{vendored_app_core_for_sku, vendored_sensor_app_core_for_sku};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -120,6 +120,68 @@ mod tests {
     }
 
     #[test]
+    fn sensor_scaffold_is_west_buildable() {
+        // sensor-starter is vendored from the SDK's `sensor` scaffold-catalog
+        // entry (alp-sdk#864) -- board.yaml's `som.sku:` is retargeted onto
+        // the non-canonical SKU below, everything else is the vendored
+        // Alif-Ensemble-family tree byte-for-byte (see wizard/vendored/).
+        let plan = create_wizard_plan(&WizardPlanInput {
+            template_id: WizardTemplateId::SensorStarter,
+            project_name: "sdemo".to_string(),
+            destination: ".".to_string(),
+            som_sku: Some("E1M-AEN701".to_string()),
+        });
+        let by_path = |p: &str| {
+            plan.files
+                .iter()
+                .find(|f| f.relative_path == p)
+                .map(|f| f.content.as_str())
+        };
+        let cmake = by_path("CMakeLists.txt").expect("CMakeLists.txt is generated");
+        assert!(cmake.contains("find_package(Zephyr REQUIRED"));
+        assert!(cmake.contains("--emit zephyr-conf --core"));
+        assert!(cmake.contains("EXTRA_CONF_FILE"));
+        assert!(cmake.contains("target_sources(app PRIVATE src/main.c)"));
+        // Zephyr wires target_sources directly -- no plain-CMake src/CMakeLists.txt.
+        assert!(by_path("src/CMakeLists.txt").is_none());
+        assert!(by_path("src/main.c").is_some());
+        assert!(by_path("testcase.yaml").is_some());
+        let board = by_path("board.yaml").expect("board.yaml is generated");
+        assert!(board.contains("sku: E1M-AEN701"));
+    }
+
+    #[test]
+    fn sensor_scaffold_is_byte_exact_for_the_vendored_sku() {
+        // Same guarantee as zephyr_app_scaffold_is_byte_exact_for_the_vendored_sku:
+        // for a vendored (template, sku) pair, `tan init`'s plan must match
+        // `alp-sdk --emit scaffold`'s output byte-for-byte -- no Rust
+        // re-derivation. Both vendored SKUs (see wizard/vendored/MANIFEST.md).
+        for sku in ["E1M-AEN801", "E1M-V2N101"] {
+            let plan = create_wizard_plan(&WizardPlanInput {
+                template_id: WizardTemplateId::SensorStarter,
+                project_name: String::new(),
+                destination: ".".to_string(),
+                som_sku: Some(sku.to_string()),
+            });
+            let manifest_dir = env!("CARGO_MANIFEST_DIR");
+            for file in &plan.files {
+                let vendored_path = std::path::Path::new(manifest_dir)
+                    .join("src/wizard/vendored/sensor")
+                    .join(sku)
+                    .join(&file.relative_path);
+                let vendored = std::fs::read_to_string(&vendored_path)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", vendored_path.display()));
+                assert_eq!(
+                    file.content, vendored,
+                    "{sku}: {} is not byte-identical to the vendored tree",
+                    file.relative_path
+                );
+            }
+            assert_eq!(plan.files.len(), 6);
+        }
+    }
+
+    #[test]
     fn list_module_templates_has_four_entries() {
         assert_eq!(list_module_templates().len(), 4);
     }
@@ -163,15 +225,20 @@ mod tests {
 
     #[test]
     fn som_sku_overrides_board_yaml() {
+        // Override with a NON-canonical V2N SKU (E1M-V2N102): it routes to the
+        // E1M-V2N101 vendored bucket, so retarget must rewrite the `som.sku:`
+        // line off the tree's own canonical SKU. Using E1M-V2N101 here (the
+        // bucket's own SKU) would be a byte-exact no-op that proves nothing.
         let plan = create_wizard_plan(&WizardPlanInput {
             template_id: WizardTemplateId::SensorStarter,
             project_name: String::new(),
             destination: ".".to_string(),
-            som_sku: Some("E1M-V2N101".to_string()),
+            som_sku: Some("E1M-V2N102".to_string()),
         });
         let board = board_yaml_of(&plan);
-        assert!(board.contains("sku: E1M-V2N101"));
-        assert!(!board.contains("E1M-AEN701"));
+        assert!(board.contains("sku: E1M-V2N102"));
+        // The canonical som.sku line was retargeted away.
+        assert!(!board.contains("sku: E1M-V2N101"));
     }
 
     #[test]

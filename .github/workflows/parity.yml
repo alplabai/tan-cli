@@ -81,6 +81,15 @@ jobs:
       - name: kconfig fixture byte-parity (vendored vs. pinned alp-sdk)
         run: python3 tests/parity/kconfig_fixture_parity.py --sdk alp-sdk
 
+      # Vendored wizard scaffold tree vs. the pinned alp-sdk's live
+      # `--emit scaffold`. Reuses this job's alp-sdk checkout + emit deps (same
+      # as the kconfig step above) rather than a second clone. The vendored tree
+      # is captured at this exact pin, so a re-vendor that drifts from the SDK
+      # fails here instead of shipping silently (the drift that hid the stale
+      # `minimal` README before this gate ran in CI).
+      - name: scaffold byte-parity (vendored tree vs. pinned alp-sdk --emit scaffold)
+        run: python3 tests/parity/scaffold_byte_parity.py --sdk alp-sdk
+
   seam2:
     name: "seam2 -- materialise + real build + Renode smoke (TODO)"
     runs-on: ubuntu-latest
