@@ -96,8 +96,13 @@ impl Tokens<'_> {
 /// A per-OS optional-native-libs hint.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct NativeLibHint {
-    /// Human-readable explanation, safe to print verbatim.
-    pub note: String,
+    /// Human-readable explanation, safe to print verbatim. An ARRAY of lines,
+    /// not one paragraph: the schema's `minItems: 1` says so, and both scripts
+    /// print one line per element (`for line in "${HINT_<OS>_NOTE[@]}"` /
+    /// `foreach ($line in $HintWindowsNote)`) so an aligned package -> API
+    /// mapping survives instead of collapsing into an unwrapped ~200-380 char
+    /// line.
+    pub note: Vec<String>,
     /// A copy-pasteable install command, or `None` where the OS has none.
     pub command: Option<String>,
 }
@@ -355,30 +360,41 @@ pub fn fallback_facts(min_python: (u32, u32)) -> BootstrapFacts {
             ),
             ("ZEPHYR_TOOLCHAIN_VARIANT".to_string(), "zephyr".to_string()),
         ],
+        // The note arrays are transcribed VERBATIM, including the intra-line
+        // padding that aligns the `->` column: the manifest is what carries the
+        // alignment, and re-wrapping it here would make the fallback print
+        // differently from the manifest path for the same SDK.
         hint_linux: NativeLibHint {
-            note: "Optional native libraries unlock the Yocto-side backends: libmosquitto-dev -> \
-                   alp_mqtt_* (cleartext + TLS), libasound2-dev -> alp_audio_*, libssl-dev -> \
-                   alp_hash_* / alp_aead_* / alp_random_bytes."
-                .to_string(),
+            note: owned(&[
+                "libmosquitto-dev  -> alp_mqtt_* (cleartext + TLS)",
+                "libasound2-dev    -> alp_audio_*",
+                "libssl-dev        -> alp_hash_* / alp_aead_* / alp_random_bytes",
+            ]),
             command: Some(
                 "sudo apt-get install -y libmosquitto-dev libasound2-dev libssl-dev pkg-config"
                     .to_string(),
             ),
         },
         hint_macos: NativeLibHint {
-            note: "Equivalents via Homebrew. macOS uses CoreAudio rather than ALSA, so the Yocto \
-                   audio backend doesn't apply on macOS hosts. OpenSSL ships with macOS."
-                .to_string(),
+            note: owned(&[
+                "Equivalents via Homebrew:",
+                "mosquitto  -> alp_mqtt_* (cleartext + TLS)",
+                "macOS uses CoreAudio rather than ALSA, so the Yocto audio backend doesn't apply \
+                 on macOS hosts.",
+                "OpenSSL ships with macOS.",
+            ]),
             command: Some("brew install mosquitto pkg-config".to_string()),
         },
         hint_windows: NativeLibHint {
-            note: "Under Git Bash / MSYS2 the Yocto-side backends aren't intended to run -- the \
-                   canonical use is WSL2 + Ubuntu with the linux command above; skip this step on \
-                   native Windows. The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) \
-                   are separate manual, one-time installs on native Windows -- not auto-installed \
-                   by bootstrap.ps1; native_sim / Yocto need WSL2 \
-                   (docs/cross-platform-setup.md section 5)."
-                .to_string(),
+            note: owned(&[
+                "Under Git Bash / MSYS2 the Yocto-side backends aren't intended to run -- the \
+                 canonical use is WSL2 + Ubuntu with the linux command above; skip this step on \
+                 native Windows.",
+                "The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate \
+                 manual, one-time installs on native Windows -- not auto-installed by \
+                 bootstrap.ps1; native_sim / Yocto need WSL2 (docs/cross-platform-setup.md \
+                 section 5).",
+            ]),
             command: None,
         },
         from_manifest: false,

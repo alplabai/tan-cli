@@ -33,15 +33,27 @@
   },
   "nativeLibHints": {
     "linux": {
-      "note": "Optional native libraries unlock the Yocto-side backends: libmosquitto-dev -> alp_mqtt_* (cleartext + TLS), libasound2-dev -> alp_audio_*, libssl-dev -> alp_hash_* / alp_aead_* / alp_random_bytes.",
+      "note": [
+        "libmosquitto-dev  -> alp_mqtt_* (cleartext + TLS)",
+        "libasound2-dev    -> alp_audio_*",
+        "libssl-dev        -> alp_hash_* / alp_aead_* / alp_random_bytes"
+      ],
       "command": "sudo apt-get install -y libmosquitto-dev libasound2-dev libssl-dev pkg-config"
     },
     "macos": {
-      "note": "Equivalents via Homebrew. macOS uses CoreAudio rather than ALSA, so the Yocto audio backend doesn't apply on macOS hosts. OpenSSL ships with macOS.",
+      "note": [
+        "Equivalents via Homebrew:",
+        "mosquitto  -> alp_mqtt_* (cleartext + TLS)",
+        "macOS uses CoreAudio rather than ALSA, so the Yocto audio backend doesn't apply on macOS hosts.",
+        "OpenSSL ships with macOS."
+      ],
       "command": "brew install mosquitto pkg-config"
     },
     "windows": {
-      "note": "Under Git Bash / MSYS2 the Yocto-side backends aren't intended to run -- the canonical use is WSL2 + Ubuntu with the linux command above; skip this step on native Windows. The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate manual, one-time installs on native Windows -- not auto-installed by bootstrap.ps1; native_sim / Yocto need WSL2 (docs/cross-platform-setup.md section 5).",
+      "note": [
+        "Under Git Bash / MSYS2 the Yocto-side backends aren't intended to run -- the canonical use is WSL2 + Ubuntu with the linux command above; skip this step on native Windows.",
+        "The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate manual, one-time installs on native Windows -- not auto-installed by bootstrap.ps1; native_sim / Yocto need WSL2 (docs/cross-platform-setup.md section 5)."
+      ],
       "command": null
     }
   }

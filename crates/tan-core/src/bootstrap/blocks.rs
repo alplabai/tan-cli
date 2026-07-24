@@ -110,14 +110,21 @@ pub fn optional_libs_block(
             "  #   (tick 'Add path to environment variable' during install)".to_string(),
             String::new(),
             "  # Zephyr SDK (alternative cross-toolchain + host tools like dtc):".to_string(),
+            // Deliberate divergence: `bootstrap.ps1` says "after this script."
+            // Tan is not a script, so the same sentence would misname what the
+            // reader just ran; "step" is the only word changed.
             format!("  #   run 'west sdk install' from {workspace_dir} after this step."),
             String::new(),
         ];
         if let Some(hint) = hint {
-            lines.push(format!("  {}", hint.note));
-            // `nativeLibHints.windows.command` is null today, so this renders
-            // nothing -- but a manifest that grows one (a winget line, say)
-            // must reach the output without a tan release, same as POSIX.
+            // One line per `note` element, two-space indented, exactly like
+            // `bootstrap.ps1`'s `foreach ($line in $HintWindowsNote)`.
+            lines.extend(hint.note.iter().map(|line| format!("  {line}")));
+            // Deliberate divergence: `bootstrap.ps1` never prints a command on
+            // this branch. `nativeLibHints.windows.command` is null today, so
+            // this renders nothing -- but a manifest that grows one (a winget
+            // line, say) must reach the output without a tan release, same as
+            // POSIX, rather than vanishing silently.
             if let Some(command) = hint.command.as_deref().filter(|c| !c.is_empty()) {
                 lines.push(String::new());
                 lines.push(format!("  {command}"));
@@ -132,8 +139,10 @@ pub fn optional_libs_block(
     ];
     match hint {
         Some(hint) => {
+            // `bootstrap.sh`'s per-OS arm: a blank line, then
+            // `for line in "${HINT_<OS>_NOTE[@]}"; do echo "  ${line}"; done`.
             lines.push(String::new());
-            lines.push(format!("  {}", hint.note));
+            lines.extend(hint.note.iter().map(|line| format!("  {line}")));
             if let Some(command) = hint.command.as_deref().filter(|c| !c.is_empty()) {
                 lines.push(String::new());
                 lines.push(format!("  {command}"));
@@ -317,31 +326,100 @@ $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"";
         );
     }
 
+    /// Byte-parity against `bootstrap.sh`'s "Optional native libs hint"
+    /// section for a MULTI-element note: the `info` line, a blank line, then
+    /// one two-space-indented line per `nativeLibHints.linux.note` element
+    /// (`for line in "${HINT_LINUX_NOTE[@]}"; do echo "  ${line}"; done`),
+    /// then a blank line and the command. The `->` column stays aligned,
+    /// which is the whole reason the field became an array.
+    #[test]
+    fn optional_libs_posix_renders_one_line_per_note_element() {
+        // Leading newline, NOT a `"\` continuation: the block's first element
+        // is the blank line `bootstrap.sh` echoes before the info line.
+        let expected = "
+bootstrap: Optional native libraries unlock the Yocto-side backends:
+
+  libmosquitto-dev  -> alp_mqtt_* (cleartext + TLS)
+  libasound2-dev    -> alp_audio_*
+  libssl-dev        -> alp_hash_* / alp_aead_* / alp_random_bytes
+
+  sudo apt-get install -y libmosquitto-dev libasound2-dev libssl-dev pkg-config";
+        assert_eq!(
+            optional_libs_block(&manifest_facts(), HostOs::Linux, "/ws").join("\n"),
+            expected
+        );
+        // The fallback constants must render the same bytes as the manifest.
+        assert_eq!(
+            optional_libs_block(&fallback_facts((3, 10)), HostOs::Linux, "/ws").join("\n"),
+            expected
+        );
+    }
+
+    /// Same, for `bootstrap.ps1`'s `foreach ($line in $HintWindowsNote)`: the
+    /// literal Arm/Zephyr-SDK here-string, then one indented line per element.
+    #[test]
+    fn optional_libs_windows_renders_one_line_per_note_element() {
+        let expected = "
+bootstrap: NOT auto-installed (manual, one-time):
+
+  # Arm GNU Toolchain (cross-compiles for real silicon) -- installer EXE:
+  #   https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads
+  #   (tick 'Add path to environment variable' during install)
+
+  # Zephyr SDK (alternative cross-toolchain + host tools like dtc):
+  #   run 'west sdk install' from C:\\ws after this step.
+
+  Under Git Bash / MSYS2 the Yocto-side backends aren't intended to run -- the canonical use is \
+WSL2 + Ubuntu with the linux command above; skip this step on native Windows.
+  The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate manual, one-time \
+installs on native Windows -- not auto-installed by bootstrap.ps1; native_sim / Yocto need WSL2 \
+(docs/cross-platform-setup.md section 5).";
+        // `command: null` -> note only, no trailing blank + command line.
+        assert_eq!(
+            optional_libs_block(&manifest_facts(), HostOs::Windows, "C:\\ws").join("\n"),
+            expected
+        );
+        assert_eq!(
+            optional_libs_block(&fallback_facts((3, 10)), HostOs::Windows, "C:\\ws").join("\n"),
+            expected
+        );
+    }
+
+    /// A ONE-element note must still render exactly as a single indented line
+    /// on both branches — the array shape adds lines, it does not add spacing.
+    #[test]
+    fn a_single_element_note_renders_as_one_indented_line() {
+        let mut facts = manifest_facts();
+        facts.hint_linux.note = vec!["one line only".to_string()];
+        facts.hint_linux.command = None;
+        assert_eq!(
+            optional_libs_block(&facts, HostOs::Linux, "/ws"),
+            vec![
+                "".to_string(),
+                "bootstrap: Optional native libraries unlock the Yocto-side backends:".to_string(),
+                "".to_string(),
+                "  one line only".to_string(),
+            ]
+        );
+        facts.hint_windows.note = vec!["one line only".to_string()];
+        let win = optional_libs_block(&facts, HostOs::Windows, "C:\\ws");
+        assert_eq!(win.last().unwrap(), "  one line only");
+        assert_eq!(win[win.len() - 2], "", "the here-string's trailing blank");
+    }
+
     #[test]
     fn optional_libs_renders_the_manifest_hint_per_host() {
         let facts = manifest_facts();
-        let linux = optional_libs_block(&facts, HostOs::Linux, "/ws").join("\n");
-        assert!(
-            linux.contains("Optional native libraries unlock"),
-            "{linux}"
-        );
-        assert!(
-            linux.contains(
-                "  sudo apt-get install -y libmosquitto-dev libasound2-dev libssl-dev pkg-config"
-            ),
-            "{linux}"
-        );
         let mac = optional_libs_block(&facts, HostOs::MacOs, "/ws").join("\n");
-        assert!(mac.contains("  brew install mosquitto pkg-config"), "{mac}");
-        // The Windows hint has `command: null` -> note only, no blank command line.
-        let win = optional_libs_block(&facts, HostOs::Windows, "C:\\ws").join("\n");
+        assert!(mac.contains("  Equivalents via Homebrew:"), "{mac}");
         assert!(
-            win.contains("NOT auto-installed (manual, one-time)"),
-            "{win}"
+            mac.contains("  mosquitto  -> alp_mqtt_* (cleartext + TLS)"),
+            "{mac}"
         );
-        assert!(win.contains("run 'west sdk install' from C:\\ws"), "{win}");
-        assert!(win.contains("the canonical use is WSL2 + Ubuntu"), "{win}");
-        // ...but a manifest that GROWS one must render it, spaced like POSIX.
+        assert!(mac.contains("  brew install mosquitto pkg-config"), "{mac}");
+        // `nativeLibHints.windows.command` is null, but a manifest that GROWS
+        // one must render it, spaced like POSIX (a tan-only tail, see
+        // `optional_libs_block`).
         let mut with_command = manifest_facts();
         with_command.hint_windows.command = Some("winget install -e --id Foo.Bar".to_string());
         let grown = optional_libs_block(&with_command, HostOs::Windows, "C:\\ws");
