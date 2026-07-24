@@ -332,10 +332,9 @@ pub struct ModelArgs {
     pub sub: ModelSub,
 }
 
-/// The `alp_cli model` subcommands. `Build`/`List`/`Info`/`Doctor` mirror
-/// `alp_cli`'s own option surface (`--board`/`--out`/`--metadata-root`) so tan
-/// can wrap their `--format json` payload in its envelope; `Run` stays a raw
-/// passthrough (Phase-3, streams — not yet implemented SDK-side).
+/// The `alp_cli model` subcommands. All mirror `alp_cli`'s own option surface
+/// (`--board`/`--out`/`--metadata-root`/…) so tan can wrap their `--format
+/// json` payload in its envelope.
 #[derive(Debug, Subcommand)]
 pub enum ModelSub {
     /// Compile board.yaml `models:` into `.alpmodel` packages.
@@ -354,9 +353,11 @@ pub enum ModelSub {
     Prep(ModelPrepArgs),
     /// Report installed NPU compiler toolchains.
     Doctor,
-    /// Forward-compatible passthrough (Phase-3); streams like the other
-    /// west/alp forwards.
-    Run(WestForwardArgs),
+    /// Host reference run of a model: deterministic (or supplied) input,
+    /// optional top-1 accuracy check, optional timed median-latency run.
+    Run(ModelRunArgs),
+    /// A/B two models on the same input.
+    Ab(ModelAbArgs),
 }
 
 /// Args for `model build`.
@@ -474,6 +475,40 @@ pub struct ModelPrepArgs {
     /// Minimum calibration samples.
     #[arg(long = "min-samples", value_name = "N")]
     pub min_samples: Option<u32>,
+}
+
+/// Args for `model run` (host reference run).
+#[derive(Debug, Args)]
+pub struct ModelRunArgs {
+    /// Model to run (`.onnx`).
+    #[arg(value_name = "MODEL")]
+    pub model: String,
+    /// Input sample .npy (default: deterministic random matching the model input).
+    #[arg(long, value_name = "FILE")]
+    pub input: Option<String>,
+    /// Expected class label (top-1 accuracy check).
+    #[arg(long, value_name = "LABEL")]
+    pub expected: Option<i64>,
+    /// Timed inference count (median latency).
+    #[arg(long, value_name = "N")]
+    pub runs: Option<u32>,
+}
+
+/// Args for `model ab` (A/B two models on the same input).
+#[derive(Debug, Args)]
+pub struct ModelAbArgs {
+    /// First model (`.onnx`).
+    #[arg(value_name = "MODEL_A")]
+    pub model_a: String,
+    /// Second model (`.onnx`).
+    #[arg(value_name = "MODEL_B")]
+    pub model_b: String,
+    /// Shared input sample .npy (default: deterministic random matching model_a).
+    #[arg(long, value_name = "FILE")]
+    pub input: Option<String>,
+    /// Timed inference count.
+    #[arg(long, value_name = "N")]
+    pub runs: Option<u32>,
 }
 
 /// Args for `run`: build the project, then run it. Thin orchestrator over the
