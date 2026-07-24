@@ -1,44 +1,101 @@
 // SPDX-License-Identifier: Apache-2.0
-//! The verbatim text blocks `tan bootstrap` prints, one renderer per block.
+//! The text blocks `tan bootstrap` prints, one renderer per block.
 //!
-//! Each is a byte-for-byte reproduction of the corresponding heredoc /
-//! here-string in the parity oracles — `bootstrap.sh:94-100, 266-299, 305-329`
-//! and `bootstrap.ps1:75-81, 278-291, 297-318`. They are copy-pasteable shell
-//! snippets, so they carry NO `bootstrap:` prefix (unlike the progress lines)
-//! and their whitespace is load-bearing. Lines are returned individually
-//! because `CommandRun::text` is printed one line at a time.
+//! Each reproduces the corresponding section of the parity oracles — the
+//! "Print-env shortcut", "Optional native libs hint" / "Manual-install hints"
+//! and "Done" sections of `bootstrap.sh` and `bootstrap.ps1`. Since alp-sdk#917
+//! those sections render from `metadata/bootstrap.json` rather than from
+//! hardcoded text, so these take [`BootstrapFacts`] too: the env map, the venv
+//! directory names and the native-lib hints are all manifest facts now, and
+//! only the surrounding prose is literal here.
+//!
+//! They are copy-pasteable shell snippets, so they carry NO `bootstrap:` prefix
+//! (unlike the progress lines) and their whitespace is load-bearing. Lines are
+//! returned individually because `CommandRun::text` is printed one line at a
+//! time.
 
+use super::manifest::{BootstrapFacts, Tokens};
 use super::runtime::HostOs;
 
-/// `--print-env`: the two `export`/`$env:` lines plus the venv-activation
-/// comment header. Printed and exited BEFORE any prerequisite check or venv
-/// work, exactly as both scripts short-circuit.
-pub fn print_env_block(workspace_dir: &str, is_windows: bool) -> Vec<String> {
-    if is_windows {
+/// Render the manifest's `env` map as shell-ready lines.
+///
+/// POSIX (`bootstrap.sh`'s `print_env_lines`) quotes the value only when it
+/// looks like a path — i.e. contains `/` — which is what keeps
+/// `export ZEPHYR_TOOLCHAIN_VARIANT=zephyr` unquoted while `ZEPHYR_BASE` is
+/// quoted. Windows (`bootstrap.ps1`'s `Write-EnvLines`) always quotes.
+///
+/// Substitution happens HERE, not at load time, so a `workspace_dir` repointed
+/// by workspace selection is reflected — see [`Tokens`].
+///
+/// One deliberate divergence from `bootstrap.ps1`: a token-substituted value is
+/// separator-normalised for the host, so Windows emits `C:\dev\ws\zephyr`
+/// rather than the script's mixed `C:\dev\ws/zephyr` (it interpolates the
+/// manifest's forward-slash-joined value straight into a backslash path). Both
+/// work as `ZEPHYR_BASE`; only one is copy-pasteable without a double-take.
+/// A value with no token in it is passed through untouched.
+pub fn render_env_lines(
+    env: &[(String, String)],
+    tokens: Tokens,
+    prefix: &str,
+    is_windows: bool,
+) -> Vec<String> {
+    env.iter()
+        .map(|(key, raw)| {
+            let mut value = tokens.apply(raw);
+            let substituted = value != *raw;
+            if is_windows {
+                if substituted {
+                    value = value.replace('/', "\\");
+                }
+                format!("{prefix}$env:{key} = \"{value}\"")
+            } else if value.contains('/') {
+                format!("{prefix}export {key}=\"{value}\"")
+            } else {
+                format!("{prefix}export {key}={value}")
+            }
+        })
+        .collect()
+}
+
+/// `--print-env`: the venv-activation comment header plus the rendered `env`
+/// map. Both scripts print exactly this and exit 0.
+pub fn print_env_block(
+    facts: &BootstrapFacts,
+    tokens: Tokens,
+    venv_bin_dir: &str,
+    is_windows: bool,
+) -> Vec<String> {
+    let workspace = tokens.workspace_dir;
+    let venv = &facts.venv_dir_name;
+    let mut lines = if is_windows {
         vec![
             "# Add to your PowerShell profile (or run before invoking the SDK):".to_string(),
             "# Activate the workspace venv (west + Zephyr/SDK Python deps live here):".to_string(),
-            format!("#   & \"{workspace_dir}\\.venv\\Scripts\\Activate.ps1\""),
-            format!("$env:ZEPHYR_BASE = \"{workspace_dir}\\zephyr\""),
-            "$env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"".to_string(),
+            format!("#   & \"{workspace}\\{venv}\\{venv_bin_dir}\\Activate.ps1\""),
         ]
     } else {
         vec![
             "# Add to your shell profile (or run before invoking the SDK):".to_string(),
             "# Activate the workspace venv (west + Zephyr/SDK Python deps live here):".to_string(),
-            format!("#   source \"{workspace_dir}/.venv/bin/activate\""),
-            format!("export ZEPHYR_BASE=\"{workspace_dir}/zephyr\""),
-            "export ZEPHYR_TOOLCHAIN_VARIANT=zephyr".to_string(),
+            format!("#   source \"{workspace}/{venv}/{venv_bin_dir}/activate\""),
         ]
-    }
+    };
+    lines.extend(render_env_lines(&facts.env, tokens, "", is_windows));
+    lines
 }
 
-/// The trailing manual-install hint. POSIX hosts get the optional-native-libs
-/// block that unlocks the Yocto-side backends (apt on Linux, brew on macOS);
-/// native Windows gets the "NOT auto-installed" toolchain block instead.
-pub fn optional_libs_block(host: HostOs, workspace_dir: &str) -> Vec<String> {
-    match host {
-        HostOs::Windows => vec![
+/// The trailing manual-install hint. POSIX prints the manifest's per-OS
+/// optional-native-libs note (plus its install command, when the OS has one);
+/// native Windows prints the script's literal Arm/Zephyr-SDK block followed by
+/// the manifest's Windows note.
+pub fn optional_libs_block(
+    facts: &BootstrapFacts,
+    host: HostOs,
+    workspace_dir: &str,
+) -> Vec<String> {
+    let hint = facts.native_lib_hint(host);
+    if host == HostOs::Windows {
+        let mut lines = vec![
             String::new(),
             "bootstrap: NOT auto-installed (manual, one-time):".to_string(),
             String::new(),
@@ -49,76 +106,67 @@ pub fn optional_libs_block(host: HostOs, workspace_dir: &str) -> Vec<String> {
             "  # Zephyr SDK (alternative cross-toolchain + host tools like dtc):".to_string(),
             format!("  #   run 'west sdk install' from {workspace_dir} after this step."),
             String::new(),
-            "  # native_sim / Yocto: not available on native Windows -- use WSL2".to_string(),
-            "  #   (docs/cross-platform-setup.md section 5) and scripts/bootstrap.sh there."
-                .to_string(),
-        ],
-        HostOs::Linux => {
-            let mut lines = optional_libs_header();
-            lines.extend([
-                String::new(),
-                "  # libmosquitto-dev  -> alp_mqtt_* (cleartext + TLS)".to_string(),
-                "  # libasound2-dev    -> alp_audio_*".to_string(),
-                "  # libssl-dev        -> alp_hash_* / alp_aead_* / alp_random_bytes".to_string(),
-                String::new(),
-                "  sudo apt-get install -y libmosquitto-dev libasound2-dev libssl-dev pkg-config"
-                    .to_string(),
-            ]);
-            lines
+        ];
+        if let Some(hint) = hint {
+            lines.push(format!("  {}", hint.note));
         }
-        HostOs::MacOs => {
-            let mut lines = optional_libs_header();
-            lines.extend([
-                String::new(),
-                "  # Equivalents via Homebrew:".to_string(),
-                "  brew install mosquitto pkg-config".to_string(),
-                "  # Note: macOS uses CoreAudio rather than ALSA, so the Yocto audio".to_string(),
-                "  # backend doesn't apply on macOS hosts.  OpenSSL ships with macOS.".to_string(),
-            ]);
-            lines
-        }
-        HostOs::Other => {
-            let mut lines = optional_libs_header();
-            lines.push("  (OS not auto-detected; see docs/testing.md)".to_string());
-            lines
-        }
+        return lines;
     }
-}
 
-/// The blank line + `info` header both POSIX branches share (bootstrap.sh:266-267).
-fn optional_libs_header() -> Vec<String> {
-    vec![
+    let mut lines = vec![
         String::new(),
         "bootstrap: Optional native libraries unlock the Yocto-side backends:".to_string(),
-    ]
+    ];
+    match hint {
+        Some(hint) => {
+            lines.push(String::new());
+            lines.push(format!("  {}", hint.note));
+            if let Some(command) = hint.command.as_deref().filter(|c| !c.is_empty()) {
+                lines.push(String::new());
+                lines.push(format!("  {command}"));
+            }
+        }
+        None => lines.push("  (OS not auto-detected; see docs/testing.md)".to_string()),
+    }
+    lines
 }
 
-/// The closing "Next steps:" block: activate the venv, export `ZEPHYR_BASE`,
-/// run `tan doctor`, and one ready-to-paste `west build` for the platform's
-/// canonical example target.
+/// The closing "Next steps:" block: activate the venv, export the manifest's
+/// `env` map, run `tan doctor`, and one ready-to-paste `west build` for the
+/// platform's canonical example target.
 pub fn next_steps_block(
-    workspace_dir: &str,
+    facts: &BootstrapFacts,
+    tokens: Tokens,
     venv_dir: &str,
-    repo_root: &str,
+    venv_bin_dir: &str,
     is_windows: bool,
 ) -> Vec<String> {
+    let repo_root = tokens.sdk_root;
+    let mut lines = vec![String::new(), "Next steps:".to_string()];
     if is_windows {
-        vec![
-            String::new(),
-            "Next steps:".to_string(),
+        lines.push(
             "  # Activate the workspace venv (west + Zephyr/SDK deps + tan's Python backend):"
                 .to_string(),
-            format!("  & \"{venv_dir}\\Scripts\\Activate.ps1\""),
-            String::new(),
-            "  # Make Zephyr reachable for builds:".to_string(),
-            format!("  $env:ZEPHYR_BASE = \"{workspace_dir}\\zephyr\""),
-            "  $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"".to_string(),
-            String::new(),
-            "  # Sanity-check the host environment (needs tan on PATH -- see README.md".to_string(),
-            "  # for `cargo install --git https://github.com/alplabai/tan-cli --bin tan`):"
-                .to_string(),
-            "  tan doctor".to_string(),
-            String::new(),
+        );
+        lines.push(format!("  & \"{venv_dir}\\{venv_bin_dir}\\Activate.ps1\""));
+    } else {
+        lines.push(
+            "  # Activate the workspace venv (west + Zephyr/SDK deps live here):".to_string(),
+        );
+        lines.push(format!("  source \"{venv_dir}/{venv_bin_dir}/activate\""));
+    }
+    lines.push(String::new());
+    lines.push("  # Make Zephyr reachable for builds:".to_string());
+    lines.extend(render_env_lines(&facts.env, tokens, "  ", is_windows));
+    lines.extend([
+        String::new(),
+        "  # Sanity-check the host environment (needs tan on PATH -- see README.md".to_string(),
+        "  # for `cargo install --git https://github.com/alplabai/tan-cli --bin tan`):".to_string(),
+        "  tan doctor".to_string(),
+        String::new(),
+    ]);
+    if is_windows {
+        lines.extend([
             "  # Or jump straight into building an example for real silicon:".to_string(),
             "  west build -b alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he `".to_string(),
             format!(
@@ -128,23 +176,9 @@ pub fn next_steps_block(
             "References:".to_string(),
             "  - docs\\cross-platform-setup.md  -- the full per-OS setup guide".to_string(),
             "  - docs\\cli.md                   -- the tan CLI verb reference".to_string(),
-        ]
+        ]);
     } else {
-        vec![
-            String::new(),
-            "Next steps:".to_string(),
-            "  # Activate the workspace venv (west + Zephyr/SDK deps live here):".to_string(),
-            format!("  source \"{venv_dir}/bin/activate\""),
-            String::new(),
-            "  # Make Zephyr reachable for builds:".to_string(),
-            format!("  export ZEPHYR_BASE=\"{workspace_dir}/zephyr\""),
-            "  export ZEPHYR_TOOLCHAIN_VARIANT=zephyr".to_string(),
-            String::new(),
-            "  # Sanity-check the host environment (needs tan on PATH -- see README.md".to_string(),
-            "  # for `cargo install --git https://github.com/alplabai/tan-cli --bin tan`):"
-                .to_string(),
-            "  tan doctor".to_string(),
-            String::new(),
+        lines.extend([
             "  # Run the local test suite:".to_string(),
             "  bash scripts/test-all.sh".to_string(),
             String::new(),
@@ -157,16 +191,26 @@ pub fn next_steps_block(
                 .to_string(),
             "  - docs/test-plan.md        -- per-feature verification ledger (⏳ / 🟡 / ✅)"
                 .to_string(),
-        ]
+        ]);
     }
+    lines
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::manifest::{fallback_facts, parse_bootstrap_manifest};
     use super::*;
 
-    /// Byte-parity against `bootstrap.sh:94-100`'s heredoc. If this test has to
-    /// change, the SDK script changed and the port must be re-synced.
+    const REAL_MANIFEST: &str =
+        include_str!("../../../../contract/fixtures/bootstrap/manifest.json");
+
+    fn manifest_facts() -> BootstrapFacts {
+        parse_bootstrap_manifest(REAL_MANIFEST).expect("real manifest must parse")
+    }
+
+    /// Byte-parity against the WORKING-TREE `bootstrap.sh`'s "Print-env
+    /// shortcut" section: three `printf` header lines then `print_env_lines`,
+    /// which quotes a value only when it contains `/`.
     #[test]
     fn print_env_posix_matches_bootstrap_sh_verbatim() {
         let expected = "\
@@ -175,15 +219,24 @@ mod tests {
 #   source \"/home/dev/work/.venv/bin/activate\"
 export ZEPHYR_BASE=\"/home/dev/work/zephyr\"
 export ZEPHYR_TOOLCHAIN_VARIANT=zephyr";
+        let tokens = Tokens {
+            sdk_root: "/home/dev/work/alp-sdk",
+            workspace_dir: "/home/dev/work",
+        };
         assert_eq!(
-            print_env_block("/home/dev/work", false).join("\n"),
+            print_env_block(&manifest_facts(), tokens, "bin", false).join("\n"),
+            expected
+        );
+        // The fallback constants must render the same bytes as the manifest.
+        assert_eq!(
+            print_env_block(&fallback_facts((3, 10)), tokens, "bin", false).join("\n"),
             expected
         );
     }
 
-    /// Byte-parity against `bootstrap.ps1:75-81`'s here-string. The backticks
-    /// there escape `$env:` for PowerShell, so the RENDERED text is a bare
-    /// `$env:ZEPHYR_BASE = "..."` — that rendered form is the contract.
+    /// Byte-parity against the WORKING-TREE `bootstrap.ps1`'s "Print-env
+    /// shortcut" section (`Write-EnvLines` always quotes), modulo the
+    /// documented separator normalisation in [`render_env_lines`].
     #[test]
     fn print_env_windows_matches_bootstrap_ps1_verbatim() {
         let expected = "\
@@ -192,25 +245,72 @@ export ZEPHYR_TOOLCHAIN_VARIANT=zephyr";
 #   & \"C:\\dev\\work\\.venv\\Scripts\\Activate.ps1\"
 $env:ZEPHYR_BASE = \"C:\\dev\\work\\zephyr\"
 $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"";
-        assert_eq!(print_env_block("C:\\dev\\work", true).join("\n"), expected);
+        let tokens = Tokens {
+            sdk_root: "C:\\dev\\work\\alp-sdk",
+            workspace_dir: "C:\\dev\\work",
+        };
+        assert_eq!(
+            print_env_block(&manifest_facts(), tokens, "Scripts", true).join("\n"),
+            expected
+        );
+        assert_eq!(
+            print_env_block(&fallback_facts((3, 10)), tokens, "Scripts", true).join("\n"),
+            expected
+        );
+    }
+
+    /// A manifest that renames the venv dir or adds an env var must reach the
+    /// output without a tan release — that is the whole point of consuming it.
+    #[test]
+    fn a_changed_manifest_changes_the_rendered_env_block() {
+        let doc = REAL_MANIFEST
+            .replace("\"dirName\": \".venv\"", "\"dirName\": \".venv-4.5\"")
+            .replace(
+                "\"ZEPHYR_TOOLCHAIN_VARIANT\": \"zephyr\"",
+                "\"ZEPHYR_TOOLCHAIN_VARIANT\": \"zephyr\", \"ZEPHYR_EXTRA\": \"${SDK_ROOT}/x\"",
+            );
+        let facts = parse_bootstrap_manifest(&doc).expect("edited manifest must parse");
+        let tokens = Tokens {
+            sdk_root: "/ws/alp-sdk",
+            workspace_dir: "/ws",
+        };
+        let rendered = print_env_block(&facts, tokens, "bin", false).join("\n");
+        assert!(
+            rendered.contains("/ws/.venv-4.5/bin/activate"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("export ZEPHYR_EXTRA=\"/ws/alp-sdk/x\""),
+            "{rendered}"
+        );
     }
 
     #[test]
-    fn optional_libs_picks_the_per_host_block() {
-        let linux = optional_libs_block(HostOs::Linux, "/ws").join("\n");
+    fn optional_libs_renders_the_manifest_hint_per_host() {
+        let facts = manifest_facts();
+        let linux = optional_libs_block(&facts, HostOs::Linux, "/ws").join("\n");
         assert!(
-            linux.contains("sudo apt-get install -y libmosquitto-dev"),
+            linux.contains("Optional native libraries unlock"),
             "{linux}"
         );
-        let mac = optional_libs_block(HostOs::MacOs, "/ws").join("\n");
-        assert!(mac.contains("brew install mosquitto pkg-config"), "{mac}");
-        let win = optional_libs_block(HostOs::Windows, "C:\\ws").join("\n");
+        assert!(
+            linux.contains(
+                "  sudo apt-get install -y libmosquitto-dev libasound2-dev libssl-dev pkg-config"
+            ),
+            "{linux}"
+        );
+        let mac = optional_libs_block(&facts, HostOs::MacOs, "/ws").join("\n");
+        assert!(mac.contains("  brew install mosquitto pkg-config"), "{mac}");
+        // The Windows hint has `command: null` -> note only, no blank command line.
+        let win = optional_libs_block(&facts, HostOs::Windows, "C:\\ws").join("\n");
         assert!(
             win.contains("NOT auto-installed (manual, one-time)"),
             "{win}"
         );
         assert!(win.contains("run 'west sdk install' from C:\\ws"), "{win}");
-        let other = optional_libs_block(HostOs::Other, "/ws").join("\n");
+        assert!(win.contains("the canonical use is WSL2 + Ubuntu"), "{win}");
+        // `*)` arm: no hint for an unrecognised OS.
+        let other = optional_libs_block(&facts, HostOs::Other, "/ws").join("\n");
         assert!(
             other.contains("(OS not auto-detected; see docs/testing.md)"),
             "{other}"
@@ -219,7 +319,18 @@ $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"";
 
     #[test]
     fn next_steps_uses_the_platform_activation_and_example_target() {
-        let posix = next_steps_block("/ws", "/ws/.venv", "/ws/alp-sdk", false).join("\n");
+        let facts = manifest_facts();
+        let posix = next_steps_block(
+            &facts,
+            Tokens {
+                sdk_root: "/ws/alp-sdk",
+                workspace_dir: "/ws",
+            },
+            "/ws/.venv",
+            "bin",
+            false,
+        )
+        .join("\n");
         assert!(
             posix.contains("  source \"/ws/.venv/bin/activate\""),
             "{posix}"
@@ -231,7 +342,17 @@ $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"";
         assert!(posix.contains("native_sim/native/64"), "{posix}");
         assert!(posix.contains("bash scripts/test-all.sh"), "{posix}");
 
-        let win = next_steps_block("C:\\ws", "C:\\ws\\.venv", "C:\\ws\\alp-sdk", true).join("\n");
+        let win = next_steps_block(
+            &facts,
+            Tokens {
+                sdk_root: "C:\\ws\\alp-sdk",
+                workspace_dir: "C:\\ws",
+            },
+            "C:\\ws\\.venv",
+            "Scripts",
+            true,
+        )
+        .join("\n");
         assert!(
             win.contains("  & \"C:\\ws\\.venv\\Scripts\\Activate.ps1\""),
             "{win}"
@@ -246,5 +367,24 @@ $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"";
         );
         // native_sim does not exist on native Windows — must NOT be suggested.
         assert!(!win.contains("native_sim"), "{win}");
+    }
+
+    /// The reuse path repoints WORKSPACE_DIR after `--print-env` has returned;
+    /// rendering must follow it. `bootstrap.sh` re-substitutes per call for
+    /// this reason, `bootstrap.ps1` binds once and prints the pre-reuse path.
+    #[test]
+    fn env_lines_follow_a_repointed_workspace_dir() {
+        let facts = manifest_facts();
+        let reused = Tokens {
+            sdk_root: "/cache/alp-sdk",
+            workspace_dir: "/adopted/zephyrproject",
+        };
+        assert_eq!(
+            render_env_lines(&facts.env, reused, "  ", false),
+            vec![
+                "  export ZEPHYR_BASE=\"/adopted/zephyrproject/zephyr\"",
+                "  export ZEPHYR_TOOLCHAIN_VARIANT=zephyr",
+            ]
+        );
     }
 }

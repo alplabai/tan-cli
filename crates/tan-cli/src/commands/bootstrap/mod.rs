@@ -6,16 +6,18 @@
 //! the workspace venv, install west into it, `west init -l` / `west update` the
 //! Zephyr workspace beside the alp-sdk checkout, and install the Python deps.
 //! No `bash` anywhere — native Windows is a first-class host (#49), so the two
-//! scripts are the parity oracle for step order and message strings, not a
-//! runtime dependency. The compiler toolchains (Zephyr SDK, vendor SDKs) stay
-//! out of scope; `doctor` detects + points to those.
+//! scripts are the parity oracle for CONTROL FLOW and message strings, not a
+//! runtime dependency. The FACTS come from `<sdkRoot>/metadata/bootstrap.json`
+//! (alp-sdk#917), which names tan a required consumer. The compiler toolchains
+//! (Zephyr SDK, vendor SDKs) stay out of scope; `doctor` detects + points to
+//! those.
 //!
 //! Decision logic lives in `tan_core::bootstrap`; the spawning steps live in
-//! `steps`; this file is orchestration + the envelope.
+//! [`steps`]; this file is orchestration + the envelope.
 //!
 //! Text mode streams the (long) install live on inherited stdio; JSON mode
 //! captures it and emits exactly one envelope, folding a failing step's output
-//! tail into the issue message.
+//! tail into the issue message and every non-fatal warning into an issue.
 
 mod steps;
 mod west_config;
@@ -25,9 +27,10 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use tan_core::bootstrap::{
-    ExistingWorkspace, HostOs, WorkspaceChoice, YoctoGate, ZEPHYR_VERSION, decide_workspace_reuse,
-    in_play_runtimes, next_steps_block, optional_libs_block, pin_major_minor, print_env_block,
-    yocto_gate, yocto_mixed_warning, yocto_only_refusal,
+    BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, ExistingWorkspace, HostOs, Tokens,
+    WorkspaceChoice, YoctoGate, decide_workspace_reuse, fallback_facts, in_play_runtimes,
+    next_steps_block, optional_libs_block, parse_bootstrap_manifest, print_env_block,
+    resolve_pin_major_minor, yocto_gate, yocto_mixed_warning, yocto_only_refusal,
 };
 use tan_core::sdk_catalogue::TopologyCore;
 
@@ -35,7 +38,7 @@ use super::CommandRun;
 use crate::cli::{BootstrapArgs, GlobalArgs};
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
-use crate::util::resolve_cli_project_context;
+use crate::util::{MIN_PYTHON, resolve_cli_project_context};
 
 use steps::{
     Log, Runner, Workspace, check_prerequisites, ensure_venv, native, pip_phase, west_phase,
@@ -43,7 +46,7 @@ use steps::{
 use west_config::{reconcile_west_manifest_path, same_directory};
 
 /// `data` payload for the `bootstrap` envelope: the resolved SDK root, the
-/// three paths the run produced, and the pass-through flags.
+/// three paths the run produced, where its facts came from, and the flags.
 ///
 /// `schemaVersion` is `"2"`: v1's `scriptPath` named `<sdkRoot>/scripts/
 /// bootstrap.sh`, which this command no longer runs (and no consumer ever read
@@ -61,12 +64,21 @@ struct BootstrapData {
     /// `$ZEPHYR_BASE` workspace); empty when unresolved.
     #[serde(rename = "workspaceDir")]
     workspace_dir: String,
-    /// `<workspaceDir>/.venv` — the hermetic west + Python deps venv.
+    /// `<workspaceDir>/<venv.dirName>` — the hermetic west + Python deps venv.
     #[serde(rename = "venvDir")]
     venv_dir: String,
     /// `<workspaceDir>/zephyr` — the value to export as `ZEPHYR_BASE`.
     #[serde(rename = "zephyrBase")]
     zephyr_base: String,
+    /// Whether the workspace facts came from the SDK's
+    /// `metadata/bootstrap.json` (alp-sdk#917) rather than tan's documented
+    /// fallback constants. A consumer diagnosing "why did it use THAT pin"
+    /// needs to know which side it read.
+    #[serde(rename = "factsFromManifest")]
+    facts_from_manifest: bool,
+    /// The Zephyr `MAJOR.MINOR` the workspace-reuse test compared against.
+    #[serde(rename = "zephyrPin")]
+    zephyr_pin: String,
     /// `--no-pip` (skip the Python dependency installs).
     #[serde(rename = "noPip")]
     no_pip: bool,
@@ -78,13 +90,36 @@ struct BootstrapData {
     print_env: bool,
 }
 
+/// Mutable run state the envelope reports, threaded through the phases.
+struct RunPaths {
+    /// `REPO_ROOT` — the alp-sdk checkout.
+    repo_root: PathBuf,
+    /// `WORKSPACE_DIR` — repointed when a `$ZEPHYR_BASE` workspace is adopted.
+    workspace_dir: PathBuf,
+    /// `<WORKSPACE_DIR>/<venv.dirName>` — follows `workspace_dir`.
+    venv_dir: PathBuf,
+}
+
+impl RunPaths {
+    /// `${SDK_ROOT}` / `${WORKSPACE_DIR}` values for the CURRENT paths.
+    /// Re-derived at each use so a repointed workspace is reflected — see
+    /// `tan_core::bootstrap::Tokens`.
+    fn token_strings(&self) -> (String, String) {
+        (
+            self.repo_root.to_string_lossy().into_owned(),
+            self.workspace_dir.to_string_lossy().into_owned(),
+        )
+    }
+}
+
 /// Runs `tan bootstrap`. Resolves the SDK root and the west topdir beside it,
-/// short-circuits on `--print-env`, gates a Yocto-only project on a non-Linux
-/// host, then walks the venv → west → pip phases in the scripts' order.
+/// loads the workspace facts, short-circuits on `--print-env`, gates a
+/// Yocto-only project on a non-Linux host, then walks the venv → west → pip
+/// phases in the scripts' order.
 pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     let is_windows = cfg!(windows);
     let host = HostOs::detect(std::env::consts::OS);
-    let log = Log { json: g.is_json() };
+    let mut log = Log::new(g.is_json());
 
     let context = resolve_cli_project_context(g);
     let project = Project {
@@ -109,16 +144,58 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     // alp-sdk itself the manifest repo, which is what registers the `alp-*`
     // extension commands (#769). Zephyr + HALs land as its siblings.
     let repo_root = PathBuf::from(&sdk_root);
-    let mut workspace_dir = repo_root
+    let workspace_dir = repo_root
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo_root.clone());
-    let mut venv_dir = workspace_dir.join(".venv");
+    let mut paths = RunPaths {
+        venv_dir: workspace_dir.join(".venv"),
+        workspace_dir,
+        repo_root,
+    };
 
-    // --print-env short-circuits BEFORE any prerequisite check or venv work.
+    // Workspace facts: the SDK's manifest when it has one, else the documented
+    // fallback constants. An unsupported schemaVersion is FATAL — silently
+    // falling back to hand-ported values is the RFC #843 drift.
+    let facts = match load_facts(&sdk_root) {
+        Ok(facts) => facts,
+        Err(message) => {
+            let data = data_for(args, &sdk_root, &paths, &fallback_facts(MIN_PYTHON), "");
+            return failure(
+                g,
+                ExitCode::ValidationFailure,
+                "manifest",
+                vec![message],
+                data,
+            );
+        }
+    };
+    // `venv.dirName` is a manifest fact, so the venv path is only final now.
+    paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
+    // ONE pin authority, shared with `preflight`'s zephyrVersion check.
+    let pin = resolve_pin_major_minor(
+        std::fs::read_to_string(paths.repo_root.join("west.yml"))
+            .ok()
+            .as_deref(),
+        &facts.zephyr_version,
+    );
+
+    // `--print-env` short-circuits before any prerequisite check or venv work.
+    //
+    // Both scripts moved this AFTER their prereq check under #917, because
+    // reading the manifest needs `python3`/`python` and they must not surface a
+    // raw "command not found" first. tan parses the manifest with `serde_json`
+    // and has no such bootstrap-of-the-bootstrap, so the short-circuit stays
+    // where it is most useful: `--print-env` answers on a machine that is still
+    // missing cmake or ninja.
     if args.print_env {
-        let text = print_env_block(&native(&workspace_dir), is_windows);
-        let data = data_for(args, &sdk_root, &workspace_dir, &venv_dir);
+        let (sdk, ws) = paths.token_strings();
+        let tokens = Tokens {
+            sdk_root: &sdk,
+            workspace_dir: &ws,
+        };
+        let text = print_env_block(&facts, tokens, facts.venv_bin_dir(is_windows), is_windows);
+        let data = data_for(args, &sdk_root, &paths, &facts, &pin);
         return finish(g, ExitCode::Success, project, data, Vec::new(), text);
     }
 
@@ -127,13 +204,11 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     // Yocto-specific (venv + west + Zephyr requirements), and its Zephyr cores
     // need exactly this.
     let mut issues: Vec<Issue> = Vec::new();
-    let runtimes = in_play_runtimes(
-        &read_board_model(&context).unwrap_or_default(),
-        &read_som_topology(&context, &sdk_root),
-    );
+    let board = read_board_model(&context).unwrap_or_default();
+    let runtimes = in_play_runtimes(&board, &read_som_topology(&board, &sdk_root));
     match yocto_gate(&runtimes, host) {
         YoctoGate::Refuse => {
-            let data = data_for(args, &sdk_root, &workspace_dir, &venv_dir);
+            let data = data_for(args, &sdk_root, &paths, &facts, &pin);
             return failure(
                 g,
                 ExitCode::ValidationFailure,
@@ -142,22 +217,14 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
                 data,
             );
         }
-        YoctoGate::Warn => {
-            let message = yocto_mixed_warning();
-            log.line(&message);
-            issues.push(Issue {
-                code: "bootstrap.yocto-host".to_string(),
-                severity: "warning".to_string(),
-                message,
-            });
-        }
+        YoctoGate::Warn => log.warn("yocto-host", &yocto_mixed_warning()),
         YoctoGate::Clear => {}
     }
 
-    let host_python = match check_prerequisites(is_windows) {
+    let host_python = match check_prerequisites(&facts, is_windows) {
         Ok(python) => python,
         Err(lines) => {
-            let data = data_for(args, &sdk_root, &workspace_dir, &venv_dir);
+            let data = data_for(args, &sdk_root, &paths, &facts, &pin);
             return failure(
                 g,
                 ExitCode::RuntimeFailure,
@@ -168,50 +235,57 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         }
     };
 
-    log.line(&format!("Repo root:       {}", native(&repo_root)));
+    log.line(&format!("Repo root:       {}", native(&paths.repo_root)));
     if is_windows {
         log.line(&format!(
             "Workspace dir:   {}  (west topdir; alp-sdk is the manifest)",
-            native(&workspace_dir)
+            native(&paths.workspace_dir)
         ));
         log.line(&format!(
             "Python:          {}.{}",
             host_python.version.0, host_python.version.1
         ));
     } else {
-        log.line(&format!("Workspace dir:   {}", native(&workspace_dir)));
+        log.line(&format!(
+            "Workspace dir:   {}",
+            native(&paths.workspace_dir)
+        ));
         log.line(&format!("Detected OS:     {}", os_label(host)));
     }
 
-    let (reuse, clear_zephyr_base) = select_workspace(
-        &log,
-        is_windows,
-        &repo_root,
-        &mut workspace_dir,
-        &mut venv_dir,
-    );
+    let (reuse, clear_zephyr_base) =
+        select_workspace(&mut log, is_windows, &pin, &facts, &mut paths);
 
     let workspace = Workspace {
         is_windows,
-        repo_root: &repo_root,
-        workspace_dir: &workspace_dir,
-        venv_dir: &venv_dir,
+        facts: &facts,
+        repo_root: &paths.repo_root,
+        workspace_dir: &paths.workspace_dir,
+        venv_dir: &paths.venv_dir,
     };
     let runner = Runner {
         json: g.is_json(),
         clear_zephyr_base,
     };
-    let data = || data_for(args, &sdk_root, &workspace_dir, &venv_dir);
 
-    if !args.no_west || !args.no_pip {
-        if let Err(message) = ensure_venv(&workspace, &log, &runner, &host_python) {
-            return failure(g, ExitCode::RuntimeFailure, "failed", vec![message], data());
+    // The venv backs BOTH later phases, so it is created when either will run.
+    let venv = if args.no_west && args.no_pip {
+        None
+    } else {
+        match ensure_venv(&workspace, &mut log, &runner, &host_python) {
+            Ok(venv) => Some(venv),
+            Err(message) => {
+                let mut issues = issues;
+                issues.extend(log.take_issues());
+                let data = data_for(args, &sdk_root, &paths, &facts, &pin);
+                return fatal(g, project, data, issues, message);
+            }
         }
-    }
+    };
 
     if args.no_west {
         log.line("Skipping west setup (--no-west)");
-    } else {
+    } else if let Some(venv) = &venv {
         // Reconcile a stale `.west/config` manifest.path BEFORE west init/update
         // (#31): the "already initialised" branch runs `west update` without
         // re-running `west init -l`, so a config left over from a different SDK
@@ -219,50 +293,96 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         // west.yml. Pointless (and a stray write) when an existing workspace is
         // reused, since that path touches neither west nor this topdir.
         if !reuse {
-            if let Some((config_path, _old_rel, new_rel)) = reconcile_west_manifest_path(&sdk_root)
-            {
-                log.line(&format!(
-                    "reconciled {} manifest.path -> {new_rel}",
-                    config_path.display()
-                ));
+            if let Some((config_path, old_rel, new_rel)) = reconcile_west_manifest_path(&sdk_root) {
+                log.warn(
+                    "west-config-reconciled",
+                    &format!(
+                        "reconciled {} manifest.path {old_rel} -> {new_rel} (it named a different \
+                         SDK checkout under this topdir, #31)",
+                        config_path.display()
+                    ),
+                );
             }
         }
-        if let Err(message) = west_phase(&workspace, &log, &runner, reuse) {
-            return failure(g, ExitCode::RuntimeFailure, "failed", vec![message], data());
+        if let Err(message) = west_phase(&workspace, venv, &mut log, &runner, reuse) {
+            let mut issues = issues;
+            issues.extend(log.take_issues());
+            let data = data_for(args, &sdk_root, &paths, &facts, &pin);
+            return fatal(g, project, data, issues, message);
         }
     }
 
     if args.no_pip {
         log.line("Skipping pip installs (--no-pip)");
-    } else {
-        pip_phase(&workspace, &log, &runner);
+    } else if let Some(venv) = &venv {
+        pip_phase(&workspace, venv, &mut log, &runner);
     }
 
     // NOTE: this does NOT install the Zephyr SDK (the cross toolchains). Real
     // silicon targets need it -- run `west sdk install` from the workspace once.
-    let mut text = optional_libs_block(host, &native(&workspace_dir));
+    let venv_bin_dir = venv
+        .as_ref()
+        .map(|v| v.bin_dir.clone())
+        .unwrap_or_else(|| facts.venv_bin_dir(is_windows).to_string());
+    // `workspace` borrows `paths`; the closing blocks read `paths` directly.
+    let _ = workspace;
+    let (sdk, ws) = paths.token_strings();
+    let tokens = Tokens {
+        sdk_root: &sdk,
+        workspace_dir: &ws,
+    };
+    let mut text = optional_libs_block(&facts, host, &native(&paths.workspace_dir));
     text.push(String::new());
+    // Deliberately NOT the oracles' "Bootstrap complete." — `doctor`'s
+    // `bootstrap_fix_doctor_check` folds this exact line into its `bootstrapFix`
+    // check detail, and `tan`'s own house prefix is what reads correctly there
+    // ("bootstrap: complete."). The only line in the port that is reworded.
     text.push("bootstrap: complete.".to_string());
     text.extend(next_steps_block(
-        &native(&workspace_dir),
-        &native(&venv_dir),
-        &native(&repo_root),
+        &facts,
+        tokens,
+        &native(&paths.venv_dir),
+        &venv_bin_dir,
         is_windows,
     ));
-    finish(g, ExitCode::Success, project, data(), issues, text)
+    issues.extend(log.take_issues());
+    let data = data_for(args, &sdk_root, &paths, &facts, &pin);
+    finish(g, ExitCode::Success, project, data, issues, text)
+}
+
+/// Load `<sdkRoot>/metadata/bootstrap.json`, or fall back to the hand-ported
+/// constants when the SDK predates alp-sdk#917.
+///
+/// Version-skew guard, matching `parse_build_plan`: an ABSENT manifest is the
+/// legacy path and falls back; a manifest present with an unsupported
+/// `schemaVersion` (or one that cannot be parsed) is a hard `Err` naming why.
+/// Falling back THERE would silently re-introduce hand-ported behaviour against
+/// an SDK that explicitly declared something else — the RFC #843 drift.
+fn load_facts(sdk_root: &str) -> Result<BootstrapFacts, String> {
+    let path = Path::new(sdk_root).join(BOOTSTRAP_MANIFEST_REL_PATH);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => parse_bootstrap_manifest(&text).map_err(|e| e.to_string()),
+        // Any read failure (absent, unreadable) is treated as "legacy SDK":
+        // every released alp-sdk today has no manifest at all.
+        Err(_) => Ok(fallback_facts(MIN_PYTHON)),
+    }
 }
 
 /// Workspace selection: reuse the `$ZEPHYR_BASE` tree only when it is a
 /// `<pin>.x` west workspace whose manifest IS this alp-sdk checkout. Returns
-/// `(reuse, clear_zephyr_base)` and, on reuse, repoints `workspace_dir` /
-/// `venv_dir` at the adopted tree. The rejected cases clear `$ZEPHYR_BASE` from
-/// every child so a stale tree cannot hijack `west init`.
+/// `(reuse, clear_zephyr_base)` and, on reuse, repoints `paths.workspace_dir` /
+/// `paths.venv_dir` at the adopted tree. The rejected cases clear
+/// `$ZEPHYR_BASE` from every child so a stale tree cannot hijack `west init`.
+///
+/// Both rejection outcomes are recorded as warnings, not just printed: a JSON
+/// consumer otherwise could not tell that its `$ZEPHYR_BASE` was refused and a
+/// second workspace built somewhere else entirely.
 fn select_workspace(
-    log: &Log,
+    log: &mut Log,
     is_windows: bool,
-    repo_root: &Path,
-    workspace_dir: &mut PathBuf,
-    venv_dir: &mut PathBuf,
+    pin: &str,
+    facts: &BootstrapFacts,
+    paths: &mut RunPaths,
 ) -> (bool, bool) {
     // Read the ENVIRONMENT VARIABLE only -- never a shell rc file -- so this
     // behaves identically under bash / zsh / fish / PowerShell / WSL.
@@ -277,41 +397,41 @@ fn select_workspace(
         return (false, false);
     };
     let top = zephyr_base_path.parent().map(Path::to_path_buf);
-    let pin = pin_major_minor(ZEPHYR_VERSION).unwrap_or_default();
     let var = if is_windows {
         "$env:ZEPHYR_BASE"
     } else {
         "$ZEPHYR_BASE"
     };
-    let facts = ExistingWorkspace {
+    let existing = ExistingWorkspace {
         version_file: &version_file,
         top_is_west_workspace: top.as_ref().is_some_and(|t| t.join(".west").is_dir()),
         manifest_is_sdk: top
             .as_deref()
-            .is_some_and(|t| manifest_points_at(t, repo_root)),
+            .is_some_and(|t| manifest_points_at(t, &paths.repo_root)),
     };
-    match decide_workspace_reuse(&facts, &pin) {
+    match decide_workspace_reuse(&existing, pin) {
         WorkspaceChoice::Reuse { major_minor } => {
             // Never modify the user's tree: adopt it and skip init/update.
-            *workspace_dir = top.unwrap_or_else(|| workspace_dir.clone());
-            *venv_dir = workspace_dir.join(".venv");
+            paths.workspace_dir = top.unwrap_or_else(|| paths.workspace_dir.clone());
+            paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
             log.line(&format!(
                 "Reusing compatible alp-sdk workspace from {var}: {} (Zephyr {major_minor}.x)",
-                native(workspace_dir)
+                native(&paths.workspace_dir)
             ));
             (true, false)
         }
         WorkspaceChoice::ManifestMismatch => {
             let existing = native(top.as_deref().unwrap_or(&zephyr_base_path));
-            log.line(&format!(
-                "{var} workspace ({existing}) is a {pin}.x tree but its manifest is not alp-sdk's \
-                 west.yml"
-            ));
-            log.line(&format!(
-                "-- not reusing it (would leave 'west alp-migrate' unknown, #769); building an \
-                 alp-sdk workspace at {}",
-                native(workspace_dir)
-            ));
+            log.warn(
+                "zephyr-base-manifest-mismatch",
+                &format!(
+                    "{var} workspace ({existing}) is a {pin}.x tree but its manifest is not \
+                     alp-sdk's west.yml -- not reusing it (would leave 'west {}' unknown, #769); \
+                     building an alp-sdk workspace at {}",
+                    facts.west_extension_guard,
+                    native(&paths.workspace_dir)
+                ),
+            );
             (false, true)
         }
         WorkspaceChoice::Incompatible => {
@@ -321,9 +441,12 @@ fn select_workspace(
             } else {
                 " and building an isolated one"
             };
-            log.line(&format!(
-                "{var} ({zephyr_base}) is not a {pin}.x west workspace -- ignoring it{tail}"
-            ));
+            log.warn(
+                "zephyr-base-incompatible",
+                &format!(
+                    "{var} ({zephyr_base}) is not a {pin}.x west workspace -- ignoring it{tail}"
+                ),
+            );
             (false, true)
         }
     }
@@ -348,22 +471,24 @@ fn read_board_model(context: &tan_core::ProjectContext) -> Option<tan_core::Boar
     tan_core::parse_board_model(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-/// The SoM topology for the project's `som.sku`, read from the SDK metadata.
+/// The SoM topology for `board`'s `som.sku`, read from the SDK metadata.
 /// Supports both layouts the SDK has used — a flat `<sku>.yaml` or an
 /// `<sku>/som.yaml` directory. Empty when anything is missing or unparseable,
 /// which every caller must treat as "unresolvable, proceed".
-fn read_som_topology(context: &tan_core::ProjectContext, sdk_root: &str) -> Vec<TopologyCore> {
-    let Some(sku) = read_board_model(context)
-        .and_then(|board| board.som)
-        .and_then(|som| som.sku)
-        .filter(|sku| !sku.trim().is_empty())
+fn read_som_topology(board: &tan_core::BoardModel, sdk_root: &str) -> Vec<TopologyCore> {
+    let Some(sku) = board
+        .som
+        .as_ref()
+        .and_then(|som| som.sku.as_deref())
+        .map(str::trim)
+        .filter(|sku| !sku.is_empty())
     else {
         return Vec::new();
     };
     let dir = Path::new(sdk_root).join("metadata").join("e1m_modules");
     for candidate in [
         dir.join(format!("{sku}.yaml")),
-        dir.join(&sku).join("som.yaml"),
+        dir.join(sku).join("som.yaml"),
     ] {
         if let Ok(text) = std::fs::read_to_string(&candidate) {
             if let Ok(som) = tan_core::parse_som_preset(&text) {
@@ -402,13 +527,39 @@ fn finish(
     CommandRun {
         exit,
         text: if g.is_json() { Vec::new() } else { text },
-        json: None.or(json),
+        json,
     }
 }
 
-/// Assemble a failure `CommandRun`: one `bootstrap.<code>` issue whose message
-/// is `lines` joined, a null project, and those same lines as the text output
-/// (which is what `doctor --build --fix` and `build`'s auto-bootstrap surface).
+/// A failing STEP: the fatal message as a `bootstrap.failed` error issue, on
+/// top of whatever warnings the run had already recorded, keeping the resolved
+/// project + paths (unlike [`failure`], which reports a null project).
+fn fatal(
+    g: &GlobalArgs,
+    project: Project,
+    data: BootstrapData,
+    mut issues: Vec<Issue>,
+    message: String,
+) -> CommandRun {
+    issues.push(Issue {
+        code: "bootstrap.failed".to_string(),
+        severity: "error".to_string(),
+        message: message.clone(),
+    });
+    finish(
+        g,
+        ExitCode::RuntimeFailure,
+        project,
+        data,
+        issues,
+        vec![message],
+    )
+}
+
+/// Assemble a failure `CommandRun` for a refusal before any step ran: one
+/// `bootstrap.<code>` issue whose message is `lines` joined, a null project,
+/// and those same lines as the text output (which is what
+/// `doctor --build --fix` and `build`'s auto-bootstrap surface).
 fn failure(
     g: &GlobalArgs,
     exit: ExitCode,
@@ -433,15 +584,18 @@ fn failure(
 fn data_for(
     args: &BootstrapArgs,
     sdk_root: &str,
-    workspace_dir: &Path,
-    venv_dir: &Path,
+    paths: &RunPaths,
+    facts: &BootstrapFacts,
+    pin: &str,
 ) -> BootstrapData {
     BootstrapData {
         schema_version: "2".to_string(),
         sdk_root: sdk_root.to_string(),
-        workspace_dir: native(workspace_dir),
-        venv_dir: native(venv_dir),
-        zephyr_base: native(&workspace_dir.join("zephyr")),
+        workspace_dir: native(&paths.workspace_dir),
+        venv_dir: native(&paths.venv_dir),
+        zephyr_base: native(&paths.workspace_dir.join("zephyr")),
+        facts_from_manifest: facts.from_manifest,
+        zephyr_pin: pin.to_string(),
         no_pip: args.no_pip,
         no_west: args.no_west,
         print_env: args.print_env,
@@ -457,6 +611,8 @@ fn empty_data(args: &BootstrapArgs) -> BootstrapData {
         workspace_dir: String::new(),
         venv_dir: String::new(),
         zephyr_base: String::new(),
+        facts_from_manifest: false,
+        zephyr_pin: String::new(),
         no_pip: args.no_pip,
         no_west: args.no_west,
         print_env: args.print_env,
@@ -486,7 +642,7 @@ pub(super) fn capture_tail(stdout: &[u8], stderr: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::capture_tail;
+    use super::*;
 
     #[test]
     fn capture_tail_prefers_stderr_and_keeps_last_lines_in_order() {
@@ -511,5 +667,82 @@ mod tests {
     #[test]
     fn capture_tail_is_empty_when_nothing_was_captured() {
         assert_eq!(capture_tail(b"", b""), "");
+    }
+
+    /// Fresh temp dir for one test, tagged and pid-scoped like the other
+    /// command test suites in this crate.
+    fn tmp(tag: &str) -> PathBuf {
+        let d =
+            std::env::temp_dir().join(format!("tan-bootstrap-mod-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn an_sdk_without_a_manifest_falls_back_but_a_skewed_one_is_fatal() {
+        let sdk = tmp("facts");
+        // No metadata/bootstrap.json at all -> legacy SDK -> fallback constants.
+        let legacy = load_facts(&sdk.to_string_lossy()).expect("absent manifest must fall back");
+        assert!(!legacy.from_manifest);
+        assert_eq!(legacy.zephyr_version, "v4.4.0");
+
+        // Present and supported -> its values win.
+        let metadata = sdk.join("metadata");
+        std::fs::create_dir_all(&metadata).unwrap();
+        let real = include_str!("../../../../../contract/fixtures/bootstrap/manifest.json");
+        std::fs::write(metadata.join("bootstrap.json"), real).unwrap();
+        let loaded = load_facts(&sdk.to_string_lossy()).expect("real manifest must parse");
+        assert!(loaded.from_manifest);
+        assert_eq!(loaded.west_pip_spec, "west>=0.14.0");
+
+        // Present but skewed -> HARD ERROR, never a silent fallback (RFC #843).
+        std::fs::write(
+            metadata.join("bootstrap.json"),
+            real.replace("\"schemaVersion\": 1", "\"schemaVersion\": 99"),
+        )
+        .unwrap();
+        let err = load_facts(&sdk.to_string_lossy()).expect_err("skew must not fall back");
+        assert!(err.contains("schemaVersion 99"), "{err}");
+        let _ = std::fs::remove_dir_all(&sdk);
+    }
+
+    #[test]
+    fn som_topology_reads_both_metadata_layouts_and_tolerates_neither() {
+        let sdk = tmp("topology");
+        let modules = sdk.join("metadata").join("e1m_modules");
+        std::fs::create_dir_all(modules.join("E1M-DIR101")).unwrap();
+        let yaml = "schema_version: 1\nsku: E1M-FLAT101\nfamily: aen\nsilicon: alif-e7\n\
+                    topology:\n  m55_hp:\n    board: b\n";
+        std::fs::write(modules.join("E1M-FLAT101.yaml"), yaml).unwrap();
+        std::fs::write(
+            modules.join("E1M-DIR101").join("som.yaml"),
+            yaml.replace("E1M-FLAT101", "E1M-DIR101"),
+        )
+        .unwrap();
+
+        let board = |sku: &str| tan_core::BoardModel {
+            som: Some(tan_core::model::Som {
+                sku: Some(sku.to_string()),
+            }),
+            ..Default::default()
+        };
+        let sdk_root = sdk.to_string_lossy().into_owned();
+        assert_eq!(
+            read_som_topology(&board("E1M-FLAT101"), &sdk_root)
+                .first()
+                .map(|c| c.id.clone()),
+            Some("m55_hp".to_string())
+        );
+        assert_eq!(
+            read_som_topology(&board("E1M-DIR101"), &sdk_root)
+                .first()
+                .map(|c| c.id.clone()),
+            Some("m55_hp".to_string())
+        );
+        // Unknown SKU / no SKU -> empty, which the Yocto gate treats as "run".
+        assert!(read_som_topology(&board("E1M-NOPE"), &sdk_root).is_empty());
+        assert!(read_som_topology(&tan_core::BoardModel::default(), &sdk_root).is_empty());
+        let _ = std::fs::remove_dir_all(&sdk);
     }
 }

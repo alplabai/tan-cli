@@ -372,6 +372,12 @@ pub struct BuildArgs {
     /// `--manifest`.
     #[arg(long = "manifest-from", value_name = "FILE")]
     pub manifest_from: Option<String>,
+    /// Never bootstrap implicitly. By default a text-mode build with no Zephyr
+    /// workspace (or a stale one) runs `tan bootstrap` first, which clones
+    /// Zephyr + the HALs beside the SDK checkout and takes minutes. Use this to
+    /// keep `tan build` to building and get the readiness report instead.
+    #[arg(long = "no-auto-bootstrap")]
+    pub no_auto_bootstrap: bool,
 }
 
 /// Args for `kconfig`: scope the board-scoped Kconfig symbol menu to one core.

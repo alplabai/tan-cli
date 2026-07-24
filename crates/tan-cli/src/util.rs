@@ -157,6 +157,7 @@ pub fn python_too_old(binary: &str) -> Option<String> {
 }
 
 /// A host Python interpreter that was probed and actually ran.
+#[derive(Debug)]
 pub struct HostPython {
     /// argv prefix that launches it — `["py", "-3"]`, `["python3"]`, …
     pub argv: Vec<String>,
