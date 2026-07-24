@@ -44,8 +44,8 @@ pub mod inspect;
 /// `tan kconfig` — board-scoped Kconfig symbol menu for one core (the vscode
 /// `prj.conf` LSP's live feed); wraps the SDK's `--emit kconfig`.
 pub mod kconfig;
-/// `tan model` envelope-wrapping helpers for the `alp_cli model` forward
-/// (argv/exit/wrap; the spawn/IO wiring lands in a follow-up).
+/// `tan model` — captures + wraps `alp_cli model <build|list|info|doctor>
+/// --format json` in tan's envelope (`model run` still streams via `sdk_cli`).
 pub mod model;
 /// `tan pinmux` — the E1M pinmux capability table (E1M pad → silicon function) for a SoM family.
 pub mod pinmux;

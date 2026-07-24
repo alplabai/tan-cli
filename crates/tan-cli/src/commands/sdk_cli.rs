@@ -13,7 +13,7 @@
 //! child's exit class.
 
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde::Serialize;
@@ -22,6 +22,17 @@ use super::CommandRun;
 use crate::cli::GlobalArgs;
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
+
+/// Resolved inputs for spawning `python -m alp_cli <sub> …` against an SDK
+/// checkout — everything [`prepare_alp_cli`] figures out once so both the
+/// streaming forwarders ([`run`]) and `model`'s captured-output path
+/// (`model::run`) share a single resolution instead of each re-deriving it.
+pub(crate) struct AlpCliSpawn {
+    pub python: String,
+    pub sdk_root: PathBuf,
+    pub pythonpath: OsString,
+    pub workspace_root: PathBuf,
+}
 
 /// Envelope `data` payload for a failed forward — just the verb, since a
 /// captured-output payload is impossible for these interactive passthroughs
@@ -76,30 +87,32 @@ fn build_pythonpath(
     std::env::join_paths(entries)
 }
 
-/// Run an `alp_cli` subcommand by spawning `python -m alp_cli <sub> <args…>`
-/// against the resolved SDK checkout, streaming its stdio through. `subcommand`
-/// is the bare verb (`model`/`monitor`/`new-som`/`faultdecode`).
-pub fn run(g: &GlobalArgs, subcommand: &str, passthrough: &[String]) -> CommandRun {
+/// Resolve the SDK root, python interpreter, and `PYTHONPATH` needed to spawn
+/// `python -m alp_cli <sub> …` — the guard chain (SDK root, python-too-old,
+/// PYTHONPATH build) shared by both [`run`]'s streaming spawn and `model`'s
+/// captured-output spawn. `subcommand` names the forward for the failing
+/// envelope's issue code/`data` (`fail`'s `<subcommand>.failed`) — the only
+/// per-caller bit of an otherwise identical resolution.
+pub(crate) fn prepare_alp_cli(g: &GlobalArgs, subcommand: &str) -> Result<AlpCliSpawn, CommandRun> {
     let workspace_root = crate::util::cli_workspace_root(g);
 
     let Some(sdk_root) = crate::util::resolve_sdk_root(g, &workspace_root) else {
-        return fail(
+        return Err(fail(
             g,
             subcommand,
             ExitCode::ValidationFailure,
             "alp-sdk root is unresolved. Use --sdk-root, pin one with \
              `tan sdk switch <version|path>`, or place the project near an alp-sdk checkout.",
-        );
+        ));
     };
 
-    let python = default_python_binary();
+    let python = default_python_binary().to_string();
     // Guard: the interpreter must be new enough to run the SDK scripts
     // (`@dataclass(slots=True)`, Python 3.10+) — parity with `generate`/`build`.
-    if let Some(message) = crate::util::python_too_old(python) {
-        return fail(g, subcommand, ExitCode::RuntimeFailure, &message);
+    if let Some(message) = crate::util::python_too_old(&python) {
+        return Err(fail(g, subcommand, ExitCode::RuntimeFailure, &message));
     }
 
-    let argv = build_argv(subcommand, passthrough, g.is_json());
     // Previously `.env("PYTHONPATH", sdk_root.join("scripts"))` unconditionally
     // — an outright overwrite ("ponytail: overwrite is fine — alp_cli needs
     // nothing else on PYTHONPATH", which was wrong) that silently dropped a
@@ -112,21 +125,40 @@ pub fn run(g: &GlobalArgs, subcommand: &str, passthrough: &[String]) -> CommandR
     ) {
         Ok(p) => p,
         Err(e) => {
-            return fail(
+            return Err(fail(
                 g,
                 subcommand,
                 ExitCode::RuntimeFailure,
                 &format!("failed to build PYTHONPATH for alp_cli: {e}"),
-            );
+            ));
         }
     };
-    let mut cmd = Command::new(python);
+
+    Ok(AlpCliSpawn {
+        python,
+        sdk_root,
+        pythonpath,
+        workspace_root,
+    })
+}
+
+/// Run an `alp_cli` subcommand by spawning `python -m alp_cli <sub> <args…>`
+/// against the resolved SDK checkout, streaming its stdio through. `subcommand`
+/// is the bare verb (`model`/`monitor`/`new-som`/`faultdecode`).
+pub fn run(g: &GlobalArgs, subcommand: &str, passthrough: &[String]) -> CommandRun {
+    let spawn = match prepare_alp_cli(g, subcommand) {
+        Ok(spawn) => spawn,
+        Err(guard_failure) => return guard_failure,
+    };
+
+    let argv = build_argv(subcommand, passthrough, g.is_json());
+    let mut cmd = Command::new(&spawn.python);
     cmd.args(&argv)
-        .current_dir(&workspace_root)
-        .env("ALP_SDK_ROOT", &sdk_root)
+        .current_dir(&spawn.workspace_root)
+        .env("ALP_SDK_ROOT", &spawn.sdk_root)
         // alp_cli's absolute imports (`from alp_cli import …`) resolve from
         // <sdk>/scripts; mirror `_alp_common.env_with_sdk()`.
-        .env("PYTHONPATH", &pythonpath);
+        .env("PYTHONPATH", &spawn.pythonpath);
 
     // Inherit stdio (the std default) and stream live — these are interactive /
     // passthrough tools, so capturing their output would break them.
@@ -149,7 +181,7 @@ pub fn run(g: &GlobalArgs, subcommand: &str, passthrough: &[String]) -> CommandR
             g,
             subcommand,
             ExitCode::RuntimeFailure,
-            &launch_error(python, &e),
+            &launch_error(&spawn.python, &e),
         ),
     }
 }
@@ -191,8 +223,10 @@ fn fail(g: &GlobalArgs, subcommand: &str, exit: ExitCode, message: &str) -> Comm
 }
 
 /// Map a Python launch I/O error to a user-facing message — special-casing
-/// `NotFound` with an install hint.
-fn launch_error(python: &str, e: &std::io::Error) -> String {
+/// `NotFound` with an install hint. `pub(crate)` so `model::run`'s own
+/// captured spawn (a python launch failure, not the child's own exit) reuses
+/// the identical message instead of re-deriving it.
+pub(crate) fn launch_error(python: &str, e: &std::io::Error) -> String {
     if e.kind() == std::io::ErrorKind::NotFound {
         format!("`{python}` not found on PATH — install Python 3.10+ and ensure it is on PATH.")
     } else {
