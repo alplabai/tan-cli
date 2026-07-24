@@ -60,9 +60,13 @@ pub fn sub_argv(sub: &ModelSub) -> Vec<String> {
             argv
         }
         ModelSub::Check(a) => {
-            let mut argv = vec!["check".to_string(), a.model.clone()];
-            argv.push("--sku".to_string());
-            argv.push(a.sku.clone());
+            let mut argv = vec!["check".to_string()];
+            if let Some(m) = &a.model {
+                argv.push(m.clone());
+            }
+            push_opt(&mut argv, "--sku", &a.sku);
+            push_opt(&mut argv, "--board", &a.board);
+            push_opt(&mut argv, "--model", &a.select);
             push_opt(&mut argv, "--metadata-root", &a.metadata_root);
             argv
         }
@@ -303,8 +307,10 @@ mod tests {
     #[test]
     fn sub_argv_maps_check_with_required_sku() {
         let sub = ModelSub::Check(ModelCheckArgs {
-            model: "m.tflite".to_string(),
-            sku: "E1M-AEN801".to_string(),
+            model: Some("m.tflite".to_string()),
+            sku: Some("E1M-AEN801".to_string()),
+            board: None,
+            select: None,
             metadata_root: None,
         });
         assert_eq!(
@@ -316,8 +322,10 @@ mod tests {
     #[test]
     fn model_argv_appends_format_json_for_check() {
         let sub = ModelSub::Check(ModelCheckArgs {
-            model: "m.tflite".to_string(),
-            sku: "E1M-AEN801".to_string(),
+            model: Some("m.tflite".to_string()),
+            sku: Some("E1M-AEN801".to_string()),
+            board: None,
+            select: None,
             metadata_root: Some("meta".to_string()),
         });
         let argv = model_argv(&sub, true);
@@ -326,6 +334,21 @@ mod tests {
         assert!(argv.contains(&"check".to_string()));
         assert!(argv.contains(&"--metadata-root".to_string()));
         assert!(is_wrappable(&sub), "check must be wrappable");
+    }
+
+    #[test]
+    fn sub_argv_maps_board_mode_with_selector() {
+        let sub = ModelSub::Check(ModelCheckArgs {
+            model: None,
+            sku: None,
+            board: Some("board.yaml".to_string()),
+            select: Some("tiny".to_string()),
+            metadata_root: None,
+        });
+        assert_eq!(
+            sub_argv(&sub),
+            vec!["check", "--board", "board.yaml", "--model", "tiny"]
+        );
     }
 
     #[test]

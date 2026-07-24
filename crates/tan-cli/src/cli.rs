@@ -398,15 +398,22 @@ pub struct ModelInfoArgs {
     pub metadata_root: Option<String>,
 }
 
-/// Args for `model check`.
+/// Args for `model check`. Two modes: a single `MODEL --sku`, or `--board`
+/// (check every board.yaml `models:` entry against `som.sku`).
 #[derive(Debug, Args)]
 pub struct ModelCheckArgs {
-    /// Model file to check (`.tflite`).
+    /// Model file to check (`.tflite`). Mutually exclusive with `--board`.
     #[arg(value_name = "MODEL")]
-    pub model: String,
-    /// SoM SKU, e.g. `E1M-AEN801`.
+    pub model: Option<String>,
+    /// SoM SKU, e.g. `E1M-AEN801`. Required unless `--board` supplies it.
     #[arg(long, value_name = "SKU")]
-    pub sku: String,
+    pub sku: Option<String>,
+    /// Check every (or one, with `--model`) `models:` entry in this board.yaml.
+    #[arg(long, value_name = "PATH")]
+    pub board: Option<String>,
+    /// With `--board`, check only the named `models:` entry.
+    #[arg(long = "model", value_name = "NAME")]
+    pub select: Option<String>,
     /// Path to the metadata/ root (default: the SDK's own `metadata/`).
     #[arg(long = "metadata-root")]
     pub metadata_root: Option<String>,
