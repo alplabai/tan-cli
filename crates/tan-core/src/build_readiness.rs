@@ -17,6 +17,13 @@ use serde::Serialize;
 use crate::debug::{DoctorCheck, DoctorStatus, DoctorSummary};
 use crate::model::BoardModel;
 
+/// Why a non-Linux host cannot run a Yocto build. Shared verbatim by `doctor
+/// --build`'s `yoctoHost` check and `tan bootstrap`'s Yocto host gate
+/// (`crate::bootstrap::yocto_only_refusal`) so the two never say different
+/// things about the same host limitation.
+pub const YOCTO_HOST_DETAIL: &str =
+    "Yocto builds are Linux-only; use WSL2 or a Linux host/container.";
+
 /// A build backend a `board.yaml` can target. Serializes lowercase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -212,8 +219,7 @@ pub fn build_readiness_report(
             checks.push(DoctorCheck {
                 name: "yoctoHost".to_string(),
                 status: DoctorStatus::Warn,
-                detail: "Yocto builds are Linux-only; use WSL2 or a Linux host/container."
-                    .to_string(),
+                detail: YOCTO_HOST_DETAIL.to_string(),
                 fix: Some("Run Yocto builds on Linux (WSL2 / Docker).".to_string()),
             });
         }

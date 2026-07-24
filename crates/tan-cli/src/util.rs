@@ -156,6 +156,74 @@ pub fn python_too_old(binary: &str) -> Option<String> {
     }
 }
 
+/// A host Python interpreter that was probed and actually ran.
+pub struct HostPython {
+    /// argv prefix that launches it — `["py", "-3"]`, `["python3"]`, …
+    pub argv: Vec<String>,
+    /// The `(major, minor)` it reported.
+    pub version: (u32, u32),
+}
+
+impl HostPython {
+    /// A fresh [`Command`] for this interpreter, with its launcher flags applied.
+    pub fn command(&self) -> Command {
+        let mut cmd = Command::new(&self.argv[0]);
+        cmd.args(&self.argv[1..]);
+        cmd
+    }
+
+    /// How to spell this interpreter in a message (`py -3`, `python3`, …).
+    pub fn display(&self) -> String {
+        self.argv.join(" ")
+    }
+}
+
+/// Find the host interpreter `tan bootstrap` creates the workspace venv with:
+/// walk [`tan_core::bootstrap::python_candidates`] in order and take the first
+/// that actually RUNS and is at least [`MIN_PYTHON`], falling back to the first
+/// that merely ran (so the caller can report a real version in its too-old
+/// message rather than "did not run"). `None` when no candidate runs at all.
+///
+/// "Actually runs" is the whole point on Windows: the Microsoft Store
+/// `python.exe` alias sits on PATH and satisfies any presence check, but
+/// executing it prints nothing and opens the Store instead (bootstrap.ps1:110-114).
+/// Requiring parseable output rejects it, and the `py -3` candidate ahead of it
+/// means a machine with only the launcher installed still bootstraps.
+///
+/// The version preference is what keeps that ordering safe: `py -3` resolves to
+/// the LAUNCHER's default, which is routinely an older install than the bare
+/// `python` on PATH (a 3.9 default alongside a 3.14 on PATH is exactly the
+/// shape that would otherwise make bootstrap refuse a perfectly good host).
+pub fn probe_host_python() -> Option<HostPython> {
+    let mut first_that_ran: Option<HostPython> = None;
+    for candidate in tan_core::bootstrap::python_candidates(cfg!(windows)) {
+        let Some((program, flags)) = candidate.split_first() else {
+            continue;
+        };
+        let output = Command::new(program)
+            .args(flags)
+            .arg("-c")
+            .arg("import sys;print('%d.%d' % sys.version_info[:2])")
+            .output();
+        let Ok(output) = output else { continue };
+        if !output.status.success() {
+            continue;
+        }
+        let Some(version) = parse_python_version(&String::from_utf8_lossy(&output.stdout)) else {
+            continue;
+        };
+        let found = HostPython {
+            argv: candidate.iter().map(|s| (*s).to_string()).collect(),
+            version,
+        };
+        if version >= MIN_PYTHON {
+            return Some(found);
+        }
+        first_that_ran.get_or_insert(found);
+    }
+    first_that_ran
+}
+
 /// Lexically normalize a path (collapse `.` and `..`) without touching the
 /// filesystem, mirroring Node's `path.resolve` behavior on the joined result.
 pub fn normalize_path(path: &Path) -> PathBuf {

@@ -12,6 +12,7 @@
 
 use std::path::Path;
 
+use tan_core::bootstrap::runtime_for_topology_core;
 use tan_core::{empty_preset_catalogue, parse_som_preset};
 
 use super::CommandRun;
@@ -165,19 +166,15 @@ fn read_soms(sdk_root: &str) -> Vec<SomEntry> {
             let cores = som
                 .topology
                 .iter()
-                .map(|t| {
+                .map(|t| SomCoreEntry {
+                    id: t.id.clone(),
                     // OS is resolved from the topology: a `board:` is a Zephyr
                     // (Cortex-M) target, a `machine:` is a Yocto (Cortex-A) one;
-                    // fall back to the shared silicon-class heuristic.
-                    let os = match (t.board.is_some(), t.machine.is_some()) {
-                        (true, _) => "zephyr",
-                        (_, true) => "yocto",
-                        _ => tan_core::wizard::infer_runtime_for_core_id(&t.id),
-                    };
-                    SomCoreEntry {
-                        id: t.id.clone(),
-                        os: os.to_string(),
-                    }
+                    // fall back to the shared silicon-class heuristic. Shared
+                    // with `tan bootstrap`'s Yocto host gate — one owner, so
+                    // what `presets` reports and what `bootstrap` gates on can
+                    // never disagree.
+                    os: runtime_for_topology_core(t).to_string(),
                 })
                 .collect();
             Some(SomEntry {

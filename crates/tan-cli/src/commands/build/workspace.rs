@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tan_core::ProjectContext;
+use tan_core::bootstrap::venv_layout;
 
 use super::BuildData;
 use super::CommandRun;
@@ -170,12 +171,8 @@ fn west_argv(subcommand: &str, passthrough: &[String]) -> Vec<String> {
 /// both callers need. `None` when none resolve (CI, an activated venv, the
 /// contract harness).
 fn find_workspace_venv(start: &str, sdk_root: Option<&Path>) -> Option<PathBuf> {
-    let (sub, west_exe) = if cfg!(windows) {
-        ("Scripts", "west.exe")
-    } else {
-        ("bin", "west")
-    };
-    let has_west = |venv: &Path| venv.join(sub).join(west_exe).is_file();
+    let layout = venv_layout(cfg!(windows));
+    let has_west = |venv: &Path| venv.join(layout.bin_dir).join(layout.west).is_file();
 
     // 1. A `.venv` in the project tree.
     let mut dir = Some(Path::new(start));
@@ -218,13 +215,14 @@ fn find_workspace_venv(start: &str, sdk_root: Option<&Path>) -> Option<PathBuf> 
 /// when none resolve (CI, an activated venv, the contract harness) — behaving
 /// exactly as before in those environments.
 pub(super) fn west_program(start: &str, sdk_root: Option<&Path>) -> String {
-    let (sub, exe) = if cfg!(windows) {
-        ("Scripts", "west.exe")
-    } else {
-        ("bin", "west")
-    };
+    let layout = venv_layout(cfg!(windows));
     find_workspace_venv(start, sdk_root)
-        .map(|venv| venv.join(sub).join(exe).to_string_lossy().into_owned())
+        .map(|venv| {
+            venv.join(layout.bin_dir)
+                .join(layout.west)
+                .to_string_lossy()
+                .into_owned()
+        })
         .unwrap_or_else(|| "west".to_string())
 }
 
@@ -237,13 +235,9 @@ pub(super) fn west_program(start: &str, sdk_root: Option<&Path>) -> String {
 /// for the west child). `None` when no workspace venv resolves — the caller
 /// then falls back to `context.python_binary`.
 fn venv_python(start: &str, sdk_root: Option<&Path>) -> Option<String> {
-    let (sub, exe) = if cfg!(windows) {
-        ("Scripts", "python.exe")
-    } else {
-        ("bin", "python")
-    };
+    let layout = venv_layout(cfg!(windows));
     find_workspace_venv(start, sdk_root).and_then(|venv| {
-        let candidate = venv.join(sub).join(exe);
+        let candidate = venv.join(layout.bin_dir).join(layout.python);
         candidate
             .is_file()
             .then(|| candidate.to_string_lossy().into_owned())
@@ -330,7 +324,7 @@ pub(crate) fn resolve_zephyr_base(base: &str, sdk_root: Option<&Path>) -> Option
 /// spawns nested `west build`/`bitbake` that resolve `west` via PATH — without
 /// this, they fail with "west not found in PATH" and silently skip the slice
 /// unless the user activated the venv. A bare `"west"` (PATH fallback) is left as-is.
-pub(super) fn with_venv_on_path(command: &mut Command, tool: &str) {
+pub(crate) fn with_venv_on_path(command: &mut Command, tool: &str) {
     let bin = Path::new(tool);
     if !bin.is_absolute() {
         return;
