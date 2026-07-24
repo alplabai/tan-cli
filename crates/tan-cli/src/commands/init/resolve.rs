@@ -8,7 +8,7 @@ use inquire::{InquireError, Select, Text};
 use tan_core::is_plain_relative;
 use tan_core::wizard::{
     WizardTemplateId, app_core_for_sku, infer_runtime_for_core_id, list_wizard_templates,
-    vendored_app_core_for_sku, vendored_sensor_app_core_for_sku,
+    vendored_app_core_for_sku, vendored_edge_ai_app_core_for_sku, vendored_sensor_app_core_for_sku,
 };
 
 /// Accepted per-core OS values for `--cores` entries (`id:os`).
@@ -62,20 +62,25 @@ pub(super) fn parse_cores(raw: Option<&str>) -> Result<Vec<(String, String)>, St
 
 /// The fixed app-core id `template_id`'s plan will assign `sku`'s app source
 /// to — the ground truth `tan init`'s upfront `--cores` validation must agree
-/// with. `zephyr-app`/`sensor-starter` plan straight from their vendored SDK
-/// `minimal`/`sensor` scaffolds (alp-sdk#864), whose `board.yaml` `cores:`
-/// key is authoritative for that template (`vendored_app_core_for_sku`/
-/// `vendored_sensor_app_core_for_sku`); every other, hand-generated
+/// with. `zephyr-app`/`sensor-starter`/`edge-ai-starter` plan straight from
+/// their vendored SDK `minimal`/`sensor`/`edge-ai` scaffolds (alp-sdk#864),
+/// whose `board.yaml` `cores:` key is authoritative for that template
+/// (`vendored_app_core_for_sku`/`vendored_sensor_app_core_for_sku`/
+/// `vendored_edge_ai_app_core_for_sku`); every other, hand-generated
 /// template's own `gen_board_yaml` derives it from `app_core_for_sku`'s
 /// SKU-prefix heuristic instead. The two derivations can silently drift on an
 /// SDK re-vendor (alp-sdk#877 fixed exactly that: `E1M-V2N101`'s vendored
 /// `minimal` scaffold used to carry the non-buildable Alif `m55_hp` core) —
 /// picking per-template here is what keeps the CLI-level check from
 /// disagreeing with what `create_wizard_plan_with_cores` actually plans.
+/// `edge-ai` is heterogeneous (its `board.yaml` lists a companion core before
+/// the app core), so `vendored_edge_ai_app_core_for_sku` matters even more
+/// here than for the single-core templates.
 pub(super) fn app_core_for_template(template_id: WizardTemplateId, sku: &str) -> &'static str {
     match template_id {
         WizardTemplateId::ZephyrApp => vendored_app_core_for_sku(sku),
         WizardTemplateId::SensorStarter => vendored_sensor_app_core_for_sku(sku),
+        WizardTemplateId::EdgeAiStarter => vendored_edge_ai_app_core_for_sku(sku),
         _ => app_core_for_sku(sku),
     }
 }
@@ -221,6 +226,24 @@ mod tests {
         );
         assert_eq!(
             app_core_for_template(WizardTemplateId::SensorStarter, "E1M-AEN801"),
+            "m55_hp"
+        );
+    }
+
+    #[test]
+    fn app_core_for_template_uses_the_vendored_core_for_edge_ai_starter() {
+        // edge-ai-starter also plans off a vendored SDK scaffold (`edge-ai`)
+        // -- same treatment as zephyr-app/sensor-starter, off its OWN
+        // vendored tree. This is the FIRST heterogeneous vendored template:
+        // its board.yaml lists a companion core (a55_cluster/a32_cluster,
+        // os: "off") BEFORE the app core, so this specifically exercises
+        // that the CLI-level check picks the app core, not the companion.
+        assert_eq!(
+            app_core_for_template(WizardTemplateId::EdgeAiStarter, "E1M-V2N101"),
+            "m33_sm"
+        );
+        assert_eq!(
+            app_core_for_template(WizardTemplateId::EdgeAiStarter, "E1M-AEN801"),
             "m55_hp"
         );
     }

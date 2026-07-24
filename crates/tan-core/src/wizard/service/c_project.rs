@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! C-project (plain-CMake + Zephyr) file-content generators.
 
-use super::vendored::{vendored_minimal_files, vendored_sensor_files};
+use super::vendored::{vendored_edge_ai_files, vendored_minimal_files, vendored_sensor_files};
 use crate::wizard::models::{WizardPlannedFile, WizardTemplateDefinition, WizardTemplateId};
 
 pub(super) fn gen_c_project_files(
@@ -9,12 +9,12 @@ pub(super) fn gen_c_project_files(
     som_sku: Option<&str>,
     cores: &[(String, String)],
 ) -> Vec<WizardPlannedFile> {
-    // zephyr-app and sensor-starter are vendored from the SDK's `minimal`/
-    // `sensor` scaffold-catalog entries (alp-sdk#864) instead of
-    // hand-generated -- see `wizard/vendored/MANIFEST.md`. These are the only
-    // templates mapped onto a vendored tree today; every other template below
-    // still hand-generates its files (no clean 1:1 SDK catalog equivalent --
-    // see the manifest).
+    // zephyr-app, sensor-starter, and edge-ai-starter are vendored from the
+    // SDK's `minimal`/`sensor`/`edge-ai` scaffold-catalog entries
+    // (alp-sdk#864) instead of hand-generated -- see
+    // `wizard/vendored/MANIFEST.md`. These are the only templates mapped onto
+    // a vendored tree today; every other template below still hand-generates
+    // its files (no clean 1:1 SDK catalog equivalent -- see the manifest).
     let vendored_files = match def.id {
         WizardTemplateId::ZephyrApp => {
             let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
@@ -23,6 +23,10 @@ pub(super) fn gen_c_project_files(
         WizardTemplateId::SensorStarter => {
             let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
             Some(vendored_sensor_files(sku, cores))
+        }
+        WizardTemplateId::EdgeAiStarter => {
+            let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
+            Some(vendored_edge_ai_files(sku, cores))
         }
         _ => None,
     };
@@ -122,8 +126,10 @@ pub fn infer_runtime_for_core_id(id: &str) -> &'static str {
 
 /// Emit a board.yaml conforming to the SDK board schema (v0.6+): `som` + `cores`
 /// are the only required top-level keys; population/OS is per-core. Template
-/// connectivity/inference tuning lives under the app core's `core_entry`, but
-/// `libraries` is a project-wide, top-level key (`core_entry` only allows
+/// connectivity tuning lives under the app core's `core_entry` (edge-ai-starter's
+/// inference tuning moved with it to the vendored `edge-ai` scaffold, see
+/// `wizard/vendored/MANIFEST.md`), but `libraries` is a project-wide, top-level
+/// key (`core_entry` only allows
 /// `extra_libraries`, additionalProperties: false) mapping each library to the
 /// cores that use it; project-wide diagnostics is a sanctioned top-level key.
 fn gen_board_yaml(
@@ -151,13 +157,6 @@ fn gen_board_yaml(
         s.push_str(&format!("      mqtt: {}\n", f.mqtt));
         s.push_str(&format!("      ble: {}\n", f.ble));
         s.push_str(&format!("      tls: {}\n", f.tls));
-    }
-
-    if def.id == WizardTemplateId::EdgeAiStarter {
-        // Backend is silicon-determined (SoM `capabilities:`); only the
-        // app-level arena budget is a board.yaml knob.
-        s.push_str("    inference:\n");
-        s.push_str("      default_arena_kib: 256\n");
     }
 
     // Companion cores (heterogeneous `--cores`): emit each core other than the
