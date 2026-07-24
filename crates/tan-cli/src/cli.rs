@@ -148,7 +148,7 @@ pub enum Command {
     /// Run the board.yaml quality checks (`west alp-quality`).
     Quality(WestForwardArgs),
     /// Compile + package board.yaml `models:` into `.alpmodel` (`alp model`).
-    Model(WestForwardArgs),
+    Model(ModelArgs),
     /// Open a serial console to the board (`alp monitor`).
     Monitor(WestForwardArgs),
     /// Scaffold a new SoM's metadata skeleton (`alp new-som`).
@@ -318,6 +318,79 @@ pub struct WestForwardArgs {
         value_name = "ARGS"
     )]
     pub args: Vec<String>,
+}
+
+/// Args for `model`: a real clap subcommand group (not a trailing-var-arg
+/// passthrough), so `--format`/other globals parse correctly regardless of
+/// where they're placed on the command line — a passthrough would otherwise
+/// swallow a global placed AFTER `model` (e.g. `tan model list --format
+/// json`, the shape the vscode extension calls) into the forwarded argv
+/// instead of parsing it.
+#[derive(Debug, Args)]
+pub struct ModelArgs {
+    #[command(subcommand)]
+    pub sub: ModelSub,
+}
+
+/// The `alp_cli model` subcommands. `Build`/`List`/`Info`/`Doctor` mirror
+/// `alp_cli`'s own option surface (`--board`/`--out`/`--metadata-root`) so tan
+/// can wrap their `--format json` payload in its envelope; `Run` stays a raw
+/// passthrough (Phase-3, streams — not yet implemented SDK-side).
+#[derive(Debug, Subcommand)]
+pub enum ModelSub {
+    /// Compile board.yaml `models:` into `.alpmodel` packages.
+    Build(ModelBuildArgs),
+    /// List board.yaml `models:` + built `.alpmodel` status.
+    List(ModelListArgs),
+    /// Decode a built `.alpmodel`: targets, requires, coverage matrix.
+    Info(ModelInfoArgs),
+    /// Report installed NPU compiler toolchains.
+    Doctor,
+    /// Forward-compatible passthrough (Phase-3); streams like the other
+    /// west/alp forwards.
+    Run(WestForwardArgs),
+}
+
+/// Args for `model build`.
+#[derive(Debug, Args)]
+pub struct ModelBuildArgs {
+    /// Path to board.yaml (default: `board.yaml`).
+    #[arg(long)]
+    pub board: Option<String>,
+    /// Output directory for built `.alpmodel` packages (default: `build/models`).
+    #[arg(long)]
+    pub out: Option<String>,
+    /// Path to the metadata/ root (default: the SDK's own `metadata/`).
+    #[arg(long = "metadata-root")]
+    pub metadata_root: Option<String>,
+}
+
+/// Args for `model list`.
+#[derive(Debug, Args)]
+pub struct ModelListArgs {
+    /// Path to board.yaml (default: `board.yaml`).
+    #[arg(long)]
+    pub board: Option<String>,
+    /// Build output directory (default: `build/models`).
+    #[arg(long)]
+    pub out: Option<String>,
+}
+
+/// Args for `model info`.
+#[derive(Debug, Args)]
+pub struct ModelInfoArgs {
+    /// Name of the built model to decode.
+    #[arg(value_name = "NAME")]
+    pub name: String,
+    /// Build output directory (default: `build/models`).
+    #[arg(long)]
+    pub out: Option<String>,
+    /// board.yaml — enables the SoM coverage matrix.
+    #[arg(long)]
+    pub board: Option<String>,
+    /// Path to the metadata/ root (default: the SDK's own `metadata/`).
+    #[arg(long = "metadata-root")]
+    pub metadata_root: Option<String>,
 }
 
 /// Args for `run`: build the project, then run it. Thin orchestrator over the

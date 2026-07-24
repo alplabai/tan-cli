@@ -4,40 +4,84 @@
 //! own JSON payload; tan doesn't re-derive it, it wraps it in the stable
 //! `{command,ok,exitCode,project,data,issues}` envelope so a JSON consumer
 //! (the vscode extension) gets one contract for every `tan` subcommand.
+//!
+//! `model` is a real clap subcommand group (`ModelSub`), not a
+//! trailing-var-arg passthrough — a passthrough parses every token after
+//! `model` as opaque, so a global flag placed there (e.g. `tan model list
+//! --format json`, the shape the vscode extension calls) got swallowed into
+//! the forwarded argv instead of being parsed as `GlobalArgs::format`.
+//!
 //! `model run` streams interactively (like `sdk_cli`'s other forwards) and is
-//! not wrappable — see `wrappable_sub`; in text mode (any sub) tan just
+//! not wrappable — see `is_wrappable`; in text mode (any sub) tan just
 //! streams too, since a captured/re-printed transcript would only delay
 //! multi-minute `vela`/`dxcom` compiles.
 
 use std::process::Command;
 
 use super::{CommandRun, sdk_cli};
-use crate::cli::GlobalArgs;
+use crate::cli::{GlobalArgs, ModelSub};
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 use crate::util::resolve_cli_project_context;
 
-/// The `alp_cli model` subcommands whose `--format json` payload tan can wrap
-/// in its own envelope. `model run` is interactive/streaming (like the other
-/// `sdk_cli` forwards) and is deliberately excluded — Phase-3.
-pub const WRAPPABLE_SUBS: [&str; 4] = ["build", "list", "info", "doctor"];
-
-/// Returns the first passthrough token iff it names a wrappable `model` sub
-/// (`WRAPPABLE_SUBS`); `None` for empty passthrough, `run`, `--help`, or any
-/// other unknown token.
-pub fn wrappable_sub(passthrough: &[String]) -> Option<&str> {
-    let first = passthrough.first()?.as_str();
-    WRAPPABLE_SUBS.iter().copied().find(|&sub| sub == first)
+/// Append `--flag value` to `argv` iff `value` is `Some`.
+fn push_opt(argv: &mut Vec<String>, flag: &str, value: &Option<String>) {
+    if let Some(v) = value {
+        argv.push(flag.to_string());
+        argv.push(v.clone());
+    }
 }
 
-/// Build the `alp_cli` argv tail: `-m alp_cli model <passthrough…>`, appending
-/// `--format json` when `json` is set unless the passthrough already carries
-/// a `--format` token (dedup — mirrors `sdk_cli::build_argv`'s `--json` dedup;
-/// the user may have typed `--format` themselves after `model`).
-pub fn model_argv(passthrough: &[String], json: bool) -> Vec<String> {
+/// Map a structured [`ModelSub`] to the `alp_cli model` argv tail (everything
+/// after `model` itself) — e.g. `Build { board: Some("b.yaml"), .. }` →
+/// `["build", "--board", "b.yaml"]` — including only the options that are
+/// `Some`. `Run` forwards its passthrough verbatim (Phase-3, streams).
+pub fn sub_argv(sub: &ModelSub) -> Vec<String> {
+    match sub {
+        ModelSub::Build(a) => {
+            let mut argv = vec!["build".to_string()];
+            push_opt(&mut argv, "--board", &a.board);
+            push_opt(&mut argv, "--out", &a.out);
+            push_opt(&mut argv, "--metadata-root", &a.metadata_root);
+            argv
+        }
+        ModelSub::List(a) => {
+            let mut argv = vec!["list".to_string()];
+            push_opt(&mut argv, "--board", &a.board);
+            push_opt(&mut argv, "--out", &a.out);
+            argv
+        }
+        ModelSub::Info(a) => {
+            let mut argv = vec!["info".to_string(), a.name.clone()];
+            push_opt(&mut argv, "--out", &a.out);
+            push_opt(&mut argv, "--board", &a.board);
+            push_opt(&mut argv, "--metadata-root", &a.metadata_root);
+            argv
+        }
+        ModelSub::Doctor => vec!["doctor".to_string()],
+        ModelSub::Run(fwd) => {
+            let mut argv = vec!["run".to_string()];
+            argv.extend(fwd.args.iter().cloned());
+            argv
+        }
+    }
+}
+
+/// Whether `sub` is one of the four subs whose `--format json` payload tan
+/// can wrap in its own envelope. `Run` is interactive/streaming (like the
+/// other `sdk_cli` forwards) and is deliberately excluded — Phase-3.
+pub fn is_wrappable(sub: &ModelSub) -> bool {
+    !matches!(sub, ModelSub::Run(_))
+}
+
+/// Build the full `alp_cli` argv: `-m alp_cli model <tail…>`, appending
+/// `--format json` when `json` is set. The structured sub's own args never
+/// contain `--format` (it's the global, not a per-sub option), so unlike the
+/// old passthrough there's no dedup to do.
+pub fn model_argv(sub: &ModelSub, json: bool) -> Vec<String> {
     let mut argv = vec!["-m".to_string(), "alp_cli".to_string(), "model".to_string()];
-    argv.extend(passthrough.iter().cloned());
-    if json && !passthrough.iter().any(|a| a == "--format") {
+    argv.extend(sub_argv(sub));
+    if json {
         argv.push("--format".to_string());
         argv.push("json".to_string());
     }
@@ -125,15 +169,15 @@ fn project_from(g: &GlobalArgs) -> Project {
     }
 }
 
-/// `tan model <sub> …` entry point. Text mode and non-wrappable subs (`run`,
-/// unrecognized tokens, `--help`) stream live through `sdk_cli::run` — the
-/// existing forwarder, unchanged. A wrappable sub (`WRAPPABLE_SUBS`) under
-/// `--format json` instead resolves the SDK/python once via
-/// `sdk_cli::prepare_alp_cli` (shared, not re-derived) and spawns the child
-/// CAPTURED so its `--format json` payload can be wrapped in tan's envelope.
-pub fn run(g: &GlobalArgs, passthrough: &[String]) -> CommandRun {
-    if !g.is_json() || wrappable_sub(passthrough).is_none() {
-        return sdk_cli::run(g, "model", passthrough);
+/// `tan model <sub>` entry point. Text mode and the non-wrappable `Run` sub
+/// stream live through `sdk_cli::run` — the existing forwarder, unchanged. A
+/// wrappable sub (`is_wrappable`) under `--format json` instead resolves the
+/// SDK/python once via `sdk_cli::prepare_alp_cli` (shared, not re-derived) and
+/// spawns the child CAPTURED so its `--format json` payload can be wrapped in
+/// tan's envelope.
+pub fn run(g: &GlobalArgs, sub: &ModelSub) -> CommandRun {
+    if !g.is_json() || !is_wrappable(sub) {
+        return sdk_cli::run(g, "model", &sub_argv(sub));
     }
 
     let spawn = match sdk_cli::prepare_alp_cli(g, "model") {
@@ -142,7 +186,7 @@ pub fn run(g: &GlobalArgs, passthrough: &[String]) -> CommandRun {
     };
 
     let project = project_from(g);
-    let argv = model_argv(passthrough, true);
+    let argv = model_argv(sub, true);
     let output = Command::new(&spawn.python)
         .args(&argv)
         .current_dir(&spawn.workspace_root)
@@ -189,34 +233,78 @@ pub fn run(g: &GlobalArgs, passthrough: &[String]) -> CommandRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::{ModelBuildArgs, ModelInfoArgs, ModelListArgs, WestForwardArgs};
 
     #[test]
-    fn wrappable_sub_detects_the_four_and_rejects_others() {
+    fn sub_argv_maps_build_including_only_set_options() {
+        let sub = ModelSub::Build(ModelBuildArgs {
+            board: Some("b.yaml".to_string()),
+            out: Some("o".to_string()),
+            metadata_root: None,
+        });
         assert_eq!(
-            wrappable_sub(&["build".into(), "--board".into(), "b.yaml".into()]),
-            Some("build")
+            sub_argv(&sub),
+            vec!["build", "--board", "b.yaml", "--out", "o"]
         );
-        assert_eq!(wrappable_sub(&["doctor".into()]), Some("doctor"));
-        assert_eq!(wrappable_sub(&["run".into(), "m".into()]), None); // Phase-3, streams
-        assert_eq!(wrappable_sub(&["--help".into()]), None);
-        assert_eq!(wrappable_sub(&[]), None);
     }
 
     #[test]
-    fn model_argv_appends_format_json_once() {
-        let a = model_argv(&["build".into(), "--board".into(), "b.yaml".into()], true);
+    fn sub_argv_maps_list_info_doctor_run() {
         assert_eq!(
-            a,
+            sub_argv(&ModelSub::List(ModelListArgs {
+                board: None,
+                out: Some("build/models".to_string()),
+            })),
+            vec!["list", "--out", "build/models"]
+        );
+        assert_eq!(
+            sub_argv(&ModelSub::Info(ModelInfoArgs {
+                name: "demo".to_string(),
+                out: None,
+                board: Some("b.yaml".to_string()),
+                metadata_root: None,
+            })),
+            vec!["info", "demo", "--board", "b.yaml"]
+        );
+        assert_eq!(sub_argv(&ModelSub::Doctor), vec!["doctor"]);
+        assert_eq!(
+            sub_argv(&ModelSub::Run(WestForwardArgs {
+                args: vec!["m".to_string()],
+            })),
+            vec!["run", "m"]
+        );
+    }
+
+    #[test]
+    fn is_wrappable_excludes_only_run() {
+        assert!(is_wrappable(&ModelSub::Doctor));
+        assert!(is_wrappable(&ModelSub::List(ModelListArgs {
+            board: None,
+            out: None,
+        })));
+        assert!(!is_wrappable(&ModelSub::Run(WestForwardArgs {
+            args: vec![],
+        })));
+    }
+
+    #[test]
+    fn model_argv_appends_format_json_for_wrappable_subs() {
+        let sub = ModelSub::Build(ModelBuildArgs {
+            board: Some("b.yaml".to_string()),
+            out: None,
+            metadata_root: None,
+        });
+        assert_eq!(
+            model_argv(&sub, true),
             vec![
                 "-m", "alp_cli", "model", "build", "--board", "b.yaml", "--format", "json"
             ]
         );
-        // dedup: user already passed --format
-        let b = model_argv(&["build".into(), "--format".into(), "json".into()], true);
-        assert_eq!(b.iter().filter(|s| *s == "--format").count(), 1);
         // text mode: no --format appended
-        let c = model_argv(&["build".into()], false);
-        assert_eq!(c, vec!["-m", "alp_cli", "model", "build"]);
+        assert_eq!(
+            model_argv(&sub, false),
+            vec!["-m", "alp_cli", "model", "build", "--board", "b.yaml"]
+        );
     }
 
     #[test]
@@ -336,21 +424,24 @@ mod tests {
             sdk_root: Some(NO_SDK_ROOT.to_string()),
             ..text_global()
         };
-        let run = run(&g, &["doctor".to_string()]);
+        let run = run(&g, &ModelSub::Doctor);
         assert!(run.json.is_none());
     }
 
     #[test]
     fn json_non_wrappable_sub_delegates_and_does_not_wrap_as_model_payload() {
         // `model run` is Phase-3 / interactive → still streams (delegates to
-        // sdk_cli::run) even under --format json; `wrappable_sub` returning
-        // None routes straight there instead of attempting a captured spawn.
-        assert!(wrappable_sub(&["run".to_string(), "m".to_string()]).is_none());
+        // sdk_cli::run) even under --format json; `is_wrappable` returning
+        // false routes straight there instead of attempting a captured spawn.
+        let run_sub = ModelSub::Run(WestForwardArgs {
+            args: vec!["m".to_string()],
+        });
+        assert!(!is_wrappable(&run_sub));
         let g = GlobalArgs {
             sdk_root: Some(NO_SDK_ROOT.to_string()),
             ..json_global()
         };
-        let run = run(&g, &["run".to_string(), "m".to_string()]);
+        let run = run(&g, &run_sub);
         let doc = run
             .json
             .expect("guard failure emits a json envelope in json mode");
@@ -371,12 +462,31 @@ mod tests {
             sdk_root: Some(NO_SDK_ROOT.to_string()),
             ..json_global()
         };
-        let run = run(&g, &["doctor".to_string()]);
+        let run = run(&g, &ModelSub::Doctor);
         assert_eq!(run.exit, ExitCode::ValidationFailure);
         let doc = run.json.expect("guard failure must emit a json envelope");
         let v: serde_json::Value = serde_json::from_str(&doc).unwrap();
         assert_eq!(v["ok"], false);
         assert_eq!(v["exitCode"], 2);
         assert_eq!(v["issues"][0]["code"], "model.failed");
+    }
+
+    /// Regression for the bug this commit fixes: a global placed AFTER `model`
+    /// (the vscode extension's exact call shape, `model doctor --format
+    /// json`) must parse into `GlobalArgs::format`, not get swallowed into a
+    /// passthrough — proven by asserting clap itself resolves it, independent
+    /// of any hand-rolled forwarding logic.
+    #[test]
+    fn global_after_model_subcommand_parses_as_a_global_not_passthrough() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from(["tan", "model", "doctor", "--format", "json"])
+            .expect("global after `model doctor` must parse");
+        assert!(cli.global.is_json());
+        assert!(matches!(
+            cli.command,
+            crate::cli::Command::Model(crate::cli::ModelArgs {
+                sub: ModelSub::Doctor
+            })
+        ));
     }
 }
