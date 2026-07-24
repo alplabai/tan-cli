@@ -73,6 +73,7 @@ pub fn sub_argv(sub: &ModelSub) -> Vec<String> {
         ModelSub::Zoo(a) => {
             let mut argv = vec!["zoo".to_string()];
             push_opt(&mut argv, "--sku", &a.sku);
+            push_opt(&mut argv, "--board", &a.board);
             push_opt(&mut argv, "--metadata-root", &a.metadata_root);
             argv
         }
@@ -370,9 +371,20 @@ mod tests {
     fn sub_argv_maps_zoo_with_sku() {
         let sub = ModelSub::Zoo(ModelZooArgs {
             sku: Some("E1M-AEN801".to_string()),
+            board: None,
             metadata_root: None,
         });
         assert_eq!(sub_argv(&sub), vec!["zoo", "--sku", "E1M-AEN801"]);
+    }
+
+    #[test]
+    fn sub_argv_maps_zoo_with_board() {
+        let sub = ModelSub::Zoo(ModelZooArgs {
+            sku: None,
+            board: Some("board.yaml".to_string()),
+            metadata_root: None,
+        });
+        assert_eq!(sub_argv(&sub), vec!["zoo", "--board", "board.yaml"]);
     }
 
     #[test]
