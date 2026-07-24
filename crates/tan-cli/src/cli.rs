@@ -363,6 +363,9 @@ pub struct ModelBuildArgs {
     /// Path to the metadata/ root (default: the SDK's own `metadata/`).
     #[arg(long = "metadata-root")]
     pub metadata_root: Option<String>,
+    /// Build only the named `models:` entry (default: build all declared models).
+    #[arg(long, value_name = "NAME")]
+    pub model: Option<String>,
 }
 
 /// Args for `model list`.

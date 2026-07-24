@@ -43,6 +43,7 @@ pub fn sub_argv(sub: &ModelSub) -> Vec<String> {
             push_opt(&mut argv, "--board", &a.board);
             push_opt(&mut argv, "--out", &a.out);
             push_opt(&mut argv, "--metadata-root", &a.metadata_root);
+            push_opt(&mut argv, "--model", &a.model);
             argv
         }
         ModelSub::List(a) => {
@@ -241,11 +242,26 @@ mod tests {
             board: Some("b.yaml".to_string()),
             out: Some("o".to_string()),
             metadata_root: None,
+            model: None,
         });
         assert_eq!(
             sub_argv(&sub),
             vec!["build", "--board", "b.yaml", "--out", "o"]
         );
+    }
+
+    #[test]
+    fn sub_argv_forwards_the_model_selector() {
+        // B1 regression: the vscode panel builds a single model via `tan model
+        // build --model <name>` — the alp_cli argv must carry `--model NAME`.
+        let sub = ModelSub::Build(ModelBuildArgs {
+            board: None,
+            out: None,
+            metadata_root: None,
+            model: Some("demo".to_string()),
+        });
+        let argv = sub_argv(&sub);
+        assert_eq!(argv, vec!["build", "--model", "demo"]);
     }
 
     #[test]
@@ -293,6 +309,7 @@ mod tests {
             board: Some("b.yaml".to_string()),
             out: None,
             metadata_root: None,
+            model: None,
         });
         assert_eq!(
             model_argv(&sub, true),
