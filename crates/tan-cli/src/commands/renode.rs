@@ -164,7 +164,7 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
                 report,
                 "renode.manifest-unavailable",
                 &format!(
-                    "no system-manifest.yaml at {}; run `tan build {}` first ({e}).",
+                    "no system-manifest.yaml at {}; run `tan build --project {}` first ({e}).",
                     manifest_path.display(),
                     app_path.display()
                 ),
@@ -189,7 +189,7 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
             report,
             "renode.elf-missing",
             &format!(
-                "Zephyr ELF not found at {}; run `tan build {}` first.",
+                "Zephyr ELF not found at {}; run `tan build --project {}` first.",
                 elf.display(),
                 app_path.display()
             ),

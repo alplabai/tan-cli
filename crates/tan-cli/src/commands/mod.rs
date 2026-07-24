@@ -41,6 +41,9 @@ pub mod image;
 pub mod init;
 /// `tan inspect` — inspect resolved project/debug context values.
 pub mod inspect;
+/// `tan kconfig` — board-scoped Kconfig symbol menu for one core (the vscode
+/// `prj.conf` LSP's live feed); wraps the SDK's `--emit kconfig`.
+pub mod kconfig;
 /// `tan pinmux` — the E1M pinmux capability table (E1M pad → silicon function) for a SoM family.
 pub mod pinmux;
 /// `tan presets` — list SDK presets (SKUs/SoMs) + built-in catalogue defaults.

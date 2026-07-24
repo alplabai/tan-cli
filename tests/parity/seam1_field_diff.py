@@ -5,10 +5,26 @@
 ADR-0020 (alp-sdk#855 amendment) requires a two-seam parity gate before the
 `tan`-is-sole-executor migration can release. This is seam 1: **plan-shape**
 parity -- does a live `--emit build-plan` from the alp-sdk checkout under test
-still match the frozen oracle, field for field? Seam 2 (materialise byte-check
-+ a real build + a Renode smoke test) is a documented follow-up that needs a
-Linux toolchain runner -- see `tests/parity/README.md` and the `seam2`
-placeholder job in `.github/workflows/parity.yml`.
+still match the frozen oracle's command / env / appDir / skip-fail-decision
+shape, field for field? Seam 2 (materialise byte-check + a real build + a
+Renode smoke test) is a documented follow-up that needs a Linux toolchain
+runner -- see `tests/parity/README.md` and the `seam2` placeholder job in
+`.github/workflows/parity.yml`.
+
+Seam-1 deliberately does NOT compare the materialised config-artefact
+CONTENT (`slices[*].configArtefacts[*].contents` / `sharedArtefacts[*].
+contents` -- the rendered alp.conf/local.conf/cmake-args.txt/DTS-overlay/
+sysbuild-conf bytes each slice carries): that content is covered
+byte-for-byte on the alp-sdk side by `tests/fixtures/emit-snapshots/*.
+{build-plan,zephyr-conf}.snap` (alp-sdk#874) and, eventually, by seam-2's
+real build -- this vendored twin only needs the plan SHAPE, not what each
+artefact says. Diffing content here as well as there turned every
+intentional emitter content change (a Kconfig-gating fix, a new peripheral
+default) into a seam-1 failure requiring a bespoke strip in `normalize_plan`
+-- a per-change treadmill that eroded the gate's actual job instead of doing
+it (alp-sdk#874 follow-up). `_drop_artefact_contents` removes the content,
+keeping each artefact's `path` in the shape check: an artefact appearing/
+vanishing/moving is still a real seam-1 failure.
 
 The oracle (`tests/parity/oracle/*.build-plan.json`) was captured at alp-sdk
 `df312cec^` == `97ad481b` ("feat(build-plan): publish envAppendPath +
@@ -20,18 +36,30 @@ and every SDK-side executor, so nothing after it can be diffed against an
 in-repo oracle again -- this is the last frame where that comparison exists.
 
 Build plans are NOT hermetic: they embed the emitting checkout's absolute
-root path (`env.ALP_SDK_ROOT`, `envAppendPath.*`, per-slice `appDir`) and the
-emitting commit (`sdkCommit`). Both fields are real signal for a human but
-pure noise for a parity diff -- normalize them before comparing:
+root path (`env.ALP_SDK_ROOT`, `envAppendPath.*`, per-slice `appDir`), the
+emitting commit (`sdkCommit`), and the emitting checkout's SDK release
+version (`sdkVersion`). All three are real signal for a human but pure noise
+for a parity diff -- normalize them before comparing:
 
   * any string carrying the checkout root as a prefix -> the root prefix is
     replaced with the literal token ``__SDKROOT__`` (root discovered from the
     plan's own ``slices[0].env.ALP_SDK_ROOT`` -- no path is hardcoded);
   * ``sdkCommit`` -> the literal token ``__SHA__``;
+  * ``sdkVersion`` -> dropped entirely (mirrors alp-sdk's own comparator fix,
+    alp-sdk#883: it bumps on every version-bump PR with zero shape change, so
+    unlike `sdkCommit` -- whose oracle value stays pinned to 97ad481b forever
+    -- there is no stable token to normalize it to);
   * the emitting machine's Python interpreter, baked into a
     ``-DPython3_EXECUTABLE=<abs path>`` cmake arg (Homebrew on the macOS
     oracle-capture box, the hosted-toolcache on CI) -> ``__PYTHON__`` -- an
     environment path, not a planner change.
+
+alp-sdk issue #865 flips a LIVE plan's emit from those baked-in absolute
+paths to literal ``${SDK_ROOT}``/``${PROJECT_ROOT}`` tokens (this repo's own
+`commands/build/token_substitution.rs` substitutes them back at materialise
+time). The frozen 97ad481b oracle predates that and stays absolute --
+`normalize_plan` reconciles the two shapes onto the same normalized form;
+see its docstring for the mapping.
 
 The ONLY semantic delta allowed to pass without failing the gate is
 ``slices[*].debug.probe`` going from ``"openocd"`` (the oracle, at 97ad481b)
@@ -95,7 +123,8 @@ def _discover_sdk_root(plan: dict) -> str | None:
     return None
 
 
-def _normalize_strings(node: Any, sdk_root: str | None) -> Any:
+def _normalize_strings(node: Any, sdk_root: str | None,
+                        project_token: str | None = None) -> Any:
     """Deep-copy `node`, replacing environment-specific noise in any string.
 
     Two normalizations, both applied to every string leaf:
@@ -107,29 +136,144 @@ def _normalize_strings(node: Any, sdk_root: str | None) -> Any:
       * the emitting machine's Python interpreter in `-DPython3_EXECUTABLE=`
         -> ``__PYTHON__`` (see [`_PYTHON_EXE_RE`]). Applied unconditionally --
         it is machine noise regardless of whether a checkout root is present.
+
+    `project_token`, when set (a #865 tokened plan -- see `normalize_plan`),
+    substitutes the literal ``${PROJECT_ROOT}``/``${SDK_ROOT}`` tokens
+    instead of the plain `sdk_root` substring replace above; a `;`-joined
+    value (e.g. `SB_CONF_FILE`) can legitimately carry one of each, so both
+    substitutions always run rather than branching on which is present.
     """
     if isinstance(node, dict):
-        return {k: _normalize_strings(v, sdk_root) for k, v in node.items()}
+        return {k: _normalize_strings(v, sdk_root, project_token)
+                for k, v in node.items()}
     if isinstance(node, list):
-        return [_normalize_strings(v, sdk_root) for v in node]
+        return [_normalize_strings(v, sdk_root, project_token)
+                for v in node]
     if isinstance(node, str):
-        text = node.replace(sdk_root, _SDKROOT_TOKEN) if sdk_root else node
+        if project_token is not None:
+            text = (node.replace("${PROJECT_ROOT}", project_token)
+                        .replace("${SDK_ROOT}", _SDKROOT_TOKEN))
+        else:
+            text = node.replace(sdk_root, _SDKROOT_TOKEN) if sdk_root else node
         return _PYTHON_EXE_RE.sub(f"-DPython3_EXECUTABLE={_PYTHON_TOKEN}", text)
     return node
 
 
-def normalize_plan(plan: dict) -> dict:
-    """Return a checkout-independent copy of a build-plan dict.
+def _project_relpath(plan: dict) -> str:
+    """Directory holding `boardYaml`, e.g. `examples/audio/i2s-tone` for a
+    `boardYaml` of `examples/audio/i2s-tone/board.yaml`.
 
-    Replaces the embedded checkout-root absolute path with ``__SDKROOT__``
-    and ``sdkCommit`` with ``__SHA__`` -- the two fields that legitimately
-    differ between the oracle's capture checkout and whatever checkout the
-    live SDK is emitted from, without being a real parity break.
+    `boardYaml` is deliberately NOT tokenized by the #865 planner change
+    (it stays repo-relative, as-passed) precisely so it can anchor this:
+    every harness fixture lives UNDER the SDK root, so once `${SDK_ROOT}`
+    is substituted in, `${PROJECT_ROOT}` == `__SDKROOT__/<this relpath>`.
     """
-    sdk_root = _discover_sdk_root(plan)
-    normalized = _normalize_strings(plan, sdk_root)
+    return os.path.dirname(plan.get("boardYaml") or "")
+
+
+# The #863/#871 planner change adds a `-DEXTRA_CONF_FILE=<per-core alp.conf>`
+# arg to each NON-sysbuild Zephyr slice's command that the frozen 97ad481b
+# oracle predates -- the intended, hand-reviewed ADR-0020 delta (see the
+# ADR-0020 amendment), analogous to the debug.probe openocd->null allowance.
+# This is a COMMAND-SHAPE delta (an arg present/absent), not a content delta,
+# so it stays even after content dropped out of scope below.
+#
+# Scoped to NON-sysbuild slices ONLY, detected the same way the emitter
+# itself decides (`orchestrator.py::_slice_command`): a sysbuild slice's
+# `command.args` carries the literal `--sysbuild` flag. Sysbuild slices
+# deliberately do NOT carry `-DEXTRA_CONF_FILE` (Option A, #871: a bare
+# -DEXTRA_CONF_FILE lands on the sysbuild image not the app, silently
+# dropping the per-core alp.conf on boot:/OTA projects -- ADR-0020 Amendment
+# item 4) -- stripping the arg unconditionally from EVERY slice, sysbuild
+# included, would silently hide exactly that regression (a sysbuild slice
+# wrongly gaining the arg) from the comparator instead of catching it.
+# KEEP IN LOCKSTEP with tan-cli's vendored copy of this comparator.
+def _strip_863_extra_conf_file_arg(plan):
+    """Remove the intended #863/#871 `-DEXTRA_CONF_FILE=` command arg from
+    every NON-sysbuild slice's command in a (normalized) plan dict."""
+    for slice_ in plan.get("slices", []) or []:
+        cmd = slice_.get("command")
+        if not (isinstance(cmd, dict) and isinstance(cmd.get("args"), list)):
+            continue
+        if "--sysbuild" in cmd["args"]:
+            continue
+        cmd["args"] = [a for a in cmd["args"]
+                       if not (isinstance(a, str)
+                               and a.startswith("-DEXTRA_CONF_FILE="))]
+    return plan
+
+
+def _drop_artefact_contents(plan):
+    """Drop the materialised CONTENT of every artefact, keeping only its
+    `path` in the shape check.
+
+    Config-artefact content (`slices[*].configArtefacts[*].contents`) and
+    shared-artefact content (`sharedArtefacts[*].contents`) are covered
+    byte-for-byte on the alp-sdk side by the emit-snapshot goldens instead
+    (see this module's docstring) -- seam-1 only needs to know an artefact
+    still exists at the same path, not what it says.
+    """
+    for slice_ in plan.get("slices", []) or []:
+        for art in slice_.get("configArtefacts", []) or []:
+            art.pop("contents", None)
+    for art in plan.get("sharedArtefacts", []) or []:
+        art.pop("contents", None)
+    return plan
+
+
+def normalize_plan(plan: dict) -> dict:
+    """Return a checkout-independent, content-free copy of a build-plan
+    dict, ready for the seam-1 SHAPE diff.
+
+    Replaces the embedded checkout-root absolute path with ``__SDKROOT__``,
+    ``sdkCommit`` with ``__SHA__``, and drops ``sdkVersion`` entirely --
+    fields that legitimately differ between the oracle's capture checkout
+    and whatever checkout the live SDK is emitted from, without being a real
+    parity break. Also drops every artefact's materialised content
+    (``_drop_artefact_contents``) -- that's the alp-sdk-side emit-snapshot
+    goldens' job, not this shape check's.
+
+    alp-sdk issue #865 flipped a LIVE plan's emit to carry literal
+    ``${SDK_ROOT}``/``${PROJECT_ROOT}`` tokens instead of this checkout's
+    absolute paths (`commands/build/token_substitution.rs` substitutes them
+    at materialise time -- KEEP THIS RECONCILIATION IN LOCKSTEP with
+    alp-sdk's copy of this comparator). The frozen 97ad481b oracle predates
+    that and still carries real absolute paths, so a tokened live plan is
+    mapped to the SAME normalized form the oracle collapses to rather than
+    diffed as a foreign shape:
+
+      * ``${SDK_ROOT}``     -> ``__SDKROOT__`` (the oracle's own absolute
+        checkout root also collapses here, via ``_discover_sdk_root``).
+      * ``${PROJECT_ROOT}`` -> ``__SDKROOT__/<project relpath>``, where
+        ``<project relpath>`` is ``boardYaml``'s own directory (see
+        ``_project_relpath``) -- the harness fixtures live under the SDK
+        root, so this lands on the identical string the oracle's absolute
+        ``sdk_root/<project relpath>/...`` prefix collapses to.
+
+    Gated on ``planPathMode == "tokened"`` -- a legacy (non-tokened) plan
+    keeps the pre-#865 absolute-path normalization untouched.
+    """
+    if plan.get("planPathMode") == "tokened":
+        project_token = f"{_SDKROOT_TOKEN}/{_project_relpath(plan)}".rstrip("/")
+        normalized = _normalize_strings(plan, sdk_root=None,
+                                         project_token=project_token)
+    else:
+        sdk_root = _discover_sdk_root(plan)
+        normalized = _normalize_strings(plan, sdk_root)
     if "sdkCommit" in normalized:
         normalized["sdkCommit"] = _SHA_TOKEN
+    # `sdkVersion` is the same class of volatile identity field as
+    # `sdkCommit` above: it names the emitting checkout's SDK release, not
+    # the plan's shape, and bumps on every version-bump PR (e.g. 0.11.1 ->
+    # 0.13.0) with zero shape change -- drop it rather than diff it, mirror
+    # of alp-sdk's own comparator fix (alp-sdk#883).
+    normalized.pop("sdkVersion", None)
+    normalized = _strip_863_extra_conf_file_arg(normalized)
+    normalized = _drop_artefact_contents(normalized)
+    # `planPathMode` is itself a #865 addition the oracle predates (like the
+    # #863/#871 command-arg addition above) -- drop it rather than diff it;
+    # the token-vs-absolute SHAPE it flags is already reconciled above.
+    normalized.pop("planPathMode", None)
     return normalized
 
 

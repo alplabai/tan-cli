@@ -7,6 +7,116 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-24
+
+### Added
+- **Zero-flag default-SDK resolution** — a new machine-global SDK default
+  tier sits between the project pin and auto-discovery: `tan sdk switch
+  --global` pins `~/.alp/sdk-default` (same shape as the project pin);
+  `tan init` now resolves the new project's SDK through the full four-tier
+  precedence (`sdkRootFlag` > `projectPin` > `globalDefault` > `discovery`
+  > `none`) and pins it into the new project's `.alp/sdk-path` without a
+  separate `tan sdk switch` step; `tan sdk current --json` reports which
+  tier resolved via the new `sourceTier` field (#32).
+- **`tan kconfig`** — board-scoped Kconfig symbol menu for one core (the
+  vscode `prj.conf` LSP's live feed), wrapping the SDK's `alp_orchestrate
+  --emit kconfig --core <id>` (alp-sdk #894) in the standard
+  `Envelope<KconfigData>`. Workspace-dependent — the SDK's one deliberate
+  exception to "every emit is hermetic" — so `tan kconfig` resolves
+  `ZEPHYR_BASE` via the same workspace/venv resolver `tan build` already
+  uses and fails loud (exit 2, `run 'tan bootstrap' first`) when no
+  bootstrapped workspace resolves, instead of spawning the emit for a
+  cryptic Python failure. `--core` defaults to the board's one declared
+  Zephyr core when unambiguous; otherwise it's required, with an error
+  naming the board's declared cores (#35).
+
+### Changed
+- **Release notes** — `release.yml` now slices the matching `## [X.Y.Z]`
+  section out of `CHANGELOG.md` and publishes it as the GitHub Release body
+  instead of an empty one (v0.2.0 shipped with no notes) (#30).
+- **New golden-envelope contract test** (`crates/tan-cli/tests/
+  contract.rs`) pins the JSON envelope shape of the vscode-parsed commands
+  (`init`, `generate`, `validate`, `sdk`) across six offline, deterministic
+  cases plus the `tan --version` format, so an accidental wire-format
+  change fails `cargo test` instead of surfacing as a silent extension
+  regression. Test infrastructure only; no change to `tan`'s own runtime
+  behavior (#7).
+- **Release assets** — the Linux `-gnu` binaries are now cross-built with
+  `cargo-zigbuild` against a pinned **glibc 2.31** floor instead of inheriting
+  the ubuntu-latest runner's own glibc (2.39, which broke consumers on older
+  distros with `GLIBC_2.39 not found`); two new fully-static
+  `-unknown-linux-musl` assets (x86_64 + aarch64) ship alongside them for
+  Alpine/container consumers and arm64 Linux (no arm runner needed). Every
+  release asset, plus a new `checksums.txt`, now carries a GitHub
+  build-provenance attestation (`gh attestation verify`) (#6, #20).
+
+### Fixed
+- **`tan bootstrap` could silently pull the wrong SDK's west manifest.**
+  After `tan sdk switch` between two cached SDK versions sharing a `.west`
+  topdir, the "already initialised" path ran `west update` without
+  reconciling `.west/config`'s `[manifest] path`, so it kept pulling the
+  FIRST SDK's manifest. `tan bootstrap` (unless `--no-west`) now reconciles
+  `manifest.path` against the resolved SDK root before shelling
+  `bootstrap.sh`, preserving CRLF line endings and rewriting the file
+  atomically (#31).
+- **`tan kconfig`'s symbol deserialization now requires every key the
+  SDK's `--emit kconfig` always emits** (`depends`/`help`/`symbols`)
+  instead of silently defaulting a renamed/missing key to empty; the
+  vendored `tests/fixtures/kconfig-contract/emit-kconfig.golden.json`
+  contract anchor is now byte-diffed against alp-sdk's own canonical
+  fixture by `tests/parity/kconfig_fixture_parity.py` in CI (#40).
+
+## [0.2.0] — 2026-07-22
+
+### Added
+- **Build-plan token-substitution pass (alp-sdk #865, "hermetic build
+  plans").** `tan_core::plan_tokens::substitute_plan_tokens` swaps
+  `${SDK_ROOT}`/`${PROJECT_ROOT}`/`${PYTHON}` for tan's already-resolved
+  values in every path-bearing plan string, gated on the additive top-level
+  `planPathMode: "tokened"` field — a no-op on every plan the SDK emits
+  today. Guards: a leftover `${...}` token after substitution fails loudly;
+  a `--plan-from` plan's `sdkCommit` is checked against the resolved SDK
+  checkout's actual `git` HEAD (the two-SDK split-brain guard); `${PROJECT_ROOT}`
+  diverging from the executor's actual base dir refuses the build rather than
+  silently building against the wrong tree.
+- **`tan init`'s `zephyr-app` template now scaffolds from alp-sdk's vendored
+  `--emit scaffold` output** (alp-sdk #864), retiring tan's own hand-rolled
+  Rust scaffold generators — which had regressed a cross-core Kconfig leak.
+  A cross-repo byte-parity gate (`tests/parity/scaffold_byte_parity.py`) holds
+  the vendored `minimal` E1M-AEN801/E1M-V2N101 trees byte-identical to the
+  SDK's emit.
+
+### Changed
+- **Seam-1 parity twin retuned to shape-only comparison** (alp-sdk #874/#879).
+  The vendored comparator no longer diffs each slice's materialised
+  config-artefact contents (`alp.conf`/`local.conf`/`cmake-args.txt`/
+  sysbuild-conf bytes) against the frozen oracle — only command / env /
+  `appDir` / skip-fail-decision shape — so a content-only emitter change no
+  longer needs a hand-reviewed comparator strip to stay green. Test/CI
+  infrastructure only; no change to `tan`'s own runtime behavior.
+- **Seam-1 twin reconciled with alp-sdk #865's tokenized plans**: the
+  comparator now maps a live `planPathMode: "tokened"` plan's
+  `${SDK_ROOT}`/`${PROJECT_ROOT}` tokens onto the same normalized form the
+  frozen (pre-#865, absolute-path) oracle collapses to, instead of diffing
+  them as a foreign shape; the frozen `iot-fleet-ota` oracle fixture was
+  re-synced to alp-sdk's #862-corrected bytes.
+
+### Fixed
+- **Re-vendored the `zephyr-app` scaffold from a corrected `--emit scaffold`**
+  (alp-sdk #877): the E1M-V2N101 tree had shipped the non-buildable Alif
+  `m55_hp` core (corrected to the Renesas `m33_sm` core) and a bare Zephyr
+  board target, now the fully-qualified `board/soc/core` form; the
+  `ALP_SDK_ROOT` CMake resolution now hard-errors instead of silently
+  falling back to a relative-path guess. `tan init --cores` validation now
+  derives the `zephyr-app` template's expected core from the vendored
+  scaffold's own ground truth rather than the SKU-prefix heuristic every
+  other template uses, fixing a latent E1M-NX9101 core mismatch in the
+  process.
+- **`tan build`/`flash`/`renode`'s "not built yet" error hints now say
+  `tan build --project <path>`** — `build` takes no positional path
+  argument, so the previous bare `tan build <path>` hint named an
+  invocation clap rejects.
+
 ## [0.1.1] — 2026-07-20
 
 A full adversarially-verified codebase review found data-loss and

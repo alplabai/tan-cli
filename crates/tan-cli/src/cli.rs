@@ -123,6 +123,9 @@ pub enum Command {
     /// Build the project natively: consume the SDK's emitted build plan,
     /// materialise its files, then run each per-core slice's command directly.
     Build(BuildArgs),
+    /// Show the board-scoped Kconfig symbol menu for one core (the vscode
+    /// `prj.conf` LSP's live feed). Needs a bootstrapped Zephyr workspace.
+    Kconfig(KconfigArgs),
     /// Assemble a flashable-image bundle from `build/system-manifest.yaml` (native).
     Image(ImageArgs),
     /// Flash every slice + helper MCU from `build/system-manifest.yaml` onto the
@@ -371,6 +374,15 @@ pub struct BuildArgs {
     pub manifest_from: Option<String>,
 }
 
+/// Args for `kconfig`: scope the board-scoped Kconfig symbol menu to one core.
+#[derive(Debug, Args)]
+pub struct KconfigArgs {
+    /// Core id to scope the Kconfig symbol menu to (default: the board's one
+    /// declared Zephyr core, when unambiguous).
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
+}
+
 /// Args for `bootstrap`: toggles for the pip/west steps and an env-only dry run.
 #[derive(Debug, Args)]
 pub struct BootstrapArgs {
@@ -397,6 +409,10 @@ pub struct SdkArgs {
     /// Cache root for `install` (default: ~/.alp/sdk-cache).
     #[arg(long)]
     pub destination: Option<String>,
+    /// With `switch`: pin the machine-global default (`~/.alp/sdk-default`)
+    /// instead of the current project (`.alp/sdk-path`).
+    #[arg(long)]
+    pub global: bool,
 }
 
 /// Args for `doctor`: debug target/server selection and a build-readiness toggle.

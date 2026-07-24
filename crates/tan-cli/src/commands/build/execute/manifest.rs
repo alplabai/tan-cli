@@ -71,7 +71,13 @@ pub(super) fn write_post_build_manifest(
         };
     }
 
-    let yaml = match invoke_sdk_emit(context, "system-manifest", "build.manifest-unavailable") {
+    let yaml = match invoke_sdk_emit(
+        context,
+        "system-manifest",
+        "build.manifest-unavailable",
+        &[],
+        &[],
+    ) {
         Ok(y) => y,
         Err((_, msg)) => {
             return PostBuildManifest {

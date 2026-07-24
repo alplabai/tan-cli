@@ -34,6 +34,7 @@ pub(super) fn empty_data(
         file_changes,
         written: vec![],
         unchanged: vec![],
+        sdk_pinned: None,
     }
 }
 
@@ -69,6 +70,7 @@ pub(super) fn error_run(g: &GlobalArgs, exit: ExitCode, code: &str, message: &st
         file_changes: vec![],
         written: vec![],
         unchanged: vec![],
+        sdk_pinned: None,
     };
     let text = if g.is_json() {
         vec![]
@@ -109,6 +111,7 @@ pub(super) fn write_error_run(
         file_changes: vec![],
         written: partial.written,
         unchanged: partial.unchanged,
+        sdk_pinned: None,
     };
     let text = if g.is_json() {
         vec![]
