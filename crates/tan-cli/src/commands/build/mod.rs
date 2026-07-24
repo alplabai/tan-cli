@@ -25,7 +25,9 @@ mod native;
 mod plan_modes;
 mod preflight;
 mod token_substitution;
-mod workspace;
+/// `west`-workspace plumbing. Not private: `commands::bootstrap` reuses
+/// `with_venv_on_path` so the venv-on-PATH fix (#106) has exactly one owner.
+pub(crate) mod workspace;
 
 use serde::Serialize;
 

@@ -79,9 +79,17 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
         // Probe once; only re-probe if a bootstrap actually ran (it can change
         // the workspace/west readiness), instead of always probing twice.
         let mut checks = probe_build_preflight(g, &context);
-        if let Some(updated) = maybe_auto_bootstrap(g, &checks) {
-            context = updated;
-            checks = probe_build_preflight(g, &context);
+        // `--no-auto-bootstrap` keeps `tan build` to building. The implicit
+        // trigger is now a full native bootstrap on EVERY host (#49) — on
+        // Windows it used to refuse instantly, and instead it can clone Zephyr
+        // + the HALs into `<sdkRoot>/..` unattended, which is not something a
+        // build should start without a way to say no. Default is unchanged
+        // (auto-trigger stays, matching the POSIX behaviour it always had).
+        if !args.no_auto_bootstrap {
+            if let Some(updated) = maybe_auto_bootstrap(g, &checks) {
+                context = updated;
+                checks = probe_build_preflight(g, &context);
+            }
         }
         if let Some(blocked) = gate_from_checks(g, checks) {
             return NativeBuildOutcome {

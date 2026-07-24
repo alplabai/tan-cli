@@ -156,6 +156,86 @@ pub fn python_too_old(binary: &str) -> Option<String> {
     }
 }
 
+/// A host Python interpreter that was probed and actually ran.
+#[derive(Debug)]
+pub struct HostPython {
+    /// argv prefix that launches it — `["py", "-3"]`, `["python3"]`, …
+    pub argv: Vec<String>,
+    /// The `(major, minor)` it reported.
+    pub version: (u32, u32),
+}
+
+impl HostPython {
+    /// A fresh [`Command`] for this interpreter, with its launcher flags applied.
+    pub fn command(&self) -> Command {
+        let mut cmd = Command::new(&self.argv[0]);
+        cmd.args(&self.argv[1..]);
+        cmd
+    }
+
+    /// How to spell this interpreter in a message (`py -3`, `python3`, …).
+    pub fn display(&self) -> String {
+        self.argv.join(" ")
+    }
+}
+
+/// Find the host interpreter `tan bootstrap` creates the workspace venv with:
+/// walk [`tan_core::bootstrap::python_candidates`] in order and take the first
+/// that actually RUNS and is at least `minimum`, falling back to the first that
+/// merely ran (so the caller can report a real version in its too-old message
+/// rather than "did not run"). `None` when no candidate runs at all.
+///
+/// `minimum` is a PARAMETER because the floor bootstrap enforces is the
+/// manifest's `prerequisites.pythonMinVersion`, not tan's compiled-in
+/// [`MIN_PYTHON`]. Probing against the compiled-in floor while enforcing the
+/// manifest's would hard-fail a host that has a good interpreter one candidate
+/// further down the list the moment alp-sdk bumps its floor — the exact skew
+/// manifest consumption exists to survive. Non-bootstrap callers pass
+/// [`MIN_PYTHON`].
+///
+/// "Actually runs" is the whole point on Windows: the Microsoft Store
+/// `python.exe` alias sits on PATH and satisfies any presence check, but
+/// executing it prints nothing and opens the Store instead (bootstrap.ps1, the
+/// "Prerequisite check" section's `python did not run (Windows Store alias?)`
+/// Fail — anchored by name because the oracle's line numbers have already
+/// drifted twice).
+/// Requiring parseable output rejects it, and the `py -3` candidate ahead of it
+/// means a machine with only the launcher installed still bootstraps.
+///
+/// The version preference is what keeps that ordering safe: `py -3` resolves to
+/// the LAUNCHER's default, which is routinely an older install than the bare
+/// `python` on PATH (a 3.9 default alongside a 3.14 on PATH is exactly the
+/// shape that would otherwise make bootstrap refuse a perfectly good host).
+pub fn probe_host_python(minimum: (u32, u32)) -> Option<HostPython> {
+    let mut first_that_ran: Option<HostPython> = None;
+    for candidate in tan_core::bootstrap::python_candidates(cfg!(windows)) {
+        let Some((program, flags)) = candidate.split_first() else {
+            continue;
+        };
+        let output = Command::new(program)
+            .args(flags)
+            .arg("-c")
+            .arg("import sys;print('%d.%d' % sys.version_info[:2])")
+            .output();
+        let Ok(output) = output else { continue };
+        if !output.status.success() {
+            continue;
+        }
+        let Some(version) = parse_python_version(&String::from_utf8_lossy(&output.stdout)) else {
+            continue;
+        };
+        let found = HostPython {
+            argv: candidate.iter().map(|s| (*s).to_string()).collect(),
+            version,
+        };
+        if version >= minimum {
+            return Some(found);
+        }
+        first_that_ran.get_or_insert(found);
+    }
+    first_that_ran
+}
+
 /// Lexically normalize a path (collapse `.` and `..`) without touching the
 /// filesystem, mirroring Node's `path.resolve` behavior on the joined result.
 pub fn normalize_path(path: &Path) -> PathBuf {
