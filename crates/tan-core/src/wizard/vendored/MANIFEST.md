@@ -15,7 +15,9 @@ from an un-revendored SDK change.
 - Commit: **v0.13.0 (`93ef5726`)** — `minimal` was re-vendored at this commit
   (only its `README.md` doc-version link changed, `v0.11.1` -> `v0.13.0`; the
   scaffold content itself is unchanged since the `a0849e10` vendor point
-  below). `sensor` was vendored fresh at this same commit.
+  below). `sensor` and `edge-ai` were vendored fresh at this same commit --
+  `edge-ai` supersedes the `edge-ai-starter` flag this manifest carried
+  before v0.13.0 (see "Template-id mapping" below).
   - Prior vendor point: `a0849e10` (`feat(build-plan): --emit scaffold
     derives cores per SKU + adapts scaffold content (#864) (#877)`) —
     re-vendored from this commit (tan-cli#25 had vendored `75ef3b02`, before
@@ -27,13 +29,16 @@ from an un-revendored SDK change.
 
 ## Template x SKU matrix vendored
 
-| tan `WizardTemplateId` | SDK catalog id | Vendored SKUs | Example dir |
-|---|---|---|---|
-| `zephyr-app` | `minimal` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/hello-world` |
-| `sensor-starter` | `sensor` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/i2c-master` |
+| tan `WizardTemplateId` | SDK catalog id | Vendored SKUs | Example dir | Files |
+|---|---|---|---|---|
+| `zephyr-app` | `minimal` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/hello-world` | 6 |
+| `sensor-starter` | `sensor` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/i2c-master` | 6 |
+| `edge-ai-starter` | `edge-ai` | `E1M-AEN801`, `E1M-V2N101` | `examples/ai/cold-chain-monitor` | 8 |
 
 Layout: `vendored/<sdk-template-id>/<sku>/<path>`, e.g.
-`vendored/minimal/E1M-AEN801/CMakeLists.txt`.
+`vendored/minimal/E1M-AEN801/CMakeLists.txt`. `edge-ai` ships two extra files
+over `minimal`/`sensor`'s six: `src/cold_chain.c` + `src/cold_chain.h` (the
+cold-chain-metrics core the app links against).
 
 `crates/tan-core/src/wizard/service/vendored.rs` reads these via
 `include_str!` (baked into the binary at compile time — no filesystem read at
@@ -52,22 +57,40 @@ Layout: `vendored/<sdk-template-id>/<sku>/<path>`, e.g.
 
 ## Template-id mapping: resolved vs. flagged (maintainer decision)
 
-`zephyr-app -> minimal` and `sensor-starter -> sensor` are mapped/vendored —
-the two mappings confirmed clean, and the two templates whose existing
-generator (`gen_zephyr_project_files`) already targeted (or, for
-`sensor-starter`, was retired in favor of) a real, west-buildable Zephyr
+`zephyr-app -> minimal`, `sensor-starter -> sensor`, and
+`edge-ai-starter -> edge-ai` are mapped/vendored — the three mappings
+confirmed clean, and the three templates whose existing generator
+(`gen_zephyr_project_files`) already targeted (or, for `sensor-starter`/
+`edge-ai-starter`, was retired in favor of) a real, west-buildable Zephyr
 layout structurally matching the SDK's canonical scaffold
 (`find_package(Zephyr)` + `board.yaml` -> generated Kconfig):
 `examples/peripheral-io/hello-world` for `minimal`,
-`examples/peripheral-io/i2c-master` for `sensor`. `zephyr-app` is also the
+`examples/peripheral-io/i2c-master` for `sensor`,
+`examples/ai/cold-chain-monitor` for `edge-ai`. `zephyr-app` is also the
 one directly responsible for #864's motivating regression: the retired
 CMakeLists.txt ran `--emit zephyr-conf` **without** `--core <id>`, which on a
 heterogeneous (`--cores`) project lets one core's Kconfig leak into another
 core's build. The vendored CMakeLists.txt threads `--core <id>` explicitly,
-closing it — `sensor-starter`'s vendored CMakeLists.txt does the same.
-`sensor-starter`'s hand-written generator emitted a generic sensor-polling
-stub; the vendored tree instead emits the SDK's real TMP112
-`<alp/chips/tmp112.h>` i2c-master example.
+closing it — `sensor-starter`'s and `edge-ai-starter`'s vendored
+CMakeLists.txt do the same. `sensor-starter`'s hand-written generator emitted
+a generic sensor-polling stub, and `edge-ai-starter`'s a generic
+arena-sizing stub; the vendored trees instead emit the SDK's real TMP112
+`<alp/chips/tmp112.h>` i2c-master example and BME280 cold-chain-monitor app,
+respectively.
+
+`edge-ai-starter` was flagged (not vendored) through v0.11.1: the SDK's
+`edge-ai` scaffold's `cores:` topology did **not** change with `--sku` back
+then (see "Per-SKU substitution" below) — its `E1M-V2N101` render kept
+`cores:` keyed on `m55_hp`/`a32_cluster`, the Alif-only pair, not the real
+Renesas `m33_sm`/`a55_cluster`. alp-sdk#877 (the same fix that resolved
+`zephyr-app`'s per-SKU core bug) fixed this for `edge-ai` too, so it is now
+vendored at v0.13.0: `E1M-V2N101`'s tree correctly keys the app core on
+`m33_sm` (companion `a55_cluster`, `os: "off"`). It is also the FIRST
+HETEROGENEOUS (multi-core) vendored template — its `board.yaml` lists the
+companion core BEFORE the app core, which is why `vendored_app_core_key`
+(`vendored.rs`) reads the core that OWNS an `app:` key rather than trusting
+positional "first child under `cores:`" (correct for `minimal`/`sensor` only
+because they are single-core).
 
 Every other tan wizard template is **left on its existing hand-written
 generator, unchanged** — each has a real gap against the SDK catalog rather
@@ -80,14 +103,6 @@ than a clean 1:1:
   `zephyr-app` would make the two templates byte-identical in the wizard's
   template picker — a product decision (merge/deprecate one), not something
   to invent here.
-- **`edge-ai-starter`** — same plain-CMake-shape gap against SDK `edge-ai`
-  (a concrete BME280 cold-chain-monitor app, not a generic arena-sizing
-  stub). Also: the SDK's `edge-ai` scaffold's `cores:` topology does **not**
-  change with `--sku` (see "Two-line substitution only" below) — its
-  `E1M-V2N101` render still keys `cores:` on `m55_hp`/`a32_cluster`, not
-  `m33_sm`. Vendoring it as-is would silently break the existing
-  `app_core_for_sku`-driven core-consistency assumptions tan's init-time
-  `--cores` validation relies on; flagging rather than papering over it.
 - **`iot-starter`** — no SDK catalog template covers Wi-Fi/MQTT/TLS at all
   (`gateway` is Modbus, not IoT connectivity).
 - **`board-diagnostics`** — no SDK catalog template is diagnostics/bring-up
@@ -129,31 +144,52 @@ e.g. `alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33`). Confirmed for `minimal`:
 and `README.md`; `prj.conf`, `src/main.c`, and `testcase.yaml` (not part of
 the scaffold envelope, see below) stay byte-identical between the two.
 
-The vendored `minimal`/`sensor` scaffolds' `cores:` key is `m33_sm` for
-`E1M-V2N101`/`E1M-V2M101` and `m55_hp` for `E1M-AEN801` — agreeing with
+The vendored `minimal`/`sensor`/`edge-ai` scaffolds' `cores:` key is `m33_sm`
+for `E1M-V2N101`/`E1M-V2M101` and `m55_hp` for `E1M-AEN801` — agreeing with
 `app_core_for_sku`. `vendored.rs` still derives the `--cores` companion-splice
 target from EACH template's OWN vendored `board.yaml` `cores:` key
 (`vendored_app_core_key`/`vendored_app_core_for_sku`/
-`vendored_sensor_app_core_for_sku`) rather than calling `app_core_for_sku`
-directly, so a *future* re-vendor that (again) derives a different core for a
-vendored SKU fails `cargo test`
+`vendored_sensor_app_core_for_sku`/`vendored_edge_ai_app_core_for_sku`)
+rather than calling `app_core_for_sku` directly, so a *future* re-vendor that
+(again) derives a different core for a vendored SKU fails `cargo test`
 (`vendored_app_core_matches_each_familys_board_yaml`/
-`vendored_sensor_app_core_matches_each_familys_board_yaml`) instead of
+`vendored_sensor_app_core_matches_each_familys_board_yaml`/
+`vendored_edge_ai_app_core_matches_each_familys_board_yaml`) instead of
 silently drifting. `tan init`'s upfront `--cores` validation
 (`commands/init/resolve.rs`'s `app_core_for_template`) now calls
-`vendored_app_core_for_sku`/`vendored_sensor_app_core_for_sku` for the
-`zephyr-app`/`sensor-starter` templates specifically (every other template
-still uses `app_core_for_sku`, matching its own hand-written
-`gen_board_yaml`), so the CLI-level check can never again independently
-disagree with what `create_wizard_plan_with_cores` actually plans.
+`vendored_app_core_for_sku`/`vendored_sensor_app_core_for_sku`/
+`vendored_edge_ai_app_core_for_sku` for the `zephyr-app`/`sensor-starter`/
+`edge-ai-starter` templates specifically (every other template still uses
+`app_core_for_sku`, matching its own hand-written `gen_board_yaml`), so the
+CLI-level check can never again independently disagree with what
+`create_wizard_plan_with_cores` actually plans.
+
+### Heterogeneous `cores:` — `vendored_app_core_key` reads the `app:` owner
+
+`edge-ai`'s `board.yaml` lists its companion core FIRST
+(`a55_cluster:`/`a32_cluster:`, `os: "off"`, no `app:` key) and the real app
+core SECOND (`m33_sm`/`m55_hp`, the one with `app: ./src`) — the reverse
+insertion order every single-core `minimal`/`sensor` tree happens to share
+with its app core being the only entry. `vendored_app_core_key` therefore
+scans every child under `cores:`, tracking the current `  <core>:` key, and
+returns whichever one owns a `    app:` line, instead of positionally
+trusting the first indented child (which used to be correct only because
+`minimal`/`sensor` are single-core). Two `vendored.rs` unit tests are the
+regression guards for this: `vendored_app_core_key_finds_the_app_core_not_the_first_listed_core`
+and `edge_ai_cores_splice_targets_the_real_app_core_not_the_companion` both
+assert the edge-ai V2N tree resolves to `m33_sm`, not `a55_cluster` — for the
+raw key lookup and for where a `--cores` splice lands its IPC endpoint,
+respectively.
 
 `testcase.yaml` is vendored alongside the scaffold envelope but is **not**
 part of `--emit scaffold`'s output — the catalog's `files.user_owned` for
-both `minimal` and `sensor` is `board.yaml`/`prj.conf`/`CMakeLists.txt`/
-`src/main.c`/`README.md` only. It's a byte-exact copy of the canonical
-example's own `testcase.yaml`
+`minimal`, `sensor`, and `edge-ai` is `board.yaml`/`prj.conf`/
+`CMakeLists.txt`/`src/main.c`/`README.md` (plus, for `edge-ai`,
+`src/cold_chain.c`/`src/cold_chain.h`) only. It's a byte-exact copy of the
+canonical example's own `testcase.yaml`
 (`examples/peripheral-io/hello-world/testcase.yaml` for `minimal`,
-`examples/peripheral-io/i2c-master/testcase.yaml` for `sensor`) — the SDK's
+`examples/peripheral-io/i2c-master/testcase.yaml` for `sensor`,
+`examples/ai/cold-chain-monitor/testcase.yaml` for `edge-ai`) — the SDK's
 twister harness for that example, family-independent like every other
 non-`board.yaml` file. `tests/parity/scaffold_byte_parity.py` diffs it
 against that example directory rather than the live scaffold emit.

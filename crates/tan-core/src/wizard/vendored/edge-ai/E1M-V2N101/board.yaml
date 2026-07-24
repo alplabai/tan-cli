@@ -1,0 +1,37 @@
+# board.yaml -- cold-chain integrity monitor.
+#
+# A low-power M55 node reads the on-board BME280 temperature/humidity/pressure
+# sensor on a slow logging cadence, computes the cold-chain metrics (MKT,
+# dewpoint, excursion time), and classifies the integrity state.  Same source
+# targets the V2N DEEPX path when som.sku is flipped.
+
+libraries:
+  - name: tflite-micro
+    cores: [m33_sm]
+
+som:
+  sku: E1M-V2N101
+
+preset: e1m-x-evk
+supported_boards:
+  - e1m-evk
+  - e1m-x-evk
+
+pins:
+  - { e1m: E1M_X_I2C0, macro: XEVK_I2C_BUS_SENSORS, doc: "On-board sensor + IO-expander + INA236 bus (ICM-42670, BMI323, BMP581, TCAL9538, INA236)." }
+
+cores:
+  a55_cluster:
+    os: "off"
+  m33_sm:
+    app: ./src
+    inference:
+      default_arena_kib: 64
+    peripherals:
+      - i2c                   # BME280 link.
+
+chips:
+  - bme280                    # temperature / humidity / pressure.
+
+diagnostics:
+  log_level: info

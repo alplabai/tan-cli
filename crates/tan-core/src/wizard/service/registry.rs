@@ -100,20 +100,23 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
     WizardTemplateDefinition {
         id: WizardTemplateId::EdgeAiStarter,
         label: "Edge AI starter",
-        description: "Inference-first starter with arena sizing and backend hints.",
-        libs: &["cmsis-dsp", "etl"],
+        description: "West-buildable BME280 cold-chain-monitor app wired to board.yaml via the SDK loader.",
+        // Files are vendored from the SDK's `edge-ai` scaffold-catalog entry
+        // (alp-sdk#864, see wizard/vendored/MANIFEST.md), not hand-generated
+        // from these fields -- libs/features/prj_conf_extras/feature_files/
+        // body_line* are unread for this template (see gen_c_project_files).
+        // FIRST heterogeneous (multi-core) vendored template: a companion
+        // Cortex-A cluster (`os: "off"`) ships alongside the Cortex-M app core.
+        libs: &[],
         features: None,
-        prj_conf_extras: &["CONFIG_CMSIS_DSP=y", "CONFIG_CBPRINTF_FP_SUPPORT=y"],
-        feature_files: &[FeatureFileSpec {
-            path: "src/features/inference_pipeline.c",
-            unit_name: "inference_pipeline",
-            todo_line: "TODO: map input tensors, execute inference, and decode model output.",
-        }],
-        body_line1: "ALP edge AI starter boot",
-        body_line2: "TODO: load model and run inference loop",
+        prj_conf_extras: &[],
+        feature_files: &[],
+        body_line1: "",
+        body_line2: "",
         explanation: &[
-            "board.yaml includes an inference block with arena defaults for initial runs.",
-            "src/main.c points to model-load and inference-loop integration work.",
+            "Real Zephyr app vendored from the SDK's `edge-ai` scaffold: a BME280 cold-chain integrity monitor (MKT / dewpoint / excursion time) plus a TFLite-Micro anomaly score.",
+            "Heterogeneous board.yaml: the app core (m33_sm/m55_hp) runs inference alongside a companion Cortex-A cluster (a55_cluster/a32_cluster, os: \"off\").",
+            "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your alp-sdk checkout>`.",
         ],
     },
     WizardTemplateDefinition {

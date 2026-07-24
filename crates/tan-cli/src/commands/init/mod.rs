@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use tan_core::wizard::{WizardPlanInput, create_wizard_plan_with_cores};
+use tan_core::wizard::{WizardPlanInput, create_wizard_plan_with_cores, vendored_core_ids_for};
 
 use super::CommandRun;
 use crate::cli::{GlobalArgs, InitArgs};
@@ -145,6 +145,27 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
             ),
         );
     }
+    // The vendored scaffold may already pre-declare a companion core (e.g.
+    // edge-ai ships `a55_cluster`/`a32_cluster`, os: "off") -- a --cores id
+    // colliding with one would append a SECOND, duplicate `cores:` mapping
+    // key (serde_yaml/`tan validate` reject it; the SDK Python loader takes
+    // last-wins). Reject rather than silently drop the user's os or silently
+    // override the scaffold's.
+    if let Some((collide_id, os)) = vendored_core_ids_for(template_id, sku)
+        .into_iter()
+        .find(|(id, _)| id.as_str() != app_core && cores.iter().any(|(cid, _)| cid == id))
+    {
+        return error_run(
+            g,
+            ExitCode::ValidationFailure,
+            "init.invalid-cores",
+            &format!(
+                "Core '{collide_id}' is already declared by the {} scaffold (os: {}); edit board.yaml to change its os instead of passing --cores.",
+                template_id.as_str(),
+                os.trim_matches('"'),
+            ),
+        );
+    }
     let mut plan = create_wizard_plan_with_cores(
         &WizardPlanInput {
             template_id,
@@ -269,5 +290,56 @@ mod tests {
         assert!(ws.join("myproj").join(".alp").join("sdk-path").exists());
 
         std::fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn edge_ai_cores_colliding_with_a_pre_declared_companion_is_rejected() {
+        // Regression: edge-ai's vendored board.yaml already declares a
+        // companion core (a55_cluster on V2N, a32_cluster on AEN, os: "off").
+        // --cores re-declaring that same id used to append a SECOND `cores:`
+        // mapping key -- duplicate YAML rejected by tan validate/serde_yaml.
+        let g = GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: true,
+            ci: false,
+        };
+        for (sku, companion) in [("E1M-V2N101", "a55_cluster"), ("E1M-AEN801", "a32_cluster")] {
+            let ws = std::env::temp_dir().join(format!(
+                "edge-ai-cores-collide-{sku}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&ws);
+            let args = InitArgs {
+                template: Some("edge-ai-starter".to_string()),
+                from_example: None,
+                name: Some("proj".to_string()),
+                destination: Some(ws.to_string_lossy().into_owned()),
+                som: Some(sku.to_string()),
+                cores: Some(format!("{companion}:yocto")),
+                preview: false,
+                force: false,
+            };
+
+            let result = run(&g, &args);
+            assert_eq!(result.exit, ExitCode::ValidationFailure);
+            let json: serde_json::Value =
+                serde_json::from_str(result.json.as_deref().expect("json envelope")).unwrap();
+            assert_eq!(
+                json["issues"][0]["code"].as_str(),
+                Some("init.invalid-cores")
+            );
+            let message = json["issues"][0]["message"].as_str().unwrap_or_default();
+            assert!(message.contains(companion), "message: {message}");
+            assert!(message.contains("edge-ai-starter"), "message: {message}");
+            assert!(!ws.exists(), "a rejected --cores must not write any files");
+        }
     }
 }
