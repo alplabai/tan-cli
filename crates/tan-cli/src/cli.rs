@@ -432,6 +432,9 @@ pub struct ModelZooArgs {
     /// Mark which entries run on this SoM (via validated_soms).
     #[arg(long, value_name = "SKU")]
     pub sku: Option<String>,
+    /// Read the SoM SKU from this board.yaml (som.sku) to mark which entries run here.
+    #[arg(long, value_name = "PATH")]
+    pub board: Option<String>,
     /// Path to the metadata/ root (default: the SDK's own `metadata/`).
     #[arg(long = "metadata-root")]
     pub metadata_root: Option<String>,
