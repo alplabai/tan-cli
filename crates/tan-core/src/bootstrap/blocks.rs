@@ -65,15 +65,21 @@ pub fn print_env_block(
     venv_bin_dir: &str,
     is_windows: bool,
 ) -> Vec<String> {
-    let workspace = tokens.workspace_dir;
     let venv = &facts.venv_dir_name;
     let mut lines = if is_windows {
+        // `bootstrap.ps1` interpolates `$WorkspaceDir`, a native backslash path
+        // from `Resolve-Path`. Ours is the `ProjectContext` string, which is
+        // forward-slash on every OS -- normalise it, or this line comes out
+        // mixed (`C:/Users/dev\.venv\Scripts\Activate.ps1`), the exact thing
+        // `render_env_lines` normalises a substituted value to avoid.
+        let workspace = tokens.workspace_dir.replace('/', "\\");
         vec![
             "# Add to your PowerShell profile (or run before invoking the SDK):".to_string(),
             "# Activate the workspace venv (west + Zephyr/SDK Python deps live here):".to_string(),
             format!("#   & \"{workspace}\\{venv}\\{venv_bin_dir}\\Activate.ps1\""),
         ]
     } else {
+        let workspace = tokens.workspace_dir;
         vec![
             "# Add to your shell profile (or run before invoking the SDK):".to_string(),
             "# Activate the workspace venv (west + Zephyr/SDK Python deps live here):".to_string(),
@@ -109,6 +115,13 @@ pub fn optional_libs_block(
         ];
         if let Some(hint) = hint {
             lines.push(format!("  {}", hint.note));
+            // `nativeLibHints.windows.command` is null today, so this renders
+            // nothing -- but a manifest that grows one (a winget line, say)
+            // must reach the output without a tan release, same as POSIX.
+            if let Some(command) = hint.command.as_deref().filter(|c| !c.is_empty()) {
+                lines.push(String::new());
+                lines.push(format!("  {command}"));
+            }
         }
         return lines;
     }
@@ -141,7 +154,6 @@ pub fn next_steps_block(
     venv_bin_dir: &str,
     is_windows: bool,
 ) -> Vec<String> {
-    let repo_root = tokens.sdk_root;
     let mut lines = vec![String::new(), "Next steps:".to_string()];
     if is_windows {
         lines.push(
@@ -166,6 +178,10 @@ pub fn next_steps_block(
         String::new(),
     ]);
     if is_windows {
+        // `bootstrap.ps1` interpolates `$RepoRoot` here -- a native backslash
+        // path -- and the same line spells the example as `examples\...`, so a
+        // raw forward-slash `${SDK_ROOT}` would print mixed. See `print_env_block`.
+        let repo_root = tokens.sdk_root.replace('/', "\\");
         lines.extend([
             "  # Or jump straight into building an example for real silicon:".to_string(),
             "  west build -b alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he `".to_string(),
@@ -237,6 +253,10 @@ export ZEPHYR_TOOLCHAIN_VARIANT=zephyr";
     /// Byte-parity against the WORKING-TREE `bootstrap.ps1`'s "Print-env
     /// shortcut" section (`Write-EnvLines` always quotes), modulo the
     /// documented separator normalisation in [`render_env_lines`].
+    ///
+    /// The tokens are FORWARD-slash on purpose: that is what production hands
+    /// in (the `ProjectContext` path), and the header line used to interpolate
+    /// it raw, printing `C:/dev/work\.venv\Scripts\Activate.ps1`.
     #[test]
     fn print_env_windows_matches_bootstrap_ps1_verbatim() {
         let expected = "\
@@ -246,15 +266,27 @@ export ZEPHYR_TOOLCHAIN_VARIANT=zephyr";
 $env:ZEPHYR_BASE = \"C:\\dev\\work\\zephyr\"
 $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"";
         let tokens = Tokens {
+            sdk_root: "C:/dev/work/alp-sdk",
+            workspace_dir: "C:/dev/work",
+        };
+        let lines = print_env_block(&manifest_facts(), tokens, "Scripts", true);
+        assert_eq!(lines.join("\n"), expected);
+        // No PATH line may carry a forward slash — a mixed-separator line is
+        // the bug this guards. (The prose header's "Zephyr/SDK" is not a path.)
+        for line in lines.iter().filter(|l| l.contains("C:")) {
+            assert!(!line.contains('/'), "mixed separators: {line}");
+        }
+        assert_eq!(
+            print_env_block(&fallback_facts((3, 10)), tokens, "Scripts", true).join("\n"),
+            expected
+        );
+        // A backslash path in (what `bootstrap.ps1` itself has) is untouched.
+        let native = Tokens {
             sdk_root: "C:\\dev\\work\\alp-sdk",
             workspace_dir: "C:\\dev\\work",
         };
         assert_eq!(
-            print_env_block(&manifest_facts(), tokens, "Scripts", true).join("\n"),
-            expected
-        );
-        assert_eq!(
-            print_env_block(&fallback_facts((3, 10)), tokens, "Scripts", true).join("\n"),
+            print_env_block(&manifest_facts(), native, "Scripts", true).join("\n"),
             expected
         );
     }
@@ -309,6 +341,15 @@ $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"";
         );
         assert!(win.contains("run 'west sdk install' from C:\\ws"), "{win}");
         assert!(win.contains("the canonical use is WSL2 + Ubuntu"), "{win}");
+        // ...but a manifest that GROWS one must render it, spaced like POSIX.
+        let mut with_command = manifest_facts();
+        with_command.hint_windows.command = Some("winget install -e --id Foo.Bar".to_string());
+        let grown = optional_libs_block(&with_command, HostOs::Windows, "C:\\ws");
+        let at = grown
+            .iter()
+            .position(|l| l == "  winget install -e --id Foo.Bar")
+            .expect("windows hint command must be rendered");
+        assert_eq!(grown[at - 1], "", "command must be blank-line separated");
         // `*)` arm: no hint for an unrecognised OS.
         let other = optional_libs_block(&facts, HostOs::Other, "/ws").join("\n");
         assert!(
@@ -342,17 +383,19 @@ $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"";
         assert!(posix.contains("native_sim/native/64"), "{posix}");
         assert!(posix.contains("bash scripts/test-all.sh"), "{posix}");
 
-        let win = next_steps_block(
+        // FORWARD-slash tokens, as production hands in: the `west build` line
+        // used to interpolate `${SDK_ROOT}` raw beside `examples\...`.
+        let lines = next_steps_block(
             &facts,
             Tokens {
-                sdk_root: "C:\\ws\\alp-sdk",
-                workspace_dir: "C:\\ws",
+                sdk_root: "C:/ws/alp-sdk",
+                workspace_dir: "C:/ws",
             },
             "C:\\ws\\.venv",
             "Scripts",
             true,
-        )
-        .join("\n");
+        );
+        let win = lines.join("\n");
         assert!(
             win.contains("  & \"C:\\ws\\.venv\\Scripts\\Activate.ps1\""),
             "{win}"
@@ -361,6 +404,18 @@ $env:ZEPHYR_TOOLCHAIN_VARIANT = \"zephyr\"";
             win.contains("  $env:ZEPHYR_BASE = \"C:\\ws\\zephyr\""),
             "{win}"
         );
+        assert!(
+            win.contains("-DEXTRA_ZEPHYR_MODULES=C:\\ws\\alp-sdk"),
+            "{win}"
+        );
+        // Every line that carries a PATH must be single-separator. (The block's
+        // other slashes are legitimate: the README URL and the board target.)
+        for line in lines
+            .iter()
+            .filter(|l| l.contains("C:\\ws") || l.contains("C:/ws"))
+        {
+            assert!(!line.contains('/'), "mixed separators: {line}");
+        }
         assert!(
             win.contains("alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he"),
             "{win}"

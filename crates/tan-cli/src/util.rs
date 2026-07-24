@@ -181,9 +181,17 @@ impl HostPython {
 
 /// Find the host interpreter `tan bootstrap` creates the workspace venv with:
 /// walk [`tan_core::bootstrap::python_candidates`] in order and take the first
-/// that actually RUNS and is at least [`MIN_PYTHON`], falling back to the first
-/// that merely ran (so the caller can report a real version in its too-old
-/// message rather than "did not run"). `None` when no candidate runs at all.
+/// that actually RUNS and is at least `minimum`, falling back to the first that
+/// merely ran (so the caller can report a real version in its too-old message
+/// rather than "did not run"). `None` when no candidate runs at all.
+///
+/// `minimum` is a PARAMETER because the floor bootstrap enforces is the
+/// manifest's `prerequisites.pythonMinVersion`, not tan's compiled-in
+/// [`MIN_PYTHON`]. Probing against the compiled-in floor while enforcing the
+/// manifest's would hard-fail a host that has a good interpreter one candidate
+/// further down the list the moment alp-sdk bumps its floor — the exact skew
+/// manifest consumption exists to survive. Non-bootstrap callers pass
+/// [`MIN_PYTHON`].
 ///
 /// "Actually runs" is the whole point on Windows: the Microsoft Store
 /// `python.exe` alias sits on PATH and satisfies any presence check, but
@@ -198,7 +206,7 @@ impl HostPython {
 /// the LAUNCHER's default, which is routinely an older install than the bare
 /// `python` on PATH (a 3.9 default alongside a 3.14 on PATH is exactly the
 /// shape that would otherwise make bootstrap refuse a perfectly good host).
-pub fn probe_host_python() -> Option<HostPython> {
+pub fn probe_host_python(minimum: (u32, u32)) -> Option<HostPython> {
     let mut first_that_ran: Option<HostPython> = None;
     for candidate in tan_core::bootstrap::python_candidates(cfg!(windows)) {
         let Some((program, flags)) = candidate.split_first() else {
@@ -220,7 +228,7 @@ pub fn probe_host_python() -> Option<HostPython> {
             argv: candidate.iter().map(|s| (*s).to_string()).collect(),
             version,
         };
-        if version >= MIN_PYTHON {
+        if version >= minimum {
             return Some(found);
         }
         first_that_ran.get_or_insert(found);

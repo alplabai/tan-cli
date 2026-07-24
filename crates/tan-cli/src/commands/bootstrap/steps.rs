@@ -205,7 +205,12 @@ pub(super) fn check_prerequisites(
         }
         // Python >= pythonMinVersion (dataclass slots, `X | None` unions).
         let (min_major, min_minor) = facts.python_min_version;
-        let Some(python) = probe_host_python() else {
+        // Probe against the MANIFEST's floor, not tan's compiled-in one: the
+        // check just below enforces the manifest's, and probing to a lower bar
+        // would stop at the first candidate that clears 3.10 (`py -3`, often
+        // the launcher's older default) and then fail the host for it, while a
+        // newer `python` sat one candidate down the list.
+        let Some(python) = probe_host_python(facts.python_min_version) else {
             return Err(vec![
                 "python did not run (Windows Store alias?).  Install real Python: winget install \
                  -e --id Python.Python.3.12, reopen PowerShell, re-run."
@@ -229,10 +234,12 @@ pub(super) fn check_prerequisites(
             names.join(" ")
         )]);
     }
-    // No version check here — see the doc comment. The only extra failure this
-    // adds over bootstrap.sh is an interpreter on PATH that cannot run, which
-    // the script would have hit one step later at `python3 -m venv`.
-    probe_host_python().ok_or_else(|| {
+    // No version check here — see the doc comment. The manifest floor is still
+    // what the probe PREFERS (it only picks between candidates that ran; it
+    // never refuses), so this branch cannot fail on version. The only extra
+    // failure this adds over bootstrap.sh is an interpreter on PATH that cannot
+    // run, which the script would have hit one step later at `python3 -m venv`.
+    probe_host_python(facts.python_min_version).ok_or_else(|| {
         vec![
             "python3 is on PATH but did not run.  Install a working Python 3 and re-run."
                 .to_string(),
@@ -382,6 +389,16 @@ pub(super) fn west_phase(
 ) -> Result<(), String> {
     // west into the venv (NOT global / --user) so the system interpreter can't
     // break it. `west.pipSpec` is a manifest FLOOR, not a hard pin.
+    //
+    // DOCUMENTED DIVERGENCE from the schema's own stance: bootstrap-v1's
+    // description of `west.pipSpec` reads "Informational today -- both
+    // bootstrap scripts still run an unpinned `pip install --upgrade -q west`;
+    // this is the recorded floor, not (yet) fed into that command." tan
+    // deliberately DOES feed it: a declared floor that nothing honours is not a
+    // floor, and `--upgrade west` vs `--upgrade "west>=0.14.0"` resolve to the
+    // same wheel today, so honouring it costs nothing and starts mattering the
+    // day the floor moves ahead of what a stale venv has. Raise on alp-sdk#917
+    // so the schema wording catches up with its consumers.
     if !venv.west.is_file() {
         log.line("Installing west into the workspace venv");
         let mut install = Command::new(&venv.python);

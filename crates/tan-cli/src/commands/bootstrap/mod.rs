@@ -137,6 +137,11 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
                     .to_string(),
             ],
             empty_data(args),
+            // The only refusal that predates project resolution.
+            Project {
+                root: None,
+                board_yaml: None,
+            },
         );
     };
 
@@ -167,6 +172,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
                 "manifest",
                 vec![message],
                 data,
+                project,
             );
         }
     };
@@ -215,6 +221,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
                 "yocto-host",
                 vec![yocto_only_refusal()],
                 data,
+                project,
             );
         }
         YoctoGate::Warn => log.warn("yocto-host", &yocto_mixed_warning()),
@@ -231,6 +238,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
                 "prerequisites-missing",
                 lines,
                 data,
+                project,
             );
         }
     };
@@ -557,26 +565,28 @@ fn fatal(
 }
 
 /// Assemble a failure `CommandRun` for a refusal before any step ran: one
-/// `bootstrap.<code>` issue whose message is `lines` joined, a null project,
-/// and those same lines as the text output (which is what
-/// `doctor --build --fix` and `build`'s auto-bootstrap surface).
+/// `bootstrap.<code>` issue whose message is `lines` joined, and those same
+/// lines as the text output (which is what `doctor --build --fix` and `build`'s
+/// auto-bootstrap surface).
+///
+/// `project` is the resolved one on every refusal that happens AFTER project
+/// resolution — the Yocto verdict in particular is DERIVED from that project's
+/// `board.yaml`, so reporting a null project told a consumer "every core here
+/// targets Yocto" with no way to say which project. Only
+/// `sdk-root-unresolved`, which returns before resolution, passes a null one.
 fn failure(
     g: &GlobalArgs,
     exit: ExitCode,
     code: &str,
     lines: Vec<String>,
     data: BootstrapData,
+    project: Project,
 ) -> CommandRun {
     let issues = vec![Issue {
         code: format!("bootstrap.{code}"),
         severity: "error".to_string(),
         message: lines.join(" "),
     }];
-    // Failure paths report a null project (matches the other commands).
-    let project = Project {
-        root: None,
-        board_yaml: None,
-    };
     finish(g, exit, project, data, issues, lines)
 }
 
@@ -588,12 +598,30 @@ fn data_for(
     facts: &BootstrapFacts,
     pin: &str,
 ) -> BootstrapData {
+    // `zephyrBase` is RENDERED FROM THE MANIFEST (`env.ZEPHYR_BASE`), never
+    // re-derived as `<workspaceDir>/zephyr`: if alp-sdk repoints that key the
+    // printed export line follows it, and a second derivation here would hand a
+    // JSON consumer a path nothing else in the run agrees with. Absent key ->
+    // empty, same as every other unresolved path field.
+    let (sdk, ws) = paths.token_strings();
+    let tokens = Tokens {
+        sdk_root: &sdk,
+        workspace_dir: &ws,
+    };
+    let zephyr_base = facts
+        .env
+        .iter()
+        .find(|(key, _)| key == "ZEPHYR_BASE")
+        .map(|(_, raw)| native(Path::new(&tokens.apply(raw))))
+        .unwrap_or_default();
     BootstrapData {
         schema_version: "2".to_string(),
-        sdk_root: sdk_root.to_string(),
+        // `native()` like the other three: a consumer comparing `sdkRoot`
+        // against `workspaceDir` (prefix / dirname) needs one separator.
+        sdk_root: native(Path::new(sdk_root)),
         workspace_dir: native(&paths.workspace_dir),
         venv_dir: native(&paths.venv_dir),
-        zephyr_base: native(&paths.workspace_dir.join("zephyr")),
+        zephyr_base,
         facts_from_manifest: facts.from_manifest,
         zephyr_pin: pin.to_string(),
         no_pip: args.no_pip,
