@@ -187,7 +187,10 @@ impl HostPython {
 ///
 /// "Actually runs" is the whole point on Windows: the Microsoft Store
 /// `python.exe` alias sits on PATH and satisfies any presence check, but
-/// executing it prints nothing and opens the Store instead (bootstrap.ps1:110-114).
+/// executing it prints nothing and opens the Store instead (bootstrap.ps1, the
+/// "Prerequisite check" section's `python did not run (Windows Store alias?)`
+/// Fail — anchored by name because the oracle's line numbers have already
+/// drifted twice).
 /// Requiring parseable output rejects it, and the `py -3` candidate ahead of it
 /// means a machine with only the launcher installed still bootstraps.
 ///
