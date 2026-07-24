@@ -350,6 +350,8 @@ pub enum ModelSub {
     Zoo(ModelZooArgs),
     /// Add a model-zoo entry to board.yaml (fetch source + append models:).
     Add(ModelAddArgs),
+    /// License-free INT8 quantize + fp32-vs-int8 accuracy report.
+    Prep(ModelPrepArgs),
     /// Report installed NPU compiler toolchains.
     Doctor,
     /// Forward-compatible passthrough (Phase-3); streams like the other
@@ -452,6 +454,26 @@ pub struct ModelAddArgs {
     /// Path to the metadata/ root (default: the SDK's own `metadata/`).
     #[arg(long = "metadata-root")]
     pub metadata_root: Option<String>,
+}
+
+/// Args for `model prep`.
+#[derive(Debug, Args)]
+pub struct ModelPrepArgs {
+    /// Raw model to quantize (`.onnx`).
+    #[arg(value_name = "RAW")]
+    pub raw: String,
+    /// Directory of .npy calibration samples matching the model input.
+    #[arg(long, value_name = "DIR")]
+    pub calibration: String,
+    /// Output INT8 .onnx (default: `<raw>.int8.onnx`).
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<String>,
+    /// Per-channel weight quantization (often recovers accuracy).
+    #[arg(long = "per-channel")]
+    pub per_channel: bool,
+    /// Minimum calibration samples.
+    #[arg(long = "min-samples", value_name = "N")]
+    pub min_samples: Option<u32>,
 }
 
 /// Args for `run`: build the project, then run it. Thin orchestrator over the

@@ -84,6 +84,20 @@ pub fn sub_argv(sub: &ModelSub) -> Vec<String> {
             push_opt(&mut argv, "--metadata-root", &a.metadata_root);
             argv
         }
+        ModelSub::Prep(a) => {
+            let mut argv = vec!["prep".to_string(), a.raw.clone()];
+            argv.push("--calibration".to_string());
+            argv.push(a.calibration.clone());
+            push_opt(&mut argv, "--out", &a.out);
+            if a.per_channel {
+                argv.push("--per-channel".to_string());
+            }
+            if let Some(n) = a.min_samples {
+                argv.push("--min-samples".to_string());
+                argv.push(n.to_string());
+            }
+            argv
+        }
         ModelSub::Doctor => vec!["doctor".to_string()],
         ModelSub::Run(fwd) => {
             let mut argv = vec!["run".to_string()];
@@ -260,8 +274,8 @@ pub fn run(g: &GlobalArgs, sub: &ModelSub) -> CommandRun {
 mod tests {
     use super::*;
     use crate::cli::{
-        ModelAddArgs, ModelBuildArgs, ModelCheckArgs, ModelInfoArgs, ModelListArgs, ModelZooArgs,
-        WestForwardArgs,
+        ModelAddArgs, ModelBuildArgs, ModelCheckArgs, ModelInfoArgs, ModelListArgs, ModelPrepArgs,
+        ModelZooArgs, WestForwardArgs,
     };
 
     #[test]
@@ -389,6 +403,41 @@ mod tests {
             vec!["add", "example-tiny", "--board", "board.yaml"]
         );
         assert!(is_wrappable(&sub), "add must be wrappable");
+    }
+
+    #[test]
+    fn sub_argv_maps_prep_required_calibration() {
+        let sub = ModelSub::Prep(ModelPrepArgs {
+            raw: "m.onnx".to_string(),
+            calibration: "cal".to_string(),
+            out: None,
+            per_channel: false,
+            min_samples: None,
+        });
+        assert_eq!(
+            sub_argv(&sub),
+            vec!["prep", "m.onnx", "--calibration", "cal"]
+        );
+    }
+
+    #[test]
+    fn sub_argv_maps_prep_flags_and_min_samples() {
+        let sub = ModelSub::Prep(ModelPrepArgs {
+            raw: "m.onnx".to_string(),
+            calibration: "cal".to_string(),
+            out: Some("o.onnx".to_string()),
+            per_channel: true,
+            min_samples: Some(16),
+        });
+        let argv = sub_argv(&sub);
+        assert!(argv.contains(&"--per-channel".to_string()));
+        assert_eq!(
+            argv.windows(2)
+                .find(|w| w[0] == "--min-samples")
+                .map(|w| &w[1]),
+            Some(&"16".to_string())
+        );
+        assert!(is_wrappable(&sub), "prep must be wrappable");
     }
 
     #[test]
