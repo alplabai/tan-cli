@@ -192,7 +192,8 @@ carries the newer ADR-0020 fields the SDK now emits — per-slice
 ## Development
 
 Four gates, all of them, before every push. CI runs `fmt` + `clippy` once on
-Linux and matrixes `build` + `test` across Linux, Windows, and macOS:
+Linux, matrixes `build` + `test` across Linux, Windows, and macOS, and adds an
+`msrv` job that re-checks the declared `rust-version` (1.86):
 
 ```sh
 cargo fmt --all --check
