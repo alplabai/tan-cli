@@ -55,7 +55,7 @@ pub struct ModelCheckArgs {
 
 - [ ] **Step 3: Build to confirm it compiles (exhaustiveness will fail in model.rs — expected)**
 
-Run: `cd /e/GitHub/tan-cli/.claude/worktrees/model-check && cargo build --all-targets 2>&1 | head -20`
+Run: `cd <worktree> && cargo build --all-targets 2>&1 | head -20`
 Expected: a non-exhaustive-match error in `commands/model.rs` `sub_argv` (the new variant isn't handled yet) — that is Task 2.
 
 ---
@@ -118,7 +118,7 @@ In the `#[cfg(test)] mod tests` block, extend the `use crate::cli::{…}` import
 
 - [ ] **Step 3: The four cargo gates (all must pass)**
 
-Run in `/e/GitHub/tan-cli/.claude/worktrees/model-check`:
+Run in `<worktree>`:
 ```bash
 cargo fmt --all --check
 cargo clippy --all-targets -- -D warnings
