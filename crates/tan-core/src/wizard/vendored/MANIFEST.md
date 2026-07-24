@@ -10,20 +10,27 @@ from an un-revendored SDK change.
 ## Source
 
 - Repo: `alplabai/alp-sdk`
-- Branch: `dev`
-- Commit: `a0849e10` (`feat(build-plan): --emit scaffold derives cores per
-  SKU + adapts scaffold content (#864) (#877)`) — re-vendored from this
-  commit (tan-cli#25 had vendored `75ef3b02`, before #877 fixed `--emit
-  scaffold` deriving the wrong, non-buildable Alif `m55_hp` core for every
-  SKU including `E1M-V2N101`; see "App-core disagreement" below).
+- Ref: `v0.13.0` (release tag — `git checkout v0.13.0` reproduces the exact
+  pinned commit; `dev`'s tip does not)
+- Commit: **v0.13.0 (`93ef5726`)** — `minimal` was re-vendored at this commit
+  (only its `README.md` doc-version link changed, `v0.11.1` -> `v0.13.0`; the
+  scaffold content itself is unchanged since the `a0849e10` vendor point
+  below). `sensor` was vendored fresh at this same commit.
+  - Prior vendor point: `a0849e10` (`feat(build-plan): --emit scaffold
+    derives cores per SKU + adapts scaffold content (#864) (#877)`) —
+    re-vendored from this commit (tan-cli#25 had vendored `75ef3b02`, before
+    #877 fixed `--emit scaffold` deriving the wrong, non-buildable Alif
+    `m55_hp` core for every SKU including `E1M-V2N101`; see "App-core
+    disagreement" below).
 - Command: `PYTHONPATH=$SDK/scripts python3 scripts/alp_project.py --emit
   scaffold --template <id> --sku <SKU>`
 
 ## Template x SKU matrix vendored
 
-| tan `WizardTemplateId` | SDK catalog id | Vendored SKUs |
-|---|---|---|
-| `zephyr-app` | `minimal` | `E1M-AEN801`, `E1M-V2N101` |
+| tan `WizardTemplateId` | SDK catalog id | Vendored SKUs | Example dir |
+|---|---|---|---|
+| `zephyr-app` | `minimal` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/hello-world` |
+| `sensor-starter` | `sensor` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/i2c-master` |
 
 Layout: `vendored/<sdk-template-id>/<sku>/<path>`, e.g.
 `vendored/minimal/E1M-AEN801/CMakeLists.txt`.
@@ -45,16 +52,22 @@ Layout: `vendored/<sdk-template-id>/<sku>/<path>`, e.g.
 
 ## Template-id mapping: resolved vs. flagged (maintainer decision)
 
-Only `zephyr-app -> minimal` is mapped/vendored in this change — the one
-mapping the task explicitly confirmed as clean, and the one template whose
-existing generator (`gen_zephyr_project_files`) already targeted a real,
-west-buildable Zephyr layout structurally matching the SDK's canonical
-`examples/peripheral-io/hello-world` scaffold (`find_package(Zephyr)` +
-`board.yaml` -> generated Kconfig). It is also the one directly responsible
-for #864's motivating regression: the retired CMakeLists.txt ran
-`--emit zephyr-conf` **without** `--core <id>`, which on a heterogeneous
-(`--cores`) project lets one core's Kconfig leak into another core's build.
-The vendored CMakeLists.txt threads `--core m55_hp` explicitly, closing it.
+`zephyr-app -> minimal` and `sensor-starter -> sensor` are mapped/vendored —
+the two mappings confirmed clean, and the two templates whose existing
+generator (`gen_zephyr_project_files`) already targeted (or, for
+`sensor-starter`, was retired in favor of) a real, west-buildable Zephyr
+layout structurally matching the SDK's canonical scaffold
+(`find_package(Zephyr)` + `board.yaml` -> generated Kconfig):
+`examples/peripheral-io/hello-world` for `minimal`,
+`examples/peripheral-io/i2c-master` for `sensor`. `zephyr-app` is also the
+one directly responsible for #864's motivating regression: the retired
+CMakeLists.txt ran `--emit zephyr-conf` **without** `--core <id>`, which on a
+heterogeneous (`--cores`) project lets one core's Kconfig leak into another
+core's build. The vendored CMakeLists.txt threads `--core <id>` explicitly,
+closing it — `sensor-starter`'s vendored CMakeLists.txt does the same.
+`sensor-starter`'s hand-written generator emitted a generic sensor-polling
+stub; the vendored tree instead emits the SDK's real TMP112
+`<alp/chips/tmp112.h>` i2c-master example.
 
 Every other tan wizard template is **left on its existing hand-written
 generator, unchanged** — each has a real gap against the SDK catalog rather
@@ -67,9 +80,6 @@ than a clean 1:1:
   `zephyr-app` would make the two templates byte-identical in the wizard's
   template picker — a product decision (merge/deprecate one), not something
   to invent here.
-- **`sensor-starter`** — same plain-CMake-shape gap against SDK `sensor`
-  (which is a real TMP112 `<alp/chips/tmp112.h>` driver app, not a generic
-  polling stub).
 - **`edge-ai-starter`** — same plain-CMake-shape gap against SDK `edge-ai`
   (a concrete BME280 cold-chain-monitor app, not a generic arena-sizing
   stub). Also: the SDK's `edge-ai` scaffold's `cores:` topology does **not**
@@ -119,26 +129,31 @@ e.g. `alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33`). Confirmed for `minimal`:
 and `README.md`; `prj.conf`, `src/main.c`, and `testcase.yaml` (not part of
 the scaffold envelope, see below) stay byte-identical between the two.
 
-The vendored `minimal` scaffold's `cores:` key is now `m33_sm` for
+The vendored `minimal`/`sensor` scaffolds' `cores:` key is `m33_sm` for
 `E1M-V2N101`/`E1M-V2M101` and `m55_hp` for `E1M-AEN801` — agreeing with
 `app_core_for_sku`. `vendored.rs` still derives the `--cores` companion-splice
-target from the vendored `board.yaml`'s own `cores:` key
-(`vendored_app_core_key`/`vendored_app_core_for_sku`) rather than calling
-`app_core_for_sku` directly, so a *future* re-vendor that (again) derives a
-different core for a vendored SKU fails `cargo test`
-(`vendored_app_core_matches_each_familys_board_yaml`) instead of silently
-drifting. `tan init`'s upfront `--cores` validation
-(`commands/init/mod.rs`) now calls `vendored_app_core_for_sku` for the
-`zephyr-app` template specifically (every other template still uses
-`app_core_for_sku`, matching its own hand-written `gen_board_yaml`), so the
-CLI-level check can never again independently disagree with what
-`create_wizard_plan_with_cores` actually plans.
+target from EACH template's OWN vendored `board.yaml` `cores:` key
+(`vendored_app_core_key`/`vendored_app_core_for_sku`/
+`vendored_sensor_app_core_for_sku`) rather than calling `app_core_for_sku`
+directly, so a *future* re-vendor that (again) derives a different core for a
+vendored SKU fails `cargo test`
+(`vendored_app_core_matches_each_familys_board_yaml`/
+`vendored_sensor_app_core_matches_each_familys_board_yaml`) instead of
+silently drifting. `tan init`'s upfront `--cores` validation
+(`commands/init/resolve.rs`'s `app_core_for_template`) now calls
+`vendored_app_core_for_sku`/`vendored_sensor_app_core_for_sku` for the
+`zephyr-app`/`sensor-starter` templates specifically (every other template
+still uses `app_core_for_sku`, matching its own hand-written
+`gen_board_yaml`), so the CLI-level check can never again independently
+disagree with what `create_wizard_plan_with_cores` actually plans.
 
 `testcase.yaml` is vendored alongside the scaffold envelope but is **not**
 part of `--emit scaffold`'s output — the catalog's `files.user_owned` for
-`minimal` is `board.yaml`/`prj.conf`/`CMakeLists.txt`/`src/main.c`/
-`README.md` only. It's a byte-exact copy of the canonical example's own
-`examples/peripheral-io/hello-world/testcase.yaml` (the SDK's twister
-harness for that example), family-independent like every other
+both `minimal` and `sensor` is `board.yaml`/`prj.conf`/`CMakeLists.txt`/
+`src/main.c`/`README.md` only. It's a byte-exact copy of the canonical
+example's own `testcase.yaml`
+(`examples/peripheral-io/hello-world/testcase.yaml` for `minimal`,
+`examples/peripheral-io/i2c-master/testcase.yaml` for `sensor`) — the SDK's
+twister harness for that example, family-independent like every other
 non-`board.yaml` file. `tests/parity/scaffold_byte_parity.py` diffs it
 against that example directory rather than the live scaffold emit.

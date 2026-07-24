@@ -52,20 +52,20 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
     WizardTemplateDefinition {
         id: WizardTemplateId::SensorStarter,
         label: "Sensor starter",
-        description: "Sensor polling skeleton with diagnostics-friendly logging.",
-        libs: &["fmt"],
+        description: "West-buildable TMP112 i2c-master app wired to board.yaml via the SDK loader.",
+        // Files are vendored from the SDK's `sensor` scaffold-catalog entry
+        // (alp-sdk#864, see wizard/vendored/MANIFEST.md), not hand-generated
+        // from these fields -- libs/features/prj_conf_extras/feature_files/
+        // body_line* are unread for this template (see gen_c_project_files).
+        libs: &[],
         features: None,
-        prj_conf_extras: &["CONFIG_SENSOR=y", "CONFIG_I2C=y"],
-        feature_files: &[FeatureFileSpec {
-            path: "src/features/sensor_pipeline.c",
-            unit_name: "sensor_pipeline",
-            todo_line: "TODO: initialize bus, read sensors, normalize values for app flow.",
-        }],
-        body_line1: "ALP sensor starter boot",
-        body_line2: "TODO: initialize sensor bus and polling loop",
+        prj_conf_extras: &[],
+        feature_files: &[],
+        body_line1: "",
+        body_line2: "",
         explanation: &[
-            "src/main.c includes a sensor-oriented TODO path for bus init and polling.",
-            "Use this when your first milestone is sensor bring-up and deterministic sampling.",
+            "Real Zephyr app vendored from the SDK's `sensor` scaffold: reads the TMP112 temperature sensor via <alp/chips/tmp112.h> on BRD_I2C.",
+            "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your alp-sdk checkout>`.",
         ],
     },
     WizardTemplateDefinition {

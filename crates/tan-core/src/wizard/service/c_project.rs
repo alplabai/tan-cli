@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! C-project (plain-CMake + Zephyr) file-content generators.
 
-use super::vendored::vendored_minimal_files;
+use super::vendored::{vendored_minimal_files, vendored_sensor_files};
 use crate::wizard::models::{WizardPlannedFile, WizardTemplateDefinition, WizardTemplateId};
 
 pub(super) fn gen_c_project_files(
@@ -9,14 +9,25 @@ pub(super) fn gen_c_project_files(
     som_sku: Option<&str>,
     cores: &[(String, String)],
 ) -> Vec<WizardPlannedFile> {
-    // zephyr-app is vendored from the SDK's `minimal` scaffold-catalog entry
-    // (alp-sdk#864) instead of hand-generated -- see
-    // `wizard/vendored/MANIFEST.md`. This is the only template mapped onto a
-    // vendored tree today; every other template below still hand-generates
-    // its files (no clean 1:1 SDK catalog equivalent -- see the manifest).
-    if def.id == WizardTemplateId::ZephyrApp {
-        let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
-        return vendored_minimal_files(sku, cores)
+    // zephyr-app and sensor-starter are vendored from the SDK's `minimal`/
+    // `sensor` scaffold-catalog entries (alp-sdk#864) instead of
+    // hand-generated -- see `wizard/vendored/MANIFEST.md`. These are the only
+    // templates mapped onto a vendored tree today; every other template below
+    // still hand-generates its files (no clean 1:1 SDK catalog equivalent --
+    // see the manifest).
+    let vendored_files = match def.id {
+        WizardTemplateId::ZephyrApp => {
+            let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
+            Some(vendored_minimal_files(sku, cores))
+        }
+        WizardTemplateId::SensorStarter => {
+            let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
+            Some(vendored_sensor_files(sku, cores))
+        }
+        _ => None,
+    };
+    if let Some(vendored_files) = vendored_files {
+        return vendored_files
             .into_iter()
             .map(|(relative_path, content)| WizardPlannedFile {
                 relative_path,
@@ -315,10 +326,13 @@ mod tests {
     /// allows `extra_libraries` and forbids unknown keys.
     #[test]
     fn board_yaml_libraries_are_top_level_not_under_core_entry() {
+        // sensor-starter is now vendored (see `wizard/vendored/MANIFEST.md`),
+        // so this hand-generator regression check picks another hand-generated
+        // template that still declares `libs`.
         let def = list_wizard_templates()
             .into_iter()
-            .find(|d| d.id == WizardTemplateId::SensorStarter)
-            .expect("sensor-starter template registered");
+            .find(|d| d.id == WizardTemplateId::BoardDiagnostics)
+            .expect("board-diagnostics template registered");
         let files = gen_c_project_files(def, None, &[]);
         let board_yaml = &files
             .iter()

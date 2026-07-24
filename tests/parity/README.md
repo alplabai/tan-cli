@@ -149,9 +149,11 @@ against for build-plans). Unlike `seam1_field_diff.py`, it is optionally
 self-skipping — no reachable alp-sdk checkout (`--sdk` / `$ALP_SDK_ROOT` / a
 sibling `alp-sdk` checkout) is a clean no-op, not a failure, since
 `tan-core`'s own `cargo test` already covers the vendored tree's internal
-consistency. Not yet wired into `.github/workflows/parity.yml` — CI wiring
-(a `scaffold-byte-parity` job analogous to `seam1-plan-shape`) is a follow-up
-for whoever owns that workflow.
+consistency. Wired into `.github/workflows/parity.yml` as a `scaffold byte-parity`
+step inside the `seam1-plan-shape` job — it reuses that job's pinned alp-sdk
+checkout + emit deps (same as `kconfig_fixture_parity.py`) rather than cloning a
+second time, so a re-vendor that drifts from the pinned SDK's `--emit scaffold`
+fails CI instead of shipping silently.
 
 ```
 python3 tests/parity/scaffold_byte_parity.py --sdk /path/to/an/alp-sdk/checkout
