@@ -19,7 +19,7 @@ use crate::exit::ExitCode;
 // ---------------------------------------------------------------------------
 
 /// One planned file change in the JSON envelope: a project-relative path and
-/// its `kind` (`create` / `update` / `unchanged`).
+/// its `kind` (`new` / `update` / `unchanged`, from `WizardFileChangeKind`).
 #[derive(serde::Serialize)]
 struct FileChangeSer {
     #[serde(rename = "relativePath")]

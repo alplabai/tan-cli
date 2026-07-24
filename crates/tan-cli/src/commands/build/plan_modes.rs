@@ -18,6 +18,7 @@ use crate::util::resolve_cli_project_context;
 
 use super::materialise::materialise_plan;
 use super::native::base_dir;
+use super::token_substitution::apply_plan_token_substitution;
 use super::workspace::invoke_sdk_emit;
 
 /// `tan build --manifest [--manifest-from FILE]` — the post-build IDE/tool
@@ -47,7 +48,13 @@ pub(super) fn manifest_command(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
                 );
             }
         },
-        None => match invoke_sdk_emit(&context, "system-manifest", "build.manifest-unavailable") {
+        None => match invoke_sdk_emit(
+            &context,
+            "system-manifest",
+            "build.manifest-unavailable",
+            &[],
+            &[],
+        ) {
             Ok(s) => s,
             Err((code, message)) => {
                 return plan_error_run(g, project, code, message, ExitCode::RuntimeFailure);
@@ -122,7 +129,20 @@ pub(super) fn plan_command(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
         return show_plan_run(g, project, &plan, &json);
     }
 
+    // Build-plan token substitution (alp-sdk #865): the SAME pass/guards
+    // `native::native_build_outcome` applies, run here too — a tokened plan
+    // reaching `materialise_plan` unsubstituted would write literal
+    // `${SDK_ROOT}`/`${PROJECT_ROOT}` into config-artefact contents (and,
+    // since `${`/`}` are ordinary path characters, even create a literal
+    // `${PROJECT_ROOT}/` directory) instead of erroring or resolving them.
     let base = base_dir(&context);
+    let plan = match apply_plan_token_substitution(g, &context, &base, &plan) {
+        Ok(plan) => plan,
+        Err((code, message)) => {
+            return plan_error_run(g, project, code, message, ExitCode::RuntimeFailure);
+        }
+    };
+
     match materialise_plan(&plan, Path::new(&base)) {
         Ok(written) => materialise_ok_run(g, project, &base, written),
         Err(e) => plan_error_run(
@@ -153,7 +173,7 @@ fn acquire_plan_json(
                 format!("failed to read plan file `{path}`: {e}"),
             )
         }),
-        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable"),
+        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable", &[], &[]),
     }
 }
 

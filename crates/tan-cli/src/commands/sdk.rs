@@ -11,8 +11,8 @@ use std::process::Command;
 
 use serde::Serialize;
 use tan_core::{
-    GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, check_sdk_readiness,
-    is_plain_relative, parse_remote_sdk_releases, resolve_active_sdk,
+    GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
+    check_sdk_readiness, is_plain_relative, parse_remote_sdk_releases,
 };
 
 use super::CommandRun;
@@ -42,7 +42,8 @@ struct InstallData {
     readiness: SdkReadinessReport,
 }
 
-/// Envelope `data` payload for `sdk current`: the active SDK, if any, plus its readiness.
+/// Envelope `data` payload for `sdk current`: the active SDK, if any, its
+/// readiness, and which precedence tier produced it.
 #[derive(Serialize)]
 struct CurrentData {
     subcommand: &'static str,
@@ -50,6 +51,10 @@ struct CurrentData {
     #[serde(rename = "sdkPath")]
     sdk_path: Option<String>,
     readiness: Option<SdkReadinessReport>,
+    /// Precedence tier that produced `sdkPath` (serialized as `sourceTier`):
+    /// `sdkRootFlag` > `projectPin` > `globalDefault` > `discovery` > `none`.
+    #[serde(rename = "sourceTier")]
+    source_tier: SdkSourceTier,
 }
 
 /// Envelope `data` payload for `sdk switch`: the new active path and its resolved version.
@@ -60,6 +65,10 @@ struct SwitchData {
     #[serde(rename = "sdkPath")]
     sdk_path: String,
     version: Option<String>,
+    /// Which pointer was written: `"global"` (`~/.alp/sdk-default`, from
+    /// `--global`) or `"project"` (`<workspace>/.alp/sdk-path`). Lets a JSON
+    /// consumer distinguish the scope without parsing the human text line.
+    scope: &'static str,
 }
 
 /// Dispatches `tan sdk` to the matching subcommand handler; unknown subcommands fail.
@@ -314,7 +323,9 @@ fn git_clone(version: &str, dest: &Path) -> Result<(), String> {
 
 // ── tan sdk current ──────────────────────────────────────────────────────────
 
-/// Resolves the active SDK for the current workspace and reports its path + readiness.
+/// Resolves the active SDK for the current workspace across the full
+/// four-tier precedence chain (`--sdk-root` > project pin > global default >
+/// discovery) and reports its path, readiness, and the winning tier.
 fn run_current(g: &GlobalArgs) -> CommandRun {
     // Every other reader of `.alp/sdk-path` resolves it under
     // `cli_workspace_root` (cwd joined with `--project`) — this used to read
@@ -322,11 +333,7 @@ fn run_current(g: &GlobalArgs) -> CommandRun {
     // reported the repo-root pointer instead of the one `build`/`flash`/etc.
     // actually consult for that project.
     let workspace_root = crate::util::cli_workspace_root(g);
-    let sdk_path = resolve_active_sdk(
-        &workspace_root.to_string_lossy(),
-        |p| Path::new(p).exists(),
-        |p| std::fs::read_to_string(p).ok(),
-    );
+    let (sdk_path, source_tier) = crate::util::resolve_sdk_tiered(g, &workspace_root);
     let readiness = sdk_path.as_deref().map(readiness_for);
 
     let text = match (&sdk_path, &readiness) {
@@ -342,6 +349,7 @@ fn run_current(g: &GlobalArgs) -> CommandRun {
             subcommand: "current",
             sdk_path,
             readiness,
+            source_tier,
         },
         ExitCode::Success,
         Vec::new(),
@@ -355,6 +363,9 @@ fn run_current(g: &GlobalArgs) -> CommandRun {
 /// cache root, anything path-shaped resolves under the workspace root — absolute as-is),
 /// verifying the path exists and writing the pointer file.
 fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
+    // Which pointer this switch targets — echoed in every `SwitchData` envelope
+    // so a JSON consumer can tell a `--global` switch from a project one.
+    let scope = if args.global { "global" } else { "project" };
     let Some(version_or_path) = args.arg.clone() else {
         return emit_failure(
             g,
@@ -362,6 +373,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 subcommand: "switch",
                 sdk_path: String::new(),
                 version: None,
+                scope,
             },
             ExitCode::RuntimeFailure,
             "missing-version",
@@ -411,6 +423,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 subcommand: "switch",
                 sdk_path: sdk_path.clone(),
                 version: None,
+                scope,
             },
             ExitCode::RuntimeFailure,
             "path-not-found",
@@ -435,6 +448,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 subcommand: "switch",
                 sdk_path: sdk_path.clone(),
                 version: None,
+                scope,
             },
             ExitCode::RuntimeFailure,
             "not-an-sdk-checkout",
@@ -448,13 +462,21 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
         );
     }
 
-    if let Err(message) = write_active_pointer(g, &sdk_path) {
+    let pointer_path = switch_pointer_path(
+        &crate::util::cli_workspace_root(g)
+            .join(".alp")
+            .join("sdk-path"),
+        &global_default_pointer_path(),
+        args.global,
+    );
+    if let Err(message) = write_sdk_pointer(&pointer_path, &sdk_path) {
         return emit_failure(
             g,
             SwitchData {
                 subcommand: "switch",
                 sdk_path: sdk_path.clone(),
                 version: None,
+                scope,
             },
             ExitCode::RuntimeFailure,
             "switch-failed",
@@ -467,9 +489,14 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     }
 
     let readiness = readiness_for(&sdk_path);
+    let scope_label = if args.global {
+        "machine-global default"
+    } else {
+        "project"
+    };
     let text = vec![
         format!(
-            "Switched active SDK to {}.",
+            "Switched {scope_label} SDK to {}.",
             readiness
                 .version
                 .clone()
@@ -484,6 +511,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
             subcommand: "switch",
             sdk_path,
             version: readiness.version,
+            scope,
         },
         ExitCode::Success,
         Vec::new(),
@@ -491,21 +519,34 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     )
 }
 
-/// Writes the active-SDK pointer JSON (`sdkPath` + `updatedAt`) to
-/// `<workspace_root>/.alp/sdk-path`, where `workspace_root` is `cli_workspace_root(g)`
-/// (cwd joined with `--project`) — every reader (`resolve_sdk_root`,
-/// `resolve_cli_project_context`) resolves the pointer under that same root, so
-/// writing at the bare process cwd left `--project` invocations writing a
-/// pointer nothing reads.
-fn write_active_pointer(g: &GlobalArgs, sdk_path: &str) -> Result<(), String> {
-    let dir = crate::util::cli_workspace_root(g).join(".alp");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+/// Writes the active-SDK pointer JSON (`sdkPath` + `updatedAt`) to `path`,
+/// creating its parent directory as needed. Shared by the project-scoped
+/// pointer (`<workspace_root>/.alp/sdk-path`), the machine-global default
+/// (`sdk switch --global`, `~/.alp/sdk-default`), and `tan init`'s post-write
+/// SDK pin.
+pub(crate) fn write_sdk_pointer(path: &Path, sdk_path: &str) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
     let pointer = serde_json::json!({ "sdkPath": sdk_path, "updatedAt": generated_at_iso() });
     let content = format!(
         "{}\n",
         serde_json::to_string_pretty(&pointer).expect("pointer is serializable")
     );
-    std::fs::write(dir.join("sdk-path"), content).map_err(|e| e.to_string())
+    std::fs::write(path, content).map_err(|e| e.to_string())
+}
+
+/// Picks which pointer file `sdk switch` should write: the machine-global
+/// default when `--global` was given, else the project-scoped pin. Pure
+/// selection over two already-resolved paths so it is unit-testable without
+/// touching the real home directory (`global_pointer` is derived from
+/// [`global_default_pointer_path`], which reads `USERPROFILE`/`HOME`).
+fn switch_pointer_path(project_pointer: &Path, global_pointer: &Path, global: bool) -> PathBuf {
+    if global {
+        global_pointer.to_path_buf()
+    } else {
+        project_pointer.to_path_buf()
+    }
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -533,13 +574,16 @@ fn empty_readiness(sdk_path: &str) -> SdkReadinessReport {
 
 /// Default SDK cache directory: `~/.alp/sdk-cache` (uses `USERPROFILE` on Windows).
 fn default_cache_root() -> String {
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join(".alp")
+    crate::util::home_alp_dir()
         .join("sdk-cache")
         .to_string_lossy()
         .to_string()
+}
+
+/// Machine-global default-SDK pointer file, written by `tan sdk switch
+/// --global` and read by every command's `globalDefault` resolution tier.
+fn global_default_pointer_path() -> PathBuf {
+    crate::util::home_alp_dir().join("sdk-default")
 }
 
 /// Maps a `SdkReadinessState` to its lowercase display label.
@@ -693,6 +737,7 @@ mod tests {
                 subcommand: Some("install".to_string()),
                 arg: Some("../../evil".to_string()),
                 destination: None,
+                global: false,
             },
         );
         assert_eq!(run.exit, ExitCode::RuntimeFailure);
@@ -719,6 +764,7 @@ mod tests {
                 subcommand: Some("switch".to_string()),
                 arg: Some("does-not-exist-anywhere".to_string()),
                 destination: None,
+                global: false,
             },
         );
         // Resolves under the cache root and (as expected) doesn't exist —
@@ -759,6 +805,7 @@ mod tests {
                     sibling.file_name().unwrap().to_string_lossy()
                 )),
                 destination: None,
+                global: false,
             },
         );
         assert_eq!(run.exit, ExitCode::Success);
@@ -789,6 +836,7 @@ mod tests {
                 subcommand: Some("switch".to_string()),
                 arg: Some(not_an_sdk.to_string_lossy().into_owned()),
                 destination: None,
+                global: false,
             },
         );
         assert_eq!(run.exit, ExitCode::RuntimeFailure);
@@ -800,7 +848,7 @@ mod tests {
 
     #[test]
     fn switch_and_current_use_project_scoped_workspace_root_not_process_cwd() {
-        // Regression: `write_active_pointer`/`run_current` used to resolve
+        // Regression: the project pointer writer/`run_current` used to resolve
         // `.alp/sdk-path` from the bare process cwd, while every consumer
         // (`resolve_sdk_root`, `resolve_cli_project_context`) resolves it under
         // `cli_workspace_root` (cwd joined with --project). With --project set,
@@ -816,9 +864,15 @@ mod tests {
                 subcommand: Some("switch".to_string()),
                 arg: Some(sdk_root.to_string_lossy().into_owned()),
                 destination: None,
+                global: false,
             },
         );
         assert_eq!(switched.exit, ExitCode::Success);
+        assert_eq!(
+            json_data(&switched)["data"]["scope"],
+            "project",
+            "a non-global switch must report project scope in the envelope"
+        );
         assert!(
             ws.join(".alp").join("sdk-path").exists(),
             "pointer should be written under the --project workspace root"
@@ -830,5 +884,37 @@ mod tests {
             data["data"]["sdkPath"].as_str().unwrap(),
             sdk_root.to_string_lossy()
         );
+        assert_eq!(data["data"]["sourceTier"], "projectPin");
+    }
+
+    #[test]
+    fn current_reports_sdk_root_flag_tier_when_set() {
+        // `--sdk-root` is terminal and wins over any project pin — `sourceTier`
+        // must reflect that even though no `tan sdk switch` ever ran.
+        let ws = tmp("current-sdk-root-flag-ws");
+        let sdk_root = tmp("current-sdk-root-flag-root");
+        make_sdk_root(&sdk_root);
+        let g = global(&ws, Some(&sdk_root), Format::Json);
+
+        let current = run_current(&g);
+        let data = json_data(&current);
+        assert_eq!(
+            data["data"]["sdkPath"].as_str().unwrap(),
+            sdk_root.to_string_lossy()
+        );
+        assert_eq!(data["data"]["sourceTier"], "sdkRootFlag");
+    }
+
+    #[test]
+    fn switch_pointer_path_selects_global_or_project() {
+        // Pure selection over two already-resolved paths — deliberately not
+        // exercised end-to-end through `run_switch --global`, which would have
+        // to write under the REAL `USERPROFILE`/`HOME` (`global_default_pointer_path`
+        // is not injectable); this covers the branch without ever touching the
+        // real home directory from a test.
+        let project = Path::new("/ws/.alp/sdk-path");
+        let global = Path::new("/home/.alp/sdk-default");
+        assert_eq!(switch_pointer_path(project, global, false), project);
+        assert_eq!(switch_pointer_path(project, global, true), global);
     }
 }

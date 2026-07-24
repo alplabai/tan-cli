@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! C-project (plain-CMake + Zephyr) file-content generators.
 
+use super::vendored::{vendored_edge_ai_files, vendored_minimal_files, vendored_sensor_files};
 use crate::wizard::models::{WizardPlannedFile, WizardTemplateDefinition, WizardTemplateId};
 
 pub(super) fn gen_c_project_files(
@@ -8,11 +9,35 @@ pub(super) fn gen_c_project_files(
     som_sku: Option<&str>,
     cores: &[(String, String)],
 ) -> Vec<WizardPlannedFile> {
-    // The zephyr-app template emits a real, west-buildable Zephyr scaffold
-    // (find_package(Zephyr) + board.yaml -> EXTRA_CONF_FILE) instead of the
-    // plain-CMake starter the other templates share.
-    if def.id == WizardTemplateId::ZephyrApp {
-        return gen_zephyr_project_files(def, som_sku, cores);
+    // zephyr-app, sensor-starter, and edge-ai-starter are vendored from the
+    // SDK's `minimal`/`sensor`/`edge-ai` scaffold-catalog entries
+    // (alp-sdk#864) instead of hand-generated -- see
+    // `wizard/vendored/MANIFEST.md`. These are the only templates mapped onto
+    // a vendored tree today; every other template below still hand-generates
+    // its files (no clean 1:1 SDK catalog equivalent -- see the manifest).
+    let vendored_files = match def.id {
+        WizardTemplateId::ZephyrApp => {
+            let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
+            Some(vendored_minimal_files(sku, cores))
+        }
+        WizardTemplateId::SensorStarter => {
+            let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
+            Some(vendored_sensor_files(sku, cores))
+        }
+        WizardTemplateId::EdgeAiStarter => {
+            let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
+            Some(vendored_edge_ai_files(sku, cores))
+        }
+        _ => None,
+    };
+    if let Some(vendored_files) = vendored_files {
+        return vendored_files
+            .into_iter()
+            .map(|(relative_path, content)| WizardPlannedFile {
+                relative_path,
+                content,
+            })
+            .collect();
     }
 
     let mut files = vec![
@@ -63,120 +88,6 @@ pub(super) fn gen_c_project_files(
     files
 }
 
-/// Emit the west-buildable Zephyr scaffold for the `zephyr-app` template: a real
-/// Zephyr `CMakeLists.txt` that runs the SDK loader on board.yaml
-/// (`alp_project.py --emit zephyr-conf` -> `EXTRA_CONF_FILE`), an intentionally
-/// empty `prj.conf` (config is declarative in board.yaml), and a hello-world
-/// `src/main.c`. No `src/CMakeLists.txt` / `include/app` (Zephyr wires
-/// `target_sources(app ...)` directly). Mirrors the SDK's curated
-/// `examples/peripheral-io/hello-world`.
-fn gen_zephyr_project_files(
-    def: &WizardTemplateDefinition,
-    som_sku: Option<&str>,
-    cores: &[(String, String)],
-) -> Vec<WizardPlannedFile> {
-    vec![
-        WizardPlannedFile {
-            relative_path: "board.yaml".to_string(),
-            content: gen_board_yaml(def, som_sku, cores),
-        },
-        WizardPlannedFile {
-            relative_path: "README.md".to_string(),
-            content: gen_readme(def, som_sku),
-        },
-        WizardPlannedFile {
-            relative_path: "prj.conf".to_string(),
-            content: gen_zephyr_prj_conf(),
-        },
-        WizardPlannedFile {
-            relative_path: "CMakeLists.txt".to_string(),
-            content: gen_zephyr_cmake(app_core_for_sku(som_sku.unwrap_or(crate::DEFAULT_SOM_SKU))),
-        },
-        WizardPlannedFile {
-            relative_path: "src/main.c".to_string(),
-            content: gen_zephyr_main_c(),
-        },
-    ]
-}
-
-fn gen_zephyr_cmake(app_core: &str) -> String {
-    // `--core <id>` scopes the emit to the app core. An unscoped `--emit
-    // zephyr-conf` sums Kconfig across every core -- a cross-core leak on a
-    // multi-Zephyr-core SoM (every AEN family: the unused M55 defaults to a
-    // Zephyr shim slice). Matches the SDK example convention
-    // (examples/**/CMakeLists.txt: `--core`-scoped, layered via EXTRA_CONF_FILE).
-    r#"# SPDX-License-Identifier: Apache-2.0
-
-cmake_minimum_required(VERSION 3.20)
-
-# A scaffolded project lives outside the SDK tree, so ALP_SDK_ROOT must point at
-# your alp-sdk checkout: `export ALP_SDK_ROOT=/path/to/alp-sdk`.
-if(DEFINED ENV{ALP_SDK_ROOT})
-    set(ALP_SDK_ROOT $ENV{ALP_SDK_ROOT})
-else()
-    message(FATAL_ERROR "ALP_SDK_ROOT is not set. Point it at your alp-sdk checkout.")
-endif()
-
-find_package(Python3 REQUIRED COMPONENTS Interpreter)
-
-# Derive CONFIG_* from board.yaml via the SDK loader, before Zephyr config.
-set(_alp_generated ${CMAKE_BINARY_DIR}/generated/alp.conf)
-execute_process(
-    COMMAND ${Python3_EXECUTABLE} ${ALP_SDK_ROOT}/scripts/alp_project.py
-            --input ${CMAKE_CURRENT_SOURCE_DIR}/board.yaml
-            --emit zephyr-conf --core __ALP_APP_CORE__
-            --output ${_alp_generated}
-    RESULT_VARIABLE _alp_rv
-    ERROR_VARIABLE _alp_stderr
-)
-if(NOT _alp_rv EQUAL 0)
-    message(FATAL_ERROR "alp_project.py failed (rv=${_alp_rv}); check board.yaml.\nstderr: ${_alp_stderr}")
-endif()
-
-# Layer the generated CONFIG_* over prj.conf via EXTRA_CONF_FILE.
-list(APPEND EXTRA_CONF_FILE ${_alp_generated})
-
-find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
-project(alp_app LANGUAGES C)
-
-target_sources(app PRIVATE src/main.c)
-"#
-    .replace("__ALP_APP_CORE__", app_core)
-}
-
-fn gen_zephyr_prj_conf() -> String {
-    r#"# SPDX-License-Identifier: Apache-2.0
-#
-# Intentionally empty. Every CONFIG_* this app needs is derived from board.yaml
-# by scripts/alp_project.py and layered in via EXTRA_CONF_FILE (see CMakeLists.txt).
-# Add app-specific tuning knobs here only when they are NOT feature-selection --
-# everything declarative belongs in board.yaml.
-"#
-    .to_string()
-}
-
-fn gen_zephyr_main_c() -> String {
-    r#"/* SPDX-License-Identifier: Apache-2.0 */
-
-#include <zephyr/kernel.h>
-#include <stdio.h>
-
-int main(void)
-{
-    printf("[app] Alp SDK Zephyr app starting\n");
-
-    for (int tick = 0; tick < 5; tick++) {
-        printf("[app] tick %d\n", tick);
-        k_msleep(500);
-    }
-
-    printf("[app] done\n");
-    return 0;
-}
-"#
-    .to_string()
-}
-
 /// Canonical Zephyr app-core id for a SoM family, taken from the SoM preset's
 /// `topology:`. `tan init` is SDK-free, so this maps by SKU prefix; the value is
 /// re-checked against the SoM catalogue by `tan validate` once an SDK resolves.
@@ -215,8 +126,10 @@ pub fn infer_runtime_for_core_id(id: &str) -> &'static str {
 
 /// Emit a board.yaml conforming to the SDK board schema (v0.6+): `som` + `cores`
 /// are the only required top-level keys; population/OS is per-core. Template
-/// connectivity/inference tuning lives under the app core's `core_entry`, but
-/// `libraries` is a project-wide, top-level key (`core_entry` only allows
+/// connectivity tuning lives under the app core's `core_entry` (edge-ai-starter's
+/// inference tuning moved with it to the vendored `edge-ai` scaffold, see
+/// `wizard/vendored/MANIFEST.md`), but `libraries` is a project-wide, top-level
+/// key (`core_entry` only allows
 /// `extra_libraries`, additionalProperties: false) mapping each library to the
 /// cores that use it; project-wide diagnostics is a sanctioned top-level key.
 fn gen_board_yaml(
@@ -244,13 +157,6 @@ fn gen_board_yaml(
         s.push_str(&format!("      mqtt: {}\n", f.mqtt));
         s.push_str(&format!("      ble: {}\n", f.ble));
         s.push_str(&format!("      tls: {}\n", f.tls));
-    }
-
-    if def.id == WizardTemplateId::EdgeAiStarter {
-        // Backend is silicon-determined (SoM `capabilities:`); only the
-        // app-level arena budget is a board.yaml knob.
-        s.push_str("    inference:\n");
-        s.push_str("      default_arena_kib: 256\n");
     }
 
     // Companion cores (heterogeneous `--cores`): emit each core other than the
@@ -419,10 +325,13 @@ mod tests {
     /// allows `extra_libraries` and forbids unknown keys.
     #[test]
     fn board_yaml_libraries_are_top_level_not_under_core_entry() {
+        // sensor-starter is now vendored (see `wizard/vendored/MANIFEST.md`),
+        // so this hand-generator regression check picks another hand-generated
+        // template that still declares `libs`.
         let def = list_wizard_templates()
             .into_iter()
-            .find(|d| d.id == WizardTemplateId::SensorStarter)
-            .expect("sensor-starter template registered");
+            .find(|d| d.id == WizardTemplateId::BoardDiagnostics)
+            .expect("board-diagnostics template registered");
         let files = gen_c_project_files(def, None, &[]);
         let board_yaml = &files
             .iter()
@@ -438,49 +347,5 @@ mod tests {
             !board_yaml.contains("    libraries:"),
             "libraries must not be nested under cores.<core>, got:\n{board_yaml}"
         );
-    }
-
-    /// The wizard's Zephyr `CMakeLists.txt` must scope its `--emit zephyr-conf`
-    /// to the app core (`--core <id>`). An unscoped emit sums Kconfig across
-    /// every core -- a cross-core leak on a multi-Zephyr-core SoM. Regression
-    /// guard for the leak the SDK ADR-0020 addendum fixed in the examples.
-    #[test]
-    fn zephyr_cmake_scopes_emit_to_app_core() {
-        let def = list_wizard_templates()
-            .into_iter()
-            .find(|d| d.id == WizardTemplateId::ZephyrApp)
-            .expect("zephyr-app template registered");
-
-        let assert_scoped = |som_sku: Option<&str>, want_core: &str| {
-            let files = gen_c_project_files(def, som_sku, &[]);
-            let cmake = &files
-                .iter()
-                .find(|f| f.relative_path == "CMakeLists.txt")
-                .expect("CMakeLists.txt planned")
-                .content;
-            let label = som_sku.unwrap_or("<default>");
-
-            assert!(
-                cmake.contains(&format!("--emit zephyr-conf --core {want_core}")),
-                "expected `--core {want_core}` for {label}, got:\n{cmake}"
-            );
-            // Every `--emit zephyr-conf` must be `--core`-scoped (no leak).
-            assert_eq!(
-                cmake.matches("--emit zephyr-conf").count(),
-                cmake.matches("--emit zephyr-conf --core ").count(),
-                "unscoped `--emit zephyr-conf` for {label}, got:\n{cmake}"
-            );
-            // The placeholder must be substituted, never emitted literally.
-            assert!(
-                !cmake.contains("__ALP_APP_CORE__"),
-                "placeholder left unsubstituted for {label}:\n{cmake}"
-            );
-        };
-
-        // Every SKU family + the `--som`-omitted default path (mod.rs:123).
-        assert_scoped(Some("E1M-AEN801"), "m55_hp");
-        assert_scoped(Some("E1M-V2N"), "m33_sm");
-        assert_scoped(Some("E1M-NX9101"), "m33");
-        assert_scoped(None, app_core_for_sku(crate::DEFAULT_SOM_SKU));
     }
 }

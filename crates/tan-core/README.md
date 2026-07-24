@@ -21,6 +21,7 @@ later be bridged elsewhere (napi-rs / WASM).
 | --- | --- |
 | `build_plan` | Parse the SDK's build-plan contract (consumer structs, `envAppendPath`, `executionPolicy`) + the version-skew guard. |
 | `system_manifest` | The post-build system-manifest contract — `parse_system_manifest` / `overlay_run_results` / `serialize_system_manifest`. |
+| `kconfig` | The `--emit kconfig` contract (workspace-dependent) — `parse_kconfig` + `resolve_default_kconfig_core`. |
 | `plan_exec` | **Pure** env-append + skip/fail-policy decisions (`apply_env_append`, `assemble_slice_env`, `resolve_action`). |
 | `size` | `tan size` measurement logic + SoM-preset → SoC-variant budget resolution. |
 | `flash` | `tan flash` boot-order / artefact planning. |

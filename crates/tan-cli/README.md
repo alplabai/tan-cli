@@ -9,8 +9,10 @@ the workspace README for the three-repo model.
 
 Ported commands: `validate`, `generate`, `init`, `scaffold`, `examples`,
 `doctor`, `completion`, `diff`, `presets`, `pinmux`, `explain`, `inspect`,
-`trace`, `debug-config`, `support-bundle`, `sdk`, `bootstrap`, `build`.
-`build`/`size`/`image`/`flash`/`clean`/`renode` are native Rust; only
-`migrate`/`lock`/`quality` still forward to `west alp-*`. Plus
-`model`/`monitor`/`new-som`/`faultdecode` forwarders to the SDK `alp` CLI
-(`python -m alp_cli <sub>`).
+`trace`, `debug-config`, `support-bundle`, `sdk`, `bootstrap`, `build`,
+`kconfig`. `build`/`run`/`size`/`image`/`flash`/`clean`/`renode` are native
+Rust;
+only `migrate`/`lock`/`quality` still forward to `west alp-*`. `kconfig`
+wraps the SDK's `--emit kconfig` (needs a bootstrapped Zephyr workspace).
+Plus `model`/`monitor`/`new-som`/`faultdecode` forwarders to the SDK `alp`
+CLI (`python -m alp_cli <sub>`).

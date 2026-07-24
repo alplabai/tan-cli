@@ -1,5 +1,5 @@
 complete -c tan -f
-complete -c tan -n '__fish_use_subcommand' -a 'validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build image flash run clean renode size migrate lock quality model monitor new-som faultdecode'
+complete -c tan -n '__fish_use_subcommand' -a 'validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode'
 complete -c tan -l project -d 'Project root'
 complete -c tan -l board-yaml -d 'board.yaml path'
 complete -c tan -l sdk-root -d 'SDK root path'
@@ -48,6 +48,7 @@ complete -c tan -n '__fish_seen_subcommand_from build' -l materialise -d 'Materi
 complete -c tan -n '__fish_seen_subcommand_from build' -l native -d 'Build natively'
 complete -c tan -n '__fish_seen_subcommand_from build' -l manifest -d 'Show the system manifest'
 complete -c tan -n '__fish_seen_subcommand_from build' -l manifest-from -d 'Read manifest from file'
+complete -c tan -n '__fish_seen_subcommand_from kconfig' -l core -d 'Core id to scope the menu to'
 complete -c tan -n '__fish_seen_subcommand_from image flash clean renode size' -l build-root -d 'Override build root'
 complete -c tan -n '__fish_seen_subcommand_from flash' -l dry-run -d 'Print planned commands only'
 complete -c tan -n '__fish_seen_subcommand_from flash' -l core -d 'Flash only this core'

@@ -17,11 +17,14 @@ use super::execute::{NativeBuildOutcome, execute_slices_outcome};
 use super::materialise::materialise_plan;
 use super::plan_modes::plan_error_run;
 use super::preflight::{gate_from_checks, maybe_auto_bootstrap, probe_build_preflight};
+use super::token_substitution::apply_plan_token_substitution;
 use super::workspace::invoke_sdk_emit;
 
 /// The project build tree base (where `build/<core>-<os>/` lives) — the
-/// directory `tan build` runs each slice's command from.
-pub(super) fn base_dir(context: &ProjectContext) -> String {
+/// directory `tan build` runs each slice's command from. `pub(crate)`
+/// (widened from `pub(super)`) so `commands::kconfig` can derive the SAME
+/// base for its `resolve_zephyr_base` call instead of a second copy.
+pub(crate) fn base_dir(context: &ProjectContext) -> String {
     context
         .west_cwd
         .clone()
@@ -42,7 +45,7 @@ pub(super) fn acquire_plan(
                 format!("failed to read plan file `{path}`: {e}"),
             )
         })?,
-        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable")?,
+        None => invoke_sdk_emit(context, "build-plan", "build.plan-unavailable", &[], &[])?,
     };
     parse_build_plan(&json).map_err(|e| ("build.plan-invalid", e.to_string()))
 }
@@ -105,6 +108,23 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
         }
     };
 
+    // Build-plan token substitution (alp-sdk #865): a no-op unless the plan is
+    // `planPathMode: "tokened"`. Runs on the in-memory plan BEFORE materialise
+    // writes anything or a slice command is ever built, using `base` (the
+    // SAME exec base every slice actually runs under) for the PROJECT_ROOT/
+    // exec-base divergence guard.
+    let base = base_dir(&context);
+    let plan = match apply_plan_token_substitution(g, &context, &base, &plan) {
+        Ok(plan) => plan,
+        Err((code, message)) => {
+            return NativeBuildOutcome {
+                run: plan_error_run(g, project, code, message, ExitCode::RuntimeFailure),
+                manifest_written: false,
+                native_sim_target: None,
+            };
+        }
+    };
+
     // Refuse a plan whose build_root isn't the `<project>/build` that
     // flash/size/image/renode read — building into a different directory would
     // leave those separate invocations reading a stale (or missing) manifest,
@@ -130,7 +150,6 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
         };
     }
 
-    let base = base_dir(&context);
     if let Err(e) = materialise_plan(&plan, Path::new(&base)) {
         return NativeBuildOutcome {
             run: plan_error_run(

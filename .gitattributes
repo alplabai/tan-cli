@@ -1,0 +1,12 @@
+# Vendored `alp-sdk --emit scaffold` output is baked into the binary via
+# include_str! and byte-compared against a fresh LF emit by the cross-repo
+# parity gate. Force LF so a Windows CI checkout (autocrlf=true) cannot
+# CRLF-convert these files and break byte-exactness / the vendored test.
+crates/tan-core/src/wizard/vendored/** text eol=lf
+tests/parity/** text eol=lf
+
+# Vendored copy of alp-sdk's `tests/fixtures/kconfig-contract/emit-kconfig.
+# golden.json` (alp-sdk#894), byte-diffed against the pinned alp-sdk checkout
+# by tests/parity/kconfig_fixture_parity.py. Force LF for the same reason as
+# the wizard-template vendoring above.
+tests/fixtures/kconfig-contract/** text eol=lf

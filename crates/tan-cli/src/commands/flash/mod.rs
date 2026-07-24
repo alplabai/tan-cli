@@ -111,7 +111,7 @@ pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
             build_root_str,
             "flash.manifest-not-found",
             format!(
-                "system-manifest.yaml not found at {}; run `tan build {}` first.",
+                "system-manifest.yaml not found at {}; run `tan build --project {}` first.",
                 manifest_path.display(),
                 args.app_path
             ),

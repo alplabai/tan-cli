@@ -21,6 +21,7 @@ _tan() {
     'sdk:Manage local SDK installs'
     'bootstrap:Set up the SDK build environment'
     'build:Build the project natively'
+    'kconfig:Show the board-scoped Kconfig symbol menu'
     'image:Assemble a flashable image bundle'
     'flash:Flash slices and helper MCUs onto the device'
     'run:Build then run the project'
@@ -85,6 +86,9 @@ _tan() {
           ;;
         build)
           _arguments '--plan[Show the build plan]' '--plan-from[Read build plan from file]:path:_files' '--materialise[Materialise plan files]' '--native[Build natively]' '--manifest[Show the system manifest]' '--manifest-from[Read manifest from file]:path:_files' '--format[Output format]:format:(text json)'
+          ;;
+        kconfig)
+          _arguments '--core[Core id to scope the menu to]' '--format[Output format]:format:(text json)'
           ;;
         image)
           _arguments '--build-root[Override build root]:path:_files -/' '--format[Output format]:format:(text json)'

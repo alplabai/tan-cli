@@ -27,12 +27,17 @@ env:
   # It MUST be a ref at or after the oracle SHA (97ad481b) -- an OLDER ref
   # (e.g. the last release v0.11.1, which predates the Phase-1 fields) lacks
   # envAppendPath/executionPolicy and would fail seam1 on missing-field diffs,
-  # not real drift. Pinned to df312cec (dev tip at gate-seed time = #848): it
-  # carries the Phase-1 fields AND the one allowed delta (debug.probe
-  # openocd->null), so a green bare-PR run proves the comparator handles the
-  # known-good case. Bump to the v0.12 release tag once alp-sdk cuts one past
-  # #848 (blocked on this gate landing -- alp-sdk ADR-0020 amendment, alp-sdk#855).
-  PINNED_SDK_TAG: df312cec3650bccc5976d31c2ab705f2a8e5f0ef
+  # not real drift. Pinned to the v0.13.0 release tag (93ef5726): carries the
+  # Phase-1 fields, the one allowed delta (debug.probe openocd->null), the
+  # tokened-plan reconciliation branch `normalize_plan` exercises, AND
+  # alp-sdk#893/#894/#897 (the `--emit kconfig` feature + its canonical
+  # fixture) -- `kconfig_fixture_parity.py` below now byte-diffs the vendored
+  # `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` for real
+  # instead of soft-NOTICE-skipping (that self-skip only fired for a pin
+  # predating #897; verified locally against a v0.13.0 checkout, PASS, 814
+  # bytes). Re-bump on every alp-sdk release this repo's parity gate should
+  # track.
+  PINNED_SDK_TAG: v0.13.0
 
 jobs:
   seam1-plan-shape:
@@ -72,6 +77,18 @@ jobs:
           python3 tests/parity/seam1_field_diff.py
           --sdk alp-sdk
           --oracle tests/parity/oracle
+
+      - name: kconfig fixture byte-parity (vendored vs. pinned alp-sdk)
+        run: python3 tests/parity/kconfig_fixture_parity.py --sdk alp-sdk
+
+      # Vendored wizard scaffold tree vs. the pinned alp-sdk's live
+      # `--emit scaffold`. Reuses this job's alp-sdk checkout + emit deps (same
+      # as the kconfig step above) rather than a second clone. The vendored tree
+      # is captured at this exact pin, so a re-vendor that drifts from the SDK
+      # fails here instead of shipping silently (the drift that hid the stale
+      # `minimal` README before this gate ran in CI).
+      - name: scaffold byte-parity (vendored tree vs. pinned alp-sdk --emit scaffold)
+        run: python3 tests/parity/scaffold_byte_parity.py --sdk alp-sdk
 
   seam2:
     name: "seam2 -- materialise + real build + Renode smoke (TODO)"
