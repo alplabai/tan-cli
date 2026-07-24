@@ -344,6 +344,8 @@ pub enum ModelSub {
     List(ModelListArgs),
     /// Decode a built `.alpmodel`: targets, requires, coverage matrix.
     Info(ModelInfoArgs),
+    /// Static pre-flight fit/perf check for a model on a SoM (offline, no toolchain).
+    Check(ModelCheckArgs),
     /// Report installed NPU compiler toolchains.
     Doctor,
     /// Forward-compatible passthrough (Phase-3); streams like the other
@@ -391,6 +393,20 @@ pub struct ModelInfoArgs {
     /// board.yaml — enables the SoM coverage matrix.
     #[arg(long)]
     pub board: Option<String>,
+    /// Path to the metadata/ root (default: the SDK's own `metadata/`).
+    #[arg(long = "metadata-root")]
+    pub metadata_root: Option<String>,
+}
+
+/// Args for `model check`.
+#[derive(Debug, Args)]
+pub struct ModelCheckArgs {
+    /// Model file to check (`.tflite`).
+    #[arg(value_name = "MODEL")]
+    pub model: String,
+    /// SoM SKU, e.g. `E1M-AEN801`.
+    #[arg(long, value_name = "SKU")]
+    pub sku: String,
     /// Path to the metadata/ root (default: the SDK's own `metadata/`).
     #[arg(long = "metadata-root")]
     pub metadata_root: Option<String>,

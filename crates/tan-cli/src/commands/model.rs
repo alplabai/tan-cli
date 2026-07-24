@@ -59,6 +59,13 @@ pub fn sub_argv(sub: &ModelSub) -> Vec<String> {
             push_opt(&mut argv, "--metadata-root", &a.metadata_root);
             argv
         }
+        ModelSub::Check(a) => {
+            let mut argv = vec!["check".to_string(), a.model.clone()];
+            argv.push("--sku".to_string());
+            argv.push(a.sku.clone());
+            push_opt(&mut argv, "--metadata-root", &a.metadata_root);
+            argv
+        }
         ModelSub::Doctor => vec!["doctor".to_string()],
         ModelSub::Run(fwd) => {
             let mut argv = vec!["run".to_string()];
@@ -234,7 +241,9 @@ pub fn run(g: &GlobalArgs, sub: &ModelSub) -> CommandRun {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cli::{ModelBuildArgs, ModelInfoArgs, ModelListArgs, WestForwardArgs};
+    use crate::cli::{
+        ModelBuildArgs, ModelCheckArgs, ModelInfoArgs, ModelListArgs, WestForwardArgs,
+    };
 
     #[test]
     fn sub_argv_maps_build_including_only_set_options() {
@@ -289,6 +298,34 @@ mod tests {
             })),
             vec!["run", "m"]
         );
+    }
+
+    #[test]
+    fn sub_argv_maps_check_with_required_sku() {
+        let sub = ModelSub::Check(ModelCheckArgs {
+            model: "m.tflite".to_string(),
+            sku: "E1M-AEN801".to_string(),
+            metadata_root: None,
+        });
+        assert_eq!(
+            sub_argv(&sub),
+            vec!["check", "m.tflite", "--sku", "E1M-AEN801"]
+        );
+    }
+
+    #[test]
+    fn model_argv_appends_format_json_for_check() {
+        let sub = ModelSub::Check(ModelCheckArgs {
+            model: "m.tflite".to_string(),
+            sku: "E1M-AEN801".to_string(),
+            metadata_root: Some("meta".to_string()),
+        });
+        let argv = model_argv(&sub, true);
+        // -m alp_cli model check m.tflite --sku E1M-AEN801 --metadata-root meta --format json
+        assert!(argv.ends_with(&["--format".to_string(), "json".to_string()]));
+        assert!(argv.contains(&"check".to_string()));
+        assert!(argv.contains(&"--metadata-root".to_string()));
+        assert!(is_wrappable(&sub), "check must be wrappable");
     }
 
     #[test]
