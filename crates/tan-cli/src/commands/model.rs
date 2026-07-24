@@ -70,6 +70,20 @@ pub fn sub_argv(sub: &ModelSub) -> Vec<String> {
             push_opt(&mut argv, "--metadata-root", &a.metadata_root);
             argv
         }
+        ModelSub::Zoo(a) => {
+            let mut argv = vec!["zoo".to_string()];
+            push_opt(&mut argv, "--sku", &a.sku);
+            push_opt(&mut argv, "--metadata-root", &a.metadata_root);
+            argv
+        }
+        ModelSub::Add(a) => {
+            let mut argv = vec!["add".to_string(), a.zoo_id.clone()];
+            push_opt(&mut argv, "--board", &a.board);
+            push_opt(&mut argv, "--name", &a.name);
+            push_opt(&mut argv, "--models-dir", &a.models_dir);
+            push_opt(&mut argv, "--metadata-root", &a.metadata_root);
+            argv
+        }
         ModelSub::Doctor => vec!["doctor".to_string()],
         ModelSub::Run(fwd) => {
             let mut argv = vec!["run".to_string()];
@@ -246,7 +260,8 @@ pub fn run(g: &GlobalArgs, sub: &ModelSub) -> CommandRun {
 mod tests {
     use super::*;
     use crate::cli::{
-        ModelBuildArgs, ModelCheckArgs, ModelInfoArgs, ModelListArgs, WestForwardArgs,
+        ModelAddArgs, ModelBuildArgs, ModelCheckArgs, ModelInfoArgs, ModelListArgs, ModelZooArgs,
+        WestForwardArgs,
     };
 
     #[test]
@@ -349,6 +364,31 @@ mod tests {
             sub_argv(&sub),
             vec!["check", "--board", "board.yaml", "--model", "tiny"]
         );
+    }
+
+    #[test]
+    fn sub_argv_maps_zoo_with_sku() {
+        let sub = ModelSub::Zoo(ModelZooArgs {
+            sku: Some("E1M-AEN801".to_string()),
+            metadata_root: None,
+        });
+        assert_eq!(sub_argv(&sub), vec!["zoo", "--sku", "E1M-AEN801"]);
+    }
+
+    #[test]
+    fn sub_argv_maps_add_with_id_and_opts() {
+        let sub = ModelSub::Add(ModelAddArgs {
+            zoo_id: "example-tiny".to_string(),
+            board: Some("board.yaml".to_string()),
+            name: None,
+            models_dir: None,
+            metadata_root: None,
+        });
+        assert_eq!(
+            sub_argv(&sub),
+            vec!["add", "example-tiny", "--board", "board.yaml"]
+        );
+        assert!(is_wrappable(&sub), "add must be wrappable");
     }
 
     #[test]

@@ -346,6 +346,10 @@ pub enum ModelSub {
     Info(ModelInfoArgs),
     /// Static pre-flight fit/perf check for a model on a SoM (offline, no toolchain).
     Check(ModelCheckArgs),
+    /// Browse curated model-zoo entries (and which run on a SoM).
+    Zoo(ModelZooArgs),
+    /// Add a model-zoo entry to board.yaml (fetch source + append models:).
+    Add(ModelAddArgs),
     /// Report installed NPU compiler toolchains.
     Doctor,
     /// Forward-compatible passthrough (Phase-3); streams like the other
@@ -414,6 +418,37 @@ pub struct ModelCheckArgs {
     /// With `--board`, check only the named `models:` entry.
     #[arg(long = "model", value_name = "NAME")]
     pub select: Option<String>,
+    /// Path to the metadata/ root (default: the SDK's own `metadata/`).
+    #[arg(long = "metadata-root")]
+    pub metadata_root: Option<String>,
+}
+
+/// Args for `model zoo`.
+#[derive(Debug, Args)]
+pub struct ModelZooArgs {
+    /// Mark which entries run on this SoM (via validated_soms).
+    #[arg(long, value_name = "SKU")]
+    pub sku: Option<String>,
+    /// Path to the metadata/ root (default: the SDK's own `metadata/`).
+    #[arg(long = "metadata-root")]
+    pub metadata_root: Option<String>,
+}
+
+/// Args for `model add`.
+#[derive(Debug, Args)]
+pub struct ModelAddArgs {
+    /// Zoo entry id to add.
+    #[arg(value_name = "ZOO_ID")]
+    pub zoo_id: String,
+    /// board.yaml to append to (default: `board.yaml`).
+    #[arg(long, value_name = "PATH")]
+    pub board: Option<String>,
+    /// models: entry name (default: the zoo id).
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+    /// Directory (relative to board.yaml) to cache the fetched model.
+    #[arg(long = "models-dir", value_name = "DIR")]
+    pub models_dir: Option<String>,
     /// Path to the metadata/ root (default: the SDK's own `metadata/`).
     #[arg(long = "metadata-root")]
     pub metadata_root: Option<String>,
