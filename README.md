@@ -10,8 +10,10 @@ executes it — it is the single executor and the user command surface for
 building, flashing, and inspecting Alp Lab E1M / E1M-X firmware.
 
 `build` / `run` / `size` / `image` / `flash` / `clean` / `renode` are native
-Rust; only `migrate` / `lock` / `quality` still forward to `west alp-*`, and
-`model` / `monitor` / `new-som` / `faultdecode` to the SDK `alp` CLI. Licensed
+Rust; `migrate` / `lock` / `quality` still forward to `west alp-*`, and
+`monitor` / `new-som` / `faultdecode` to the SDK `alp` CLI. `model` is no longer
+a bare forwarder — it is a fuller subcommand family, a thin envelope wrapper over
+the SDK's `alp model <cmd>` (see [Model](#model)). Licensed
 **Apache-2.0** (see [`LICENSE`](LICENSE); the SPDX identifier is also set in each
 `Cargo.toml` and source header).
 
@@ -126,7 +128,8 @@ script.
 | **Configure & verify** | `validate` · `generate` · `diff` · `inspect` · `trace` · `doctor` · `debug-config` · `support-bundle` · `kconfig` |
 | **Build & run** (native) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
 | **Environment** | `bootstrap` · `sdk` · `completion` |
-| **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `model` · `monitor` · `new-som` · `faultdecode` → `python -m alp_cli` |
+| **Model** | `model build` · `list` · `info` · `doctor` · `check` · `zoo` · `add` · `prep` · `run` · `ab` (envelope wrapper over `alp model` — see [Model](#model)) |
+| **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `monitor` · `new-som` · `faultdecode` → `python -m alp_cli` |
 
 `tan <command> --help` for flags. Global flags apply to every command:
 
@@ -143,6 +146,29 @@ script.
 `{command, ok, exitCode, project, data, issues}` — the contract the
 alp-sdk-vscode extension consumes. Text output is for humans and may change;
 the envelope is the API.
+
+### Model
+
+`tan model <cmd>` mirrors the alp-sdk `alp model <cmd>` surface — a thin envelope
+wrapper emitting `{command, ok, exitCode, project, data, issues}`. The
+pre-existing subcommands compile the `board.yaml` `models:` list and inspect
+toolchains; `check` / `zoo` / `add` / `prep` / `run` / `ab` are the
+model-lifecycle add-ons.
+
+| Subcommand | What it does |
+| --- | --- |
+| `model build` / `list` / `info` / `doctor` | Compile `board.yaml` models: → `.alpmodel`; list; decode; report toolchains. |
+| `model check <model.tflite\|.onnx> --sku <SKU>` (or `--board board.yaml [--model NAME]`) `[--format human\|json]` | Static **pre-flight** fit/perf, offline, no toolchain. Per SoM-backend verdict `fits` / `cpu-fallback` / `no-fit`, plus est SRAM (vs the SoC arena budget), est latency, op-coverage %, unsupported ops. Labelled `source:static` (tier-1, biased **conservative** — never over-promises "fits"); verified on silicon later. |
+| `model zoo [--sku <SKU> \| --board board.yaml] [--format]` | Browse curated model-zoo entries (`metadata/model_zoo/<id>.yaml`), each marked `runs_here` for the SoM via `validated_soms`. Link + fetch + layer, no weight redistribution. |
+| `model add <zoo-id> [--board board.yaml] [--name NAME] [--models-dir DIR]` | Fetch the source (URL sha256-verified, or bundled) and append `{name, source}` to `board.yaml` models:. Non-destructive (duplicate name errors). |
+| `model prep <model.onnx\|.tflite> --calibration <dir> [--out] [--per-channel] [--min-samples N]` | License-free INT8 quantize (onnxruntime QDQ) + fp32-vs-int8 accuracy report (top1 agreement %, mean cosine, max-abs-err, verdict `good` / `degraded` + guidance). `.tflite` is converted to ONNX first via tf2onnx. |
+| `model run <model.onnx> [--input FILE.npy] [--expected LABEL] [--runs N]` | **Host** reference run, backend `cpu-host`: functional + host-latency + accuracy. `peak_sram_kib` / `power_mj` are null on host. |
+| `model ab <a.onnx> <b.onnx> [--input] [--runs]` | A/B two models on the same input (host reference): latency + size delta. |
+
+Honest caveats: `run` / `ab` are a **host reference, not target-SoM perf**;
+`check` is a **conservative static pre-flight estimate**, verified on silicon
+later; power + on-device measurement are **HW-gated** (they need the EVK
+power-topology + Yocto NPU runtimes).
 
 ## Where it sits (three repos, one executor)
 

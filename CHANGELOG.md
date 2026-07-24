@@ -7,6 +7,23 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`tan model` edge-AI lifecycle surface** (thin envelope wrappers over
+  `alp_cli model`, all emitting the stable `{command,ok,exitCode,project,data,
+  issues}` envelope):
+  - **`tan model check`** — offline static pre-flight fit/perf: per-SoM-backend
+    verdict (`fits` / `cpu-fallback` / `no-fit`) plus estimated SRAM, latency and
+    op-coverage, before you build. Single-model (`<model> --sku`) or board-mode
+    (`--board board.yaml [--model NAME]`).
+  - **`tan model zoo`** / **`tan model add`** — browse curated model-zoo entries
+    (marked `runs_here` for the SoM via `--sku`/`--board`) and one-click append a
+    chosen entry to `board.yaml` `models:` (source fetched + SHA-256 verified).
+  - **`tan model prep`** — license-free INT8 quantize + fp32-vs-int8 accuracy
+    report (`.onnx` or `.tflite` input).
+  - **`tan model run`** (repurposed from the streaming placeholder to a wrappable
+    host reference run, `backend: cpu-host`) and **`tan model ab`** (A/B two
+    models on the same input). Host-reference latency, NOT target-SoM performance.
+
 ## [0.3.0] — 2026-07-24
 
 ### Added

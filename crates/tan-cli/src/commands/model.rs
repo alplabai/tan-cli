@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `tan model` — forwards to `alp_cli model <build|list|info|doctor|run|ab>`.
+//! `tan model` — forwards to `alp_cli model
+//! <build|list|info|check|zoo|add|prep|doctor|run|ab>`.
 //! `alp_cli model <sub> --format json` already emits its own JSON payload;
 //! tan doesn't re-derive it, it wraps it in the stable
 //! `{command,ok,exitCode,project,data,issues}` envelope so a JSON consumer
