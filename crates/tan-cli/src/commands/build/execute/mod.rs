@@ -141,13 +141,18 @@ pub(crate) fn execute_slices_outcome(
     // for a stale-SDK build dir (issue #52) — never silent, since the VS Code
     // extension only ever sees the envelope, not this function's `eprintln!`s.
     let mut sdk_switch_issues: Vec<Issue> = Vec::new();
-    let sdk_root = crate::util::resolve_sdk_root(g, &crate::util::cli_workspace_root(g));
-    // Stringified once: `sdk_stamp_action` compares against the stamp file's
-    // (also string) contents, and every slice in this run resolved the same
-    // root, so there's no reason to re-derive it per iteration.
-    let sdk_root_str = sdk_root
-        .as_deref()
-        .map(|p| p.to_string_lossy().into_owned());
+    let workspace_root = crate::util::cli_workspace_root(g);
+    let sdk_root = crate::util::resolve_sdk_root(g, &workspace_root);
+    // Normalized (absolute + `.`/`..`-collapsed) — NOT `sdk_root`'s raw
+    // `to_string_lossy()`. `resolve_sdk_root` returns an explicit `--sdk-root`
+    // verbatim (relative forms are a documented, supported shape), while `tan
+    // sdk switch` stores an absolute, `tan_core::normalize_path`-normalized
+    // pointer (the same `normalize_path(workspace_root.join(p))` idiom reused
+    // here, sdk.rs:414). Comparing the two raw byte-mismatches a relative
+    // `--sdk-root ../alp-sdk` against the identical absolute path `tan sdk
+    // switch` already pinned for the SAME checkout — thrashing `Pristine` (a
+    // full wipe) on every alternating invocation between the two forms.
+    let sdk_root_str = normalized_sdk_root_str(sdk_root.as_deref(), &workspace_root);
     // Auto-manage the build env so `tan build` needs no manual
     // `source .venv/activate` / `export ZEPHYR_BASE`: derive ZEPHYR_BASE from the
     // resolved workspace and pass the alp-sdk checkout as an extra Zephyr module,
@@ -299,6 +304,57 @@ pub(crate) fn execute_slices_outcome(
             });
             continue;
         }
+
+        let tool = if cmd.tool == "west" {
+            west_program(base, sdk_root.as_deref())
+        } else {
+            cmd.tool.clone()
+        };
+
+        // SDK parity (alp-sdk#114 / orchestrator.py:299): a build tool that's
+        // simply not installed on this host is normal — non-Zephyr dev boxes
+        // won't have `bitbake`, non-Linux boxes may lack the vendor toolchain.
+        // Treat it as skipped (exit 0), not failed, and say why.
+        if !crate::util::tool_available(&tool) {
+            // The SDK's verbatim reason wording. "not found in PATH" assumes a
+            // PATH-resolved tool; an absolute `tool` here is effectively
+            // unreachable (west_program only returns venv paths it verified
+            // with `is_file()`).
+            let reason =
+                format!("{tool} not found in PATH; this is normal on non-{backend} dev hosts");
+            // `missing_tool` policy: Skip (default / older plan) vs Fail.
+            let fail = resolve_action(
+                plan.execution_policy.as_ref(),
+                |p| p.missing_tool,
+                PolicyAction::Skip,
+            ) == PolicyAction::Fail;
+            if text_mode {
+                let ds = if fail {
+                    DoctorStatus::Fail
+                } else {
+                    DoctorStatus::Warn
+                };
+                eprintln!(
+                    "{}",
+                    theme
+                        .slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, reason))
+                );
+            }
+            if fail {
+                any_failed = true;
+            }
+            results.push(SliceResult {
+                core_id: slice.core_id.clone(),
+                backend,
+                status: if fail { "failed" } else { "skipped" }.to_string(),
+                rc: None,
+                reason: Some(reason),
+                output_artefact: None,
+                build_dir: None,
+            });
+            continue;
+        }
+
         // Sdk-switch-pristine guard (issue #52): a build dir west configured
         // against a PREVIOUS `--sdk-root` makes it FATAL ERROR on this one
         // ("please clean it, use --pristine, or use --build-dir") — a real
@@ -307,6 +363,16 @@ pub(crate) fn execute_slices_outcome(
         // scrollback. Detect it here and wipe west's own nested build dir
         // before the tool runs, so the configure that follows is fresh
         // instead of fatal.
+        //
+        // Deliberately AFTER the missing-tool skip above (not right after
+        // `create_dir_all`): the wipe is destructive and the tool-availability
+        // check is the only thing standing between "this slice is about to be
+        // rebuilt" and "this slice is about to be skipped". Running the wipe
+        // first meant a host missing `west` (or mid-switch to an SDK whose
+        // venv isn't resolvable yet) got its LAST GOOD `zephyr.elf` deleted
+        // for a rebuild that then never happened — the skip still reported
+        // exit 0, so nothing downstream (`tan flash`/`size`) ever learned the
+        // artefact it names is gone.
         //
         // Two guards (mirroring `resolve_zephyr_artefact`'s own refusal to
         // trust a build dir it cannot resolve) gate the WHOLE block —
@@ -374,56 +440,6 @@ pub(crate) fn execute_slices_outcome(
             if let Some(root) = sdk_root_str.as_deref() {
                 let _ = manifest::write_sdk_stamp(&cwd, root);
             }
-        }
-
-        let tool = if cmd.tool == "west" {
-            west_program(base, sdk_root.as_deref())
-        } else {
-            cmd.tool.clone()
-        };
-
-        // SDK parity (alp-sdk#114 / orchestrator.py:299): a build tool that's
-        // simply not installed on this host is normal — non-Zephyr dev boxes
-        // won't have `bitbake`, non-Linux boxes may lack the vendor toolchain.
-        // Treat it as skipped (exit 0), not failed, and say why.
-        if !crate::util::tool_available(&tool) {
-            // The SDK's verbatim reason wording. "not found in PATH" assumes a
-            // PATH-resolved tool; an absolute `tool` here is effectively
-            // unreachable (west_program only returns venv paths it verified
-            // with `is_file()`).
-            let reason =
-                format!("{tool} not found in PATH; this is normal on non-{backend} dev hosts");
-            // `missing_tool` policy: Skip (default / older plan) vs Fail.
-            let fail = resolve_action(
-                plan.execution_policy.as_ref(),
-                |p| p.missing_tool,
-                PolicyAction::Skip,
-            ) == PolicyAction::Fail;
-            if text_mode {
-                let ds = if fail {
-                    DoctorStatus::Fail
-                } else {
-                    DoctorStatus::Warn
-                };
-                eprintln!(
-                    "{}",
-                    theme
-                        .slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, reason))
-                );
-            }
-            if fail {
-                any_failed = true;
-            }
-            results.push(SliceResult {
-                core_id: slice.core_id.clone(),
-                backend,
-                status: if fail { "failed" } else { "skipped" }.to_string(),
-                rc: None,
-                reason: Some(reason),
-                output_artefact: None,
-                build_dir: None,
-            });
-            continue;
         }
 
         // Assemble the slice subprocess env (pure, in tan-core): slice env +
@@ -633,6 +649,21 @@ pub(crate) fn execute_slices_outcome(
     }
 }
 
+/// Absolute, `.`/`..`-collapsed form of `sdk_root`, anchored at `workspace_root`
+/// — what `sdk_stamp_action` actually compares. An absolute `sdk_root` (`tan
+/// sdk switch`'s own pointer, or an absolute `--sdk-root`) passes through
+/// unchanged (`Path::join` discards the base for an absolute pushed path); a
+/// relative one (a bare `--sdk-root ../alp-sdk`) is resolved against
+/// `workspace_root` first, so it compares equal to the absolute form of the
+/// SAME checkout instead of byte-mismatching it.
+fn normalized_sdk_root_str(sdk_root: Option<&Path>, workspace_root: &Path) -> Option<String> {
+    sdk_root.map(|p| {
+        tan_core::normalize_path(&workspace_root.join(p))
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
 /// The failure tail from an ALREADY-captured process `Output` (JSON mode) — a
 /// pure read, no second spawn. Returns the last 4 non-empty output lines
 /// joined by " | ", or an rc-only fallback when the captured streams were
@@ -681,6 +712,22 @@ mod tests {
 
     fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
         std::env::temp_dir().join(format!("{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn normalized_sdk_root_str_treats_a_relative_and_absolute_form_as_equal() {
+        // The reported thrash: `--sdk-root ../alp-sdk` (returned verbatim by
+        // `resolve_sdk_root`) must stamp/compare identically to the absolute,
+        // normalized pointer `tan sdk switch` already pins for the SAME
+        // checkout — otherwise alternating between the two forms across
+        // invocations pristines (a full wipe) every other build.
+        let workspace_root = unique_temp_dir("normalize-sdk-root-ws");
+        let sdk_abs = workspace_root.parent().unwrap().join("alp-sdk");
+
+        let via_absolute = normalized_sdk_root_str(Some(&sdk_abs), &workspace_root);
+        let via_relative = normalized_sdk_root_str(Some(Path::new("../alp-sdk")), &workspace_root);
+
+        assert_eq!(via_absolute, via_relative);
     }
 
     #[test]
@@ -1296,14 +1343,24 @@ mod tests {
 
     /// A one-slice plan whose command is a portable no-op (its exit status is
     /// never asserted by these tests — they only check the guard's
-    /// filesystem/issue side effects, which land before the tool spawns).
+    /// filesystem/issue side effects). MUST actually be on PATH: the guard now
+    /// runs AFTER the missing-tool skip (so a slice whose tool isn't installed
+    /// is never wiped only to sit un-rebuilt), so a tool that doesn't resolve
+    /// would `continue` before these tests' side effects ever land — `"true"`
+    /// isn't a binary on Windows, hence the per-platform pick every other
+    /// tool-spawning test in this file already uses.
     fn one_slice_plan_at(cwd: &str) -> BuildPlan {
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
         let json = format!(
             r#"{{
               "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
               "slices": [
                 {{ "coreId": "c1", "backend": "zephyr", "buildDir": "{cwd}",
-                   "command": {{ "tool": "true", "args": [], "cwd": "{cwd}" }} }}
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "{cwd}" }} }}
               ],
               "sharedArtefacts": []
             }}"#
@@ -1436,15 +1493,26 @@ mod tests {
         std::fs::write(nested.join("leftover-from-sdk-a.marker"), "x").unwrap();
 
         let g = global_with_sdk_root(&sdk_b);
-        let json = r#"{
-          "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
-          "slices": [
-            { "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
-              "command": { "tool": "true", "args": ["-d", "../elsewhere"], "cwd": "build/c1" } }
-          ],
-          "sharedArtefacts": []
-        }"#;
-        let plan = parse_build_plan(json).unwrap();
+        // Same portable-tool requirement as `one_slice_plan_at`: the `-d
+        // ../elsewhere` override marker must ride along with a tool that
+        // actually launches, or the missing-tool skip (which now runs first)
+        // would `continue` before `build_dir_overridden` ever gets checked.
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0", "-d", "../elsewhere"]"#)
+        } else {
+            ("true", r#"["-d", "../elsewhere"]"#)
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/c1" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
         let project = Project {
             root: None,
             board_yaml: None,
