@@ -55,8 +55,8 @@ pub const WEST_REQUIREMENT: &str = "west>=0.14.0";
 /// `bootstrap.ps1`'s `$Vpy`/`$West`). The DIRECTORY names are facts from
 /// `metadata/bootstrap.json` (`venv.posixBinDir`/`windowsBinDir`); the
 /// executable names are not in the manifest and live here. Single owner of the
-/// split — `commands::build::workspace` resolves the same three names through
-/// this, so the two can never drift.
+/// split — tan-cli's `crate::venv` resolves the same three names through this,
+/// so the two can never drift.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VenvLayout {
     /// Executable sub-directory: `bin` (POSIX) or `Scripts` (Windows).
