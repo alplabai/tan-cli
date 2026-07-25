@@ -171,11 +171,21 @@ pub(super) fn resolved_planner_python(context: &ProjectContext) -> String {
 /// Resolve the west workspace topdir — the directory holding `.west/`. `west alp-*`
 /// are extension commands discovered *only* from a workspace manifest, so they must
 /// be launched from inside the workspace, not the app dir. Checks: the project tree
-/// upward (app inside a workspace), then `$ZEPHYR_BASE/..`, then the SDK-derived
-/// layouts — `<sdk-parent>` (alp-sdk-manifest topdir, post-alp-sdk#782) and the
-/// legacy `<sdk-parent>/zephyrproject`. `None` when no workspace is found (the
-/// caller then keeps the pre-existing behavior of running in the app dir).
-pub(super) fn west_workspace_dir(start: &str, sdk_root: Option<&Path>) -> Option<PathBuf> {
+/// upward (app inside a workspace), then `$ZEPHYR_BASE/..` (manifest-verified as
+/// alp-sdk's — see step 2 below), then the SDK-derived layouts — `<sdk-parent>`
+/// (alp-sdk-manifest topdir, post-alp-sdk#782) and the legacy
+/// `<sdk-parent>/zephyrproject`. `None` when no workspace is found (the caller
+/// then keeps the pre-existing behavior of running in the app dir).
+///
+/// `pub(crate)`, not `pub(super)`: `commands::flash` shares this too (#61) —
+/// `west flash`'s runner registration (`run_common.py`'s
+/// `zephyr_module.parse_modules(ZEPHYR_BASE, command.manifest)`) resolves
+/// ONLY from the west workspace manifest, discovered by walking the child's
+/// OWN cwd upward, exactly like this resolver walks `start`. Re-deriving a
+/// second copy of this walk in `flash` would drift the two commands apart
+/// the moment one of the search steps above changes; re-export it instead
+/// (mirrors how `venv_bin_dir` is already shared from `crate::venv`).
+pub(crate) fn west_workspace_dir(start: &str, sdk_root: Option<&Path>) -> Option<PathBuf> {
     let is_workspace = |dir: &Path| dir.join(".west").is_dir();
 
     // 1. The project tree (if the app lives inside a workspace).
@@ -186,12 +196,10 @@ pub(super) fn west_workspace_dir(start: &str, sdk_root: Option<&Path>) -> Option
         }
         dir = d.parent();
     }
-    // 2. `$ZEPHYR_BASE/..` (the workspace topdir).
+    // 2. `$ZEPHYR_BASE/..`, manifest-verified (see `zephyr_base_workspace`).
     if let Ok(zephyr_base) = std::env::var("ZEPHYR_BASE") {
-        if let Some(workspace) = Path::new(&zephyr_base).parent() {
-            if is_workspace(workspace) {
-                return Some(workspace.to_path_buf());
-            }
+        if let Some(ws) = zephyr_base_workspace(Path::new(&zephyr_base), sdk_root) {
+            return Some(ws);
         }
     }
     // 3. SDK-derived layouts.
@@ -203,6 +211,37 @@ pub(super) fn west_workspace_dir(start: &str, sdk_root: Option<&Path>) -> Option
         }
     }
     None
+}
+
+/// Step 2 of `west_workspace_dir`: `zephyr_base`'s PARENT, but only when it is
+/// both a west workspace (`.west/` present) AND its manifest is verifiably
+/// alp-sdk's. A stock/unrelated Zephyr checkout's parent IS a west workspace
+/// by the bare `.west`-dir test alone (`west list` runs fine in it), yet
+/// carries no alp-sdk module at all: landing the child there reproduces the
+/// exact bug this resolver exists to prevent (#61 -- the reporting host's
+/// ambient `$ZEPHYR_BASE` was such a tree, and this step used to return it
+/// unconditionally, so `west flash` still couldn't see `alif_flash`). Mirrors
+/// `bootstrap::select_workspace`'s own refusal of a manifest-mismatched
+/// `$ZEPHYR_BASE` (`WorkspaceChoice::ManifestMismatch`, #769) -- reuse that
+/// check rather than trusting `.west` alone. `sdk_root` absent means there is
+/// nothing to verify against; fall back to the old unconditional accept
+/// rather than refusing a workspace we can't check.
+///
+/// Split out from `west_workspace_dir` (rather than inlined in its `if let
+/// Ok(zephyr_base) = std::env::var(...)` block) so this decision is
+/// unit-testable by passing `zephyr_base` directly -- every other test in
+/// this binary that reads the REAL `$ZEPHYR_BASE` (`venv.rs`'s venv
+/// resolution) guards itself by skipping when it's already set, so a test
+/// here that instead mutated the process env would race those, exactly the
+/// hazard `std::env::set_var` being `unsafe` as of edition 2024 flags.
+fn zephyr_base_workspace(zephyr_base: &Path, sdk_root: Option<&Path>) -> Option<PathBuf> {
+    let workspace = zephyr_base.parent()?;
+    if !workspace.join(".west").is_dir() {
+        return None;
+    }
+    let manifest_ok =
+        sdk_root.is_none_or(|s| crate::commands::bootstrap::manifest_points_at(workspace, s));
+    manifest_ok.then_some(workspace.to_path_buf())
 }
 
 /// Resolve `ZEPHYR_BASE` — the workspace's `zephyr/` checkout —
@@ -394,6 +433,97 @@ mod west_workspace_dir_tests {
             west_workspace_dir(&cwd.to_string_lossy(), Some(sdk.as_path())),
             Some(workspace)
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod zephyr_base_workspace_tests {
+    use super::zephyr_base_workspace;
+
+    fn tmp(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("alp-zbwp-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        d
+    }
+
+    #[test]
+    fn a_manifest_matched_zephyr_base_workspace_resolves() {
+        let root = tmp("match");
+        let workspace = root.join("workspace");
+        let sdk = workspace.join("alp-sdk");
+        std::fs::create_dir_all(&sdk).unwrap();
+        std::fs::create_dir_all(workspace.join(".west")).unwrap();
+        std::fs::write(
+            workspace.join(".west").join("config"),
+            "[manifest]\npath = alp-sdk\n",
+        )
+        .unwrap();
+        let zephyr_base = workspace.join("zephyr");
+
+        assert_eq!(
+            zephyr_base_workspace(&zephyr_base, Some(sdk.as_path())),
+            Some(workspace.clone())
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_mismatched_zephyr_base_workspace_is_refused() {
+        // #61: a stock/unrelated Zephyr checkout's parent IS a west workspace
+        // by the bare `.west`-dir test (`west list` runs fine there), but its
+        // manifest is NOT alp-sdk's -- the exact shape of the reporting
+        // host's ambient $ZEPHYR_BASE. Before the fix this resolved anyway,
+        // landing `west flash` in a tree with no `alif_flash` runner.
+        let root = tmp("mismatch");
+        let workspace = root.join("stock-zephyrproject");
+        std::fs::create_dir_all(workspace.join(".west")).unwrap();
+        std::fs::create_dir_all(workspace.join("some-other-module")).unwrap();
+        std::fs::write(
+            workspace.join(".west").join("config"),
+            "[manifest]\npath = some-other-module\n",
+        )
+        .unwrap();
+        let zephyr_base = workspace.join("zephyr");
+
+        // The real alp-sdk lives entirely elsewhere -- proves this isn't
+        // accidentally matching by coincidence.
+        let sdk = tmp("mismatch-sdk").join("alp-sdk");
+        std::fs::create_dir_all(&sdk).unwrap();
+
+        assert_eq!(
+            zephyr_base_workspace(&zephyr_base, Some(sdk.as_path())),
+            None
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        std::fs::remove_dir_all(sdk.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn no_sdk_root_keeps_the_unconditional_accept() {
+        // Nothing to verify the manifest against -- refusing here (rather
+        // than falling back to the old accept-on-`.west`-alone behavior)
+        // would be a regression for every caller that hasn't resolved an SDK
+        // root yet.
+        let root = tmp("no-sdk-root");
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".west")).unwrap();
+        let zephyr_base = workspace.join("zephyr");
+
+        assert_eq!(
+            zephyr_base_workspace(&zephyr_base, None),
+            Some(workspace.clone())
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn not_a_west_workspace_at_all_returns_none() {
+        let root = tmp("not-ws");
+        std::fs::create_dir_all(&root).unwrap();
+        let zephyr_base = root.join("zephyr"); // no `.west` next to it
+
+        assert_eq!(zephyr_base_workspace(&zephyr_base, None), None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

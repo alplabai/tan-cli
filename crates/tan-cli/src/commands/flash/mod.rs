@@ -112,6 +112,25 @@ pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
     // with "needs one of [\"west\"] on PATH; none found" on such a host (#59).
     let venv_bin = venv_bin_dir(&app_path.to_string_lossy(), Some(sdk_root.as_path()));
 
+    // `west flash`'s runner registration (`run_common.py`'s
+    // `zephyr_module.parse_modules(ZEPHYR_BASE, command.manifest)`, called with
+    // NO `extra_modules`) resolves ONLY from the west WORKSPACE manifest, found
+    // by walking the child's own cwd upward — never from the
+    // `EXTRA_ZEPHYR_MODULES` `tan build` injects, and never from wherever this
+    // process's own cwd happens to sit. Leaving the child in the app dir (or
+    // whatever ambient directory invoked `tan flash`) means west can't see
+    // alp-sdk's out-of-tree runners at all: `FATAL ERROR: unknown runner
+    // "alif_flash"` on an E1M-AEN801 bench (#61). `tan build`'s legacy `west
+    // alp-*` entry already resolves this SAME workspace topdir for its own
+    // spawn (`build::workspace::run`); share that resolver rather than
+    // re-deriving it, and resolve it ONCE for the whole run — `west_workspace_dir`
+    // walks the filesystem, so calling it per-target would repeat that walk for
+    // every slice/helper for no reason.
+    let workspace = crate::commands::build::west_workspace_dir(
+        &app_path.to_string_lossy(),
+        Some(sdk_root.as_path()),
+    );
+
     let manifest_path = build_root.join("system-manifest.yaml");
     if !manifest_path.is_file() {
         return error_run(
@@ -194,6 +213,7 @@ pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
         force_confirm,
         args,
         venv_bin: venv_bin.as_deref(),
+        workspace: workspace.as_deref(),
     };
 
     for t in &targets {
@@ -291,6 +311,11 @@ struct EntryContext<'a> {
     args: &'a FlashArgs,
     /// The west-capable workspace venv's bin dir, when one resolves (#59).
     venv_bin: Option<&'a Path>,
+    /// The west workspace topdir (holding `.west/`), when one resolves (#61) —
+    /// becomes every spawned child's cwd, so `west flash`'s runner registration
+    /// can find it. `None` keeps today's inherited-cwd behavior (CI, the
+    /// contract harness, an app with no resolvable workspace above it).
+    workspace: Option<&'a Path>,
 }
 
 /// Dispatch + run one target. Returns `(rc, entry, text-lines)`.
@@ -306,6 +331,7 @@ fn flash_entry(
         force_confirm,
         args,
         venv_bin,
+        workspace,
     } = ctx;
     let kind = t.kind.as_str();
     let id = t.id.as_str();
@@ -455,7 +481,7 @@ fn flash_entry(
     }
 
     // Real spawn.
-    match execute(g, &plan, venv_bin) {
+    match execute(g, &plan, venv_bin, workspace) {
         Ok(outcome) if outcome.success => {
             lines.push(format!("  ok: {}", plan.ok_message));
             (0, entry(t, Some(method), "ok", 0, plan.ok_message), lines)
@@ -544,10 +570,29 @@ struct ExecOutcome {
 /// Spawn the plan and report success. Handles the three real shapes: a J-Link
 /// plan (write the Commander script to a temp file, append its path), a
 /// decompress→dd pipeline (a `"|"` token), and a plain single process.
+///
+/// `workspace`, when resolved, becomes every spawned child's cwd (#61) — safe
+/// for every backend's OWN argv: `inp.artefact` (what every backend actually
+/// programs — `zephyr_west_flash`'s `build_dir` fallback, `swd_probe`'s
+/// `loadbin`/`loadfile`, `yocto_wic`'s `if=`/`copy` source) is always resolved
+/// to an ABSOLUTE path before a `FlashPlan` is built (`resolve_artefact_path`
+/// in `flash_entry`); `yocto_wic`'s `target` is validated to start with
+/// `/dev/`; and the J-Link Commander script lives under `std::env::temp_dir()`
+/// (`jlink_temp_path`) — none of those shift with cwd. The one raw pass-through
+/// is `zephyr_west_flash`/`baremetal_cmake_flash`'s OPTIONAL
+/// `flash_args.build_dir` override and `zephyr_west_flash`'s optional
+/// `flash_args.hex_file` (`tan_core::flash::builders`): read verbatim from the
+/// manifest, not resolved against `build_root` the way `output_artefact` is.
+/// If a manifest ever sets either to a RELATIVE string, it now resolves
+/// against the workspace topdir instead of whatever directory happened to be
+/// the CLI's own cwd — but no `.current_dir()` was set on this child AT ALL
+/// before this fix, so that path was already host-dependent/undefined, not a
+/// working behavior this change regresses.
 fn execute(
     g: &GlobalArgs,
     plan: &FlashPlan,
     venv_bin: Option<&Path>,
+    workspace: Option<&Path>,
 ) -> std::io::Result<ExecOutcome> {
     let argv = programs_resolved_in_venv(&plan.argv, venv_bin);
     // The venv joins the child's PATH only when we actually launched one of its
@@ -556,12 +601,12 @@ fn execute(
     let on_path = if argv == plan.argv { None } else { venv_bin };
     if let Some(pos) = argv.iter().position(|a| a == "|") {
         let (left, right) = argv.split_at(pos);
-        return spawn_pipeline(g.is_json(), left, &right[1..], on_path);
+        return spawn_pipeline(g.is_json(), left, &right[1..], on_path, workspace);
     }
     if let Some(script) = &plan.jlink_script {
-        return spawn_jlink(g.is_json(), &argv, script, on_path);
+        return spawn_jlink(g.is_json(), &argv, script, on_path, workspace);
     }
-    spawn_single(g.is_json(), &argv, on_path)
+    spawn_single(g.is_json(), &argv, on_path, workspace)
 }
 
 /// A single process: capture in JSON mode (output kept for the failure message —
@@ -570,11 +615,15 @@ fn spawn_single(
     capture: bool,
     argv: &[String],
     venv_bin: Option<&Path>,
+    workspace: Option<&Path>,
 ) -> std::io::Result<ExecOutcome> {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
     if let Some(bin) = venv_bin {
         prepend_path(&mut cmd, bin);
+    }
+    if let Some(ws) = workspace {
+        cmd.current_dir(ws);
     }
     if capture {
         let out = cmd.output()?;
@@ -597,6 +646,7 @@ fn spawn_jlink(
     argv: &[String],
     script: &str,
     venv_bin: Option<&Path>,
+    workspace: Option<&Path>,
 ) -> std::io::Result<ExecOutcome> {
     let path = jlink_temp_path();
     {
@@ -605,7 +655,7 @@ fn spawn_jlink(
     }
     let mut full = argv.to_vec();
     full.push(path.to_string_lossy().into_owned());
-    let result = spawn_single(capture, &full, venv_bin);
+    let result = spawn_single(capture, &full, venv_bin, workspace);
     let _ = std::fs::remove_file(&path);
     result
 }
@@ -626,11 +676,15 @@ fn spawn_pipeline(
     left: &[String],
     right: &[String],
     venv_bin: Option<&Path>,
+    workspace: Option<&Path>,
 ) -> std::io::Result<ExecOutcome> {
     let mut lc = Command::new(&left[0]);
     lc.args(&left[1..]).stdout(Stdio::piped());
     if let Some(bin) = venv_bin {
         prepend_path(&mut lc, bin);
+    }
+    if let Some(ws) = workspace {
+        lc.current_dir(ws);
     }
     if capture {
         lc.stderr(Stdio::piped());
@@ -660,6 +714,9 @@ fn spawn_pipeline(
     rc.args(&right[1..]).stdin(Stdio::from(lout));
     if let Some(bin) = venv_bin {
         prepend_path(&mut rc, bin);
+    }
+    if let Some(ws) = workspace {
+        rc.current_dir(ws);
     }
     // Capture dd's (the right/sink process) output for the failure tail — it is
     // the meaningful diagnostic; the decompressor rarely errors alone.
@@ -1213,7 +1270,7 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = spawn_pipeline(true, &left, &right, None);
+            let result = spawn_pipeline(true, &left, &right, None, None);
             let _ = tx.send(result.is_ok());
         });
         match rx.recv_timeout(std::time::Duration::from_secs(20)) {
@@ -1221,6 +1278,103 @@ mod tests {
             Err(_) => panic!("spawn_pipeline deadlocked: decompressor stderr not drained"),
         }
         std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    #[test]
+    fn spawn_pipelines_workspace_becomes_both_childrens_actual_cwd() {
+        // #61: `spawn_pipeline` sets `.current_dir(ws)` on BOTH halves
+        // (`yocto_wic`'s decompressor and its `dd` sink); each child writes a
+        // marker via a RELATIVE path, which only lands under `ws` if the cwd
+        // was actually applied -- proving `Some(path)` reaches both spawns,
+        // not just the single-process path `spawn_single` already covers.
+        let ws = tmp("pipeline-cwd");
+        let (left, right): (Vec<String>, Vec<String>) = if cfg!(windows) {
+            (
+                vec![
+                    "cmd".to_string(),
+                    "/C".to_string(),
+                    "copy nul left.marker".to_string(),
+                ],
+                vec![
+                    "cmd".to_string(),
+                    "/C".to_string(),
+                    "copy nul right.marker".to_string(),
+                ],
+            )
+        } else {
+            (
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "touch left.marker".to_string(),
+                ],
+                vec![
+                    "sh".to_string(),
+                    "-c".to_string(),
+                    "touch right.marker".to_string(),
+                ],
+            )
+        };
+        let outcome = spawn_pipeline(true, &left, &right, None, Some(&ws)).unwrap();
+        assert!(outcome.success);
+        assert!(
+            ws.join("left.marker").is_file(),
+            "left child did not run in {ws:?}"
+        );
+        assert!(
+            ws.join("right.marker").is_file(),
+            "right child did not run in {ws:?}"
+        );
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn executes_workspace_reaches_the_spawned_child_through_the_dispatch_layer() {
+        // #61, one hop above `spawn_single`: `flash_entry` never builds a
+        // `Command` itself -- it hands `ctx.workspace` straight to `execute()`,
+        // which then picks the single/jlink/pipeline dispatch. Prove that hop
+        // (not just the spawn primitive underneath it) lands the child in the
+        // resolved workspace.
+        let ws = tmp("execute-cwd");
+        let (tool, args): (&str, Vec<&str>) = if cfg!(windows) {
+            ("cmd", vec!["/C", "cd"])
+        } else {
+            ("pwd", vec![])
+        };
+        let argv: Vec<String> = std::iter::once(tool.to_string())
+            .chain(args.into_iter().map(str::to_string))
+            .collect();
+        let plan = FlashPlan {
+            argv,
+            ok_message: String::new(),
+            planning_only: false,
+            jlink_script: None,
+        };
+        // `execute` only reads `g.is_json()` -- no sdk/project fixture needed.
+        let g = GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: true,
+            non_interactive: false,
+            ci: false,
+        };
+        let outcome = execute(&g, &plan, None, Some(&ws)).unwrap();
+        assert!(outcome.success);
+        let stdout = String::from_utf8_lossy(&outcome.captured.unwrap().stdout)
+            .trim()
+            .to_string();
+        assert_eq!(
+            std::fs::canonicalize(&stdout).ok(),
+            std::fs::canonicalize(&ws).ok(),
+            "child ran in {stdout:?}, expected the resolved workspace {ws:?}"
+        );
+        std::fs::remove_dir_all(&ws).unwrap();
     }
 }
 
@@ -1296,5 +1450,75 @@ mod venv_resolution_tests {
         // the plan's argv must survive byte-for-byte, exactly as before #59.
         let original = argv(&["west", "flash", "--runner", "openocd"]);
         assert_eq!(programs_resolved_in_venv(&original, None), original);
+    }
+}
+
+#[cfg(test)]
+mod workspace_cwd_tests {
+    use super::spawn_single;
+    use std::path::PathBuf;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("tan-flash-ws-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn resolved_workspace_becomes_the_spawned_childs_actual_cwd() {
+        // #61: `west flash`'s runner registration walks the CHILD's own cwd
+        // upward to find the west workspace manifest -- proving `Some(path)`
+        // merely got threaded through `EntryContext`/`execute` isn't enough;
+        // this spawns a real child and reads back the directory it actually
+        // ran in, exactly what `run_common.py` would then search from.
+        let ws = tmp("real-cwd");
+        let (tool, args): (&str, Vec<&str>) = if cfg!(windows) {
+            ("cmd", vec!["/C", "cd"])
+        } else {
+            ("pwd", vec![])
+        };
+        let argv: Vec<String> = std::iter::once(tool.to_string())
+            .chain(args.into_iter().map(str::to_string))
+            .collect();
+        let outcome = spawn_single(true, &argv, None, Some(&ws)).unwrap();
+        assert!(outcome.success);
+        let stdout = String::from_utf8_lossy(&outcome.captured.unwrap().stdout)
+            .trim()
+            .to_string();
+        // Canonicalize both sides: `cmd /C cd` and `std::env::temp_dir()` can
+        // disagree on drive-letter case / 8.3 short names / `\\?\` prefixes
+        // even when they name the identical directory.
+        assert_eq!(
+            std::fs::canonicalize(&stdout).ok(),
+            std::fs::canonicalize(&ws).ok(),
+            "child ran in {stdout:?}, expected the resolved workspace {ws:?}"
+        );
+        std::fs::remove_dir_all(&ws).unwrap();
+    }
+
+    #[test]
+    fn no_workspace_leaves_the_childs_cwd_untouched() {
+        // `None` (CI, the contract harness, no resolvable workspace) must keep
+        // today's behavior: no `.current_dir()` call at all, so the child
+        // inherits this test process's own cwd.
+        let (tool, args): (&str, Vec<&str>) = if cfg!(windows) {
+            ("cmd", vec!["/C", "cd"])
+        } else {
+            ("pwd", vec![])
+        };
+        let argv: Vec<String> = std::iter::once(tool.to_string())
+            .chain(args.into_iter().map(str::to_string))
+            .collect();
+        let outcome = spawn_single(true, &argv, None, None).unwrap();
+        let stdout = String::from_utf8_lossy(&outcome.captured.unwrap().stdout)
+            .trim()
+            .to_string();
+        assert_eq!(
+            std::fs::canonicalize(&stdout).ok(),
+            std::env::current_dir()
+                .ok()
+                .and_then(|d| d.canonicalize().ok()),
+        );
     }
 }
