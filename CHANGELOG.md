@@ -8,6 +8,22 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **`tan flash` could not find `west`'s out-of-tree runners.** No spawned
+  backend ever set a child `current_dir`, so it inherited whatever directory
+  invoked `tan flash`. `west`'s runner registration
+  (`run_common.py`'s `zephyr_module.parse_modules(ZEPHYR_BASE,
+  command.manifest)`) resolves out-of-tree runners (alp-sdk's `alif_flash`)
+  ONLY from the west workspace manifest, discovered by walking the child's own
+  cwd upward — never from `tan build`'s `EXTRA_ZEPHYR_MODULES` — so on an
+  E1M-AEN801 bench `zephyr_west_flash` died with `FATAL ERROR: unknown runner
+  "alif_flash"`. `tan flash` now resolves the same workspace topdir `tan
+  build`'s legacy `west alp-*` entry already does and runs every spawned
+  child there. The resolver also now refuses a `$ZEPHYR_BASE` whose manifest
+  isn't alp-sdk's (a stock/unrelated Zephyr checkout is still a west
+  workspace by the bare `.west`-dir test) rather than returning it
+  unconditionally — the exact shape that left this fix a no-op on a host with
+  such a `$ZEPHYR_BASE` already exported. An app with no workspace above it
+  keeps today's inherited-cwd behavior. (#61)
 - **`tan debug-config` emitted a launch configuration that could not launch.**
   `device`, `configFiles` and `svdFile` shipped as literal `<resolved-…>`
   placeholders, and `executable` was the fixed `build/app/zephyr/zephyr.elf` —
