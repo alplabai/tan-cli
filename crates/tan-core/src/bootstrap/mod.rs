@@ -20,12 +20,17 @@
 
 mod blocks;
 pub mod manifest;
+mod prerequisites;
 mod runtime;
 
 pub use blocks::{next_steps_block, optional_libs_block, print_env_block, render_env_lines};
 pub use manifest::{
     BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, BootstrapManifestError, Tokens, fallback_facts,
     parse_bootstrap_manifest, venv_exe_names,
+};
+pub use prerequisites::{
+    MissingPrerequisite, PrereqFailure, hint_line, install_command, posix_python_not_runnable,
+    posix_refusal, python_too_old, windows_python_not_runnable, windows_refusal,
 };
 pub use runtime::{
     HostOs, OS_OFF, YoctoGate, in_play_runtimes, runtime_for_topology_core, yocto_gate,

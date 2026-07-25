@@ -29,8 +29,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 
 use tan_core::bootstrap::{
-    BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, ExistingWorkspace, HostOs, Tokens,
-    WorkspaceChoice, YoctoGate, decide_workspace_reuse, fallback_facts, in_play_runtimes,
+    BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, ExistingWorkspace, HostOs, MissingPrerequisite,
+    Tokens, WorkspaceChoice, YoctoGate, decide_workspace_reuse, fallback_facts, in_play_runtimes,
     next_steps_block, optional_libs_block, parse_bootstrap_manifest, print_env_block,
     resolve_pin_major_minor, yocto_gate, yocto_mixed_warning, yocto_only_refusal,
 };
@@ -100,6 +100,27 @@ struct BootstrapData {
     /// `--print-env` (print the env-var lines and exit, installing nothing).
     #[serde(rename = "printEnv")]
     print_env: bool,
+    /// Per-tool form of a `prerequisites-missing` refusal, so a consumer never
+    /// has to parse `issues[].message` back apart (the message is
+    /// `lines.join(" ")`, and a command contains the same spaces the join used
+    /// — the split is not recoverable; alp-sdk-vscode#347 proved that parse
+    /// dead and deleted it).
+    ///
+    /// `null` on every run that has no missing tool to name: a success, a
+    /// refusal that fired BEFORE the gate, AND the two Python-floor refusals,
+    /// which have no missing tool at all. NEVER `[]` — a run that checked the
+    /// tool list and found it clean is exactly a successful run, which reports
+    /// `null`, so `[]` would be a second spelling of the same fact and the
+    /// distinction would carry no information a consumer could act on.
+    ///
+    /// No `skip_serializing_if`: an explicit `null` matches
+    /// [`crate::envelope::Project`]'s two fields and makes a captured envelope
+    /// self-documenting — the key is in every sample, so a consumer can see the
+    /// field exists without reaching for a schema. A deliberate divergence from
+    /// the sibling `data` payloads (`build`, `flash`, `pinmux`), which omit
+    /// their optional keys instead.
+    #[serde(rename = "missingPrerequisites")]
+    missing_prerequisites: Option<Vec<MissingPrerequisite>>,
 }
 
 /// Mutable run state the envelope reports, threaded through the phases.
@@ -242,16 +263,20 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
 
     let host_python = match check_prerequisites(&facts, is_windows) {
         Ok(python) => python,
-        Err(lines) => {
-            let data = data_for(args, &sdk_root, &paths, &facts, &pin);
-            return failure(
-                g,
-                ExitCode::RuntimeFailure,
-                "prerequisites-missing",
-                lines,
-                data,
-                project,
-            );
+        Err(f) => {
+            // The ONLY path that fills `missingPrerequisites` — `data_for`'s
+            // other six call sites have nothing to say about prerequisites, so
+            // the field stays out of its signature and is set here instead.
+            // The code comes from the refusal (`prerequisites-missing`, or one
+            // of the two Python-floor codes that carry no tool at all).
+            //
+            // Empty stays `null`, never `[]`: the Python-floor refusals name no
+            // tool, and a run that checked the list and found it clean IS a
+            // successful run, which reports `null`. Two spellings of one fact
+            // would only give a consumer something extra to get wrong.
+            let mut data = data_for(args, &sdk_root, &paths, &facts, &pin);
+            data.missing_prerequisites = reported_missing(f.missing);
+            return failure(g, ExitCode::RuntimeFailure, f.code, f.lines, data, project);
         }
     };
 
@@ -644,7 +669,19 @@ fn data_for(
         no_pip: args.no_pip,
         no_west: args.no_west,
         print_env: args.print_env,
+        // Only the prerequisite refusal has a verdict to report; every other
+        // caller of this leaves it `null` ("not reported"), never `[]`.
+        missing_prerequisites: None,
     }
+}
+
+/// The envelope form of a refusal's missing-tool list: `None` when the refusal
+/// names no tool. See [`BootstrapData::missing_prerequisites`] — the two
+/// Python-floor refusals reach this with an empty vec, and reporting `[]` for
+/// them would spell "checked, nothing missing", which is what a SUCCESSFUL run
+/// reports as `null`. One fact, one spelling.
+fn reported_missing(missing: Vec<MissingPrerequisite>) -> Option<Vec<MissingPrerequisite>> {
+    (!missing.is_empty()).then_some(missing)
 }
 
 /// `BootstrapData` for a failure before any path resolved: empty paths, but
@@ -661,6 +698,8 @@ fn empty_data(args: &BootstrapArgs) -> BootstrapData {
         no_pip: args.no_pip,
         no_west: args.no_west,
         print_env: args.print_env,
+        // `sdk-root-unresolved` refuses before the gate ever runs.
+        missing_prerequisites: None,
     }
 }
 
@@ -712,6 +751,107 @@ mod tests {
     #[test]
     fn capture_tail_is_empty_when_nothing_was_captured() {
         assert_eq!(capture_tail(b"", b""), "");
+    }
+
+    /// `--format json`, everything else default.
+    fn json_args() -> GlobalArgs {
+        GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: crate::cli::Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: true,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    /// No flags set.
+    fn bootstrap_args() -> BootstrapArgs {
+        BootstrapArgs {
+            no_pip: false,
+            no_west: false,
+            print_env: false,
+        }
+    }
+
+    #[test]
+    fn missing_prerequisites_is_null_unless_a_tool_is_actually_named() {
+        let args = bootstrap_args();
+        // Never reported: an explicit `null`, NOT an omitted key.
+        let json = serde_json::to_value(empty_data(&args)).unwrap();
+        assert_eq!(json["missingPrerequisites"], serde_json::Value::Null);
+
+        // The blocker this guards: the two Python-floor refusals reach the
+        // assignment with an EMPTY vec, and `[]` on the wire would spell
+        // "checked, nothing missing" -- which is what a successful run reports
+        // as `null`. Both must be `null`.
+        assert_eq!(
+            reported_missing(tan_core::bootstrap::windows_python_not_runnable().missing),
+            None
+        );
+        assert_eq!(
+            reported_missing(tan_core::bootstrap::python_too_old((3, 9), (3, 10)).missing),
+            None
+        );
+        assert!(
+            reported_missing(tan_core::bootstrap::windows_refusal(&["ninja"]).missing).is_some()
+        );
+
+        // Reported: one object per tool, `command` null for a tool tan knows no
+        // install command for (a consumer renders that field as something it
+        // RUNS, so advice must never appear there).
+        let mut data = empty_data(&args);
+        data.missing_prerequisites = reported_missing(
+            tan_core::bootstrap::windows_refusal(&["ninja", "no-such-tool"]).missing,
+        );
+        let json = serde_json::to_value(data).unwrap();
+        assert_eq!(
+            json["missingPrerequisites"],
+            serde_json::json!([
+                {"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"},
+                {"tool": "no-such-tool", "command": null},
+            ])
+        );
+    }
+
+    #[test]
+    fn failure_joins_its_lines_with_a_single_space_into_one_issue_message() {
+        // The PREMISE of `missingPrerequisites`: this join is why a consumer
+        // cannot recover `<tool>`/`<command>` from the message (a command
+        // contains the same spaces the join used). Nothing else pins it, and
+        // there is no bootstrap golden under `contract/envelopes/` -- bootstrap
+        // probes the host PATH, which that suite deliberately excludes -- so a
+        // refactor to `join("\n")` would silently change every bootstrap issue
+        // message on the wire.
+        let refusal = tan_core::bootstrap::windows_refusal(&["ninja"]);
+        let run = failure(
+            &json_args(),
+            ExitCode::RuntimeFailure,
+            refusal.code,
+            refusal.lines,
+            empty_data(&bootstrap_args()),
+            Project {
+                root: None,
+                board_yaml: None,
+            },
+        );
+        let envelope: serde_json::Value =
+            serde_json::from_str(&run.json.expect("json mode emits an envelope")).unwrap();
+        assert_eq!(
+            envelope["issues"][0]["code"],
+            "bootstrap.prerequisites-missing"
+        );
+        assert_eq!(envelope["issues"][0]["severity"], "error");
+        assert_eq!(
+            envelope["issues"][0]["message"],
+            "Missing required tools:   ninja  ->  winget install -e --id Ninja-build.Ninja \
+             Install the tools above (then reopen PowerShell) and re-run."
+        );
     }
 
     /// Fresh temp dir for one test, tagged and pid-scoped like the other
