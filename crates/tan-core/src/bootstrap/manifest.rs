@@ -2,10 +2,12 @@
 //! CONSUMER side of `alp-sdk/metadata/bootstrap.json` — the single source of
 //! truth for the workspace-assembly FACTS that `scripts/bootstrap.sh`,
 //! `scripts/bootstrap.ps1` and tan all need (alp-sdk#917). The manifest's own
-//! `_comment` names tan as a required consumer, and
-//! `scripts/check_bootstrap_manifest.py` is its drift gate — but that gate does
-//! NOT scan tan-cli, so hand-ported constants here would desync silently.
-//! Reading the manifest is what keeps us honest.
+//! `_comment` (as vendored) still describes tan as only an INTENDED future
+//! consumer that no code reads yet — that line is stale the moment this
+//! module exists: `parse_bootstrap_manifest` below IS the tan-side reader.
+//! `scripts/check_bootstrap_manifest.py` is the manifest's drift gate, but
+//! that gate does NOT scan tan-cli, so hand-ported constants here would
+//! desync silently. Reading the manifest is what keeps us honest.
 //!
 //! Facts only. Control flow (`$ZEPHYR_BASE` reuse/rejection, venv idempotency,
 //! `.west` branching) stays CODE in each executor, per the manifest's contract.
@@ -107,6 +109,31 @@ pub struct NativeLibHint {
     pub command: Option<String>,
 }
 
+/// A manual, one-time install step a script cannot automate for itself (a
+/// GUI/EXE installer, or a step that only makes sense from an
+/// already-assembled workspace) — distinct from [`NativeLibHint`], which is an
+/// apt/brew/pkg-manager fact bootstrap CAN hand the user verbatim. No
+/// `command` field: there is nothing copy-pasteable about "run this
+/// installer" (`metadata/schemas/bootstrap-v1.schema.json`'s
+/// `manualInstallHints.windows` has no `command` property at all).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ManualInstallHint {
+    /// Human-readable lines, safe to print verbatim.
+    pub note: Vec<String>,
+}
+
+/// `manifest.json`'s `manualInstallHints` — Windows-only today (alp-sdk#917
+/// review item 7 moved the Arm-GNU-Toolchain/Zephyr-SDK sentence OUT of
+/// `nativeLibHints.windows.note`, where it used to print under an "OPTIONAL
+/// NATIVE LIBRARIES" heading it never belonged under). POSIX hosts have no
+/// manual-install fact, so this doesn't grow a `linux`/`macos` field until one
+/// exists.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ManualInstallHints {
+    /// `manualInstallHints.windows`.
+    pub windows: ManualInstallHint,
+}
+
 /// The workspace-assembly facts, however they were obtained: parsed from
 /// `metadata/bootstrap.json`, or reconstructed from the hand-ported constants
 /// when the SDK predates alp-sdk#917.
@@ -156,6 +183,8 @@ pub struct BootstrapFacts {
     pub hint_macos: NativeLibHint,
     /// `nativeLibHints.windows`.
     pub hint_windows: NativeLibHint,
+    /// `manualInstallHints`.
+    pub manual_install_hints: ManualInstallHints,
     /// True when these came from the SDK's manifest rather than the fallback
     /// constants.
     pub from_manifest: bool,
@@ -209,6 +238,7 @@ struct ManifestDoc {
     /// manifest's declared order like both scripts do.
     env: serde_json::Map<String, serde_json::Value>,
     native_lib_hints: NativeLibHintsDoc,
+    manual_install_hints: ManualInstallHints,
 }
 
 #[derive(Deserialize)]
@@ -314,6 +344,7 @@ pub fn parse_bootstrap_manifest(text: &str) -> Result<BootstrapFacts, BootstrapM
         hint_linux: doc.native_lib_hints.linux,
         hint_macos: doc.native_lib_hints.macos,
         hint_windows: doc.native_lib_hints.windows,
+        manual_install_hints: doc.manual_install_hints,
         from_manifest: true,
     })
 }
@@ -390,12 +421,22 @@ pub fn fallback_facts(min_python: (u32, u32)) -> BootstrapFacts {
                 "Under Git Bash / MSYS2 the Yocto-side backends aren't intended to run -- the \
                  canonical use is WSL2 + Ubuntu with the linux command above; skip this step on \
                  native Windows.",
-                "The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate \
-                 manual, one-time installs on native Windows -- not auto-installed by \
-                 bootstrap.ps1; native_sim / Yocto need WSL2 (docs/cross-platform-setup.md \
-                 section 5).",
             ]),
             command: None,
+        },
+        // Moved OUT of hint_windows.note (alp-sdk#917 review item 7): that
+        // sentence is a manual-install fact, not a native-library one, and
+        // printing it there is exactly the "OPTIONAL NATIVE LIBRARIES"
+        // mis-framing the review caught.
+        manual_install_hints: ManualInstallHints {
+            windows: ManualInstallHint {
+                note: owned(&[
+                    "The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate \
+                     manual, one-time installs on native Windows -- not auto-installed by \
+                     bootstrap.ps1; native_sim / Yocto need WSL2 (docs/cross-platform-setup.md \
+                     section 5).",
+                ]),
+            },
         },
         from_manifest: false,
     }
@@ -470,6 +511,28 @@ mod tests {
                 .starts_with("sudo apt-get")
         );
         assert_eq!(facts.hint_windows.command, None);
+        // #917 review item 7: this sentence lives in `manualInstallHints` now,
+        // NOT in `nativeLibHints.windows.note` (which is asserted separately
+        // below to prove the two fields didn't just merge back together).
+        assert_eq!(
+            facts.hint_windows.note,
+            vec![
+                "Under Git Bash / MSYS2 the Yocto-side backends aren't intended to run -- the \
+                 canonical use is WSL2 + Ubuntu with the linux command above; skip this step on \
+                 native Windows."
+                    .to_string()
+            ]
+        );
+        assert_eq!(
+            facts.manual_install_hints.windows.note,
+            vec![
+                "The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate \
+                 manual, one-time installs on native Windows -- not auto-installed by \
+                 bootstrap.ps1; native_sim / Yocto need WSL2 (docs/cross-platform-setup.md \
+                 section 5)."
+                    .to_string()
+            ]
+        );
         assert!(facts.from_manifest);
     }
 
