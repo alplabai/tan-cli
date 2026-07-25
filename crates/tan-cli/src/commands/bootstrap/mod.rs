@@ -473,7 +473,12 @@ fn select_workspace(
 /// Whether `<topdir>/.west/config`'s `[manifest] path` resolves to `repo_root`.
 /// west/the venv aren't set up yet at this point, so read the config directly
 /// rather than shelling `west config manifest.path`.
-fn manifest_points_at(topdir: &Path, repo_root: &Path) -> bool {
+///
+/// `pub(crate)`, not private: `build::workspace::west_workspace_dir` reuses this
+/// SAME check (#61) to refuse a `$ZEPHYR_BASE` workspace whose manifest isn't
+/// alp-sdk's, exactly like `select_workspace` above refuses one for `tan
+/// bootstrap` -- one manifest-match test, not two copies that could drift.
+pub(crate) fn manifest_points_at(topdir: &Path, repo_root: &Path) -> bool {
     let Ok(config) = std::fs::read_to_string(topdir.join(".west").join("config")) else {
         return false;
     };
