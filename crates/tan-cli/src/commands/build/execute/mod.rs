@@ -22,7 +22,9 @@ use crate::cli::GlobalArgs;
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 
-use super::workspace::{resolve_zephyr_base, west_program, with_venv_on_path};
+use crate::venv::{west_program, with_venv_on_path};
+
+use super::workspace::resolve_zephyr_base;
 
 /// `SliceResult.reason` for a plan slice that carries no command. The recap
 /// keys its `(no command)` rendering off this exact string — keep producer and

@@ -18,6 +18,20 @@ All notable changes to `tan` are documented here. Format follows
   guard latches Renode's own refusal wording off the console and fails the run
   (`renode.argv-rejected`, exit 1) regardless of exit status, so the next
   incompatible flag cannot pass silently either.
+- **`tan flash` could not find the `west` that `tan build` uses.** `west` is
+  installed INSIDE the `tan bootstrap` venv, and nothing activates that venv for
+  a GUI-launched editor, so the ambient PATH has none. `tan build` has resolved
+  the west-capable workspace venv since #106; `tan flash` only ever probed PATH,
+  so on such a host a build succeeded and the flash that followed failed every
+  Zephyr slice with `flash: slice '<core>' backend 'zephyr_west_flash' needs one
+  of ["west"] on PATH; none found.` The venv resolution moved out of
+  `commands::build` into a shared `venv` module; `flash` now uses it for the
+  required-tool gate, for the backend's argv (the program is spawned by its
+  absolute venv path), and for the child's PATH (so nested `west`/`python`
+  resolve too). The tool-probing plan builders (`swd_probe`, `yocto_wic`) see
+  the venv as well. With no west-capable venv — CI, an activated venv, the
+  contract harness — every argv and message stays byte-identical to before.
+  (#59)
 
 ### Added
 - **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore

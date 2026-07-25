@@ -37,6 +37,7 @@ use crate::exit::ExitCode;
 use crate::util::{
     cli_workspace_root, command_on_path, resolve_cli_project_context, resolve_sdk_root,
 };
+use crate::venv::{prepend_path, tool_in_venv, venv_bin_dir};
 
 /// One entry's result in the envelope `data`.
 #[derive(Debug, Clone, Serialize)]
@@ -102,6 +103,14 @@ pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
         None => app_path.join("build"),
     };
     let build_root_str = build_root.to_string_lossy().into_owned();
+
+    // `west` normally lives ONLY inside the bootstrapped venv — nothing activates
+    // it for a GUI-launched editor, so the ambient PATH has no `west` at all.
+    // Resolve that venv ONCE here and let the required-tool gate, the backend's
+    // argv, and the spawned child's PATH all see it. `tan build` has resolved it
+    // this way since #106; `tan flash` did not, and failed every Zephyr slice
+    // with "needs one of [\"west\"] on PATH; none found" on such a host (#59).
+    let venv_bin = venv_bin_dir(&app_path.to_string_lossy(), Some(sdk_root.as_path()));
 
     let manifest_path = build_root.join("system-manifest.yaml");
     if !manifest_path.is_file() {
@@ -178,9 +187,17 @@ pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
         });
     }
 
+    let entry_context = EntryContext {
+        sku: &sku,
+        build_root: &build_root,
+        sdk_root: &sdk_root,
+        force_confirm,
+        args,
+        venv_bin: venv_bin.as_deref(),
+    };
+
     for t in &targets {
-        let (rc, entry, lines) =
-            flash_entry(g, t, &sku, &build_root, &sdk_root, force_confirm, args);
+        let (rc, entry, lines) = flash_entry(g, t, &entry_context);
         text.extend(lines);
         // A failed entry used to land only in `data.entries[].message`; `issues`
         // is the channel `--format json` consumers (the vscode extension) key
@@ -261,16 +278,35 @@ pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
     }
 }
 
+/// Everything `flash_entry` needs that is the same for every target in one run.
+/// Grouped so a run-wide input (the workspace venv, most recently) can be added
+/// without lengthening the entry point's signature again. All fields are `Copy`,
+/// so the callee destructures it in one line and reads exactly as before.
+#[derive(Clone, Copy)]
+struct EntryContext<'a> {
+    sku: &'a str,
+    build_root: &'a Path,
+    sdk_root: &'a Path,
+    force_confirm: bool,
+    args: &'a FlashArgs,
+    /// The west-capable workspace venv's bin dir, when one resolves (#59).
+    venv_bin: Option<&'a Path>,
+}
+
 /// Dispatch + run one target. Returns `(rc, entry, text-lines)`.
 fn flash_entry(
     g: &GlobalArgs,
     t: &FlashTarget,
-    sku: &str,
-    build_root: &Path,
-    sdk_root: &Path,
-    force_confirm: bool,
-    args: &FlashArgs,
+    ctx: &EntryContext<'_>,
 ) -> (i32, FlashEntry, Vec<String>) {
+    let &EntryContext {
+        sku,
+        build_root,
+        sdk_root,
+        force_confirm,
+        args,
+        venv_bin,
+    } = ctx;
     let kind = t.kind.as_str();
     let id = t.id.as_str();
     let mut lines: Vec<String> = Vec::new();
@@ -359,7 +395,7 @@ fn flash_entry(
         kind,
         id,
         method,
-        command_on_path,
+        |tool| tool_available(tool, venv_bin),
     ) {
         ToolGate::Proceed => {}
         ToolGate::Skip(msg) => {
@@ -380,7 +416,7 @@ fn flash_entry(
         dry_run: args.dry_run,
         force_confirm,
     };
-    let plan = match dispatch_plan(meta.kind, &inp) {
+    let plan = match dispatch_plan(meta.kind, &inp, venv_bin) {
         Ok(p) => p,
         Err(msg) => {
             lines.push(format!("flash: {kind} '{id}' -> {method}"));
@@ -419,7 +455,7 @@ fn flash_entry(
     }
 
     // Real spawn.
-    match execute(g, &plan) {
+    match execute(g, &plan, venv_bin) {
         Ok(outcome) if outcome.success => {
             lines.push(format!("  ok: {}", plan.ok_message));
             (0, entry(t, Some(method), "ok", 0, plan.ok_message), lines)
@@ -437,15 +473,53 @@ fn flash_entry(
     }
 }
 
-/// Route a backend kind to its pure plan-builder.
-fn dispatch_plan(kind: BackendKind, inp: &FlashInputs) -> Result<FlashPlan, String> {
+/// Route a backend kind to its pure plan-builder. The builders that probe for a
+/// tool (`swd_probe` picks a J-Link/OpenOCD/pyOCD binary, `yocto_wic` a
+/// decompressor) get the same venv-aware lookup the required-tool gate uses, so
+/// a probe tool pip-installed into the workspace venv is found there too.
+fn dispatch_plan(
+    kind: BackendKind,
+    inp: &FlashInputs,
+    venv_bin: Option<&Path>,
+) -> Result<FlashPlan, String> {
+    let which = |tool: &str| tool_available(tool, venv_bin);
     match kind {
-        BackendKind::Swd => plan_swd_probe(inp, command_on_path),
+        BackendKind::Swd => plan_swd_probe(inp, which),
         BackendKind::Zephyr => plan_zephyr_west_flash(inp),
         BackendKind::Cmake => plan_baremetal_cmake_flash(inp),
-        BackendKind::YoctoWic => plan_yocto_wic(inp, command_on_path),
+        BackendKind::YoctoWic => plan_yocto_wic(inp, which),
         BackendKind::Xspi => plan_xspi_flashwriter(inp),
     }
+}
+
+/// A tool counts as available when it is on PATH **or** provided by the
+/// west-capable workspace venv. `west` is the case that matters: `tan bootstrap`
+/// installs it INSIDE the venv, and a GUI-launched editor's PATH never has it.
+fn tool_available(tool: &str, venv_bin: Option<&Path>) -> bool {
+    command_on_path(tool) || venv_bin.is_some_and(|bin| tool_in_venv(bin, tool).is_some())
+}
+
+/// Rewrite every PROGRAM position in `argv` — argv[0], plus the token right
+/// after a `"|"` pipeline separator — to its absolute venv path when the venv
+/// provides that program. Arguments are never touched, an already-absolute
+/// program is left alone, and a tool the venv does not provide keeps its bare
+/// name so PATH resolution stays in charge. Pure.
+fn programs_resolved_in_venv(argv: &[String], venv_bin: Option<&Path>) -> Vec<String> {
+    let Some(bin) = venv_bin else {
+        return argv.to_vec();
+    };
+    let mut out = Vec::with_capacity(argv.len());
+    let mut is_program = true;
+    for arg in argv {
+        let resolved = if is_program && !Path::new(arg).is_absolute() {
+            tool_in_venv(bin, arg).unwrap_or_else(|| arg.clone())
+        } else {
+            arg.clone()
+        };
+        is_program = arg == "|";
+        out.push(resolved);
+    }
+    out
 }
 
 /// The would-run display string; J-Link plans show a `<generated.jlink>`
@@ -470,22 +544,38 @@ struct ExecOutcome {
 /// Spawn the plan and report success. Handles the three real shapes: a J-Link
 /// plan (write the Commander script to a temp file, append its path), a
 /// decompress→dd pipeline (a `"|"` token), and a plain single process.
-fn execute(g: &GlobalArgs, plan: &FlashPlan) -> std::io::Result<ExecOutcome> {
-    if let Some(pos) = plan.argv.iter().position(|a| a == "|") {
-        let (left, right) = plan.argv.split_at(pos);
-        return spawn_pipeline(g.is_json(), left, &right[1..]);
+fn execute(
+    g: &GlobalArgs,
+    plan: &FlashPlan,
+    venv_bin: Option<&Path>,
+) -> std::io::Result<ExecOutcome> {
+    let argv = programs_resolved_in_venv(&plan.argv, venv_bin);
+    // The venv joins the child's PATH only when we actually launched one of its
+    // programs: `west flash` spawns nested `west`/`python` that resolve through
+    // PATH, so without this they die exactly the way the parent would have.
+    let on_path = if argv == plan.argv { None } else { venv_bin };
+    if let Some(pos) = argv.iter().position(|a| a == "|") {
+        let (left, right) = argv.split_at(pos);
+        return spawn_pipeline(g.is_json(), left, &right[1..], on_path);
     }
     if let Some(script) = &plan.jlink_script {
-        return spawn_jlink(g.is_json(), &plan.argv, script);
+        return spawn_jlink(g.is_json(), &argv, script, on_path);
     }
-    spawn_single(g.is_json(), &plan.argv)
+    spawn_single(g.is_json(), &argv, on_path)
 }
 
 /// A single process: capture in JSON mode (output kept for the failure message —
 /// never re-spawned), inherit stdio (stream live) in text.
-fn spawn_single(capture: bool, argv: &[String]) -> std::io::Result<ExecOutcome> {
+fn spawn_single(
+    capture: bool,
+    argv: &[String],
+    venv_bin: Option<&Path>,
+) -> std::io::Result<ExecOutcome> {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
+    if let Some(bin) = venv_bin {
+        prepend_path(&mut cmd, bin);
+    }
     if capture {
         let out = cmd.output()?;
         Ok(ExecOutcome {
@@ -502,7 +592,12 @@ fn spawn_single(capture: bool, argv: &[String]) -> std::io::Result<ExecOutcome> 
 
 /// The J-Link path: materialise the Commander script to a temp file, append it
 /// as the final `-CommanderScript` arg, spawn, and remove the temp file.
-fn spawn_jlink(capture: bool, argv: &[String], script: &str) -> std::io::Result<ExecOutcome> {
+fn spawn_jlink(
+    capture: bool,
+    argv: &[String],
+    script: &str,
+    venv_bin: Option<&Path>,
+) -> std::io::Result<ExecOutcome> {
     let path = jlink_temp_path();
     {
         let mut f = std::fs::File::create(&path)?;
@@ -510,7 +605,7 @@ fn spawn_jlink(capture: bool, argv: &[String], script: &str) -> std::io::Result<
     }
     let mut full = argv.to_vec();
     full.push(path.to_string_lossy().into_owned());
-    let result = spawn_single(capture, &full);
+    let result = spawn_single(capture, &full, venv_bin);
     let _ = std::fs::remove_file(&path);
     result
 }
@@ -530,9 +625,13 @@ fn spawn_pipeline(
     capture: bool,
     left: &[String],
     right: &[String],
+    venv_bin: Option<&Path>,
 ) -> std::io::Result<ExecOutcome> {
     let mut lc = Command::new(&left[0]);
     lc.args(&left[1..]).stdout(Stdio::piped());
+    if let Some(bin) = venv_bin {
+        prepend_path(&mut lc, bin);
+    }
     if capture {
         lc.stderr(Stdio::piped());
     }
@@ -559,6 +658,9 @@ fn spawn_pipeline(
 
     let mut rc = Command::new(&right[0]);
     rc.args(&right[1..]).stdin(Stdio::from(lout));
+    if let Some(bin) = venv_bin {
+        prepend_path(&mut rc, bin);
+    }
     // Capture dd's (the right/sink process) output for the failure tail — it is
     // the meaningful diagnostic; the decompressor rarely errors alone.
     let (right_ok, captured) = if capture {
@@ -1111,7 +1213,7 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let result = spawn_pipeline(true, &left, &right);
+            let result = spawn_pipeline(true, &left, &right, None);
             let _ = tx.send(result.is_ok());
         });
         match rx.recv_timeout(std::time::Duration::from_secs(20)) {
@@ -1119,5 +1221,80 @@ mod tests {
             Err(_) => panic!("spawn_pipeline deadlocked: decompressor stderr not drained"),
         }
         std::fs::remove_dir_all(&scratch).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod venv_resolution_tests {
+    use super::{programs_resolved_in_venv, tool_available};
+    use std::path::PathBuf;
+
+    /// A scratch venv bin dir holding a fake `west` (the tool `tan bootstrap`
+    /// installs into the venv and a GUI-launched editor's PATH never has).
+    fn venv_with_west(tag: &str) -> PathBuf {
+        let bin = std::env::temp_dir()
+            .join(format!("tan-flash-venv-{tag}-{}", std::process::id()))
+            .join(if cfg!(windows) { "Scripts" } else { "bin" });
+        let _ = std::fs::remove_dir_all(bin.parent().unwrap());
+        std::fs::create_dir_all(&bin).unwrap();
+        let exe = if cfg!(windows) { "west.exe" } else { "west" };
+        std::fs::write(bin.join(exe), "").unwrap();
+        bin
+    }
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_venv_only_tool_counts_as_available() {
+        // The #59 regression in one assertion: `west` is absent from PATH but
+        // present in the workspace venv, so the required-tool gate must let the
+        // Zephyr slice through instead of failing it.
+        let bin = venv_with_west("gate");
+        assert!(tool_available("west", Some(&bin)));
+        // A tool in neither place is still unavailable — the gate keeps failing
+        // loudly rather than spawning something that isn't there.
+        assert!(!tool_available("definitely-not-a-real-tool", Some(&bin)));
+        std::fs::remove_dir_all(bin.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn argv0_is_rewritten_to_the_venv_program_and_args_are_untouched() {
+        let bin = venv_with_west("argv");
+        let exe = if cfg!(windows) { "west.exe" } else { "west" };
+        let out = programs_resolved_in_venv(
+            &argv(&["west", "flash", "--build-dir", "build/m55_hp-zephyr"]),
+            Some(&bin),
+        );
+        assert_eq!(out[0], bin.join(exe).to_string_lossy());
+        assert_eq!(
+            &out[1..],
+            &argv(&["flash", "--build-dir", "build/m55_hp-zephyr"])[..]
+        );
+        std::fs::remove_dir_all(bin.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn the_program_after_a_pipe_is_rewritten_too() {
+        // `yocto_wic` plans are `<decompressor> ... | dd ...`; both sides are
+        // program positions, everything else is an argument.
+        let bin = venv_with_west("pipe");
+        let exe = if cfg!(windows) { "west.exe" } else { "west" };
+        let out = programs_resolved_in_venv(
+            &argv(&["zstd", "-dc", "x.wic.zst", "|", "west"]),
+            Some(&bin),
+        );
+        assert_eq!(out[0], "zstd"); // not in the venv -> PATH stays in charge
+        assert_eq!(out[4], bin.join(exe).to_string_lossy());
+        std::fs::remove_dir_all(bin.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn without_a_venv_the_argv_is_returned_verbatim() {
+        // No west-capable venv (CI, an activated venv, the contract harness) —
+        // the plan's argv must survive byte-for-byte, exactly as before #59.
+        let original = argv(&["west", "flash", "--runner", "openocd"]);
+        assert_eq!(programs_resolved_in_venv(&original, None), original);
     }
 }

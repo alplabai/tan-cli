@@ -17,8 +17,10 @@ use crate::cli::{BootstrapArgs, GlobalArgs};
 use crate::exit::ExitCode;
 use crate::util::resolve_cli_project_context;
 
+use crate::venv::west_program;
+
 use super::native::base_dir;
-use super::workspace::{west_program, west_workspace_dir};
+use super::workspace::west_workspace_dir;
 
 /// Probe the build prerequisites (SDK / board.yaml / workspace / west) into the
 /// pure `tan_core::preflight` checks. Shared by `tan build`'s pre-flight gate and
