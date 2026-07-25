@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// guards, this only fixes the clear-divergence case. Returns `(config_path,
 /// old_rel, new_rel)` when it rewrote the file, for the optional text-mode
 /// info line.
-pub(super) fn reconcile_west_manifest_path(sdk_root: &str) -> Option<(PathBuf, String, String)> {
+pub(crate) fn reconcile_west_manifest_path(sdk_root: &str) -> Option<(PathBuf, String, String)> {
     let sdk_root_path = Path::new(sdk_root);
     let topdir = sdk_root_path.parent()?;
     let config_path = topdir.join(".west").join("config");
@@ -50,6 +50,61 @@ pub(super) fn reconcile_west_manifest_path(sdk_root: &str) -> Option<(PathBuf, S
     Some((config_path, current_rel, new_rel))
 }
 
+/// Outcome of [`reconcile_west_manifest_path_for_switch`].
+pub(crate) enum SwitchReconcile {
+    /// Rewrote a stale pointer that named either #62's reported state (a
+    /// pruned directory) or another real alp-sdk checkout under this topdir.
+    Rewrote {
+        config_path: PathBuf,
+        old_rel: String,
+        new_rel: String,
+    },
+    /// `.west/config`'s `manifest.path` names a directory that exists on disk
+    /// and is NOT an alp-sdk checkout -- left untouched.
+    Blocked {
+        config_path: PathBuf,
+        old_rel: String,
+    },
+}
+
+/// Same divergence check as [`reconcile_west_manifest_path`], gated by one
+/// extra guard for `tan sdk switch` specifically: only rewrite when the stale
+/// target is missing (#62's reported state) or is itself a real alp-sdk
+/// checkout. `tan bootstrap`'s job IS the workspace under its topdir, so it
+/// reconciles unconditionally; `sdk switch` only repoints the active-SDK
+/// selection and must not also silently repoint an unrelated directory that
+/// happens to share the topdir -- concretely, a plain Zephyr workspace
+/// (`.west/config` naming `path = zephyr`) with an alp-sdk checkout cloned
+/// beside it as a sibling: switching to that sibling must not overwrite the
+/// Zephyr workspace's OWN manifest pointer just because it lives under the
+/// same parent directory.
+pub(crate) fn reconcile_west_manifest_path_for_switch(sdk_root: &str) -> Option<SwitchReconcile> {
+    let sdk_root_path = Path::new(sdk_root);
+    let topdir = sdk_root_path.parent()?;
+    let config_path = topdir.join(".west").join("config");
+    let contents = std::fs::read_to_string(&config_path).ok()?;
+    let current_rel = tan_core::get_manifest_path(&contents)?;
+
+    let configured = topdir.join(&current_rel);
+    if same_directory(&configured, sdk_root_path) {
+        return None; // already matches -- nothing to do.
+    }
+    if configured.exists() && !crate::util::has_loader_script(&configured) {
+        return Some(SwitchReconcile::Blocked {
+            config_path,
+            old_rel: current_rel,
+        });
+    }
+
+    reconcile_west_manifest_path(sdk_root).map(|(config_path, old_rel, new_rel)| {
+        SwitchReconcile::Rewrote {
+            config_path,
+            old_rel,
+            new_rel,
+        }
+    })
+}
+
 /// True when `a` and `b` name the same directory. Canonicalizes when both
 /// exist on disk (the reliable answer); falls back to a lexical
 /// `tan_core::normalize_path` comparison when either side doesn't (e.g. the
@@ -63,7 +118,9 @@ pub(super) fn same_directory(a: &Path, b: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::reconcile_west_manifest_path;
+    use super::{
+        SwitchReconcile, reconcile_west_manifest_path, reconcile_west_manifest_path_for_switch,
+    };
     use std::path::PathBuf;
 
     /// Fresh temp dir for one test, tagged and pid-scoped like the other
@@ -163,5 +220,88 @@ mod tests {
         // No .west/config at all -- the `west init -l` step's own guard handles
         // this case; reconcile must not fail or fabricate anything.
         assert!(reconcile_west_manifest_path(&sdk.to_string_lossy()).is_none());
+    }
+
+    #[test]
+    fn switch_guard_blocks_a_manifest_path_naming_a_real_non_sdk_directory() {
+        // A plain Zephyr workspace (`.west/config` naming `path = zephyr`, no
+        // `scripts/alp_project.py` under it) with an alp-sdk checkout cloned
+        // beside it as a sibling: `tan sdk switch <the sibling>` must not
+        // repoint the Zephyr workspace's OWN manifest just because it shares
+        // a topdir with the SDK being switched to -- that config names a real,
+        // unrelated directory, not #62's "pruned and unambiguously broken"
+        // state or a stale alp-sdk sibling.
+        let topdir = tmp("switch-guard-real-non-sdk");
+        std::fs::create_dir_all(topdir.join("zephyr")).unwrap();
+        let sdk = topdir.join("alp-sdk");
+        std::fs::create_dir_all(sdk.join("scripts")).unwrap();
+        std::fs::write(sdk.join("scripts").join("alp_project.py"), "").unwrap();
+        let west_dir = topdir.join(".west");
+        std::fs::create_dir_all(&west_dir).unwrap();
+        let original = "[manifest]\npath = zephyr\nfile = west.yml\n";
+        std::fs::write(west_dir.join("config"), original).unwrap();
+
+        match reconcile_west_manifest_path_for_switch(&sdk.to_string_lossy()) {
+            Some(SwitchReconcile::Blocked { old_rel, .. }) => assert_eq!(old_rel, "zephyr"),
+            other => panic!(
+                "expected Blocked, got a rewrite or no-op: {}",
+                other.is_some()
+            ),
+        }
+        assert_eq!(
+            std::fs::read_to_string(west_dir.join("config")).unwrap(),
+            original,
+            "the unrelated Zephyr workspace's manifest.path must be left untouched"
+        );
+    }
+
+    #[test]
+    fn switch_guard_allows_a_manifest_path_naming_a_stale_sdk_sibling() {
+        // The ordinary #62 case: `.west/config` names a DIFFERENT, still-present
+        // alp-sdk checkout under the same topdir (both have the loader script).
+        // The switch guard must not block this -- it is exactly what `sdk
+        // switch` is meant to reconcile.
+        let topdir = tmp("switch-guard-sdk-sibling");
+        let old_sdk = topdir.join("v0.11.0");
+        std::fs::create_dir_all(old_sdk.join("scripts")).unwrap();
+        std::fs::write(old_sdk.join("scripts").join("alp_project.py"), "").unwrap();
+        let new_sdk = topdir.join("v0.13.0");
+        std::fs::create_dir_all(&new_sdk).unwrap();
+        let west_dir = topdir.join(".west");
+        std::fs::create_dir_all(&west_dir).unwrap();
+        std::fs::write(
+            west_dir.join("config"),
+            "[manifest]\npath = v0.11.0\nfile = west.yml\n",
+        )
+        .unwrap();
+
+        match reconcile_west_manifest_path_for_switch(&new_sdk.to_string_lossy()) {
+            Some(SwitchReconcile::Rewrote { new_rel, .. }) => assert_eq!(new_rel, "v0.13.0"),
+            other => panic!("expected a rewrite, got: {}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn switch_guard_allows_a_manifest_path_naming_a_pruned_directory() {
+        // #62's reported state: the configured `path` no longer exists on disk
+        // at all. The guard's `configured.exists()` check must fall through to
+        // "allow" here, not "block" -- a missing directory can never be an
+        // unrelated real workspace.
+        let topdir = tmp("switch-guard-pruned");
+        let new_sdk = topdir.join("v0.13.0");
+        std::fs::create_dir_all(&new_sdk).unwrap();
+        // deliberately NOT creating topdir/v0.11.0.
+        let west_dir = topdir.join(".west");
+        std::fs::create_dir_all(&west_dir).unwrap();
+        std::fs::write(
+            west_dir.join("config"),
+            "[manifest]\npath = v0.11.0\nfile = west.yml\n",
+        )
+        .unwrap();
+
+        match reconcile_west_manifest_path_for_switch(&new_sdk.to_string_lossy()) {
+            Some(SwitchReconcile::Rewrote { new_rel, .. }) => assert_eq!(new_rel, "v0.13.0"),
+            other => panic!("expected a rewrite, got: {}", other.is_some()),
+        }
     }
 }
