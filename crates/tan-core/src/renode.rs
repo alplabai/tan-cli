@@ -336,13 +336,23 @@ pub fn build_renode_argv(
 /// in the segment. An allocated `.note.gnu.build-id` ahead of `_vector_table`,
 /// or a padded/offset link, would satisfy containment and still hand back a
 /// confident wrong address. So this also reads the table's own second word —
-/// the reset vector, the Thumb bit cleared must equal `e_entry` with the
-/// Thumb bit cleared — before trusting the guess. That word lives at file
-/// offset `p_offset + 4`; the delta is kept in the `paddr` domain (not
-/// `vaddr`) because `paddr` is the address actually being verified and
-/// returned, and the two diverge for exactly the MRAM-linked shape above.
-/// `None` when the word isn't even in the file (`p_filesz < 8`, e.g. a
-/// bss-only LOAD segment) or doesn't match — no answer beats a wrong one.
+/// the reset vector — and requires it to equal `e_entry` (Thumb bit cleared
+/// on both sides) before trusting the guess. That word lives at file offset
+/// `p_offset + 4` directly — no `vaddr`/`paddr` arithmetic needed there,
+/// since `p_offset` already locates the bytes in the file regardless of
+/// where they end up mapped. `None` when the word isn't even in the file
+/// (`p_filesz < 8`, e.g. a bss-only LOAD segment) or doesn't match — no
+/// answer beats a wrong one.
+///
+/// The `e_entry == reset vector` equality rests on the standard Cortex-M
+/// convention of linking `ENTRY(Reset_Handler)` (or equivalent), which is why
+/// tools rely on the ELF's own entry point being the address the CPU is
+/// meant to jump to on reset — this has NOT been independently re-confirmed
+/// against a real E1M-AEN801 `.elf`'s `readelf -h`/`-x .vectors` output in
+/// this change. If a real build's `e_entry` ever diverges from its vector
+/// table's second word, this returns `None` on that image (falling back to
+/// Renode's own guess, a failure `renode_cpu_halted` now reports rather than
+/// letting pass silently) instead of handing back a wrong address.
 pub fn elf_vector_table_base(elf: &[u8]) -> Option<u32> {
     // e_ident: 0x7F 'E' 'L' 'F', class 1 (32-bit), data 1 (little-endian).
     if elf.len() < 52 || &elf[0..4] != b"\x7FELF" || elf[4] != 1 || elf[5] != 1 {
@@ -383,14 +393,17 @@ pub fn elf_vector_table_base(elf: &[u8]) -> Option<u32> {
         let filesz = u32_at(off + 16)?;
         let memsz = u32_at(off + 20)?;
         if entry >= vaddr && entry < vaddr.checked_add(memsz)? {
-            // The table's own second word isn't even in the file — nothing
-            // to verify against, so refuse rather than guess.
+            // The table's own second word isn't even in the file for THIS
+            // segment — nothing to verify against, so keep scanning rather
+            // than abort: a bss-only PT_LOAD (`p_filesz` 0) whose `memsz`
+            // footprint happens to cover the entry must not give up before a
+            // later, real code segment gets examined.
             if filesz < 8 {
-                return None;
+                continue;
             }
             let word1 = u32_at(p_offset + 4)?;
             if word1 & !1 != entry {
-                return None; // segment starts with something else — not our table
+                continue; // this segment starts with something else — not our table
             }
             return Some(paddr);
         }
@@ -700,10 +713,16 @@ mod tests {
     /// `elf_vector_table_base`. `segs` is `(vaddr, paddr, memsz)`; each
     /// segment gets real file content (2 words, `p_filesz = 8`) so the
     /// second-word verification has something to read. Word 1 (the reset
-    /// vector) of the segment containing `entry` defaults to `entry` itself —
-    /// a well-formed image whose vector table really is first in that
-    /// segment — unless `bad_reset_vector` overrides it, faking an image
-    /// where something else (e.g. a build-id note) sits there instead.
+    /// vector) defaults to `entry` itself, UNMASKED — the real hardware
+    /// shape, where the vector table's own reset-vector word carries the
+    /// same Thumb bit as `e_entry` (a masked-even default would let the `&
+    /// !1` mask on the checked word go untested). Written for EVERY segment,
+    /// not just the one this helper computes as "the" entry segment: that
+    /// way a containment-bound bug in the function under test which (wrongly)
+    /// matches a *different* segment still finds a word1 that would pass
+    /// verification, so a boundary test can only pass when the bound itself
+    /// is right. `bad_reset_vector` overrides it, faking an image where
+    /// something else (e.g. a build-id note) sits there instead.
     fn synthetic_elf(
         entry: u32,
         segs: &[(u32, u32, u32)],
@@ -721,7 +740,7 @@ mod tests {
         e[0x2A..0x2C].copy_from_slice(&phentsize.to_le_bytes());
         e[0x2C..0x2E].copy_from_slice(&(segs.len() as u16).to_le_bytes());
 
-        let masked_entry = entry & !1;
+        let word1 = bad_reset_vector.unwrap_or(entry);
         for (i, (vaddr, paddr, memsz)) in segs.iter().enumerate() {
             let off = phoff as usize + i * phentsize as usize;
             let content_off = (phdrs_end + i * 8) as u32; // 2 words (8 bytes) per segment
@@ -732,13 +751,6 @@ mod tests {
             e[off + 16..off + 20].copy_from_slice(&8u32.to_le_bytes()); // p_filesz
             e[off + 20..off + 24].copy_from_slice(&memsz.to_le_bytes());
 
-            let is_entry_segment =
-                masked_entry >= *vaddr && masked_entry < vaddr.wrapping_add(*memsz);
-            let word1 = if is_entry_segment {
-                bad_reset_vector.unwrap_or(masked_entry)
-            } else {
-                0
-            };
             e.extend_from_slice(&0u32.to_le_bytes()); // word0: initial SP (unread by the check)
             e.extend_from_slice(&word1.to_le_bytes()); // word1: reset vector
         }
@@ -836,8 +848,10 @@ mod tests {
 
     #[test]
     fn vector_table_base_rejects_a_too_small_phentsize() {
-        // A corrupt e_phentsize (8 or 16) would otherwise make the loop read
-        // vaddr/paddr/memsz out of the neighbouring phdr's fields.
+        // A corrupt e_phentsize (8 or 16) is rejected outright regardless of
+        // phnum. With more than one segment it would otherwise make the loop
+        // read vaddr/paddr/memsz out of the neighbouring phdr's fields; this
+        // single-segment case only pins that the guard fires at all.
         let mut elf = synthetic_elf(0x2000_0201, &[(0x2000_0000, 0x2000_0000, 8192)], None);
         elf[0x2A..0x2C].copy_from_slice(&16u16.to_le_bytes());
         assert_eq!(elf_vector_table_base(&elf), None);

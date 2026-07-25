@@ -30,9 +30,15 @@ All notable changes to `tan` are documented here. Format follows
   run still exited 0. `tan renode` now derives the real vector-table base from
   the ELF — the load address of the LOAD segment containing the entry point —
   and injects it as `$vtor` ahead of the descriptor include, correct for both
-  the MRAM-linked and RAM-run shapes. Inert until the descriptor reads `$vtor`
-  (alp-sdk#947); an unreadable or unexpected ELF injects nothing and leaves
-  Renode exactly as before.
+  the MRAM-linked and RAM-run shapes. Containment alone doesn't prove the
+  vector table starts where the segment does — an allocated
+  `.note.gnu.build-id` (or any offset/padded link) ahead of `_vector_table`
+  would satisfy it and still hand back a confident wrong address — so the
+  derivation is only trusted once the segment's own second word (the reset
+  vector, Thumb bit cleared) matches the entry point too; no match, no
+  answer. Inert until the descriptor reads `$vtor` (alp-sdk#947); an
+  unreadable or unexpected ELF injects nothing and leaves Renode exactly as
+  before.
 - **The Renode smoke never actually booted, and reported success anyway.**
   `build_renode_argv` passed `--console --disable-xwt --hide-monitor --plain`;
   Renode 1.16.1 rejects that combination outright — "--hide-monitor and
@@ -43,6 +49,20 @@ All notable changes to `tan` are documented here. Format follows
   guard latches Renode's own refusal wording off the console and fails the run
   (`renode.argv-rejected`, exit 1) regardless of exit status, so the next
   incompatible flag cannot pass silently either.
+- **The Renode smoke reported success when the CPU halted on its first
+  instruction fetch.** Without `--expect`, `tan renode` had exactly two
+  failure signals — a non-zero `natural_exit` and the argv-rejection latch
+  above — and neither trips when Renode boots, halts the CPU on its first
+  instruction fetch, and shuts down cleanly: the run reported `ok: true` /
+  exit 0 while no firmware code ever ran. A new `renode_cpu_halted` predicate
+  matches Renode's own two exact console wordings (`CPU was halted` / `PC
+  does not lay in memory`), latched in `run_renode` alongside
+  `argv_rejected` and checked at the same priority — independently of
+  `--expect`/`natural_exit`, since the whole point is catching a run that
+  gave neither (`renode.cpu-halted`, exit 1). The `$vtor` injection above
+  does not make this redundant: it stays inert until alp-sdk#947 wires
+  `cpu VectorTableOffset $vtor` into the `.resc`, so the halt this guards
+  against still reproduces today. (#64)
 - **`tan flash` could not find the `west` that `tan build` uses.** `west` is
   installed INSIDE the `tan bootstrap` venv, and nothing activates that venv for
   a GUI-launched editor, so the ambient PATH has none. `tan build` has resolved
