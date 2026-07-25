@@ -135,21 +135,14 @@ pub fn run(g: &GlobalArgs, args: &SupportBundleArgs) -> CommandRun {
         return server_incompatible(g, &generated_at, target, server);
     }
 
-    let runtime = collect_runtime_capabilities_from_commands(&project, command_on_path);
+    let runtime = collect_runtime_capabilities_from_commands(command_on_path);
 
     let decisions =
         match create_bundle_trace_decisions(&project, g.target.as_deref(), args.path.as_deref()) {
             Ok(d) => d,
             Err(message) => return internal_failure(g, &generated_at, message),
         };
-    // The prerequisite gate runs HERE too, not just in `tan doctor`. A support
-    // bundle is what a user attaches precisely when bootstrap failed, and
-    // `DoctorReport::missing_prerequisites` defines `null` as "checked, nothing
-    // missing" -- so a bundle built without this call would hide the missing
-    // `ninja` that caused it AND positively assert the host is fine.
-    let mut doctor = build_doctor_report(&context, target, server, &runtime);
-    crate::commands::doctor::append_host_prerequisites(&mut doctor, context.sdk_root.as_deref());
-    doctor.next_steps = tan_core::unique_next_steps(&doctor.checks);
+    let doctor = bundle_doctor_report(&context, target, server, &runtime);
 
     // Assemble + serialize the bundle file (side effect; not in the envelope).
     let notes = vec![
@@ -219,6 +212,32 @@ pub fn run(g: &GlobalArgs, args: &SupportBundleArgs) -> CommandRun {
         .then(|| Envelope::new("support-bundle", project_env, data, issues, exit.code()).to_json());
 
     CommandRun { exit, text, json }
+}
+
+/// The bundle's doctor section: the pure report PLUS the host-prerequisite
+/// gate.
+///
+/// The gate runs here too, not just in `tan doctor`. A support bundle is what a
+/// user attaches *precisely when bootstrap failed*, and
+/// `DoctorReport::missing_prerequisites` defines `null` as "checked, nothing
+/// missing" — so a bundle built without it would hide the missing `ninja` that
+/// caused it AND positively assert the host is fine. A missing prerequisite
+/// therefore also makes `tan support-bundle` exit 4 with a
+/// `support-bundle.hostPrerequisites` error issue (the bundle file is still
+/// written).
+///
+/// Its own function rather than four inline lines in `run` so the gate call is
+/// reachable from a test: `run` writes files and resolves a real project, so a
+/// no-op'd call inline there was invisible to the suite.
+fn bundle_doctor_report(
+    context: &DebugWorkspaceContext,
+    target: DebugTargetKind,
+    server: DebugServerKind,
+    runtime: &tan_core::DebugRuntimeCapabilities,
+) -> DoctorReport {
+    let mut doctor = build_doctor_report(context, target, server, runtime);
+    crate::commands::doctor::append_host_prerequisites(&mut doctor, context.sdk_root.as_deref());
+    doctor
 }
 
 /// Builds the generation-trace decisions: one `Planned` entry per emit target
@@ -452,5 +471,99 @@ fn null_project() -> Project {
     Project {
         root: None,
         board_yaml: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn context() -> DebugWorkspaceContext {
+        DebugWorkspaceContext {
+            generated_at: "1970-01-01T00:00:00.000Z".to_string(),
+            workspace_root: Some("/work/proj".to_string()),
+            // No SDK root -> the prerequisite gate falls back to tan's built-in
+            // tool list, which is still a real probe of this host.
+            sdk_root: None,
+            board_yaml_path: Some("/work/proj/board.yaml".to_string()),
+            west_cwd: Some("/work/proj".to_string()),
+            python_binary: "python3".to_string(),
+            board_yaml_exists: true,
+            debugger_extensions: DebuggerExtensionsState {
+                cortex_debug: true,
+                peripheral_viewer: true,
+                memory_view: true,
+                cpp_tools: true,
+                code_lldb: true,
+            },
+        }
+    }
+
+    fn runtime() -> tan_core::DebugRuntimeCapabilities {
+        tan_core::DebugRuntimeCapabilities {
+            jlink_executable: None,
+            open_ocd_executable: None,
+            pyocd_executable: None,
+            gdb_executable: None,
+            lldb_executable: Some("lldb".to_string()),
+        }
+    }
+
+    #[test]
+    fn the_bundles_doctor_section_runs_the_host_prerequisite_gate() {
+        // `build_doctor_report` alone never probes prerequisites, so it
+        // serializes `"missingPrerequisites": null` -- which that field defines
+        // as "checked, nothing missing" -- for a host nobody checked. Dropping
+        // the `append_host_prerequisites` call has to fail HERE; the assertion
+        // is on the CHECK's presence, not its status, because the status is
+        // whatever this host's PATH produces.
+        let doctor = bundle_doctor_report(
+            &context(),
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime(),
+        );
+        let check = doctor
+            .checks
+            .iter()
+            .find(|c| c.name == "hostPrerequisites")
+            .expect("the bundle's doctor section must carry the prerequisite verdict");
+        assert!(
+            check
+                .detail
+                .contains("facts from tan's built-in fallback list"),
+            "{}",
+            check.detail
+        );
+        // Counted, not just appended -- the exit code is `summary.fail > 0`.
+        let counted = doctor.summary.pass + doctor.summary.warn + doctor.summary.fail;
+        assert_eq!(counted as usize, doctor.checks.len());
+    }
+
+    #[test]
+    fn a_failing_prerequisite_check_becomes_a_support_bundle_error_issue() {
+        // The `support-bundle.` prefix, not `doctor.` and not
+        // `bootstrap.prerequisites-missing`: in this CLI an issue code's prefix
+        // is the command that emitted the envelope, without exception.
+        let issues = doctor_checks_to_issues(&[
+            DoctorCheck {
+                name: "boardYaml".to_string(),
+                status: DoctorStatus::Pass,
+                detail: "fine".to_string(),
+                fix: None,
+            },
+            DoctorCheck {
+                name: "hostPrerequisites".to_string(),
+                status: DoctorStatus::Fail,
+                detail: "Missing required tools: ninja.".to_string(),
+                fix: Some(
+                    "Install the missing prerequisites, then run `tan bootstrap`.".to_string(),
+                ),
+            },
+        ]);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "support-bundle.hostPrerequisites");
+        assert_eq!(issues[0].severity, "error");
+        assert_eq!(issues[0].message, "Missing required tools: ninja.");
     }
 }

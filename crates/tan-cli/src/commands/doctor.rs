@@ -10,14 +10,14 @@ use std::path::Path;
 
 use tan_core::{
     BuildOs, BuildToolProbe, DebugServerKind, DebugTargetKind, DebuggerExtensionsState,
-    DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, ProjectContext, board_os_set,
-    build_doctor_report, build_readiness_report, collect_runtime_capabilities_from_commands,
-    create_debug_workspace_context, is_server_supported_for_target, parse_board_model,
-    parse_server_kind, parse_target_kind,
+    DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, ProjectContext, append_doctor_check,
+    board_os_set, build_doctor_report, build_readiness_report,
+    collect_runtime_capabilities_from_commands, create_debug_workspace_context,
+    is_server_supported_for_target, parse_board_model, parse_server_kind, parse_target_kind,
+    prepend_doctor_checks,
 };
 
 use tan_core::bootstrap::{apply_prerequisite_check, doctor_prerequisite_check, fallback_facts};
-use tan_core::unique_next_steps;
 
 use super::CommandRun;
 use crate::cli::{BootstrapArgs, DoctorArgs, GlobalArgs};
@@ -57,21 +57,8 @@ pub fn run(g: &GlobalArgs, args: &DoctorArgs) -> CommandRun {
         return unsupported_server(g, &generated_at, target, server);
     }
 
-    let runtime =
-        collect_runtime_capabilities_from_commands(&project_context(&context), command_on_path);
-    let mut report = build_doctor_report(&context, target, server, &runtime);
-    append_host_prerequisites(&mut report, context.sdk_root.as_deref());
-    append_sdk_provenance(
-        &mut report.checks,
-        &mut report.summary,
-        context.sdk_root.as_deref(),
-    );
-    // Every appender above lands AFTER `build_doctor_report` computed
-    // `nextSteps`, so their `fix` strings never reached the field the envelope
-    // documents as "deduplicated remediation steps for non-passing checks" and
-    // the extension renders as a Fix button. Recompute over the final list once,
-    // instead of making each appender remember to push (and dedup) its own.
-    report.next_steps = unique_next_steps(&report.checks);
+    let runtime = collect_runtime_capabilities_from_commands(command_on_path);
+    let report = assemble_doctor_report(&context, target, server, &runtime);
 
     let exit = if report.summary.fail > 0 {
         ExitCode::DoctorFailure
@@ -147,42 +134,37 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         bmaptool: command_on_path("bmaptool"),
         dd: command_on_path("dd"),
         is_linux: cfg!(target_os = "linux"),
+        is_windows: cfg!(windows),
     };
 
     let mut report = build_readiness_report(generated_at.to_string(), os_set, &probe);
     append_sdk_provenance(
-        &mut report.checks,
         &mut report.summary,
+        &mut report.checks,
+        &mut report.next_steps,
         context.sdk_root.as_deref(),
     );
 
     // Real gate: prepend the project/workspace readiness (can a build even
     // start?) ahead of the host-tool probes, sharing `tan build`'s pre-flight
     // checks so `doctor` and `build` agree on what "ready" means.
-    for check in probe_build_preflight(g, &context).into_iter().rev() {
-        match check.status {
-            DoctorStatus::Pass => report.summary.pass += 1,
-            DoctorStatus::Warn => report.summary.warn += 1,
-            DoctorStatus::Fail => report.summary.fail += 1,
-        }
-        report.checks.insert(0, check);
-    }
+    prepend_doctor_checks(
+        &mut report.summary,
+        &mut report.checks,
+        &mut report.next_steps,
+        probe_build_preflight(g, &context),
+    );
 
     // Surface the `--fix` bootstrap outcome (see the discarded-CommandRun
     // comment above) right after the readiness checks it was meant to repair.
     if let Some(check) = bootstrap_fix_check {
-        match check.status {
-            DoctorStatus::Pass => report.summary.pass += 1,
-            DoctorStatus::Warn => report.summary.warn += 1,
-            DoctorStatus::Fail => report.summary.fail += 1,
-        }
-        report.checks.push(check);
+        append_doctor_check(
+            &mut report.summary,
+            &mut report.checks,
+            &mut report.next_steps,
+            check,
+        );
     }
-
-    // Same post-finalize append problem as the plain report's (see `run`): the
-    // preflight, the provenance check and the `--fix` outcome all arrive after
-    // `build_readiness_report` computed `nextSteps`.
-    report.next_steps = unique_next_steps(&report.checks);
 
     let exit = if report.summary.fail > 0 {
         ExitCode::DoctorFailure
@@ -200,6 +182,36 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         .then(|| Envelope::new("doctor", resolved_project, report, issues, exit.code()).to_json());
 
     CommandRun { exit, text, json }
+}
+
+/// The plain `tan doctor` report: the pure check set, plus the two checks that
+/// can only be built with IO.
+///
+/// Its own function rather than four inline lines in `run` so the appends are
+/// reachable from a test. `run` resolves a real project and shells `git`, so a
+/// dropped `append_host_prerequisites` call inline there was invisible to the
+/// suite — the same hole `support_bundle::bundle_doctor_report` closes.
+///
+/// Both appends land AFTER `build_doctor_report` computed `nextSteps`, so both
+/// go through `append_doctor_check`, which re-derives it. That is why there is
+/// no trailing `next_steps = unique_next_steps(...)` statement here: a
+/// statement a caller can forget is a bug waiting to be re-introduced, and this
+/// one already was one.
+fn assemble_doctor_report(
+    context: &tan_core::DebugWorkspaceContext,
+    target: DebugTargetKind,
+    server: DebugServerKind,
+    runtime: &tan_core::DebugRuntimeCapabilities,
+) -> DoctorReport {
+    let mut report = build_doctor_report(context, target, server, runtime);
+    append_host_prerequisites(&mut report, context.sdk_root.as_deref());
+    append_sdk_provenance(
+        &mut report.summary,
+        &mut report.checks,
+        &mut report.next_steps,
+        context.sdk_root.as_deref(),
+    );
+    report
 }
 
 /// Append the `hostPrerequisites` check: run `bootstrap`'s own prerequisite
@@ -267,8 +279,9 @@ pub(crate) fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Opt
 /// can be traced to the planner that produced it, and warns when the checkout
 /// is behind its upstream tracking ref.
 fn append_sdk_provenance(
-    checks: &mut Vec<DoctorCheck>,
     summary: &mut DoctorSummary,
+    checks: &mut Vec<DoctorCheck>,
+    next_steps: &mut Vec<String>,
     sdk_root: Option<&str>,
 ) {
     let Some(root) = sdk_root else {
@@ -300,17 +313,17 @@ fn append_sdk_provenance(
         _ => (DoctorStatus::Pass, None),
     };
 
-    match status {
-        DoctorStatus::Pass => summary.pass += 1,
-        DoctorStatus::Warn => summary.warn += 1,
-        DoctorStatus::Fail => summary.fail += 1,
-    }
-    checks.push(DoctorCheck {
-        name: "sdkProvenance".to_string(),
-        status,
-        detail,
-        fix,
-    });
+    append_doctor_check(
+        summary,
+        checks,
+        next_steps,
+        DoctorCheck {
+            name: "sdkProvenance".to_string(),
+            status,
+            detail,
+            fix,
+        },
+    );
 }
 
 /// `git -C <root> rev-parse --short HEAD`, or `None` when `root` is not a git
@@ -496,18 +509,6 @@ fn resolve_context(g: &GlobalArgs, generated_at: &str) -> tan_core::DebugWorkspa
     )
 }
 
-/// Rebuild a `ProjectContext` view from the resolved debug context so the
-/// runtime-capability probe can read the python binary.
-fn project_context(context: &tan_core::DebugWorkspaceContext) -> ProjectContext {
-    ProjectContext {
-        workspace_root: context.workspace_root.clone(),
-        sdk_root: context.sdk_root.clone(),
-        board_yaml_path: context.board_yaml_path.clone(),
-        west_cwd: None,
-        python_binary: context.python_binary.clone(),
-    }
-}
-
 /// Map non-passing `DoctorCheck`s to envelope `Issue`s, prefixing the check name
 /// with `doctor.` and mapping `Fail`/`Warn` status to `error`/`warning` severity.
 fn checks_to_issues(checks: &[DoctorCheck]) -> Vec<Issue> {
@@ -670,6 +671,40 @@ fn null_project() -> Project {
 mod tests {
     use super::*;
 
+    /// A temp directory that removes itself on drop.
+    ///
+    /// Two reasons this is a guard type and not a `create_dir_all` + a trailing
+    /// `remove_dir_all`: the trailing call is skipped by a failing assertion —
+    /// exactly the case a regression produces, so the leak lands on every
+    /// failing run and never gets cleaned up — and `Drop` runs on the unwind.
+    ///
+    /// Keyed on the test's own `label` as well as the pid, because the pid is
+    /// process-unique, not test-unique: cargo runs a crate's tests as threads
+    /// of ONE process, so two tests sharing the pid-only name would collide
+    /// non-deterministically (one's `remove_dir_all` deleting the other's tree
+    /// mid-assertion).
+    struct TempTree(std::path::PathBuf);
+
+    impl TempTree {
+        fn new(label: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("tan-doctor-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn issues_skip_passing_checks() {
         let checks = vec![
@@ -737,6 +772,58 @@ mod tests {
     }
 
     #[test]
+    fn the_plain_doctor_report_carries_both_io_built_checks() {
+        // `run` resolves a real project and shells `git`, so the two appends
+        // were unreachable from a test and dropping either left the suite
+        // green -- proven by mutation. Asserting on the CHECK NAMES, not their
+        // statuses, because both statuses depend on the host.
+        let tree = TempTree::new("assemble");
+        let context = tan_core::DebugWorkspaceContext {
+            generated_at: "1970-01-01T00:00:00.000Z".to_string(),
+            workspace_root: Some("/work/proj".to_string()),
+            // A real directory, so `append_sdk_provenance` reaches its check
+            // instead of its `sdk_root.is_none()` early return. It is not a git
+            // checkout and has no metadata/sdk_version.yaml, which is a case
+            // that function already handles.
+            sdk_root: Some(tree.path().to_string_lossy().to_string()),
+            board_yaml_path: Some("/work/proj/board.yaml".to_string()),
+            west_cwd: None,
+            python_binary: "python3".to_string(),
+            board_yaml_exists: true,
+            debugger_extensions: DebuggerExtensionsState {
+                cortex_debug: true,
+                peripheral_viewer: true,
+                memory_view: true,
+                cpp_tools: true,
+                code_lldb: true,
+            },
+        };
+        let runtime = tan_core::DebugRuntimeCapabilities {
+            jlink_executable: None,
+            open_ocd_executable: None,
+            pyocd_executable: None,
+            gdb_executable: None,
+            lldb_executable: Some("lldb".to_string()),
+        };
+
+        let report = assemble_doctor_report(
+            &context,
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime,
+        );
+        let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"hostPrerequisites"), "{names:?}");
+        assert!(names.contains(&"sdkProvenance"), "{names:?}");
+        // Every appended check is counted, or the exit code (`fail > 0`) and
+        // the rendered summary disagree with the list they summarize.
+        let counted = report.summary.pass + report.summary.warn + report.summary.fail;
+        assert_eq!(counted as usize, report.checks.len());
+        // The retired `python` check must not come back alongside it.
+        assert!(!names.contains(&"python"), "{names:?}");
+    }
+
+    #[test]
     fn host_prerequisites_probes_the_host_and_lands_as_one_counted_check() {
         // Wiring only. The three OUTCOMES (pass, tool-naming refusal, Python
         // floor) are pinned in `tan_core::bootstrap::prerequisites` against a
@@ -786,8 +873,8 @@ mod tests {
         // indistinguishable from "no SDK resolved". Written against a real SDK
         // root on disk so it exercises `load_facts` itself, not a hand-made
         // `Err`.
-        let root = std::env::temp_dir().join(format!("tan-doctor-skew-{}", std::process::id()));
-        let metadata = root.join("metadata");
+        let root = TempTree::new("skew");
+        let metadata = root.path().join("metadata");
         std::fs::create_dir_all(&metadata).unwrap();
         std::fs::write(metadata.join("bootstrap.json"), r#"{"schemaVersion": 99}"#).unwrap();
 
@@ -798,8 +885,7 @@ mod tests {
             Vec::new(),
         );
         report.summary.fail = 0;
-        append_host_prerequisites(&mut report, Some(&root.to_string_lossy()));
-        let _ = std::fs::remove_dir_all(&root);
+        append_host_prerequisites(&mut report, Some(&root.path().to_string_lossy()));
 
         let check = &report.checks[0];
         assert!(
@@ -811,55 +897,22 @@ mod tests {
         // fallback), but the manifest was read and refused, and `tan bootstrap`
         // will exit 4 on the same message.
         assert_ne!(check.status, DoctorStatus::Pass);
-        assert!(check.fix.is_some());
-    }
-
-    #[test]
-    fn an_appended_checks_fix_reaches_next_steps() {
-        // `unique_next_steps` runs inside `finalize_report`, BEFORE every
-        // appender in this file, so a `hostPrerequisites` / `sdkProvenance` /
-        // preflight fix used to be dropped from the field the envelope
-        // documents as the remediation list and the extension renders as a Fix
-        // button. The recompute in `run`/`run_build_readiness` is what this
-        // pins; the ordering trap is gone rather than papered over per-appender.
-        let checks = vec![
-            DoctorCheck {
-                name: "hostPrerequisites".to_string(),
-                status: DoctorStatus::Fail,
-                detail: "Missing required tools: ninja.".to_string(),
-                fix: Some(
-                    "Install the missing prerequisites, then run `tan bootstrap`.".to_string(),
-                ),
-            },
-            DoctorCheck {
-                name: "sdkProvenance".to_string(),
-                status: DoctorStatus::Warn,
-                detail: "alp-sdk @ abc1234 — 3 commit(s) behind upstream".to_string(),
-                fix: Some("Update the SDK checkout: git -C /sdk pull".to_string()),
-            },
-        ];
-        let steps = unique_next_steps(&checks);
-        assert_eq!(
-            steps,
-            vec![
-                "Install the missing prerequisites, then run `tan bootstrap`.",
-                "Update the SDK checkout: git -C /sdk pull",
-            ]
-        );
+        let fix = check.fix.clone().expect("a refused manifest is actionable");
+        // Host-independent proof that this appender goes through
+        // `append_doctor_check`: the check is non-Pass on every host here, so
+        // its fix has to be in the field the extension renders as a Fix button.
+        // `next_steps` was computed by the report builder BEFORE this append.
+        assert_eq!(report.next_steps, vec![fix]);
     }
 
     #[test]
     fn env_dir_still_exists_requires_the_directory_to_be_present() {
-        let missing =
-            std::env::temp_dir().join(format!("tan-doctor-missing-sdk-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&missing);
-        assert!(!env_dir_still_exists(missing.as_os_str()));
+        let missing = TempTree::new("missing-sdk");
+        std::fs::remove_dir_all(missing.path()).unwrap();
+        assert!(!env_dir_still_exists(missing.path().as_os_str()));
 
-        let present =
-            std::env::temp_dir().join(format!("tan-doctor-present-sdk-{}", std::process::id()));
-        std::fs::create_dir_all(&present).unwrap();
-        assert!(env_dir_still_exists(present.as_os_str()));
-        let _ = std::fs::remove_dir_all(&present);
+        let present = TempTree::new("present-sdk");
+        assert!(env_dir_still_exists(present.path().as_os_str()));
     }
 
     #[test]

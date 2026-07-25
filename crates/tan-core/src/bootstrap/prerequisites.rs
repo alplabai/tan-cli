@@ -15,7 +15,7 @@
 
 use serde::Serialize;
 
-use crate::debug::{DoctorCheck, DoctorReport, DoctorStatus};
+use crate::debug::{DoctorCheck, DoctorReport, DoctorStatus, append_doctor_check};
 
 /// One missing host prerequisite, in the form a consumer can act on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -263,8 +263,9 @@ pub fn doctor_prerequisite_check(
 /// re-spelling the sentence.
 pub const BOOTSTRAP_MANIFEST_REJECTED_PREFIX: &str = "metadata/bootstrap.json rejected: ";
 
-/// Fold a finished `hostPrerequisites` check into the report: count it in the
-/// summary, and record the machine-readable half of the same verdict.
+/// Fold a finished `hostPrerequisites` check into the report: record the
+/// machine-readable half of the same verdict, then append the check through
+/// [`append_doctor_check`] (which counts it and re-derives `next_steps`).
 ///
 /// Pure, and in `tan-core`, precisely because the probe that produces `check`
 /// is not. When this lived inline next to the PATH walk, its test could only
@@ -280,12 +281,12 @@ pub fn apply_prerequisite_check(
     missing: Vec<MissingPrerequisite>,
 ) {
     report.missing_prerequisites = reported_missing(missing);
-    match check.status {
-        DoctorStatus::Pass => report.summary.pass += 1,
-        DoctorStatus::Warn => report.summary.warn += 1,
-        DoctorStatus::Fail => report.summary.fail += 1,
-    }
-    report.checks.push(check);
+    append_doctor_check(
+        &mut report.summary,
+        &mut report.checks,
+        &mut report.next_steps,
+        check,
+    );
 }
 
 /// POSIX: `python3` is on PATH but did not run — the only failure this port
@@ -580,6 +581,13 @@ mod tests {
                 tool: "ninja".to_string(),
                 command: Some("winget install -e --id Ninja-build.Ninja".to_string()),
             }])
+        );
+        // The check arrives AFTER the report builder computed `next_steps`, so
+        // routing this through `append_doctor_check` (rather than a bare
+        // `checks.push`) is what puts its fix in front of the user.
+        assert_eq!(
+            report.next_steps,
+            vec!["Install the missing prerequisites, then run `tan bootstrap`."]
         );
     }
 

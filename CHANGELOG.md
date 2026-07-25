@@ -14,11 +14,13 @@ All notable changes to `tan` are documented here. Format follows
   bootstrap to find out — and in the extension a missing `ninja` therefore read
   as `failed to launch (exit code: 1)` from the bootstrap terminal. Plain
   `tan doctor` now runs bootstrap's own gate (not a second copy of it) and
-  reports a `hostPrerequisites` check. It is on the plain report, not
-  `--build`: prerequisites are a HOST fact needing no `board.yaml`, no
+  reports a `hostPrerequisites` check. The CHECK is on the plain report only,
+  not `--build`: prerequisites are a HOST fact needing no `board.yaml`, no
   workspace and no SDK, and alp-sdk ADR 0021's Lane 1 P0a runs `tan doctor`
   *before* the bootstrap terminal exists — while `--build` already probes
-  `ninja`/`cmake` through `BuildToolProbe` and would report them twice. The
+  `ninja`/`cmake` through `BuildToolProbe` and would report them twice. (One
+  fact, one check — but `--build` does carry the machine-readable
+  `missingPrerequisites` data derived from those probes; see Changed.) The
   check's detail names which tool list it checked against — the SDK's
   `metadata/bootstrap.json` or tan's built-in fallback — so a run with no
   resolvable SDK still checks the host and says which list it used, rather
@@ -80,18 +82,36 @@ All notable changes to `tan` are documented here. Format follows
   a consumer may already match: in this CLI an issue code's prefix is the
   command that emitted the envelope, without exception, and a `bootstrap.*` code
   inside a `doctor` envelope would tell a consumer a command ran that did not.
-  `missingPrerequisites` is present on every **plain** `tan doctor` envelope
-  (including its error envelopes), `null` when there is no missing TOOL to name
-  — a clean host, an error envelope that never reached the probe, and the two
-  Python-floor refusals, whose fix no `{tool, command}` pair can carry.
-  **`tan doctor --build` does NOT carry it**: that mode's `data` is a
-  `BuildReadinessReport` (`schemaVersion`/`generatedAt`/`osSet`/`summary`/
-  `checks`/`nextSteps`) and has no such key at all, so a consumer keying on
-  `command === "doctor"` alone gets `undefined` there, not `null` — branch on
-  the payload, not on the command name. (`alp-sdk-vscode` calls only
-  `tan doctor --build` today, at `src/toolchain.ts:219` and `:248`, so P0a needs
-  either a `--build` carry or an extension change — a cross-repo seam decision,
-  deliberately not taken here.) (alp-sdk ADR 0021 P0a)
+  `missingPrerequisites` is present on **both** `doctor` payloads — the plain
+  report (including its error envelopes) and `--build`'s `BuildReadinessReport`
+  — always as an explicit key, `null` when there is no missing TOOL to name.
+  What differs is where each gets its list from, and that is deliberate:
+  - **plain `tan doctor`** carries the `hostPrerequisites` CHECK and fills the
+    field from its refusal. `null` on a clean host, on an error envelope that
+    never reached the probe, and on the two Python-floor refusals, whose fix no
+    `{tool, command}` pair can carry.
+  - **`tan doctor --build`** carries the field as **data only — there is no
+    `hostPrerequisites` check in that mode.** It already probes
+    `west`/`cmake`/`ninja`/`bitbake` through `BuildToolProbe` and reports each
+    as its own check, so mirroring the aggregate check would report the same
+    tool twice under two names. The field is derived from exactly those
+    PATH-binary checks, so it inherits their OS gating (a Zephyr-only project is
+    never told to install `bitbake`; a non-Linux host gets `yoctoHost` instead
+    of a `bitbake` entry) and their dedup (`cmake`, needed by two declared OSes,
+    appears once). Excluded on purpose: `zephyrSdk` (env-var detection, its fix
+    is a docs URL), `bmaptool` (two tools, one advisory, working `dd`
+    fallback), `yoctoHost` and `vendorToolchain` (no tool name at all) — none
+    has a single `{tool, command}` pair that could carry it. `command` is the
+    `winget` one-liner only on Windows and only for a tool tan knows one for;
+    `west` and `bitbake` report `command: null` rather than an invented ID.
+    This is what `alp-sdk-vscode` needs: it calls only `tan doctor --build`
+    (`src/toolchain.ts:219`, `:248`), and its `runToolchainFix` previously had
+    nothing runnable to put behind a Fix button, so a missing `ninja` reached
+    the user as `failed to launch (exit code: 1)`.
+
+  `--build`'s payload `schemaVersion` stays `"1"`: the field is additive and
+  optional, and its other keys (`generatedAt`/`osSet`/`summary`/`checks`/
+  `nextSteps`) are unchanged. (alp-sdk ADR 0021 P0a)
 - **The retired `doctor` `python` check.** Plain `tan doctor` no longer emits a
   `python` check. It probed `context.python_binary`, which in this CLI is always
   the bare `python3`/`python` — literally the tool `hostPrerequisites` now probes
@@ -120,9 +140,11 @@ All notable changes to `tan` are documented here. Format follows
   on `--build` the project/workspace preflight and the `--fix` bootstrap outcome
   — so those checks' `fix` strings never reached the field the envelope
   documents as "deduplicated remediation steps for non-passing checks" and the
-  extension renders as a Fix button. Both `doctor` modes now recompute it over
-  the final check list. **`nextSteps` gains entries and follows check order**;
-  on `--build` the preflight's `tan sdk switch <path>` / `tan init` now lead it.
+  extension renders as a Fix button. Appending a check now re-derives the field
+  as part of the same call (`tan_core::append_doctor_check` /
+  `prepend_doctor_checks`), so there is no trailing recompute statement left for
+  a caller to forget. **`nextSteps` gains entries and follows check order**; on
+  `--build` the preflight's `tan sdk switch <path>` / `tan init` now lead it.
 - **`tan bootstrap`'s two Python-floor refusals report under their own issue
   codes.** A host whose `python` does not run now raises
   `bootstrap.python-not-runnable`, and one below `pythonMinVersion` raises

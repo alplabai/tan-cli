@@ -355,17 +355,72 @@ fn count_status(checks: &[DoctorCheck], status: DoctorStatus) -> u32 {
     checks.iter().filter(|c| c.status == status).count() as u32
 }
 
+/// Count one check into a summary.
+fn count_into(summary: &mut DoctorSummary, status: DoctorStatus) {
+    match status {
+        DoctorStatus::Pass => summary.pass += 1,
+        DoctorStatus::Warn => summary.warn += 1,
+        DoctorStatus::Fail => summary.fail += 1,
+    }
+}
+
+/// Fold a check produced AFTER a report builder finalized back into that
+/// report's derived fields: count it in `summary`, push it onto `checks`, and
+/// re-derive `next_steps` over the FINAL list.
+///
+/// The counting and the re-derivation are ONE call deliberately. `tan-cli`
+/// appends four checks it can only build with IO (`hostPrerequisites`,
+/// `sdkProvenance`, the `--build` preflight, the `--fix` bootstrap outcome),
+/// each of which used to hand-roll the summary `match` and rely on a separate,
+/// trailing `next_steps = unique_next_steps(...)` statement. That statement was
+/// deletable with no test noticing — the only test covering it called
+/// `unique_next_steps` directly and never went through an append. Making the
+/// append itself own the re-derivation removes the statement (and the bug it
+/// carried) rather than testing around it: there is no longer an ordering for a
+/// caller to get wrong.
+///
+/// Takes the three fields rather than a report, because the two report types
+/// that need it (`DoctorReport` and
+/// [`BuildReadinessReport`](crate::BuildReadinessReport)) share these fields but
+/// not a type — and a trait over two structs would be more machinery than the
+/// three-argument call it replaces.
+pub fn append_doctor_check(
+    summary: &mut DoctorSummary,
+    checks: &mut Vec<DoctorCheck>,
+    next_steps: &mut Vec<String>,
+    check: DoctorCheck,
+) {
+    count_into(summary, check.status);
+    checks.push(check);
+    *next_steps = unique_next_steps(checks);
+}
+
+/// As [`append_doctor_check`], but the checks land at the FRONT of the list,
+/// keeping their relative order.
+///
+/// `tan doctor --build` prepends the project/workspace preflight ahead of the
+/// host-tool probes: "can a build even start" outranks "is `ninja` installed",
+/// and `nextSteps` follows check order, so the preflight's `tan sdk switch
+/// <path>` / `tan init` must lead it.
+pub fn prepend_doctor_checks(
+    summary: &mut DoctorSummary,
+    checks: &mut Vec<DoctorCheck>,
+    next_steps: &mut Vec<String>,
+    prepended: Vec<DoctorCheck>,
+) {
+    for check in prepended.into_iter().rev() {
+        count_into(summary, check.status);
+        checks.insert(0, check);
+    }
+    *next_steps = unique_next_steps(checks);
+}
+
 /// Deduplicated `fix` strings of every non-passing check, in check order.
 ///
 /// `pub` and deliberately re-runnable: `finalize_report` computes this once,
-/// but `tan-cli` then APPENDS the checks it can only build with IO
-/// (`hostPrerequisites`, `sdkProvenance`, the `--build` preflight, the `--fix`
-/// bootstrap outcome). Those all landed after the one computation, so their
-/// remediation never reached `nextSteps` — the envelope documents that field as
-/// "deduplicated remediation steps for non-passing checks", and the extension
-/// renders it as a Fix button. Rather than teach four append sites to also push
-/// a step (and keep the dedup right in each), the CLI recomputes this over the
-/// FINAL check list. Idempotent by construction, so recomputing costs nothing.
+/// but [`append_doctor_check`] re-derives it on every later append, because
+/// `tan-cli` adds checks that need IO long after the pure builder ran.
+/// Idempotent by construction, so recomputing costs nothing.
 pub fn unique_next_steps(checks: &[DoctorCheck]) -> Vec<String> {
     let mut steps: Vec<String> = Vec::new();
     for check in checks {
@@ -438,7 +493,6 @@ mod tests {
 
     fn runtime_all_present() -> DebugRuntimeCapabilities {
         DebugRuntimeCapabilities {
-            python_available: true,
             jlink_executable: Some("JLinkGDBServerCL".to_string()),
             open_ocd_executable: Some("openocd".to_string()),
             pyocd_executable: Some("pyocd".to_string()),
@@ -449,7 +503,6 @@ mod tests {
 
     fn runtime_none() -> DebugRuntimeCapabilities {
         DebugRuntimeCapabilities {
-            python_available: false,
             jlink_executable: None,
             open_ocd_executable: None,
             pyocd_executable: None,
@@ -688,5 +741,131 @@ mod tests {
                 target.as_str()
             );
         }
+    }
+
+    fn check(name: &str, status: DoctorStatus, fix: Option<&str>) -> DoctorCheck {
+        DoctorCheck {
+            name: name.to_string(),
+            status,
+            detail: format!("{name} detail"),
+            fix: fix.map(str::to_string),
+        }
+    }
+
+    /// A finalized report: `next_steps` already computed (and empty, because
+    /// its one check passes), exactly the state `tan-cli` starts appending to.
+    fn finalized() -> (DoctorSummary, Vec<DoctorCheck>, Vec<String>) {
+        let checks = vec![check("boardYaml", DoctorStatus::Pass, None)];
+        let next_steps = unique_next_steps(&checks);
+        assert!(next_steps.is_empty());
+        (
+            DoctorSummary {
+                pass: 1,
+                warn: 0,
+                fail: 0,
+            },
+            checks,
+            next_steps,
+        )
+    }
+
+    #[test]
+    fn an_appended_checks_fix_reaches_next_steps() {
+        // The regression: `next_steps` is computed by the report BUILDER, so
+        // every check `tan-cli` appends afterwards (it needs IO to build them)
+        // landed with its `fix` missing from the field the envelope documents
+        // as "deduplicated remediation steps for non-passing checks" and the
+        // extension renders as a Fix button. Deleting the re-derivation inside
+        // `append_doctor_check` has to fail HERE.
+        let (mut summary, mut checks, mut steps) = finalized();
+        append_doctor_check(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            check(
+                "hostPrerequisites",
+                DoctorStatus::Fail,
+                Some("Install the missing prerequisites, then run `tan bootstrap`."),
+            ),
+        );
+
+        assert_eq!(
+            steps,
+            vec!["Install the missing prerequisites, then run `tan bootstrap`."]
+        );
+        // Counted exactly once, in the right bucket -- swapping the summary
+        // arms would make a clean host exit 4.
+        assert_eq!((summary.pass, summary.warn, summary.fail), (1, 0, 1));
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[1].name, "hostPrerequisites");
+    }
+
+    #[test]
+    fn appending_a_passing_check_adds_no_step_and_keeps_the_earlier_ones() {
+        // The re-derivation runs over the WHOLE list, so it must not be a
+        // "clear and rebuild from the new check" either: an earlier appender's
+        // step has to survive a later, passing append.
+        let (mut summary, mut checks, mut steps) = finalized();
+        append_doctor_check(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            check("sdkProvenance", DoctorStatus::Warn, Some("git pull")),
+        );
+        append_doctor_check(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            check("bootstrapFix", DoctorStatus::Pass, None),
+        );
+
+        assert_eq!(steps, vec!["git pull"]);
+        assert_eq!((summary.pass, summary.warn, summary.fail), (2, 1, 0));
+    }
+
+    #[test]
+    fn a_repeated_fix_is_not_duplicated_across_appends() {
+        let (mut summary, mut checks, mut steps) = finalized();
+        for name in ["west", "cmake"] {
+            append_doctor_check(
+                &mut summary,
+                &mut checks,
+                &mut steps,
+                check(name, DoctorStatus::Warn, Some("Run `tan bootstrap`.")),
+            );
+        }
+        assert_eq!(steps, vec!["Run `tan bootstrap`."]);
+        assert_eq!(summary.warn, 2);
+    }
+
+    #[test]
+    fn prepended_checks_keep_their_order_and_lead_next_steps() {
+        // `--build` puts the project/workspace preflight ahead of the host-tool
+        // probes, and `nextSteps` follows check order -- so `tan sdk switch` /
+        // `tan init` must LEAD, not trail, an already-appended tool fix.
+        let (mut summary, mut checks, mut steps) = finalized();
+        append_doctor_check(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            check("west", DoctorStatus::Warn, Some("Install west.")),
+        );
+        prepend_doctor_checks(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            vec![
+                check("sdk", DoctorStatus::Fail, Some("tan sdk switch <path>")),
+                check("workspace", DoctorStatus::Fail, Some("tan init")),
+            ],
+        );
+
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["sdk", "workspace", "boardYaml", "west"]);
+        assert_eq!(
+            steps,
+            vec!["tan sdk switch <path>", "tan init", "Install west."]
+        );
+        assert_eq!((summary.pass, summary.warn, summary.fail), (1, 1, 2));
     }
 }

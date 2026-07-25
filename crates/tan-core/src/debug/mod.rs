@@ -19,7 +19,8 @@ pub use context::{
     collect_runtime_capabilities_from_commands, create_debug_workspace_context,
 };
 pub use doctor::{
-    DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, build_doctor_report, unique_next_steps,
+    DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, append_doctor_check,
+    build_doctor_report, prepend_doctor_checks, unique_next_steps,
 };
 pub use inspect::{DebugResolvedValue, DebugValueSource, collect_resolved_values};
 pub use target::{
