@@ -81,6 +81,16 @@ jobs:
       - name: kconfig fixture byte-parity (vendored vs. pinned alp-sdk)
         run: python3 tests/parity/kconfig_fixture_parity.py --sdk alp-sdk
 
+      # `tan bootstrap` reads the SDK's metadata/bootstrap.json (alp-sdk#917)
+      # and falls back to hand-ported constants for an SDK without one.
+      # alp-sdk's own check_bootstrap_manifest.py polices its two shell
+      # scripts against that manifest but cannot see this checkout, so this
+      # is the tan-side half of that gate. NOTE: PINNED_SDK_TAG (v0.13.0)
+      # predates #917, so this step NOTICEs and passes until the pin is
+      # bumped — same lag the kconfig step had before #897.
+      - name: bootstrap manifest byte-parity (vendored vs. pinned alp-sdk)
+        run: python3 tests/parity/bootstrap_manifest_parity.py --sdk alp-sdk
+
       # Vendored wizard scaffold tree vs. the pinned alp-sdk's live
       # `--emit scaffold`. Reuses this job's alp-sdk checkout + emit deps (same
       # as the kconfig step above) rather than a second clone. The vendored tree

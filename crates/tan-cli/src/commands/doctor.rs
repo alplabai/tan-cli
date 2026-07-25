@@ -97,13 +97,15 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
             .any(|c| c.name == "workspace" && c.status == DoctorStatus::Fail)
     {
         // `let _ = ...` used to throw away the whole bootstrap CommandRun --
-        // its exit code, its text, and (in --format json, where bootstrap.rs
+        // its exit code, its text, and (in --format json, where `bootstrap`
         // *captures* rather than streams) its entire envelope including the
-        // `bootstrap.failed` / `windows-unsupported` issue. A failed or
-        // refused `--fix` was then completely invisible: JSON mode reported
-        // nothing at all, and on Windows nothing was printed either, so
-        // `--fix` looked like a silent no-op. Fold the outcome into a doctor
-        // check instead so it survives into the report/envelope.
+        // `bootstrap.failed` / `bootstrap.prerequisites-missing` /
+        // `bootstrap.yocto-host` issue. A failed or refused `--fix` was then
+        // completely invisible: JSON mode reported nothing at all, so `--fix`
+        // looked like a silent no-op. Fold the outcome into a doctor check
+        // instead so it survives into the report/envelope. `--fix` is an
+        // EXPLICIT opt-in, so it is deliberately not covered by `tan build`'s
+        // `--no-auto-bootstrap`.
         let bootstrap_run = crate::commands::bootstrap::run(
             g,
             &BootstrapArgs {
@@ -667,11 +669,14 @@ mod tests {
 
     #[test]
     fn bootstrap_fix_check_surfaces_json_mode_failure_instead_of_silence() {
-        // Simulates bootstrap.rs's JSON-mode CommandRun: empty `text`, the
-        // failure captured only inside the serialized envelope. Before the
-        // fix `let _ = bootstrap::run(...)` discarded this whole value, so
-        // `--fix` failing (or refusing to run on Windows) was invisible.
-        let envelope = r#"{"command":"bootstrap","ok":false,"exitCode":1,"project":{"root":null,"boardYaml":null},"data":{},"issues":[{"code":"bootstrap.failed","severity":"error","message":"bootstrap.sh reported a failure; re-run without --format json to see the log."}]}"#;
+        // Simulates `bootstrap`'s JSON-mode CommandRun: empty `text`, the
+        // failure captured only inside the serialized envelope. Before the fix
+        // `let _ = bootstrap::run(...)` discarded this whole value, so a
+        // failing `--fix` was invisible. The message is a real one bootstrap
+        // can emit now that it runs west natively -- the old fixture pinned
+        // "bootstrap.sh reported a failure", which no code path produces since
+        // the bash dependency was dropped (#49).
+        let envelope = r#"{"command":"bootstrap","ok":false,"exitCode":1,"project":{"root":null,"boardYaml":null},"data":{},"issues":[{"code":"bootstrap.failed","severity":"error","message":"west update failed: fatal: unable to access remote repository"}]}"#;
         let run = CommandRun {
             exit: ExitCode::RuntimeFailure,
             text: Vec::new(),
@@ -679,7 +684,7 @@ mod tests {
         };
         let check = bootstrap_fix_doctor_check(&run);
         assert_eq!(check.status, DoctorStatus::Fail);
-        assert!(check.detail.contains("bootstrap.sh reported a failure"));
+        assert!(check.detail.contains("west update failed"));
         assert!(check.fix.is_some());
     }
 

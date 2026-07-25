@@ -157,8 +157,10 @@ pub fn parse_west_zephyr_pin(body: &str) -> Option<String> {
 }
 
 /// `"v4.4.0"` / `"4.4.0"` -> `"4.4"`; `None` for a branch/SHA revision that has
-/// no leading `MAJOR.MINOR`.
-fn parse_major_minor_tag(revision: &str) -> Option<String> {
+/// no leading `MAJOR.MINOR`. Also the parse behind
+/// [`crate::bootstrap::pin_major_minor`] — the workspace-reuse test compares
+/// the SAME `MAJOR.MINOR` shape, so there is one parser, not two.
+pub fn parse_major_minor_tag(revision: &str) -> Option<String> {
     let trimmed = revision.trim();
     let stripped = trimmed.strip_prefix('v').unwrap_or(trimmed);
     let mut parts = stripped.split('.');

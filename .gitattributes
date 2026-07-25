@@ -10,3 +10,9 @@ tests/parity/** text eol=lf
 # by tests/parity/kconfig_fixture_parity.py. Force LF for the same reason as
 # the wizard-template vendoring above.
 tests/fixtures/kconfig-contract/** text eol=lf
+
+# Vendored copy of alp-sdk's `metadata/bootstrap.json` (alp-sdk#917), byte-
+# diffed against the live checkout by tests/parity/bootstrap_manifest_parity.py.
+# Same reason again: a Windows checkout with autocrlf=true would CRLF-convert
+# it and fail that byte-diff against the LF original.
+contract/fixtures/bootstrap/** text eol=lf

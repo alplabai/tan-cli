@@ -134,14 +134,15 @@ pub(super) fn maybe_auto_bootstrap(
             print_env: false,
         },
     );
-    // `bootstrap::run` returns early on Windows with the ONLY actionable
-    // message the user gets ("not supported on native Windows... use WSL2 /
-    // docs §4"). The old `let _ =` discarded that `CommandRun` entirely, so
-    // the readiness gate below fell through to its generic `run \`tan
-    // bootstrap\`` hint — an instruction that can never succeed on this host.
-    // This is text-mode-only (the JSON path never calls `maybe_auto_bootstrap`
-    // — see the `!g.is_json()` gate at the call site), so printing here is the
-    // full fix; there is no envelope to fold an Issue into.
+    // `bootstrap::run` can return early with the ONLY actionable message the
+    // user gets — a missing `git`/`cmake`/`python` with its `winget`/apt hint,
+    // or a Yocto-only project on a non-Linux host. The old `let _ =` discarded
+    // that `CommandRun` entirely, so the readiness gate below fell through to
+    // its generic `run \`tan bootstrap\`` hint, which on those hosts can never
+    // succeed. This is text-mode-only (the JSON path never calls
+    // `maybe_auto_bootstrap` — see the `!g.is_json()` gate at the call site),
+    // so printing here is the full fix; there is no envelope to fold an Issue
+    // into.
     print_bootstrap_failure(&bootstrap_run, std::io::stderr());
     Some(resolve_cli_project_context(g))
 }
@@ -166,24 +167,28 @@ mod print_bootstrap_failure_tests {
     #[test]
     fn prints_the_failed_run_s_lines() {
         // Regression: this used to be `let _ = crate::commands::bootstrap::run(...)`
-        // — a failed delegate's own diagnostic (e.g. bootstrap's Windows
-        // "not supported" pointer) was thrown away entirely.
+        // — a failed delegate's own diagnostic (e.g. bootstrap's missing-tool
+        // list with its per-tool install hints) was thrown away entirely, and
+        // the readiness gate's generic "run `tan bootstrap`" hint took its
+        // place. `bootstrap` is native on every host now (#49), so the shape
+        // that matters is a real prerequisite failure, not a platform refusal.
         let run = CommandRun {
             exit: ExitCode::RuntimeFailure,
             text: vec![
-                "bootstrap: not supported on native Windows.".to_string(),
-                "Use WSL2 (Ubuntu) or docs/cross-platform-setup.md §4.".to_string(),
+                "Missing required tools:".to_string(),
+                "  cmake  ->  winget install -e --id Kitware.CMake".to_string(),
+                "Install the tools above (then reopen PowerShell) and re-run.".to_string(),
             ],
             json: None,
         };
         let mut buf = Vec::new();
         print_bootstrap_failure(&run, &mut buf);
         let printed = String::from_utf8(buf).unwrap();
+        assert!(printed.contains("Missing required tools"), "{printed}");
         assert!(
-            printed.contains("not supported on native Windows"),
+            printed.contains("winget install -e --id Kitware.CMake"),
             "{printed}"
         );
-        assert!(printed.contains("WSL2"), "{printed}");
     }
 
     #[test]
