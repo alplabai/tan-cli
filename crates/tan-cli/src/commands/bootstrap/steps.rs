@@ -165,6 +165,11 @@ fn prereq_present(tool: &str, is_windows: bool) -> bool {
 /// the fatal message lines verbatim PLUS the structured per-tool form of them
 /// (see [`PrereqFailure`]).
 ///
+/// `pub(crate)` rather than `pub(super)`: `commands::doctor` runs this SAME
+/// gate so plain `tan doctor` reports a missing `ninja` without anyone having
+/// to run bootstrap first (alp-sdk ADR 0021 P0a). One probe, not two that could
+/// disagree about what the host is missing.
+///
 /// This is the PROBING half only — `prereq_present` walks PATH and
 /// `probe_host_python` spawns interpreters, so it has to live here. Every
 /// message and every struct it returns is built by
@@ -177,7 +182,7 @@ fn prereq_present(tool: &str, is_windows: bool) -> bool {
 /// not silently unified") and so does this: the floor below is applied on the
 /// Windows branch only. Every path that actually RUNS an SDK script still
 /// applies `crate::util::python_too_old` on both platforms.
-pub(super) fn check_prerequisites(
+pub(crate) fn check_prerequisites(
     facts: &BootstrapFacts,
     is_windows: bool,
 ) -> Result<HostPython, PrereqFailure> {

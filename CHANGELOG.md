@@ -8,6 +8,21 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`tan doctor` reports a missing host prerequisite without `--fix`.**
+  `check_prerequisites` had no caller outside `tan bootstrap`, so the only way
+  a missing `ninja` surfaced was `tan doctor --build --fix`, which runs
+  bootstrap to find out — and in the extension a missing `ninja` therefore read
+  as `failed to launch (exit code: 1)` from the bootstrap terminal. Plain
+  `tan doctor` now runs bootstrap's own gate (not a second copy of it) and
+  reports a `hostPrerequisites` check. It is on the plain report, not
+  `--build`: prerequisites are a HOST fact needing no `board.yaml`, no
+  workspace and no SDK, and alp-sdk ADR 0021's Lane 1 P0a runs `tan doctor`
+  *before* the bootstrap terminal exists — while `--build` already probes
+  `ninja`/`cmake` through `BuildToolProbe` and would report them twice. The
+  check's detail names which tool list it checked against — the SDK's
+  `metadata/bootstrap.json` or tan's built-in fallback — so a run with no
+  resolvable SDK still checks the host and says which list it used, rather
+  than implying it read the SDK's. (alp-sdk ADR 0021 P0a)
 - **`tan bootstrap` reports its missing prerequisites as structured data.**
   The envelope's issue message is the message lines joined with a space, and
   an install command contains the same spaces the join used — so
@@ -43,6 +58,23 @@ All notable changes to `tan` are documented here. Format follows
   the project's own `build` root. (#52)
 
 ### Changed
+- **The `doctor` envelope gained `data.missingPrerequisites` and a
+  `doctor.hostPrerequisites` issue code.** The new check (see Added) reports
+  `Fail` on every prerequisite refusal — each one blocks a build, and bootstrap
+  itself refuses to run against exactly these — so **a host missing a
+  prerequisite now makes plain `tan doctor` exit `4` (`doctorFailure`) where it
+  previously passed**, and raises a `doctor.hostPrerequisites` error issue. The
+  structured half rides on `data.missingPrerequisites`, deliberately the same
+  key, the same `[{tool, command}]` element and the same `null`-never-`[]` rule
+  as the `bootstrap` envelope's field, so one fact does not get two
+  vocabularies. The code is `doctor.*`, not the `bootstrap.prerequisites-missing`
+  a consumer may already match: in this CLI an issue code's prefix is the
+  command that emitted the envelope, without exception, and a `bootstrap.*` code
+  inside a `doctor` envelope would tell a consumer a command ran that did not.
+  `missingPrerequisites` is present on every `doctor` envelope, `null` when
+  there is no missing TOOL to name — a clean host, an error envelope that never
+  reached the probe, and the two Python-floor refusals, whose fix no
+  `{tool, command}` pair can carry. (alp-sdk ADR 0021 P0a)
 - **`tan bootstrap`'s two Python-floor refusals report under their own issue
   codes.** A host whose `python` does not run now raises
   `bootstrap.python-not-runnable`, and one below `pythonMinVersion` raises

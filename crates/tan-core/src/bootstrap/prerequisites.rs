@@ -15,6 +15,8 @@
 
 use serde::Serialize;
 
+use crate::debug::{DoctorCheck, DoctorStatus};
+
 /// One missing host prerequisite, in the form a consumer can act on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MissingPrerequisite {
@@ -159,6 +161,71 @@ pub fn python_too_old(found: (u32, u32), floor: (u32, u32)) -> PrereqFailure {
     }
 }
 
+/// The envelope form of a refusal's missing-tool list: `None` when the refusal
+/// names no tool.
+///
+/// `[]` is NEVER a value here. The two Python-floor refusals reach this with an
+/// empty vec, and `[]` on the wire would spell "checked, nothing missing" —
+/// which is exactly what a run that found the list clean reports, as `null`.
+/// One fact, one spelling.
+///
+/// Shared by `bootstrap`'s `data.missingPrerequisites` and `doctor`'s: the rule
+/// has to be identical in both envelopes or a consumer that learned it from one
+/// command gets it wrong on the other.
+pub fn reported_missing(missing: Vec<MissingPrerequisite>) -> Option<Vec<MissingPrerequisite>> {
+    (!missing.is_empty()).then_some(missing)
+}
+
+/// The `doctor` verdict for a prerequisite probe: the check `tan doctor`
+/// reports so a missing `ninja` is visible WITHOUT running `tan bootstrap`
+/// (alp-sdk ADR 0021, Lane 1 P0a — the extension gates the bootstrap terminal
+/// on this instead of letting it die as "failed to launch (exit code: 1)").
+///
+/// `Fail`, not `Warn`, on every refusal: each one is a hard blocker for
+/// building, and bootstrap itself refuses to run against exactly these. There
+/// is no degraded-but-usable middle here.
+///
+/// One check for all three refusals, so the wording that reaches a human is the
+/// SAME string bootstrap would have printed (`lines.join(" ")`, as `failure()`
+/// joins it). The machine half — which tool, which install command — travels
+/// separately in `data.missingPrerequisites` via [`reported_missing`], because
+/// that join is not recoverable from the prose.
+///
+/// `from_manifest` is [`BootstrapFacts::from_manifest`](super::BootstrapFacts):
+/// the detail names which tool list was actually checked, the same fact
+/// bootstrap's envelope reports as `factsFromManifest`. A `doctor` run with no
+/// resolvable SDK still checks the host — against tan's built-in list — and has
+/// to say so rather than imply it read the SDK's.
+pub fn doctor_prerequisite_check(
+    refusal: Option<&PrereqFailure>,
+    checked: &[String],
+    from_manifest: bool,
+) -> DoctorCheck {
+    let source = if from_manifest {
+        "facts from alp-sdk metadata/bootstrap.json"
+    } else {
+        "facts from tan's built-in fallback list"
+    };
+    let (status, detail, fix) = match refusal {
+        None => (
+            DoctorStatus::Pass,
+            format!("{} present ({source})", checked.join(", ")),
+            None,
+        ),
+        Some(failure) => (
+            DoctorStatus::Fail,
+            format!("{} ({source})", failure.lines.join(" ")),
+            Some("Install the missing prerequisites, then run `tan bootstrap`.".to_string()),
+        ),
+    };
+    DoctorCheck {
+        name: "hostPrerequisites".to_string(),
+        status,
+        detail,
+        fix,
+    }
+}
+
 /// POSIX: `python3` is on PATH but did not run — the only failure this port
 /// adds over `bootstrap.sh`, which would have hit it one step later at
 /// `python3 -m venv`.
@@ -271,6 +338,70 @@ mod tests {
         );
         assert!(refusal.missing.iter().all(|m| m.command.is_none()));
         assert_eq!(refusal.missing.len(), 2);
+    }
+
+    #[test]
+    fn reported_missing_never_spells_a_clean_check_as_an_empty_array() {
+        // `[]` would mean "checked, nothing missing" -- which is what a clean
+        // run reports as `null`. Both bootstrap's envelope and doctor's key off
+        // this one function so the two cannot drift into two spellings.
+        assert_eq!(reported_missing(Vec::new()), None);
+        assert_eq!(
+            reported_missing(python_too_old((3, 9), (3, 10)).missing),
+            None
+        );
+        assert_eq!(
+            reported_missing(windows_refusal(&["ninja"]).missing).map(|m| m.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn the_doctor_check_fails_on_every_refusal_and_names_its_facts_source() {
+        // The gap this closes: plain `tan doctor` never mentioned a missing
+        // `ninja` at all, so the extension had nothing to render and the user
+        // met it as "failed to launch (exit code: 1)" from the bootstrap
+        // terminal instead (ADR 0021 P0a).
+        let checked = vec!["git".to_string(), "ninja".to_string()];
+        let pass = doctor_prerequisite_check(None, &checked, true);
+        assert_eq!(pass.name, "hostPrerequisites");
+        assert_eq!(pass.status, DoctorStatus::Pass);
+        assert_eq!(
+            pass.detail,
+            "git, ninja present (facts from alp-sdk metadata/bootstrap.json)"
+        );
+        assert!(pass.fix.is_none());
+
+        // No resolvable SDK -> still a real host check, against tan's own list,
+        // and the detail must SAY so rather than imply it read the SDK's.
+        let fallback = doctor_prerequisite_check(None, &checked, false);
+        assert!(
+            fallback
+                .detail
+                .ends_with("(facts from tan's built-in fallback list)"),
+            "{}",
+            fallback.detail
+        );
+
+        // Every refusal is a hard blocker -- including the two Python-floor
+        // ones, which name no tool and so can only be actioned through the
+        // message. The wording is bootstrap's own, space-joined exactly as the
+        // envelope's issue message joins it.
+        for refusal in [
+            windows_refusal(&["ninja"]),
+            posix_refusal(&["cmake"]),
+            windows_python_not_runnable(),
+            python_too_old((3, 9), (3, 10)),
+        ] {
+            let check = doctor_prerequisite_check(Some(&refusal), &checked, true);
+            assert_eq!(check.status, DoctorStatus::Fail);
+            assert!(check.fix.is_some());
+            assert!(
+                check.detail.starts_with(&refusal.lines.join(" ")),
+                "{}",
+                check.detail
+            );
+        }
     }
 
     #[test]

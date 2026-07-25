@@ -16,13 +16,16 @@ use tan_core::{
     parse_server_kind, parse_target_kind,
 };
 
+use tan_core::bootstrap::{doctor_prerequisite_check, fallback_facts, reported_missing};
+
 use super::CommandRun;
 use crate::cli::{BootstrapArgs, DoctorArgs, GlobalArgs};
+use crate::commands::bootstrap::{check_prerequisites, load_facts};
 use crate::commands::build::probe_build_preflight;
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 use crate::style::{self, Theme};
-use crate::util::{command_on_path, generated_at_iso, resolve_cli_project_context};
+use crate::util::{MIN_PYTHON, command_on_path, generated_at_iso, resolve_cli_project_context};
 
 /// Entry point for `tan doctor`: dispatches to `--build` readiness, else resolves
 /// the debug context, validates `--target-kind`/`--server`, probes runtime
@@ -56,6 +59,7 @@ pub fn run(g: &GlobalArgs, args: &DoctorArgs) -> CommandRun {
     let runtime =
         collect_runtime_capabilities_from_commands(&project_context(&context), command_on_path);
     let mut report = build_doctor_report(&context, target, server, &runtime);
+    append_host_prerequisites(&mut report, context.sdk_root.as_deref());
     append_sdk_provenance(
         &mut report.checks,
         &mut report.summary,
@@ -184,6 +188,51 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         .then(|| Envelope::new("doctor", resolved_project, report, issues, exit.code()).to_json());
 
     CommandRun { exit, text, json }
+}
+
+/// Append the `hostPrerequisites` check: run `bootstrap`'s own prerequisite
+/// gate and report its verdict, so a missing `ninja` is visible from plain
+/// `tan doctor` (alp-sdk ADR 0021, Lane 1 P0a).
+///
+/// PLAIN `tan doctor`, not `--build`, deliberately. Prerequisites are a HOST
+/// fact — they need no `board.yaml`, no workspace, no SDK — and P0a runs this
+/// BEFORE the bootstrap terminal exists, when there is nothing project-shaped to
+/// resolve yet. `--build` is the project-shaped report (its OS set comes from
+/// the active `board.yaml`) and already probes `ninja`/`cmake` separately
+/// through `BuildToolProbe`; adding this there would report the same tool twice
+/// under two names.
+///
+/// Facts: the SDK's `metadata/bootstrap.json` when one resolves and parses,
+/// else tan's built-in fallback list — including when the manifest is
+/// version-skewed, whose FATAL verdict belongs to the commands that act on it
+/// (`bootstrap`, `build`), not to a read-only report. Either way the host IS
+/// checked and the check's detail names which list it checked against, the same
+/// fact bootstrap's envelope reports as `factsFromManifest`; a doctor run
+/// without an SDK must not quietly claim the host is fine.
+fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Option<&str>) {
+    let facts = sdk_root
+        .and_then(|root| load_facts(root).ok())
+        .unwrap_or_else(|| fallback_facts(MIN_PYTHON));
+    let is_windows = cfg!(windows);
+    let refusal = check_prerequisites(&facts, is_windows).err();
+
+    let check = doctor_prerequisite_check(
+        refusal.as_ref(),
+        facts.prerequisites(is_windows),
+        facts.from_manifest,
+    );
+    // The structured half: `{tool, command}` pairs a consumer can render as
+    // buttons. It rides on the report rather than the check because the issue
+    // message is prose the split is not recoverable from -- the whole point of
+    // the bootstrap side it mirrors (alp-sdk-vscode#347).
+    report.missing_prerequisites = refusal.and_then(|f| reported_missing(f.missing));
+
+    match check.status {
+        DoctorStatus::Pass => report.summary.pass += 1,
+        DoctorStatus::Warn => report.summary.warn += 1,
+        DoctorStatus::Fail => report.summary.fail += 1,
+    }
+    report.checks.push(check);
 }
 
 /// Append an SDK-provenance check (conformance Issue 4 + 6): records the SDK
@@ -487,6 +536,10 @@ fn empty_report(
         },
         checks: Vec::new(),
         next_steps,
+        // These paths refuse before the prerequisite gate ever runs, so there is
+        // no verdict to report -- `null`, exactly as bootstrap's own
+        // pre-gate refusals report it.
+        missing_prerequisites: None,
     }
 }
 
@@ -649,8 +702,62 @@ mod tests {
         assert!(json.contains("\"root\":null"));
         assert!(json.contains("doctor.server-compatibility"));
         assert!(json.contains("\"checks\":[]"));
+        // Explicit `null`, not an omitted key -- a consumer can see the field
+        // exists from any captured envelope, matching bootstrap's.
+        assert!(json.contains("\"missingPrerequisites\":null"));
         assert!(json.contains("Server 'jlink' is not supported for 'native-host'."));
         assert!(json.contains("Choose a supported server for the selected target-kind."));
+    }
+
+    #[test]
+    fn host_prerequisites_is_reported_and_its_structured_half_tracks_the_verdict() {
+        // The gap ADR 0021 P0a names: `check_prerequisites` had ZERO references
+        // in this file, so plain `tan doctor` never mentioned a missing `ninja`
+        // and the extension had nothing to render. The OUTCOME here depends on
+        // the test host's PATH, so what is pinned is the wiring: the check
+        // lands, the summary counts it, and the structured field agrees with it.
+        let mut report = empty_report(
+            "1970-01-01T00:00:00.000Z",
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            Vec::new(),
+        );
+        report.summary.fail = 0;
+        // No SDK root resolves -> the fallback tool list, still a real probe.
+        append_host_prerequisites(&mut report, None);
+
+        assert_eq!(report.checks.len(), 1);
+        let check = &report.checks[0];
+        assert_eq!(check.name, "hostPrerequisites");
+        assert_eq!(
+            report.summary.pass + report.summary.warn + report.summary.fail,
+            1,
+            "the appended check must be counted exactly once"
+        );
+        assert!(
+            check
+                .detail
+                .contains("facts from tan's built-in fallback list"),
+            "a doctor run with no SDK must say which list it checked: {}",
+            check.detail
+        );
+        match check.status {
+            // Clean host: nothing to name, so `null` -- never `[]`.
+            DoctorStatus::Pass => assert!(report.missing_prerequisites.is_none()),
+            // Refused: a tool-naming refusal must hand the consumer the pairs
+            // rather than leave it to re-parse the joined message, and the two
+            // Python-floor refusals name no tool at all (hence `is_none()` is
+            // also legal here).
+            _ => {
+                assert!(check.fix.is_some());
+                if let Some(missing) = &report.missing_prerequisites {
+                    assert!(!missing.is_empty(), "an empty list must serialize as null");
+                    for entry in missing {
+                        assert!(check.detail.contains(&entry.tool));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

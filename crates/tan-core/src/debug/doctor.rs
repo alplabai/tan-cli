@@ -73,6 +73,24 @@ pub struct DoctorReport {
     /// Deduplicated remediation steps for non-passing checks.
     #[serde(rename = "nextSteps")]
     pub next_steps: Vec<String>,
+    /// Per-tool form of the `hostPrerequisites` check's refusal, so a consumer
+    /// never has to parse a rendered line back apart.
+    ///
+    /// Deliberately the SAME key, the same element type, and the same
+    /// `null`-never-`[]` rule as the `bootstrap` envelope's
+    /// `data.missingPrerequisites` (see
+    /// [`reported_missing`](crate::bootstrap::reported_missing)): one fact
+    /// reported by two commands must not have two vocabularies, or a consumer
+    /// that learned it from `bootstrap` gets it wrong on `doctor`.
+    ///
+    /// `null` whenever there is no missing TOOL to name — a clean host, an
+    /// error envelope that never reached the probe, and the two Python-floor
+    /// refusals, which have no `{tool, command}` pair that could carry the fix.
+    /// No `skip_serializing_if`, for the same reason bootstrap has none: the key
+    /// is then in every sample, so a consumer can see it exists without
+    /// reaching for a schema.
+    #[serde(rename = "missingPrerequisites")]
+    pub missing_prerequisites: Option<Vec<crate::bootstrap::MissingPrerequisite>>,
 }
 
 /// A companion viewer extension surfaced as an MCU debug-readiness check.
@@ -324,6 +342,9 @@ fn finalize_report(
         summary,
         checks,
         next_steps,
+        // The prerequisite probe walks PATH and spawns interpreters, so it is
+        // appended by `tan-cli` after this pure report is built, never here.
+        missing_prerequisites: None,
     }
 }
 
