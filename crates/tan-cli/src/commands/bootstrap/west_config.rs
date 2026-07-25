@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 /// guards, this only fixes the clear-divergence case. Returns `(config_path,
 /// old_rel, new_rel)` when it rewrote the file, for the optional text-mode
 /// info line.
-pub(super) fn reconcile_west_manifest_path(sdk_root: &str) -> Option<(PathBuf, String, String)> {
+pub(crate) fn reconcile_west_manifest_path(sdk_root: &str) -> Option<(PathBuf, String, String)> {
     let sdk_root_path = Path::new(sdk_root);
     let topdir = sdk_root_path.parent()?;
     let config_path = topdir.join(".west").join("config");

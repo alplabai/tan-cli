@@ -43,7 +43,12 @@ use crate::util::{MIN_PYTHON, resolve_cli_project_context};
 use steps::{
     Log, Runner, Workspace, check_prerequisites, ensure_venv, native, pip_phase, west_phase,
 };
-use west_config::{reconcile_west_manifest_path, same_directory};
+use west_config::same_directory;
+// Re-exported at crate visibility (rather than the module's own `pub(super)`)
+// so `commands::sdk`'s `run_switch` can chain the SAME reconciliation (#62) —
+// `west_config` itself stays a private submodule; only this one function
+// needs a wider audience than `bootstrap` alone.
+pub(crate) use west_config::reconcile_west_manifest_path;
 
 /// `data` payload for the `bootstrap` envelope: the resolved SDK root, the
 /// three paths the run produced, where its facts came from, and the flags.

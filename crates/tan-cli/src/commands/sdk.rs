@@ -16,6 +16,7 @@ use tan_core::{
 };
 
 use super::CommandRun;
+use super::bootstrap::reconcile_west_manifest_path;
 use crate::cli::{GlobalArgs, SdkArgs};
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
@@ -494,7 +495,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     } else {
         "project"
     };
-    let text = vec![
+    let mut text = vec![
         format!(
             "Switched {scope_label} SDK to {}.",
             readiness
@@ -505,6 +506,64 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
         format!("  path    {sdk_path}"),
         format!("  state   {}", state_label(readiness.state)),
     ];
+
+    // #62: the pointer write above only repoints the ACTIVE-SDK pointer
+    // (`.alp/sdk-path` / `~/.alp/sdk-default`); it never touches
+    // `<topdir>/.west/config`'s OWN manifest pointer, which `west` reads
+    // directly and independently. Left alone, a `.west/config` written by a
+    // PRIOR bootstrap/switch under the same topdir keeps naming that old SDK
+    // checkout -- silently, until something needs the workspace (#62's `west
+    // flash` fell back to an unrelated Zephyr tree and failed with `unknown
+    // runner`). Warn, never fail: `sdk switch` is exactly the command a user
+    // runs to escape a broken workspace pointer, so hard-failing here would
+    // block the escape hatch -- worse than the staleness it replaces. Safe to
+    // call unconditionally: a no-op whenever the pointer already matches.
+    let mut issues: Vec<Issue> = Vec::new();
+    if let Some((config_path, old_rel, new_rel)) = reconcile_west_manifest_path(&sdk_path) {
+        // A reconcile firing at all means this topdir's `.west/` was read
+        // successfully and its `path` did NOT already name `sdk_path` --
+        // i.e. the workspace under it was bootstrapped for a DIFFERENT SDK.
+        // `west update` never ran against the newly selected one's manifest,
+        // so the checked-out zephyr/HAL trees still reflect the old SDK; a
+        // bare "switched" success here would read as nothing left to do.
+        let old_existed = Path::new(&sdk_path)
+            .parent()
+            .is_some_and(|topdir| topdir.join(&old_rel).exists());
+        // Distinguish "pointed at a still-present sibling SDK checkout" from
+        // the state #62 reported -- `path` naming a directory that no longer
+        // exists on disk at all, which the reporter called unambiguously
+        // broken -- rather than folding both into one generic line.
+        let message = if old_existed {
+            format!(
+                "reconciled {} manifest.path {old_rel} -> {new_rel} (it named a different SDK \
+                 checkout under this topdir, #31)",
+                config_path.display()
+            )
+        } else {
+            format!(
+                "reconciled {} manifest.path {old_rel} -> {new_rel} ({old_rel} no longer exists \
+                 on disk -- the workspace's only manifest pointer was unambiguously broken, #62)",
+                config_path.display()
+            )
+        };
+        text.push(format!("  info    {message}"));
+        issues.push(Issue {
+            code: "sdk.west-config-reconciled".to_string(),
+            severity: "warning".to_string(),
+            message,
+        });
+        text.push(
+            "  next    run `tan bootstrap` to sync the workspace to the new SDK.".to_string(),
+        );
+        issues.push(Issue {
+            code: "sdk.bootstrap-recommended".to_string(),
+            severity: "warning".to_string(),
+            message: "this topdir's workspace was bootstrapped for a different SDK version; run \
+                      `tan bootstrap` to sync it to the newly selected one."
+                .to_string(),
+        });
+    }
+
     emit_success(
         g,
         SwitchData {
@@ -514,7 +573,7 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
             scope,
         },
         ExitCode::Success,
-        Vec::new(),
+        issues,
         text,
     )
 }
@@ -844,6 +903,108 @@ mod tests {
         assert_eq!(data["issues"][0]["code"], "sdk.not-an-sdk-checkout");
         // No pointer was written.
         assert!(!ws.join(".alp").join("sdk-path").exists());
+    }
+
+    #[test]
+    fn switch_reconciles_a_stale_west_config_pointer() {
+        // Regression for #62: `write_sdk_pointer` only repoints the
+        // ACTIVE-SDK pointer (`.alp/sdk-path`); `run_switch` used to return
+        // right after that, never touching `<topdir>/.west/config`'s OWN
+        // manifest pointer, which `west` reads directly. Two SDK versions
+        // sharing one topdir (like `~/.alp/sdk-cache/*`) -- switching from
+        // the first to the second must reconcile it, same as `tan bootstrap`
+        // already does (#31).
+        let ws = tmp("switch-reconcile-ws");
+        let topdir = tmp("switch-reconcile-topdir");
+        let old_sdk = topdir.join("v0.11.0");
+        make_sdk_root(&old_sdk); // still present -- the benign-divergence case.
+        let new_sdk = topdir.join("v0.13.0");
+        make_sdk_root(&new_sdk);
+        let west_dir = topdir.join(".west");
+        std::fs::create_dir_all(&west_dir).unwrap();
+        std::fs::write(
+            west_dir.join("config"),
+            "[manifest]\npath = v0.11.0\nfile = west.yml\n",
+        )
+        .unwrap();
+        let g = global(&ws, None, Format::Json);
+
+        let run = run_switch(
+            &g,
+            &SdkArgs {
+                subcommand: Some("switch".to_string()),
+                arg: Some(new_sdk.to_string_lossy().into_owned()),
+                destination: None,
+                global: false,
+            },
+        );
+
+        assert_eq!(run.exit, ExitCode::Success);
+        assert_eq!(
+            std::fs::read_to_string(west_dir.join("config")).unwrap(),
+            "[manifest]\npath = v0.13.0\nfile = west.yml\n",
+            "switch must rewrite the topdir's .west/config, not just the active-SDK pointer"
+        );
+        let data = json_data(&run);
+        let codes: Vec<String> = data["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|issue| issue["code"].as_str().unwrap().to_string())
+            .collect();
+        assert!(codes.contains(&"sdk.west-config-reconciled".to_string()));
+        assert!(
+            codes.contains(&"sdk.bootstrap-recommended".to_string()),
+            "a reconciled pointer means this topdir was bootstrapped for the OLD SDK -- the \
+             result must name `tan bootstrap` as the next step, not report a bare success"
+        );
+    }
+
+    #[test]
+    fn switch_reconcile_names_a_stale_path_that_no_longer_exists_as_unambiguously_broken() {
+        // The exact state #62 reported: `.west/config`'s `path` names a
+        // version pruned from the cache entirely -- not just "a different
+        // but still-present sibling". Worth a distinct wording rather than
+        // folding both cases into one generic reconciliation line.
+        let ws = tmp("switch-reconcile-pruned-ws");
+        let topdir = tmp("switch-reconcile-pruned-topdir");
+        let new_sdk = topdir.join("v0.13.0");
+        make_sdk_root(&new_sdk);
+        // deliberately NOT creating topdir/v0.11.0 -- it was pruned from the cache.
+        let west_dir = topdir.join(".west");
+        std::fs::create_dir_all(&west_dir).unwrap();
+        std::fs::write(
+            west_dir.join("config"),
+            "[manifest]\npath = v0.11.0\nfile = west.yml\n",
+        )
+        .unwrap();
+        let g = global(&ws, None, Format::Json);
+
+        let run = run_switch(
+            &g,
+            &SdkArgs {
+                subcommand: Some("switch".to_string()),
+                arg: Some(new_sdk.to_string_lossy().into_owned()),
+                destination: None,
+                global: false,
+            },
+        );
+
+        assert_eq!(run.exit, ExitCode::Success);
+        let data = json_data(&run);
+        let message = data["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|issue| issue["code"] == "sdk.west-config-reconciled")
+            .expect("expected a west-config-reconciled issue")["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            message.contains("no longer exists on disk"),
+            "expected the unambiguously-broken wording (#62), got: {message}"
+        );
     }
 
     #[test]
