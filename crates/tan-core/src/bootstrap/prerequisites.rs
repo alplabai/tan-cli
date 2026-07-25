@@ -15,7 +15,7 @@
 
 use serde::Serialize;
 
-use crate::debug::{DoctorCheck, DoctorStatus};
+use crate::debug::{DoctorCheck, DoctorReport, DoctorStatus};
 
 /// One missing host prerequisite, in the form a consumer can act on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -196,10 +196,21 @@ pub fn reported_missing(missing: Vec<MissingPrerequisite>) -> Option<Vec<Missing
 /// bootstrap's envelope reports as `factsFromManifest`. A `doctor` run with no
 /// resolvable SDK still checks the host — against tan's built-in list — and has
 /// to say so rather than imply it read the SDK's.
+///
+/// `manifest_error` is the version-skew / parse guard's `Err` message, when an
+/// SDK resolved but its `metadata/bootstrap.json` was REFUSED. Reporting that as
+/// a plain fallback would be the worst outcome available: `tan doctor` is the
+/// command a user runs to find out why `tan bootstrap` refuses, and bootstrap's
+/// verdict on the very same message is a fatal `ValidationFailure`. Doctor does
+/// not repeat that verdict — it is a read-only report and the tool list it fell
+/// back to is still a real answer — but it must not report a bare `Pass` either,
+/// so a rejected manifest is at minimum a `Warn` naming the rejection verbatim.
+/// A refusal still outranks it: a missing `ninja` is the more urgent fact.
 pub fn doctor_prerequisite_check(
     refusal: Option<&PrereqFailure>,
     checked: &[String],
     from_manifest: bool,
+    manifest_error: Option<&str>,
 ) -> DoctorCheck {
     let source = if from_manifest {
         "facts from alp-sdk metadata/bootstrap.json"
@@ -218,12 +229,63 @@ pub fn doctor_prerequisite_check(
             Some("Install the missing prerequisites, then run `tan bootstrap`.".to_string()),
         ),
     };
+    let (status, detail, fix) = match manifest_error {
+        None => (status, detail, fix),
+        Some(message) => (
+            // `max` in severity terms, spelled out: a refusal stays `Fail`.
+            if status == DoctorStatus::Fail {
+                DoctorStatus::Fail
+            } else {
+                DoctorStatus::Warn
+            },
+            format!("{detail} — {BOOTSTRAP_MANIFEST_REJECTED_PREFIX}{message}"),
+            // The refusal's own fix wins when there is one; the manifest is the
+            // secondary problem then.
+            fix.or_else(|| {
+                Some(
+                    "Update `tan` or pin an SDK whose metadata/bootstrap.json this version \
+                     understands; `tan bootstrap` will refuse outright until then."
+                        .to_string(),
+                )
+            }),
+        ),
+    };
     DoctorCheck {
         name: "hostPrerequisites".to_string(),
         status,
         detail,
         fix,
     }
+}
+
+/// The detail-string marker for a refused manifest. Its own constant so the
+/// wiring test can assert the message SURVIVED into the check rather than
+/// re-spelling the sentence.
+pub const BOOTSTRAP_MANIFEST_REJECTED_PREFIX: &str = "metadata/bootstrap.json rejected: ";
+
+/// Fold a finished `hostPrerequisites` check into the report: count it in the
+/// summary, and record the machine-readable half of the same verdict.
+///
+/// Pure, and in `tan-core`, precisely because the probe that produces `check`
+/// is not. When this lived inline next to the PATH walk, its test could only
+/// ever exercise whichever branch the test host happened to be in — a clean
+/// host, always `Pass` — and the refusal path was dead code at test time.
+/// Deleting the whole `missing_prerequisites` assignment, or swapping the
+/// `Pass`/`Fail` summary arms (which would exit 4 on every clean host), both
+/// left the suite green. Taking the verdict as a PARAMETER is what makes those
+/// mutations fail, so all three outcomes are tested below rather than one.
+pub fn apply_prerequisite_check(
+    report: &mut DoctorReport,
+    check: DoctorCheck,
+    missing: Vec<MissingPrerequisite>,
+) {
+    report.missing_prerequisites = reported_missing(missing);
+    match check.status {
+        DoctorStatus::Pass => report.summary.pass += 1,
+        DoctorStatus::Warn => report.summary.warn += 1,
+        DoctorStatus::Fail => report.summary.fail += 1,
+    }
+    report.checks.push(check);
 }
 
 /// POSIX: `python3` is on PATH but did not run — the only failure this port
@@ -363,7 +425,7 @@ mod tests {
         // met it as "failed to launch (exit code: 1)" from the bootstrap
         // terminal instead (ADR 0021 P0a).
         let checked = vec!["git".to_string(), "ninja".to_string()];
-        let pass = doctor_prerequisite_check(None, &checked, true);
+        let pass = doctor_prerequisite_check(None, &checked, true, None);
         assert_eq!(pass.name, "hostPrerequisites");
         assert_eq!(pass.status, DoctorStatus::Pass);
         assert_eq!(
@@ -374,7 +436,7 @@ mod tests {
 
         // No resolvable SDK -> still a real host check, against tan's own list,
         // and the detail must SAY so rather than imply it read the SDK's.
-        let fallback = doctor_prerequisite_check(None, &checked, false);
+        let fallback = doctor_prerequisite_check(None, &checked, false, None);
         assert!(
             fallback
                 .detail
@@ -393,7 +455,7 @@ mod tests {
             windows_python_not_runnable(),
             python_too_old((3, 9), (3, 10)),
         ] {
-            let check = doctor_prerequisite_check(Some(&refusal), &checked, true);
+            let check = doctor_prerequisite_check(Some(&refusal), &checked, true, None);
             assert_eq!(check.status, DoctorStatus::Fail);
             assert!(check.fix.is_some());
             assert!(
@@ -402,6 +464,148 @@ mod tests {
                 check.detail
             );
         }
+    }
+
+    #[test]
+    fn a_rejected_manifest_is_named_in_the_check_instead_of_being_swallowed() {
+        // `load_facts` returns a hard `Err` naming WHY a present-but-skewed
+        // `metadata/bootstrap.json` was refused -- for `tan bootstrap` that is a
+        // fatal ValidationFailure. Doctor used to `.ok()` the message away and
+        // report a plain `Pass` whose detail was byte-identical to the no-SDK
+        // case, so the one command a user runs to find out why bootstrap refuses
+        // was the command hiding the reason.
+        let checked = vec!["git".to_string()];
+        let skew = "metadata/bootstrap.json declares schemaVersion 2, but this `tan` supports \
+                    only 1.";
+
+        let warned = doctor_prerequisite_check(None, &checked, false, Some(skew));
+        assert_eq!(warned.status, DoctorStatus::Warn);
+        assert!(warned.detail.contains(skew), "{}", warned.detail);
+        assert!(
+            warned
+                .detail
+                .contains(BOOTSTRAP_MANIFEST_REJECTED_PREFIX)
+                // The fallback list is still what was checked, and must still
+                // say so -- the two facts are reported together, not swapped.
+                && warned.detail.contains("built-in fallback list"),
+            "{}",
+            warned.detail
+        );
+        assert!(warned.fix.is_some());
+
+        // A real refusal outranks it: a missing `ninja` stays the `Fail`, and
+        // keeps ITS fix (install the tools), with the manifest as the tail.
+        let refused = doctor_prerequisite_check(
+            Some(&windows_refusal(&["ninja"])),
+            &checked,
+            false,
+            Some(skew),
+        );
+        assert_eq!(refused.status, DoctorStatus::Fail);
+        assert!(refused.detail.contains(skew));
+        assert_eq!(
+            refused.fix.as_deref(),
+            Some("Install the missing prerequisites, then run `tan bootstrap`.")
+        );
+    }
+
+    /// A `DoctorReport` with nothing counted yet, so each case below asserts on
+    /// exactly what `apply_prerequisite_check` did.
+    fn empty_doctor_report() -> DoctorReport {
+        DoctorReport {
+            generated_at: "1970-01-01T00:00:00.000Z".to_string(),
+            target_kind: crate::debug::DebugTargetKind::NativeHost,
+            server: crate::debug::DebugServerKind::None,
+            summary: crate::debug::DoctorSummary {
+                pass: 0,
+                warn: 0,
+                fail: 0,
+            },
+            checks: Vec::new(),
+            next_steps: Vec::new(),
+            missing_prerequisites: None,
+        }
+    }
+
+    #[test]
+    fn a_clean_host_counts_a_pass_and_names_no_tool() {
+        let checked = vec!["git".to_string()];
+        let mut report = empty_doctor_report();
+        apply_prerequisite_check(
+            &mut report,
+            doctor_prerequisite_check(None, &checked, true, None),
+            Vec::new(),
+        );
+
+        // Swapping the summary arms would exit 4 on every clean host; this is
+        // the assertion that catches it.
+        assert_eq!(
+            (
+                report.summary.pass,
+                report.summary.warn,
+                report.summary.fail
+            ),
+            (1, 0, 0)
+        );
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].name, "hostPrerequisites");
+        // `null`, never `[]` -- see `reported_missing`.
+        assert_eq!(report.missing_prerequisites, None);
+    }
+
+    #[test]
+    fn a_tool_naming_refusal_counts_a_fail_and_carries_the_pairs() {
+        let checked = vec!["git".to_string(), "ninja".to_string()];
+        let refusal = windows_refusal(&["ninja"]);
+        let mut report = empty_doctor_report();
+        apply_prerequisite_check(
+            &mut report,
+            doctor_prerequisite_check(Some(&refusal), &checked, true, None),
+            refusal.missing.clone(),
+        );
+
+        assert_eq!(
+            (
+                report.summary.pass,
+                report.summary.warn,
+                report.summary.fail
+            ),
+            (0, 0, 1)
+        );
+        // Deleting the structured half -- the whole point of the change -- has
+        // to fail HERE, not go unnoticed because the host happened to be clean.
+        assert_eq!(
+            report.missing_prerequisites,
+            Some(vec![MissingPrerequisite {
+                tool: "ninja".to_string(),
+                command: Some("winget install -e --id Ninja-build.Ninja".to_string()),
+            }])
+        );
+    }
+
+    #[test]
+    fn a_python_floor_refusal_counts_a_fail_but_still_names_no_tool() {
+        // The asymmetric case: fully actionable through the MESSAGE, with no
+        // `{tool, command}` pair that could carry it -- so `Fail` with `null`.
+        let checked = vec!["python".to_string()];
+        let refusal = python_too_old((3, 9), (3, 10));
+        let mut report = empty_doctor_report();
+        apply_prerequisite_check(
+            &mut report,
+            doctor_prerequisite_check(Some(&refusal), &checked, true, None),
+            refusal.missing.clone(),
+        );
+
+        assert_eq!(
+            (
+                report.summary.pass,
+                report.summary.warn,
+                report.summary.fail
+            ),
+            (0, 0, 1)
+        );
+        assert_eq!(report.missing_prerequisites, None);
+        assert!(report.checks[0].detail.contains("Python 3.9 found"));
     }
 
     #[test]

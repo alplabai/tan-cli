@@ -159,6 +159,18 @@ pub fn build_doctor_report(
     let has_workspace = is_present(&context.workspace_root);
     let has_sdk = is_present(&context.sdk_root);
 
+    // No `python` check here any more. It probed `context.python_binary` — which
+    // in this CLI is ALWAYS the bare `python3`/`python` (`python_path` is never
+    // configured; that setting is the extension's), i.e. literally the same name
+    // `hostPrerequisites` probes off the manifest's prerequisite list. Two names
+    // for one host fact is bad enough; the two also DISAGREED — `Warn` here
+    // versus `Fail` there, with two different exit-code consequences — and this
+    // one was the weaker probe: no `pythonMinVersion` floor, and no `py`
+    // launcher widening, so a Windows host with only the launcher installed got
+    // a `python` Warn next to a `hostPrerequisites` Pass about the same
+    // interpreter. `hostPrerequisites` (appended by `tan-cli`, see
+    // `bootstrap::doctor_prerequisite_check`) is a strict superset, so this one
+    // is retired rather than left to contradict it.
     let mut checks: Vec<DoctorCheck> = vec![
         DoctorCheck::new(
             "workspaceRoot",
@@ -193,15 +205,6 @@ pub fn build_doctor_report(
             fix_when(
                 !context.board_yaml_exists,
                 "Create board.yaml or configure alpSdk.boardYamlPath.",
-            ),
-        ),
-        DoctorCheck::new(
-            "python",
-            status_pass_warn(runtime.python_available),
-            format!("Interpreter probe: {}", context.python_binary),
-            fix_when(
-                !runtime.python_available,
-                "Install the configured Python interpreter or update alpSdk.pythonPath.",
             ),
         ),
     ];
@@ -352,7 +355,18 @@ fn count_status(checks: &[DoctorCheck], status: DoctorStatus) -> u32 {
     checks.iter().filter(|c| c.status == status).count() as u32
 }
 
-fn unique_next_steps(checks: &[DoctorCheck]) -> Vec<String> {
+/// Deduplicated `fix` strings of every non-passing check, in check order.
+///
+/// `pub` and deliberately re-runnable: `finalize_report` computes this once,
+/// but `tan-cli` then APPENDS the checks it can only build with IO
+/// (`hostPrerequisites`, `sdkProvenance`, the `--build` preflight, the `--fix`
+/// bootstrap outcome). Those all landed after the one computation, so their
+/// remediation never reached `nextSteps` — the envelope documents that field as
+/// "deduplicated remediation steps for non-passing checks", and the extension
+/// renders it as a Fix button. Rather than teach four append sites to also push
+/// a step (and keep the dedup right in each), the CLI recomputes this over the
+/// FINAL check list. Idempotent by construction, so recomputing costs nothing.
+pub fn unique_next_steps(checks: &[DoctorCheck]) -> Vec<String> {
     let mut steps: Vec<String> = Vec::new();
     for check in checks {
         if check.status == DoctorStatus::Pass {
@@ -452,9 +466,12 @@ mod tests {
             DebugServerKind::None,
             &runtime_all_present(),
         );
-        // 4 base checks + codeLLDBExtension + lldb = 6 checks, all pass.
-        assert_eq!(report.checks.len(), 6);
-        assert_eq!(report.summary.pass, 6);
+        // 3 base checks + codeLLDBExtension + lldb = 5 checks, all pass. The
+        // retired `python` check is now `hostPrerequisites`, appended by
+        // `tan-cli` because it probes PATH.
+        assert_eq!(report.checks.len(), 5);
+        assert!(!report.checks.iter().any(|c| c.name == "python"));
+        assert_eq!(report.summary.pass, 5);
         assert_eq!(report.summary.warn, 0);
         assert_eq!(report.summary.fail, 0);
         assert!(report.next_steps.is_empty());
@@ -469,7 +486,7 @@ mod tests {
             DebugServerKind::Jlink,
             &runtime_none(),
         );
-        // 4 base (python warn) + cortexDebugExtension pass + jlinkBackend warn.
+        // 3 base + cortexDebugExtension pass + jlinkBackend warn.
         let backend = report
             .checks
             .iter()
@@ -477,8 +494,9 @@ mod tests {
             .expect("backend check present");
         assert_eq!(backend.status, DoctorStatus::Warn);
         assert!(backend.detail.contains("No jlink executable"));
-        // python warn + backend warn.
-        assert_eq!(report.summary.warn, 2);
+        // Backend warn only: the missing interpreter is `hostPrerequisites`'
+        // business now, and it reports one as a `Fail`, not a second `Warn`.
+        assert_eq!(report.summary.warn, 1);
         assert_eq!(report.summary.fail, 0);
         assert!(
             report
@@ -520,8 +538,8 @@ mod tests {
         assert_eq!(compat.status, DoctorStatus::Fail);
         assert_eq!(compat.detail, "jlink is not supported for native-host.");
         assert_eq!(report.summary.fail, 1);
-        // base 4 checks + serverCompatibility, no target-specific checks.
-        assert_eq!(report.checks.len(), 5);
+        // base 3 checks + serverCompatibility, no target-specific checks.
+        assert_eq!(report.checks.len(), 4);
     }
 
     #[test]

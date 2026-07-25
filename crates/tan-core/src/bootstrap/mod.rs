@@ -29,7 +29,8 @@ pub use manifest::{
     parse_bootstrap_manifest, venv_exe_names,
 };
 pub use prerequisites::{
-    MissingPrerequisite, PrereqFailure, doctor_prerequisite_check, hint_line, install_command,
+    BOOTSTRAP_MANIFEST_REJECTED_PREFIX, MissingPrerequisite, PrereqFailure,
+    apply_prerequisite_check, doctor_prerequisite_check, hint_line, install_command,
     posix_python_not_runnable, posix_refusal, python_too_old, reported_missing,
     windows_python_not_runnable, windows_refusal,
 };

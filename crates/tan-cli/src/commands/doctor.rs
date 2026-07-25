@@ -16,7 +16,8 @@ use tan_core::{
     parse_server_kind, parse_target_kind,
 };
 
-use tan_core::bootstrap::{doctor_prerequisite_check, fallback_facts, reported_missing};
+use tan_core::bootstrap::{apply_prerequisite_check, doctor_prerequisite_check, fallback_facts};
+use tan_core::unique_next_steps;
 
 use super::CommandRun;
 use crate::cli::{BootstrapArgs, DoctorArgs, GlobalArgs};
@@ -65,6 +66,12 @@ pub fn run(g: &GlobalArgs, args: &DoctorArgs) -> CommandRun {
         &mut report.summary,
         context.sdk_root.as_deref(),
     );
+    // Every appender above lands AFTER `build_doctor_report` computed
+    // `nextSteps`, so their `fix` strings never reached the field the envelope
+    // documents as "deduplicated remediation steps for non-passing checks" and
+    // the extension renders as a Fix button. Recompute over the final list once,
+    // instead of making each appender remember to push (and dedup) its own.
+    report.next_steps = unique_next_steps(&report.checks);
 
     let exit = if report.summary.fail > 0 {
         ExitCode::DoctorFailure
@@ -172,6 +179,11 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         report.checks.push(check);
     }
 
+    // Same post-finalize append problem as the plain report's (see `run`): the
+    // preflight, the provenance check and the `--fix` outcome all arrive after
+    // `build_readiness_report` computed `nextSteps`.
+    report.next_steps = unique_next_steps(&report.checks);
+
     let exit = if report.summary.fail > 0 {
         ExitCode::DoctorFailure
     } else {
@@ -203,16 +215,32 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
 /// under two names.
 ///
 /// Facts: the SDK's `metadata/bootstrap.json` when one resolves and parses,
-/// else tan's built-in fallback list — including when the manifest is
-/// version-skewed, whose FATAL verdict belongs to the commands that act on it
-/// (`bootstrap`, `build`), not to a read-only report. Either way the host IS
-/// checked and the check's detail names which list it checked against, the same
-/// fact bootstrap's envelope reports as `factsFromManifest`; a doctor run
-/// without an SDK must not quietly claim the host is fine.
-fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Option<&str>) {
-    let facts = sdk_root
-        .and_then(|root| load_facts(root).ok())
-        .unwrap_or_else(|| fallback_facts(MIN_PYTHON));
+/// else tan's built-in fallback list. Either way the host IS checked and the
+/// check's detail names which list it checked against, the same fact
+/// bootstrap's envelope reports as `factsFromManifest`; a doctor run without an
+/// SDK must not quietly claim the host is fine.
+///
+/// A manifest that resolved but was REFUSED (version skew, unparseable) is a
+/// third case, not the second. `load_facts`'s `Err` names why — that is the
+/// whole reason it returns a `Result`, and `tan bootstrap` treats the same
+/// message as a fatal `ValidationFailure`. Doctor keeps the message and hands it
+/// to `doctor_prerequisite_check` rather than `.ok()`-ing it away: this command
+/// exists to tell a user why bootstrap refuses, so it is the last command that
+/// may hide the reason. It does NOT repeat bootstrap's fatal verdict (a
+/// read-only report should not be the thing that exits 4 over a manifest), it
+/// downgrades it to a `Warn` naming the rejection.
+///
+/// `pub(crate)` — `commands::support_bundle` builds the same `DoctorReport` and
+/// must append the same gate. A bundle is what a user attaches PRECISELY when
+/// bootstrap failed, so one serialized with `"missingPrerequisites": null` for a
+/// host nobody probed would positively claim a host is clean while hiding the
+/// missing `ninja` that is the reason for the bundle.
+pub(crate) fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Option<&str>) {
+    let (facts, manifest_error) = match sdk_root.map(load_facts) {
+        Some(Ok(facts)) => (facts, None),
+        Some(Err(message)) => (fallback_facts(MIN_PYTHON), Some(message)),
+        None => (fallback_facts(MIN_PYTHON), None),
+    };
     let is_windows = cfg!(windows);
     let refusal = check_prerequisites(&facts, is_windows).err();
 
@@ -220,19 +248,18 @@ fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Option<&str>) 
         refusal.as_ref(),
         facts.prerequisites(is_windows),
         facts.from_manifest,
+        manifest_error.as_deref(),
     );
-    // The structured half: `{tool, command}` pairs a consumer can render as
-    // buttons. It rides on the report rather than the check because the issue
-    // message is prose the split is not recoverable from -- the whole point of
-    // the bootstrap side it mirrors (alp-sdk-vscode#347).
-    report.missing_prerequisites = refusal.and_then(|f| reported_missing(f.missing));
-
-    match check.status {
-        DoctorStatus::Pass => report.summary.pass += 1,
-        DoctorStatus::Warn => report.summary.warn += 1,
-        DoctorStatus::Fail => report.summary.fail += 1,
-    }
-    report.checks.push(check);
+    // The verdict is folded in by a PURE function, so the summary arithmetic and
+    // the structured `{tool, command}` half (which rides on the report rather
+    // than the check, because the issue message is prose the split is not
+    // recoverable from -- alp-sdk-vscode#347) are tested over all three
+    // outcomes, not only whichever one this test host's PATH happens to produce.
+    apply_prerequisite_check(
+        report,
+        check,
+        refusal.map(|f| f.missing).unwrap_or_default(),
+    );
 }
 
 /// Append an SDK-provenance check (conformance Issue 4 + 6): records the SDK
@@ -710,12 +737,12 @@ mod tests {
     }
 
     #[test]
-    fn host_prerequisites_is_reported_and_its_structured_half_tracks_the_verdict() {
-        // The gap ADR 0021 P0a names: `check_prerequisites` had ZERO references
-        // in this file, so plain `tan doctor` never mentioned a missing `ninja`
-        // and the extension had nothing to render. The OUTCOME here depends on
-        // the test host's PATH, so what is pinned is the wiring: the check
-        // lands, the summary counts it, and the structured field agrees with it.
+    fn host_prerequisites_probes_the_host_and_lands_as_one_counted_check() {
+        // Wiring only. The three OUTCOMES (pass, tool-naming refusal, Python
+        // floor) are pinned in `tan_core::bootstrap::prerequisites` against a
+        // supplied verdict, because the outcome HERE depends on the test host's
+        // PATH -- on a clean host only the `Pass` branch ever executes, which is
+        // what made the previous version of this test mutation-dead.
         let mut report = empty_report(
             "1970-01-01T00:00:00.000Z",
             DebugTargetKind::NativeHost,
@@ -741,23 +768,84 @@ mod tests {
             "a doctor run with no SDK must say which list it checked: {}",
             check.detail
         );
-        match check.status {
-            // Clean host: nothing to name, so `null` -- never `[]`.
-            DoctorStatus::Pass => assert!(report.missing_prerequisites.is_none()),
-            // Refused: a tool-naming refusal must hand the consumer the pairs
-            // rather than leave it to re-parse the joined message, and the two
-            // Python-floor refusals name no tool at all (hence `is_none()` is
-            // also legal here).
-            _ => {
-                assert!(check.fix.is_some());
-                if let Some(missing) = &report.missing_prerequisites {
-                    assert!(!missing.is_empty(), "an empty list must serialize as null");
-                    for entry in missing {
-                        assert!(check.detail.contains(&entry.tool));
-                    }
-                }
-            }
-        }
+        // No SDK resolved is NOT the same fact as a manifest that resolved and
+        // was refused -- the two used to render byte-identically.
+        assert!(
+            !check
+                .detail
+                .contains(tan_core::bootstrap::BOOTSTRAP_MANIFEST_REJECTED_PREFIX),
+            "{}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn a_skewed_bootstrap_manifest_reaches_the_check_instead_of_being_swallowed() {
+        // `load_facts` refuses a present-but-skewed manifest with a message
+        // naming the version; doctor used to `.ok()` it away and report a `Pass`
+        // indistinguishable from "no SDK resolved". Written against a real SDK
+        // root on disk so it exercises `load_facts` itself, not a hand-made
+        // `Err`.
+        let root = std::env::temp_dir().join(format!("tan-doctor-skew-{}", std::process::id()));
+        let metadata = root.join("metadata");
+        std::fs::create_dir_all(&metadata).unwrap();
+        std::fs::write(metadata.join("bootstrap.json"), r#"{"schemaVersion": 99}"#).unwrap();
+
+        let mut report = empty_report(
+            "1970-01-01T00:00:00.000Z",
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            Vec::new(),
+        );
+        report.summary.fail = 0;
+        append_host_prerequisites(&mut report, Some(&root.to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        let check = &report.checks[0];
+        assert!(
+            check.detail.contains("schemaVersion 99"),
+            "the refusal reason must survive into the report: {}",
+            check.detail
+        );
+        // Never a bare Pass: the host list still got checked (against the
+        // fallback), but the manifest was read and refused, and `tan bootstrap`
+        // will exit 4 on the same message.
+        assert_ne!(check.status, DoctorStatus::Pass);
+        assert!(check.fix.is_some());
+    }
+
+    #[test]
+    fn an_appended_checks_fix_reaches_next_steps() {
+        // `unique_next_steps` runs inside `finalize_report`, BEFORE every
+        // appender in this file, so a `hostPrerequisites` / `sdkProvenance` /
+        // preflight fix used to be dropped from the field the envelope
+        // documents as the remediation list and the extension renders as a Fix
+        // button. The recompute in `run`/`run_build_readiness` is what this
+        // pins; the ordering trap is gone rather than papered over per-appender.
+        let checks = vec![
+            DoctorCheck {
+                name: "hostPrerequisites".to_string(),
+                status: DoctorStatus::Fail,
+                detail: "Missing required tools: ninja.".to_string(),
+                fix: Some(
+                    "Install the missing prerequisites, then run `tan bootstrap`.".to_string(),
+                ),
+            },
+            DoctorCheck {
+                name: "sdkProvenance".to_string(),
+                status: DoctorStatus::Warn,
+                detail: "alp-sdk @ abc1234 — 3 commit(s) behind upstream".to_string(),
+                fix: Some("Update the SDK checkout: git -C /sdk pull".to_string()),
+            },
+        ];
+        let steps = unique_next_steps(&checks);
+        assert_eq!(
+            steps,
+            vec![
+                "Install the missing prerequisites, then run `tan bootstrap`.",
+                "Update the SDK checkout: git -C /sdk pull",
+            ]
+        );
     }
 
     #[test]

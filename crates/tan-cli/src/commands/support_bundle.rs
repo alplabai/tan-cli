@@ -142,7 +142,14 @@ pub fn run(g: &GlobalArgs, args: &SupportBundleArgs) -> CommandRun {
             Ok(d) => d,
             Err(message) => return internal_failure(g, &generated_at, message),
         };
-    let doctor = build_doctor_report(&context, target, server, &runtime);
+    // The prerequisite gate runs HERE too, not just in `tan doctor`. A support
+    // bundle is what a user attaches precisely when bootstrap failed, and
+    // `DoctorReport::missing_prerequisites` defines `null` as "checked, nothing
+    // missing" -- so a bundle built without this call would hide the missing
+    // `ninja` that caused it AND positively assert the host is fine.
+    let mut doctor = build_doctor_report(&context, target, server, &runtime);
+    crate::commands::doctor::append_host_prerequisites(&mut doctor, context.sdk_root.as_deref());
+    doctor.next_steps = tan_core::unique_next_steps(&doctor.checks);
 
     // Assemble + serialize the bundle file (side effect; not in the envelope).
     let notes = vec![

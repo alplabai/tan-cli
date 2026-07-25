@@ -14,7 +14,10 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use crate::debug::{DoctorCheck, DoctorStatus, DoctorSummary};
+// `unique_next_steps` is the doctor module's, not a second copy: this file used
+// to carry a byte-identical clone, and two implementations of "what goes in
+// `nextSteps`" is one drift away from the two reports disagreeing.
+use crate::debug::{DoctorCheck, DoctorStatus, DoctorSummary, unique_next_steps};
 use crate::model::BoardModel;
 
 /// Why a non-Linux host cannot run a Yocto build. Shared verbatim by `doctor
@@ -294,21 +297,6 @@ fn push_tool(
 
 fn count(checks: &[DoctorCheck], status: DoctorStatus) -> u32 {
     checks.iter().filter(|c| c.status == status).count() as u32
-}
-
-fn unique_next_steps(checks: &[DoctorCheck]) -> Vec<String> {
-    let mut steps = Vec::new();
-    for check in checks {
-        if check.status == DoctorStatus::Pass {
-            continue;
-        }
-        if let Some(fix) = &check.fix {
-            if !steps.contains(fix) {
-                steps.push(fix.clone());
-            }
-        }
-    }
-    steps
 }
 
 #[cfg(test)]

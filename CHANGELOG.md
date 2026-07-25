@@ -22,7 +22,16 @@ All notable changes to `tan` are documented here. Format follows
   check's detail names which tool list it checked against — the SDK's
   `metadata/bootstrap.json` or tan's built-in fallback — so a run with no
   resolvable SDK still checks the host and says which list it used, rather
-  than implying it read the SDK's. (alp-sdk ADR 0021 P0a)
+  than implying it read the SDK's. A manifest that resolved but was REFUSED
+  (unsupported `schemaVersion`, unparseable) is a third case, not the second:
+  the refusal message `tan bootstrap` treats as a fatal `ValidationFailure` is
+  now carried into the check's detail as
+  `metadata/bootstrap.json rejected: …` and downgrades the check to `Warn`
+  (a refusal still outranks it as `Fail`). `tan doctor` is the command a user
+  runs to find out why `tan bootstrap` refuses, so it is the last one that may
+  swallow the reason — it reports it without repeating bootstrap's exit code.
+  The same check is appended to `tan support-bundle`'s doctor payload, for the
+  reason below. (alp-sdk ADR 0021 P0a)
 - **`tan bootstrap` reports its missing prerequisites as structured data.**
   The envelope's issue message is the message lines joined with a space, and
   an install command contains the same spaces the join used — so
@@ -71,10 +80,49 @@ All notable changes to `tan` are documented here. Format follows
   a consumer may already match: in this CLI an issue code's prefix is the
   command that emitted the envelope, without exception, and a `bootstrap.*` code
   inside a `doctor` envelope would tell a consumer a command ran that did not.
-  `missingPrerequisites` is present on every `doctor` envelope, `null` when
-  there is no missing TOOL to name — a clean host, an error envelope that never
-  reached the probe, and the two Python-floor refusals, whose fix no
-  `{tool, command}` pair can carry. (alp-sdk ADR 0021 P0a)
+  `missingPrerequisites` is present on every **plain** `tan doctor` envelope
+  (including its error envelopes), `null` when there is no missing TOOL to name
+  — a clean host, an error envelope that never reached the probe, and the two
+  Python-floor refusals, whose fix no `{tool, command}` pair can carry.
+  **`tan doctor --build` does NOT carry it**: that mode's `data` is a
+  `BuildReadinessReport` (`schemaVersion`/`generatedAt`/`osSet`/`summary`/
+  `checks`/`nextSteps`) and has no such key at all, so a consumer keying on
+  `command === "doctor"` alone gets `undefined` there, not `null` — branch on
+  the payload, not on the command name. (`alp-sdk-vscode` calls only
+  `tan doctor --build` today, at `src/toolchain.ts:219` and `:248`, so P0a needs
+  either a `--build` carry or an extension change — a cross-repo seam decision,
+  deliberately not taken here.) (alp-sdk ADR 0021 P0a)
+- **The retired `doctor` `python` check.** Plain `tan doctor` no longer emits a
+  `python` check. It probed `context.python_binary`, which in this CLI is always
+  the bare `python3`/`python` — literally the tool `hostPrerequisites` now probes
+  off the manifest's prerequisite list — so one host fact landed twice under two
+  names with two severities (`Warn` vs `Fail`) and two different exit-code
+  consequences. The retired one was also the weaker probe: no `pythonMinVersion`
+  floor, and no `py`-launcher widening, so a Windows host with only the launcher
+  installed got a `python` `Warn` beside a `hostPrerequisites` `Pass` about the
+  same interpreter. **A consumer matching the `python` check name or the
+  `doctor.python` issue code must move to `hostPrerequisites` /
+  `doctor.hostPrerequisites`**, which reports the same fact as a `Fail`.
+  `tan doctor --build` is unaffected (it never had this check).
+- **`tan support-bundle`'s doctor payload gained `missingPrerequisites` and the
+  `hostPrerequisites` check.** The bundle (payload `schemaVersion` `"1"`) built
+  its `DoctorReport` without ever running the prerequisite gate, so it serialized
+  `"missingPrerequisites": null` — which that field defines as "checked, nothing
+  missing" — for a host nobody probed. A bundle is what a user attaches
+  *precisely when bootstrap failed*, so it both hid the missing `ninja` and
+  asserted the host was fine. It now runs the same gate, which also means **a
+  missing prerequisite makes `tan support-bundle` exit `4` and emit a
+  `support-bundle.hostPrerequisites` error issue** (the bundle file is still
+  written). Payload `schemaVersion` stays `"1"`: additive and optional.
+- **`nextSteps` now includes the remediation of every appended check.**
+  `nextSteps` was computed once inside the report builders, before `tan-cli`
+  appends the checks that need IO — `hostPrerequisites`, `sdkProvenance`, and
+  on `--build` the project/workspace preflight and the `--fix` bootstrap outcome
+  — so those checks' `fix` strings never reached the field the envelope
+  documents as "deduplicated remediation steps for non-passing checks" and the
+  extension renders as a Fix button. Both `doctor` modes now recompute it over
+  the final check list. **`nextSteps` gains entries and follows check order**;
+  on `--build` the preflight's `tan sdk switch <path>` / `tan init` now lead it.
 - **`tan bootstrap`'s two Python-floor refusals report under their own issue
   codes.** A host whose `python` does not run now raises
   `bootstrap.python-not-runnable`, and one below `pythonMinVersion` raises
