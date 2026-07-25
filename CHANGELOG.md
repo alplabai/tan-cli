@@ -7,6 +7,19 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`tan build` auto-pristines a slice build dir left stale by an SDK switch.**
+  Switching the active SDK (`~/.alp/sdk/v0.11.0` → `~/.alp/sdk/v0.13.0`) left
+  every previously-configured slice failing with west's raw `Build directory
+  … is for application "…/v0.11.0/firmware/alp-stock-shim" … FATAL ERROR:
+  refusing to proceed without --force`, which in the extension surfaced only
+  as `terminated with exit code: 1`. Each slice build dir now carries a
+  `.tan-sdk-root` stamp written before the tool spawns; a dir that is
+  configured but absent-or-differently stamped is wiped and re-configured,
+  reported as `build.sdk-switch-pristine` naming both SDK roots. The wipe
+  skips any slice with an explicit `-d`/`--build-dir` and only fires under
+  the project's own `build` root. (#52)
+
 ### Fixed
 - **`tan sdk switch` left `.west/config` pinned to the old SDK version.**
   The reconciliation that keeps `<topdir>/.west/config`'s `manifest.path` in
