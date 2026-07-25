@@ -46,6 +46,12 @@ struct DebugConfigData {
     replaced: bool,
     /// Human-readable preview/usage notes.
     notes: Vec<String>,
+    /// The launch configuration itself — the very thing the command produces.
+    /// Additive: the envelope used to describe the write (path, replaced,
+    /// notes) without carrying the object, so an automated consumer had to
+    /// re-read `launch.json` or scrape the text preview to see what was
+    /// generated (alp-sdk-vscode#339).
+    configuration: Value,
 }
 
 /// Entry point for `tan debug-config`: parse target/server, build the launch
@@ -202,6 +208,7 @@ fn success(
         launch_json_path: launch_json_path.to_string(),
         replaced,
         notes: notes.to_vec(),
+        configuration: draft.clone(),
     };
     let text = if g.is_json() {
         Vec::new()
@@ -312,6 +319,10 @@ fn failure_envelope(
         launch_json_path,
         replaced: false,
         notes: Vec::new(),
+        // No draft exists on this path — the failure happened before (or
+        // instead of) generating one. `null`, not an empty object, so a
+        // consumer cannot mistake it for a configuration with no fields.
+        configuration: Value::Null,
     };
     let text = if g.is_json() {
         Vec::new()
