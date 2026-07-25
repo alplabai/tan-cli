@@ -178,7 +178,7 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
     };
     report.sku = sku.clone();
 
-    let elf = match zephyr_elf_from_manifest(&manifest, &build_root) {
+    let elf = match zephyr_elf_from_manifest(&manifest, &build_root, args.core.as_deref()) {
         Ok(p) => p,
         Err(e) => return fail(g, project, report, "renode.slice", &e.to_string()),
     };

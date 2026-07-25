@@ -7,6 +7,17 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+- **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
+  project in the headless smoke. A manifest with more than one Zephyr slice (an
+  E1M-AEN801's `m55_hp` + `m55_he`) was refused outright with "the Renode smoke
+  boots a single-Zephyr-slice system", leaving no way to smoke-test such a
+  project at all. `--core` narrows the zephyr set before the runnable filter, so
+  an explicitly named blocked/skipped slice still boots exactly like a lone one
+  does (the smoke touches no hardware). A name matching no zephyr slice fails
+  with `UnknownCore`, listing the manifest's zephyr cores. The refusal message
+  now names the flag. Unchanged for a single-slice project.
+
 ## [0.3.0] — 2026-07-24
 
 ### Added
