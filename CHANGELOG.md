@@ -70,7 +70,15 @@ All notable changes to `tan` are documented here. Format follows
   breaking a host with an empty OS store instead). The agent also caps a whole
   request at 60 s — proxied now, a black-hole proxy would otherwise hang `tan`
   forever, and the extension waits on process exit.
-  **Two limitations worth knowing.** `NO_PROXY` is *not* honoured — ureq 2.12
+  **Scheme-correct by choice.** Only `ALL_PROXY`/`HTTPS_PROXY` (and their
+  lowercase aliases) select the proxy, in that precedence order.
+  `HTTP_PROXY`/`http_proxy` are *not* applied to these `https://` requests, even
+  though ureq's own `try_proxy_from_env` would apply them regardless of scheme:
+  curl, git and Python all treat `HTTP_PROXY` as plain-HTTP-only, and a
+  corporate host exporting just that one would otherwise have its GitHub request
+  pushed through a proxy that may refuse `CONNECT` — breaking a machine that
+  worked going direct. An empty value (`HTTPS_PROXY=`) counts as unset.
+  **One limitation worth knowing.** `NO_PROXY` is *not* honoured — ureq 2.12
   has no support for it at all — so a host with both `HTTPS_PROXY` and a
   `NO_PROXY` covering `api.github.com` is now proxied where it went direct.
   And the subprocesses `tan` spawns for network work (`git clone` in
@@ -78,7 +86,9 @@ All notable changes to `tan` are documented here. Format follows
   any of this: they inherit the proxy environment and use their own trust
   stores.
   A handshake or proxy failure — including `tan sdk install`'s `git clone` —
-  now names the likely cause, a proxy or an untrusted corporate CA, rather than
+  now names the likely cause, a proxy or an untrusted corporate CA (without
+  naming a specific knob — git's `http.sslCAInfo` would be wrong advice on the
+  in-process path that shares the sentence), rather than
   surfacing a raw error a user reads as "the network is down"; a proxy that is
   set but unreachable is named too, from the environment, since ureq reports
   that as a plain connect failure that never says "proxy". Only the message

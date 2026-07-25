@@ -301,8 +301,9 @@ fn git_clone(version: &str, dest: &Path) -> Result<(), String> {
     // HTTPS through the same middlebox `sdk list` hits, and its own wording
     // ("SSL certificate problem: unable to get local issuer certificate", or the
     // schannel equivalent) reads as a broken download too. Same hint, one
-    // command later; git uses its own trust store, so the fix is on the user's
-    // side (`http.sslCAInfo`), which is exactly what the sentence points at.
+    // command later. It deliberately names no specific knob: git has its own
+    // trust store and its own `http.sslCAInfo`, which would be the wrong advice
+    // on the in-process `sdk list` path that shares this sentence.
     let output = Command::new("git")
         .args([
             "clone",

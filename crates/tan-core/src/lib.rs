@@ -27,6 +27,7 @@ pub mod preflight;
 pub mod presets;
 pub mod preview;
 pub mod project;
+pub mod proxy;
 pub mod renode;
 pub mod run;
 pub mod runners;
@@ -95,6 +96,7 @@ pub use project::{
     ProjectContext, ProjectResolutionInput, ProjectSettings, discover_workspace_sdk,
     resolve_project_context,
 };
+pub use proxy::{HTTPS_PROXY_ENV_VARS, select_https_proxy};
 pub use renode::{
     FAMILY_TOKEN_TO_PLATFORM, RenodeError, build_renode_argv, elf_vector_table_base,
     platform_files_for_sku, platform_stem_for_sku, renode_rejected_argv, select_sku, sku_family,

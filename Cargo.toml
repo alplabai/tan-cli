@@ -21,11 +21,11 @@ serde_yaml = "0.9"
 clap = { version = "4.6", features = ["derive"] }
 inquire = "0.9"
 # Lightweight blocking HTTP client (rustls) for `tan sdk list` (GitHub releases).
-# `socks-proxy` is not optional once the agent reads the proxy environment: ureq
-# consults `ALL_PROXY` FIRST, and with the feature off its SOCKS connector is a
-# stub that fails every request with "SOCKS feature disabled." — so a dev box or
-# WSL SSH tunnel exporting `ALL_PROXY=socks5://…` would go from working (request
-# went direct, proxy env ignored) to hard-broken.
+# `socks-proxy` is not optional once the agent reads the proxy environment:
+# `ALL_PROXY` is consulted FIRST, and with the feature off ureq's SOCKS connector
+# is a stub that fails every request with "SOCKS feature disabled." — so a dev
+# box or WSL SSH tunnel exporting `ALL_PROXY=socks5://…` would go from working
+# (request went direct, proxy env ignored) to hard-broken.
 ureq = { version = "2", features = ["json", "socks-proxy"] }
 # `tan sdk list` is the only command that reaches the network, and it has to work
 # from behind a corporate TLS-intercepting middlebox. ureq's own `native-certs`
