@@ -8,6 +8,20 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **`tan debug-config` emitted a launch configuration that could not launch.**
+  `device`, `configFiles` and `svdFile` shipped as literal `<resolved-…>`
+  placeholders, and `executable` was the fixed `build/app/zephyr/zephyr.elf` —
+  wrong for every heterogeneous project. Each value is now resolved from what
+  the build itself recorded: the per-core ELF from `system-manifest.yaml`, and
+  `device` / `serverpath` / `searchDir` / `configFiles` / `gdbPath` from that
+  slice's `runners.yaml` (the same file `west flash` reads), via the new pure
+  `tan_core::runners`. `--core <CORE_ID>` picks the slice on a multicore board.
+  Unresolved `svdFile`/`svdPath` keys are now dropped rather than left pointing
+  nowhere — cortex-debug fails a session on an unreadable SVD, while an absent
+  key only costs the peripheral view (no SVD is resolvable until alp-sdk#948).
+  The "placeholder fields still need resolution" note is now keyed off what is
+  actually left in the draft, and a board that registers no runner for the
+  requested server says so instead of leaving the user to guess. (#66)
 - **The Renode smoke's CPU halted on an MRAM-linked image.** Renode guesses
   `VectorTableOffset` from the LOWEST `vaddr` it sees. A Zephyr image linked to
   MRAM has a `.data` init segment that RUNS at 0x20000000 but is STORED at

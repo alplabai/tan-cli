@@ -473,6 +473,11 @@ pub struct DebugConfigArgs {
     /// Debug server backend (jlink, openocd, pyocd, gdbserver, none).
     #[arg(long, value_name = "SERVER")]
     pub server: Option<String>,
+    /// Resolve against the build slice with this `core_id`. Defaults to the
+    /// first slice matching the target class's OS, which is the whole project
+    /// on a single-core board; needed to pick a side on a multicore one.
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
     /// Print the launch configuration without writing launch.json.
     #[arg(long)]
     pub preview: bool,
