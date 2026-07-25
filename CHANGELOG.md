@@ -8,6 +8,19 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **`tan sdk switch` left `.west/config` pinned to the old SDK version.**
+  The reconciliation that keeps `<topdir>/.west/config`'s `manifest.path` in
+  sync already existed for `tan bootstrap` (#31), but `sdk switch` only ever
+  rewrote the active-SDK pointer files (`.alp/sdk-path` /
+  `~/.alp/sdk-default`) — `west` reads `.west/config` directly and
+  independently, so a switch left it naming the OLD checkout, silently, until
+  something needed the workspace (`west flash` falling back to an unrelated
+  Zephyr tree and failing with `unknown runner`). `sdk switch` now reconciles
+  it too, warning (never failing) and naming `tan bootstrap` as the next step
+  when it fires, and guards the rewrite on the old target being either a real
+  alp-sdk checkout or missing entirely (#62's reported state) — never a real,
+  unrelated directory that merely shares the same parent as the SDK just
+  switched to. (#62)
 - **`tan debug-config` emitted a launch configuration that could not launch.**
   `device`, `configFiles` and `svdFile` shipped as literal `<resolved-…>`
   placeholders, and `executable` was the fixed `build/app/zephyr/zephyr.elf` —
