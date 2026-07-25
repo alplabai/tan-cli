@@ -99,7 +99,9 @@ npx @alplabai/tan --version
 `--sdk-root <path>`, the `.alp/sdk-path` pointer `tan sdk switch` writes, or an
 `alp-sdk/` directory beside the project. `tan sdk install <version>` only
 downloads into `~/.alp/sdk-cache` — follow it with `tan sdk switch <version>` to
-select it. No VS Code required.
+select it (which also reconciles a stale `.west/config` manifest pointer left
+over from a prior SDK version under the same workspace topdir). No VS Code
+required.
 
 ## Quickstart
 

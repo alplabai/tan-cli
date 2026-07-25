@@ -45,7 +45,17 @@ use crate::util::{MIN_PYTHON, resolve_cli_project_context};
 use steps::{
     Log, Runner, Workspace, check_prerequisites, ensure_venv, native, pip_phase, west_phase,
 };
-use west_config::{reconcile_west_manifest_path, same_directory};
+use west_config::same_directory;
+// Re-exported at crate visibility (rather than the module's own `pub(super)`)
+// so `commands::sdk`'s `run_switch` can chain the SAME reconciliation (#62) —
+// `west_config` itself stays a private submodule; only these two names need a
+// wider audience than `bootstrap` alone. `run_switch` uses the guarded
+// `_for_switch` variant (below), never the unconditional one directly — that
+// stays `bootstrap`-only since only bootstrap's job IS the workspace under
+// its topdir.
+pub(crate) use west_config::{
+    SwitchReconcile, reconcile_west_manifest_path, reconcile_west_manifest_path_for_switch,
+};
 
 /// `data` payload for the `bootstrap` envelope: the resolved SDK root, the
 /// three paths the run produced, where its facts came from, and the flags.
@@ -465,7 +475,12 @@ fn select_workspace(
 /// Whether `<topdir>/.west/config`'s `[manifest] path` resolves to `repo_root`.
 /// west/the venv aren't set up yet at this point, so read the config directly
 /// rather than shelling `west config manifest.path`.
-fn manifest_points_at(topdir: &Path, repo_root: &Path) -> bool {
+///
+/// `pub(crate)`, not private: `build::workspace::west_workspace_dir` reuses this
+/// SAME check (#61) to refuse a `$ZEPHYR_BASE` workspace whose manifest isn't
+/// alp-sdk's, exactly like `select_workspace` above refuses one for `tan
+/// bootstrap` -- one manifest-match test, not two copies that could drift.
+pub(crate) fn manifest_points_at(topdir: &Path, repo_root: &Path) -> bool {
     let Ok(config) = std::fs::read_to_string(topdir.join(".west").join("config")) else {
         return false;
     };
