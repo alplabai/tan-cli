@@ -22,9 +22,17 @@ All notable changes to `tan` are documented here. Format follows
   The "placeholder fields still need resolution" note is now keyed off what is
   actually left in the draft, and a board that registers no runner for the
   requested server says so instead of leaving the user to guess. (#66)
-
-
-### Fixed
+- **The Renode smoke's CPU halted on an MRAM-linked image.** Renode guesses
+  `VectorTableOffset` from the LOWEST `vaddr` it sees. A Zephyr image linked to
+  MRAM has a `.data` init segment that RUNS at 0x20000000 but is STORED at
+  0x80018348, so the guess pointed at memory nothing was loaded to: SP/PC read
+  back as zero and the CPU halted before executing one instruction, while the
+  run still exited 0. `tan renode` now derives the real vector-table base from
+  the ELF — the load address of the LOAD segment containing the entry point —
+  and injects it as `$vtor` ahead of the descriptor include, correct for both
+  the MRAM-linked and RAM-run shapes. Inert until the descriptor reads `$vtor`
+  (alp-sdk#947); an unreadable or unexpected ELF injects nothing and leaves
+  Renode exactly as before.
 - **The Renode smoke never actually booted, and reported success anyway.**
   `build_renode_argv` passed `--console --disable-xwt --hide-monitor --plain`;
   Renode 1.16.1 rejects that combination outright — "--hide-monitor and
