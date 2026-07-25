@@ -8,6 +8,28 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`tan bootstrap` reports its missing prerequisites as structured data.**
+  The envelope's issue message is the message lines joined with a space, and
+  an install command contains the same spaces the join used — so
+  `Missing required tools:   ninja  ->  winget install -e --id
+  Ninja-build.Ninja Install the tools above …` cannot be split back into
+  `<tool>`/`<command>` pairs safely, and alp-sdk-vscode#347 deleted the parse
+  that tried. `data.missingPrerequisites` now carries
+  `[{tool, command}]` alongside the unchanged message: `command` is the
+  `winget install` one-liner where tan knows one and `null` where it does not
+  (an unlisted tool, and every POSIX host until alp-sdk#949 lands
+  `prerequisites.install.posix`) — never advice prose, which a consumer would
+  render as a runnable button that cannot work. The field is `null`, not `[]`,
+  on every run that did not reach the prerequisite gate, so "not reported" is
+  distinguishable from "reported empty". `data.schemaVersion` stays `"2"`: the
+  field is additive and optional, and a consumer that does not know it is
+  unaffected. The two Python-floor refusals — which have no missing tool at
+  all, so no `{tool, command}` pair could carry their fix — now report under
+  their own codes `bootstrap.python-not-runnable` and
+  `bootstrap.python-too-old` instead of `bootstrap.prerequisites-missing`;
+  **a consumer matching `bootstrap.prerequisites-missing` for those two cases
+  must add the new codes.** `bootstrap.prerequisites-missing` itself is
+  unchanged for the missing-tool case, message text included. (#70)
 - **`tan build` auto-pristines a slice build dir left stale by an SDK switch.**
   Switching the active SDK (`~/.alp/sdk/v0.11.0` → `~/.alp/sdk/v0.13.0`) left
   every previously-configured slice failing with west's raw `Build directory
@@ -19,6 +41,17 @@ All notable changes to `tan` are documented here. Format follows
   reported as `build.sdk-switch-pristine` naming both SDK roots. The wipe
   skips any slice with an explicit `-d`/`--build-dir` and only fires under
   the project's own `build` root. (#52)
+
+### Changed
+- **`tan bootstrap`'s two Python-floor refusals report under their own issue
+  codes.** A host whose `python` does not run now raises
+  `bootstrap.python-not-runnable`, and one below `pythonMinVersion` raises
+  `bootstrap.python-too-old`, instead of both sharing
+  `bootstrap.prerequisites-missing` — neither names a missing TOOL, so neither
+  can carry the new `data.missingPrerequisites` entries (see Added).
+  **A consumer matching `bootstrap.prerequisites-missing` for those two cases
+  must add the new codes**; the code is unchanged, message text included, for
+  the missing-tool case it originally described. (#70)
 
 ### Fixed
 - **`tan sdk switch` left `.west/config` pinned to the old SDK version.**
