@@ -7,12 +7,13 @@
 //!
 //! Those scripts are the parity oracle for CONTROL FLOW and message strings;
 //! the FACTS they act on (pins, tool lists, argv, env map, hints) are
-//! single-sourced from `alp-sdk/metadata/bootstrap.json` (alp-sdk#917), which
-//! names tan a required consumer — see [`manifest`]. Everything in this module
-//! is IO-free and takes `is_windows: bool` explicitly (the
-//! `resolve_project_context` house style) so both platforms' behaviour is
-//! unit-testable from either host. The spawning half lives in `tan-cli`'s
-//! `commands::bootstrap`.
+//! single-sourced from `alp-sdk/metadata/bootstrap.json` (alp-sdk#917) — see
+//! [`manifest`], which is the tan-side reader that makes it so, even though the
+//! manifest's own `_comment` (as vendored) still calls tan only an INTENDED
+//! future consumer. Everything in this module is IO-free and takes
+//! `is_windows: bool` explicitly (the `resolve_project_context` house style)
+//! so both platforms' behaviour is unit-testable from either host. The
+//! spawning half lives in `tan-cli`'s `commands::bootstrap`.
 //!
 //! Citations here name an ANCHOR (a function, variable or section heading) and
 //! never a line number: the oracles have already moved twice under this port.

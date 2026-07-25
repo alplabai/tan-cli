@@ -106,6 +106,24 @@ All notable changes to `tan` are documented here. Format follows
   the venv as well. With no west-capable venv — CI, an activated venv, the
   contract harness — every argv and message stays byte-identical to before.
   (#59)
+- **The bootstrap manifest fixture was hand-written, not vendored, and `tan
+  bootstrap` silently dropped `manualInstallHints`.**
+  `contract/fixtures/bootstrap/manifest.json`'s `_comment` matched no alp-sdk
+  commit at all. Re-vendored byte-for-byte from alp-sdk's
+  `metadata/bootstrap.json` at `8b216a04` (dev), which had split the old
+  `nativeLibHints.windows.note` into a shorter git-bash hint plus a new
+  `manualInstallHints.windows.note` (the Arm GNU Toolchain / Zephyr SDK
+  manual-install sentence, moved out of the "OPTIONAL NATIVE LIBRARIES"
+  heading it was wrongly printed under — alp-sdk#917 review item 7).
+  `BootstrapFactsDoc` had no field for the new key, so parsing a real manifest
+  silently discarded that sentence while `optional_libs_block`'s Windows
+  branch still hardcoded it AND appended the stale `nativeLibHints.windows`
+  copy, printing it twice. Added `ManualInstallHint`/`ManualInstallHints`,
+  wired them through `parse_bootstrap_manifest` and `BootstrapFacts`, and made
+  the Windows branch read `manual_install_hints` instead. `PINNED_SDK_TAG`
+  (`.github/workflows/parity.yml`) is now pinned to that same commit, so the
+  bootstrap-manifest byte-parity gate actually gates instead of
+  NOTICE-and-passing. (#69)
 
 ### Added
 - **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore

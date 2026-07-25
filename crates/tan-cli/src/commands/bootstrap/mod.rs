@@ -8,9 +8,11 @@
 //! No `bash` anywhere — native Windows is a first-class host (#49), so the two
 //! scripts are the parity oracle for CONTROL FLOW and message strings, not a
 //! runtime dependency. The FACTS come from `<sdkRoot>/metadata/bootstrap.json`
-//! (alp-sdk#917), which names tan a required consumer. The compiler toolchains
-//! (Zephyr SDK, vendor SDKs) stay out of scope; `doctor` detects + points to
-//! those.
+//! (alp-sdk#917) — its own `_comment` (as vendored) still calls tan only an
+//! INTENDED future consumer that no code reads yet; `tan_core::bootstrap`'s
+//! `parse_bootstrap_manifest` is what makes that stale. The compiler
+//! toolchains (Zephyr SDK, vendor SDKs) stay out of scope; `doctor` detects +
+//! points to those.
 //!
 //! Decision logic lives in `tan_core::bootstrap`; the spawning steps live in
 //! [`steps`]; this file is orchestration + the envelope.
