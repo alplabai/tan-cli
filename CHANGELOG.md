@@ -5,7 +5,7 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-07-25
 
 ### Added
 - **`tan bootstrap` reports its missing prerequisites as structured data.**
