@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tan_core::renode::{
     build_renode_argv, elf_vector_table_base, platform_files_for_sku, platform_stem_for_sku,
-    renode_rejected_argv, select_sku, zephyr_elf_from_manifest,
+    renode_cpu_halted, renode_rejected_argv, select_sku, zephyr_elf_from_manifest,
 };
 use tan_core::system_manifest::{SystemManifestError, parse_system_manifest};
 
@@ -262,7 +262,7 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
     }
 
     // Run — enforce the wall-clock timeout even on a silent child.
-    let (found, natural_exit, argv_rejected) = match run_renode(
+    let (found, natural_exit, argv_rejected, cpu_halted) = match run_renode(
         &argv,
         &log_path,
         args.timeout,
@@ -297,6 +297,23 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
             log_path.display()
         );
         issues.push(issue("renode.argv-rejected", "error", &msg));
+        if !g.is_json() {
+            text.push(msg);
+        }
+    } else if cpu_halted {
+        // Checked next, and just as independently of --expect/natural_exit as
+        // argv_rejected above: a Renode that boots, halts the CPU on its
+        // first instruction fetch, and then shuts down cleanly exits 0 —
+        // indistinguishable from a healthy smoke to either of those signals
+        // (issue #64). Without this, `tan renode` reported `ok: true` on a
+        // run where the firmware never executed a single instruction.
+        exit = ExitCode::RuntimeFailure;
+        let msg = format!(
+            "renode: the CPU halted on its first instruction fetch — no firmware code \
+             ever ran, even though the process exited cleanly (see {}).",
+            log_path.display()
+        );
+        issues.push(issue("renode.cpu-halted", "error", &msg));
         if !g.is_json() {
             text.push(msg);
         }
@@ -359,21 +376,26 @@ fn resolve_renode_binary() -> Option<String> {
 /// the `expect` marker appearing, the child exiting (EOF), or `timeout_s`
 /// elapsing — the deadline fires even on a silent child via a reader thread +
 /// `recv_timeout` (the Python `for line in proc.stdout` blocked until EOF).
-/// Returns `(expect_found, natural_exit)`: `expect_found` is whether the
-/// `expect` marker was seen (always false when `expect` is `None`);
-/// `natural_exit` is `Some(status)` only when the child terminated ON ITS OWN
-/// (both pipes hit EOF) before the deadline/kill — i.e. a status worth
-/// trusting. A child we had to force-kill for the timeout always reports
-/// `None` here, so a forced-kill exit code is never mistaken for the child's
-/// own failure. `echo_stdout` tees each line to the CLI's own stdout (text
-/// mode only — in JSON mode it would corrupt the single-line Envelope).
+/// Returns `(expect_found, natural_exit, argv_rejected, cpu_halted)`:
+/// `expect_found` is whether the `expect` marker was seen (always false when
+/// `expect` is `None`); `natural_exit` is `Some(status)` only when the child
+/// terminated ON ITS OWN (both pipes hit EOF) before the deadline/kill — i.e.
+/// a status worth trusting. A child we had to force-kill for the timeout
+/// always reports `None` here, so a forced-kill exit code is never mistaken
+/// for the child's own failure. `argv_rejected` and `cpu_halted` are both
+/// latched from the console text rather than the exit status, because Renode
+/// exits **0** in both failure shapes: an argv it refuses (usage page) and a
+/// CPU that halts on its first instruction fetch (issue #64) are otherwise
+/// indistinguishable from a clean smoke. `echo_stdout` tees each line to the
+/// CLI's own stdout (text mode only — in JSON mode it would corrupt the
+/// single-line Envelope).
 fn run_renode(
     argv: &[String],
     log_path: &Path,
     timeout_s: u64,
     expect: Option<&str>,
     echo_stdout: bool,
-) -> std::io::Result<(bool, Option<ExitStatus>, bool)> {
+) -> std::io::Result<(bool, Option<ExitStatus>, bool, bool)> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -400,6 +422,11 @@ fn run_renode(
     // Set when Renode answers with its usage page instead of booting. Latched
     // from the console because the exit code carries no signal for it (0).
     let mut argv_rejected = false;
+    // Set when Renode reports the CPU halted before executing anything
+    // (issue #64). Latched from the console for the same reason as
+    // `argv_rejected`: a Renode that boots, halts the CPU, and shuts down
+    // cleanly also exits 0.
+    let mut cpu_halted = false;
     let read_result = (|| -> std::io::Result<bool> {
         let deadline = Instant::now() + Duration::from_secs(timeout_s);
         let mut found = false;
@@ -417,6 +444,9 @@ fn run_renode(
                     }
                     if renode_rejected_argv(&line) {
                         argv_rejected = true;
+                    }
+                    if renode_cpu_halted(&line) {
+                        cpu_halted = true;
                     }
                     if let Some(exp) = expect {
                         if line.contains(exp) {
@@ -451,7 +481,7 @@ fn run_renode(
     let _ = h_out.join();
     let _ = h_err.join();
 
-    read_result.map(|found| (found, natural_exit, argv_rejected))
+    read_result.map(|found| (found, natural_exit, argv_rejected, cpu_halted))
 }
 
 /// Pump `\n`-delimited lines from `reader` into `tx`, lossily replacing invalid
@@ -587,7 +617,7 @@ mod tests {
     fn expect_marker_present_returns_found_and_writes_log() {
         let log = tmp_log("hit");
         let argv = echo_argv(&["boot", "[hello] done", "tail"]);
-        let (found, _status, _rejected) =
+        let (found, _status, _rejected, _cpu_halted) =
             run_renode(&argv, &log, 30, Some("[hello] done"), true).unwrap();
         assert!(found);
         let contents = std::fs::read_to_string(&log).unwrap();
@@ -599,7 +629,7 @@ mod tests {
     fn expect_marker_absent_returns_not_found() {
         let log = tmp_log("miss");
         let argv = echo_argv(&["boot", "running", "tail"]);
-        let (found, _status, _rejected) =
+        let (found, _status, _rejected, _cpu_halted) =
             run_renode(&argv, &log, 30, Some("[hello] done"), false).unwrap();
         assert!(!found);
         let _ = std::fs::remove_dir_all(log.parent().unwrap());
@@ -609,7 +639,8 @@ mod tests {
     fn no_expect_always_returns_false_and_still_tees() {
         let log = tmp_log("noexpect");
         let argv = echo_argv(&["one", "two"]);
-        let (found, _status, _rejected) = run_renode(&argv, &log, 30, None, false).unwrap();
+        let (found, _status, _rejected, _cpu_halted) =
+            run_renode(&argv, &log, 30, None, false).unwrap();
         assert!(!found);
         let contents = std::fs::read_to_string(&log).unwrap();
         assert!(contents.contains("one"), "{contents}");
@@ -630,10 +661,36 @@ mod tests {
         } else {
             vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()]
         };
-        let (found, status, _rejected) = run_renode(&argv, &log, 30, None, false).unwrap();
+        let (found, status, _rejected, _cpu_halted) =
+            run_renode(&argv, &log, 30, None, false).unwrap();
         assert!(!found);
         let status = status.expect("child exited on its own before the deadline");
         assert!(!status.success());
+        let _ = std::fs::remove_dir_all(log.parent().unwrap());
+    }
+
+    /// Issue #64: a Renode that boots, halts the CPU on the first instruction
+    /// fetch, and then shuts down cleanly exits 0 — the child's own status
+    /// says success, so this latch is the ONLY signal available without
+    /// `--expect`. Echoes the real captured console (issue description).
+    #[test]
+    fn cpu_halt_is_latched_even_though_the_child_exits_cleanly() {
+        let log = tmp_log("halted");
+        let argv = echo_argv(&[
+            "cpu: Guessing VectorTableOffset value to be 0x20000000.",
+            "cpu: PC does not lay in memory or PC and SP are equal to zero. CPU was halted.",
+            "aen801: Machine started.",
+        ]);
+        let (found, status, rejected, cpu_halted) =
+            run_renode(&argv, &log, 30, None, false).unwrap();
+        assert!(!found);
+        assert!(!rejected);
+        assert!(cpu_halted);
+        let status = status.expect("child exited on its own before the deadline");
+        assert!(
+            status.success(),
+            "the child's own exit status says success — that's the whole bug this latch fixes"
+        );
         let _ = std::fs::remove_dir_all(log.parent().unwrap());
     }
 
@@ -652,7 +709,8 @@ mod tests {
         } else {
             vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()]
         };
-        let (found, status, _rejected) = run_renode(&argv, &log, 1, None, false).unwrap();
+        let (found, status, _rejected, _cpu_halted) =
+            run_renode(&argv, &log, 1, None, false).unwrap();
         assert!(!found);
         assert!(
             status.is_none(),
