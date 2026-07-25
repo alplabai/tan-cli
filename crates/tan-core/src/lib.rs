@@ -28,6 +28,7 @@ pub mod preview;
 pub mod project;
 pub mod renode;
 pub mod run;
+pub mod runners;
 pub mod sdk;
 pub mod sdk_catalogue;
 pub mod size;
@@ -57,8 +58,8 @@ pub use debug::{
     parse_target_kind, server_choices_for_target,
 };
 pub use debug_launch::{
-    LaunchJsonWritePlan, create_launch_draft, create_launch_json_write_plan,
-    launch_preview_document, launch_preview_notes,
+    LaunchJsonWritePlan, LaunchResolution, apply_launch_resolution, create_launch_draft,
+    create_launch_json_write_plan, launch_preview_document, launch_preview_notes,
 };
 pub use diff::{DiffEntry, DiffKind, collect_diff_entries, prune_nulls};
 pub use flash::{

@@ -9,9 +9,12 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
+use tan_core::runners::{parse_runners_config, runner_arg_value, runner_arg_values};
+use tan_core::system_manifest::parse_system_manifest;
 use tan_core::{
-    DebugServerKind, DebugTargetKind, create_launch_draft, create_launch_json_write_plan,
-    launch_preview_document, launch_preview_notes, parse_server_kind, parse_target_kind,
+    DebugServerKind, DebugTargetKind, LaunchResolution, apply_launch_resolution,
+    create_launch_draft, create_launch_json_write_plan, launch_preview_document,
+    launch_preview_notes, parse_server_kind, parse_target_kind,
 };
 
 use super::CommandRun;
@@ -68,7 +71,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         Ok(s) => s,
         Err(message) => return internal_failure(g, &generated_at, message, cwd_launch_path()),
     };
-    let draft = match create_launch_draft(target, server) {
+    let mut draft = match create_launch_draft(target, server) {
         Ok(d) => d,
         Err(message) => return internal_failure(g, &generated_at, message, cwd_launch_path()),
     };
@@ -80,7 +83,14 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         .join("launch.json")
         .to_string_lossy()
         .to_string();
-    let notes = launch_preview_notes();
+
+    // Fill the `<resolved-…>` placeholders from what this project's own build
+    // recorded (#66). Nothing here fails the command: pre-build, or against a
+    // Zephyr that reshaped `runners.yaml`, the draft keeps its placeholders.
+    let (resolution, registered_runners) =
+        resolve_from_build(&workspace_root, target, server, args.core.as_deref());
+    apply_launch_resolution(&mut draft, &resolution);
+    let notes = preview_notes_for(&draft, &registered_runners, server);
 
     if args.preview {
         return success(
@@ -370,6 +380,147 @@ fn debug_config_text(
     lines
 }
 
+/// The manifest `os` a debug target class runs on, or `None` for a target with
+/// no per-core build slice to resolve against.
+fn manifest_os_for_target(target: DebugTargetKind) -> Option<&'static str> {
+    match target {
+        DebugTargetKind::ZephyrMcu | DebugTargetKind::NativeHost => Some("zephyr"),
+        DebugTargetKind::BaremetalMcu => Some("baremetal"),
+        DebugTargetKind::YoctoUserspace => Some("yocto"),
+    }
+}
+
+/// The `runners.yaml` runner id a debug server reads its arguments from.
+fn runner_id_for_server(server: DebugServerKind) -> Option<&'static str> {
+    match server {
+        DebugServerKind::Jlink => Some("jlink"),
+        DebugServerKind::Openocd => Some("openocd"),
+        DebugServerKind::Pyocd => Some("pyocd"),
+        DebugServerKind::Gdbserver | DebugServerKind::None => None,
+    }
+}
+
+/// Rewrite a path under `workspace_root` as `${workspaceFolder}/<rel>`, so a
+/// committed `launch.json` stays portable; an artefact outside the project
+/// (an out-of-tree build root) is left absolute rather than mangled.
+fn workspace_relative(workspace_root: &Path, path: &str) -> String {
+    Path::new(path)
+        .strip_prefix(workspace_root)
+        .ok()
+        .map(|rel| format!("${{workspaceFolder}}/{}", rel.to_string_lossy()))
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// Everything this project's own build knows about how to debug it: the
+/// per-core ELF from `system-manifest.yaml`, and the probe/tool paths from that
+/// slice's `runners.yaml` — the same file `west flash` reads.
+///
+/// Best-effort throughout. A missing manifest (pre-build), a missing slice, an
+/// unreadable or reshaped `runners.yaml` each leave the corresponding field
+/// unresolved instead of failing the command: `debug-config` must still emit
+/// its draft before the first build.
+fn resolve_from_build(
+    workspace_root: &Path,
+    target: DebugTargetKind,
+    server: DebugServerKind,
+    core: Option<&str>,
+) -> (LaunchResolution, Vec<String>) {
+    let mut resolution = LaunchResolution::default();
+    let Some(os) = manifest_os_for_target(target) else {
+        return (resolution, Vec::new());
+    };
+    let manifest_path = workspace_root.join("build").join("system-manifest.yaml");
+    let Ok(yaml) = std::fs::read_to_string(&manifest_path) else {
+        return (resolution, Vec::new());
+    };
+    let Ok(manifest) = parse_system_manifest(&yaml) else {
+        return (resolution, Vec::new());
+    };
+    // `--core` names the slice outright; otherwise the first slice of this
+    // target's OS wins, which is the whole manifest on a single-core project.
+    let Some(slice) = manifest
+        .slices
+        .iter()
+        .find(|s| s.os == os && core.map(|c| s.core_id == c).unwrap_or(true))
+    else {
+        return (resolution, Vec::new());
+    };
+
+    if let Some(artefact) = slice.output_artefact.as_deref().filter(|a| !a.is_empty()) {
+        resolution.executable = Some(workspace_relative(workspace_root, artefact));
+    }
+
+    let Some(build_dir) = slice.build_dir.as_deref().filter(|b| !b.is_empty()) else {
+        return (resolution, Vec::new());
+    };
+    let runners_path = Path::new(build_dir).join("zephyr").join("runners.yaml");
+    let Ok(text) = std::fs::read_to_string(&runners_path) else {
+        return (resolution, Vec::new());
+    };
+    let Ok(runners) = parse_runners_config(&text) else {
+        return (resolution, Vec::new());
+    };
+
+    resolution.gdb_path = runners.gdb.clone();
+    if let Some(runner) = runner_id_for_server(server) {
+        match server {
+            DebugServerKind::Jlink => {
+                resolution.device = runner_arg_value(&runners, runner, "--device");
+            }
+            DebugServerKind::Openocd => {
+                resolution.server_path = runners.openocd.clone();
+                resolution.search_dirs = runners.openocd_search.clone();
+                resolution.config_files = runner_arg_values(&runners, runner, "--config");
+            }
+            DebugServerKind::Pyocd => {
+                resolution.target_id = runner_arg_value(&runners, runner, "--target");
+            }
+            DebugServerKind::Gdbserver | DebugServerKind::None => {}
+        }
+    }
+    (resolution, runners.runners.clone())
+}
+
+/// Whether any `<resolved-…>` placeholder survived resolution, anywhere in the
+/// draft — including inside `configFiles`, which is an array.
+fn has_placeholder(value: &Value) -> bool {
+    match value {
+        Value::String(s) => s.contains("<resolved-"),
+        Value::Array(items) => items.iter().any(has_placeholder),
+        Value::Object(map) => map.values().any(has_placeholder),
+        _ => false,
+    }
+}
+
+/// The preview notes, minus the "still needs resolution" warning once nothing
+/// is left to resolve. Keyed off the FINAL draft rather than off "did anything
+/// resolve": a partly-resolved config (a board that registers no OpenOCD runner
+/// still has `<resolved-openocd-board-cfg>`) must keep the warning, and a fully
+/// resolved one must lose it — otherwise the note is noise on configs that are
+/// fine and silence on configs that are not.
+fn preview_notes_for(
+    draft: &Value,
+    registered_runners: &[String],
+    server: DebugServerKind,
+) -> Vec<String> {
+    let mut notes: Vec<String> = launch_preview_notes()
+        .into_iter()
+        .filter(|n| !n.starts_with("Placeholder fields") || has_placeholder(draft))
+        .collect();
+    // The most common reason a placeholder survives: the board never registered
+    // this server. Say so, instead of leaving the user to wonder which project-
+    // specific value they are supposed to invent.
+    if let Some(runner) = runner_id_for_server(server) {
+        if !registered_runners.is_empty() && !registered_runners.iter().any(|r| r == runner) {
+            notes.push(format!(
+                "This build registers no '{runner}' runner (runners.yaml: {registered_runners:?}), \
+                 so its fields could not be resolved.",
+            ));
+        }
+    }
+    notes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,6 +565,7 @@ mod tests {
 
         let g = global(&dir);
         let args = DebugConfigArgs {
+            core: None,
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             preview: false,

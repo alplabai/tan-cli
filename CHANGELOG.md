@@ -8,6 +8,23 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **`tan debug-config` emitted a launch configuration that could not launch.**
+  `device`, `configFiles` and `svdFile` shipped as literal `<resolved-…>`
+  placeholders, and `executable` was the fixed `build/app/zephyr/zephyr.elf` —
+  wrong for every heterogeneous project. Each value is now resolved from what
+  the build itself recorded: the per-core ELF from `system-manifest.yaml`, and
+  `device` / `serverpath` / `searchDir` / `configFiles` / `gdbPath` from that
+  slice's `runners.yaml` (the same file `west flash` reads), via the new pure
+  `tan_core::runners`. `--core <CORE_ID>` picks the slice on a multicore board.
+  Unresolved `svdFile`/`svdPath` keys are now dropped rather than left pointing
+  nowhere — cortex-debug fails a session on an unreadable SVD, while an absent
+  key only costs the peripheral view (no SVD is resolvable until alp-sdk#948).
+  The "placeholder fields still need resolution" note is now keyed off what is
+  actually left in the draft, and a board that registers no runner for the
+  requested server says so instead of leaving the user to guess. (#66)
+
+
+### Fixed
 - **The Renode smoke never actually booted, and reported success anyway.**
   `build_renode_argv` passed `--console --disable-xwt --hide-monitor --plain`;
   Renode 1.16.1 rejects that combination outright — "--hide-monitor and
