@@ -7,6 +7,8 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-25
+
 ### Added
 - **`tan bootstrap` is native Rust on every host; the `bash` dependency is
   gone** — it no longer shells `bash <sdkRoot>/scripts/bootstrap.sh`, and no
