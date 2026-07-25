@@ -424,8 +424,26 @@ pub(crate) fn execute_slices_outcome(
                     // Best-effort: west's own FATAL ERROR below (if the wipe
                     // didn't fully land) at least now ships with a note
                     // explaining WHY, instead of reading as opaque.
+                    //
+                    // This MUST reach the envelope too, not just the terminal.
+                    // The extension only ever sees JSON, and the warning above
+                    // has already claimed pristine is "running" — leaving the
+                    // failure text-only means a locked `CMakeCache.txt` (the
+                    // reachable case on Windows) hands the user the exact
+                    // FATAL ERROR this feature exists to prevent, underneath a
+                    // warning saying it was handled.
+                    let failed = format!(
+                        "{}: could not fully wipe the stale build dir: {e}",
+                        slice.core_id
+                    );
                     if text_mode {
-                        eprintln!("note: could not fully wipe stale build dir: {e}");
+                        eprintln!("note: {failed}");
+                    } else {
+                        sdk_switch_issues.push(Issue {
+                            code: "build.sdk-switch-pristine-failed".to_string(),
+                            severity: "warning".to_string(),
+                            message: failed,
+                        });
                     }
                 }
             }
