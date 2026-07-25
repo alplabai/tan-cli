@@ -281,8 +281,14 @@ pub fn zephyr_elf_from_manifest(
 /// "--hide-monitor and --console cannot be set at the same time" — printing its
 /// usage page and exiting, so nothing ever booted. It was redundant anyway:
 /// Renode's own `--disable-xwt` help reads "It automatically sets HideMonitor".
-pub fn build_renode_argv(renode_bin: &str, repl: &Path, resc: &Path, elf: &Path) -> Vec<String> {
-    vec![
+pub fn build_renode_argv(
+    renode_bin: &str,
+    repl: &Path,
+    resc: &Path,
+    elf: &Path,
+    vtor: Option<u32>,
+) -> Vec<String> {
+    let mut argv = vec![
         renode_bin.to_string(),
         "--console".to_string(),
         "--disable-xwt".to_string(),
@@ -291,9 +297,20 @@ pub fn build_renode_argv(renode_bin: &str, repl: &Path, resc: &Path, elf: &Path)
         format!("$repl=@{}", repl.display()),
         "-e".to_string(),
         format!("$elf=@{}", elf.display()),
-        "-e".to_string(),
-        format!("i @{}", resc.display()),
-    ]
+    ];
+    // Assigned UNQUOTED on purpose: a quoted `$vtor="0x…"` reaches the script
+    // as a string and `cpu VectorTableOffset $vtor` dies with "Cannot convert
+    // type 'string' to 'uint'". Injected before the include so the script can
+    // read it; a descriptor that ignores `$vtor` is unaffected (an unused
+    // monitor variable), which is what keeps this safe to ship ahead of
+    // alp-sdk#947 wiring `cpu VectorTableOffset $vtor` into the .resc.
+    if let Some(base) = vtor {
+        argv.push("-e".to_string());
+        argv.push(format!("$vtor={base:#010X}"));
+    }
+    argv.push("-e".to_string());
+    argv.push(format!("i @{}", resc.display()));
+    argv
 }
 
 /// Whether a console line is Renode telling us it REFUSED the command line —
@@ -306,6 +323,58 @@ pub fn build_renode_argv(renode_bin: &str, repl: &Path, resc: &Path, elf: &Path)
 /// the next incompatible flag would pass just as quietly. Matched on Renode's
 /// own wording rather than an exit code, since the exit code carries no signal
 /// here.
+/// The base address of the LOAD segment holding `elf`'s entry point — the
+/// image's real vector table, and the value Renode's `cpu VectorTableOffset`
+/// needs. `None` when `elf` isn't a 32-bit little-endian ELF, or no LOAD
+/// segment covers the entry (a malformed or unexpected image; the caller then
+/// injects nothing and Renode keeps its own guess).
+///
+/// Renode guesses that offset from the LOWEST `vaddr` it sees, which is wrong
+/// for an MRAM-linked Zephyr image: its `.data` init segment has `vaddr`
+/// 0x20000000 (where it RUNS, in DTCM) but `paddr` 0x80018348 (where it is
+/// STORED, in MRAM), so Renode reads SP/PC out of an address nothing was ever
+/// loaded to, gets zeros, and halts the CPU before one instruction executes
+/// (alp-sdk#947). Keying on the entry point instead of the lowest address is
+/// what makes this correct for BOTH shapes — a RAM-run image's entry lands in
+/// its DTCM segment, an MRAM-linked one's in its MRAM segment.
+///
+/// Physical (`p_paddr`), not virtual: the load address is where the bytes
+/// actually are, which is exactly what the vector-table fetch reads.
+pub fn elf_vector_table_base(elf: &[u8]) -> Option<u32> {
+    // e_ident: 0x7F 'E' 'L' 'F', class 1 (32-bit), data 1 (little-endian).
+    if elf.len() < 52 || &elf[0..4] != b"\x7FELF" || elf[4] != 1 || elf[5] != 1 {
+        return None;
+    }
+    let u32_at = |off: usize| -> Option<u32> {
+        elf.get(off..off + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let u16_at = |off: usize| -> Option<u16> {
+        elf.get(off..off + 2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+    };
+    // Thumb entry points carry bit 0 set; the address itself is even.
+    let entry = u32_at(0x18)? & !1;
+    let phoff = u32_at(0x1C)? as usize;
+    let phentsize = u16_at(0x2A)? as usize;
+    let phnum = u16_at(0x2C)? as usize;
+
+    for i in 0..phnum {
+        let off = phoff.checked_add(i.checked_mul(phentsize)?)?;
+        // Elf32_Phdr: type, offset, vaddr, paddr, filesz, memsz, ...
+        if u32_at(off)? != 1 {
+            continue; // PT_LOAD only
+        }
+        let vaddr = u32_at(off + 8)?;
+        let paddr = u32_at(off + 12)?;
+        let memsz = u32_at(off + 20)?;
+        if entry >= vaddr && entry < vaddr.checked_add(memsz)? {
+            return Some(paddr);
+        }
+    }
+    None
+}
+
 pub fn renode_rejected_argv(line: &str) -> bool {
     let line = line.trim_start();
     line.starts_with("usage: renode") || line.contains("cannot be set at the same time")
@@ -557,6 +626,7 @@ mod tests {
             Path::new("/m/x.repl"),
             Path::new("/m/x.resc"),
             Path::new("/b/zephyr.elf"),
+            None,
         );
         assert_eq!(
             argv,
@@ -577,6 +647,91 @@ mod tests {
         // Renode 1.16.1 refuses `--hide-monitor` alongside `--console`, and
         // `--disable-xwt` already implies it. Keep it out.
         assert!(!argv.iter().any(|a| a == "--hide-monitor"));
+    }
+
+    /// A minimal Elf32 LE header + program headers, enough for
+    /// `elf_vector_table_base`. `segs` is `(vaddr, paddr, memsz)`.
+    fn synthetic_elf(entry: u32, segs: &[(u32, u32, u32)]) -> Vec<u8> {
+        let phoff = 52u32;
+        let phentsize = 32u16;
+        let mut e = vec![0u8; phoff as usize];
+        e[0..4].copy_from_slice(b"\x7FELF");
+        e[4] = 1; // 32-bit
+        e[5] = 1; // little-endian
+        e[0x18..0x1C].copy_from_slice(&entry.to_le_bytes());
+        e[0x1C..0x20].copy_from_slice(&phoff.to_le_bytes());
+        e[0x2A..0x2C].copy_from_slice(&phentsize.to_le_bytes());
+        e[0x2C..0x2E].copy_from_slice(&(segs.len() as u16).to_le_bytes());
+        for (vaddr, paddr, memsz) in segs {
+            let mut ph = vec![0u8; phentsize as usize];
+            ph[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+            ph[8..12].copy_from_slice(&vaddr.to_le_bytes());
+            ph[12..16].copy_from_slice(&paddr.to_le_bytes());
+            ph[20..24].copy_from_slice(&memsz.to_le_bytes());
+            e.extend_from_slice(&ph);
+        }
+        e
+    }
+
+    #[test]
+    fn vector_table_base_is_the_entry_segments_load_address() {
+        // The real E1M-AEN801 m55_he shape (alp-sdk#947): the .data init
+        // segment RUNS at 0x20000000 but is STORED at 0x80018348, so the lowest
+        // vaddr — what Renode guesses from — points at memory nothing was
+        // loaded to. Keying on the entry's segment gives 0x80000000.
+        let elf = synthetic_elf(
+            0x8000_5A51, // Thumb bit set
+            &[
+                (0x2000_0130, 0x2000_0130, 16664),
+                (0x8000_0000, 0x8000_0000, 99144),
+                (0x2000_0000, 0x8001_8348, 304),
+                (0x8001_8478, 0x8001_8478, 4),
+            ],
+        );
+        assert_eq!(elf_vector_table_base(&elf), Some(0x8000_0000));
+    }
+
+    #[test]
+    fn vector_table_base_handles_a_ram_run_image_too() {
+        // The hello-world shape the descriptor was written for: everything in
+        // DTCM. The same rule must keep working, or fixing #947 would break it.
+        let elf = synthetic_elf(0x2000_0201, &[(0x2000_0000, 0x2000_0000, 8192)]);
+        assert_eq!(elf_vector_table_base(&elf), Some(0x2000_0000));
+    }
+
+    #[test]
+    fn vector_table_base_is_none_on_junk_or_an_unmapped_entry() {
+        assert_eq!(elf_vector_table_base(b"not an elf at all"), None);
+        // Entry outside every LOAD segment -> no answer, rather than a wrong one.
+        let elf = synthetic_elf(0x9000_0000, &[(0x2000_0000, 0x2000_0000, 8192)]);
+        assert_eq!(elf_vector_table_base(&elf), None);
+    }
+
+    #[test]
+    fn argv_injects_vtor_unquoted_before_the_include() {
+        // Unquoted: a quoted value reaches the script as a string and
+        // `cpu VectorTableOffset $vtor` dies with "Cannot convert type
+        // 'string' to 'uint'" (verified against Renode 1.16.1).
+        let argv = build_renode_argv(
+            "renode",
+            Path::new("/m/x.repl"),
+            Path::new("/m/x.resc"),
+            Path::new("/b/zephyr.elf"),
+            Some(0x8000_0000),
+        );
+        let vtor_at = argv.iter().position(|a| a == "$vtor=0x80000000").unwrap();
+        let include_at = argv.iter().position(|a| a == "i @/m/x.resc").unwrap();
+        assert!(vtor_at < include_at, "the script must see $vtor: {argv:?}");
+        assert!(!argv.iter().any(|a| a.contains('"')));
+        // No offset resolved -> nothing injected, argv byte-identical to before.
+        let plain = build_renode_argv(
+            "renode",
+            Path::new("/m/x.repl"),
+            Path::new("/m/x.resc"),
+            Path::new("/b/zephyr.elf"),
+            None,
+        );
+        assert!(!plain.iter().any(|a| a.starts_with("$vtor=")));
     }
 
     #[test]

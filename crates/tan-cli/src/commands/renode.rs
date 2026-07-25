@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tan_core::renode::{
-    build_renode_argv, platform_files_for_sku, platform_stem_for_sku, renode_rejected_argv,
-    select_sku, zephyr_elf_from_manifest,
+    build_renode_argv, elf_vector_table_base, platform_files_for_sku, platform_stem_for_sku,
+    renode_rejected_argv, select_sku, zephyr_elf_from_manifest,
 };
 use tan_core::system_manifest::{SystemManifestError, parse_system_manifest};
 
@@ -239,7 +239,15 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
         }
     }
 
-    let argv = build_renode_argv(&renode_bin, &repl, &resc, &elf);
+    // Read the ELF purely to learn where its vector table really is, so the
+    // descriptor can point the CPU at it instead of letting Renode guess from
+    // the lowest vaddr — which halts an MRAM-linked image before it executes a
+    // single instruction (alp-sdk#947). Best-effort by design: an unreadable or
+    // unexpected ELF injects nothing and leaves Renode exactly as it was.
+    let vtor = std::fs::read(&elf)
+        .ok()
+        .and_then(|bytes| elf_vector_table_base(&bytes));
+    let argv = build_renode_argv(&renode_bin, &repl, &resc, &elf, vtor);
     report.renode_argv = argv.clone();
 
     if !g.is_json() {
