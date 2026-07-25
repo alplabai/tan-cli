@@ -8,6 +8,7 @@ mod exit;
 mod progress;
 mod style;
 mod util;
+mod venv;
 
 use clap::Parser;
 
