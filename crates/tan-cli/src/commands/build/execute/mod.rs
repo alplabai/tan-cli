@@ -12,9 +12,9 @@ use std::process::Command;
 
 use serde::Serialize;
 use tan_core::ProjectContext;
-use tan_core::build_plan::{BuildPlan, PolicyAction};
+use tan_core::build_plan::{BuildPlan, CONSUMER_BUILD_ROOT, PolicyAction};
 use tan_core::debug::{DoctorCheck, DoctorStatus};
-use tan_core::plan_exec::{assemble_slice_env, resolve_action};
+use tan_core::plan_exec::{SdkStampAction, assemble_slice_env, resolve_action, sdk_stamp_action};
 use tan_core::preflight::preflight_summary;
 
 use super::CommandRun;
@@ -137,7 +137,17 @@ pub(crate) fn execute_slices_outcome(
     // `build.slice-failed` issue — because the whole point of this policy is
     // to name WHICH backend string the plan sent that this CLI doesn't know.
     let mut backend_issues: Vec<Issue> = Vec::new();
+    // Also folded into the JSON envelope: a warning per slice this run wiped
+    // for a stale-SDK build dir (issue #52) — never silent, since the VS Code
+    // extension only ever sees the envelope, not this function's `eprintln!`s.
+    let mut sdk_switch_issues: Vec<Issue> = Vec::new();
     let sdk_root = crate::util::resolve_sdk_root(g, &crate::util::cli_workspace_root(g));
+    // Stringified once: `sdk_stamp_action` compares against the stamp file's
+    // (also string) contents, and every slice in this run resolved the same
+    // root, so there's no reason to re-derive it per iteration.
+    let sdk_root_str = sdk_root
+        .as_deref()
+        .map(|p| p.to_string_lossy().into_owned());
     // Auto-manage the build env so `tan build` needs no manual
     // `source .venv/activate` / `export ZEPHYR_BASE`: derive ZEPHYR_BASE from the
     // resolved workspace and pass the alp-sdk checkout as an extra Zephyr module,
@@ -289,6 +299,83 @@ pub(crate) fn execute_slices_outcome(
             });
             continue;
         }
+        // Sdk-switch-pristine guard (issue #52): a build dir west configured
+        // against a PREVIOUS `--sdk-root` makes it FATAL ERROR on this one
+        // ("please clean it, use --pristine, or use --build-dir") — a real
+        // failure the user only sees as a bare "terminated with exit code: 1"
+        // in the terminal tab title, with the actual cause buried in
+        // scrollback. Detect it here and wipe west's own nested build dir
+        // before the tool runs, so the configure that follows is fresh
+        // instead of fatal.
+        //
+        // Two guards (mirroring `resolve_zephyr_artefact`'s own refusal to
+        // trust a build dir it cannot resolve) gate the WHOLE block —
+        // detection, wipe, AND the stamp write below — so tan never touches a
+        // `<cwd>/build` it cannot vouch for: an explicit `-d`/`--build-dir`
+        // override (west wrote somewhere this can't know), and a cwd that
+        // doesn't normalize under `CONSUMER_BUILD_ROOT` (a plan cwd of `src/`
+        // would put the touch target at `<project>/src/build`, which may hold
+        // files the build never created — even a harmless stamp write there
+        // is an uninvited side effect outside the build tree).
+        let build_dir_overridden = manifest::build_dir_overridden(&cmd.args);
+        let cwd_under_build_root = Path::new(&cmd.cwd)
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == CONSUMER_BUILD_ROOT);
+        if !build_dir_overridden && cwd_under_build_root {
+            let cached_sdk_root = manifest::read_sdk_stamp(&cwd);
+            let action = sdk_stamp_action(
+                cached_sdk_root.as_deref(),
+                sdk_root_str.as_deref(),
+                manifest::cmake_cache_configured(&cwd),
+                build_dir_overridden,
+                cwd_under_build_root,
+            );
+            if action == SdkStampAction::Pristine {
+                let new_root = sdk_root_str.as_deref().unwrap_or("?");
+                let message = match &cached_sdk_root {
+                    Some(old) => format!(
+                        "{}: build dir was configured against SDK root `{old}`; \
+                         active SDK is `{new_root}` — running pristine",
+                        slice.core_id
+                    ),
+                    None => format!(
+                        "{}: build dir predates the SDK-switch stamp (no recorded \
+                         SDK root); running pristine against the active SDK `{new_root}`",
+                        slice.core_id
+                    ),
+                };
+                if text_mode {
+                    eprintln!("note: {message}");
+                } else {
+                    sdk_switch_issues.push(Issue {
+                        code: "build.sdk-switch-pristine".to_string(),
+                        severity: "warning".to_string(),
+                        message,
+                    });
+                }
+                if let Err(e) = std::fs::remove_dir_all(cwd.join("build")) {
+                    // Best-effort: west's own FATAL ERROR below (if the wipe
+                    // didn't fully land) at least now ships with a note
+                    // explaining WHY, instead of reading as opaque.
+                    if text_mode {
+                        eprintln!("note: could not fully wipe stale build dir: {e}");
+                    }
+                }
+            }
+            // Re-stamp BEFORE the tool runs (not after success): a
+            // mid-configure failure still stamped correctly, because the dir
+            // really was configured against `sdk_root` regardless of whether
+            // the build finishes — and a compile-error iteration loop keeps
+            // its incremental state instead of re-pristine-ing on every
+            // retry. Best-effort: a write failure here just leaves the dir
+            // unstamped, which fails toward a spurious future rebuild, never
+            // toward trusting a stale one.
+            if let Some(root) = sdk_root_str.as_deref() {
+                let _ = manifest::write_sdk_stamp(&cwd, root);
+            }
+        }
+
         let tool = if cmd.tool == "west" {
             west_program(base, sdk_root.as_deref())
         } else {
@@ -472,6 +559,7 @@ pub(crate) fn execute_slices_outcome(
             Vec::new()
         };
         issues.extend(backend_issues);
+        issues.extend(sdk_switch_issues);
         if let Some(reason) = manifest_warning {
             issues.push(Issue {
                 code: "build.manifest-write-failed".to_string(),
@@ -1178,5 +1266,257 @@ mod tests {
         assert_eq!(outcome.native_sim_target, None);
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A minimal fake SDK root: only what `resolve_sdk_root`'s
+    /// `has_loader_script` marker check needs.
+    fn fake_sdk_root(tag: &str) -> std::path::PathBuf {
+        let d = unique_temp_dir(tag);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        std::fs::write(d.join("scripts").join("alp_project.py"), "").unwrap();
+        d
+    }
+
+    /// `GlobalArgs` with an explicit `--sdk-root`, so `sdk_root_str` resolves
+    /// deterministically — unlike this module's other tests, which leave
+    /// `--sdk-root` unset and rely on nothing resolving in the sandbox.
+    fn global_with_sdk_root(sdk_root: &std::path::Path) -> GlobalArgs {
+        use clap::Parser;
+        crate::cli::Cli::parse_from([
+            "alp",
+            "--format",
+            "json",
+            "--sdk-root",
+            sdk_root.to_str().unwrap(),
+            "validate",
+        ])
+        .global
+    }
+
+    /// A one-slice plan whose command is a portable no-op (its exit status is
+    /// never asserted by these tests — they only check the guard's
+    /// filesystem/issue side effects, which land before the tool spawns).
+    fn one_slice_plan_at(cwd: &str) -> BuildPlan {
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "{cwd}",
+                   "command": {{ "tool": "true", "args": [], "cwd": "{cwd}" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        parse_build_plan(&json).unwrap()
+    }
+
+    fn sdk_switch_issue_codes(json: &str) -> Vec<String> {
+        let env: serde_json::Value = serde_json::from_str(json).unwrap();
+        env["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["code"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn execute_slices_wipes_a_build_dir_stamped_for_a_different_sdk_root() {
+        // The reported regression (issue #52): switching --sdk-root from
+        // sdk_a to sdk_b must wipe m55_he's stale nested build dir (west's
+        // own output, at <cwd>/build) BEFORE dispatch, instead of letting
+        // west's FATAL ERROR abort the slice.
+        let sdk_a = fake_sdk_root("sdkswitch-a");
+        let sdk_b = fake_sdk_root("sdkswitch-b");
+        let base = unique_temp_dir("exec-sdkswitch-wipe");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("leftover-from-sdk-a.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_b);
+        let plan = one_slice_plan_at("build/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            !nested.join("leftover-from-sdk-a.marker").exists(),
+            "the stale build dir must be wiped"
+        );
+        let stamped = std::fs::read_to_string(nested.join(".tan-sdk-root")).unwrap();
+        assert_eq!(stamped, sdk_b.to_string_lossy());
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+        std::fs::remove_dir_all(&sdk_b).ok();
+    }
+
+    #[test]
+    fn execute_slices_keeps_a_build_dir_stamped_for_the_current_sdk_root() {
+        // A build dir whose stamp already matches this run's --sdk-root is an
+        // ordinary incremental rebuild, not a switch — must not be touched.
+        let sdk_a = fake_sdk_root("sdkswitch-match-a");
+        let base = unique_temp_dir("exec-sdkswitch-match");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("incremental-state.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_a);
+        let plan = one_slice_plan_at("build/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            nested.join("incremental-state.marker").exists(),
+            "a matching stamp must not be wiped"
+        );
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+    }
+
+    #[test]
+    fn execute_slices_skips_the_wipe_when_the_build_dir_is_overridden() {
+        // Guard 1: an explicit -d/--build-dir means west wrote somewhere this
+        // check cannot know — mirrors resolve_zephyr_artefact's own refusal.
+        let sdk_a = fake_sdk_root("sdkswitch-override-a");
+        let sdk_b = fake_sdk_root("sdkswitch-override-b");
+        let base = unique_temp_dir("exec-sdkswitch-override");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("leftover-from-sdk-a.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_b);
+        let json = r#"{
+          "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+          "slices": [
+            { "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+              "command": { "tool": "true", "args": ["-d", "../elsewhere"], "cwd": "build/c1" } }
+          ],
+          "sharedArtefacts": []
+        }"#;
+        let plan = parse_build_plan(json).unwrap();
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            nested.join("leftover-from-sdk-a.marker").exists(),
+            "an overridden build dir must not be wiped"
+        );
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+        std::fs::remove_dir_all(&sdk_b).ok();
+    }
+
+    #[test]
+    fn execute_slices_skips_the_wipe_when_cwd_is_outside_the_build_root() {
+        // Guard 2: a plan cwd outside CONSUMER_BUILD_ROOT (here "src/c1")
+        // would put the wipe target at <project>/src/c1/build — files the
+        // build never created must never be touched.
+        let sdk_a = fake_sdk_root("sdkswitch-outside-a");
+        let sdk_b = fake_sdk_root("sdkswitch-outside-b");
+        let base = unique_temp_dir("exec-sdkswitch-outside");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("src").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("user-owned.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_b);
+        let plan = one_slice_plan_at("src/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            nested.join("user-owned.marker").exists(),
+            "a cwd outside the build root must not be wiped"
+        );
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+        std::fs::remove_dir_all(&sdk_b).ok();
     }
 }
