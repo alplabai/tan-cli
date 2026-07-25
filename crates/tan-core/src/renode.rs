@@ -413,6 +413,20 @@ pub fn renode_rejected_argv(line: &str) -> bool {
     line.starts_with("usage: renode") || line.contains("cannot be set at the same time")
 }
 
+/// Whether a console line is Renode reporting that the CPU halted on its
+/// FIRST instruction fetch — the firmware never ran a single instruction.
+///
+/// This exists for the same reason as [`renode_rejected_argv`]: without
+/// `--expect`, a Renode that boots, halts the CPU, and then shuts down
+/// cleanly exits **0** just like a healthy smoke does (issue #64) — neither
+/// `natural_exit` nor the argv-rejection latch trips. Matched on Renode's own
+/// two exact wordings rather than any `[ERROR]` line: a broad "any ERROR"
+/// rule risks turning a healthy smoke red on a non-fatal emulation warning,
+/// which is worse than missing this one specific failure shape.
+pub fn renode_cpu_halted(line: &str) -> bool {
+    line.contains("CPU was halted") || line.contains("PC does not lay in memory")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -871,6 +885,23 @@ mod tests {
             "renode: booting /b/zephyr.elf on alif_ensemble_e8.repl"
         ));
         assert!(!renode_rejected_argv("*** Booting Zephyr OS ***"));
+    }
+
+    #[test]
+    fn renode_cpu_halt_is_recognised_from_its_own_wording() {
+        // Issue #64's real captured console, verbatim.
+        assert!(renode_cpu_halted(
+            "16:23:19.7011 [ERROR] cpu: PC does not lay in memory or PC and SP are equal \
+             to zero. CPU was halted."
+        ));
+        assert!(renode_cpu_halted("CPU was halted"));
+        assert!(renode_cpu_halted("PC does not lay in memory"));
+        // A normal boot line must never trip it — turning a healthy smoke red
+        // is exactly the false-failure issue #64 rejects as too broad a rule.
+        assert!(!renode_cpu_halted(
+            "renode: booting /b/zephyr.elf on alif_ensemble_e8.repl"
+        ));
+        assert!(!renode_cpu_halted("*** Booting Zephyr OS ***"));
     }
 
     #[test]
