@@ -30,6 +30,38 @@ pub struct SdkRelease {
     pub release_notes: String,
 }
 
+/// Append the likely environmental cause to a raw HTTP transport error.
+///
+/// rustls reports a middlebox-signed certificate as a bare "tls connection init
+/// failed: invalid peer certificate: UnknownIssuer", and ureq reports an
+/// unreachable proxy as a bare connect error. Both read to a user as "the
+/// network is down", so they go hunting in the wrong place — the actual answer
+/// is almost always "your corporate CA is not in this machine's trust store" or
+/// "your proxy env vars are wrong". alp-sdk ADR 0021 makes this explicit for the
+/// download path: a failure behind a TLS-intercepting middlebox must say
+/// *proxy/CA interference*, never blame the payload. One sentence appended to
+/// the error we already surface — deliberately not a diagnostic-code scheme.
+pub fn describe_network_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    // Proxy first: a proxy-connect/auth failure never mentions TLS, but a TLS
+    // failure caused BY a proxy does, so the certificate arm would swallow it.
+    let hint = if lower.contains("proxy") {
+        Some(
+            "Check HTTPS_PROXY/HTTP_PROXY — the configured proxy refused or could not complete the connection.",
+        )
+    } else if lower.contains("certificate") || lower.contains("tls") {
+        Some(
+            "This is usually a TLS-intercepting proxy or a corporate CA that this machine does not trust, not a broken connection.",
+        )
+    } else {
+        None
+    };
+    match hint {
+        Some(hint) => format!("{error} {hint}"),
+        None => error.to_string(),
+    }
+}
+
 /// Parse the GitHub Releases API payload into typed releases (mirror of
 /// `listRemoteSdkReleases`'s mapping). Errors on a non-array response.
 pub fn parse_remote_sdk_releases(raw: &Value) -> Result<Vec<SdkRelease>, String> {
@@ -267,6 +299,25 @@ mod tests {
         assert_eq!(releases[0].tag, "v1.5.0");
         assert_eq!(releases[0].release_notes_summary, "First line.");
         assert_eq!(releases[0].release_notes, "First line.\n\nrest");
+    }
+
+    #[test]
+    fn network_error_names_the_likely_cause() {
+        // The real rustls string a TLS-intercepting middlebox produces.
+        let tls = describe_network_error(
+            "https://api.github.com/…: tls connection init failed: invalid peer certificate: UnknownIssuer",
+        );
+        assert!(tls.contains("corporate CA"), "{tls}");
+        // Proxy wins over the certificate arm — a proxy CONNECT failure that also
+        // mentions TLS is still a proxy problem to go look at first.
+        let proxy = describe_network_error("proxy: tls connection failed");
+        assert!(proxy.contains("HTTPS_PROXY"), "{proxy}");
+        assert!(!proxy.contains("corporate CA"), "{proxy}");
+        // Anything else is passed through untouched — no invented diagnosis.
+        assert_eq!(
+            describe_network_error("dns: failed to lookup address"),
+            "dns: failed to lookup address"
+        );
     }
 
     #[test]

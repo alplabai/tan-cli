@@ -5,6 +5,7 @@ mod cli;
 mod commands;
 mod envelope;
 mod exit;
+mod http;
 mod progress;
 mod style;
 mod util;

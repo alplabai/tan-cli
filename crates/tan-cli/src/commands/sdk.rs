@@ -12,7 +12,7 @@ use std::process::Command;
 use serde::Serialize;
 use tan_core::{
     GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
-    check_sdk_readiness, is_plain_relative, parse_remote_sdk_releases,
+    check_sdk_readiness, describe_network_error, is_plain_relative, parse_remote_sdk_releases,
 };
 
 use super::CommandRun;
@@ -137,13 +137,20 @@ fn run_list(g: &GlobalArgs) -> CommandRun {
 }
 
 /// GETs the GitHub releases API and parses the JSON into `SdkRelease`s via `tan-core`.
+///
+/// Goes through [`crate::http::agent`] rather than the bare `ureq::get` this used
+/// to call: that default agent ignores both `HTTPS_PROXY`/`HTTP_PROXY` and the OS
+/// trust store, so this command was unusable behind a corporate proxy or a
+/// TLS-intercepting middlebox. `describe_network_error` then names that as the
+/// likely cause instead of leaving the user with a raw transport error.
 fn fetch_releases() -> Result<Vec<SdkRelease>, String> {
-    let response = ureq::get(GITHUB_RELEASES_URL)
+    let response = crate::http::agent()
+        .get(GITHUB_RELEASES_URL)
         .set("User-Agent", "tan-cli/0")
         .set("Accept", "application/vnd.github+json")
         .set("X-GitHub-Api-Version", "2022-11-28")
         .call()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| describe_network_error(&e.to_string()))?;
     let value: serde_json::Value = response.into_json().map_err(|e| e.to_string())?;
     parse_remote_sdk_releases(&value)
 }

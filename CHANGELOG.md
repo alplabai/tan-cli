@@ -54,6 +54,22 @@ All notable changes to `tan` are documented here. Format follows
   the missing-tool case it originally described. (#70)
 
 ### Fixed
+- **`tan sdk list` failed behind an HTTP proxy or a TLS-intercepting
+  middlebox.** Two independent causes on the one command that reaches the
+  network. It called a bare `ureq::get`, and ureq 2.x's default agent neither
+  reads `HTTPS_PROXY`/`HTTP_PROXY` (that needs `AgentBuilder` +
+  `try_proxy_from_env`) nor consults the OS trust store — its rustls config
+  trusts only the bundled webpki roots, so a corporate middlebox re-signing
+  with a private CA from the Windows/macOS/Linux system store failed the
+  handshake outright. Every network call now goes through one shared agent
+  that honours the proxy environment and trusts the bundled webpki roots
+  **and** the system store (ureq's own `native-certs` feature would have
+  swapped one for the other, breaking a host with an empty OS store instead).
+  A handshake or proxy failure now names the likely cause — a proxy or an
+  untrusted corporate CA — rather than surfacing a raw transport error a user
+  reads as "the network is down". Only the `sdk.fetch-failed` issue's message
+  text gains that sentence; no issue code, `data` field, or timeout changed.
+  Absent proxy environment variables behave exactly as before. (#79)
 - **`tan sdk switch` left `.west/config` pinned to the old SDK version.**
   The reconciliation that keeps `<topdir>/.west/config`'s `manifest.path` in
   sync already existed for `tan bootstrap` (#31), but `sdk switch` only ever
