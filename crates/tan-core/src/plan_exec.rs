@@ -109,6 +109,62 @@ pub fn resolve_action(
     policy.and_then(pick).unwrap_or(default)
 }
 
+/// What the executor should do with a slice's build dir before dispatching it
+/// (issue #52): keep it, or wipe it (`Pristine`) because it was configured
+/// against a different SDK root than the one this run resolved. West itself
+/// refuses to reconfigure a build dir whose CMake cache is bound to a
+/// different source tree (`FATAL ERROR: refusing to proceed without --force`)
+/// — a real failure that reads to the user as a bare "terminated with exit
+/// code: 1" with the actual cause buried in scrollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SdkStampAction {
+    /// Leave the build dir alone — either it matches the current SDK root, or
+    /// one of the guards below means this run cannot trust the check.
+    Keep,
+    /// Wipe the build dir before the tool runs; it was configured against a
+    /// different (or unrecorded) SDK root.
+    Pristine,
+}
+
+/// Decide [`SdkStampAction`] for one slice (pure — the caller resolves every
+/// input from disk/argv). `cached` is the `<cwd>/build/.tan-sdk-root` stamp
+/// tan itself wrote on a previous dispatch (`None` = absent, either a
+/// pre-feature build dir or one that never got past `create_dir_all`);
+/// `current` is this run's resolved `--sdk-root` (`None` only when it could
+/// not be resolved at all — never wipe on that, there is nothing to compare
+/// against); `cache_configured` is whether `<cwd>/build/CMakeCache.txt`
+/// exists (a dir west has never configured has nothing to go stale).
+///
+/// The two bool guards mirror `resolve_zephyr_artefact`'s own refusal to trust
+/// a build dir it cannot resolve: `build_dir_overridden` — a `-d`/
+/// `--build-dir` in the slice's argv means west wrote somewhere this function
+/// cannot know, so it must not touch `<cwd>/build` at all; `cwd_under_build_root`
+/// — confines the wipe target to under `CONSUMER_BUILD_ROOT` (`build`), so a
+/// plan cwd of `src/` (still `is_plain_relative`, but not under `build/`)
+/// cannot put the wipe target at `<project>/src/build`, which may hold files
+/// the build never created.
+///
+/// A missing stamp on an already-configured dir (`cached: None`,
+/// `cache_configured: true`) reads as stale, deliberately: it is the only way
+/// a build dir that predates this feature (like the one issue #52 reported)
+/// ever self-heals, since a dir that fails to build never earns a stamp.
+pub fn sdk_stamp_action(
+    cached: Option<&str>,
+    current: Option<&str>,
+    cache_configured: bool,
+    build_dir_overridden: bool,
+    cwd_under_build_root: bool,
+) -> SdkStampAction {
+    if build_dir_overridden || !cwd_under_build_root || !cache_configured {
+        return SdkStampAction::Keep;
+    }
+    match current {
+        None => SdkStampAction::Keep,
+        Some(current) if cached == Some(current) => SdkStampAction::Keep,
+        Some(_) => SdkStampAction::Pristine,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,6 +274,90 @@ mod tests {
         assert_eq!(
             resolve_action(None, |p| p.missing_tool, PolicyAction::Skip),
             PolicyAction::Skip
+        );
+    }
+
+    #[test]
+    fn sdk_stamp_action_keeps_a_matching_stamp() {
+        assert_eq!(
+            sdk_stamp_action(
+                Some("/sdk/v0.13.0"),
+                Some("/sdk/v0.13.0"),
+                true,
+                false,
+                true
+            ),
+            SdkStampAction::Keep
+        );
+    }
+
+    #[test]
+    fn sdk_stamp_action_pristines_a_mismatched_stamp() {
+        // The reported case: v0.11.0 -> v0.13.0.
+        assert_eq!(
+            sdk_stamp_action(
+                Some("/sdk/v0.11.0"),
+                Some("/sdk/v0.13.0"),
+                true,
+                false,
+                true
+            ),
+            SdkStampAction::Pristine
+        );
+    }
+
+    #[test]
+    fn sdk_stamp_action_pristines_a_missing_stamp_on_an_already_configured_dir() {
+        // Deliberate: the ONLY way a pre-feature build dir (never stamped, but
+        // already has a CMakeCache.txt) ever self-heals.
+        assert_eq!(
+            sdk_stamp_action(None, Some("/sdk/v0.13.0"), true, false, true),
+            SdkStampAction::Pristine
+        );
+    }
+
+    #[test]
+    fn sdk_stamp_action_keeps_when_no_cache_configured_yet() {
+        // Nothing to go stale — a first-ever configure, not a switch.
+        assert_eq!(
+            sdk_stamp_action(None, Some("/sdk/v0.13.0"), false, false, true),
+            SdkStampAction::Keep
+        );
+    }
+
+    #[test]
+    fn sdk_stamp_action_keeps_when_build_dir_is_overridden() {
+        // West wrote somewhere this function cannot know (-d/--build-dir) —
+        // mirrors resolve_zephyr_artefact's own refusal to trust that case.
+        assert_eq!(
+            sdk_stamp_action(Some("/sdk/v0.11.0"), Some("/sdk/v0.13.0"), true, true, true),
+            SdkStampAction::Keep
+        );
+    }
+
+    #[test]
+    fn sdk_stamp_action_keeps_when_cwd_is_outside_the_build_root() {
+        // A plan cwd of "src/" would put the wipe target at
+        // <project>/src/build, which may hold files the build never created.
+        assert_eq!(
+            sdk_stamp_action(
+                Some("/sdk/v0.11.0"),
+                Some("/sdk/v0.13.0"),
+                true,
+                false,
+                false
+            ),
+            SdkStampAction::Keep
+        );
+    }
+
+    #[test]
+    fn sdk_stamp_action_never_wipes_on_an_unresolved_current_sdk_root() {
+        // current: None means this run could not resolve --sdk-root at all —
+        // there is nothing to compare the stamp against.
+        assert_eq!(
+            sdk_stamp_action(Some("/sdk/v0.11.0"), None, true, false, true),
+            SdkStampAction::Keep
         );
     }
 }
