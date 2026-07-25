@@ -175,7 +175,16 @@ pub(super) fn resolved_planner_python(context: &ProjectContext) -> String {
 /// layouts — `<sdk-parent>` (alp-sdk-manifest topdir, post-alp-sdk#782) and the
 /// legacy `<sdk-parent>/zephyrproject`. `None` when no workspace is found (the
 /// caller then keeps the pre-existing behavior of running in the app dir).
-pub(super) fn west_workspace_dir(start: &str, sdk_root: Option<&Path>) -> Option<PathBuf> {
+///
+/// `pub(crate)`, not `pub(super)`: `commands::flash` shares this too (#61) —
+/// `west flash`'s runner registration (`run_common.py`'s
+/// `zephyr_module.parse_modules(ZEPHYR_BASE, command.manifest)`) resolves
+/// ONLY from the west workspace manifest, discovered by walking the child's
+/// OWN cwd upward, exactly like this resolver walks `start`. Re-deriving a
+/// second copy of this walk in `flash` would drift the two commands apart
+/// the moment one of the search steps above changes; re-export it instead
+/// (mirrors how `venv_bin_dir` is already shared from `crate::venv`).
+pub(crate) fn west_workspace_dir(start: &str, sdk_root: Option<&Path>) -> Option<PathBuf> {
     let is_workspace = |dir: &Path| dir.join(".west").is_dir();
 
     // 1. The project tree (if the app lives inside a workspace).
