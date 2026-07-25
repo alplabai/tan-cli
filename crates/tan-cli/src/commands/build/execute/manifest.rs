@@ -212,11 +212,54 @@ pub(super) fn resolve_zephyr_artefact(
 /// True when the slice's argv redirects west's build dir away from the
 /// default nested `<cwd>/build` (`-d <dir>`, `--build-dir <dir>`, or
 /// `--build-dir=<dir>`) — the one case `resolve_zephyr_artefact`'s default
-/// path can't follow.
-fn build_dir_overridden(cmd_args: &[String]) -> bool {
+/// path can't follow. `pub(super)` — also consulted by the executor's
+/// sdk-switch-pristine guard (see `sdk_stamp_path`), which refuses to touch a
+/// build dir west didn't put at the default nested path for the same reason.
+pub(super) fn build_dir_overridden(cmd_args: &[String]) -> bool {
     cmd_args
         .iter()
         .any(|a| a == "-d" || a == "--build-dir" || a.starts_with("--build-dir="))
+}
+
+/// Path of the tan-owned SDK-root stamp (issue #52): lives INSIDE west's own
+/// nested build dir (`<cwd>/build`, not `<cwd>` itself), so wiping that dir on
+/// a mismatch retires the stamp atomically — it can never outlive or
+/// misdescribe a build dir that no longer exists.
+pub(super) fn sdk_stamp_path(slice_cwd: &Path) -> std::path::PathBuf {
+    slice_cwd.join("build").join(".tan-sdk-root")
+}
+
+/// The SDK root recorded in the stamp file, if any (`None` covers both "never
+/// stamped" and "unreadable" — both read as "no signal", which
+/// `sdk_stamp_action` treats as a mismatch on an already-configured dir).
+pub(super) fn read_sdk_stamp(slice_cwd: &Path) -> Option<String> {
+    std::fs::read_to_string(sdk_stamp_path(slice_cwd))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Write the stamp BEFORE the tool is spawned (see the executor call site):
+/// a mid-configure failure still stamped correctly, since the dir really was
+/// configured against `sdk_root` regardless of whether the build finishes.
+/// Best-effort — a write failure here is not fatal to the build; it just
+/// means the next run may treat this dir as unstamped (fails toward a
+/// spurious rebuild, not toward trusting a stale one).
+pub(super) fn write_sdk_stamp(slice_cwd: &Path, sdk_root: &str) -> std::io::Result<()> {
+    let path = sdk_stamp_path(slice_cwd);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, sdk_root)
+}
+
+/// Whether west has ever configured this slice's build dir (`<cwd>/build/
+/// CMakeCache.txt`) — the "was this dir ever configured" signal
+/// `sdk_stamp_action` needs before it treats a missing stamp as stale. Present
+/// at the top of the nested dir in both plain and `--sysbuild` builds (the
+/// sysbuild superbuild project has its own top-level cache; only per-image
+/// caches nest further), so this holds for every slice `tan` emits today.
+pub(super) fn cmake_cache_configured(slice_cwd: &Path) -> bool {
+    slice_cwd.join("build").join("CMakeCache.txt").is_file()
 }
 
 /// Absolute, lossy-string form of a path (no filesystem round-trip beyond
@@ -475,6 +518,51 @@ boot_order: []
         let (artefact, build_dir) = resolve_zephyr_artefact(&cwd, &[]);
         assert!(artefact.is_some());
         assert!(build_dir.is_some());
+
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    #[test]
+    fn sdk_stamp_round_trips_through_write_and_read() {
+        let cwd = unique_temp_dir("alp-sdk-stamp-roundtrip");
+        let _ = std::fs::remove_dir_all(&cwd);
+
+        assert_eq!(read_sdk_stamp(&cwd), None, "nothing written yet");
+        write_sdk_stamp(&cwd, "/sdk/v0.13.0").unwrap();
+        assert_eq!(read_sdk_stamp(&cwd), Some("/sdk/v0.13.0".to_string()));
+
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    #[test]
+    fn sdk_stamp_lives_inside_the_nested_build_dir_so_wiping_it_retires_the_stamp() {
+        // The load-bearing property: the stamp can never outlive or
+        // misdescribe a build dir that no longer exists, because it sits
+        // INSIDE the exact directory the mismatch wipe removes.
+        let cwd = unique_temp_dir("alp-sdk-stamp-retires-with-wipe");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write_sdk_stamp(&cwd, "/sdk/v0.11.0").unwrap();
+        assert!(sdk_stamp_path(&cwd).starts_with(cwd.join("build")));
+
+        std::fs::remove_dir_all(cwd.join("build")).unwrap();
+        assert_eq!(
+            read_sdk_stamp(&cwd),
+            None,
+            "stamp must not survive the wipe"
+        );
+
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    #[test]
+    fn cmake_cache_configured_reflects_whether_west_ever_configured_the_dir() {
+        let cwd = unique_temp_dir("alp-cmake-cache-configured");
+        let _ = std::fs::remove_dir_all(&cwd);
+        std::fs::create_dir_all(cwd.join("build")).unwrap();
+
+        assert!(!cmake_cache_configured(&cwd), "no CMakeCache.txt yet");
+        std::fs::write(cwd.join("build").join("CMakeCache.txt"), "").unwrap();
+        assert!(cmake_cache_configured(&cwd));
 
         std::fs::remove_dir_all(&cwd).ok();
     }
