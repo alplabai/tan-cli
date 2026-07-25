@@ -150,7 +150,7 @@ fn fetch_releases() -> Result<Vec<SdkRelease>, String> {
         .set("Accept", "application/vnd.github+json")
         .set("X-GitHub-Api-Version", "2022-11-28")
         .call()
-        .map_err(|e| describe_network_error(&e.to_string()))?;
+        .map_err(|e| describe_network_error(&e.to_string(), crate::http::proxy_configured()))?;
     let value: serde_json::Value = response.into_json().map_err(|e| e.to_string())?;
     parse_remote_sdk_releases(&value)
 }
@@ -297,7 +297,12 @@ fn git_clone(version: &str, dest: &Path) -> Result<(), String> {
     }
     // Capture output (--quiet) rather than inherit: the spinner owns the
     // terminal while cloning, and JSON/non-interactive runs stay output-free.
-    // git's stderr is surfaced verbatim only on failure.
+    // git's stderr is surfaced verbatim only on failure — but git clones over
+    // HTTPS through the same middlebox `sdk list` hits, and its own wording
+    // ("SSL certificate problem: unable to get local issuer certificate", or the
+    // schannel equivalent) reads as a broken download too. Same hint, one
+    // command later; git uses its own trust store, so the fix is on the user's
+    // side (`http.sslCAInfo`), which is exactly what the sentence points at.
     let output = Command::new("git")
         .args([
             "clone",
@@ -324,7 +329,10 @@ fn git_clone(version: &str, dest: &Path) -> Result<(), String> {
                     .unwrap_or_else(|| "unknown".to_string())
             ));
         }
-        return Err(format!("Alp: git clone failed: {detail}"));
+        return Err(describe_network_error(
+            &format!("Alp: git clone failed: {detail}"),
+            crate::http::proxy_configured(),
+        ));
     }
     Ok(())
 }

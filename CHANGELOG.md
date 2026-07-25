@@ -55,21 +55,36 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Fixed
 - **`tan sdk list` failed behind an HTTP proxy or a TLS-intercepting
-  middlebox.** Two independent causes on the one command that reaches the
-  network. It called a bare `ureq::get`, and ureq 2.x's default agent neither
-  reads `HTTPS_PROXY`/`HTTP_PROXY` (that needs `AgentBuilder` +
-  `try_proxy_from_env`) nor consults the OS trust store — its rustls config
-  trusts only the bundled webpki roots, so a corporate middlebox re-signing
-  with a private CA from the Windows/macOS/Linux system store failed the
-  handshake outright. Every network call now goes through one shared agent
-  that honours the proxy environment and trusts the bundled webpki roots
-  **and** the system store (ureq's own `native-certs` feature would have
-  swapped one for the other, breaking a host with an empty OS store instead).
-  A handshake or proxy failure now names the likely cause — a proxy or an
-  untrusted corporate CA — rather than surfacing a raw transport error a user
-  reads as "the network is down". Only the `sdk.fetch-failed` issue's message
-  text gains that sentence; no issue code, `data` field, or timeout changed.
-  Absent proxy environment variables behave exactly as before. (#79)
+  middlebox.** Two independent causes on the only command that makes an
+  **in-process HTTP** request. It called a bare `ureq::get`, and ureq 2.x's
+  default agent neither reads `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (that
+  needs `AgentBuilder` + `try_proxy_from_env`) nor consults the OS trust store
+  — its rustls config trusts only the bundled webpki roots, so a corporate
+  middlebox re-signing with a private CA from the Windows/macOS/Linux system
+  store failed the handshake outright. Every in-process HTTP call now goes
+  through one shared agent that honours the proxy environment (SOCKS included —
+  ureq reads `ALL_PROXY` first, so its `socks-proxy` feature is now on;
+  without it a `socks5://` tunnel would have hard-failed where it previously
+  went direct) and trusts the bundled webpki roots **and** the system store
+  (ureq's own `native-certs` feature would have swapped one for the other,
+  breaking a host with an empty OS store instead). The agent also caps a whole
+  request at 60 s — proxied now, a black-hole proxy would otherwise hang `tan`
+  forever, and the extension waits on process exit.
+  **Two limitations worth knowing.** `NO_PROXY` is *not* honoured — ureq 2.12
+  has no support for it at all — so a host with both `HTTPS_PROXY` and a
+  `NO_PROXY` covering `api.github.com` is now proxied where it went direct.
+  And the subprocesses `tan` spawns for network work (`git clone` in
+  `tan sdk install`, `pip`/`west update` in `tan bootstrap`) are untouched by
+  any of this: they inherit the proxy environment and use their own trust
+  stores.
+  A handshake or proxy failure — including `tan sdk install`'s `git clone` —
+  now names the likely cause, a proxy or an untrusted corporate CA, rather than
+  surfacing a raw error a user reads as "the network is down"; a proxy that is
+  set but unreachable is named too, from the environment, since ureq reports
+  that as a plain connect failure that never says "proxy". Only the message
+  text of the `sdk.fetch-failed` / `sdk.install-failed` issues gains that
+  sentence; no issue code or `data` field changed. Absent proxy environment
+  variables behave exactly as before.
 - **`tan sdk switch` left `.west/config` pinned to the old SDK version.**
   The reconciliation that keeps `<topdir>/.west/config`'s `manifest.path` in
   sync already existed for `tan bootstrap` (#31), but `sdk switch` only ever
