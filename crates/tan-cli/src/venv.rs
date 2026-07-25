@@ -12,6 +12,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use tan_core::bootstrap::venv_layout;
+
 /// Locate the workspace `.venv` directory whose `west` is actually present —
 /// the one search shared by `west_program` (the venv's `west` binary) and
 /// `venv_python` (the venv's `python`, used by `invoke_sdk_emit`). Prefer a
@@ -29,12 +31,8 @@ use std::process::Command;
 /// every caller needs. `None` when none resolve (CI, an activated venv, the
 /// contract harness).
 fn find_workspace_venv(start: &str, sdk_root: Option<&Path>) -> Option<PathBuf> {
-    let (sub, west_exe) = if cfg!(windows) {
-        ("Scripts", "west.exe")
-    } else {
-        ("bin", "west")
-    };
-    let has_west = |venv: &Path| venv.join(sub).join(west_exe).is_file();
+    let layout = venv_layout(cfg!(windows));
+    let has_west = |venv: &Path| venv.join(layout.bin_dir).join(layout.west).is_file();
 
     // 1. A `.venv` in the project tree.
     let mut dir = Some(Path::new(start));
@@ -77,7 +75,7 @@ fn find_workspace_venv(start: &str, sdk_root: Option<&Path>) -> Option<PathBuf> 
 /// directory to look tool names up in, and the directory to put on the child's
 /// PATH. `None` when no west-capable venv resolves.
 pub(crate) fn venv_bin_dir(start: &str, sdk_root: Option<&Path>) -> Option<PathBuf> {
-    let sub = if cfg!(windows) { "Scripts" } else { "bin" };
+    let sub = venv_layout(cfg!(windows)).bin_dir;
     find_workspace_venv(start, sdk_root).map(|venv| venv.join(sub))
 }
 

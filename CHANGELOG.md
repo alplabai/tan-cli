@@ -69,6 +69,60 @@ All notable changes to `tan` are documented here. Format follows
   with `UnknownCore`, listing the manifest's zephyr cores. The refusal message
   now names the flag. Unchanged for a single-slice project.
 
+## [0.3.1] — 2026-07-25
+
+### Added
+- **`tan bootstrap` is native Rust on every host; the `bash` dependency is
+  gone** — it no longer shells `bash <sdkRoot>/scripts/bootstrap.sh`, and no
+  longer refuses on native Windows. The venv → `pip install west` →
+  `west init -l` / `west update` / `west zephyr-export` → #769 legibility
+  guard → pip-deps flow runs natively on Linux, macOS and Windows, with the
+  SDK's `scripts/bootstrap.sh` + `scripts/bootstrap.ps1` as the parity
+  oracle for control flow and message strings. Text mode streams the install
+  live; JSON mode emits exactly one envelope (#49).
+- **Consumes `<sdkRoot>/metadata/bootstrap.json`** (alp-sdk#917) — the SDK's
+  single source of truth for the workspace-assembly facts, which names tan a
+  required consumer. The Zephyr pin, venv layout, prerequisite lists +
+  Python floor, `west` pip spec (`west>=0.14.0`) and argv, pip package sets,
+  the `env` map and the per-OS native-lib hints all come from it, with
+  `${SDK_ROOT}`/`${WORKSPACE_DIR}` token substitution. An SDK without the
+  manifest falls back to documented constants; a manifest with an
+  unsupported `schemaVersion` is a hard error, never a silent fallback
+  (RFC #843).
+- **`tan build --no-auto-bootstrap`** — suppresses the implicit bootstrap a
+  text-mode build triggers when no Zephyr workspace resolves. Now that the
+  trigger can start a real unattended `west update` on every host (it used
+  to refuse instantly on Windows), a build needs a way to say no. Default
+  behaviour is unchanged. `tan doctor --build --fix` is explicit opt-in and
+  is unaffected.
+
+### Changed
+- **BREAKING (wire): `bootstrap` envelope `data.schemaVersion` `"1"` →
+  `"2"`.** `scriptPath` is REMOVED — it named
+  `<sdkRoot>/scripts/bootstrap.sh`, which this command no longer runs (no
+  consumer read it: the VS Code extension runs bootstrap in a terminal, not
+  through the envelope, and there is no bootstrap fixture in
+  `contract/envelopes/`). Added `workspaceDir`, `venvDir`, `zephyrBase`,
+  `factsFromManifest` and `zephyrPin`. `sdkRoot`, `noPip`, `noWest` and
+  `printEnv` are unchanged, as is the surrounding
+  `{command, ok, exitCode, project, data, issues}` envelope.
+- **Non-fatal bootstrap warnings now reach the envelope** as
+  `severity: "warning"` issues (`bootstrap.pip-upgrade`,
+  `.zephyr-requirements`, `.sdk-extras`, `.editable-install`,
+  `.zephyr-base-manifest-mismatch`, `.zephyr-base-incompatible`,
+  `.west-config-reconciled`, `.yocto-host`). A JSON run where every
+  non-fatal pip step failed used to report `ok: true` with an empty
+  `issues` array.
+- **One Zephyr pin authority.** The `$ZEPHYR_BASE` workspace-reuse test now
+  reads the SDK's own `west.yml` — the same file `doctor --build` /
+  `build`'s preflight compares against — instead of a hardcoded value. With
+  two sources, an SDK pin bump made bootstrap adopt the very workspace
+  preflight called stale, so the auto-bootstrap self-heal never converged.
+- **Yocto host gate.** `tan bootstrap` refuses (exit 2) only when EVERY
+  in-play core resolves to Yocto on a non-Linux host; a mixed board
+  bootstraps normally with a warning, and an unresolvable project always
+  runs. The refusal reuses `doctor --build`'s `yoctoHost` wording.
+
 ## [0.3.0] — 2026-07-24
 
 ### Added

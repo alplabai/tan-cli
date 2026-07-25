@@ -183,3 +183,35 @@ present upstream, content differs) always fails.
 ```
 python3 tests/parity/kconfig_fixture_parity.py --sdk /path/to/an/alp-sdk/checkout
 ```
+
+## Bootstrap manifest byte-parity (alp-sdk#917)
+
+`bootstrap_manifest_parity.py` guards the same class of drift for `tan
+bootstrap`'s workspace-assembly FACTS. alp-sdk's `metadata/bootstrap.json` is
+the single source of truth the two bootstrap scripts and `tan` all read (the
+Zephyr pin, venv layout, prerequisites + Python floor, the `west` pip spec and
+argv, pip package sets, the `env` map, the per-OS native-lib hints); its own
+`_comment` names tan a required consumer. alp-sdk polices its *scripts*
+against it with `scripts/check_bootstrap_manifest.py` — but that gate cannot
+see a tan-cli checkout, so nothing upstream catches
+`crates/tan-core/src/bootstrap/manifest.rs` drifting from the producer. This
+script byte-diffs the vendored copy at
+`contract/fixtures/bootstrap/manifest.json` (which the consumer and its tests
+`include_str!`) against the pinned checkout's `metadata/bootstrap.json`. The
+relative paths deliberately differ between the repos — it is a test fixture
+here, SDK metadata there.
+
+Paired with `cargo test`, a failure here has a follow-on: `manifest.rs`'s
+`the_fallback_matches_the_real_manifest_field_for_field` asserts the
+hand-ported fallback constants (the path taken against any SDK predating
+#917) equal this fixture field-for-field, so re-vendoring a changed manifest
+fails that test until the constants are updated too.
+
+Self-skips with no reachable alp-sdk checkout, like the two gates above.
+`PINNED_SDK_TAG` (`v0.13.0`) PREDATES alp-sdk#917, so today the gate NOTICEs
+and passes on every CI run — it starts byte-diffing for real once the pin is
+bumped past #917. A byte MISMATCH always fails regardless of the pin.
+
+```
+python3 tests/parity/bootstrap_manifest_parity.py --sdk /path/to/an/alp-sdk/checkout
+```

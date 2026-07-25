@@ -9,8 +9,10 @@
 executes it — it is the single executor and the user command surface for
 building, flashing, and inspecting Alp Lab E1M / E1M-X firmware.
 
-`build` / `run` / `size` / `image` / `flash` / `clean` / `renode` are native
-Rust; only `migrate` / `lock` / `quality` still forward to `west alp-*`, and
+`bootstrap` / `build` / `run` / `size` / `image` / `flash` / `clean` / `renode`
+are native Rust — `bootstrap` included, so there is no `bash` dependency and
+native Windows is a first-class host. Only `migrate` / `lock` / `quality` still
+forward to `west alp-*`, and
 `model` / `monitor` / `new-som` / `faultdecode` to the SDK `alp` CLI. Licensed
 **Apache-2.0** (see [`LICENSE`](LICENSE); the SPDX identifier is also set in each
 `Cargo.toml` and source header).
@@ -105,6 +107,7 @@ select it. No VS Code required.
 # Start in a directory holding an alp-sdk checkout — clone one, or
 # `tan sdk install <version> && tan sdk switch <version>`.
 tan bootstrap --sdk-root ./alp-sdk    # west + Zephyr workspace + Python deps
+                                      # (Linux, macOS and native Windows alike)
 tan init --template minimal-app --som E1M-AEN701 --name my-app
 cd my-app                             # sibling ../alp-sdk resolves automatically
 
@@ -118,6 +121,13 @@ tan run --flash                       # build, then run (host) or program (hardw
 environment that is not ready. `tan completion --shell zsh` emits a completion
 script.
 
+`bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; on
+Windows it prints the `winget install` line for any missing `git`/`cmake`/
+`python`/`ninja` rather than installing system packages itself. Zephyr and
+baremetal cores build on every host. Only a project whose cores are *all* Yocto
+is refused off Linux — a mixed board still bootstraps, with a warning that the
+Yocto core itself needs WSL2 or a Linux host.
+
 ## Commands
 
 | Area | Commands |
@@ -125,7 +135,7 @@ script.
 | **Project** | `init` · `scaffold` · `examples` · `explain` · `presets` · `pinmux` |
 | **Configure & verify** | `validate` · `generate` · `diff` · `inspect` · `trace` · `doctor` · `debug-config` · `support-bundle` · `kconfig` |
 | **Build & run** (native) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
-| **Environment** | `bootstrap` · `sdk` · `completion` |
+| **Environment** (native) | `bootstrap` · `sdk` · `completion` |
 | **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `model` · `monitor` · `new-som` · `faultdecode` → `python -m alp_cli` |
 
 `tan <command> --help` for flags. Global flags apply to every command:
