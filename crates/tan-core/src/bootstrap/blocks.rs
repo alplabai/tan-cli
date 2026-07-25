@@ -95,11 +95,18 @@ pub fn print_env_block(
 /// native Windows prints the script's literal Arm/Zephyr-SDK block followed by
 /// the manifest's `manualInstallHints.windows.note` — the SDK-sourced fact,
 /// matching `bootstrap.ps1`'s own `foreach ($line in $ManualInstallNote)`.
-/// This must NOT read `nativeLibHints.windows.note` here: that field is the
-/// git-bash "Optional native libraries" hint (the `else` branch below), a
-/// DIFFERENT fact, and appending both used to print the Arm/Zephyr-SDK
-/// sentence twice — once hardcoded, once from a manifest note field that (pre
-/// alp-sdk#917 review) still carried the same sentence.
+/// This must NOT read `nativeLibHints.windows.note` here: appending both used
+/// to print the Arm/Zephyr-SDK sentence twice — once hardcoded, once from a
+/// manifest note field that (pre alp-sdk#917 review) still carried the same
+/// sentence. That field (the "Under Git Bash / MSYS2..." hint
+/// `bootstrap.sh`'s `windows-bash)` arm prints) is parsed into
+/// `BootstrapFacts::hint_windows` for round-trip fidelity but rendered by
+/// NOTHING in this crate: `HostOs::detect` reads the compile-time
+/// `std::env::consts::OS`, so a Windows-built `tan.exe` always takes THIS
+/// branch, git-bash or not — the `else` branch below never runs on Windows.
+/// `bootstrap.ps1` itself has no heading for this hint either, so the gap
+/// matches the ps1 oracle tan mirrors on native Windows; there is no
+/// git-bash detection here to make the `bootstrap.sh` arm reachable.
 pub fn optional_libs_block(
     facts: &BootstrapFacts,
     host: HostOs,

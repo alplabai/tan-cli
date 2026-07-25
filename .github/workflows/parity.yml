@@ -27,17 +27,19 @@ env:
   # It MUST be a ref at or after the oracle SHA (97ad481b) -- an OLDER ref
   # (e.g. the last release v0.11.1, which predates the Phase-1 fields) lacks
   # envAppendPath/executionPolicy and would fail seam1 on missing-field diffs,
-  # not real drift. Pinned to the v0.13.0 release tag (93ef5726): carries the
-  # Phase-1 fields, the one allowed delta (debug.probe openocd->null), the
-  # tokened-plan reconciliation branch `normalize_plan` exercises, AND
-  # alp-sdk#893/#894/#897 (the `--emit kconfig` feature + its canonical
-  # fixture) -- `kconfig_fixture_parity.py` below now byte-diffs the vendored
-  # `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` for real
-  # instead of soft-NOTICE-skipping (that self-skip only fired for a pin
-  # predating #897; verified locally against a v0.13.0 checkout, PASS, 814
-  # bytes). Re-bump on every alp-sdk release this repo's parity gate should
-  # track.
-  PINNED_SDK_TAG: v0.13.0
+  # not real drift. Pinned to an exact alp-sdk `dev` commit SHA rather than a
+  # tag: `actions/checkout`'s `ref:` takes any git ref, and a full SHA is
+  # exactly as immutable as a tag without waiting on alp-sdk to cut one.
+  # Carries the Phase-1 fields, the one allowed delta (debug.probe
+  # openocd->null), the tokened-plan reconciliation branch `normalize_plan`
+  # exercises, alp-sdk#893/#894/#897 (the `--emit kconfig` fixture), AND
+  # alp-sdk#917/#928 (the `metadata/bootstrap.json` manifest + its
+  # `manualInstallHints` split) -- all four parity steps below verified PASS
+  # against this exact SHA (bootstrap-manifest 3180 bytes, kconfig 814 bytes,
+  # scaffold 6 trees, seam1 field diff clean). Re-bump (to a released tag once
+  # alp-sdk cuts one at or after this SHA, or straight to a later SHA) on
+  # every alp-sdk change this repo's parity gate should track.
+  PINNED_SDK_TAG: 8b216a04e0595cca64c7db65c3255c9b35bd63e0
 
 jobs:
   seam1-plan-shape:
@@ -85,9 +87,9 @@ jobs:
       # and falls back to hand-ported constants for an SDK without one.
       # alp-sdk's own check_bootstrap_manifest.py polices its two shell
       # scripts against that manifest but cannot see this checkout, so this
-      # is the tan-side half of that gate. NOTE: PINNED_SDK_TAG (v0.13.0)
-      # predates #917, so this step NOTICEs and passes until the pin is
-      # bumped — same lag the kconfig step had before #897.
+      # is the tan-side half of that gate. PINNED_SDK_TAG is now past #917
+      # (and #928), so this step byte-diffs for real -- same milestone the
+      # kconfig step passed once its pin moved past #897.
       - name: bootstrap manifest byte-parity (vendored vs. pinned alp-sdk)
         run: python3 tests/parity/bootstrap_manifest_parity.py --sdk alp-sdk
 

@@ -7,8 +7,10 @@ alp-sdk's `metadata/bootstrap.json` vs. the pinned alp-sdk checkout's own copy.
 workspace-assembly FACTS that `scripts/bootstrap.sh`, `scripts/bootstrap.ps1`
 and `tan bootstrap` all need -- the Zephyr pin, venv layout, prerequisite
 lists + Python floor, the `west` pip spec and argv, the pip package sets, the
-`env` map and the per-OS native-lib hints. Its own `_comment` names tan a
-required consumer.
+`env` map and the per-OS native-lib hints. Its own `_comment` (as vendored)
+still calls tan only an INTENDED future consumer that no code reads yet --
+`crates/tan-core/src/bootstrap/manifest.rs`'s `parse_bootstrap_manifest` is
+what makes that stale.
 
 alp-sdk polices its two scripts against that manifest with
 `scripts/check_bootstrap_manifest.py`, but that gate cannot see a tan-cli
@@ -38,11 +40,12 @@ Reachability is resolved in the same order: `--sdk`, then `$ALP_SDK_ROOT`,
 then an `alp-sdk` checkout next to this tan-cli checkout.
 
 A SECOND non-failure case, same shape as the kconfig gate's: the manifest
-absent at the ref `parity.yml` pins. `PINNED_SDK_TAG` is `v0.13.0`, which
-PREDATES alp-sdk#917 -- so today this gate NOTICEs and passes on every CI run
-and only bites once the pin is bumped past #917 landing. A byte MISMATCH
-(manifest present upstream, content differs) always fails regardless of the
-pin -- that is the actual drift this gate exists to catch.
+absent at the ref `parity.yml` pins. `PINNED_SDK_TAG` is now past alp-sdk#917
+landing this manifest, so this gate byte-diffs for real in CI today; this
+branch is dead against that pin and only fires for an OLDER ref used locally
+(e.g. one predating #917). A byte MISMATCH (manifest present upstream,
+content differs) always fails regardless of the pin -- that is the actual
+drift this gate exists to catch.
 """
 
 from __future__ import annotations
@@ -88,12 +91,12 @@ def run(sdk_root: Path) -> bool:
         print(f"FAIL: vendored manifest missing at {VENDORED_PATH}")
         return False
     if not upstream_path.is_file():
-        # NOT a fail: `PINNED_SDK_TAG` (parity.yml) is a hand-bumped fixed ref
-        # and v0.13.0 predates alp-sdk#917 introducing this manifest at all. A
-        # ref that never HAD it is "not yet applicable", not drift -- unlike a
-        # byte MISMATCH below, which means it existed and something changed.
-        # Once the pin bumps past #917 this branch stops firing and a real
-        # removal starts failing loudly instead.
+        # NOT a fail: `PINNED_SDK_TAG` (parity.yml) is a hand-bumped fixed ref,
+        # and a ref predating alp-sdk#917 introducing this manifest has no
+        # such file at all. That is "not yet applicable", not drift -- unlike
+        # a byte MISMATCH below, which means it existed and something
+        # changed. `parity.yml`'s current pin is past #917, so in CI this
+        # branch is dead; it only fires for an older ref used locally.
         print(f"NOTICE: no manifest at {upstream_path} in this alp-sdk ref -- "
               f"pinned ref predates alp-sdk#917 landing "
               f"metadata/bootstrap.json; not treated as drift until the pin "

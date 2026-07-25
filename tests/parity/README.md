@@ -130,7 +130,7 @@ board's only diffs (if any) are the allowed `debug.probe` delta.
 ## CI wiring
 
 `.github/workflows/parity.yml` runs `seam1-plan-shape` on every pull request
-(against a pinned alp-sdk tag — see the workflow's `PINNED_SDK_TAG` comment)
+(against a pinned alp-sdk ref — see the workflow's `PINNED_SDK_TAG` comment)
 and on a `repository_dispatch` of type `alp-sdk-planner-change` (the
 cross-repo trigger ADR-0020's Amendment requires: alp-sdk CI fires this on
 every planner change so a drifting emit surfaces on the *alp-sdk* PR, not
@@ -176,9 +176,9 @@ test` already covers the vendored copy's internal consistency); unlike it,
 a fixture simply absent at the *pinned* ref is ALSO not a fail (see
 `PINNED_SDK_TAG`'s comment in `.github/workflows/parity.yml` and the
 script's own docstring) — that branch only fires for a pin predating
-alp-sdk#897 landing this fixture; `PINNED_SDK_TAG` is now `v0.13.0`
-(past #897), so the gate byte-diffs for real. A byte MISMATCH (fixture
-present upstream, content differs) always fails.
+alp-sdk#897 landing this fixture; the current pin is past #897, so the gate
+byte-diffs for real. A byte MISMATCH (fixture present upstream, content
+differs) always fails.
 
 ```
 python3 tests/parity/kconfig_fixture_parity.py --sdk /path/to/an/alp-sdk/checkout
@@ -191,7 +191,8 @@ bootstrap`'s workspace-assembly FACTS. alp-sdk's `metadata/bootstrap.json` is
 the single source of truth the two bootstrap scripts and `tan` all read (the
 Zephyr pin, venv layout, prerequisites + Python floor, the `west` pip spec and
 argv, pip package sets, the `env` map, the per-OS native-lib hints); its own
-`_comment` names tan a required consumer. alp-sdk polices its *scripts*
+`_comment` (as vendored) still calls tan only an INTENDED future consumer
+that no code reads yet. alp-sdk polices its *scripts*
 against it with `scripts/check_bootstrap_manifest.py` — but that gate cannot
 see a tan-cli checkout, so nothing upstream catches
 `crates/tan-core/src/bootstrap/manifest.rs` drifting from the producer. This
@@ -208,9 +209,9 @@ hand-ported fallback constants (the path taken against any SDK predating
 fails that test until the constants are updated too.
 
 Self-skips with no reachable alp-sdk checkout, like the two gates above.
-`PINNED_SDK_TAG` (`v0.13.0`) PREDATES alp-sdk#917, so today the gate NOTICEs
-and passes on every CI run — it starts byte-diffing for real once the pin is
-bumped past #917. A byte MISMATCH always fails regardless of the pin.
+The current `PINNED_SDK_TAG` is past alp-sdk#917, so the gate byte-diffs for
+real; the NOTICE-and-pass branch only fires for an older ref used locally
+(one predating #917). A byte MISMATCH always fails regardless of the pin.
 
 ```
 python3 tests/parity/bootstrap_manifest_parity.py --sdk /path/to/an/alp-sdk/checkout
