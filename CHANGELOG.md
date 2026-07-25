@@ -8,6 +8,16 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **The Renode smoke never actually booted, and reported success anyway.**
+  `build_renode_argv` passed `--console --disable-xwt --hide-monitor --plain`;
+  Renode 1.16.1 rejects that combination outright — "--hide-monitor and
+  --console cannot be set at the same time" — printing its usage page and
+  exiting **0**, so `tan renode` reported a clean smoke while nothing was ever
+  simulated. `--hide-monitor` was redundant (Renode's own `--disable-xwt` help:
+  "It automatically sets HideMonitor") and is gone. A new `renode_rejected_argv`
+  guard latches Renode's own refusal wording off the console and fails the run
+  (`renode.argv-rejected`, exit 1) regardless of exit status, so the next
+  incompatible flag cannot pass silently either.
 - **`tan flash` could not find the `west` that `tan build` uses.** `west` is
   installed INSIDE the `tan bootstrap` venv, and nothing activates that venv for
   a GUI-launched editor, so the ambient PATH has none. `tan build` has resolved
@@ -22,6 +32,17 @@ All notable changes to `tan` are documented here. Format follows
   the venv as well. With no west-capable venv — CI, an activated venv, the
   contract harness — every argv and message stays byte-identical to before.
   (#59)
+
+### Added
+- **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
+  project in the headless smoke. A manifest with more than one Zephyr slice (an
+  E1M-AEN801's `m55_hp` + `m55_he`) was refused outright with "the Renode smoke
+  boots a single-Zephyr-slice system", leaving no way to smoke-test such a
+  project at all. `--core` narrows the zephyr set before the runnable filter, so
+  an explicitly named blocked/skipped slice still boots exactly like a lone one
+  does (the smoke touches no hardware). A name matching no zephyr slice fails
+  with `UnknownCore`, listing the manifest's zephyr cores. The refusal message
+  now names the flag. Unchanged for a single-slice project.
 
 ## [0.3.0] — 2026-07-24
 

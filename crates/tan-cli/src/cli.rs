@@ -230,6 +230,12 @@ pub struct RenodeArgs {
     /// (default: `hw_info.sku` from the manifest).
     #[arg(long, value_name = "SKU")]
     pub board: Option<String>,
+    /// Boot the Zephyr slice with this `core_id`. Needed on a manifest carrying
+    /// more than one Zephyr slice (an AEN801's `m55_hp` + `m55_he`), which the
+    /// single-slice smoke otherwise refuses outright; optional when the project
+    /// has exactly one.
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
     /// Directory of pre-built per-slice artefacts. Accepted for parity with the
     /// dual-OS flow; unused by the single-Zephyr-slice smoke.
     #[arg(long = "image-bundle", value_name = "DIR")]

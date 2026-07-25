@@ -55,15 +55,27 @@ pub enum RenodeError {
     /// The manifest carries no `os: zephyr` slice to boot.
     #[error("system-manifest.yaml has no os: zephyr slice to boot in Renode.")]
     NoZephyrSlice,
-    /// More than one runnable Zephyr slice — the smoke boots a single one.
+    /// More than one runnable Zephyr slice and no `--core` to disambiguate —
+    /// the smoke boots a single one.
     #[error(
         "system-manifest.yaml has {} zephyr slices (cores {cores:?}); the Renode \
-         smoke boots a single-Zephyr-slice system. Multi-slice dual-OS boot is a \
-         separate target.",
+         smoke boots a single-Zephyr-slice system. Pick one with `--core <CORE_ID>`. \
+         Booting several slices together (dual-OS) is a separate target.",
         cores.len()
     )]
     MultipleZephyrSlices {
         /// The core ids of the competing zephyr slices.
+        cores: Vec<String>,
+    },
+    /// `--core` named a core the manifest carries no Zephyr slice for.
+    #[error(
+        "system-manifest.yaml has no zephyr slice for core '{core}'; \
+         its zephyr cores are {cores:?}."
+    )]
+    UnknownCore {
+        /// The `--core` value that matched nothing.
+        core: String,
+        /// The zephyr core ids the manifest does carry.
         cores: Vec<String>,
     },
     /// Neither `hw_info.sku` nor `--board` gave a SKU.
@@ -174,7 +186,16 @@ pub fn select_sku(
 /// Filters `os == "zephyr"`; a slice is runnable when its `status` is NOT in
 /// `{blocked, skipped}`; the pool is the runnable set, or the full zephyr set
 /// when none are runnable (a single blocked zephyr slice still boots). Errors
-/// `NoZephyrSlice` (empty) / `MultipleZephyrSlices` (>1).
+/// `NoZephyrSlice` (empty) / `MultipleZephyrSlices` (>1, no `core`).
+///
+/// `core` is the caller's `--core <CORE_ID>` choice. When given, the zephyr set
+/// is narrowed to that one core BEFORE the runnable filter, so a multicore
+/// project (an AEN801's `m55_hp` + `m55_he`) can boot one slice in the smoke
+/// instead of being refused outright. The narrowing keeps the runnable-or-all
+/// fallback, so an explicitly named blocked/skipped slice still boots exactly
+/// like a lone one does — the smoke touches no hardware, so a stale artefact
+/// costs a failed simulation, not a mis-flashed board. `UnknownCore` when the
+/// name matches no zephyr slice.
 ///
 /// A post-build `output_artefact` (the real elf the build wrote) is PREFERRED
 /// when present — used as-is when absolute, joined to `build_root` when
@@ -184,12 +205,30 @@ pub fn select_sku(
 pub fn zephyr_elf_from_manifest(
     manifest: &SystemManifest,
     build_root: &Path,
+    core: Option<&str>,
 ) -> Result<PathBuf, RenodeError> {
-    let zephyr: Vec<&crate::system_manifest::Slice> = manifest
+    let all_zephyr: Vec<&crate::system_manifest::Slice> = manifest
         .slices
         .iter()
         .filter(|s| s.os == "zephyr")
         .collect();
+    let zephyr: Vec<&crate::system_manifest::Slice> = match core {
+        Some(id) => {
+            let picked: Vec<&crate::system_manifest::Slice> = all_zephyr
+                .iter()
+                .copied()
+                .filter(|s| s.core_id == id)
+                .collect();
+            if picked.is_empty() {
+                return Err(RenodeError::UnknownCore {
+                    core: id.to_string(),
+                    cores: all_zephyr.iter().map(|s| s.core_id.clone()).collect(),
+                });
+            }
+            picked
+        }
+        None => all_zephyr,
+    };
     let runnable: Vec<&crate::system_manifest::Slice> = zephyr
         .iter()
         .copied()
@@ -234,14 +273,19 @@ pub fn zephyr_elf_from_manifest(
 
 /// The headless Renode command line. Injects the `.resc`'s `$repl` / `$elf`
 /// variables by value and includes the script. This ordering + flags is a
-/// machine contract — VERBATIM: `--console --disable-xwt --hide-monitor --plain`
-/// then `-e $repl=@… -e $elf=@… -e i @…`.
+/// machine contract — VERBATIM: `--console --disable-xwt --plain` then
+/// `-e $repl=@… -e $elf=@… -e i @…`.
+///
+/// `--hide-monitor` used to sit between `--disable-xwt` and `--plain`, ported
+/// straight from the Python command. Renode 1.16.1 REJECTS that combination —
+/// "--hide-monitor and --console cannot be set at the same time" — printing its
+/// usage page and exiting, so nothing ever booted. It was redundant anyway:
+/// Renode's own `--disable-xwt` help reads "It automatically sets HideMonitor".
 pub fn build_renode_argv(renode_bin: &str, repl: &Path, resc: &Path, elf: &Path) -> Vec<String> {
     vec![
         renode_bin.to_string(),
         "--console".to_string(),
         "--disable-xwt".to_string(),
-        "--hide-monitor".to_string(),
         "--plain".to_string(),
         "-e".to_string(),
         format!("$repl=@{}", repl.display()),
@@ -250,6 +294,21 @@ pub fn build_renode_argv(renode_bin: &str, repl: &Path, resc: &Path, elf: &Path)
         "-e".to_string(),
         format!("i @{}", resc.display()),
     ]
+}
+
+/// Whether a console line is Renode telling us it REFUSED the command line —
+/// either the complaint itself or the usage page it dumps afterwards.
+///
+/// This exists because argv rejection is otherwise indistinguishable from a
+/// clean smoke: Renode prints its usage and exits **0**, so the run reported
+/// success while nothing was ever simulated. A smoke test that cannot fail is
+/// worse than no smoke test, and the failure mode is silent by construction —
+/// the next incompatible flag would pass just as quietly. Matched on Renode's
+/// own wording rather than an exit code, since the exit code carries no signal
+/// here.
+pub fn renode_rejected_argv(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("usage: renode") || line.contains("cannot be set at the same time")
 }
 
 #[cfg(test)]
@@ -349,7 +408,7 @@ mod tests {
     #[test]
     fn relative_build_dir_joins_build_root() {
         let m = manifest_with(&[("m55_hp", "pending", "m55_hp-zephyr")]);
-        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build"), None).unwrap();
         assert_eq!(
             elf,
             PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
@@ -367,7 +426,7 @@ mod tests {
              output_artefact: m55_hp-zephyr/build/zephyr/zephyr.elf\n",
         )
         .unwrap();
-        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build"), None).unwrap();
         assert_eq!(
             elf,
             PathBuf::from("/p/build/m55_hp-zephyr/build/zephyr/zephyr.elf")
@@ -382,21 +441,21 @@ mod tests {
              output_artefact: /abs/out/build/zephyr/zephyr.elf\n",
         )
         .unwrap();
-        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build"), None).unwrap();
         assert_eq!(elf, PathBuf::from("/abs/out/build/zephyr/zephyr.elf"));
     }
 
     #[test]
     fn absolute_build_dir_used_verbatim() {
         let m = manifest_with(&[("m55_hp", "pending", "/abs/out")]);
-        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build"), None).unwrap();
         assert_eq!(elf, PathBuf::from("/abs/out/zephyr/zephyr.elf"));
     }
 
     #[test]
     fn absent_build_dir_falls_back_to_core_os_stem() {
         let m = manifest_with(&[("m55_hp", "pending", "")]);
-        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build"), None).unwrap();
         assert_eq!(
             elf,
             PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
@@ -406,7 +465,7 @@ mod tests {
     #[test]
     fn blocked_slice_ignored_boots_the_runnable_one() {
         let m = manifest_with(&[("m55_he", "blocked", ""), ("m55_hp", "pending", "")]);
-        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build"), None).unwrap();
         assert_eq!(
             elf,
             PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
@@ -414,10 +473,51 @@ mod tests {
     }
 
     #[test]
+    fn core_picks_one_slice_out_of_a_multi_slice_manifest() {
+        // The AEN801 shape: two runnable Zephyr slices. Without `--core` this is
+        // `MultipleZephyrSlices` (asserted below); with it, the named slice boots.
+        let m = manifest_with(&[("m55_hp", "pending", ""), ("m55_he", "pending", "")]);
+        assert_eq!(
+            zephyr_elf_from_manifest(&m, Path::new("/p/build"), Some("m55_he")).unwrap(),
+            PathBuf::from("/p/build/m55_he-zephyr/zephyr/zephyr.elf")
+        );
+        assert_eq!(
+            zephyr_elf_from_manifest(&m, Path::new("/p/build"), Some("m55_hp")).unwrap(),
+            PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
+        );
+    }
+
+    #[test]
+    fn core_naming_a_blocked_slice_still_boots_it() {
+        // The runnable-or-all fallback survives the narrowing: an explicitly
+        // named blocked slice boots exactly like a lone blocked one does. The
+        // smoke touches no hardware, so a stale artefact costs a failed
+        // simulation, not a mis-flashed board.
+        let m = manifest_with(&[("m55_he", "blocked", ""), ("m55_hp", "pending", "")]);
+        assert_eq!(
+            zephyr_elf_from_manifest(&m, Path::new("/p/build"), Some("m55_he")).unwrap(),
+            PathBuf::from("/p/build/m55_he-zephyr/zephyr/zephyr.elf")
+        );
+    }
+
+    #[test]
+    fn unknown_core_errors_and_lists_the_zephyr_cores() {
+        let m = manifest_with(&[("m55_hp", "pending", ""), ("m55_he", "pending", "")]);
+        match zephyr_elf_from_manifest(&m, Path::new("/p/build"), Some("a32_cluster")).unwrap_err()
+        {
+            RenodeError::UnknownCore { core, cores } => {
+                assert_eq!(core, "a32_cluster");
+                assert_eq!(cores, vec!["m55_hp", "m55_he"]);
+            }
+            other => panic!("expected UnknownCore, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn zero_zephyr_slices_errors() {
         let m = parse_system_manifest("schema_version: 1\nslices: []\n").unwrap();
         assert_eq!(
-            zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap_err(),
+            zephyr_elf_from_manifest(&m, Path::new("/p/build"), None).unwrap_err(),
             RenodeError::NoZephyrSlice
         );
     }
@@ -425,7 +525,7 @@ mod tests {
     #[test]
     fn two_runnable_zephyr_slices_error_lists_cores() {
         let m = manifest_with(&[("m55_hp", "pending", ""), ("m55_he", "pending", "")]);
-        match zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap_err() {
+        match zephyr_elf_from_manifest(&m, Path::new("/p/build"), None).unwrap_err() {
             RenodeError::MultipleZephyrSlices { cores } => {
                 assert_eq!(cores, vec!["m55_hp", "m55_he"]);
             }
@@ -437,7 +537,7 @@ mod tests {
     fn all_blocked_falls_back_and_boots_the_blocked_slice() {
         // pool = runnable OR all-zephyr; one blocked zephyr slice still boots.
         let m = manifest_with(&[("m55_hp", "blocked", "")]);
-        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build")).unwrap();
+        let elf = zephyr_elf_from_manifest(&m, Path::new("/p/build"), None).unwrap();
         assert_eq!(
             elf,
             PathBuf::from("/p/build/m55_hp-zephyr/zephyr/zephyr.elf")
@@ -445,7 +545,7 @@ mod tests {
         // …but a blocked + another blocked still errors on count.
         let m2 = manifest_with(&[("m55_hp", "blocked", ""), ("m55_he", "skipped", "")]);
         assert!(matches!(
-            zephyr_elf_from_manifest(&m2, Path::new("/p/build")).unwrap_err(),
+            zephyr_elf_from_manifest(&m2, Path::new("/p/build"), None).unwrap_err(),
             RenodeError::MultipleZephyrSlices { .. }
         ));
     }
@@ -464,7 +564,6 @@ mod tests {
                 "renode",
                 "--console",
                 "--disable-xwt",
-                "--hide-monitor",
                 "--plain",
                 "-e",
                 "$repl=@/m/x.repl",
@@ -474,7 +573,27 @@ mod tests {
                 "i @/m/x.resc",
             ]
         );
-        assert_eq!(argv.len(), 11);
+        assert_eq!(argv.len(), 10);
+        // Renode 1.16.1 refuses `--hide-monitor` alongside `--console`, and
+        // `--disable-xwt` already implies it. Keep it out.
+        assert!(!argv.iter().any(|a| a == "--hide-monitor"));
+    }
+
+    #[test]
+    fn renode_argv_rejection_is_recognised_from_its_own_wording() {
+        // Both halves of what Renode 1.16.1.15992 printed instead of booting.
+        assert!(renode_rejected_argv(
+            "--hide-monitor and --console cannot be set at the same time"
+        ));
+        assert!(renode_rejected_argv(
+            "usage: renode [options] [file-to-include / snapshot]"
+        ));
+        // A normal boot line must never trip it — that would turn a good smoke
+        // into a false failure, the mirror of the bug this guards.
+        assert!(!renode_rejected_argv(
+            "renode: booting /b/zephyr.elf on alif_ensemble_e8.repl"
+        ));
+        assert!(!renode_rejected_argv("*** Booting Zephyr OS ***"));
     }
 
     #[test]

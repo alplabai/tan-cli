@@ -28,8 +28,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tan_core::renode::{
-    build_renode_argv, platform_files_for_sku, platform_stem_for_sku, select_sku,
-    zephyr_elf_from_manifest,
+    build_renode_argv, platform_files_for_sku, platform_stem_for_sku, renode_rejected_argv,
+    select_sku, zephyr_elf_from_manifest,
 };
 use tan_core::system_manifest::{SystemManifestError, parse_system_manifest};
 
@@ -178,7 +178,7 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
     };
     report.sku = sku.clone();
 
-    let elf = match zephyr_elf_from_manifest(&manifest, &build_root) {
+    let elf = match zephyr_elf_from_manifest(&manifest, &build_root, args.core.as_deref()) {
         Ok(p) => p,
         Err(e) => return fail(g, project, report, "renode.slice", &e.to_string()),
     };
@@ -254,7 +254,7 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
     }
 
     // Run — enforce the wall-clock timeout even on a silent child.
-    let (found, natural_exit) = match run_renode(
+    let (found, natural_exit, argv_rejected) = match run_renode(
         &argv,
         &log_path,
         args.timeout,
@@ -275,7 +275,24 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
     report.expect_found = found;
 
     let mut exit = ExitCode::Success;
-    if let Some(expect) = args.expect.as_deref() {
+    // Checked FIRST, and independently of the exit status: Renode answers an
+    // argv it doesn't accept by printing its usage page and exiting **0**, so
+    // this outcome is byte-identical to a clean smoke everywhere else in this
+    // function — `natural_exit` says success, and with no `--expect` nothing
+    // else looks. That is how the `--hide-monitor`/`--console` incompatibility
+    // in Renode 1.16.1 passed as green while nothing was ever simulated.
+    if argv_rejected {
+        exit = ExitCode::RuntimeFailure;
+        let msg = format!(
+            "renode: rejected the command line and printed its usage instead of booting — \
+             nothing was simulated (see {}).",
+            log_path.display()
+        );
+        issues.push(issue("renode.argv-rejected", "error", &msg));
+        if !g.is_json() {
+            text.push(msg);
+        }
+    } else if let Some(expect) = args.expect.as_deref() {
         if !found {
             exit = ExitCode::RuntimeFailure;
             let msg = format!(
@@ -348,7 +365,7 @@ fn run_renode(
     timeout_s: u64,
     expect: Option<&str>,
     echo_stdout: bool,
-) -> std::io::Result<(bool, Option<ExitStatus>)> {
+) -> std::io::Result<(bool, Option<ExitStatus>, bool)> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -372,6 +389,9 @@ fn run_renode(
     // Read loop in a closure so teardown (kill + reap + join) ALWAYS runs — even
     // if a log write fails mid-run, we must not leak the Renode child + threads.
     let mut natural_exit: Option<ExitStatus> = None;
+    // Set when Renode answers with its usage page instead of booting. Latched
+    // from the console because the exit code carries no signal for it (0).
+    let mut argv_rejected = false;
     let read_result = (|| -> std::io::Result<bool> {
         let deadline = Instant::now() + Duration::from_secs(timeout_s);
         let mut found = false;
@@ -386,6 +406,9 @@ fn run_renode(
                     logf.flush()?;
                     if echo_stdout {
                         println!("{line}");
+                    }
+                    if renode_rejected_argv(&line) {
+                        argv_rejected = true;
                     }
                     if let Some(exp) = expect {
                         if line.contains(exp) {
@@ -420,7 +443,7 @@ fn run_renode(
     let _ = h_out.join();
     let _ = h_err.join();
 
-    read_result.map(|found| (found, natural_exit))
+    read_result.map(|found| (found, natural_exit, argv_rejected))
 }
 
 /// Pump `\n`-delimited lines from `reader` into `tx`, lossily replacing invalid
@@ -556,7 +579,8 @@ mod tests {
     fn expect_marker_present_returns_found_and_writes_log() {
         let log = tmp_log("hit");
         let argv = echo_argv(&["boot", "[hello] done", "tail"]);
-        let (found, _status) = run_renode(&argv, &log, 30, Some("[hello] done"), true).unwrap();
+        let (found, _status, _rejected) =
+            run_renode(&argv, &log, 30, Some("[hello] done"), true).unwrap();
         assert!(found);
         let contents = std::fs::read_to_string(&log).unwrap();
         assert!(contents.contains("[hello] done"), "{contents}");
@@ -567,7 +591,8 @@ mod tests {
     fn expect_marker_absent_returns_not_found() {
         let log = tmp_log("miss");
         let argv = echo_argv(&["boot", "running", "tail"]);
-        let (found, _status) = run_renode(&argv, &log, 30, Some("[hello] done"), false).unwrap();
+        let (found, _status, _rejected) =
+            run_renode(&argv, &log, 30, Some("[hello] done"), false).unwrap();
         assert!(!found);
         let _ = std::fs::remove_dir_all(log.parent().unwrap());
     }
@@ -576,7 +601,7 @@ mod tests {
     fn no_expect_always_returns_false_and_still_tees() {
         let log = tmp_log("noexpect");
         let argv = echo_argv(&["one", "two"]);
-        let (found, _status) = run_renode(&argv, &log, 30, None, false).unwrap();
+        let (found, _status, _rejected) = run_renode(&argv, &log, 30, None, false).unwrap();
         assert!(!found);
         let contents = std::fs::read_to_string(&log).unwrap();
         assert!(contents.contains("one"), "{contents}");
@@ -597,7 +622,7 @@ mod tests {
         } else {
             vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()]
         };
-        let (found, status) = run_renode(&argv, &log, 30, None, false).unwrap();
+        let (found, status, _rejected) = run_renode(&argv, &log, 30, None, false).unwrap();
         assert!(!found);
         let status = status.expect("child exited on its own before the deadline");
         assert!(!status.success());
@@ -619,7 +644,7 @@ mod tests {
         } else {
             vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()]
         };
-        let (found, status) = run_renode(&argv, &log, 1, None, false).unwrap();
+        let (found, status, _rejected) = run_renode(&argv, &log, 1, None, false).unwrap();
         assert!(!found);
         assert!(
             status.is_none(),
