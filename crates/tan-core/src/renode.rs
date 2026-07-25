@@ -273,14 +273,19 @@ pub fn zephyr_elf_from_manifest(
 
 /// The headless Renode command line. Injects the `.resc`'s `$repl` / `$elf`
 /// variables by value and includes the script. This ordering + flags is a
-/// machine contract — VERBATIM: `--console --disable-xwt --hide-monitor --plain`
-/// then `-e $repl=@… -e $elf=@… -e i @…`.
+/// machine contract — VERBATIM: `--console --disable-xwt --plain` then
+/// `-e $repl=@… -e $elf=@… -e i @…`.
+///
+/// `--hide-monitor` used to sit between `--disable-xwt` and `--plain`, ported
+/// straight from the Python command. Renode 1.16.1 REJECTS that combination —
+/// "--hide-monitor and --console cannot be set at the same time" — printing its
+/// usage page and exiting, so nothing ever booted. It was redundant anyway:
+/// Renode's own `--disable-xwt` help reads "It automatically sets HideMonitor".
 pub fn build_renode_argv(renode_bin: &str, repl: &Path, resc: &Path, elf: &Path) -> Vec<String> {
     vec![
         renode_bin.to_string(),
         "--console".to_string(),
         "--disable-xwt".to_string(),
-        "--hide-monitor".to_string(),
         "--plain".to_string(),
         "-e".to_string(),
         format!("$repl=@{}", repl.display()),
@@ -289,6 +294,21 @@ pub fn build_renode_argv(renode_bin: &str, repl: &Path, resc: &Path, elf: &Path)
         "-e".to_string(),
         format!("i @{}", resc.display()),
     ]
+}
+
+/// Whether a console line is Renode telling us it REFUSED the command line —
+/// either the complaint itself or the usage page it dumps afterwards.
+///
+/// This exists because argv rejection is otherwise indistinguishable from a
+/// clean smoke: Renode prints its usage and exits **0**, so the run reported
+/// success while nothing was ever simulated. A smoke test that cannot fail is
+/// worse than no smoke test, and the failure mode is silent by construction —
+/// the next incompatible flag would pass just as quietly. Matched on Renode's
+/// own wording rather than an exit code, since the exit code carries no signal
+/// here.
+pub fn renode_rejected_argv(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("usage: renode") || line.contains("cannot be set at the same time")
 }
 
 #[cfg(test)]
@@ -544,7 +564,6 @@ mod tests {
                 "renode",
                 "--console",
                 "--disable-xwt",
-                "--hide-monitor",
                 "--plain",
                 "-e",
                 "$repl=@/m/x.repl",
@@ -554,7 +573,27 @@ mod tests {
                 "i @/m/x.resc",
             ]
         );
-        assert_eq!(argv.len(), 11);
+        assert_eq!(argv.len(), 10);
+        // Renode 1.16.1 refuses `--hide-monitor` alongside `--console`, and
+        // `--disable-xwt` already implies it. Keep it out.
+        assert!(!argv.iter().any(|a| a == "--hide-monitor"));
+    }
+
+    #[test]
+    fn renode_argv_rejection_is_recognised_from_its_own_wording() {
+        // Both halves of what Renode 1.16.1.15992 printed instead of booting.
+        assert!(renode_rejected_argv(
+            "--hide-monitor and --console cannot be set at the same time"
+        ));
+        assert!(renode_rejected_argv(
+            "usage: renode [options] [file-to-include / snapshot]"
+        ));
+        // A normal boot line must never trip it — that would turn a good smoke
+        // into a false failure, the mirror of the bug this guards.
+        assert!(!renode_rejected_argv(
+            "renode: booting /b/zephyr.elf on alif_ensemble_e8.repl"
+        ));
+        assert!(!renode_rejected_argv("*** Booting Zephyr OS ***"));
     }
 
     #[test]

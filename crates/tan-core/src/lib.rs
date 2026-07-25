@@ -95,7 +95,8 @@ pub use project::{
 };
 pub use renode::{
     FAMILY_TOKEN_TO_PLATFORM, RenodeError, build_renode_argv, platform_files_for_sku,
-    platform_stem_for_sku, select_sku, sku_family, soc_family_token, zephyr_elf_from_manifest,
+    platform_stem_for_sku, renode_rejected_argv, select_sku, sku_family, soc_family_token,
+    zephyr_elf_from_manifest,
 };
 pub use run::{NATIVE_SIM_BOARD, NATIVE_SIM_EXE, RunAction, decide_run_action, native_sim_slice};
 pub use sdk::{

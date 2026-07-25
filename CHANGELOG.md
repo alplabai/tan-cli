@@ -7,6 +7,18 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **The Renode smoke never actually booted, and reported success anyway.**
+  `build_renode_argv` passed `--console --disable-xwt --hide-monitor --plain`;
+  Renode 1.16.1 rejects that combination outright — "--hide-monitor and
+  --console cannot be set at the same time" — printing its usage page and
+  exiting **0**, so `tan renode` reported a clean smoke while nothing was ever
+  simulated. `--hide-monitor` was redundant (Renode's own `--disable-xwt` help:
+  "It automatically sets HideMonitor") and is gone. A new `renode_rejected_argv`
+  guard latches Renode's own refusal wording off the console and fails the run
+  (`renode.argv-rejected`, exit 1) regardless of exit status, so the next
+  incompatible flag cannot pass silently either.
+
 ### Added
 - **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
   project in the headless smoke. A manifest with more than one Zephyr slice (an
