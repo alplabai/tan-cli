@@ -313,16 +313,6 @@ pub fn build_renode_argv(
     argv
 }
 
-/// Whether a console line is Renode telling us it REFUSED the command line —
-/// either the complaint itself or the usage page it dumps afterwards.
-///
-/// This exists because argv rejection is otherwise indistinguishable from a
-/// clean smoke: Renode prints its usage and exits **0**, so the run reported
-/// success while nothing was ever simulated. A smoke test that cannot fail is
-/// worse than no smoke test, and the failure mode is silent by construction —
-/// the next incompatible flag would pass just as quietly. Matched on Renode's
-/// own wording rather than an exit code, since the exit code carries no signal
-/// here.
 /// The base address of the LOAD segment holding `elf`'s entry point — the
 /// image's real vector table, and the value Renode's `cpu VectorTableOffset`
 /// needs. `None` when `elf` isn't a 32-bit little-endian ELF, or no LOAD
@@ -340,6 +330,19 @@ pub fn build_renode_argv(
 ///
 /// Physical (`p_paddr`), not virtual: the load address is where the bytes
 /// actually are, which is exactly what the vector-table fetch reads.
+///
+/// Containment alone only proves the entry point falls inside this segment's
+/// runtime footprint — it does NOT prove the vector table is the FIRST thing
+/// in the segment. An allocated `.note.gnu.build-id` ahead of `_vector_table`,
+/// or a padded/offset link, would satisfy containment and still hand back a
+/// confident wrong address. So this also reads the table's own second word —
+/// the reset vector, the Thumb bit cleared must equal `e_entry` with the
+/// Thumb bit cleared — before trusting the guess. That word lives at file
+/// offset `p_offset + 4`; the delta is kept in the `paddr` domain (not
+/// `vaddr`) because `paddr` is the address actually being verified and
+/// returned, and the two diverge for exactly the MRAM-linked shape above.
+/// `None` when the word isn't even in the file (`p_filesz < 8`, e.g. a
+/// bss-only LOAD segment) or doesn't match — no answer beats a wrong one.
 pub fn elf_vector_table_base(elf: &[u8]) -> Option<u32> {
     // e_ident: 0x7F 'E' 'L' 'F', class 1 (32-bit), data 1 (little-endian).
     if elf.len() < 52 || &elf[0..4] != b"\x7FELF" || elf[4] != 1 || elf[5] != 1 {
@@ -358,6 +361,15 @@ pub fn elf_vector_table_base(elf: &[u8]) -> Option<u32> {
     let phoff = u32_at(0x1C)? as usize;
     let phentsize = u16_at(0x2A)? as usize;
     let phnum = u16_at(0x2C)? as usize;
+    // A real Elf32_Phdr is 32 bytes. A corrupt file with a smaller stride (8,
+    // 16, ...) but a still-valid e_ident makes every read below land inside
+    // the NEXT phdr's fields instead of this one's, so a garbage file would
+    // otherwise produce a plausible-looking wrong base instead of None.
+    // (phentsize == 0 is benign on its own — every iteration just re-reads
+    // phdr 0 — but the guard covers it too.)
+    if phentsize < 32 {
+        return None;
+    }
 
     for i in 0..phnum {
         let off = phoff.checked_add(i.checked_mul(phentsize)?)?;
@@ -365,16 +377,37 @@ pub fn elf_vector_table_base(elf: &[u8]) -> Option<u32> {
         if u32_at(off)? != 1 {
             continue; // PT_LOAD only
         }
+        let p_offset = u32_at(off + 4)? as usize;
         let vaddr = u32_at(off + 8)?;
         let paddr = u32_at(off + 12)?;
+        let filesz = u32_at(off + 16)?;
         let memsz = u32_at(off + 20)?;
         if entry >= vaddr && entry < vaddr.checked_add(memsz)? {
+            // The table's own second word isn't even in the file — nothing
+            // to verify against, so refuse rather than guess.
+            if filesz < 8 {
+                return None;
+            }
+            let word1 = u32_at(p_offset + 4)?;
+            if word1 & !1 != entry {
+                return None; // segment starts with something else — not our table
+            }
             return Some(paddr);
         }
     }
     None
 }
 
+/// Whether a console line is Renode telling us it REFUSED the command line —
+/// either the complaint itself or the usage page it dumps afterwards.
+///
+/// This exists because argv rejection is otherwise indistinguishable from a
+/// clean smoke: Renode prints its usage and exits **0**, so the run reported
+/// success while nothing was ever simulated. A smoke test that cannot fail is
+/// worse than no smoke test, and the failure mode is silent by construction —
+/// the next incompatible flag would pass just as quietly. Matched on Renode's
+/// own wording rather than an exit code, since the exit code carries no signal
+/// here.
 pub fn renode_rejected_argv(line: &str) -> bool {
     let line = line.trim_start();
     line.starts_with("usage: renode") || line.contains("cannot be set at the same time")
@@ -650,11 +683,22 @@ mod tests {
     }
 
     /// A minimal Elf32 LE header + program headers, enough for
-    /// `elf_vector_table_base`. `segs` is `(vaddr, paddr, memsz)`.
-    fn synthetic_elf(entry: u32, segs: &[(u32, u32, u32)]) -> Vec<u8> {
+    /// `elf_vector_table_base`. `segs` is `(vaddr, paddr, memsz)`; each
+    /// segment gets real file content (2 words, `p_filesz = 8`) so the
+    /// second-word verification has something to read. Word 1 (the reset
+    /// vector) of the segment containing `entry` defaults to `entry` itself —
+    /// a well-formed image whose vector table really is first in that
+    /// segment — unless `bad_reset_vector` overrides it, faking an image
+    /// where something else (e.g. a build-id note) sits there instead.
+    fn synthetic_elf(
+        entry: u32,
+        segs: &[(u32, u32, u32)],
+        bad_reset_vector: Option<u32>,
+    ) -> Vec<u8> {
         let phoff = 52u32;
         let phentsize = 32u16;
-        let mut e = vec![0u8; phoff as usize];
+        let phdrs_end = phoff as usize + segs.len() * phentsize as usize;
+        let mut e = vec![0u8; phdrs_end];
         e[0..4].copy_from_slice(b"\x7FELF");
         e[4] = 1; // 32-bit
         e[5] = 1; // little-endian
@@ -662,13 +706,27 @@ mod tests {
         e[0x1C..0x20].copy_from_slice(&phoff.to_le_bytes());
         e[0x2A..0x2C].copy_from_slice(&phentsize.to_le_bytes());
         e[0x2C..0x2E].copy_from_slice(&(segs.len() as u16).to_le_bytes());
-        for (vaddr, paddr, memsz) in segs {
-            let mut ph = vec![0u8; phentsize as usize];
-            ph[0..4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
-            ph[8..12].copy_from_slice(&vaddr.to_le_bytes());
-            ph[12..16].copy_from_slice(&paddr.to_le_bytes());
-            ph[20..24].copy_from_slice(&memsz.to_le_bytes());
-            e.extend_from_slice(&ph);
+
+        let masked_entry = entry & !1;
+        for (i, (vaddr, paddr, memsz)) in segs.iter().enumerate() {
+            let off = phoff as usize + i * phentsize as usize;
+            let content_off = (phdrs_end + i * 8) as u32; // 2 words (8 bytes) per segment
+            e[off..off + 4].copy_from_slice(&1u32.to_le_bytes()); // PT_LOAD
+            e[off + 4..off + 8].copy_from_slice(&content_off.to_le_bytes()); // p_offset
+            e[off + 8..off + 12].copy_from_slice(&vaddr.to_le_bytes());
+            e[off + 12..off + 16].copy_from_slice(&paddr.to_le_bytes());
+            e[off + 16..off + 20].copy_from_slice(&8u32.to_le_bytes()); // p_filesz
+            e[off + 20..off + 24].copy_from_slice(&memsz.to_le_bytes());
+
+            let is_entry_segment =
+                masked_entry >= *vaddr && masked_entry < vaddr.wrapping_add(*memsz);
+            let word1 = if is_entry_segment {
+                bad_reset_vector.unwrap_or(masked_entry)
+            } else {
+                0
+            };
+            e.extend_from_slice(&0u32.to_le_bytes()); // word0: initial SP (unread by the check)
+            e.extend_from_slice(&word1.to_le_bytes()); // word1: reset vector
         }
         e
     }
@@ -687,6 +745,7 @@ mod tests {
                 (0x2000_0000, 0x8001_8348, 304),
                 (0x8001_8478, 0x8001_8478, 4),
             ],
+            None,
         );
         assert_eq!(elf_vector_table_base(&elf), Some(0x8000_0000));
     }
@@ -695,7 +754,7 @@ mod tests {
     fn vector_table_base_handles_a_ram_run_image_too() {
         // The hello-world shape the descriptor was written for: everything in
         // DTCM. The same rule must keep working, or fixing #947 would break it.
-        let elf = synthetic_elf(0x2000_0201, &[(0x2000_0000, 0x2000_0000, 8192)]);
+        let elf = synthetic_elf(0x2000_0201, &[(0x2000_0000, 0x2000_0000, 8192)], None);
         assert_eq!(elf_vector_table_base(&elf), Some(0x2000_0000));
     }
 
@@ -703,7 +762,70 @@ mod tests {
     fn vector_table_base_is_none_on_junk_or_an_unmapped_entry() {
         assert_eq!(elf_vector_table_base(b"not an elf at all"), None);
         // Entry outside every LOAD segment -> no answer, rather than a wrong one.
-        let elf = synthetic_elf(0x9000_0000, &[(0x2000_0000, 0x2000_0000, 8192)]);
+        let elf = synthetic_elf(0x9000_0000, &[(0x2000_0000, 0x2000_0000, 8192)], None);
+        assert_eq!(elf_vector_table_base(&elf), None);
+    }
+
+    #[test]
+    fn vector_table_base_is_none_when_the_second_word_is_not_the_reset_vector() {
+        // Bounds match (entry falls inside the segment) but the segment's own
+        // second word does NOT equal e_entry — e.g. an allocated
+        // .note.gnu.build-id sits ahead of the real _vector_table. This is
+        // exactly the confident-wrong-address case #65's review flagged:
+        // containment alone must not be trusted.
+        let elf = synthetic_elf(
+            0x2000_0201,
+            &[(0x2000_0000, 0x2000_0000, 8192)],
+            Some(0x2000_9999),
+        );
+        assert_eq!(elf_vector_table_base(&elf), None);
+    }
+
+    #[test]
+    fn vector_table_base_is_none_when_the_second_word_is_not_in_the_file() {
+        // p_filesz < 8: the table's second word isn't stored in the file at
+        // all (a bss-only LOAD segment), so there's nothing to verify against.
+        let mut elf = synthetic_elf(0x2000_0201, &[(0x2000_0000, 0x2000_0000, 8192)], None);
+        let filesz_off = 52 + 16; // the sole phdr's p_filesz field
+        elf[filesz_off..filesz_off + 4].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(elf_vector_table_base(&elf), None);
+    }
+
+    #[test]
+    fn vector_table_base_entry_exactly_at_vaddr_is_in_bounds() {
+        // Pins the `>=` lower-bound check: entry == vaddr must still match.
+        let elf = synthetic_elf(0x2000_0000, &[(0x2000_0000, 0x2000_0000, 8192)], None);
+        assert_eq!(elf_vector_table_base(&elf), Some(0x2000_0000));
+    }
+
+    #[test]
+    fn vector_table_base_entry_exactly_at_vaddr_plus_memsz_is_out_of_bounds() {
+        // Pins the `<` upper-bound check: entry == vaddr + memsz must NOT match
+        // (the segment's footprint ends one byte before it).
+        let elf = synthetic_elf(0x2000_2000, &[(0x2000_0000, 0x2000_0000, 8192)], None);
+        assert_eq!(elf_vector_table_base(&elf), None);
+    }
+
+    #[test]
+    fn vector_table_base_rejects_elf64() {
+        let mut elf = synthetic_elf(0x2000_0201, &[(0x2000_0000, 0x2000_0000, 8192)], None);
+        elf[4] = 2; // ELFCLASS64
+        assert_eq!(elf_vector_table_base(&elf), None);
+    }
+
+    #[test]
+    fn vector_table_base_rejects_big_endian() {
+        let mut elf = synthetic_elf(0x2000_0201, &[(0x2000_0000, 0x2000_0000, 8192)], None);
+        elf[5] = 2; // ELFDATA2MSB
+        assert_eq!(elf_vector_table_base(&elf), None);
+    }
+
+    #[test]
+    fn vector_table_base_rejects_a_too_small_phentsize() {
+        // A corrupt e_phentsize (8 or 16) would otherwise make the loop read
+        // vaddr/paddr/memsz out of the neighbouring phdr's fields.
+        let mut elf = synthetic_elf(0x2000_0201, &[(0x2000_0000, 0x2000_0000, 8192)], None);
+        elf[0x2A..0x2C].copy_from_slice(&16u16.to_le_bytes());
         assert_eq!(elf_vector_table_base(&elf), None);
     }
 
