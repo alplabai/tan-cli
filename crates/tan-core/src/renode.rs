@@ -6,9 +6,17 @@
 //! functions; the subprocess + filesystem wiring is in `tan-cli`'s
 //! `commands/renode.rs`.
 //!
-//! SCOPE: the PLAIN (non-sim) headless smoke only. The Python `--sim-mode` studio
-//! gateway (sockets / RamConsole bridge, issue #674) is deferred; none of its
-//! helpers live here yet.
+//! SCOPE: the PLAIN (non-sim) headless smoke only. The `--sim-mode` studio
+//! gateway (sockets / RamConsole bridge) is deferred and tracked as
+//! `tan-cli#77` — none of its helpers live here yet. The historical contract
+//! it would have to satisfy is `alp-sdk#674`; that issue is CLOSED (2026-07-13)
+//! and the Python implementation that closed it was DELETED in
+//! `alp-sdk@df312cec` (ADR-0020 Phase 4, `alp-sdk#848`), so the capability
+//! exists nowhere today — `alp-sdk#674` is cited here only as prior art, not
+//! as a live reference. Do not cite a bare `#674` or a bare short SHA in this
+//! repo: neither resolves here (`git show df312cec` finds nothing; a bare
+//! `#674` is exactly what let alp-sdk workflows drift into linking
+//! `tan-cli#674`, which 404s) — always carry the owning repo.
 
 use std::path::{Path, PathBuf};
 

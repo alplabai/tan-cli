@@ -95,6 +95,24 @@ pub fn print_env_block(
 /// native Windows prints the script's literal Arm/Zephyr-SDK block followed by
 /// the manifest's `manualInstallHints.windows.note` — the SDK-sourced fact,
 /// matching `bootstrap.ps1`'s own `foreach ($line in $ManualInstallNote)`.
+///
+/// Issue #82 asked to delete the hardcoded block below as a duplicate of that
+/// manifest note, on the strength of alp-sdk#961 (merged) deleting
+/// `bootstrap.ps1`'s own copy the same way. Reverted: #961 didn't just delete
+/// its half, it moved the Arm-toolchain URL and the "tick 'Add path to
+/// environment variable'" tip INTO `manualInstallHints.windows.note` in the
+/// SAME commit -- but `contract/fixtures/bootstrap/manifest.json` (and every
+/// alp-sdk tag released so far, and the parity gate's `PINNED_SDK_TAG`, which
+/// is past #917 but not #961) still carries the PRE-#961 note: one terse
+/// sentence with neither fact. Deleting the hardcoded block against that
+/// fixture doesn't remove a duplicate, it drops a required install's URL and
+/// PATH tip for every SDK ref actually in use today. Re-delete only once tan
+/// re-vendors the fixture (and bumps `PINNED_SDK_TAG`) to a ref at or after
+/// #961 -- and re-check the wording then: #961's own PR body says the
+/// `$WorkspaceDir` locator "survives as prose" in the manifest note rather
+/// than a token, so a same-day dedup could leave the `west sdk install` line
+/// below duplicating THAT sentence instead.
+///
 /// This must NOT read `nativeLibHints.windows.note` here: appending both used
 /// to print the Arm/Zephyr-SDK sentence twice — once hardcoded, once from a
 /// manifest note field that (pre alp-sdk#917 review) still carried the same
@@ -122,16 +140,22 @@ pub fn optional_libs_block(
             "  #   (tick 'Add path to environment variable' during install)".to_string(),
             String::new(),
             "  # Zephyr SDK (alternative cross-toolchain + host tools like dtc):".to_string(),
-            // Deliberate divergence: `bootstrap.ps1` says "after this script."
+            // Deliberate divergence: `bootstrap.ps1` SAID "after this script."
             // Tan is not a script, so the same sentence would misname what the
-            // reader just ran; "step" is the only word changed.
+            // reader just ran; "step" is the only word changed. Past tense on
+            // purpose — alp-sdk#961 deleted that here-string, so the oracle
+            // this diverges from no longer exists upstream; the divergence is
+            // kept because the fixture tan still reads predates #961 (see the
+            // doc comment above), not because the ps1 still says it.
             format!("  #   run 'west sdk install' from {workspace_dir} after this step."),
             String::new(),
         ];
         // One line per `manualInstallHints.windows.note` element, two-space
         // indented, exactly like `bootstrap.ps1`'s
         // `foreach ($line in $ManualInstallNote)` — the manifest-sourced
-        // fact, not a hand-typed Rust copy that would desync silently.
+        // fact, not a hand-typed Rust copy that would desync silently. See
+        // the doc comment above for why the hardcoded block above stays too,
+        // for now.
         lines.extend(
             facts
                 .manual_install_hints
@@ -366,12 +390,15 @@ bootstrap: Optional native libraries unlock the Yocto-side backends:
         );
     }
 
-    /// Same, for `bootstrap.ps1`'s `foreach ($line in $ManualInstallNote)`: the
-    /// literal Arm/Zephyr-SDK here-string, then one indented line per
-    /// `manualInstallHints.windows.note` element. `nativeLibHints.windows.note`
-    /// (the "Under Git Bash / MSYS2..." line) must NOT appear here — that is a
-    /// different fact (bootstrap.ps1 has no heading for it at all); printing
-    /// both was the alp-sdk#917-review bug this renders around.
+    /// Byte-parity against `bootstrap.ps1`'s `foreach ($line in
+    /// $ManualInstallNote)`: the literal Arm/Zephyr-SDK block, then one
+    /// indented line per `manualInstallHints.windows.note` element. See
+    /// `optional_libs_block`'s doc comment for why the literal block still
+    /// precedes the manifest note (issue #82 is not yet safe to finish).
+    /// `nativeLibHints.windows.note` (the "Under Git Bash / MSYS2..." line)
+    /// must NOT appear here — that is a different fact (bootstrap.ps1 has no
+    /// heading for it at all); printing both was the alp-sdk#917-review bug
+    /// this renders around.
     #[test]
     fn optional_libs_windows_renders_one_line_per_note_element() {
         let expected = "
@@ -403,14 +430,27 @@ installs on native Windows -- not auto-installed by bootstrap.ps1; native_sim / 
     /// `manualInstallHints.windows.note` MUST change the rendered line — proof
     /// the block reads the field rather than a literal that merely happens to
     /// match it today.
+    ///
+    /// Mutates the PARSED value and re-serializes, rather than `.replace()`ing
+    /// the raw JSON text with a needle built from the parsed string: the note
+    /// text and its JSON encoding are not always the same bytes (a quote,
+    /// backslash or `\uXXXX` escape in a future note element would make a
+    /// text-level needle match nothing), and a `.replace()` that then finds
+    /// nothing leaves this test silently asserting nothing about the field it
+    /// exists to check — worse than no test, per issue #82. Going through
+    /// `serde_json::Value` sidesteps the whole escaping class: there is no
+    /// "needle not found" case to guard against.
     #[test]
     fn optional_libs_windows_note_comes_from_the_manifest_not_a_rust_literal() {
-        let doc = REAL_MANIFEST.replace(
-            "The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate manual, \
-             one-time installs on native Windows -- not auto-installed by bootstrap.ps1; \
-             native_sim / Yocto need WSL2 (docs/cross-platform-setup.md section 5).",
-            "EDITED sentence that only the manifest field carries.",
+        let mut doc: serde_json::Value = serde_json::from_str(REAL_MANIFEST).unwrap();
+        let note = doc
+            .pointer_mut("/manualInstallHints/windows/note/0")
+            .expect("fixture must carry at least one manualInstallHints.windows.note element");
+        let original_note = note.as_str().unwrap().to_string();
+        *note = serde_json::Value::String(
+            "EDITED sentence that only the manifest field carries.".to_string(),
         );
+        let doc = serde_json::to_string(&doc).expect("re-serializing the edited fixture");
         let facts = parse_bootstrap_manifest(&doc).expect("edited manifest must parse");
         let rendered = optional_libs_block(&facts, HostOs::Windows, "C:\\ws").join("\n");
         assert!(
@@ -418,7 +458,7 @@ installs on native Windows -- not auto-installed by bootstrap.ps1; native_sim / 
             "{rendered}"
         );
         assert!(
-            !rendered.contains("not auto-installed by bootstrap.ps1"),
+            !rendered.contains(&original_note),
             "the stale sentence must not survive the edit: {rendered}"
         );
     }
@@ -442,7 +482,14 @@ installs on native Windows -- not auto-installed by bootstrap.ps1; native_sim / 
         facts.manual_install_hints.windows.note = vec!["one line only".to_string()];
         let win = optional_libs_block(&facts, HostOs::Windows, "C:\\ws");
         assert_eq!(win.last().unwrap(), "  one line only");
-        assert_eq!(win[win.len() - 2], "", "the here-string's trailing blank");
+        // "here-string" was `bootstrap.ps1`'s construct, never tan's (this is a
+        // Rust `vec![]`), and alp-sdk#961 deleted it upstream — name what this
+        // assertion actually guards instead.
+        assert_eq!(
+            win[win.len() - 2],
+            "",
+            "the hardcoded block's trailing blank"
+        );
     }
 
     #[test]

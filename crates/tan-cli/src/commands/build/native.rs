@@ -121,9 +121,17 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
     // writes anything or a slice command is ever built, using `base` (the
     // SAME exec base every slice actually runs under) for the PROJECT_ROOT/
     // exec-base divergence guard.
+    //
+    // `toolchain` is resolved exactly ONCE here (not inside `apply_plan_token_
+    // substitution`, which used to call the resolver itself — see that
+    // function's doc for why that made its own unit tests host-dependent)
+    // and threaded down to the executor too, so a demoted slice's advice text
+    // and this run's actual dispatch decision are read off the SAME value.
     let base = base_dir(&context);
-    let plan = match apply_plan_token_substitution(g, &context, &base, &plan) {
-        Ok(plan) => plan,
+    let toolchain = crate::toolchain::resolve_toolchain_root();
+    let (plan, demoted) = match apply_plan_token_substitution(g, &context, &base, &plan, &toolchain)
+    {
+        Ok(result) => result,
         Err((code, message)) => {
             return NativeBuildOutcome {
                 run: plan_error_run(g, project, code, message, ExitCode::RuntimeFailure),
@@ -172,5 +180,5 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
         };
     }
 
-    execute_slices_outcome(g, &context, project, &plan, &base)
+    execute_slices_outcome(g, &context, project, &plan, &base, &demoted)
 }

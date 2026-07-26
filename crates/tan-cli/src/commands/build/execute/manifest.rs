@@ -453,6 +453,57 @@ boot_order: []
     }
 
     #[test]
+    fn rewrite_manifest_yaml_clears_a_stale_output_artefact_when_the_executor_says_so() {
+        // MINOR 4 of the #89 review: `overlay_run_results_raw` treats a
+        // `None` `output_artefact` as "preserve the plan-time/previous-run
+        // value" — correct for a slice this run never touched, but WRONG for
+        // one the executor knows never dispatched this run (a demoted slice,
+        // tan-cli #89). Left as `None`, a Zephyr-only tokened plan on a
+        // toolchain-less host would write `status: skipped` next to the
+        // PREVIOUS run's `zephyr.elf` path — `tan size`/`tan debug-config`
+        // read `output_artefact` with no status check of their own. The
+        // executor's fix is to overlay `Some(String::new())` instead of
+        // `None`; this pins that an explicit empty string actually clears
+        // the stale value rather than being (mis)treated as "preserve".
+        let yaml = r#"
+schema_version: 1
+generated_by: scripts/alp_orchestrate.py
+hw_info:
+  sku: E1M-V2N101
+slices:
+- core_id: m33_sm
+  os: zephyr
+  output_artefact: build/m33_sm-zephyr/build/zephyr/zephyr.elf
+  status: ok
+ipc: []
+helper_mcus: []
+boot_order: []
+"#;
+        let overlay = vec![(
+            "m33_sm".to_string(),
+            "skipped".to_string(),
+            Some(String::new()),
+            None,
+            Some(
+                "plan field `slices[0].env.ZEPHYR_SDK_INSTALL_DIR` names ${TOOLCHAIN_ROOT}, \
+                  but no toolchain install is detectable on this host"
+                    .to_string(),
+            ),
+        )];
+
+        let out = rewrite_manifest_yaml(yaml, &overlay).expect("rewrite must succeed");
+
+        assert!(
+            out.contains("status: skipped"),
+            "overlay did not land: {out}"
+        );
+        assert!(
+            !out.contains("build/m33_sm-zephyr/build/zephyr/zephyr.elf"),
+            "the previous run's elf path must not survive a demoted slice's overlay: {out}"
+        );
+    }
+
+    #[test]
     fn resolve_zephyr_artefact_accepts_an_elf_left_by_a_no_op_incremental_rebuild() {
         // Regression: an earlier version gated on `mtime >= not_before`
         // (captured right before the command was spawned) to reject a stale

@@ -24,6 +24,7 @@ use crate::exit::ExitCode;
 
 use crate::venv::{west_program, with_venv_on_path};
 
+use super::token_substitution::SliceDemotion;
 use super::workspace::resolve_zephyr_base;
 
 /// `SliceResult.reason` for a plan slice that carries no command. The recap
@@ -112,7 +113,42 @@ pub(super) fn execute_slices(
     plan: &BuildPlan,
     base: &str,
 ) -> CommandRun {
-    execute_slices_outcome(g, context, project, plan, base).run
+    // No tokened plans in this module's own tests — nothing is ever demoted.
+    execute_slices_outcome(g, context, project, plan, base, &[]).run
+}
+
+/// Shared skip/fail shaping for the dispatch loop's early-exit branches
+/// (unknown backend / null command / demoted slice / missing tool) — tan-cli
+/// #89 review, MINOR 6: this exact shape (a colored text-mode status line,
+/// plus flipping `any_failed` when the resolved policy says Fail) used to be
+/// written out four times in the loop below. Each branch still builds its
+/// own `Issue` (different codes/severities) and `SliceResult` — those differ
+/// enough per site that folding them in too would just be a config struct
+/// for four call sites, so only the part that was byte-for-byte identical is
+/// factored out here.
+fn report_slice_outcome(
+    text_mode: bool,
+    theme: &crate::style::Theme,
+    core_id: &str,
+    backend: &str,
+    fail: bool,
+    detail: &str,
+    any_failed: &mut bool,
+) {
+    if text_mode {
+        let ds = if fail {
+            DoctorStatus::Fail
+        } else {
+            DoctorStatus::Warn
+        };
+        eprintln!(
+            "{}",
+            theme.slice_result(ds, &format!("{core_id} [{backend}] — {detail}"))
+        );
+    }
+    if fail {
+        *any_failed = true;
+    }
 }
 
 /// Run each slice's `ToolStep` sequentially under `base`. Text mode streams each
@@ -125,6 +161,7 @@ pub(crate) fn execute_slices_outcome(
     project: Project,
     plan: &BuildPlan,
     base: &str,
+    demoted: &[SliceDemotion],
 ) -> NativeBuildOutcome {
     let base_path = Path::new(base);
     let text_mode = !g.is_json();
@@ -141,6 +178,13 @@ pub(crate) fn execute_slices_outcome(
     // for a stale-SDK build dir (issue #52) — never silent, since the VS Code
     // extension only ever sees the envelope, not this function's `eprintln!`s.
     let mut sdk_switch_issues: Vec<Issue> = Vec::new();
+    // Per-slice `build.toolchain-root-unresolved` issues (tan-cli #89): a
+    // slice demoted by `apply_plan_token_substitution` because its OWN fields
+    // (not a plan-level site) still name an unresolved `${TOOLCHAIN_ROOT}`.
+    // Reuses the plan-fatal sibling error's code on purpose — the extension
+    // needs no new vocabulary — but at `warning` (skip) or `error` (fail)
+    // severity instead of always erroring the whole plan.
+    let mut toolchain_issues: Vec<Issue> = Vec::new();
     let workspace_root = crate::util::cli_workspace_root(g);
     let sdk_root = crate::util::resolve_sdk_root(g, &workspace_root);
     // Normalized (absolute + `.`/`..`-collapsed) — NOT `sdk_root`'s raw
@@ -160,7 +204,7 @@ pub(crate) fn execute_slices_outcome(
     // wiring `-DEXTRA_ZEPHYR_MODULES`. The plan's per-slice env still wins.
     let zephyr_base = resolve_zephyr_base(base, sdk_root.as_deref());
 
-    for slice in &plan.slices {
+    for (idx, slice) in plan.slices.iter().enumerate() {
         let backend = slice.backend.as_str().to_string();
 
         // `unknown_backend` policy: Fail (default) vs Skip. `Backend::Unknown`
@@ -169,9 +213,18 @@ pub(crate) fn execute_slices_outcome(
         // nothing enforced `executionPolicy.unknownBackend` after that
         // landed, so an unrecognised backend fell straight into dispatch
         // unchecked: a net regression versus the old closed-enum
-        // reject-the-plan behavior. Checked before the null-command/
-        // missing-tool branches below: an unrecognised backend is unusable
-        // regardless of whether the slice happens to carry a command.
+        // reject-the-plan behavior. Checked FIRST — before null-command,
+        // missing-tool, AND the demoted-slice check below (tan-cli #89
+        // review, MAJOR 2): an unrecognised backend is unusable regardless
+        // of whether the slice happens to carry a command OR is ALSO
+        // token-demoted, and `executionPolicy.unknownBackend` (default Fail,
+        // the SDK default) must not be silently downgraded to
+        // `missingTool`'s default-Skip just because the same slice ALSO
+        // names an unresolved `${TOOLCHAIN_ROOT}` — a version/bug fact
+        // outranks a host-provisioning fact, the same principle
+        // `sub_field_lenient` (tan-core) already applies within one field.
+        // Demoted used to be checked FIRST, ahead of this, which let that
+        // exact combination exit via `missingTool`'s skip-by-default instead.
         if slice.backend.is_unknown() {
             let fail = resolve_action(
                 plan.execution_policy.as_ref(),
@@ -179,21 +232,15 @@ pub(crate) fn execute_slices_outcome(
                 PolicyAction::Fail,
             ) == PolicyAction::Fail;
             let reason = format!("unrecognised backend `{backend}`");
-            if text_mode {
-                let ds = if fail {
-                    DoctorStatus::Fail
-                } else {
-                    DoctorStatus::Warn
-                };
-                eprintln!(
-                    "{}",
-                    theme
-                        .slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, reason))
-                );
-            }
-            if fail {
-                any_failed = true;
-            }
+            report_slice_outcome(
+                text_mode,
+                &theme,
+                &slice.core_id,
+                &backend,
+                fail,
+                &reason,
+                &mut any_failed,
+            );
             backend_issues.push(Issue {
                 code: "build.unknown-backend".to_string(),
                 severity: if fail { "error" } else { "warning" }.to_string(),
@@ -217,25 +264,28 @@ pub(crate) fn execute_slices_outcome(
 
         let Some(cmd) = &slice.command else {
             // `null_command` policy: Skip (default / older plan) vs Fail.
+            // Checked before the demoted-slice check below for the same
+            // reason as unknown-backend above: a null command is unusable
+            // regardless of a co-occurring token demotion.
             let fail = resolve_action(
                 plan.execution_policy.as_ref(),
                 |p| p.null_command,
                 PolicyAction::Skip,
             ) == PolicyAction::Fail;
-            if text_mode {
-                let (ds, tail) = if fail {
-                    (DoctorStatus::Fail, "no command")
-                } else {
-                    (DoctorStatus::Warn, "no command, skipped")
-                };
-                eprintln!(
-                    "{}",
-                    theme.slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, tail))
-                );
-            }
-            if fail {
-                any_failed = true;
-            }
+            let detail = if fail {
+                "no command"
+            } else {
+                "no command, skipped"
+            };
+            report_slice_outcome(
+                text_mode,
+                &theme,
+                &slice.core_id,
+                &backend,
+                fail,
+                detail,
+                &mut any_failed,
+            );
             results.push(SliceResult {
                 core_id: slice.core_id.clone(),
                 backend,
@@ -247,6 +297,86 @@ pub(crate) fn execute_slices_outcome(
             });
             continue;
         };
+
+        // Demoted-slice check (tan-cli #89) — AFTER unknown-backend and
+        // null-command above (MAJOR 2 of the #89 review: this used to sit
+        // FIRST, ahead of both — see their comments for the regression that
+        // reopened). Still BEFORE the unsafe-cwd guard/`create_dir_all`/the
+        // pristine wipe/dispatch below: a demoted slice's PLAN fields still
+        // carry the literal, unsubstituted `${TOOLCHAIN_ROOT}` —
+        // `apply_plan_token_substitution` reported it instead of erroring
+        // precisely because it has an owning slice/dispatch seam, but it did
+        // NOT make the token usable. So nothing below this point may touch
+        // those fields: not `create_dir_all` on a possibly token-bearing cwd,
+        // not the destructive sdk-switch-pristine wipe (which would delete
+        // the slice's last-good `zephyr.elf` for a build that never runs),
+        // not env assembly, not dispatch.
+        if let Some(d) = demoted
+            .iter()
+            .find(|d| d.slice_index == idx && d.core_id == slice.core_id)
+        {
+            // Keyed on BOTH `slice_index` AND `core_id`, not index alone,
+            // and not a `debug_assert_eq!` (MINOR 3 of the #89 review: a
+            // debug assertion compiles out of the shipped release binary, so
+            // it gave no protection in production). A mismatch here simply
+            // finds no demotion, so the slice falls through to normal
+            // dispatch below — where its still-literal `${TOOLCHAIN_ROOT}`
+            // fails loudly at the tool invocation — instead of silently
+            // applying a skip/fail policy to the WRONG slice.
+            //
+            // Reuses `missingTool` rather than a new policy key: this IS the
+            // condition that knob already names — "this host lacks the thing
+            // this slice builds with" — whether the missing thing is a PATH
+            // binary or a toolchain-root token. A new key would be the exact
+            // SDK-contract drift the module doc warns against.
+            let fail = resolve_action(
+                plan.execution_policy.as_ref(),
+                |p| p.missing_tool,
+                PolicyAction::Skip,
+            ) == PolicyAction::Fail;
+            let reason = d.reason.clone();
+            report_slice_outcome(
+                text_mode,
+                &theme,
+                &slice.core_id,
+                &backend,
+                fail,
+                &reason,
+                &mut any_failed,
+            );
+            toolchain_issues.push(Issue {
+                code: "build.toolchain-root-unresolved".to_string(),
+                severity: if fail { "error" } else { "warning" }.to_string(),
+                message: format!(
+                    "slice `{}` {}: {reason}",
+                    slice.core_id,
+                    if fail { "failed" } else { "skipped" }
+                ),
+            });
+            results.push(SliceResult {
+                core_id: slice.core_id.clone(),
+                backend,
+                status: if fail { "failed" } else { "skipped" }.to_string(),
+                rc: None,
+                reason: Some(reason),
+                // Explicitly cleared, NOT `None` (MINOR 4 of the #89 review):
+                // `overlay_run_results_raw` treats a `None` output_artefact as
+                // "preserve the plan-time/previous-run value" — a demoted
+                // slice never dispatches, so leaving this `None` let a
+                // Zephyr-only tokened plan on a toolchain-less host overwrite
+                // `status` to skipped/failed while `system-manifest.yaml`
+                // still named a PREVIOUS run's `zephyr.elf`. `tan flash`
+                // already refuses any non-`ok` status before trusting
+                // `output_artefact` (`plan_flash_targets`), but `tan size`/
+                // `tan debug-config` read it with no status check of their
+                // own — clearing it here (rather than requiring every reader
+                // to add one) closes that at the one place that knows the
+                // slice never built.
+                output_artefact: Some(String::new()),
+                build_dir: None,
+            });
+            continue;
+        }
 
         if text_mode {
             eprintln!(
@@ -328,21 +458,15 @@ pub(crate) fn execute_slices_outcome(
                 |p| p.missing_tool,
                 PolicyAction::Skip,
             ) == PolicyAction::Fail;
-            if text_mode {
-                let ds = if fail {
-                    DoctorStatus::Fail
-                } else {
-                    DoctorStatus::Warn
-                };
-                eprintln!(
-                    "{}",
-                    theme
-                        .slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, reason))
-                );
-            }
-            if fail {
-                any_failed = true;
-            }
+            report_slice_outcome(
+                text_mode,
+                &theme,
+                &slice.core_id,
+                &backend,
+                fail,
+                &reason,
+                &mut any_failed,
+            );
             results.push(SliceResult {
                 core_id: slice.core_id.clone(),
                 backend,
@@ -563,11 +687,15 @@ pub(crate) fn execute_slices_outcome(
     // `tan flash`/`size`/`image` read) reflecting this run's per-slice status.
     // Best-effort in that a failure here never flips the build's own exit code
     // (the slices already ran) — but it must not be SILENT: a failed rewrite
-    // leaves the PREVIOUS run's manifest on disk, and `tan flash` doesn't
-    // check `status` before programming whatever artefact it names. Print the
-    // reason in text mode (as before) AND fold it into the JSON envelope as a
-    // warning Issue — dropping the JSON half is exactly how a stale manifest
-    // used to look identical to `ok:true`.
+    // leaves the PREVIOUS run's manifest on disk, naming that run's artefacts
+    // with that run's statuses. `tan flash` is safe against this on its own
+    // (`tan_core::flash::plan_flash_targets` refuses any slice whose `status`
+    // isn't `ok` rather than programming a possibly-stale artefact); `tan
+    // size` is NOT — its fallback re-derives `<build_dir>/zephyr/zephyr.elf`
+    // when the manifest carries no artefact, and that path still holds the
+    // previous run's binary. Print the reason in text mode (as before) AND
+    // fold it into the JSON envelope as a warning Issue — dropping the JSON
+    // half is exactly how a stale manifest used to look identical to `ok:true`.
     let manifest_outcome = manifest::write_post_build_manifest(context, plan, base, &results);
     let manifest_warning = manifest_outcome.write_failed_reason.clone();
     if let Some(reason) = &manifest_warning {
@@ -594,6 +722,7 @@ pub(crate) fn execute_slices_outcome(
         };
         issues.extend(backend_issues);
         issues.extend(sdk_switch_issues);
+        issues.extend(toolchain_issues);
         if let Some(reason) = manifest_warning {
             issues.push(Issue {
                 code: "build.manifest-write-failed".to_string(),
@@ -953,6 +1082,162 @@ mod tests {
         assert!(
             reason.contains("not found in PATH; this is normal on non-"),
             "got: {reason}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn execute_slices_outcome_skips_a_demoted_slice_and_still_builds_the_other() {
+        // tan-cli #89: a slice demoted by `apply_plan_token_substitution`
+        // (its OWN fields still name an unresolved ${TOOLCHAIN_ROOT}) must
+        // not cost the rest of the plan anything — the other slice builds
+        // normally and the whole run stays exit 0 under the default (skip)
+        // policy, exactly like a slice whose tool is simply missing.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/c1" }} }},
+                {{ "coreId": "c2", "backend": "zephyr", "buildDir": "build/c2",
+                   "command": {{ "tool": "west", "args": ["build"], "cwd": "build/c2" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-toolchain-demoted-skip");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let demoted = vec![SliceDemotion {
+            slice_index: 1,
+            core_id: "c2".to_string(),
+            reason: "plan field `slices[1].env.ZEPHYR_SDK_INSTALL_DIR` names ${TOOLCHAIN_ROOT}, \
+                     but no toolchain install is detectable on this host — install the Zephyr \
+                     SDK (`west sdk install`) or set ZEPHYR_SDK_INSTALL_DIR to an existing install"
+                .to_string(),
+        }];
+        let outcome = execute_slices_outcome(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+            &demoted,
+        );
+        assert_eq!(outcome.run.exit.code(), 0);
+
+        let env: serde_json::Value =
+            serde_json::from_str(outcome.run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], true);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "ok");
+        assert_eq!(slices[1]["status"], "skipped");
+        let reason = slices[1]["reason"].as_str().unwrap();
+        assert!(reason.contains("west sdk install"), "got: {reason}");
+
+        let issues = env["issues"].as_array().unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i["code"] == "build.toolchain-root-unresolved"
+                    && i["severity"] == "warning"
+                    && i["message"].as_str().unwrap().contains("c2")),
+            "got: {issues:?}"
+        );
+        // A skip must never carry an error-severity issue (would flip `ok`).
+        assert!(
+            issues.iter().all(|i| i["severity"] != "error"),
+            "got: {issues:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn execute_slices_outcome_fails_a_demoted_slice_when_policy_says_fail() {
+        // executionPolicy.missingTool = "fail" flips the default skip for a
+        // demoted slice too — it reuses the SAME policy key a missing tool
+        // does, so this is the same routing test as
+        // `native_execute_fails_missing_tool_when_policy_says_fail`, just for
+        // the #89 seam. The OTHER slice must still build (does-not-abort-
+        // early is preserved) even though the whole run now exits non-zero.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/c1" }} }},
+                {{ "coreId": "c2", "backend": "zephyr", "buildDir": "build/c2",
+                   "command": {{ "tool": "west", "args": ["build"], "cwd": "build/c2" }} }}
+              ],
+              "executionPolicy": {{ "missingTool": "fail" }},
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-toolchain-demoted-fail");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let demoted = vec![SliceDemotion {
+            slice_index: 1,
+            core_id: "c2".to_string(),
+            reason: "plan field `slices[1].env.ZEPHYR_SDK_INSTALL_DIR` names ${TOOLCHAIN_ROOT}, \
+                     but no toolchain install is detectable on this host"
+                .to_string(),
+        }];
+        let outcome = execute_slices_outcome(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+            &demoted,
+        );
+        assert_eq!(outcome.run.exit.code(), 1);
+
+        let env: serde_json::Value =
+            serde_json::from_str(outcome.run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], false);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "ok");
+        assert_eq!(slices[1]["status"], "failed");
+
+        let issues = env["issues"].as_array().unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i["code"] == "build.toolchain-root-unresolved"
+                    && i["severity"] == "error"
+                    && i["message"].as_str().unwrap().contains("c2")),
+            "got: {issues:?}"
         );
 
         std::fs::remove_dir_all(&base).ok();
@@ -1325,6 +1610,7 @@ mod tests {
             project,
             &plan,
             base.to_str().unwrap(),
+            &[],
         );
         assert_eq!(outcome.run.exit.code(), 0);
         assert!(!outcome.manifest_written);

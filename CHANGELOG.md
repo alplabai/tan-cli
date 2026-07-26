@@ -8,6 +8,21 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **Shell completions are gated against clap (#92).** The three scripts under
+  `completion_scripts/` are hand-maintained and nothing compared them to the
+  `#[arg(long)]` definitions, so flags drifted silently — `--core` was missing
+  from all three since #66 and was caught only by a human reading the diff. A
+  test now walks clap's BUILT command tree and asserts, per subcommand and in
+  both directions, that every long flag appears in the arm each script actually
+  runs (and that no script offers a flag clap no longer accepts). Per-arm, not
+  file-wide: zsh's `_arguments` arms do not inherit, so a global flag must be
+  repeated in each one, and a whole-file "appears somewhere" check reported
+  parity while `tan sdk --format<TAB>` completed nothing. Fixing the drift the
+  gate then exposed makes several flags newly completable across all three
+  shells. `completion_scripts/**` is now `text eol=lf` in `.gitattributes`: a
+  CRLF checkout both breaks the scripts on their target shell and makes the
+  gate's layout markers miss, which would have surfaced as a misleading
+  "layout changed" panic on the `windows-latest` leg only.
 - **`tan doctor` checks the host environment: `zephyrSdkHost`, `longPaths`,
   `homePath`.** alp-sdk ADR 0021's cross-cutting requirements name three host
   facts that decide whether a toolchain can be provisioned at all, and all
@@ -312,6 +327,43 @@ All notable changes to `tan` are documented here. Format follows
   the missing-tool case it originally described. (#70)
 
 ### Fixed
+- **A slice-confined unresolved `${TOOLCHAIN_ROOT}` failed the WHOLE plan,
+  not just the slice that needed it.** `substitute_plan_tokens` inspected
+  only the FIRST `${...}`-shaped token in each field and, on an unresolved
+  `${TOOLCHAIN_ROOT}`, returned `UnresolvedToolchainRoot` for the entire
+  plan — so ONE Zephyr slice naming a toolchain this host hasn't installed
+  (e.g. a per-slice `ZEPHYR_SDK_INSTALL_DIR` override) refused to build
+  every OTHER slice too, even a `native_sim` slice that needs no toolchain
+  at all. The pass now scans every token in a field to completion (so a
+  genuinely unknown token — a version/bug fact — still hard-fails the
+  plan regardless of where it sits relative to a known one), and when the
+  only problem in a slice's own fields is an unresolved `${TOOLCHAIN_ROOT}`,
+  reports it as a demoted slice instead of erroring the plan. `tan build
+  --native`'s executor routes a demoted slice through the SAME
+  `executionPolicy.missingTool` seam a missing `bitbake`/`west` already
+  uses — skip by default, fail under `missingTool: "fail"` — naming the
+  slice and the host-specific advice (install a toolchain / disambiguate
+  `ZEPHYR_SDK_INSTALL_DIR`) in both the text recap and a
+  `build.toolchain-root-unresolved` envelope Issue (`warning` on skip,
+  `error` on fail); the demoted slice's own `configArtefacts` are stripped
+  before materialise ever sees them, so nothing with a live token in its
+  path or contents is ever written. `boardYaml` and `sharedArtefacts[]`
+  have no owning slice to route a skip to, so they keep the old hard
+  failure unchanged. `tan build --materialise` has no per-slice dispatch
+  seam either, so it decides once, up front, instead: skip omits just the
+  demoted slice's artefacts (with a warning Issue naming it), fail writes
+  nothing at all, matching the exit-nonzero/nothing-written shape
+  `--materialise` always had. Two notes for anything parsing the envelope
+  behind a pinned `SUPPORTED_CLI_VERSION` (alp-sdk-vscode): **`build.
+  toolchain-root-unresolved` is no longer only a plan-fatal error** — it can
+  now ride an `ok:true` envelope at `warning` severity when the skip policy
+  applies, so a consumer must not treat that code alone as an `ok:false`
+  signal. And **`substitute_slice`'s field-processing order changed**
+  (`env`/`envAppendPath` now precede `command`, where `command` used to come
+  between them and `configArtefacts`) — a slice carrying an unresolved token
+  in BOTH `env` and `command.args` now reports the `env` field name in
+  `LeftoverToken`, not the `command.args[…]` one a consumer may have
+  previously seen for that (rare) shape. (#89)
 - **`tan debug-config --target-kind native-host` pointed `program` at
   `zephyr.elf`, correcting #83.** #83 fixed the slice SELECTION (native_sim is
   found by board, not by `os`) but then took that slice's `output_artefact`

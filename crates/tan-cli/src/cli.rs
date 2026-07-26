@@ -215,7 +215,8 @@ pub struct SizeArgs {
 /// headless Renode. Native — mirrors the retired `west alp-renode` flags
 /// (positional `app_path`, `--build-root`, `--board`, `--image-bundle`, `--log`,
 /// `--timeout`, `--expect`, `--sim-mode`). `--sim-mode` is wired for surface
-/// stability but errors "not yet ported" (studio sim gateway, issue #674).
+/// stability but errors "not yet ported" (studio sim gateway, deferred as
+/// `tan-cli#77`; historical contract `alp-sdk#674`, cited as prior art only).
 #[derive(Debug, Args)]
 pub struct RenodeArgs {
     /// Application source directory (default: `.`). Used to derive the default
@@ -251,8 +252,14 @@ pub struct RenodeArgs {
     /// line; exit 1 if the run ends without it.
     #[arg(long, value_name = "STR")]
     pub expect: Option<String>,
-    /// DEFERRED studio hardware-simulator mode (issue #674): wired for surface
-    /// stability but errors "not yet ported" until studio is repointed to `tan`.
+    /// DEFERRED studio hardware-simulator mode (`tan-cli#77`): wired for
+    /// surface stability but errors "not yet ported" until studio is
+    /// repointed to `tan`. Historical contract `alp-sdk#674` (closed).
+    // NOT a doc comment: clap prints the lines above verbatim in `tan renode
+    // --help`, so repo-internal citation policy does not belong there. Both
+    // issue numbers carry their repo because a bare `#674` is what let three
+    // alp-sdk workflows drift into linking `tan-cli#674` — an issue that has
+    // never existed here and 404s.
     #[arg(long = "sim-mode")]
     pub sim_mode: bool,
 }

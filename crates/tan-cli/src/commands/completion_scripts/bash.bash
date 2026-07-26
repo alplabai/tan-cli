@@ -8,7 +8,7 @@ _tan_complete() {
   cword=${COMP_CWORD}
 
   local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode"
-  local global_flags="--project --board-yaml --sdk-root --format --verbose --quiet --no-color --non-interactive --ci --help"
+  local global_flags="--project --board-yaml --sdk-root --target --all --format --verbose --quiet --no-color --non-interactive --ci --help --version"
 
   if [[ "$prev" == "--format" ]]; then
     COMPREPLY=( $(compgen -W "text json" -- "$cur") )
@@ -21,13 +21,16 @@ _tan_complete() {
   fi
 
   if [[ $cword -eq 1 ]]; then
-    COMPREPLY=( $(compgen -W "$commands" -- "$cur") )
+    COMPREPLY=( $(compgen -W "$commands $global_flags" -- "$cur") )
     return
   fi
 
   case "${COMP_WORDS[1]}" in
+    validate)
+      COMPREPLY=( $(compgen -W "$global_flags --offline" -- "$cur") )
+      ;;
     generate)
-      COMPREPLY=( $(compgen -W "$global_flags --target --all --force" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --force" -- "$cur") )
       ;;
     explain)
       COMPREPLY=( $(compgen -W "$global_flags --template" -- "$cur") )
@@ -42,7 +45,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags" -- "$cur") )
       ;;
     completion)
-      COMPREPLY=( $(compgen -W "--shell --format --help" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --shell" -- "$cur") )
       ;;
     pinmux)
       COMPREPLY=( $(compgen -W "$global_flags --sku --family" -- "$cur") )
@@ -63,13 +66,13 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags --destination --target-kind --server --path" -- "$cur") )
       ;;
     sdk)
-      COMPREPLY=( $(compgen -W "list install current switch --destination" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags list install current switch --destination --global" -- "$cur") )
       ;;
     bootstrap)
       COMPREPLY=( $(compgen -W "$global_flags --no-pip --no-west --print-env" -- "$cur") )
       ;;
     build)
-      COMPREPLY=( $(compgen -W "$global_flags --plan --plan-from --materialise --native --manifest --manifest-from" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --plan --plan-from --materialise --native --manifest --manifest-from --no-auto-bootstrap" -- "$cur") )
       ;;
     kconfig)
       COMPREPLY=( $(compgen -W "$global_flags --core" -- "$cur") )
@@ -87,7 +90,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags --build-root --dry-run" -- "$cur") )
       ;;
     renode)
-      COMPREPLY=( $(compgen -W "$global_flags --build-root --board --image-bundle --log --timeout --expect --sim-mode" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --build-root --board --core --image-bundle --log --timeout --expect --sim-mode" -- "$cur") )
       ;;
     size)
       COMPREPLY=( $(compgen -W "$global_flags --build-root --board --fail-over-budget" -- "$cur") )

@@ -7,8 +7,13 @@
 //! this and the Python is retired.
 //!
 //! SCOPE: the PLAIN (non-sim) headless smoke only. `--sim-mode` (the studio sim
-//! gateway, issue #674) is DEFERRED — the flag is wired for surface stability
-//! but errors "not yet ported".
+//! gateway) is DEFERRED and tracked as `tan-cli#77` — the flag is wired for
+//! surface stability but errors "not yet ported". The historical contract it
+//! would have to satisfy is `alp-sdk#674` (CLOSED; the Python that closed it
+//! is deleted, so cite it only as prior art). Never cite a bare `#674` here:
+//! read from this repo it means `tan-cli#674`, which has never existed and
+//! 404s — that exact ambiguity is what let three alp-sdk workflows drift into
+//! citing it. Always carry the owning repo.
 //!
 //! Divergences from the Python source, all deliberate:
 //!   - user-facing prose names `tan renode` / `tan build`, never
@@ -107,16 +112,18 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
         ..Default::default()
     };
 
-    // --sim-mode: DEFERRED. Wired for surface stability; errors until studio is
-    // repointed to `tan renode --sim-mode` (issue #674).
+    // --sim-mode: DEFERRED (tan-cli#77). Wired for surface stability; errors
+    // until studio is repointed to `tan renode --sim-mode`. The historical
+    // contract is alp-sdk#674 (closed; cited as prior art only — a bare
+    // `#674` read from this repo means `tan-cli#674`, which does not exist).
     if args.sim_mode {
         return fail(
             g,
             project,
             report,
             "renode.sim-mode-unported",
-            "renode --sim-mode is not yet ported (studio sim gateway, issue #674); \
-             use the plain headless smoke",
+            "renode --sim-mode is not yet ported (studio sim gateway, tracked as \
+             tan-cli#77; historical contract alp-sdk#674); use the plain headless smoke",
         );
     }
 
