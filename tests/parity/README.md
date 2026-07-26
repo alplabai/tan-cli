@@ -191,8 +191,8 @@ bootstrap`'s workspace-assembly FACTS. alp-sdk's `metadata/bootstrap.json` is
 the single source of truth the two bootstrap scripts and `tan` all read (the
 Zephyr pin, venv layout, prerequisites + Python floor, the `west` pip spec and
 argv, pip package sets, the `env` map, the per-OS native-lib hints); its own
-`_comment` (as vendored) still calls tan only an INTENDED future consumer
-that no code reads yet. alp-sdk polices its *scripts*
+`_comment` names tan as a real reader of those facts since tan-cli PR #55.
+alp-sdk polices its *scripts*
 against it with `scripts/check_bootstrap_manifest.py` — but that gate cannot
 see a tan-cli checkout, so nothing upstream catches
 `crates/tan-core/src/bootstrap/manifest.rs` drifting from the producer. This
@@ -209,8 +209,10 @@ hand-ported fallback constants (the path taken against any SDK predating
 fails that test until the constants are updated too.
 
 Self-skips with no reachable alp-sdk checkout, like the two gates above.
-The current `PINNED_SDK_TAG` is past alp-sdk#917, so the gate byte-diffs for
-real; the NOTICE-and-pass branch only fires for an older ref used locally
+The current `PINNED_SDK_TAG` is well past alp-sdk#917 — it sits at #967, which
+together with #961 rewrote `manualInstallHints.windows.note` from one sentence
+to five elements and bumped `zephyr.version` to v4.4.1 — so the gate byte-diffs
+for real; the NOTICE-and-pass branch only fires for an older ref used locally
 (one predating #917). A byte MISMATCH always fails regardless of the pin.
 
 ```

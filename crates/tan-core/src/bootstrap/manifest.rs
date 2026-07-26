@@ -2,12 +2,13 @@
 //! CONSUMER side of `alp-sdk/metadata/bootstrap.json` — the single source of
 //! truth for the workspace-assembly FACTS that `scripts/bootstrap.sh`,
 //! `scripts/bootstrap.ps1` and tan all need (alp-sdk#917). The manifest's own
-//! `_comment` (as vendored) still describes tan as only an INTENDED future
-//! consumer that no code reads yet — that line is stale the moment this
-//! module exists: `parse_bootstrap_manifest` below IS the tan-side reader.
-//! `scripts/check_bootstrap_manifest.py` is the manifest's drift gate, but
-//! that gate does NOT scan tan-cli, so hand-ported constants here would
-//! desync silently. Reading the manifest is what keeps us honest.
+//! `_comment` names tan as a real reader of those facts "since tan-cli PR #55"
+//! rather than an INTENDED future consumer — `parse_bootstrap_manifest` below
+//! IS that reader. `scripts/check_bootstrap_manifest.py` is the manifest's
+//! drift gate, but that gate does NOT scan tan-cli, so hand-ported constants
+//! here would desync silently. Reading the manifest is what keeps us honest;
+//! the vendored fixture plus `tests/parity/bootstrap_manifest_parity.py` are
+//! what catch the [`fallback_facts`] constants going stale behind it.
 //!
 //! Facts only. Control flow (`$ZEPHYR_BASE` reuse/rejection, venv idempotency,
 //! `.west` branching) stays CODE in each executor, per the manifest's contract.
@@ -427,14 +428,42 @@ pub fn fallback_facts(min_python: (u32, u32)) -> BootstrapFacts {
         // Moved OUT of hint_windows.note (alp-sdk#917 review item 7): that
         // sentence is a manual-install fact, not a native-library one, and
         // printing it there is exactly the "OPTIONAL NATIVE LIBRARIES"
-        // mis-framing the review caught.
+        // mis-framing the review caught. Grew from that one terse sentence to
+        // five elements in alp-sdk#961 (Arm-toolchain scoping, which folded the
+        // installer URL + PATH tip in here) and #967 (dtc/gperf settled) --
+        // which is what let `blocks::optional_libs_block` drop its hardcoded
+        // Arm/Zephyr-SDK block for issue #82.
         manual_install_hints: ManualInstallHints {
             windows: ManualInstallHint {
                 note: owned(&[
-                    "The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate \
-                     manual, one-time installs on native Windows -- not auto-installed by \
-                     bootstrap.ps1; native_sim / Yocto need WSL2 (docs/cross-platform-setup.md \
-                     section 5).",
+                    "The Zephyr SDK (`west sdk install`) is a separate, manual, one-time install \
+                     on native Windows -- not auto-installed by bootstrap.ps1. It is the one \
+                     every Zephyr-on-M customer needs: it provides the `arm-zephyr-eabi` cross \
+                     toolchain the real-silicon build (`west build` / `west flash`) actually \
+                     uses. Run it from your west workspace's top-level directory -- the alp-sdk \
+                     checkout's parent directory -- after this script completes.",
+                    "7-Zip must already be on PATH before running `west sdk install` on native \
+                     Windows: west delegates .7z extraction to patoolib, which shells out to an \
+                     external 7z/7za/7zr/7zz/7zzs/unar binary and has no pure-Python fallback.",
+                    "The Zephyr SDK's native-Windows hosttools bundle ships neither `dtc` nor \
+                     `gperf` (verified: `hosttools_windows-x86_64.7z`, sdk-ng v1.0.1, \
+                     sha256-checked against upstream's own sha256.sum -- 1486 entries via `7z l`, \
+                     zero dtc/gperf/device-tree matches -- while the equivalent Linux hosttools \
+                     archive does ship `dtc`). Both are separate, manual installs on native \
+                     Windows if you need them (see docs/cross-platform-setup.md); WARN-only in \
+                     `alp doctor` (`_check_dtc` / `_check_gperf`) -- not required by \
+                     bootstrap.ps1.",
+                    "The Arm GNU Toolchain (`arm-none-eabi-gcc`) is a SEPARATE manual install, \
+                     needed by three opt-in paths -- rebuilding the GD32 bridge firmware \
+                     (custom-carrier bring-up or bridge recovery), building the CC3501E bridge \
+                     firmware's silicon-free stub target (its production image builds with TI \
+                     ticlang, not this toolchain), or hand-writing bare-metal firmware for a real \
+                     M-class core -- most customers never touch any of them, since the GD32G553 \
+                     ships pre-flashed by Alp Lab (rebuilding it is optional and fully open, see \
+                     docs/gd32-bridge.md). Installer EXE: \
+                     https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads (tick 'Add \
+                     path to environment variable' during install).",
+                    "native_sim / Yocto need WSL2 (docs/cross-platform-setup.md section 5).",
                 ]),
             },
         },
@@ -466,7 +495,7 @@ mod tests {
     #[test]
     fn parses_every_field_of_the_real_manifest() {
         let facts = parse_bootstrap_manifest(REAL_MANIFEST).expect("real manifest must parse");
-        assert_eq!(facts.zephyr_version, "v4.4.0");
+        assert_eq!(facts.zephyr_version, "v4.4.1");
         assert_eq!(
             facts.zephyr_requirements_path,
             "zephyr/scripts/requirements.txt"
@@ -523,15 +552,37 @@ mod tests {
                     .to_string()
             ]
         );
-        assert_eq!(
-            facts.manual_install_hints.windows.note,
-            vec![
-                "The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate \
-                 manual, one-time installs on native Windows -- not auto-installed by \
-                 bootstrap.ps1; native_sim / Yocto need WSL2 (docs/cross-platform-setup.md \
-                 section 5)."
-                    .to_string()
-            ]
+        // Grew from one terse sentence to five elements in alp-sdk#961/#967.
+        // Their exact bytes are already pinned twice over — by
+        // `the_fallback_matches_the_real_manifest_field_for_field` below and by
+        // `tests/parity/bootstrap_manifest_parity.py`'s byte-diff — so assert
+        // the DISCRIMINATING parts here instead of a third 2 kB transcription.
+        // The two checked below are precisely the facts that let
+        // `blocks::optional_libs_block` drop its hardcoded block (issue #82):
+        // the workspace locator #961 kept as prose, and the Arm installer URL
+        // with its PATH tip.
+        let manual = &facts.manual_install_hints.windows.note;
+        assert_eq!(manual.len(), 5);
+        assert!(
+            manual[0].starts_with("The Zephyr SDK (`west sdk install`) is a separate, manual,"),
+            "{}",
+            manual[0]
+        );
+        assert!(
+            manual[0].contains(
+                "Run it from your west workspace's top-level directory -- the alp-sdk checkout's \
+                 parent directory -- after this script completes."
+            ),
+            "{}",
+            manual[0]
+        );
+        assert!(
+            manual[3].contains(
+                "https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads (tick 'Add \
+                 path to environment variable' during install)."
+            ),
+            "{}",
+            manual[3]
         );
         assert!(facts.from_manifest);
     }

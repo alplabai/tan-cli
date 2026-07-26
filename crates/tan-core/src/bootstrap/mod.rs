@@ -40,16 +40,26 @@ pub use runtime::{
 };
 
 /// FALLBACK Zephyr pin, used only when the SDK has no
-/// `metadata/bootstrap.json`. Mirrors that manifest's `zephyr.version`; the
-/// live value comes from [`BootstrapFacts::zephyr_version`], and the pin the
-/// reuse test actually compares comes from [`resolve_pin_major_minor`].
-pub const ZEPHYR_VERSION: &str = "v4.4.0";
+/// `metadata/bootstrap.json` — which is EVERY released SDK: that file has never
+/// existed on alp-sdk `origin/main` (absent from its whole history and from
+/// `v0.13.0`), so this constant, not the manifest, is what a customer on a
+/// release actually gets. It tracks the value the **`dev`** manifest's
+/// `zephyr.version` carries, since dev is the only place the manifest exists;
+/// it deliberately does NOT match what the refs taking this path pin, as those
+/// predate the manifest and still say `revision: v4.4.0` in `west.yml` — which
+/// is exactly why [`resolve_pin_major_minor`] prefers `west.yml` over this
+/// constant, and why the live value comes from
+/// [`BootstrapFacts::zephyr_version`] whenever a manifest is present.
+pub const ZEPHYR_VERSION: &str = "v4.4.1";
 
 /// FALLBACK west pip requirement, used only when the SDK has no
 /// `metadata/bootstrap.json`. Mirrors that manifest's `west.pipSpec`.
 ///
-/// It is a FLOOR, not a pin: `west>=0.14.0` is what Zephyr v4.4.0's
-/// `requirements-base.txt` declares. Note the two bootstrap scripts still run a
+/// It is a FLOOR, not a pin: `west>=0.14.0` is what the pinned Zephyr's
+/// `requirements-base.txt` declares (unchanged across the v4.4.0 -> v4.4.1 pin
+/// bump — alp-sdk's own manifest still carries this spec at v4.4.1, and
+/// `check_bootstrap_manifest.py` is what keeps that honest). Note the two
+/// bootstrap scripts still run a
 /// bare `pip install --upgrade -q west` and do NOT yet consume `pipSpec`
 /// themselves (the manifest calls it "informational today") — tan consuming it
 /// is strictly the safer side of that divergence, since an ancient `west` on a

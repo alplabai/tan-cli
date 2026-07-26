@@ -7,10 +7,10 @@ alp-sdk's `metadata/bootstrap.json` vs. the pinned alp-sdk checkout's own copy.
 workspace-assembly FACTS that `scripts/bootstrap.sh`, `scripts/bootstrap.ps1`
 and `tan bootstrap` all need -- the Zephyr pin, venv layout, prerequisite
 lists + Python floor, the `west` pip spec and argv, the pip package sets, the
-`env` map and the per-OS native-lib hints. Its own `_comment` (as vendored)
-still calls tan only an INTENDED future consumer that no code reads yet --
+`env` map and the per-OS native-lib hints. Its own `_comment` names tan as a
+real reader of those facts since tan-cli PR #55 --
 `crates/tan-core/src/bootstrap/manifest.rs`'s `parse_bootstrap_manifest` is
-what makes that stale.
+that reader.
 
 alp-sdk polices its two scripts against that manifest with
 `scripts/check_bootstrap_manifest.py`, but that gate cannot see a tan-cli
@@ -40,12 +40,13 @@ Reachability is resolved in the same order: `--sdk`, then `$ALP_SDK_ROOT`,
 then an `alp-sdk` checkout next to this tan-cli checkout.
 
 A SECOND non-failure case, same shape as the kconfig gate's: the manifest
-absent at the ref `parity.yml` pins. `PINNED_SDK_TAG` is now past alp-sdk#917
-landing this manifest, so this gate byte-diffs for real in CI today; this
-branch is dead against that pin and only fires for an OLDER ref used locally
-(e.g. one predating #917). A byte MISMATCH (manifest present upstream,
-content differs) always fails regardless of the pin -- that is the actual
-drift this gate exists to catch.
+absent at the ref `parity.yml` pins. `PINNED_SDK_TAG` is now well past
+alp-sdk#917 landing this manifest (it is at #967, which with #961 rewrote
+`manualInstallHints.windows.note` and bumped `zephyr.version` to v4.4.1), so
+this gate byte-diffs for real in CI today; this branch is dead against that pin
+and only fires for an OLDER ref used locally (e.g. one predating #917). A byte
+MISMATCH (manifest present upstream, content differs) always fails regardless
+of the pin -- that is the actual drift this gate exists to catch.
 """
 
 from __future__ import annotations
