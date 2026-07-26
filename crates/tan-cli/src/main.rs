@@ -8,6 +8,7 @@ mod exit;
 mod http;
 mod progress;
 mod style;
+mod toolchain;
 mod util;
 mod venv;
 

@@ -120,11 +120,20 @@ pub(super) fn apply_plan_token_substitution(
         }
     }
 
+    // ${TOOLCHAIN_ROOT} (ADR 0021): resolved LAZILY — an unresolvable
+    // toolchain root is passed through as `None`, not refused here, so the
+    // plans the SDK emits today (which name no `${TOOLCHAIN_ROOT}`) keep
+    // building on a host with no detectable toolchain install. The refusal
+    // fires inside the pass, only when a plan actually uses the token.
+    let toolchain = crate::toolchain::resolve_toolchain_root();
+    let toolchain_root = toolchain.path().map(|p| p.to_string_lossy().into_owned());
+
     let python = resolved_planner_python(context);
     let values = TokenValues {
         sdk_root: &sdk_root_str,
         project_root: &project_root,
         python: &python,
+        toolchain_root: toolchain_root.as_deref(),
     };
     substitute_plan_tokens(plan, &values).map_err(|e| match e {
         PlanTokenError::LeftoverToken { field, token } => (
@@ -132,8 +141,19 @@ pub(super) fn apply_plan_token_substitution(
             format!(
                 "plan is `planPathMode: tokened` but field `{field}` still names the literal \
                  token `{token}` after substitution — an SDK-side token this CLI does not \
-                 resolve (only ${{SDK_ROOT}}, ${{PROJECT_ROOT}}, ${{PYTHON}} are known). Upgrade \
-                 tan, or check the plan for a bug."
+                 resolve (only ${{SDK_ROOT}}, ${{PROJECT_ROOT}}, ${{PYTHON}}, \
+                 ${{TOOLCHAIN_ROOT}} are known). Upgrade tan, or check the plan for a bug."
+            ),
+        ),
+        // Distinct from the above on purpose: tan KNOWS this token, so
+        // "upgrade tan" is the wrong advice — the host is missing (or has
+        // several of) the thing it names.
+        PlanTokenError::UnresolvedToolchainRoot { field } => (
+            "build.toolchain-root-unresolved",
+            format!(
+                "plan field `{field}` names ${{TOOLCHAIN_ROOT}}, but {}. tan refuses rather than \
+                 substituting an empty path, which would silently build against the host root.",
+                describe_unresolved(&toolchain)
             ),
         ),
         PlanTokenError::UnknownPlanPathMode(mode) => (
@@ -141,6 +161,35 @@ pub(super) fn apply_plan_token_substitution(
             format!("unknown planPathMode `{mode}` (only \"tokened\" is defined)"),
         ),
     })
+}
+
+/// Why [`crate::toolchain::resolve_toolchain_root`] produced no single path,
+/// phrased to complete the sentence "…names ${TOOLCHAIN_ROOT}, but {this}."
+/// The two causes need opposite fixes — install one vs. choose between the
+/// ones already installed — so they must not share a message.
+fn describe_unresolved(toolchain: &crate::toolchain::ToolchainRoot) -> String {
+    match toolchain {
+        crate::toolchain::ToolchainRoot::Ambiguous(candidates) => {
+            let list = candidates
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "this host has several toolchain installs and no `ZEPHYR_SDK_INSTALL_DIR` to \
+                 choose between them ({list}) — set `ZEPHYR_SDK_INSTALL_DIR` to the one this \
+                 build should use"
+            )
+        }
+        // `Resolved` cannot reach here (a resolved root is substituted), but
+        // it shares the "nothing usable" advice rather than being unreachable!().
+        crate::toolchain::ToolchainRoot::NotFound
+        | crate::toolchain::ToolchainRoot::Resolved(_) => {
+            "no toolchain install is detectable on this host — install the Zephyr SDK (`west sdk \
+             install`) or set `ZEPHYR_SDK_INSTALL_DIR` to an existing install"
+                .to_string()
+        }
+    }
 }
 
 /// Parent directory of `board_yaml_path`, forward-slash (matches
@@ -318,6 +367,26 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&sdk_root).ok();
+    }
+
+    #[test]
+    fn unresolved_toolchain_root_advice_differs_by_cause() {
+        use crate::toolchain::ToolchainRoot;
+
+        // Nothing installed: tell them to install one.
+        let none = describe_unresolved(&ToolchainRoot::NotFound);
+        assert!(none.contains("west sdk install"), "got: {none}");
+
+        // Several installed: tell them to choose, and name the candidates —
+        // "install the Zephyr SDK" would be actively wrong advice here.
+        let many = describe_unresolved(&ToolchainRoot::Ambiguous(vec![
+            std::path::PathBuf::from("/opt/zephyr-sdk-0.16.5"),
+            std::path::PathBuf::from("/opt/zephyr-sdk-1.0.1"),
+        ]));
+        assert!(many.contains("ZEPHYR_SDK_INSTALL_DIR"), "got: {many}");
+        assert!(many.contains("/opt/zephyr-sdk-0.16.5"), "got: {many}");
+        assert!(many.contains("/opt/zephyr-sdk-1.0.1"), "got: {many}");
+        assert!(!many.contains("west sdk install"), "got: {many}");
     }
 
     #[test]
