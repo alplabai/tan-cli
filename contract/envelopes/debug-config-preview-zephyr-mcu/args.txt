@@ -1,0 +1,8 @@
+--format
+json
+debug-config
+--target-kind
+zephyr-mcu
+--server
+jlink
+--preview
