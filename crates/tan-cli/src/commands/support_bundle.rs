@@ -237,6 +237,11 @@ fn bundle_doctor_report(
 ) -> DoctorReport {
     let mut doctor = build_doctor_report(context, target, server, runtime);
     crate::commands::doctor::append_host_prerequisites(&mut doctor, context.sdk_root.as_deref());
+    // Same reasoning as the line above: a bundle is attached precisely when
+    // something failed, and "this host has no Zephyr SDK build at all" /
+    // "long paths are off" are facts the maintainer would otherwise reconstruct
+    // from a build log.
+    crate::commands::doctor::append_host_environment(&mut doctor);
     doctor
 }
 

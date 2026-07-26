@@ -10,11 +10,11 @@ use std::path::Path;
 
 use tan_core::{
     BuildOs, BuildToolProbe, DebugServerKind, DebugTargetKind, DebuggerExtensionsState,
-    DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, ProjectContext, append_doctor_check,
-    board_os_set, build_doctor_report, build_readiness_report,
+    DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, HostEnvProbe, ProjectContext,
+    append_doctor_check, board_os_set, build_doctor_report, build_readiness_report,
     collect_runtime_capabilities_from_commands, create_debug_workspace_context,
-    is_server_supported_for_target, parse_board_model, parse_server_kind, parse_target_kind,
-    prepend_doctor_checks,
+    host_environment_checks, is_server_supported_for_target, parse_board_model, parse_server_kind,
+    parse_target_kind, prepend_doctor_checks,
 };
 
 use tan_core::bootstrap::{apply_prerequisite_check, doctor_prerequisite_check, fallback_facts};
@@ -184,16 +184,17 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
     CommandRun { exit, text, json }
 }
 
-/// The plain `tan doctor` report: the pure check set, plus the two checks that
-/// can only be built with IO.
+/// The plain `tan doctor` report: the pure check set, plus the checks that can
+/// only be built with IO — the host prerequisite gate, the host-environment
+/// probes, and the SDK provenance.
 ///
 /// Its own function rather than four inline lines in `run` so the appends are
 /// reachable from a test. `run` resolves a real project and shells `git`, so a
 /// dropped `append_host_prerequisites` call inline there was invisible to the
 /// suite — the same hole `support_bundle::bundle_doctor_report` closes.
 ///
-/// Both appends land AFTER `build_doctor_report` computed `nextSteps`, so both
-/// go through `append_doctor_check`, which re-derives it. That is why there is
+/// Every append lands AFTER `build_doctor_report` computed `nextSteps`, so each
+/// goes through `append_doctor_check`, which re-derives it. That is why there is
 /// no trailing `next_steps = unique_next_steps(...)` statement here: a
 /// statement a caller can forget is a bug waiting to be re-introduced, and this
 /// one already was one.
@@ -205,6 +206,7 @@ fn assemble_doctor_report(
 ) -> DoctorReport {
     let mut report = build_doctor_report(context, target, server, runtime);
     append_host_prerequisites(&mut report, context.sdk_root.as_deref());
+    append_host_environment(&mut report);
     append_sdk_provenance(
         &mut report.summary,
         &mut report.checks,
@@ -280,6 +282,124 @@ pub(crate) fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Opt
         check,
         refusal.map(|f| f.missing).unwrap_or_default(),
     );
+}
+
+/// Append the host-environment checks — `zephyrSdkHost`, `longPaths`
+/// (Windows only) and `homePath` (alp-sdk ADR 0021, "Cross-cutting
+/// requirements").
+///
+/// This function is the IO half and nothing else: three probes, then one call
+/// into the pure `tan_core::host_env`. The split is what makes the checks
+/// testable at all — the verdicts depend entirely on which machine is running,
+/// so a test that called this would only ever exercise the branch this host
+/// sits in (a served `windows-x86_64`/`linux-x86_64`, always). All four host
+/// tags and both registry states are driven directly against the pure
+/// functions instead; see `tan_core::host_env`'s tests.
+///
+/// PLAIN `tan doctor`, not `--build`, for the same reason
+/// [`append_host_prerequisites`] is: these need no `board.yaml`, no workspace
+/// and no SDK, and ADR 0021 Lane 1 P0a runs `tan doctor` before anything
+/// project-shaped exists. `--build` deliberately does NOT get them.
+/// `zephyrSdkHost` looks adjacent to `--build`'s `zephyrSdk` probe but answers
+/// the opposite question — "can an SDK be installed on this host at all" versus
+/// "is one installed here" — and reporting the SDK story twice under two names
+/// is exactly the trap #81 documents.
+///
+/// `pub(crate)`: `commands::support_bundle` builds the same report and must
+/// carry the same facts. A bundle from a `windows-arm64` or Intel-Mac host that
+/// omitted the reason nothing can be provisioned would send a maintainer
+/// hunting through a build log for a fact the host already knew.
+pub(crate) fn append_host_environment(report: &mut DoctorReport) {
+    let home = host_home();
+    let probe = HostEnvProbe {
+        os: std::env::consts::OS,
+        arch: std::env::consts::ARCH,
+        long_paths_enabled: long_paths_enabled(),
+        home: home.as_deref(),
+    };
+    for check in host_environment_checks(&probe) {
+        append_doctor_check(
+            &mut report.summary,
+            &mut report.checks,
+            &mut report.next_steps,
+            check,
+        );
+    }
+}
+
+/// The user's home directory: `USERPROFILE` on Windows else `HOME`, matching
+/// [`crate::util::home_alp_dir`]'s resolution so the path this check reports a
+/// space in is the same one tan would actually put `~/.alp` under.
+///
+/// No `.` fallback here, unlike `home_alp_dir`: "unset" is a real, reportable
+/// state for a doctor check, and reporting `.` would claim a clean home nobody
+/// resolved.
+fn host_home() -> Option<String> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(|v| v.to_string_lossy().into_owned())
+}
+
+/// Read `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled`.
+///
+/// The registry API, not `reg query`: shelling out costs a process, inherits
+/// whatever `PATH` the caller has (the one thing a broken host is likely to
+/// have wrong), and turns a typed DWORD into text that then has to be parsed
+/// back. `windows-sys` is already resolved in the lock tree, so this is a
+/// direct edge onto a crate that was being built anyway, target-gated to
+/// Windows.
+///
+/// `Some(false)` for an ABSENT value, not `None`: absent IS the Windows
+/// default-off state and by far the most common one, so reporting it as
+/// "could not read" would make the check useless on the majority of hosts.
+/// `None` is reserved for a read that actually failed.
+///
+/// `HKLM\SYSTEM\...` is not subject to WOW64 registry redirection, so no
+/// `KEY_WOW64_*` flag is needed for a 32-bit `tan` on a 64-bit host.
+#[cfg(windows)]
+fn long_paths_enabled() -> Option<bool> {
+    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+    use windows_sys::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW,
+    };
+
+    /// NUL-terminated UTF-16, as the `W` entry points require.
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let subkey = wide(tan_core::host_env::LONG_PATHS_KEY.trim_start_matches(r"HKLM\"));
+    let value = wide("LongPathsEnabled");
+    let mut data: u32 = 0;
+    let mut size: u32 = std::mem::size_of::<u32>() as u32;
+    // SAFETY: `subkey`/`value` are NUL-terminated UTF-16 buffers that outlive
+    // the call; `data`/`size` are a live `u32` and its byte length, and
+    // `RRF_RT_REG_DWORD` makes the API reject any value whose type is not a
+    // 4-byte DWORD rather than overrun the buffer. A null `pdwtype` is
+    // documented as "do not return the type".
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            std::ptr::from_mut(&mut data).cast(),
+            &mut size,
+        )
+    };
+    match status {
+        s if s == ERROR_SUCCESS => Some(data != 0),
+        s if s == ERROR_FILE_NOT_FOUND => Some(false),
+        _ => None,
+    }
+}
+
+/// No such registry value off Windows. `host_environment_checks` never reaches
+/// the `longPaths` check on a non-Windows `os`, so this is only ever the unused
+/// field of the probe struct.
+#[cfg(not(windows))]
+fn long_paths_enabled() -> Option<bool> {
+    None
 }
 
 /// Append an SDK-provenance check (conformance Issue 4 + 6): records the SDK

@@ -8,6 +8,60 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`tan doctor` checks the host environment: `zephyrSdkHost`, `longPaths`,
+  `homePath`.** alp-sdk ADR 0021's cross-cutting requirements name three host
+  facts that decide whether a toolchain can be provisioned at all, and all
+  three previously surfaced only as a confusing failure much later.
+  - **`zephyrSdkHost` — `Fail`.** The pinned Zephyr SDK publishes host builds
+    for `linux-aarch64`, `linux-x86_64`, `macos-aarch64` and `windows-x86_64`
+    and nothing else (verified against `zephyrproject-rtos/sdk-ng` `v1.0.1`,
+    which is what alp-sdk `west.yml`'s `zephyr: v4.4.1` pin requires via that
+    tree's `SDK_VERSION` file). Two hosts are therefore unserved and they are
+    **not the same case**. `windows-arm64` has never been published, and the
+    ADR's remedy applies: route to WSL2, where the distro is `linux-aarch64`,
+    which *is* served. `macos-x86_64` — an Intel Mac — was published through
+    `0.17.4` and **dropped in `1.0.0`**, so it is equally unserved at the pin,
+    with no WSL2 equivalent and no `macos-aarch64` substitute (Rosetta
+    translates x86_64 *for* Apple silicon, not the reverse); its remedy is a
+    Linux host, and it says so instead of repeating the WSL2 advice, which on
+    macOS cannot be followed. `Fail`, not `Warn`, because there is no artifact
+    to install — the same category as a missing `ninja`, which
+    `hostPrerequisites` already fails on. Apple silicon and every other served
+    host pass.
+  - **`longPaths` — `Warn`, Windows only.** Reads
+    `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled` through
+    the registry API (not `reg query`: that costs a process and depends on the
+    `PATH` of a host that is by definition suspect). An absent value counts as
+    disabled, because absent *is* the Windows default; only a read that
+    genuinely failed reports "unknown", and that is a `Warn` too rather than a
+    blind `Pass`. `Warn` and not `Fail` because Windows 11 still ships the flag
+    off, so failing would exit 4 on essentially every stock Windows host —
+    including the many that build fine from a short workspace root. It is a
+    probable cause, and its value is attribution: the failure it predicts
+    arrives as a CMake or compiler error about a file that plainly exists. The
+    fix is the elevated `New-ItemProperty` one-liner, printed rather than run —
+    ADR 0021's Tier A promises zero elevation, so an `HKLM` write belongs to
+    the undecided Tier B consent flow.
+  - **`homePath` — `Warn`, all platforms.** Reports the actual resolved path
+    when it contains a space (`USERPROFILE` on Windows, else `HOME`; the same
+    resolution `~/.alp` uses). `Warn`, not `Fail`: it is a real historical
+    Zephyr breakage but a degraded-but-usable one, and a host whose account is
+    two words is not in the same category as one that cannot run the toolchain
+    at all. An unresolvable home is also a `Warn` rather than a silent pass.
+  On the PLAIN report only, never `--build` — these are host facts needing no
+  `board.yaml`, no workspace and no SDK, exactly as `hostPrerequisites` below,
+  and ADR 0021 Lane 1 P0a runs `tan doctor` before anything project-shaped
+  exists. `zephyrSdkHost` looks adjacent to `--build`'s existing `zephyrSdk`
+  probe but answers the opposite question — "can an SDK be installed on this
+  host at all" versus "is one installed here" — and reporting the SDK story
+  twice under two names is the trap this changelog documents below. The same
+  three checks are appended to `tan support-bundle`'s doctor payload, for the
+  same reason `hostPrerequisites` is. **Consumer-visible:** `data.checks[]`
+  grows by two entries (three on Windows), `data.summary` counts them, and
+  `zephyrSdkHost` can move plain `tan doctor` to exit 4 on a `windows-arm64`
+  or Intel-Mac host — which compounds the exit-4 change below, and is the
+  honest verdict for a machine no pinned toolchain serves.
+  (alp-sdk ADR 0021, tan-cli#70)
 - **`tan doctor` reports a missing host prerequisite without `--fix`.**
   `check_prerequisites` had no caller outside `tan bootstrap`, so the only way
   a missing `ninja` surfaced was `tan doctor --build --fix`, which runs
