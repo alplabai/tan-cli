@@ -13,6 +13,8 @@
 //! over: a human reads the lines, and `commands::bootstrap`'s `failure()` joins
 //! them with a single space into the envelope's issue message.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
 
 use crate::debug::{DoctorCheck, DoctorReport, DoctorStatus, append_doctor_check};
@@ -22,9 +24,10 @@ use crate::debug::{DoctorCheck, DoctorReport, DoctorStatus, append_doctor_check}
 pub struct MissingPrerequisite {
     /// The tool name, exactly as the manifest's `prerequisites.<os>` lists it.
     pub tool: String,
-    /// The install command for this host, or `None` when tan knows no command
-    /// for this tool. NEVER prose — a consumer renders this as something it
-    /// can run, so an unknown tool must be `null`, not advice.
+    /// The install command for this host, from the manifest's
+    /// `prerequisites.install.<os>`, or `None` when it lists none for this tool.
+    /// NEVER prose — a consumer renders this as something it can run, so an
+    /// unlisted tool must be `null`, not advice.
     pub command: Option<String>,
 }
 
@@ -52,33 +55,42 @@ pub struct PrereqFailure {
     pub missing: Vec<MissingPrerequisite>,
 }
 
-/// The `winget install` one-liner for a missing Windows prerequisite
-/// (`bootstrap.ps1`'s `$Prereqs`), or `None` when tan knows no command for the
-/// tool. The TOOL LIST is a manifest fact (`prerequisites.windows`); these
-/// commands are not in the manifest, so they stay keyed by tool name here.
+/// The structured per-tool half of a refusal, over the manifest's
+/// `prerequisites.install` map already resolved FOR THIS HOST
+/// ([`InstallCommands::for_host`](super::manifest::InstallCommands::for_host)).
+///
+/// Shared by both refusals below, which differ only in their prose: the tool
+/// list, the command lookup and the `null` rule are identical, and two copies of
+/// them is one drift away from the two platforms disagreeing about what the
+/// machine half of the same verdict looks like.
 ///
 /// The `None` is load-bearing, not a shrug. This value reaches the envelope's
-/// `missingPrerequisites[].command`, which a consumer renders as something it
-/// can RUN. The generic "install `x` and put it on PATH" advice for an unlisted
-/// tool is human prose and belongs in the printed line ([`hint_line`]) only —
-/// prose in a runnable-command field is a button that fails.
-pub fn install_command(tool: &str) -> Option<String> {
-    match tool {
-        "git" => Some("winget install -e --id Git.Git".to_string()),
-        "cmake" => Some("winget install -e --id Kitware.CMake".to_string()),
-        "python" => Some("winget install -e --id Python.Python.3.12".to_string()),
-        "ninja" => Some("winget install -e --id Ninja-build.Ninja".to_string()),
-        _ => None,
-    }
+/// `missingPrerequisites[].command`, which a consumer renders as something it can
+/// RUN. The generic "install `x` and put it on PATH" advice for a tool the
+/// manifest lists no command for is human prose and belongs in the printed line
+/// ([`hint_line`]) only — prose in a runnable-command field is a button that
+/// fails.
+fn structured_missing(
+    missing: &[&str],
+    install: &BTreeMap<String, String>,
+) -> Vec<MissingPrerequisite> {
+    missing
+        .iter()
+        .map(|tool| MissingPrerequisite {
+            tool: (*tool).to_string(),
+            command: install.get(*tool).cloned(),
+        })
+        .collect()
 }
 
-/// The printed report line for one missing Windows prerequisite. An unlisted
-/// tool gets generic advice rather than being dropped from the report — which
-/// is why this is a separate function from [`install_command`] and not an
-/// `unwrap_or` over it. The rendering (two-space indent, `  ->  ` with two
+/// The printed report line for one missing Windows prerequisite, over this host's
+/// resolved `prerequisites.install` map. A tool the manifest lists no command for
+/// gets generic advice rather than being dropped from the report — which is why
+/// this is a separate function from [`structured_missing`] and not an `unwrap_or`
+/// over the same lookup. The rendering (two-space indent, `  ->  ` with two
 /// spaces each side) is `bootstrap.ps1`'s and must stay byte-identical.
-pub fn hint_line(tool: &str) -> String {
-    match install_command(tool) {
+pub fn hint_line(tool: &str, install: &BTreeMap<String, String>) -> String {
+    match install.get(tool) {
         Some(command) => format!("  {tool}  ->  {command}"),
         None => format!("  {tool}  ->  install `{tool}` and put it on PATH"),
     }
@@ -87,44 +99,40 @@ pub fn hint_line(tool: &str) -> String {
 /// The Windows refusal for a non-empty list of missing tools: the header, one
 /// [`hint_line`] each, the reopen-PowerShell tail, and the matching structured
 /// entries. `bootstrap.ps1`'s `$Prereqs` loop.
-pub fn windows_refusal(missing: &[&str]) -> PrereqFailure {
+///
+/// `install` is the caller's host-resolved map, NOT `InstallCommands` plus a
+/// host: resolving once at the call site is what makes it impossible to look a
+/// tool up in the wrong OS's table.
+pub fn windows_refusal(missing: &[&str], install: &BTreeMap<String, String>) -> PrereqFailure {
     let mut lines = vec!["Missing required tools:".to_string()];
-    lines.extend(missing.iter().map(|tool| hint_line(tool)));
+    lines.extend(missing.iter().map(|tool| hint_line(tool, install)));
     lines.push("Install the tools above (then reopen PowerShell) and re-run.".to_string());
     PrereqFailure {
         code: "prerequisites-missing",
         lines,
-        missing: missing
-            .iter()
-            .map(|tool| MissingPrerequisite {
-                tool: (*tool).to_string(),
-                command: install_command(tool),
-            })
-            .collect(),
+        missing: structured_missing(missing, install),
     }
 }
 
-/// The POSIX refusal: one line naming the tools, and command-less entries.
+/// The POSIX refusal: one line naming the tools, plus the same structured
+/// entries Windows gets.
 ///
-/// `command: None` for EVERY tool, deliberately — this side has no install
-/// commands to give, and neither has `bootstrap.sh`, which just names them.
-/// They arrive with alp-sdk#949's `prerequisites.install.posix` manifest key;
-/// until then a command here could only be invented, and an invented one is
-/// worse than `null` (the consumer renders it as a runnable button).
-pub fn posix_refusal(missing: &[&str]) -> PrereqFailure {
+/// The LINE stays `bootstrap.sh`'s — the oracle names the tools and nothing else,
+/// so nothing is appended to it. What changed under alp-sdk#959 is the structured
+/// half: `command` was `None` for every POSIX tool because no install commands
+/// existed on this side at all, and `prerequisites.install.linux`/`.macos` now
+/// supply real ones (`sudo apt-get install -y cmake` / `brew install cmake`).
+/// Which of the two the caller resolved is `install`'s business, not this
+/// function's — the apt-vs-brew split is exactly why the manifest does not key
+/// these under one `posix`.
+pub fn posix_refusal(missing: &[&str], install: &BTreeMap<String, String>) -> PrereqFailure {
     PrereqFailure {
         code: "prerequisites-missing",
         lines: vec![format!(
             "Missing required tools: {}.  Install them and re-run.",
             missing.join(" ")
         )],
-        missing: missing
-            .iter()
-            .map(|tool| MissingPrerequisite {
-                tool: (*tool).to_string(),
-                command: None,
-            })
-            .collect(),
+        missing: structured_missing(missing, install),
     }
 }
 
@@ -132,31 +140,56 @@ pub fn posix_refusal(missing: &[&str]) -> PrereqFailure {
 /// prints nothing — `bootstrap.ps1`'s `$PyVer` check).
 ///
 /// Its own code, not `prerequisites-missing`: there is no missing tool to
-/// report here and no `{tool, command}` pair that could carry the fix.
-pub fn windows_python_not_runnable() -> PrereqFailure {
+/// report here and no `{tool, command}` pair that could carry the fix. The
+/// install command therefore reaches the user through the PROSE — which is
+/// exactly why the ID in it has to come from `prerequisites.install.windows`
+/// like every other one. A hardcoded `Python.Python.3.12` here would be a second
+/// copy of a manifest fact sitting beside a correct read of it, invisible to both
+/// drift gates; the manifest pin moving would then fix
+/// `missingPrerequisites[].command` and leave this sentence stale.
+///
+/// Windows-only, so the key is `python` (`prerequisites.windows`' spelling), not
+/// POSIX's `python3`.
+pub fn windows_python_not_runnable(install: &BTreeMap<String, String>) -> PrereqFailure {
     PrereqFailure {
         code: "python-not-runnable",
-        lines: vec![
-            "python did not run (Windows Store alias?).  Install real Python: winget install -e \
-             --id Python.Python.3.12, reopen PowerShell, re-run."
+        lines: vec![match install.get("python") {
+            Some(command) => format!(
+                "python did not run (Windows Store alias?).  Install real Python: {command}, \
+                 reopen PowerShell, re-run."
+            ),
+            // Only reachable for an out-of-contract manifest: the producer's
+            // schema requires `install.windows`' keys to equal
+            // `prerequisites.windows`, which lists `python`. Degrade the sentence
+            // rather than inventing a package ID for it.
+            None => "python did not run (Windows Store alias?).  Install a real Python 3, reopen \
+                     PowerShell, re-run."
                 .to_string(),
-        ],
+        }],
         missing: Vec::new(),
     }
 }
 
 /// Windows: a working interpreter that is below the manifest's
 /// `pythonMinVersion` floor. Also tool-less — the tool IS there, it is the
-/// wrong version.
-pub fn python_too_old(found: (u32, u32), floor: (u32, u32)) -> PrereqFailure {
+/// wrong version — so the install command travels in the prose, from the same
+/// manifest key [`windows_python_not_runnable`] reads.
+pub fn python_too_old(
+    found: (u32, u32),
+    floor: (u32, u32),
+    install: &BTreeMap<String, String>,
+) -> PrereqFailure {
     let (min_major, min_minor) = floor;
+    let verdict = format!(
+        "Python {}.{} found; the SDK tooling needs >= {min_major}.{min_minor}",
+        found.0, found.1
+    );
     PrereqFailure {
         code: "python-too-old",
-        lines: vec![format!(
-            "Python {}.{} found; the SDK tooling needs >= {min_major}.{min_minor} (winget install \
-             -e --id Python.Python.3.12).",
-            found.0, found.1
-        )],
+        lines: vec![match install.get("python") {
+            Some(command) => format!("{verdict} ({command})."),
+            None => format!("{verdict}."),
+        }],
         missing: Vec::new(),
     }
 }
@@ -241,13 +274,7 @@ pub fn doctor_prerequisite_check(
             format!("{detail} — {BOOTSTRAP_MANIFEST_REJECTED_PREFIX}{message}"),
             // The refusal's own fix wins when there is one; the manifest is the
             // secondary problem then.
-            fix.or_else(|| {
-                Some(
-                    "Update `tan` or pin an SDK whose metadata/bootstrap.json this version \
-                     understands; `tan bootstrap` will refuse outright until then."
-                        .to_string(),
-                )
-            }),
+            fix.or_else(|| Some(BOOTSTRAP_MANIFEST_REJECTED_FIX.to_string())),
         ),
     };
     DoctorCheck {
@@ -262,6 +289,16 @@ pub fn doctor_prerequisite_check(
 /// wiring test can assert the message SURVIVED into the check rather than
 /// re-spelling the sentence.
 pub const BOOTSTRAP_MANIFEST_REJECTED_PREFIX: &str = "metadata/bootstrap.json rejected: ";
+
+/// The fix prose for a refused manifest. Its own constant because BOTH doctor
+/// modes report the rejection and must word it identically: plain `doctor` folds
+/// it into `hostPrerequisites` (above), and `tan doctor --build` — which has no
+/// such check to hang it off, but IS the mode alp-sdk-vscode shells for
+/// `runToolchainFix` — raises its own `bootstrapManifest` warning. Two spellings
+/// of one verdict is the drift `BOOTSTRAP_MANIFEST_REJECTED_PREFIX` already
+/// exists to prevent on the detail half.
+pub const BOOTSTRAP_MANIFEST_REJECTED_FIX: &str = "Update `tan` or pin an SDK whose metadata/bootstrap.json this version understands; \
+     `tan bootstrap` will refuse outright until then.";
 
 /// Fold a finished `hostPrerequisites` check into the report: record the
 /// machine-readable half of the same verdict, then append the check through
@@ -305,7 +342,19 @@ pub fn posix_python_not_runnable() -> PrereqFailure {
 
 #[cfg(test)]
 mod tests {
+    use super::super::HostOs;
+    use super::super::manifest::fallback_facts;
     use super::*;
+
+    /// The REAL install commands for one host — the fallback constants, which
+    /// `manifest::tests::the_fallback_matches_the_real_manifest_field_for_field`
+    /// pins byte-equal to the vendored `metadata/bootstrap.json`. So every
+    /// command asserted below is the producer's own string, not a literal these
+    /// tests invented, and a manifest edit that these tests would contradict
+    /// fails there.
+    fn install(host: HostOs) -> BTreeMap<String, String> {
+        fallback_facts((3, 10)).install.for_host(host).clone()
+    }
 
     #[test]
     fn a_known_windows_tool_renders_its_exact_winget_line_and_joined_message() {
@@ -316,7 +365,7 @@ mod tests {
         // still reads the message sees. Pinned byte-for-byte, out of the real
         // assembly -- no PATH probe involved, so `ninja` being installed on the
         // test host cannot make this vanish.
-        let refusal = windows_refusal(&["ninja"]);
+        let refusal = windows_refusal(&["ninja"], &install(HostOs::Windows));
         assert_eq!(refusal.code, "prerequisites-missing");
         assert_eq!(
             refusal.missing,
@@ -335,23 +384,36 @@ mod tests {
     }
 
     #[test]
-    fn every_known_tool_keeps_its_winget_id() {
+    fn every_host_gets_its_own_package_managers_command_for_the_same_tool() {
+        // What issue #90 is: the command used to come from a hardcoded `winget`
+        // table, so `cmake` read the same on every host and every POSIX entry
+        // reported `null`. It comes from `prerequisites.install.<os>` now, so the
+        // three hosts must render three DIFFERENT commands for one tool -- and
+        // handing a macOS user Linux's `apt-get` line (the bug a `posix`-keyed
+        // lookup would cause) fails right here.
+        let command_for = |host: HostOs| {
+            let refusal = if host == HostOs::Windows {
+                windows_refusal(&["cmake"], &install(host))
+            } else {
+                posix_refusal(&["cmake"], &install(host))
+            };
+            refusal.missing[0].command.clone()
+        };
         assert_eq!(
-            install_command("git").as_deref(),
-            Some("winget install -e --id Git.Git")
+            command_for(HostOs::Linux).as_deref(),
+            Some("sudo apt-get install -y cmake")
         );
         assert_eq!(
-            install_command("cmake").as_deref(),
+            command_for(HostOs::MacOs).as_deref(),
+            Some("brew install cmake")
+        );
+        assert_eq!(
+            command_for(HostOs::Windows).as_deref(),
             Some("winget install -e --id Kitware.CMake")
         );
-        assert_eq!(
-            install_command("python").as_deref(),
-            Some("winget install -e --id Python.Python.3.12")
-        );
-        assert_eq!(
-            install_command("ninja").as_deref(),
-            Some("winget install -e --id Ninja-build.Ninja")
-        );
+        // A POSIX host that is neither: no manifest entry, so `null` -- what
+        // every POSIX host got before #959. Never a wrong-OS command.
+        assert_eq!(command_for(HostOs::Other), None);
     }
 
     #[test]
@@ -359,18 +421,19 @@ mod tests {
         // The pairing IS the correction: a refactor that leaked the generic
         // prose into `command` must fail here, because a consumer renders that
         // field as a button it can press.
-        let refusal = windows_refusal(&["tan-no-such-tool-xyz"]);
+        let commands = install(HostOs::Windows);
+        let refusal = windows_refusal(&["tan-no-such-tool-xyz"], &commands);
         assert_eq!(
             refusal.lines[1],
             "  tan-no-such-tool-xyz  ->  install `tan-no-such-tool-xyz` and put it on PATH"
         );
         assert_eq!(refusal.missing[0].command, None);
-        assert_eq!(install_command("tan-no-such-tool-xyz"), None);
+        assert_eq!(commands.get("tan-no-such-tool-xyz"), None);
     }
 
     #[test]
     fn the_windows_refusal_lists_every_missing_tool_in_order() {
-        let refusal = windows_refusal(&["git", "ninja"]);
+        let refusal = windows_refusal(&["git", "ninja"], &install(HostOs::Windows));
         assert_eq!(refusal.lines[0], "Missing required tools:");
         assert_eq!(
             refusal.lines[1],
@@ -389,18 +452,35 @@ mod tests {
     }
 
     #[test]
-    fn the_posix_refusal_is_one_line_and_never_carries_a_command() {
-        // No install commands exist on this side yet (alp-sdk#949), and the
-        // single-line wording is `bootstrap.sh`'s -- space-joined tool names,
-        // TWO spaces before "Install".
-        let refusal = posix_refusal(&["cmake", "ninja"]);
+    fn the_posix_refusal_stays_one_line_but_now_carries_real_commands() {
+        // The PROSE is `bootstrap.sh`'s and does not grow: space-joined tool
+        // names, TWO spaces before "Install", one line. The oracle prints no
+        // per-tool commands and neither may this -- alp-sdk#959 changed what the
+        // STRUCTURED half carries, not what a POSIX user reads.
+        let refusal = posix_refusal(&["cmake", "ninja"], &install(HostOs::Linux));
         assert_eq!(refusal.code, "prerequisites-missing");
         assert_eq!(
             refusal.lines,
             vec!["Missing required tools: cmake ninja.  Install them and re-run."]
         );
-        assert!(refusal.missing.iter().all(|m| m.command.is_none()));
-        assert_eq!(refusal.missing.len(), 2);
+        // Issue #90's "also still true": every POSIX entry reported
+        // `command: null` because this side had no install commands at all. It
+        // has them now -- per tool, so `ninja` (which `prerequisites.posix` does
+        // not even list, hence no `install.linux` entry) stays `null` while
+        // `cmake` becomes runnable.
+        assert_eq!(
+            refusal.missing,
+            vec![
+                MissingPrerequisite {
+                    tool: "cmake".to_string(),
+                    command: Some("sudo apt-get install -y cmake".to_string()),
+                },
+                MissingPrerequisite {
+                    tool: "ninja".to_string(),
+                    command: None,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -410,11 +490,12 @@ mod tests {
         // this one function so the two cannot drift into two spellings.
         assert_eq!(reported_missing(Vec::new()), None);
         assert_eq!(
-            reported_missing(python_too_old((3, 9), (3, 10)).missing),
+            reported_missing(python_too_old((3, 9), (3, 10), &install(HostOs::Windows)).missing),
             None
         );
         assert_eq!(
-            reported_missing(windows_refusal(&["ninja"]).missing).map(|m| m.len()),
+            reported_missing(windows_refusal(&["ninja"], &install(HostOs::Windows)).missing)
+                .map(|m| m.len()),
             Some(1)
         );
     }
@@ -451,10 +532,10 @@ mod tests {
         // message. The wording is bootstrap's own, space-joined exactly as the
         // envelope's issue message joins it.
         for refusal in [
-            windows_refusal(&["ninja"]),
-            posix_refusal(&["cmake"]),
-            windows_python_not_runnable(),
-            python_too_old((3, 9), (3, 10)),
+            windows_refusal(&["ninja"], &install(HostOs::Windows)),
+            posix_refusal(&["cmake"], &install(HostOs::Linux)),
+            windows_python_not_runnable(&install(HostOs::Windows)),
+            python_too_old((3, 9), (3, 10), &install(HostOs::Windows)),
         ] {
             let check = doctor_prerequisite_check(Some(&refusal), &checked, true, None);
             assert_eq!(check.status, DoctorStatus::Fail);
@@ -497,7 +578,7 @@ mod tests {
         // A real refusal outranks it: a missing `ninja` stays the `Fail`, and
         // keeps ITS fix (install the tools), with the manifest as the tail.
         let refused = doctor_prerequisite_check(
-            Some(&windows_refusal(&["ninja"])),
+            Some(&windows_refusal(&["ninja"], &install(HostOs::Windows))),
             &checked,
             false,
             Some(skew),
@@ -557,7 +638,7 @@ mod tests {
     #[test]
     fn a_tool_naming_refusal_counts_a_fail_and_carries_the_pairs() {
         let checked = vec!["git".to_string(), "ninja".to_string()];
-        let refusal = windows_refusal(&["ninja"]);
+        let refusal = windows_refusal(&["ninja"], &install(HostOs::Windows));
         let mut report = empty_doctor_report();
         apply_prerequisite_check(
             &mut report,
@@ -596,7 +677,7 @@ mod tests {
         // The asymmetric case: fully actionable through the MESSAGE, with no
         // `{tool, command}` pair that could carry it -- so `Fail` with `null`.
         let checked = vec!["python".to_string()];
-        let refusal = python_too_old((3, 9), (3, 10));
+        let refusal = python_too_old((3, 9), (3, 10), &install(HostOs::Windows));
         let mut report = empty_doctor_report();
         apply_prerequisite_check(
             &mut report,
@@ -622,11 +703,14 @@ mod tests {
         // 3.9", so these must NOT report under `prerequisites-missing` -- a
         // consumer keying on that code would get an empty array against a
         // fully actionable message.
-        for refusal in [windows_python_not_runnable(), posix_python_not_runnable()] {
+        for refusal in [
+            windows_python_not_runnable(&install(HostOs::Windows)),
+            posix_python_not_runnable(),
+        ] {
             assert_eq!(refusal.code, "python-not-runnable");
             assert!(refusal.missing.is_empty());
         }
-        let old = python_too_old((3, 9), (3, 10));
+        let old = python_too_old((3, 9), (3, 10), &install(HostOs::Windows));
         assert_eq!(old.code, "python-too-old");
         assert!(old.missing.is_empty());
         assert_eq!(

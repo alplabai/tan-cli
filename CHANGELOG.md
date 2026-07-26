@@ -325,6 +325,51 @@ All notable changes to `tan` are documented here. Format follows
   **A consumer matching `bootstrap.prerequisites-missing` for those two cases
   must add the new codes**; the code is unchanged, message text included, for
   the missing-tool case it originally described. (#70)
+- **Install commands come from the SDK manifest, not tan's `winget` table
+  (#90).** `data.missingPrerequisites[].command` — the field alp-sdk-vscode's
+  `runToolchainFix` puts behind a Fix button — was rendered from a hardcoded
+  four-entry `match` on tool name, plus two more copies of
+  `Python.Python.3.12` embedded in the Windows Python-floor refusal prose. It is
+  read from `prerequisites.install` (alp-sdk#959, ADR 0021 Lane 1 P0b) now, and
+  the table is **deleted** rather than kept as a fallback: `fallback_facts` —
+  which an SDK without `metadata/bootstrap.json` falls back to, i.e. every SDK a
+  customer can install today — carries the same commands, pinned byte-equal to
+  the vendored manifest by the fallback-vs-manifest field-for-field test, so no
+  host loses a command and there is no second, ungated copy of a drift-gated
+  fact. A manifest predating #959 has no `install` key at all;
+  that stays a clean parse (it is additive at an unchanged `schemaVersion: 1`,
+  and a hard refusal there would reach `tan build`/`tan run` through
+  auto-bootstrap) and gap-fills from the same constants when the `install` key is
+  absent entirely, the rule tan already applies to a build-plan key an older
+  producer omits. The gap-fill is **per OS**: an out-of-contract `install` that
+  serves only some of `linux`/`macos`/`windows` fills the rest from the constants
+  instead of leaving them empty, so a manifest carrying `windows` alone cannot
+  silently strip every POSIX command (or, with `install: {}`, all of them).
+- **Every POSIX `missingPrerequisites` entry reported `command: null`.** That
+  branch had no install commands at all; `prerequisites.install.linux`/`.macos`
+  supply real ones, so Linux gets `sudo apt-get install -y cmake` and macOS
+  `brew install cmake` where both used to get nothing. Resolution is by HOST,
+  in one place: the manifest keys install commands `linux`/`macos`/`windows`
+  while keying the tool LISTS `posix`/`windows`, and collapsing that asymmetry
+  anywhere else would hand a macOS user Debian's package manager. A POSIX host
+  the manifest does not serve (neither Linux nor macOS) keeps the all-`null`
+  behaviour rather than being handed the nearest OS's commands. The printed
+  POSIX refusal LINE is unchanged — `bootstrap.sh` names the tools and nothing
+  else, and it is still the parity oracle. `tan doctor --build`'s
+  `BuildToolProbe` loses its `is_windows` field with the table it existed to
+  gate.
+- **`tan doctor --build` reports a REFUSED `metadata/bootstrap.json` (#90).**
+  New `bootstrapManifest` check, `warn`, in `data.checks[]` — with the rejection
+  message verbatim and the same fix prose plain `doctor` puts in
+  `hostPrerequisites`' tail. `--build` now reads the manifest (for the install
+  commands above), and a version-skewed or unparseable one made it substitute
+  tan's compiled-in constants with **nothing on the wire**: no check, no issue,
+  and `sdkProvenance` reports only the git short-commit and
+  `metadata/sdk_version.yaml`, never the manifest. `--build` is the mode
+  alp-sdk-vscode shells for `runToolchainFix`, so on a future `schemaVersion: 2`
+  SDK its Fix button would have run a stale command silently — the exact drift
+  the version-skew guard exists to prevent. `warn`, not `fail`: the exit code is
+  unchanged and the fallback commands are still real.
 
 ### Fixed
 - **A slice-confined unresolved `${TOOLCHAIN_ROOT}` failed the WHOLE plan,

@@ -123,12 +123,21 @@ tan run --flash                       # build, then run (host) or program (hardw
 environment that is not ready. `tan completion --shell zsh` emits a completion
 script.
 
-`bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; on
-Windows it prints the `winget install` line for any missing `git`/`cmake`/
-`python`/`ninja` rather than installing system packages itself. Zephyr and
-baremetal cores build on every host. Only a project whose cores are *all* Yocto
-is refused off Linux — a mixed board still bootstraps, with a warning that the
-Yocto core itself needs WSL2 or a Linux host.
+`bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; it
+names the missing prerequisites rather than installing system packages itself.
+The install commands come from the SDK's own `metadata/bootstrap.json`
+(`prerequisites.install`, keyed per OS), not from a table `tan` carries — so
+Windows prints the `winget install` line for a missing `git`/`cmake`/`python`/
+`ninja`, and the JSON envelope's `missingPrerequisites[].command` now carries
+real `apt-get`/`brew` commands on Linux and macOS where it used to be `null` on
+every POSIX host. The *printed* POSIX refusal line is deliberately unchanged —
+it stays `bootstrap.sh`'s verbatim, naming the tools and nothing else. An SDK
+too old to carry `prerequisites.install` falls back to the same commands, so no
+host loses one.
+
+Zephyr and baremetal cores build on every host. Only a project whose cores are
+*all* Yocto is refused off Linux — a mixed board still bootstraps, with a
+warning that the Yocto core itself needs WSL2 or a Linux host.
 
 ## Commands
 

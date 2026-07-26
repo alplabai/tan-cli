@@ -17,7 +17,10 @@ use tan_core::{
     parse_target_kind, prepend_doctor_checks,
 };
 
-use tan_core::bootstrap::{apply_prerequisite_check, doctor_prerequisite_check, fallback_facts};
+use tan_core::bootstrap::{
+    BOOTSTRAP_MANIFEST_REJECTED_FIX, BOOTSTRAP_MANIFEST_REJECTED_PREFIX, BootstrapFacts, HostOs,
+    apply_prerequisite_check, doctor_prerequisite_check, fallback_facts,
+};
 
 use super::CommandRun;
 use crate::cli::{BootstrapArgs, DoctorArgs, GlobalArgs};
@@ -134,10 +137,49 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         bmaptool: command_on_path("bmaptool"),
         dd: command_on_path("dd"),
         is_linux: cfg!(target_os = "linux"),
-        is_windows: cfg!(windows),
     };
 
-    let mut report = build_readiness_report(generated_at.to_string(), os_set, &probe);
+    // `missingPrerequisites[].command` — the one field the extension's
+    // `runToolchainFix` puts behind a Fix button — comes from the SDK's
+    // `prerequisites.install`, so `--build` reads the same facts the prerequisite
+    // gate does. This mode adds no `hostPrerequisites` CHECK (see
+    // `append_host_prerequisites`); it needs the facts only for the commands.
+    //
+    // The REJECTION is a different matter and is not dropped. Falling back to
+    // tan's compiled-in constants for a manifest that resolved and was refused —
+    // version skew, unparseable — while reporting nothing is exactly the silent
+    // substitution `bootstrap::manifest` calls the RFC #843 drift this
+    // architecture exists to kill, and `--build` is the mode the extension shells
+    // for `runToolchainFix`: on a future `schemaVersion: 2` SDK its Fix button
+    // would otherwise run a stale command with no warning anywhere. Nothing else
+    // in this report would say so — `append_sdk_provenance` reads git and
+    // `metadata/sdk_version.yaml`, never the manifest. Plain `doctor` folds the
+    // same message into `hostPrerequisites`' detail tail; this mode has no such
+    // check, so it gets its own, sharing the wording constants so the two modes
+    // cannot word one verdict two ways.
+    let (facts, manifest_error) = resolve_bootstrap_facts(context.sdk_root.as_deref());
+    let mut report = build_readiness_report(
+        generated_at.to_string(),
+        os_set,
+        &probe,
+        facts.install.for_host(HostOs::detect(std::env::consts::OS)),
+    );
+    if let Some(message) = manifest_error {
+        // `Warn`, matching what plain `doctor` downgrades the same rejection to:
+        // a read-only report should not be the thing that exits `DoctorFailure`
+        // over a manifest, and the commands it fell back to are still real.
+        append_doctor_check(
+            &mut report.summary,
+            &mut report.checks,
+            &mut report.next_steps,
+            DoctorCheck {
+                name: "bootstrapManifest".to_string(),
+                status: DoctorStatus::Warn,
+                detail: format!("{BOOTSTRAP_MANIFEST_REJECTED_PREFIX}{message}"),
+                fix: Some(BOOTSTRAP_MANIFEST_REJECTED_FIX.to_string()),
+            },
+        );
+    }
     append_sdk_provenance(
         &mut report.summary,
         &mut report.checks,
@@ -258,17 +300,13 @@ fn assemble_doctor_report(
 /// host nobody probed would positively claim a host is clean while hiding the
 /// missing `ninja` that is the reason for the bundle.
 pub(crate) fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Option<&str>) {
-    let (facts, manifest_error) = match sdk_root.map(load_facts) {
-        Some(Ok(facts)) => (facts, None),
-        Some(Err(message)) => (fallback_facts(MIN_PYTHON), Some(message)),
-        None => (fallback_facts(MIN_PYTHON), None),
-    };
-    let is_windows = cfg!(windows);
-    let refusal = check_prerequisites(&facts, is_windows).err();
+    let (facts, manifest_error) = resolve_bootstrap_facts(sdk_root);
+    let host = HostOs::detect(std::env::consts::OS);
+    let refusal = check_prerequisites(&facts, host).err();
 
     let check = doctor_prerequisite_check(
         refusal.as_ref(),
-        facts.prerequisites(is_windows),
+        facts.prerequisites(host == HostOs::Windows),
         facts.from_manifest,
         manifest_error.as_deref(),
     );
@@ -282,6 +320,23 @@ pub(crate) fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Opt
         check,
         refusal.map(|f| f.missing).unwrap_or_default(),
     );
+}
+
+/// The bootstrap facts behind BOTH doctor modes, with the message naming why a
+/// resolved manifest was refused (`None` when none was, or when there was no SDK
+/// to read one from).
+///
+/// One resolver, because both modes now read these facts and a second copy of the
+/// skew rule is exactly the drift `load_facts`' `Result` exists to catch: plain
+/// `doctor` needs the tool LIST and the refusal wording, `--build` needs
+/// `prerequisites.install` for its `missingPrerequisites[].command`, and an SDK
+/// whose manifest one mode refuses cannot be one the other silently accepts.
+fn resolve_bootstrap_facts(sdk_root: Option<&str>) -> (BootstrapFacts, Option<String>) {
+    match sdk_root.map(load_facts) {
+        Some(Ok(facts)) => (facts, None),
+        Some(Err(message)) => (fallback_facts(MIN_PYTHON), Some(message)),
+        None => (fallback_facts(MIN_PYTHON), None),
+    }
 }
 
 /// Append the host-environment checks — `zephyrSdkHost`, `longPaths`
@@ -1180,15 +1235,20 @@ pub(crate) mod tests {
                 command: None,
             }])
         );
-        // `is_windows` wiring: the two refusals word themselves differently
-        // (Windows lists a per-tool hint line and a reopen-PowerShell tail),
-        // so hard-coding either side -- or letting `cfg!(windows)` decay to
-        // `false` -- shows up here rather than as a silently POSIX-shaped
-        // report on a Windows host.
-        let expected = if cfg!(windows) {
-            windows_refusal(&[ABSENT_TOOL])
+        // Host wiring: the two refusals word themselves differently (Windows
+        // lists a per-tool hint line and a reopen-PowerShell tail), so
+        // hard-coding either side -- or letting the host detection decay to a
+        // constant -- shows up here rather than as a silently POSIX-shaped
+        // report on a Windows host. The install map is this host's own, from the
+        // manifest that was just written to disk: passing the wrong OS's would
+        // change the Windows hint lines and fail the same assertion.
+        let host = HostOs::detect(std::env::consts::OS);
+        let facts = resolve_bootstrap_facts(Some(&root.path().to_string_lossy())).0;
+        let install = facts.install.for_host(host);
+        let expected = if host == HostOs::Windows {
+            windows_refusal(&[ABSENT_TOOL], install)
         } else {
-            posix_refusal(&[ABSENT_TOOL])
+            posix_refusal(&[ABSENT_TOOL], install)
         };
         assert!(
             report.checks[0]
@@ -1298,6 +1358,96 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("{name} missing from {names:?}"));
             assert!(at < west, "{name} must precede west: {names:?}");
         }
+    }
+
+    #[test]
+    fn doctor_build_warns_that_it_fell_back_from_a_refused_manifest() {
+        // `--build` resolved the bootstrap facts and threw the rejection message
+        // away, so a version-skewed or unparseable `metadata/bootstrap.json`
+        // made it substitute tan's compiled-in install commands with NOTHING on
+        // the wire -- no check, no issue. `sdkProvenance` cannot cover it: it
+        // reports the git short-commit and `metadata/sdk_version.yaml`, never the
+        // manifest. And this is the mode alp-sdk-vscode shells for
+        // `runToolchainFix`, so on a future `schemaVersion: 2` SDK its Fix button
+        // would run a stale command silently.
+        //
+        // Driven through `run` against a real skewed manifest on disk, not a
+        // hand-made `Err`: the whole defect was a discarded return value one
+        // level up from `load_facts`, which a direct call could not see.
+        let tree = TempTree::new("run-build-skew");
+        let sdk = TempTree::new("run-build-skew-sdk");
+        let metadata = sdk.path().join("metadata");
+        std::fs::create_dir_all(&metadata).unwrap();
+        std::fs::write(metadata.join("bootstrap.json"), r#"{"schemaVersion": 99}"#).unwrap();
+        // `scripts/alp_project.py` is what makes `--sdk-root` RESOLVE
+        // (`project::contains_loader_script`); without it `context.sdk_root` is
+        // `None`, no manifest is read, and this test would pass for the wrong
+        // reason on a change that reintroduced the discard.
+        let scripts = sdk.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("alp_project.py"), "").unwrap();
+
+        let g = GlobalArgs {
+            sdk_root: Some(sdk.path().to_string_lossy().into_owned()),
+            ..json_global(Some(tree.path()))
+        };
+        let skewed = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        );
+        let json = skewed.json.expect("json envelope");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+        let check = value["data"]["checks"]
+            .as_array()
+            .expect("data.checks is an array")
+            .iter()
+            .find(|c| c["name"] == "bootstrapManifest")
+            .unwrap_or_else(|| panic!("--build must report the refused manifest: {json}"));
+
+        // `Warn`, the same downgrade plain `doctor` applies: the fallback
+        // commands are still real, and a read-only report is not the thing that
+        // should exit `DoctorFailure` over a manifest.
+        assert_eq!(check["status"], "warn");
+        // Named verbatim -- a warning that does not say WHICH version was
+        // refused is not actionable, and it is the message `tan bootstrap` exits
+        // 4 on.
+        let detail = check["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.starts_with(BOOTSTRAP_MANIFEST_REJECTED_PREFIX)
+                && detail.contains("schemaVersion 99"),
+            "{detail}"
+        );
+        // Shared with plain `doctor`'s tail through one constant, so the two
+        // modes cannot word one verdict two ways.
+        assert_eq!(check["fix"], BOOTSTRAP_MANIFEST_REJECTED_FIX);
+
+        // A manifest that parses raises nothing -- otherwise the warning would
+        // fire on every healthy SDK and mean nothing.
+        std::fs::write(
+            metadata.join("bootstrap.json"),
+            include_str!("../../../../contract/fixtures/bootstrap/manifest.json"),
+        )
+        .unwrap();
+        let clean = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        );
+        let clean_json = clean.json.expect("json envelope");
+        let names = envelope_check_names(&clean_json);
+        assert!(
+            !names.contains(&"bootstrapManifest".to_string()),
+            "{names:?}"
+        );
     }
 
     #[cfg(windows)]
