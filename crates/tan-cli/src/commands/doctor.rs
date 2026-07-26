@@ -1161,6 +1161,42 @@ pub(crate) mod tests {
         let json = run.json.expect("json envelope");
         let names = envelope_check_names(&json);
         assert!(names.iter().any(|n| n == "hostPrerequisites"), "{names:?}");
+        // Same seam, the host-environment appends: dropping
+        // `append_host_environment` from `assemble_doctor_report` ships a
+        // binary with none of the three checks and every other test still
+        // green, because they drive the pure functions directly. The ENVELOPE
+        // is what closes it. Names only -- the statuses are this host's.
+        assert!(names.iter().any(|n| n == "zephyrSdkHost"), "{names:?}");
+        assert!(names.iter().any(|n| n == "homePath"), "{names:?}");
+        assert_eq!(
+            names.iter().any(|n| n == "longPaths"),
+            cfg!(windows),
+            "longPaths is Windows-only: {names:?}"
+        );
+    }
+
+    #[test]
+    fn doctor_build_does_not_repeat_the_host_environment_checks() {
+        // The deliberate NEGATIVE half of the placement decision (#81's "one
+        // fact, one check" trap). `--build` already carries a `zephyrSdk` probe
+        // -- "is an SDK installed here" -- and `zephyrSdkHost` answers the
+        // opposite question. Adding these there later, by reflex, would report
+        // the SDK story twice under two names; this fails if someone does.
+        let tree = TempTree::new("run-build-no-hostenv");
+        let g = json_global(Some(tree.path()));
+        let run = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        );
+        let names = envelope_check_names(&run.json.expect("json envelope"));
+        for name in ["zephyrSdkHost", "longPaths", "homePath"] {
+            assert!(!names.contains(&name.to_string()), "{name} in {names:?}");
+        }
     }
 
     #[test]

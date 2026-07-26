@@ -547,6 +547,31 @@ mod tests {
     }
 
     #[test]
+    fn the_bundles_doctor_section_carries_the_host_environment_checks() {
+        // Same hole, one line down: deleting `append_host_environment` leaves a
+        // bundle from a windows-arm64 or Intel-Mac host that never says the
+        // pinned toolchain has no build for it -- the single most useful fact
+        // in the file, and the one a maintainer would otherwise spend a build
+        // log looking for. Names only; the statuses are whatever THIS host is.
+        let doctor = bundle_doctor_report(
+            &context(),
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime(),
+        );
+        let names: Vec<&str> = doctor.checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"zephyrSdkHost"), "{names:?}");
+        assert!(names.contains(&"homePath"), "{names:?}");
+        assert_eq!(
+            names.contains(&"longPaths"),
+            cfg!(windows),
+            "longPaths is Windows-only: {names:?}"
+        );
+        let counted = doctor.summary.pass + doctor.summary.warn + doctor.summary.fail;
+        assert_eq!(counted as usize, doctor.checks.len());
+    }
+
+    #[test]
     fn the_written_bundle_file_carries_the_prerequisite_verdict() {
         // The wiring seam: `run` -> `bundle_doctor_report`. Swapping that one
         // call for the bare `build_doctor_report` writes a bundle whose doctor
