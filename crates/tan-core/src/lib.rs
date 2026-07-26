@@ -127,5 +127,6 @@ pub use validate::{
     validate_board_yaml_local,
 };
 pub use west_config::{
-    ManifestReconcile, get_manifest_path, set_manifest_path, workspace_needs_bootstrap,
+    ManifestReconcile, describe_reconcile_failure, get_manifest_path, set_manifest_path,
+    workspace_needs_bootstrap,
 };

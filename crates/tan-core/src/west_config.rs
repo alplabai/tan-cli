@@ -13,7 +13,7 @@
 //! that divergence before shelling `bootstrap.sh`; the IO (read/canonicalize/
 //! write) lives there, this module only has the section-scoped text logic.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// What an attempted `.west/config` manifest-path reconcile actually did.
 ///
@@ -52,6 +52,27 @@ pub enum ManifestReconcile {
         old_rel: Option<String>,
         reason: String,
     },
+}
+
+/// The shared opening sentence for a [`ManifestReconcile::Failed`]: what could
+/// not be rewritten, what it still says, and why (the OS's own reason).
+///
+/// Both callers — `tan sdk switch` and `tan bootstrap` — say exactly this and
+/// then append their own consequence, so it lives here once rather than being
+/// hand-formatted twice. That also makes it checkable without a venv: the
+/// bootstrap call site itself can only be reached behind a real `west` run.
+pub fn describe_reconcile_failure(
+    config_path: &Path,
+    old_rel: Option<&str>,
+    reason: &str,
+) -> String {
+    format!(
+        "could not rewrite {}'s manifest.path{} ({reason})",
+        config_path.display(),
+        // No `old_rel` when the failure landed before the current value could
+        // be read — say nothing rather than invent a value.
+        old_rel.map_or(String::new(), |old| format!(" (still {old})")),
+    )
 }
 
 /// Whether `tan bootstrap` should be recommended after a `tan sdk switch`,
@@ -187,6 +208,29 @@ mod tests {
     use super::*;
 
     const CONFIG: &str = "[manifest]\npath = alp-sdk\nfile = west.yml\n[zephyr]\nbase = zephyr\n";
+
+    #[test]
+    fn a_reconcile_failure_names_the_file_the_stale_value_and_the_reason() {
+        // The sentence both callers put in front of their own consequence.
+        // Covered here because bootstrap's copy of it sits behind a real `west`
+        // run and no unit test can reach that call site.
+        let message = describe_reconcile_failure(
+            Path::new("/top/.west/config"),
+            Some("v0.11.0"),
+            "Access is denied. (os error 5)",
+        );
+        assert!(message.contains("/top/.west/config"), "{message}");
+        assert!(message.contains("(still v0.11.0)"), "{message}");
+        assert!(
+            message.contains("Access is denied. (os error 5)"),
+            "{message}"
+        );
+
+        // Nothing was read -> no stale value is claimed.
+        let unread = describe_reconcile_failure(Path::new("/top/.west/config"), None, "EISDIR");
+        assert!(!unread.contains("still"), "{unread}");
+        assert!(unread.contains("EISDIR"), "{unread}");
+    }
 
     #[test]
     fn advice_is_silent_only_when_the_workspace_is_provably_synced() {

@@ -341,41 +341,40 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         // checkout under the same topdir would silently pull the WRONG SDK's
         // west.yml. Pointless (and a stray write) when an existing workspace is
         // reused, since that path touches neither west nor this topdir.
-        if !reuse {
-            match west_config::reconcile_west_manifest_path(&sdk_root) {
-                ManifestReconcile::Rewrote {
-                    config_path,
-                    old_rel,
-                    new_rel,
-                } => log.warn(
-                    "west-config-reconciled",
-                    &format!(
-                        "reconciled {} manifest.path {old_rel} -> {new_rel} (it named a different \
-                         SDK checkout under this topdir, #31)",
-                        config_path.display()
-                    ),
+        //
+        // The outcome outlives this block: it is also what decides whether the
+        // sync record below may be written at all.
+        let reconciled = (!reuse).then(|| west_config::reconcile_west_manifest_path(&sdk_root));
+        match &reconciled {
+            Some(ManifestReconcile::Rewrote {
+                config_path,
+                old_rel,
+                new_rel,
+            }) => log.warn(
+                "west-config-reconciled",
+                &format!(
+                    "reconciled {} manifest.path {old_rel} -> {new_rel} (it named a different SDK \
+                     checkout under this topdir, #31)",
+                    config_path.display()
                 ),
-                // Silent here would be the worst of the three callers: `west
-                // update` is about to run against whatever manifest that
-                // unrewritten pointer names -- i.e. the WRONG SDK's west.yml,
-                // the exact #31 failure this call exists to prevent.
-                ManifestReconcile::Failed {
-                    config_path,
-                    old_rel,
-                    reason,
-                } => log.warn(
-                    "west-config-reconcile-failed",
-                    &format!(
-                        "could not rewrite {}'s manifest.path{} ({reason}); `west update` will \
-                         resolve the manifest from whatever that pointer still names",
-                        config_path.display(),
-                        old_rel.map_or(String::new(), |old| format!(" (still {old})")),
-                    ),
+            ),
+            // Silent here would be the worst of the three callers: `west
+            // update` is about to run against whatever manifest that
+            // unrewritten pointer names -- i.e. the WRONG SDK's west.yml,
+            // the exact #31 failure this call exists to prevent.
+            Some(ManifestReconcile::Failed {
+                config_path,
+                old_rel,
+                reason,
+            }) => log.warn(
+                "west-config-reconcile-failed",
+                &format!(
+                    "{}; `west update` will resolve the manifest from whatever that pointer still \
+                     names",
+                    tan_core::describe_reconcile_failure(config_path, old_rel.as_deref(), reason)
                 ),
-                ManifestReconcile::NotApplicable
-                | ManifestReconcile::AlreadyMatches
-                | ManifestReconcile::Blocked { .. } => {}
-            }
+            ),
+            _ => {}
         }
         if let Err(message) = west_phase(&workspace, venv, &mut log, &runner, reuse) {
             let mut issues = issues;
@@ -389,7 +388,17 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         // happened. Only on the `!reuse` path: a reused workspace was left
         // untouched (and, when adopted via `$ZEPHYR_BASE`, is not even under
         // this topdir).
-        if !reuse {
+        //
+        // NOT after a Failed reconcile, which is the subtle one: the update
+        // above resolved its manifest from the STALE pointer, and a stale
+        // pointer naming a sibling alp-sdk checkout still satisfies west's own
+        // guard, so `west_phase` returns Ok over trees belonging to the other
+        // SDK. Recording a sync here would assert the very thing that did not
+        // happen -- and the next `tan sdk switch`, seeing a by-then-rewritable
+        // pointer plus `synced = true`, would suppress the bootstrap advice
+        // over those trees. That is the gap this branch exists to close,
+        // re-entered through the failure path.
+        if !matches!(reconciled, Some(ManifestReconcile::Failed { .. })) && !reuse {
             record_workspace_sdk(&paths.workspace_dir, &sdk_root);
         }
     }

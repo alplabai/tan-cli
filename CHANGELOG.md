@@ -15,13 +15,16 @@ All notable changes to `tan` are documented here. Format follows
   switch was clean while `west` kept resolving its manifest from the stale
   pointer. The three-way outcome (`tan_core::ManifestReconcile`) makes the
   failure distinguishable, and it now surfaces in text and in the envelope with
-  the OS's own reason and what to do about it. Severity `error` with exit code
-  `0`: the switch itself DID happen (the active-SDK pointer is written) and
-  failing would block the escape hatch out of a broken workspace — but nothing
-  weaker than an error describes a workspace still pointing at the old SDK.
-  `tan bootstrap` gained the same distinction as a `west-config-reconcile-failed`
-  warning, where it matters most: `west update` is about to run against whatever
-  manifest that unrewritten pointer names.
+  the OS's own reason and what to do about it. Severity `warning` at exit code
+  `0`, matching `clean.remove-failed` and `build.sdk-switch-pristine-failed` —
+  a best-effort repair that failed while the command carried on. The exit code
+  is deliberate: the switch itself DID happen (the active-SDK pointer is
+  written) and failing it would block the escape hatch out of a broken
+  workspace. `tan bootstrap` gained the same distinction as a
+  `west-config-reconcile-failed` warning, where it matters most: `west update`
+  is about to run against whatever manifest that unrewritten pointer names —
+  and a bootstrap whose reconcile failed no longer records the workspace as
+  synced, since that update resolved the OLD SDK's manifest.
 - **`tan doctor` reports a missing host prerequisite without `--fix`.**
   `check_prerequisites` had no caller outside `tan bootstrap`, so the only way
   a missing `ninja` surfaced was `tan doctor --build --fix`, which runs
@@ -273,7 +276,11 @@ All notable changes to `tan` are documented here. Format follows
   when it fires, and guards the rewrite on the old target being either a real
   alp-sdk checkout or missing entirely (#62's reported state) — never a real,
   unrelated directory that merely shares the same parent as the SDK just
-  switched to. (#62)
+  switched to. As first shipped this reached only the path form (`tan sdk
+  switch /path/to/sdk`): the bare-version form resolved `~/.alp/sdk-cache`
+  alone and never got that far for the `~/.alp/sdk` layout that reported it —
+  see the version-resolution entry under Changed, which lands in this same
+  release. (#62)
 - **`tan flash` could not find `west`'s out-of-tree runners.** No spawned
   backend ever set a child `current_dir`, so it inherited whatever directory
   invoked `tan flash`. `west`'s runner registration

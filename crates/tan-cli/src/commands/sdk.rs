@@ -619,25 +619,28 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
             // The repair did NOT happen. Every failure arm used to look exactly
             // like "already correct" from here, so the user was told the switch
             // was clean while `west` kept resolving its manifest from the stale
-            // pointer -- the #62 breakage, now merely unreported. Severity
-            // `error` with a Success exit is deliberate and not a contradiction:
-            // the switch itself DID happen (the active-SDK pointer is written),
-            // and failing the command would block the very escape hatch a user
-            // runs to get out of a broken workspace -- but the workspace is
-            // still broken, and nothing weaker than an error says so.
+            // pointer -- the #62 breakage, now merely unreported.
+            //
+            // `warning` at exit 0, matching this repo's two closest analogues
+            // (`clean.remove-failed`, `build.sdk-switch-pristine-failed`): a
+            // best-effort repair that failed while the command itself carried
+            // on. NOT `error`, tempting as it is -- `Envelope::new` derives
+            // `ok` from the exit code, and the extension's `classifyOutcome`
+            // derives severity from `ok` alone, so an `error` beside `ok:true`
+            // is not merely unprecedented here, it is a shape no consumer
+            // reads. The exit code stays 0 deliberately: `sdk switch` is the
+            // command a user runs to escape a broken workspace, and failing it
+            // would block the escape hatch.
             let message = format!(
-                "could not rewrite {}'s manifest.path{} ({reason}) -- `west` will keep resolving \
-                 the manifest from the stale pointer. Close anything holding the file open (or \
-                 clear its read-only flag) and run `tan bootstrap`.",
-                config_path.display(),
-                old_rel
-                    .as_ref()
-                    .map_or(String::new(), |old| format!(" (still {old})")),
+                "{} -- `west` will keep resolving the manifest from the stale pointer. Close \
+                 anything holding the file open (or clear its read-only flag) and run `tan \
+                 bootstrap`.",
+                tan_core::describe_reconcile_failure(config_path, old_rel.as_deref(), reason)
             );
-            text.push(format!("  error   {message}"));
+            text.push(format!("  warn    {message}"));
             issues.push(Issue {
                 code: "sdk.west-config-reconcile-failed".to_string(),
-                severity: "error".to_string(),
+                severity: "warning".to_string(),
                 message,
             });
         }
@@ -1264,6 +1267,57 @@ mod tests {
     }
 
     #[test]
+    fn switch_tries_the_destination_root_first_but_only_for_a_real_checkout() {
+        // Pins the CLI's root LIST, which the pure `resolve_sdk_version_root`
+        // tests cannot see: that `--destination` is in it at all (it was
+        // install-only, and `--help` now promises otherwise), that it comes
+        // FIRST, and that the probe is `has_loader_script` rather than
+        // `exists` -- with `exists` a husk directory in an earlier root wins
+        // and the command dies on `not-an-sdk-checkout` over a real checkout
+        // sitting in a later one.
+        let ws = tmp("switch-destination-root-ws");
+        let root_a = tmp("switch-destination-root-a"); // --destination
+        let root_b = tmp("switch-destination-root-b"); // parent of the active SDK
+        let version = format!("v0.13.0-tan-test-{}", std::process::id());
+        // A husk in the FIRST root, a real checkout in the last.
+        std::fs::create_dir_all(root_a.join(&version)).unwrap();
+        make_sdk_root(&root_b.join(&version));
+        let active = root_b.join("v0.11.0");
+        make_sdk_root(&active);
+        let g = global(&ws, Some(&active), Format::Json);
+        let switch_to = |version: &str| {
+            run_switch(
+                &g,
+                &SdkArgs {
+                    subcommand: Some("switch".to_string()),
+                    arg: Some(version.to_string()),
+                    destination: Some(root_a.to_string_lossy().into_owned()),
+                    global: false,
+                },
+            )
+        };
+
+        let husk = switch_to(&version);
+        assert_eq!(husk.exit, ExitCode::Success);
+        assert_eq!(
+            Path::new(json_data(&husk)["data"]["sdkPath"].as_str().unwrap()),
+            root_b.join(&version),
+            "an empty directory in an earlier root must not shadow a real checkout in a later one"
+        );
+
+        // Same command once the destination root holds a REAL checkout: it now
+        // outranks both the cache root and the active SDK's own root.
+        make_sdk_root(&root_a.join(&version));
+        let real = switch_to(&version);
+        assert_eq!(real.exit, ExitCode::Success);
+        assert_eq!(
+            Path::new(json_data(&real)["data"]["sdkPath"].as_str().unwrap()),
+            root_a.join(&version),
+            "--destination must be consulted, and consulted before every other root"
+        );
+    }
+
+    #[test]
     fn switch_surfaces_a_west_config_it_could_not_rewrite() {
         // Gap 2: every failure arm of the reconcile used to return the same
         // `None` as "already correct", so a `.west/config` that could not be
@@ -1293,11 +1347,24 @@ mod tests {
             std::fs::read_to_string(west_dir.join("config")).unwrap(),
             original
         );
+        let data = json_data(&run);
         let codes = issue_codes(&run);
         assert!(
             codes.contains(&"sdk.west-config-reconcile-failed".to_string()),
             "a rewrite that did not happen must not look like a no-op: {codes:?}"
         );
+        // `ok` is derived from the exit code, and the extension derives an
+        // issue's presentation from `ok` alone -- an `error` beside `ok:true`
+        // is a shape no consumer reads. Best-effort-repair-failed is a
+        // `warning` here, as it is for `clean.remove-failed`.
+        let failure = data["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|issue| issue["code"] == "sdk.west-config-reconcile-failed")
+            .expect("the reconcile-failure issue");
+        assert_eq!(data["ok"], true);
+        assert_eq!(failure["severity"], "warning");
         assert!(
             codes.contains(&"sdk.bootstrap-recommended".to_string()),
             "a pointer still naming another SDK is stale whatever any sync record says"
