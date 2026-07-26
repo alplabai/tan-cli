@@ -10,11 +10,11 @@
 //! fields; when none are declared we check all three backends. The authoritative
 //! per-core resolution stays the SDK build-plan emit's job — this is advisory.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-use crate::bootstrap::{MissingPrerequisite, install_command, reported_missing};
+use crate::bootstrap::{MissingPrerequisite, reported_missing};
 // `unique_next_steps` is the doctor module's, not a second copy: this file used
 // to carry a byte-identical clone, and two implementations of "what goes in
 // `nextSteps`" is one drift away from the two reports disagreeing.
@@ -91,12 +91,6 @@ pub struct BuildToolProbe {
     pub dd: bool,
     /// Host is Linux (gates Yocto builds, which are Linux-only).
     pub is_linux: bool,
-    /// Host is Windows. Gates `missingPrerequisites[].command`: the install
-    /// one-liners tan knows are `winget` (`bootstrap.ps1`'s `$Prereqs`), so a
-    /// Linux or macOS host must report `null` rather than a command it cannot
-    /// run — the same rule `posix_refusal` applies. NOT `!is_linux`: macOS is
-    /// neither.
-    pub is_windows: bool,
 }
 
 /// The build-readiness preflight result: declared OS set, per-tool checks, a
@@ -151,10 +145,18 @@ pub struct BuildReadinessReport {
 }
 
 /// Assemble the build-readiness report for an OS set + probed host tools.
+///
+/// `install` is the manifest's `prerequisites.install` map already resolved for
+/// this host
+/// ([`InstallCommands::for_host`](crate::bootstrap::InstallCommands::for_host)) —
+/// the single source of every `missingPrerequisites[].command` this report
+/// carries. Resolved by the caller, which is the side that knows the host, so
+/// this function cannot look a tool up in the wrong OS's table.
 pub fn build_readiness_report(
     generated_at: String,
     os_set: Vec<BuildOs>,
     probe: &BuildToolProbe,
+    install: &BTreeMap<String, String>,
 ) -> BuildReadinessReport {
     let mut checks: Vec<DoctorCheck> = Vec::new();
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
@@ -165,7 +167,7 @@ pub fn build_readiness_report(
             &mut checks,
             &mut seen,
             &mut missing,
-            probe.is_windows,
+            install,
             "west",
             probe.west,
             "Zephyr",
@@ -175,7 +177,7 @@ pub fn build_readiness_report(
             &mut checks,
             &mut seen,
             &mut missing,
-            probe.is_windows,
+            install,
             "cmake",
             probe.cmake,
             "Zephyr/baremetal",
@@ -185,7 +187,7 @@ pub fn build_readiness_report(
             &mut checks,
             &mut seen,
             &mut missing,
-            probe.is_windows,
+            install,
             "ninja",
             probe.ninja,
             "Zephyr",
@@ -221,7 +223,7 @@ pub fn build_readiness_report(
                 &mut checks,
                 &mut seen,
                 &mut missing,
-                probe.is_windows,
+                install,
                 "bitbake",
                 probe.bitbake,
                 "Yocto",
@@ -278,7 +280,7 @@ pub fn build_readiness_report(
             &mut checks,
             &mut seen,
             &mut missing,
-            probe.is_windows,
+            install,
             "cmake",
             probe.cmake,
             "baremetal",
@@ -323,19 +325,37 @@ pub fn build_readiness_report(
 /// already inside the `os_set` branches, so a Zephyr-only project never reaches
 /// the `bitbake` call) and its `seen` dedup, instead of re-deriving either.
 ///
-/// `command` is `None` off Windows and for any tool
-/// [`install_command`](crate::bootstrap::install_command) knows no one-liner
-/// for — `west` (installed into the venv by `tan bootstrap`, not by a package
-/// manager) and `bitbake` (a whole host-package set). A named tool with a
+/// `command` is `None` for any tool this host's `prerequisites.install` map lists
+/// no one-liner for — `west` (installed into the venv by `tan bootstrap`, not by
+/// a package manager) and `bitbake` (a whole host-package set) on every OS, and
+/// everything at all on a host the manifest does not serve. A named tool with a
 /// `null` command is still worth reporting: the consumer renders the name and
 /// falls back to the check's `fix` prose. An INVENTED command would be worse
 /// than `null`, because that field is rendered as a button.
+///
+/// There is no `is_windows` gate here any more. It existed because the commands
+/// were a hardcoded `winget` table that no other host could run; they are the
+/// manifest's per-OS fact now, so the map handed in IS the gate — a Linux host
+/// resolves `install.linux` and gets `apt-get` lines, and no branch can hand it
+/// `winget`.
+///
+/// KNOWN CEILING, on POSIX. The tools looked up here are the ones `--build`
+/// probes — `west`, `cmake`, `ninja`, `bitbake` — but the map's key set is
+/// schema-constrained to equal `prerequisites.<os>`, and `prerequisites.posix` is
+/// `[git, cmake, python3]`. So on Linux and macOS only `cmake` can ever resolve:
+/// `ninja` stays `null` here even though the probe above fails it and both `apt`
+/// and `brew` package it. Not a regression (every POSIX entry was `null` before
+/// alp-sdk#959) and `null` is the safe degrade — an invented `apt-get install -y
+/// ninja-build` behind a Fix button is worse. Nothing in tan can lift it: an
+/// actionable POSIX `ninja` needs alp-sdk to widen `prerequisites.posix` and the
+/// matching `prerequisites.install.linux`/`.macos` maps, and tan picks it up with
+/// no change here the day it does.
 #[allow(clippy::too_many_arguments)]
 fn push_tool(
     checks: &mut Vec<DoctorCheck>,
     seen: &mut BTreeSet<&'static str>,
     missing: &mut Vec<MissingPrerequisite>,
-    is_windows: bool,
+    install: &BTreeMap<String, String>,
     name: &'static str,
     present: bool,
     need: &str,
@@ -347,7 +367,7 @@ fn push_tool(
     if !present {
         missing.push(MissingPrerequisite {
             tool: name.to_string(),
-            command: is_windows.then(|| install_command(name)).flatten(),
+            command: install.get(name).cloned(),
         });
     }
     checks.push(DoctorCheck {
@@ -373,7 +393,17 @@ fn count(checks: &[DoctorCheck], status: DoctorStatus) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bootstrap::{HostOs, fallback_facts};
     use crate::validate::parse_board_model;
+
+    /// One host's REAL install map — the fallback constants, which
+    /// `bootstrap::manifest`'s
+    /// `the_fallback_matches_the_real_manifest_field_for_field` pins byte-equal to
+    /// the vendored `metadata/bootstrap.json`. Every command asserted below is
+    /// therefore the producer's own string.
+    fn install(host: HostOs) -> BTreeMap<String, String> {
+        fallback_facts((3, 10)).install.for_host(host).clone()
+    }
 
     fn probe_all_present() -> BuildToolProbe {
         BuildToolProbe {
@@ -385,7 +415,6 @@ mod tests {
             bmaptool: true,
             dd: true,
             is_linux: true,
-            is_windows: false,
         }
     }
 
@@ -410,8 +439,12 @@ mod tests {
 
     #[test]
     fn zephyr_checks_present_pass_clean() {
-        let report =
-            build_readiness_report("t".to_string(), vec![BuildOs::Zephyr], &probe_all_present());
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_all_present(),
+            &install(HostOs::Linux),
+        );
         assert_eq!(report.summary.fail, 0);
         assert!(report.summary.warn == 0);
         assert!(
@@ -433,7 +466,6 @@ mod tests {
             bmaptool: false,
             dd: false,
             is_linux: true,
-            is_windows: false,
         }
     }
 
@@ -443,6 +475,7 @@ mod tests {
             "t".to_string(),
             vec![BuildOs::Zephyr],
             &probe_none_present(),
+            &install(HostOs::Linux),
         );
         assert!(report.summary.warn >= 4); // west, cmake, ninja, zephyrSdk
         assert_eq!(report.summary.fail, 0);
@@ -458,6 +491,7 @@ mod tests {
             "t".to_string(),
             vec![BuildOs::Zephyr, BuildOs::Yocto, BuildOs::Baremetal],
             &probe_all_present(),
+            &install(HostOs::Linux),
         );
         assert_eq!(report.missing_prerequisites, None);
     }
@@ -468,16 +502,20 @@ mod tests {
         // `tan doctor --build`, and its Fix button needs something RUNNABLE.
         let probe = BuildToolProbe {
             is_linux: false,
-            is_windows: true,
             ..probe_none_present()
         };
-        let report = build_readiness_report("t".to_string(), vec![BuildOs::Zephyr], &probe);
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe,
+            &install(HostOs::Windows),
+        );
         assert_eq!(
             report.missing_prerequisites,
             Some(vec![
                 // `west` is pip-installed into the venv by `tan bootstrap`, so
-                // there is no package-manager one-liner to give -- named with a
-                // `null` command rather than dropped or invented.
+                // the manifest lists no one-liner for it -- named with a `null`
+                // command rather than dropped or invented.
                 MissingPrerequisite {
                     tool: "west".to_string(),
                     command: None,
@@ -495,18 +533,41 @@ mod tests {
     }
 
     #[test]
-    fn a_non_windows_host_is_never_handed_a_winget_command() {
-        // `install_command` is `bootstrap.ps1`'s `$Prereqs`. Handing a Linux or
-        // macOS user `winget install …` behind a button is worse than `null`.
-        let report = build_readiness_report(
-            "t".to_string(),
-            vec![BuildOs::Zephyr],
-            &probe_none_present(),
-        );
-        let missing = report.missing_prerequisites.expect("tools are missing");
-        assert!(missing.iter().all(|m| m.command.is_none()), "{missing:?}");
-        let tools: Vec<&str> = missing.iter().map(|m| m.tool.as_str()).collect();
-        assert_eq!(tools, ["west", "cmake", "ninja"]);
+    fn a_posix_host_gets_its_own_package_manager_and_never_winget() {
+        // Issue #90's "also still true": every POSIX entry reported
+        // `command: null` because the commands were a hardcoded `winget` table no
+        // POSIX host could run, and handing a Linux or macOS user `winget install
+        // …` behind a button would be worse than that `null`.
+        // `prerequisites.install.linux`/`.macos` supply real ones now -- per tool,
+        // so `ninja` (absent from `prerequisites.posix`, hence from both POSIX
+        // install maps) stays `null` while `cmake` becomes runnable, and the two
+        // hosts get DIFFERENT commands for it.
+        for (host, cmake_command) in [
+            (HostOs::Linux, Some("sudo apt-get install -y cmake")),
+            (HostOs::MacOs, Some("brew install cmake")),
+            // A POSIX host the manifest does not serve keeps the old all-`null`
+            // behaviour rather than being handed the nearest OS's commands.
+            (HostOs::Other, None),
+        ] {
+            let report = build_readiness_report(
+                "t".to_string(),
+                vec![BuildOs::Zephyr],
+                &probe_none_present(),
+                &install(host),
+            );
+            let missing = report.missing_prerequisites.expect("tools are missing");
+            let tools: Vec<&str> = missing.iter().map(|m| m.tool.as_str()).collect();
+            assert_eq!(tools, ["west", "cmake", "ninja"], "{host:?}");
+            let command_for = |tool: &str| {
+                missing
+                    .iter()
+                    .find(|m| m.tool == tool)
+                    .and_then(|m| m.command.as_deref())
+            };
+            assert_eq!(command_for("cmake"), cmake_command, "{host:?}");
+            assert_eq!(command_for("west"), None, "{host:?}");
+            assert_eq!(command_for("ninja"), None, "{host:?}");
+        }
     }
 
     #[test]
@@ -520,6 +581,7 @@ mod tests {
             "t".to_string(),
             vec![BuildOs::Zephyr],
             &probe_none_present(),
+            &install(HostOs::Linux),
         );
         let tools: Vec<String> = zephyr_only
             .missing_prerequisites
@@ -530,12 +592,14 @@ mod tests {
         assert_eq!(tools, ["west", "cmake", "ninja"]);
 
         // Yocto declared AND a Linux host -> `bitbake` is checked, so it is
-        // reportable; it has no install one-liner, so `command` is `null`.
-        let probe = BuildToolProbe {
-            is_windows: true,
-            ..probe_none_present()
-        };
-        let yocto = build_readiness_report("t".to_string(), vec![BuildOs::Yocto], &probe);
+        // reportable; no OS's install map lists it (it is a whole host-package
+        // set), so `command` is `null` even against the richest map there is.
+        let yocto = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Yocto],
+            &probe_none_present(),
+            &install(HostOs::Windows),
+        );
         assert_eq!(
             yocto.missing_prerequisites,
             Some(vec![MissingPrerequisite {
@@ -550,7 +614,12 @@ mod tests {
             is_linux: false,
             ..probe_none_present()
         };
-        let off_host = build_readiness_report("t".to_string(), vec![BuildOs::Yocto], &non_linux);
+        let off_host = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Yocto],
+            &non_linux,
+            &install(HostOs::Windows),
+        );
         assert_eq!(off_host.missing_prerequisites, None);
     }
 
@@ -562,6 +631,7 @@ mod tests {
             "t".to_string(),
             vec![BuildOs::Zephyr, BuildOs::Baremetal],
             &probe_none_present(),
+            &install(HostOs::Linux),
         );
         let tools: Vec<String> = report
             .missing_prerequisites
@@ -577,8 +647,12 @@ mod tests {
         // No `skip_serializing_if`, matching `doctor`'s and `bootstrap`'s: the
         // key is in every captured envelope, so a consumer can see it exists
         // without reaching for a schema.
-        let report =
-            build_readiness_report("t".to_string(), vec![BuildOs::Zephyr], &probe_all_present());
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_all_present(),
+            &install(HostOs::Linux),
+        );
         let json = serde_json::to_string(&report).unwrap();
         assert!(json.contains("\"missingPrerequisites\":null"), "{json}");
     }
@@ -589,6 +663,7 @@ mod tests {
             "t".to_string(),
             vec![BuildOs::Zephyr, BuildOs::Baremetal],
             &probe_all_present(),
+            &install(HostOs::Linux),
         );
         assert_eq!(
             report.checks.iter().filter(|c| c.name == "cmake").count(),
@@ -602,15 +677,24 @@ mod tests {
             is_linux: false,
             ..probe_all_present()
         };
-        let report = build_readiness_report("t".to_string(), vec![BuildOs::Yocto], &probe);
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Yocto],
+            &probe,
+            &install(HostOs::Linux),
+        );
         assert!(report.checks.iter().any(|c| c.name == "yoctoHost"));
     }
 
     #[test]
     fn yocto_flash_checks_bmaptool() {
         // bmaptool present → a passing flash-prereq check.
-        let pass =
-            build_readiness_report("t".to_string(), vec![BuildOs::Yocto], &probe_all_present());
+        let pass = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Yocto],
+            &probe_all_present(),
+            &install(HostOs::Linux),
+        );
         assert!(
             pass.checks
                 .iter()
@@ -624,14 +708,23 @@ mod tests {
             dd: false,
             ..probe_all_present()
         };
-        let warn = build_readiness_report("t".to_string(), vec![BuildOs::Yocto], &probe);
+        let warn = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Yocto],
+            &probe,
+            &install(HostOs::Linux),
+        );
         assert!(
             warn.checks
                 .iter()
                 .any(|c| c.name == "bmaptool" && c.status == DoctorStatus::Warn)
         );
-        let zephyr_only =
-            build_readiness_report("t".to_string(), vec![BuildOs::Zephyr], &probe_all_present());
+        let zephyr_only = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_all_present(),
+            &install(HostOs::Linux),
+        );
         assert!(!zephyr_only.checks.iter().any(|c| c.name == "bmaptool"));
     }
 }

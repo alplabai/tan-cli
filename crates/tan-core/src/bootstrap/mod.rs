@@ -25,12 +25,12 @@ mod runtime;
 
 pub use blocks::{next_steps_block, optional_libs_block, print_env_block, render_env_lines};
 pub use manifest::{
-    BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, BootstrapManifestError, Tokens, fallback_facts,
-    parse_bootstrap_manifest, venv_exe_names,
+    BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, BootstrapManifestError, InstallCommands, Tokens,
+    fallback_facts, parse_bootstrap_manifest, venv_exe_names,
 };
 pub use prerequisites::{
-    BOOTSTRAP_MANIFEST_REJECTED_PREFIX, MissingPrerequisite, PrereqFailure,
-    apply_prerequisite_check, doctor_prerequisite_check, hint_line, install_command,
+    BOOTSTRAP_MANIFEST_REJECTED_FIX, BOOTSTRAP_MANIFEST_REJECTED_PREFIX, MissingPrerequisite,
+    PrereqFailure, apply_prerequisite_check, doctor_prerequisite_check, hint_line,
     posix_python_not_runnable, posix_refusal, python_too_old, reported_missing,
     windows_python_not_runnable, windows_refusal,
 };

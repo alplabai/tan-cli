@@ -20,6 +20,8 @@
 //! hard error naming the version. Silently falling back there is exactly the
 //! RFC #843 drift this whole architecture exists to kill.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 
 use super::{VenvLayout, WEST_REQUIREMENT, ZEPHYR_VERSION, venv_layout};
@@ -135,6 +137,72 @@ pub struct ManualInstallHints {
     pub windows: ManualInstallHint,
 }
 
+/// `prerequisites.install` — one shell install command per prerequisite tool,
+/// per OS (alp-sdk#959, ADR 0021 Lane 1 P0b). THE source of what
+/// `data.missingPrerequisites[].command` carries. tan used to keep its own
+/// `winget` table beside this fact with nothing holding the two in step; the
+/// manifest's `install` subtree is drift-gated on the producer side by
+/// `check_bootstrap_manifest.py`'s `_check_install_commands`, a hardcoded table
+/// here was gated by nothing at all.
+///
+/// Keyed `linux`/`macos`/`windows`, NOT the `posix`/`windows` split
+/// `prerequisites` itself uses — an `apt-get`-shaped command and a `brew`-shaped
+/// one cannot share one `posix` key without electing one distro's package
+/// manager the de-facto POSIX standard, and the manifest's own schema says so at
+/// length. That asymmetry is reconciled in exactly ONE place,
+/// [`InstallCommands::for_host`], keyed off the HOST rather than off whichever
+/// tool list was checked.
+///
+/// A MAP per OS, not a list: a tool with no command is the normal case (`west` is
+/// pip-installed into the venv, `bitbake` is a whole host-package set) and must
+/// reach the envelope as `command: null`. Prose in that field is a button that
+/// fails.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub struct InstallCommands {
+    /// `prerequisites.install.linux`, keyed by tool name (the schema requires
+    /// its keys to equal `prerequisites.posix`).
+    #[serde(default)]
+    pub linux: BTreeMap<String, String>,
+    /// `prerequisites.install.macos` — keyed by `prerequisites.posix` too, since
+    /// that is the one tool list both non-Windows hosts check.
+    #[serde(default)]
+    pub macos: BTreeMap<String, String>,
+    /// `prerequisites.install.windows`, keyed by `prerequisites.windows`.
+    #[serde(default)]
+    pub windows: BTreeMap<String, String>,
+}
+
+/// What a host with no `install` entry resolves to. A `static` (`BTreeMap::new`
+/// is `const`) so [`InstallCommands::for_host`] stays infallible and every
+/// caller can look up unconditionally.
+///
+/// The host this serves is `HostOs::Other` — a POSIX host that is neither Linux
+/// nor macOS (FreeBSD, illumos). The manifest has no entry for it and is not
+/// going to grow one, so every tool there reports `command: null`, which is
+/// exactly what every POSIX host reported before #959. The alternatives are both
+/// worse than the `null`: a panic, or handing a BSD user a `brew install` line
+/// resolved from the nearest OS key.
+static NO_INSTALL_COMMANDS: BTreeMap<String, String> = BTreeMap::new();
+
+impl InstallCommands {
+    /// The tool -> command map for this host.
+    ///
+    /// THE one place the manifest's `linux`/`macos`/`windows` install keying is
+    /// reconciled with `prerequisites`' `posix`/`windows` tool-list keying.
+    /// Callers resolve once, by host, and hand the resolved map down — so no
+    /// caller can look a tool up in the wrong OS's table (a `posix` refusal on
+    /// macOS getting Linux's `apt-get` lines), and no second copy of this match
+    /// exists to drift.
+    pub fn for_host(&self, host: super::HostOs) -> &BTreeMap<String, String> {
+        match host {
+            super::HostOs::Linux => &self.linux,
+            super::HostOs::MacOs => &self.macos,
+            super::HostOs::Windows => &self.windows,
+            super::HostOs::Other => &NO_INSTALL_COMMANDS,
+        }
+    }
+}
+
 /// The workspace-assembly facts, however they were obtained: parsed from
 /// `metadata/bootstrap.json`, or reconstructed from the hand-ported constants
 /// when the SDK predates alp-sdk#917.
@@ -160,6 +228,9 @@ pub struct BootstrapFacts {
     pub prerequisites_windows: Vec<String>,
     /// `prerequisites.pythonMinVersion`, as `(major, minor)`.
     pub python_min_version: (u32, u32),
+    /// `prerequisites.install` — the per-OS install one-liner for each tool in
+    /// the two lists above.
+    pub install: InstallCommands,
     /// `west.pipSpec` — the requirement handed to `pip install --upgrade`.
     pub west_pip_spec: String,
     /// `west.initArgs` (the repo-root argument is appended by the executor).
@@ -263,6 +334,14 @@ struct PrerequisitesDoc {
     posix: Vec<String>,
     windows: Vec<String>,
     python_min_version: String,
+    /// OPTIONAL on the wire, deliberately. `install` arrived under alp-sdk#959
+    /// with `schemaVersion` still `1` (the schema pins it `const: 1` and now
+    /// lists `install` as required, so an `install`-less v1 manifest can only be
+    /// a tree that predates #959). Absence must therefore be a clean `None`: a
+    /// required field here would make every such tree a hard
+    /// `ExitCode::ValidationFailure` that `tan build` and `tan run` inherit
+    /// through auto-bootstrap.
+    install: Option<InstallCommands>,
 }
 
 #[derive(Deserialize)]
@@ -329,6 +408,7 @@ pub fn parse_bootstrap_manifest(text: &str) -> Result<BootstrapFacts, BootstrapM
         prerequisites_posix: doc.prerequisites.posix,
         prerequisites_windows: doc.prerequisites.windows,
         python_min_version,
+        install: resolve_install_commands(doc.prerequisites.install),
         west_pip_spec: doc.west.pip_spec,
         west_init_args: doc.west.init_args,
         west_update_args: doc.west.update_args,
@@ -348,6 +428,89 @@ pub fn parse_bootstrap_manifest(text: &str) -> Result<BootstrapFacts, BootstrapM
         manual_install_hints: doc.manual_install_hints,
         from_manifest: true,
     })
+}
+
+/// The install one-liners as `metadata/bootstrap.json` carries them, hand-ported
+/// like every other constant in [`fallback_facts`] and pinned equal to the
+/// vendored fixture by `the_fallback_matches_the_real_manifest_field_for_field`.
+/// That test is the whole reason tan can read these from the manifest and still
+/// serve an SDK that has none — which is why there is no longer a SECOND,
+/// ungated `winget` table anywhere in this workspace.
+///
+/// Its own function because it has TWO callers: the whole-manifest fallback
+/// below, and [`resolve_install_commands`]'s gap-fill for when the `install` key
+/// is absent entirely (a manifest predating alp-sdk#959) or serves an OS with an
+/// empty map. One transcription, one gate over it.
+fn fallback_install_commands() -> InstallCommands {
+    let map = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(tool, command)| ((*tool).to_string(), (*command).to_string()))
+            .collect()
+    };
+    InstallCommands {
+        linux: map(&[
+            ("git", "sudo apt-get install -y git"),
+            ("cmake", "sudo apt-get install -y cmake"),
+            ("python3", "sudo apt-get install -y python3"),
+        ]),
+        macos: map(&[
+            ("git", "brew install git"),
+            ("cmake", "brew install cmake"),
+            ("python3", "brew install python3"),
+        ]),
+        windows: map(&[
+            ("git", "winget install -e --id Git.Git"),
+            ("cmake", "winget install -e --id Kitware.CMake"),
+            ("python", "winget install -e --id Python.Python.3.12"),
+            ("ninja", "winget install -e --id Ninja-build.Ninja"),
+        ]),
+    }
+}
+
+/// `prerequisites.install` as parsed, with each EMPTY per-OS map replaced by
+/// [`fallback_install_commands`]'s.
+///
+/// Plan wins / CLI fills gaps — the same rule tan applies to a build-plan key an
+/// older producer omits. A manifest that predates alp-sdk#959 carries no
+/// `install` at all, and reporting `command: null` for a Windows `ninja` whose
+/// winget id tan has always known would be a straight regression against what it
+/// printed before this contract existed. A manifest that DOES serve an OS wins
+/// outright for it, per tool — including a tool it deliberately omits.
+///
+/// PER OS, not whole-subtree, because the two absences are indistinguishable
+/// after serde: each map carries `#[serde(default)]`, so `install: {}` — or one
+/// carrying `windows` alone — parses clean and an `Option::unwrap_or_else` over
+/// the SUBTREE would hand the absent OSes empty maps. On Windows that is the real
+/// pre-#959 loss: all four `winget` lines vanish, and
+/// `windows_python_not_runnable`/`python_too_old` degrade to their command-less
+/// prose. Emptiness is the signal because there is no other one — a served OS map
+/// is never legitimately empty (the producer's schema requires its keys to equal
+/// `prerequisites.<os>`, which is never an empty list).
+///
+/// Degrade, do not refuse. Every shape handled here is OUT of contract today —
+/// the schema requires all three OS keys — and a `ValidationFailure` on a
+/// manifest field would reach `tan build` and `tan run` through auto-bootstrap.
+/// A stale command from tan's own drift-gated constants is strictly better than
+/// bricking the build command over a key the producer cannot currently emit
+/// wrong.
+fn resolve_install_commands(declared: Option<InstallCommands>) -> InstallCommands {
+    let fallback = fallback_install_commands();
+    let Some(declared) = declared else {
+        return fallback;
+    };
+    let fill = |declared: BTreeMap<String, String>, fallback: BTreeMap<String, String>| {
+        if declared.is_empty() {
+            fallback
+        } else {
+            declared
+        }
+    };
+    InstallCommands {
+        linux: fill(declared.linux, fallback.linux),
+        macos: fill(declared.macos, fallback.macos),
+        windows: fill(declared.windows, fallback.windows),
+    }
 }
 
 /// `"3.10"` -> `(3, 10)`.
@@ -377,6 +540,7 @@ pub fn fallback_facts(min_python: (u32, u32)) -> BootstrapFacts {
         prerequisites_posix: owned(&["git", "cmake", "python3"]),
         prerequisites_windows: owned(&["git", "cmake", "python", "ninja"]),
         python_min_version: min_python,
+        install: fallback_install_commands(),
         west_pip_spec: WEST_REQUIREMENT.to_string(),
         west_init_args: owned(&["init", "-l"]),
         west_update_args: owned(&["update", "--narrow", "-o=--depth=1"]),
@@ -509,6 +673,33 @@ mod tests {
             ["git", "cmake", "python", "ninja"]
         );
         assert_eq!(facts.python_min_version, (3, 10));
+        // alp-sdk#959: the install one-liners are a manifest fact now, keyed per
+        // OS and per tool. Every tool in the two lists above has one, on all
+        // three served OSes -- the producer's schema requires exactly that, and a
+        // gap would silently become a `command: null` in the envelope.
+        for (host, tools) in [
+            (super::super::HostOs::Linux, &facts.prerequisites_posix),
+            (super::super::HostOs::MacOs, &facts.prerequisites_posix),
+            (super::super::HostOs::Windows, &facts.prerequisites_windows),
+        ] {
+            let commands = facts.install.for_host(host);
+            assert_eq!(commands.len(), tools.len(), "{host:?}");
+            for tool in tools {
+                assert!(commands.contains_key(tool), "{host:?} {tool}");
+            }
+        }
+        assert_eq!(
+            facts.install.linux.get("cmake").map(String::as_str),
+            Some("sudo apt-get install -y cmake")
+        );
+        assert_eq!(
+            facts.install.macos.get("cmake").map(String::as_str),
+            Some("brew install cmake")
+        );
+        assert_eq!(
+            facts.install.windows.get("ninja").map(String::as_str),
+            Some("winget install -e --id Ninja-build.Ninja")
+        );
         // The pin the coordinator's original brief got wrong: west IS pinned now.
         assert_eq!(facts.west_pip_spec, "west>=0.14.0");
         assert_eq!(facts.west_init_args, ["init", "-l"]);
@@ -602,6 +793,118 @@ mod tests {
             "fallback constants have drifted from metadata/bootstrap.json"
         );
         assert!(!fallback.from_manifest);
+    }
+
+    #[test]
+    fn a_manifest_predating_the_install_key_parses_and_keeps_its_commands() {
+        // Two facts in one, and both are load-bearing.
+        //
+        // `install` arrived under alp-sdk#959 at an UNCHANGED `schemaVersion: 1`,
+        // so a tree checked out between #917 and #959 has a perfectly valid v1
+        // manifest with no `install` key. Modelling the field as required would
+        // make that tree a hard ValidationFailure -- which `tan build`/`tan run`
+        // inherit through auto-bootstrap, i.e. a manifest field would brick the
+        // build command.
+        //
+        // And absence gap-fills from the fallback constants rather than emptying
+        // the map: dropping tan's long-standing `ninja -> winget …` on those
+        // trees is the exact regression issue #90 refused to ship, and it is what
+        // lets the hardcoded table be DELETED rather than kept as a second
+        // source. A manifest that carries `install` still wins outright.
+        let mut doc: serde_json::Value = serde_json::from_str(REAL_MANIFEST).unwrap();
+        doc["prerequisites"]
+            .as_object_mut()
+            .unwrap()
+            .remove("install")
+            .expect("the fixture must carry `install` for this test to mean anything");
+        let facts = parse_bootstrap_manifest(&doc.to_string())
+            .expect("an install-less v1 manifest is legal, not a refusal");
+        assert!(facts.from_manifest);
+        assert_eq!(facts.install, fallback_facts((3, 10)).install);
+        assert_eq!(
+            facts.install.windows.get("ninja").map(String::as_str),
+            Some("winget install -e --id Ninja-build.Ninja")
+        );
+    }
+
+    #[test]
+    fn an_install_object_that_serves_no_os_gap_fills_the_ones_it_skipped() {
+        // The gap-fill is PER OS, not whole-subtree, and these two shapes are
+        // why: every per-OS map carries `#[serde(default)]`, so `install: {}` and
+        // a single-OS `install` both parse CLEAN, and an `Option`-level
+        // `unwrap_or_else` over the subtree would leave the absent OSes EMPTY --
+        // no gap-fill, no warning. On Windows that is the entire pre-#959 loss:
+        // all four `winget` lines gone, and `windows_python_not_runnable` /
+        // `python_too_old` degraded to their command-less prose.
+        //
+        // Both shapes are out of contract today (the producer's schema requires
+        // all three OS keys), so this DEGRADES rather than refusing -- a
+        // ValidationFailure here reaches `tan build`/`tan run` through
+        // auto-bootstrap.
+        let fallback = fallback_facts((3, 10)).install;
+
+        // `install: {}` — every OS gap-fills, so nothing is lost against a
+        // manifest with no `install` key at all.
+        let mut doc: serde_json::Value = serde_json::from_str(REAL_MANIFEST).unwrap();
+        doc["prerequisites"]["install"] = serde_json::json!({});
+        let facts = parse_bootstrap_manifest(&doc.to_string())
+            .expect("out of contract is not the same as unparseable");
+        assert_eq!(facts.install, fallback);
+
+        // One OS served: it wins OUTRIGHT (not topped up per tool -- a command
+        // the producer deliberately omits must stay `null`), and only the two it
+        // skipped gap-fill.
+        let mut doc: serde_json::Value = serde_json::from_str(REAL_MANIFEST).unwrap();
+        doc["prerequisites"]["install"] =
+            serde_json::json!({"windows": {"ninja": "choco install ninja"}});
+        let facts = parse_bootstrap_manifest(&doc.to_string())
+            .expect("out of contract is not the same as unparseable");
+        assert_eq!(
+            facts.install.windows.get("ninja").map(String::as_str),
+            Some("choco install ninja")
+        );
+        assert_eq!(facts.install.windows.get("git"), None);
+        assert_eq!(facts.install.linux, fallback.linux);
+        assert_eq!(facts.install.macos, fallback.macos);
+    }
+
+    #[test]
+    fn install_commands_resolve_by_host_and_never_guess_for_an_unserved_one() {
+        // The OS-key asymmetry: `prerequisites` is keyed posix/windows, `install`
+        // linux/macos/windows. Resolving on the TOOL LIST's key would hand every
+        // macOS user Linux's `apt-get` lines.
+        let install = fallback_facts((3, 10)).install;
+        assert_eq!(
+            install
+                .for_host(super::super::HostOs::Linux)
+                .get("git")
+                .map(String::as_str),
+            Some("sudo apt-get install -y git")
+        );
+        assert_eq!(
+            install
+                .for_host(super::super::HostOs::MacOs)
+                .get("git")
+                .map(String::as_str),
+            Some("brew install git")
+        );
+        assert_eq!(
+            install
+                .for_host(super::super::HostOs::Windows)
+                .get("git")
+                .map(String::as_str),
+            Some("winget install -e --id Git.Git")
+        );
+        // A POSIX host that is neither Linux nor macOS has no manifest entry and
+        // never will: empty, so every lookup is `None` -> `command: null`, the
+        // same thing every POSIX host reported before #959. Not a panic, and not
+        // the nearest OS's commands.
+        assert!(install.for_host(super::super::HostOs::Other).is_empty());
+        // A tool the manifest lists no command for is `None`, not prose.
+        assert_eq!(
+            install.for_host(super::super::HostOs::Windows).get("west"),
+            None
+        );
     }
 
     #[test]

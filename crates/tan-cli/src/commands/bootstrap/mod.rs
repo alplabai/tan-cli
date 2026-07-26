@@ -265,7 +265,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         YoctoGate::Clear => {}
     }
 
-    let host_python = match check_prerequisites(&facts, is_windows) {
+    let host_python = match check_prerequisites(&facts, host) {
         Ok(python) => python,
         Err(f) => {
             // The ONLY path that fills `missingPrerequisites` — `data_for`'s
@@ -769,6 +769,18 @@ pub(super) fn capture_tail(stdout: &[u8], stderr: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The Windows install commands as `metadata/bootstrap.json` carries them,
+    /// via the fallback constants that `tan_core::bootstrap::manifest`'s
+    /// `the_fallback_matches_the_real_manifest_field_for_field` pins byte-equal to
+    /// the vendored fixture. So the `winget` lines asserted below are the
+    /// producer's own strings — this file no longer holds a copy of them.
+    fn windows_install_commands() -> std::collections::BTreeMap<String, String> {
+        fallback_facts(MIN_PYTHON)
+            .install
+            .for_host(HostOs::Windows)
+            .clone()
+    }
+
     #[test]
     fn capture_tail_prefers_stderr_and_keeps_last_lines_in_order() {
         // Regression: JSON-mode bootstrap used to discard the captured
@@ -831,16 +843,20 @@ mod tests {
         // assignment with an EMPTY vec, and `[]` on the wire would spell
         // "checked, nothing missing" -- which is what a successful run reports
         // as `null`. Both must be `null`.
+        let install = windows_install_commands();
         assert_eq!(
-            reported_missing(tan_core::bootstrap::windows_python_not_runnable().missing),
+            reported_missing(tan_core::bootstrap::windows_python_not_runnable(&install).missing),
             None
         );
         assert_eq!(
-            reported_missing(tan_core::bootstrap::python_too_old((3, 9), (3, 10)).missing),
+            reported_missing(
+                tan_core::bootstrap::python_too_old((3, 9), (3, 10), &install).missing
+            ),
             None
         );
         assert!(
-            reported_missing(tan_core::bootstrap::windows_refusal(&["ninja"]).missing).is_some()
+            reported_missing(tan_core::bootstrap::windows_refusal(&["ninja"], &install).missing)
+                .is_some()
         );
 
         // Reported: one object per tool, `command` null for a tool tan knows no
@@ -848,7 +864,7 @@ mod tests {
         // RUNS, so advice must never appear there).
         let mut data = empty_data(&args);
         data.missing_prerequisites = reported_missing(
-            tan_core::bootstrap::windows_refusal(&["ninja", "no-such-tool"]).missing,
+            tan_core::bootstrap::windows_refusal(&["ninja", "no-such-tool"], &install).missing,
         );
         let json = serde_json::to_value(data).unwrap();
         assert_eq!(
@@ -869,7 +885,7 @@ mod tests {
         // probes the host PATH, which that suite deliberately excludes -- so a
         // refactor to `join("\n")` would silently change every bootstrap issue
         // message on the wire.
-        let refusal = tan_core::bootstrap::windows_refusal(&["ninja"]);
+        let refusal = tan_core::bootstrap::windows_refusal(&["ninja"], &windows_install_commands());
         let run = failure(
             &json_args(),
             ExitCode::RuntimeFailure,

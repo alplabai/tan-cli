@@ -7,11 +7,19 @@
 //! A subprocess, not a unit test, because the field only says anything when a
 //! tool is actually ABSENT: on a normal developer host `cmake` and `ninja` are
 //! installed, so `missingPrerequisites` comes back as at most `[{west, null}]`
-//! — whose `command` is `null` on every platform — and the
-//! `is_windows: cfg!(windows)` that gates the whole `winget` half could be
-//! hard-coded to `false` with the suite still green. Spawning `tan` with a
-//! `PATH` that resolves nothing is what makes the absent-tool branch reachable
-//! at all, and it exercises the real argv + envelope path the extension shells.
+//! — whose `command` is `null` on every platform — and the host resolution that
+//! picks WHICH `prerequisites.install.<os>` map the report reads could be
+//! hard-coded with the suite still green. Spawning `tan` with a `PATH` that
+//! resolves nothing is what makes the absent-tool branch reachable at all, and
+//! it exercises the real argv + envelope path the extension shells.
+//!
+//! No SDK is resolvable from the scratch dir, so the commands asserted below come
+//! from tan's fallback facts — which `tan_core::bootstrap::manifest`'s
+//! `the_fallback_matches_the_real_manifest_field_for_field` pins byte-equal to the
+//! vendored `metadata/bootstrap.json`. That is the case issue #90 called out as
+//! the reason not to delete tan's hardcoded table: every SDK a customer can
+//! install today has no `metadata/bootstrap.json` at all, and this test is what
+//! proves those installs did not lose their install commands with the table.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -65,23 +73,34 @@ fn an_absent_tool_carries_this_platforms_install_command() {
             .clone()
     };
 
-    // The install one-liners tan knows are `winget` (`bootstrap.ps1`'s
-    // `$Prereqs`), so a POSIX host must report `null` rather than a command it
-    // cannot run — and a Windows host must NOT report `null`, which is what
-    // losing the `is_windows` wiring would silently do.
+    // Each host gets ITS OWN package manager's command, from
+    // `prerequisites.install.<os>` — never another host's, which is what losing
+    // the host resolution would silently do (a `winget` line behind a Fix button
+    // on Linux is worse than no button at all).
+    //
+    // `ninja` is Windows-only: `prerequisites.posix` does not list it, so neither
+    // POSIX install map carries one and the field stays `null` there even though
+    // `--build` probes the tool on every platform.
     if cfg!(windows) {
         assert_eq!(command_for("cmake"), "winget install -e --id Kitware.CMake");
         assert_eq!(
             command_for("ninja"),
             "winget install -e --id Ninja-build.Ninja"
         );
+    } else if cfg!(target_os = "linux") {
+        assert_eq!(command_for("cmake"), "sudo apt-get install -y cmake");
+        assert_eq!(command_for("ninja"), serde_json::Value::Null);
+    } else if cfg!(target_os = "macos") {
+        assert_eq!(command_for("cmake"), "brew install cmake");
+        assert_eq!(command_for("ninja"), serde_json::Value::Null);
     } else {
+        // A POSIX host the manifest does not serve: every command `null`, which
+        // is what every POSIX host reported before alp-sdk#959.
         assert_eq!(command_for("cmake"), serde_json::Value::Null);
         assert_eq!(command_for("ninja"), serde_json::Value::Null);
     }
     // `west` is installed into the workspace venv by `tan bootstrap`, not by a
-    // package manager, so tan knows no one-liner for it on either platform —
-    // and an invented one would be worse than `null` in a field rendered as a
-    // button.
+    // package manager, so no OS's install map lists one — and an invented one
+    // would be worse than `null` in a field rendered as a button.
     assert_eq!(command_for("west"), serde_json::Value::Null);
 }

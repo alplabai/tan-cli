@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use tan_core::bootstrap::{
-    BootstrapFacts, PrereqFailure, Tokens, posix_python_not_runnable, posix_refusal,
+    BootstrapFacts, HostOs, PrereqFailure, Tokens, posix_python_not_runnable, posix_refusal,
     python_too_old, venv_exe_names, windows_python_not_runnable, windows_refusal,
 };
 
@@ -184,8 +184,15 @@ fn prereq_present(tool: &str, is_windows: bool) -> bool {
 /// applies `crate::util::python_too_old` on both platforms.
 pub(crate) fn check_prerequisites(
     facts: &BootstrapFacts,
-    is_windows: bool,
+    host: HostOs,
 ) -> Result<HostPython, PrereqFailure> {
+    // The HOST, not just `is_windows`: the manifest keys its install commands
+    // `linux`/`macos`/`windows` while keying the tool LISTS `posix`/`windows`, so
+    // the refusals below need the finer fact to hand a macOS user `brew install`
+    // instead of Linux's `apt-get` line. Resolved ONCE here and passed down, so
+    // no branch can look a tool up in the wrong OS's table.
+    let is_windows = host == HostOs::Windows;
+    let install = facts.install.for_host(host);
     let missing: Vec<&str> = facts
         .prerequisites(is_windows)
         .iter()
@@ -195,7 +202,7 @@ pub(crate) fn check_prerequisites(
 
     if is_windows {
         if !missing.is_empty() {
-            return Err(windows_refusal(&missing));
+            return Err(windows_refusal(&missing, install));
         }
         // Python >= pythonMinVersion (dataclass slots, `X | None` unions).
         // Probe against the MANIFEST's floor, not tan's compiled-in one: the
@@ -204,16 +211,20 @@ pub(crate) fn check_prerequisites(
         // the launcher's older default) and then fail the host for it, while a
         // newer `python` sat one candidate down the list.
         let Some(python) = probe_host_python(facts.python_min_version) else {
-            return Err(windows_python_not_runnable());
+            return Err(windows_python_not_runnable(install));
         };
         if python.version < facts.python_min_version {
-            return Err(python_too_old(python.version, facts.python_min_version));
+            return Err(python_too_old(
+                python.version,
+                facts.python_min_version,
+                install,
+            ));
         }
         return Ok(python);
     }
 
     if !missing.is_empty() {
-        return Err(posix_refusal(&missing));
+        return Err(posix_refusal(&missing, install));
     }
     // No version check here — see the doc comment. The manifest floor is still
     // what the probe PREFERS (it only picks between candidates that ran; it
@@ -634,16 +645,33 @@ mod tests {
         facts.prerequisites_posix = vec!["tan-no-such-tool-xyz".to_string()];
         facts.prerequisites_windows = vec!["tan-no-such-tool-xyz".to_string()];
 
-        let win = check_prerequisites(&facts, true).unwrap_err();
-        assert_eq!(win, windows_refusal(&["tan-no-such-tool-xyz"]));
-        let posix = check_prerequisites(&facts, false).unwrap_err();
-        assert_eq!(posix, posix_refusal(&["tan-no-such-tool-xyz"]));
+        let win = check_prerequisites(&facts, HostOs::Windows).unwrap_err();
+        assert_eq!(
+            win,
+            windows_refusal(
+                &["tan-no-such-tool-xyz"],
+                facts.install.for_host(HostOs::Windows)
+            )
+        );
+        // Both POSIX hosts, because `check_prerequisites` is now what resolves
+        // WHICH install map a refusal carries: hard-coding either one (or
+        // collapsing the two back into an `is_windows` bool) would hand a macOS
+        // user Linux's `apt-get` lines, and only comparing against the other
+        // host's own map catches it.
+        for host in [HostOs::Linux, HostOs::MacOs, HostOs::Other] {
+            let posix = check_prerequisites(&facts, host).unwrap_err();
+            assert_eq!(
+                posix,
+                posix_refusal(&["tan-no-such-tool-xyz"], facts.install.for_host(host)),
+                "{host:?}"
+            );
+        }
 
         // A tool that IS present must not be reported -- `cargo` runs this
         // test, so it is on PATH by construction.
         facts.prerequisites_posix = vec!["cargo".to_string()];
         facts.prerequisites_windows = vec!["cargo".to_string()];
-        let refused = check_prerequisites(&facts, cfg!(windows))
+        let refused = check_prerequisites(&facts, HostOs::detect(std::env::consts::OS))
             .err()
             .map(|f| f.code);
         assert_ne!(
