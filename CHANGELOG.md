@@ -169,6 +169,23 @@ All notable changes to `tan` are documented here. Format follows
   the missing-tool case it originally described. (#70)
 
 ### Fixed
+- **`tan debug-config --target-kind native-host` pointed the debugger at a
+  Cortex-M ELF.** The manifest slice was chosen by `os`, and native-host mapped
+  to `zephyr` — so on a board that builds a real Zephyr MCU slice as well as a
+  native_sim one, the first `os: zephyr` slice won and its `output_artefact`
+  overwrote `program`. `ALP: Native Sim Debug` then handed CodeLLDB an ARM
+  binary to run on the host. Nothing flagged it: the value is a concrete
+  resolved path, so no `<resolved-…>` placeholder survived for a consumer to
+  catch, and the extension never sends `--core` for this target, so that pin
+  could not disambiguate it either. The native-host slice is now selected by
+  the discriminator that already owns the question — `run::native_sim_slice`,
+  which matches the bare `native_sim` board and Zephyr's qualified
+  `native_sim/…` form — instead of by `os`. A single-native_sim project still
+  resolves its real artefact (returning nothing for native-host would have
+  regressed it to the draft's hard-coded
+  `${workspaceFolder}/build/native_sim/zephyr/zephyr.exe`, wrong whenever the
+  build dir is per-slice), and a project with no native_sim slice resolves
+  nothing rather than the wrong ELF.
 - **`tan sdk list` failed behind an HTTP proxy or a TLS-intercepting
   middlebox.** Two independent causes on the only command that makes an
   **in-process HTTP** request. It called a bare `ureq::get`, and ureq 2.x's
