@@ -27,6 +27,7 @@ pub mod preflight;
 pub mod presets;
 pub mod preview;
 pub mod project;
+pub mod proxy;
 pub mod renode;
 pub mod run;
 pub mod runners;
@@ -96,6 +97,7 @@ pub use project::{
     ProjectContext, ProjectResolutionInput, ProjectSettings, discover_workspace_sdk,
     resolve_project_context,
 };
+pub use proxy::select_https_proxy;
 pub use renode::{
     FAMILY_TOKEN_TO_PLATFORM, RenodeError, build_renode_argv, elf_vector_table_base,
     platform_files_for_sku, platform_stem_for_sku, renode_rejected_argv, select_sku, sku_family,
@@ -104,8 +106,8 @@ pub use renode::{
 pub use run::{NATIVE_SIM_BOARD, NATIVE_SIM_EXE, RunAction, decide_run_action, native_sim_slice};
 pub use sdk::{
     GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
-    check_sdk_readiness, parse_remote_sdk_releases, resolve_active_sdk, resolve_global_default_sdk,
-    resolve_sdk_source_tier,
+    check_sdk_readiness, describe_network_error, parse_remote_sdk_releases, resolve_active_sdk,
+    resolve_global_default_sdk, resolve_sdk_source_tier,
 };
 pub use sdk_catalogue::{
     AcceleratorAvail, BoardPreset, ChipChoice, ChipDef, ChipKconfig, I2cDevice, MemorySpec,
