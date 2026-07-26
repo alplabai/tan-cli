@@ -27,7 +27,16 @@ All notable changes to `tan` are documented here. Format follows
     macOS cannot be followed. `Fail`, not `Warn`, because there is no artifact
     to install — the same category as a missing `ninja`, which
     `hostPrerequisites` already fails on. Apple silicon and every other served
-    host pass.
+    host pass. The arch compared is the **machine's**, resolved at runtime
+    (`IsWow64Process2` on Windows, `sysctl.proc_translated` on macOS), not
+    `std::env::consts::ARCH`, which is the arch tan was *compiled* for. tan
+    ships `x86_64-pc-windows-msvc` and `x86_64-apple-darwin` as their own
+    release assets and both run on aarch64 hardware — the first because
+    Windows-on-ARM emulates x64 transparently (making it the likeliest way tan
+    runs there at all, which would have left the `windows-arm64` arm almost
+    unreachable), the second under Rosetta (which would have failed a fully
+    served Mac and sent its owner after a Linux box). Linux stays on the
+    constant: no Linux asset tan ships can differ from its host.
   - **`longPaths` — `Warn`, Windows only.** Reads
     `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled` through
     the registry API (not `reg query`: that costs a process and depends on the

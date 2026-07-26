@@ -24,9 +24,12 @@ use crate::debug::{DoctorCheck, DoctorStatus};
 
 /// The host platforms the pinned Zephyr SDK publishes a build for.
 ///
-/// VERIFIED, not assumed. alp-sdk `west.yml` pins `zephyr` at `v4.4.1`, whose
-/// `SDK_VERSION` file reads `1.0.1`, and the `zephyrproject-rtos/sdk-ng`
-/// `v1.0.1` release publishes exactly four host artifact families —
+/// VERIFIED, not assumed. The SDK version is whatever the pinned Zephyr tree's
+/// `SDK_VERSION` file says, which is `1.0.1` for both pins alp-sdk currently
+/// carries (`west.yml` reads `zephyr: v4.4.0` on `main` and `v4.4.1` on `dev`)
+/// — so the host set below is the same either way. The
+/// `zephyrproject-rtos/sdk-ng` `v1.0.1` release publishes exactly four host
+/// artifact families —
 /// `hosttools_{linux-aarch64,linux-x86_64,macos-aarch64}.tar.xz` +
 /// `hosttools_windows-x86_64.7z`, with `toolchain_gnu_*`, `toolchain_llvm_*`
 /// and the `zephyr-sdk-1.0.1_*` bundles carrying the same four tokens and no
@@ -40,9 +43,12 @@ use crate::debug::{DoctorCheck, DoctorStatus};
 ///   `1.0.1` — which is why [`zephyr_sdk_host_check`] gives an Intel Mac a
 ///   different remedy than a Windows-on-ARM host rather than the same one.
 ///
-/// Spelled in the SDK's own tokens (`x86_64`, not `x64`), which happen to match
-/// `std::env::consts::{OS, ARCH}` one-for-one on every host tan runs on — so
-/// [`zephyr_sdk_host_tag`] is a `-` join and not a translation table.
+/// Spelled in the SDK's own tokens (`x86_64`, not `x64`), which are the same
+/// spellings `std::env::consts::{OS, ARCH}` uses — so [`zephyr_sdk_host_tag`]
+/// is a `-` join and not a translation table. That is a spelling coincidence
+/// and nothing more: `ARCH` is the arch tan was COMPILED for, which is not the
+/// machine's whenever tan is running emulated, and the caller must resolve the
+/// real one ([`arch_for_image_file_machine`], [`arch_for_proc_translated`]).
 pub const ZEPHYR_SDK_HOSTS: [&str; 4] = [
     "linux-aarch64",
     "linux-x86_64",
@@ -75,6 +81,90 @@ pub struct HostEnvProbe<'a> {
 /// `<os>-<arch>`, in the sdk-ng release-asset spelling.
 pub fn zephyr_sdk_host_tag(os: &str, arch: &str) -> String {
     format!("{os}-{arch}")
+}
+
+// ── Resolving the MACHINE's arch, not the binary's ───────────────────────────
+//
+// `std::env::consts::ARCH` is a compile-time constant: it is the target the
+// binary was built for. Both of tan's release assets make that the wrong
+// answer on a real host.
+//
+// * `x86_64-pc-windows-msvc` on Windows-on-ARM. Windows emulates x64
+//   transparently, so this is the LIKELIEST way tan runs there — and it would
+//   report `windows-x86_64`, a served host, making the `windows-aarch64` arm
+//   that motivates this whole check near-unreachable.
+// * `x86_64-apple-darwin` under Rosetta on Apple silicon. That reports
+//   `macos-x86_64` and fails a perfectly served machine, telling its owner to
+//   go find a Linux box.
+//
+// Both are recoverable from the OS at runtime, and both mappings are pure, so
+// they live here with the rest of the decisions rather than inside the
+// `#[cfg]`-gated FFI where no test on any host could reach them.
+
+/// Windows `IMAGE_FILE_MACHINE_AMD64` — the value `IsWow64Process2` reports in
+/// `native_machine` on an x64 host.
+pub const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
+
+/// Windows `IMAGE_FILE_MACHINE_ARM64` — reported on a Windows-on-ARM host,
+/// including when the calling process is an emulated x64 binary. This value IS
+/// the check: it is the only way to tell that host apart from a native x64 one.
+pub const IMAGE_FILE_MACHINE_ARM64: u16 = 0xAA64;
+
+/// The arch token for a Windows `IsWow64Process2` `native_machine` value, or
+/// `None` for a machine type tan has no token for (in which case the caller
+/// keeps its compile-time fallback rather than inventing one).
+pub fn arch_for_image_file_machine(native_machine: u16) -> Option<&'static str> {
+    match native_machine {
+        IMAGE_FILE_MACHINE_AMD64 => Some("x86_64"),
+        IMAGE_FILE_MACHINE_ARM64 => Some("aarch64"),
+        _ => None,
+    }
+}
+
+/// The arch token for a macOS host, given `sysctl.proc_translated`.
+///
+/// `translated` is true only for an x86_64 binary running under Rosetta, which
+/// exists on Apple silicon and nowhere else — so it is a direct statement that
+/// the machine is `aarch64` however the binary was built. When it is false the
+/// binary is running natively and the compile-time arch IS the machine's, which
+/// is why an Intel Mac still reaches the `macos-x86_64` verdict it should.
+pub fn arch_for_proc_translated(translated: bool, compiled_arch: &'static str) -> &'static str {
+    if translated { "aarch64" } else { compiled_arch }
+}
+
+/// `ERROR_SUCCESS` from `winerror.h`. Declared here, not imported, so
+/// [`classify_long_paths`] is reachable from a test on any host — the whole
+/// point of splitting it out of the `#[cfg(windows)]` `unsafe` probe. `tan-cli`
+/// static-asserts these against the real `windows-sys` values, so the two
+/// cannot drift.
+pub const WIN_ERROR_SUCCESS: u32 = 0;
+
+/// `ERROR_FILE_NOT_FOUND` from `winerror.h`. See [`WIN_ERROR_SUCCESS`].
+pub const WIN_ERROR_FILE_NOT_FOUND: u32 = 2;
+
+/// The three-way verdict for a `RegGetValueW` read of `LongPathsEnabled`.
+///
+/// * success → the DWORD, as a bool.
+/// * `ERROR_FILE_NOT_FOUND` → `Some(false)`. This covers an absent VALUE, which
+///   is the Windows default-off state and by far the most common one, and also
+///   an absent SUBKEY, which the API does not distinguish — verified against a
+///   real host. Both are correctly "no long-path support to claim"; reporting
+///   the common one as "could not read" would make the check useless on the
+///   majority of Windows machines.
+/// * anything else (an access denial, a value of the wrong type) → `None`, and
+///   [`long_paths_check`] reports that as a `Warn` naming the uncertainty
+///   rather than a blind `Pass`.
+///
+/// Pure and out here because it is ordinary branching that happened to be
+/// sitting inside an `unsafe` `#[cfg(windows)]` function, where no test on any
+/// host could reach it — leaving the exact three-way mapping this change argues
+/// hardest about with zero coverage.
+pub fn classify_long_paths(status: u32, data: u32) -> Option<bool> {
+    match status {
+        WIN_ERROR_SUCCESS => Some(data != 0),
+        WIN_ERROR_FILE_NOT_FOUND => Some(false),
+        _ => None,
+    }
 }
 
 /// The three host-environment checks, hardest blocker first.
@@ -488,6 +578,82 @@ mod tests {
             check_names(&windows),
             ["zephyrSdkHost", "longPaths", "homePath"]
         );
+    }
+
+    #[test]
+    fn an_emulated_process_resolves_the_machines_arch_not_its_own() {
+        // The defect these two mappings exist to prevent, driven from both
+        // sides. tan ships x86_64-pc-windows-msvc AND x86_64-apple-darwin, so
+        // `std::env::consts::ARCH` == "x86_64" is reachable on hardware that is
+        // aarch64 in both OSes — and on Windows that is the LIKELIEST way tan
+        // runs on ARM, since x64 emulation is transparent. Returning the
+        // compile-time constant from either mapping fails here.
+        assert_eq!(
+            arch_for_image_file_machine(IMAGE_FILE_MACHINE_ARM64),
+            Some("aarch64"),
+            "an emulated x64 tan on Windows-on-ARM must report the machine"
+        );
+        assert_eq!(
+            arch_for_image_file_machine(IMAGE_FILE_MACHINE_AMD64),
+            Some("x86_64")
+        );
+        // A machine type tan has no token for is `None`, so the caller keeps
+        // its fallback rather than inventing a tag that then fails a host for
+        // being unserved when tan simply could not name it.
+        assert_eq!(arch_for_image_file_machine(0x01c4), None);
+        assert_eq!(IMAGE_FILE_MACHINE_ARM64, 0xAA64);
+        assert_eq!(IMAGE_FILE_MACHINE_AMD64, 0x8664);
+
+        // Rosetta runs x86_64 binaries on Apple silicon and nowhere else, so
+        // "translated" IS a statement that the machine is aarch64.
+        assert_eq!(arch_for_proc_translated(true, "x86_64"), "aarch64");
+        // ... and a NATIVE x86_64 binary is a real Intel Mac, which must still
+        // reach the macos-x86_64 verdict. Hard-coding "aarch64" to "fix" the
+        // Rosetta case would silence the Intel-Mac check entirely.
+        assert_eq!(arch_for_proc_translated(false, "x86_64"), "x86_64");
+        assert_eq!(arch_for_proc_translated(false, "aarch64"), "aarch64");
+
+        // End to end: the same host that passes when its arch is resolved
+        // truthfully is the host that would FAIL on the compile-time constant.
+        let real = HostEnvProbe {
+            os: "macos",
+            arch: arch_for_proc_translated(true, "x86_64"),
+            ..clean()
+        };
+        assert_eq!(
+            zephyr_sdk_host_check(real.os, real.arch).status,
+            DoctorStatus::Pass
+        );
+        assert_eq!(
+            zephyr_sdk_host_check("macos", "x86_64").status,
+            DoctorStatus::Fail
+        );
+    }
+
+    #[test]
+    fn the_registry_status_maps_three_ways_and_never_guesses() {
+        // Ordinary branching that used to sit inside the `#[cfg(windows)]`
+        // `unsafe` probe, where no test on any host could reach it — so the
+        // exact mapping this check argues hardest about had zero coverage and
+        // a future "ACCESS_DENIED should count as disabled" edit would land
+        // silently.
+        assert_eq!(classify_long_paths(WIN_ERROR_SUCCESS, 1), Some(true));
+        assert_eq!(classify_long_paths(WIN_ERROR_SUCCESS, 0), Some(false));
+        // Any non-zero DWORD is enabled, not just 1.
+        assert_eq!(classify_long_paths(WIN_ERROR_SUCCESS, 2), Some(true));
+        // Absent value OR absent subkey — the API returns the same code for
+        // both, and both mean there is no long-path support to claim.
+        assert_eq!(
+            classify_long_paths(WIN_ERROR_FILE_NOT_FOUND, 0),
+            Some(false)
+        );
+        // ERROR_ACCESS_DENIED (5) and ERROR_INVALID_DATA (13): tan does not
+        // know, and must say so rather than pass or fail blind. The `data`
+        // buffer is untouched on these, so it must be IGNORED, not read.
+        assert_eq!(classify_long_paths(5, 1), None);
+        assert_eq!(classify_long_paths(13, 1), None);
+        assert_eq!(WIN_ERROR_SUCCESS, 0);
+        assert_eq!(WIN_ERROR_FILE_NOT_FOUND, 2);
     }
 
     #[test]

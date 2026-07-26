@@ -312,8 +312,10 @@ pub(crate) fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Opt
 pub(crate) fn append_host_environment(report: &mut DoctorReport) {
     let home = host_home();
     let probe = HostEnvProbe {
+        // `OS` is safe as a constant — a Windows binary does not run on macOS.
+        // `ARCH` is NOT (see `host_arch`).
         os: std::env::consts::OS,
-        arch: std::env::consts::ARCH,
+        arch: host_arch(),
         long_paths_enabled: long_paths_enabled(),
         home: home.as_deref(),
     };
@@ -339,6 +341,101 @@ fn host_home() -> Option<String> {
         .map(|v| v.to_string_lossy().into_owned())
 }
 
+/// The arch of the MACHINE, which is not `std::env::consts::ARCH`.
+///
+/// `ARCH` is fixed at compile time — it names the target the binary was built
+/// for. `.github/workflows/release.yml` ships `x86_64-pc-windows-msvc` and
+/// `x86_64-apple-darwin` as separate assets from their aarch64 siblings, and
+/// both of those x86_64 binaries run on aarch64 hardware:
+///
+/// * **Windows on ARM emulates x64 transparently**, so the x86_64 asset is the
+///   likeliest way tan runs there at all. On the constant it reports
+///   `windows-x86_64`, a served host — which would make the `windows-aarch64`
+///   arm this whole check exists for almost unreachable in practice.
+/// * **Rosetta** runs the x86_64 asset on Apple silicon. On the constant it
+///   reports `macos-x86_64` and FAILS a fully served machine, exiting 4 and
+///   telling its owner to go find a Linux box.
+///
+/// Both OSes will say so if asked, and the mapping from what they answer to an
+/// arch token is pure ([`tan_core::host_env::arch_for_image_file_machine`],
+/// [`tan_core::host_env::arch_for_proc_translated`]) and unit-tested there. The
+/// constant survives only as the fallback for a query that fails or names a
+/// machine type tan has no token for — inventing a tag there would fail a host
+/// merely because tan could not name it.
+///
+/// Linux is left on the constant deliberately: tan ships no Linux asset whose
+/// arch can differ from its host's, and box64-style emulation is not a
+/// configuration Alp Lab supports.
+#[cfg(windows)]
+fn host_arch() -> &'static str {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+
+    let mut process_machine: u16 = 0;
+    let mut native_machine: u16 = 0;
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no close
+    // and is always valid; both out-parameters are live `u16`s. The call
+    // returns 0 on failure, in which case `native_machine` is untouched — so
+    // the result is only read when it returned non-zero.
+    let ok = unsafe {
+        IsWow64Process2(
+            GetCurrentProcess(),
+            &mut process_machine,
+            &mut native_machine,
+        )
+    };
+    if ok == 0 {
+        return std::env::consts::ARCH;
+    }
+    tan_core::host_env::arch_for_image_file_machine(native_machine)
+        .unwrap_or(std::env::consts::ARCH)
+}
+
+/// macOS: `sysctl.proc_translated` is 1 exactly when this process is an x86_64
+/// binary running under Rosetta, which only exists on Apple silicon — so it is
+/// a direct statement that the machine is `aarch64`. The sysctl is absent on
+/// older systems, where the call fails and a native binary's own arch is the
+/// right answer anyway.
+///
+/// Declared rather than pulled in through `libc`: it is one `extern` line
+/// against `libSystem`, which every macOS binary already links, and the crate
+/// has no `libc` edge today.
+#[cfg(target_os = "macos")]
+fn host_arch() -> &'static str {
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const std::ffi::c_char,
+            oldp: *mut std::ffi::c_void,
+            oldlenp: *mut usize,
+            newp: *mut std::ffi::c_void,
+            newlen: usize,
+        ) -> std::ffi::c_int;
+    }
+
+    let mut translated: std::ffi::c_int = 0;
+    let mut size = std::mem::size_of::<std::ffi::c_int>();
+    // SAFETY: the name is a NUL-terminated literal; `translated`/`size` are a
+    // live `c_int` and its byte length; `newp`/`newlen` are null/0, which is
+    // the documented form for a READ. A non-zero return means the sysctl is
+    // absent (pre-Big Sur), and `translated` keeps its initialised 0.
+    let rc = unsafe {
+        sysctlbyname(
+            c"sysctl.proc_translated".as_ptr(),
+            std::ptr::from_mut(&mut translated).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    tan_core::host_env::arch_for_proc_translated(rc == 0 && translated == 1, std::env::consts::ARCH)
+}
+
+/// Linux and everything else: the binary's arch is the machine's. See the
+/// Windows arm above for why the other two are not.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn host_arch() -> &'static str {
+    std::env::consts::ARCH
+}
+
 /// Read `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled`.
 ///
 /// The registry API, not `reg query`: shelling out costs a process, inherits
@@ -348,21 +445,16 @@ fn host_home() -> Option<String> {
 /// direct edge onto a crate that was being built anyway, target-gated to
 /// Windows.
 ///
-/// `Some(false)` for an ABSENT value, not `None`: absent IS the Windows
-/// default-off state and by far the most common one, so reporting it as
-/// "could not read" would make the check useless on the majority of hosts.
-/// `ERROR_FILE_NOT_FOUND` covers an absent SUBKEY as well as an absent value —
-/// the API does not distinguish them — which is verified behaviour, not an
-/// assumption, and is the right verdict either way: a host with no `FileSystem`
-/// key has no long-path support to claim. `None` is left for a read that failed
-/// for some other reason (an access denial, a value of the wrong type), where
-/// tan genuinely does not know.
+/// The three-way mapping from the returned status is NOT here — it is
+/// [`tan_core::host_env::classify_long_paths`], which is unit-tested on every
+/// host. What is left below is the `RegGetValueW` call and nothing else, so
+/// the untested region is the FFI alone rather than the branching that decides
+/// what a user is told.
 ///
 /// `HKLM\SYSTEM\...` is not subject to WOW64 registry redirection, so no
 /// `KEY_WOW64_*` flag is needed for a 32-bit `tan` on a 64-bit host.
 #[cfg(windows)]
 fn long_paths_enabled() -> Option<bool> {
-    use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
     use windows_sys::Win32::System::Registry::{
         HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW,
     };
@@ -392,12 +484,22 @@ fn long_paths_enabled() -> Option<bool> {
             &mut size,
         )
     };
-    match status {
-        s if s == ERROR_SUCCESS => Some(data != 0),
-        s if s == ERROR_FILE_NOT_FOUND => Some(false),
-        _ => None,
-    }
+    tan_core::host_env::classify_long_paths(status, data)
 }
+
+/// `classify_long_paths` compares against `winerror.h` values re-declared in
+/// `tan-core` (which must stay platform-neutral and cannot import
+/// `windows-sys`). These two asserts are what stop the copies drifting: they
+/// are checked at compile time against the real headers, on the one target
+/// where the real headers exist.
+#[cfg(windows)]
+const _: () = {
+    assert!(tan_core::host_env::WIN_ERROR_SUCCESS == windows_sys::Win32::Foundation::ERROR_SUCCESS);
+    assert!(
+        tan_core::host_env::WIN_ERROR_FILE_NOT_FOUND
+            == windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND
+    );
+};
 
 /// No such registry value off Windows. `host_environment_checks` never reaches
 /// the `longPaths` check on a non-Windows `os`, so this is only ever the unused
@@ -1236,6 +1338,40 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("{name} missing from {names:?}"));
             assert!(at < west, "{name} must precede west: {names:?}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn host_arch_agrees_with_what_windows_itself_reports() {
+        // An INDEPENDENT oracle for the `IsWow64Process2` result: Windows sets
+        // `PROCESSOR_ARCHITEW6432` to the NATIVE arch in an emulated/WOW64
+        // process and leaves it unset in a native one, where
+        // `PROCESSOR_ARCHITECTURE` is already native. Nothing in `host_arch`
+        // reads either variable, so this is a real cross-check and not a
+        // restatement — swapping the ARM64/AMD64 arms of
+        // `arch_for_image_file_machine` fails here on any Windows host.
+        //
+        // What it CANNOT catch on an x64 host is `host_arch()` being replaced
+        // wholesale by `std::env::consts::ARCH`, because the two agree here by
+        // construction; that mutation is caught by
+        // `an_emulated_process_resolves_the_machines_arch_not_its_own` in
+        // tan-core, which drives the mapping over both machine types.
+        let native = std::env::var("PROCESSOR_ARCHITEW6432")
+            .or_else(|_| std::env::var("PROCESSOR_ARCHITECTURE"))
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        let expected = match native.as_str() {
+            "ARM64" => "aarch64",
+            "AMD64" => "x86_64",
+            // x86 / IA64 / an unset environment: tan has no token, and the
+            // fallback is whatever it was built for. Nothing to assert.
+            _ => return,
+        };
+        assert_eq!(
+            host_arch(),
+            expected,
+            "host_arch must report the machine Windows reports ({native})"
+        );
     }
 
     #[test]

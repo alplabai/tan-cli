@@ -45,4 +45,4 @@ sha2.workspace = true
 # rustls/ureq side), so this is a direct edge onto a crate that was being built
 # anyway, and it is target-gated so no POSIX build sees it.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Registry"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Registry", "Win32_System_Threading"] }
