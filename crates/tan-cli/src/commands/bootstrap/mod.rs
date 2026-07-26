@@ -32,7 +32,7 @@ use tan_core::bootstrap::{
     BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, ExistingWorkspace, HostOs, MissingPrerequisite,
     Tokens, WorkspaceChoice, YoctoGate, decide_workspace_reuse, fallback_facts, in_play_runtimes,
     next_steps_block, optional_libs_block, parse_bootstrap_manifest, print_env_block,
-    resolve_pin_major_minor, yocto_gate, yocto_mixed_warning, yocto_only_refusal,
+    reported_missing, resolve_pin_major_minor, yocto_gate, yocto_mixed_warning, yocto_only_refusal,
 };
 use tan_core::sdk_catalogue::TopologyCore;
 
@@ -42,10 +42,12 @@ use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 use crate::util::{MIN_PYTHON, resolve_cli_project_context};
 
-use steps::{
-    Log, Runner, Workspace, check_prerequisites, ensure_venv, native, pip_phase, west_phase,
-};
+use steps::{Log, Runner, Workspace, ensure_venv, native, pip_phase, west_phase};
 use west_config::same_directory;
+// The prerequisite gate, shared with `commands::doctor` so plain `tan doctor`
+// reports a missing `ninja` without anyone having to run bootstrap first
+// (alp-sdk ADR 0021 P0a). `steps` itself stays a private submodule.
+pub(crate) use steps::check_prerequisites;
 // Re-exported at crate visibility (rather than the module's own `pub(super)`)
 // so `commands::sdk`'s `run_switch` can chain the SAME reconciliation (#62) —
 // `west_config` itself stays a private submodule; only these two names need a
@@ -403,7 +405,11 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
 /// `schemaVersion` (or one that cannot be parsed) is a hard `Err` naming why.
 /// Falling back THERE would silently re-introduce hand-ported behaviour against
 /// an SDK that explicitly declared something else — the RFC #843 drift.
-fn load_facts(sdk_root: &str) -> Result<BootstrapFacts, String> {
+///
+/// `pub(crate)`: `commands::doctor` reads the same facts for the same gate, and
+/// a second reader with its own skew rule is exactly the drift this guard
+/// exists to catch.
+pub(crate) fn load_facts(sdk_root: &str) -> Result<BootstrapFacts, String> {
     let path = Path::new(sdk_root).join(BOOTSTRAP_MANIFEST_REL_PATH);
     match std::fs::read_to_string(&path) {
         Ok(text) => parse_bootstrap_manifest(&text).map_err(|e| e.to_string()),
@@ -673,15 +679,6 @@ fn data_for(
         // caller of this leaves it `null` ("not reported"), never `[]`.
         missing_prerequisites: None,
     }
-}
-
-/// The envelope form of a refusal's missing-tool list: `None` when the refusal
-/// names no tool. See [`BootstrapData::missing_prerequisites`] — the two
-/// Python-floor refusals reach this with an empty vec, and reporting `[]` for
-/// them would spell "checked, nothing missing", which is what a SUCCESSFUL run
-/// reports as `null`. One fact, one spelling.
-fn reported_missing(missing: Vec<MissingPrerequisite>) -> Option<Vec<MissingPrerequisite>> {
-    (!missing.is_empty()).then_some(missing)
 }
 
 /// `BootstrapData` for a failure before any path resolved: empty paths, but

@@ -23,11 +23,14 @@ pub struct DebuggerExtensionsState {
     pub code_lldb: bool,
 }
 
-/// Probed availability of debug tooling on the host (PATH lookups + interpreter).
+/// Probed availability of debug tooling on the host (PATH lookups).
+///
+/// No `python_available`: the retired `python` check was its only reader, and
+/// `hostPrerequisites` now probes the interpreter off the manifest's
+/// prerequisite list (with a `pythonMinVersion` floor the bare PATH lookup
+/// never had).
 #[derive(Debug, Clone)]
 pub struct DebugRuntimeCapabilities {
-    /// The configured Python interpreter is on PATH.
-    pub python_available: bool,
     /// Resolved J-Link GDB-server executable name, if found.
     pub jlink_executable: Option<String>,
     /// Resolved OpenOCD executable name, if found.
@@ -89,8 +92,11 @@ pub fn create_debug_workspace_context(
 }
 
 /// Mirror of TS `collectRuntimeCapabilitiesFromCommands`.
+///
+/// Takes no `ProjectContext` any more: the only field it ever read was
+/// `python_binary`, for the `python_available` flag the retired `python` check
+/// consumed.
 pub fn collect_runtime_capabilities_from_commands(
-    project: &ProjectContext,
     command_on_path: impl Fn(&str) -> bool,
 ) -> DebugRuntimeCapabilities {
     let first_available = |commands: &[&str]| -> Option<String> {
@@ -101,7 +107,6 @@ pub fn collect_runtime_capabilities_from_commands(
     };
 
     DebugRuntimeCapabilities {
-        python_available: command_on_path(&project.python_binary),
         jlink_executable: first_available(&["JLinkGDBServerCL", "JLinkGDBServer"]),
         open_ocd_executable: first_available(&["openocd"]),
         pyocd_executable: first_available(&["pyocd"]),

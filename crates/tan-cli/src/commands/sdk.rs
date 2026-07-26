@@ -12,7 +12,7 @@ use std::process::Command;
 use serde::Serialize;
 use tan_core::{
     GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
-    check_sdk_readiness, is_plain_relative, parse_remote_sdk_releases,
+    check_sdk_readiness, describe_network_error, is_plain_relative, parse_remote_sdk_releases,
 };
 
 use super::CommandRun;
@@ -105,7 +105,7 @@ pub fn run(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
 /// Fetches the GitHub releases and renders them as a table; surfaces fetch errors as a failure.
 fn run_list(g: &GlobalArgs) -> CommandRun {
     let pb = crate::progress::spinner(g, "Fetching ALP SDK releases…");
-    let result = fetch_releases();
+    let result = fetch_releases(crate::http::agent(), GITHUB_RELEASES_URL);
     pb.finish_and_clear();
     let releases = match result {
         Ok(r) => r,
@@ -136,14 +136,29 @@ fn run_list(g: &GlobalArgs) -> CommandRun {
     )
 }
 
-/// GETs the GitHub releases API and parses the JSON into `SdkRelease`s via `tan-core`.
-fn fetch_releases() -> Result<Vec<SdkRelease>, String> {
-    let response = ureq::get(GITHUB_RELEASES_URL)
+/// GETs the releases API at `url` through `agent` and parses the JSON into
+/// `SdkRelease`s via `tan-core`.
+///
+/// Production passes [`crate::http::agent`] and [`GITHUB_RELEASES_URL`], rather
+/// than the bare `ureq::get(GITHUB_RELEASES_URL)` this used to call: that
+/// default agent ignores both `ALL_PROXY`/`HTTPS_PROXY` and the OS trust store,
+/// so this command was unusable behind a corporate proxy or a TLS-intercepting
+/// middlebox. `describe_network_error` then names that as the likely cause
+/// instead of leaving the user with a raw transport error.
+///
+/// Both are parameters rather than hard-wired *so that the choice of agent is
+/// under test*: this is the single line that connects the whole shared-agent
+/// change to the binary, and with it hard-wired, reverting it to the bare
+/// `ureq::get` — undoing proxy support, the CA merge and the timeout at once —
+/// left the suite entirely green.
+fn fetch_releases(agent: &ureq::Agent, url: &str) -> Result<Vec<SdkRelease>, String> {
+    let response = agent
+        .get(url)
         .set("User-Agent", "tan-cli/0")
         .set("Accept", "application/vnd.github+json")
         .set("X-GitHub-Api-Version", "2022-11-28")
         .call()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| describe_network_error(&e.to_string(), crate::http::proxy_configured()))?;
     let value: serde_json::Value = response.into_json().map_err(|e| e.to_string())?;
     parse_remote_sdk_releases(&value)
 }
@@ -290,7 +305,13 @@ fn git_clone(version: &str, dest: &Path) -> Result<(), String> {
     }
     // Capture output (--quiet) rather than inherit: the spinner owns the
     // terminal while cloning, and JSON/non-interactive runs stay output-free.
-    // git's stderr is surfaced verbatim only on failure.
+    // git's stderr is surfaced verbatim only on failure — but git clones over
+    // HTTPS through the same middlebox `sdk list` hits, and its own wording
+    // ("SSL certificate problem: unable to get local issuer certificate", or the
+    // schannel equivalent) reads as a broken download too. Same hint, one
+    // command later. It deliberately names no specific knob: git has its own
+    // trust store and its own `http.sslCAInfo`, which would be the wrong advice
+    // on the in-process `sdk list` path that shares this sentence.
     let output = Command::new("git")
         .args([
             "clone",
@@ -317,7 +338,10 @@ fn git_clone(version: &str, dest: &Path) -> Result<(), String> {
                     .unwrap_or_else(|| "unknown".to_string())
             ));
         }
-        return Err(format!("Alp: git clone failed: {detail}"));
+        return Err(describe_network_error(
+            &format!("Alp: git clone failed: {detail}"),
+            crate::http::proxy_configured(),
+        ));
     }
     Ok(())
 }
@@ -1155,5 +1179,64 @@ mod tests {
         let global = Path::new("/home/.alp/sdk-default");
         assert_eq!(switch_pointer_path(project, global, false), project);
         assert_eq!(switch_pointer_path(project, global, true), global);
+    }
+
+    /// One-shot loopback HTTP server: accepts a single connection, drains the
+    /// request and writes `body` back as a `200`. Returns the `host:port` to
+    /// aim at.
+    ///
+    /// Deliberately hand-rolled rather than a mock-HTTP crate — it is a dozen
+    /// lines against `std::net`, and the point of the test is which *agent and
+    /// URL* `fetch_releases` uses, which no mocking layer can observe for us.
+    fn serve_one_response(body: &'static str) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let addr = listener
+            .local_addr()
+            .expect("the bound address")
+            .to_string();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            // Read *something* first: writing the response while the request is
+            // still in flight can RST the connection on Windows before ureq has
+            // finished sending, which would surface as a flaky transport error.
+            let mut scratch = [0u8; 2048];
+            let _ = std::io::Read::read(&mut stream, &mut scratch);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        });
+        addr
+    }
+
+    #[test]
+    fn fetch_releases_requests_the_agent_and_url_it_is_given() {
+        // The seam this covers: `run_list` handing `fetch_releases` the shared
+        // agent. Hard-wire `ureq::get(GITHUB_RELEASES_URL)` back into the body
+        // and this test stops seeing the canned tag — it either reaches the real
+        // api.github.com (whose releases are not `v9.9.9`) or fails outright on
+        // a runner with no network. Either way it is this assertion that says so.
+        let body = concat!(
+            r#"[{"tag_name":"v9.9.9","published_at":"2026-01-02T03:04:05Z","#,
+            r#""tarball_url":"https://example.invalid/v9.9.9.tar.gz","#,
+            r#""body":"Head line.\n\nDetail that is not the summary."}]"#
+        );
+        let addr = serve_one_response(body);
+        // A no-proxy agent with a short cap: the environment must not steer a
+        // loopback request, and a wedged accept must fail the test rather than
+        // hang `cargo test`.
+        let agent = crate::http::build_agent(std::time::Duration::from_secs(10), None);
+
+        let releases = fetch_releases(&agent, &format!("http://{addr}/releases"))
+            .expect("the canned 200 parses");
+
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].tag, "v9.9.9");
+        assert_eq!(releases[0].published_at, "2026-01-02T03:04:05Z");
+        // First paragraph only — proves the `tan-core` parse ran on OUR body.
+        assert_eq!(releases[0].release_notes_summary, "Head line.");
     }
 }

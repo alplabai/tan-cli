@@ -14,7 +14,11 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use crate::debug::{DoctorCheck, DoctorStatus, DoctorSummary};
+use crate::bootstrap::{MissingPrerequisite, install_command, reported_missing};
+// `unique_next_steps` is the doctor module's, not a second copy: this file used
+// to carry a byte-identical clone, and two implementations of "what goes in
+// `nextSteps`" is one drift away from the two reports disagreeing.
+use crate::debug::{DoctorCheck, DoctorStatus, DoctorSummary, unique_next_steps};
 use crate::model::BoardModel;
 
 /// Why a non-Linux host cannot run a Yocto build. Shared verbatim by `doctor
@@ -87,6 +91,12 @@ pub struct BuildToolProbe {
     pub dd: bool,
     /// Host is Linux (gates Yocto builds, which are Linux-only).
     pub is_linux: bool,
+    /// Host is Windows. Gates `missingPrerequisites[].command`: the install
+    /// one-liners tan knows are `winget` (`bootstrap.ps1`'s `$Prereqs`), so a
+    /// Linux or macOS host must report `null` rather than a command it cannot
+    /// run — the same rule `posix_refusal` applies. NOT `!is_linux`: macOS is
+    /// neither.
+    pub is_windows: bool,
 }
 
 /// The build-readiness preflight result: declared OS set, per-tool checks, a
@@ -109,6 +119,35 @@ pub struct BuildReadinessReport {
     /// Deduped fix hints for every non-passing check.
     #[serde(rename = "nextSteps")]
     pub next_steps: Vec<String>,
+    /// The PATH-binary checks above that came back absent, in the form a
+    /// consumer can put behind a button.
+    ///
+    /// Data only — there is deliberately no second `hostPrerequisites` CHECK in
+    /// this mode. `--build` already probes `west`/`cmake`/`ninja`/`bitbake`
+    /// through [`BuildToolProbe`] and reports each as its own check; mirroring
+    /// plain `doctor`'s aggregate check here would report the same tool twice
+    /// under two names. What `--build` could NOT give a consumer was the
+    /// COMMAND — `alp-sdk-vscode` calls only `tan doctor --build`
+    /// (`src/toolchain.ts:219`, `:248`), so with no runnable string in the
+    /// payload its `runToolchainFix` had nothing to put behind the Fix button
+    /// that ADR 0021 Lane 1 P0a asks for, and a missing `ninja` stayed
+    /// `failed to launch (exit code: 1)`.
+    ///
+    /// Populated from the PATH-binary probes ONLY, i.e. exactly the checks
+    /// [`push_tool`] emits. `zephyrSdk` is detected from an env var and
+    /// remediated by a docs URL, `bmaptool` is a two-tool advisory with a
+    /// working `dd` fallback, and `yoctoHost`/`vendorToolchain` name no tool at
+    /// all — none has a single `{tool, command}` pair that could carry it.
+    /// Deriving the list inside `push_tool` also means it inherits that
+    /// function's OS gating and dedup for free: a Zephyr-only project never
+    /// pushes the `bitbake` check, so it can never be told to install bitbake.
+    ///
+    /// Same tri-state as the `doctor` and `bootstrap` envelopes'
+    /// `missingPrerequisites` (see
+    /// [`reported_missing`](crate::bootstrap::reported_missing)): `null` when
+    /// nothing is missing, a populated array otherwise, **never `[]`**.
+    #[serde(rename = "missingPrerequisites")]
+    pub missing_prerequisites: Option<Vec<MissingPrerequisite>>,
 }
 
 /// Assemble the build-readiness report for an OS set + probed host tools.
@@ -119,11 +158,14 @@ pub fn build_readiness_report(
 ) -> BuildReadinessReport {
     let mut checks: Vec<DoctorCheck> = Vec::new();
     let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+    let mut missing: Vec<MissingPrerequisite> = Vec::new();
 
     if os_set.contains(&BuildOs::Zephyr) {
         push_tool(
             &mut checks,
             &mut seen,
+            &mut missing,
+            probe.is_windows,
             "west",
             probe.west,
             "Zephyr",
@@ -132,6 +174,8 @@ pub fn build_readiness_report(
         push_tool(
             &mut checks,
             &mut seen,
+            &mut missing,
+            probe.is_windows,
             "cmake",
             probe.cmake,
             "Zephyr/baremetal",
@@ -140,6 +184,8 @@ pub fn build_readiness_report(
         push_tool(
             &mut checks,
             &mut seen,
+            &mut missing,
+            probe.is_windows,
             "ninja",
             probe.ninja,
             "Zephyr",
@@ -174,6 +220,8 @@ pub fn build_readiness_report(
             push_tool(
                 &mut checks,
                 &mut seen,
+                &mut missing,
+                probe.is_windows,
                 "bitbake",
                 probe.bitbake,
                 "Yocto",
@@ -229,6 +277,8 @@ pub fn build_readiness_report(
         push_tool(
             &mut checks,
             &mut seen,
+            &mut missing,
+            probe.is_windows,
             "cmake",
             probe.cmake,
             "baremetal",
@@ -260,14 +310,32 @@ pub fn build_readiness_report(
         summary,
         checks,
         next_steps,
+        missing_prerequisites: reported_missing(missing),
     }
 }
 
 /// Append a PATH-binary readiness check, deduped by `name` (a tool needed by
-/// more than one declared OS is reported once).
+/// more than one declared OS is reported once), and record an absent one in
+/// `missing` for the report's `missingPrerequisites`.
+///
+/// The two land in the SAME function so the machine-readable list cannot drift
+/// from the checks: it inherits this function's OS gating (its callers are
+/// already inside the `os_set` branches, so a Zephyr-only project never reaches
+/// the `bitbake` call) and its `seen` dedup, instead of re-deriving either.
+///
+/// `command` is `None` off Windows and for any tool
+/// [`install_command`](crate::bootstrap::install_command) knows no one-liner
+/// for — `west` (installed into the venv by `tan bootstrap`, not by a package
+/// manager) and `bitbake` (a whole host-package set). A named tool with a
+/// `null` command is still worth reporting: the consumer renders the name and
+/// falls back to the check's `fix` prose. An INVENTED command would be worse
+/// than `null`, because that field is rendered as a button.
+#[allow(clippy::too_many_arguments)]
 fn push_tool(
     checks: &mut Vec<DoctorCheck>,
     seen: &mut BTreeSet<&'static str>,
+    missing: &mut Vec<MissingPrerequisite>,
+    is_windows: bool,
     name: &'static str,
     present: bool,
     need: &str,
@@ -275,6 +343,12 @@ fn push_tool(
 ) {
     if !seen.insert(name) {
         return;
+    }
+    if !present {
+        missing.push(MissingPrerequisite {
+            tool: name.to_string(),
+            command: is_windows.then(|| install_command(name)).flatten(),
+        });
     }
     checks.push(DoctorCheck {
         name: name.to_string(),
@@ -296,21 +370,6 @@ fn count(checks: &[DoctorCheck], status: DoctorStatus) -> u32 {
     checks.iter().filter(|c| c.status == status).count() as u32
 }
 
-fn unique_next_steps(checks: &[DoctorCheck]) -> Vec<String> {
-    let mut steps = Vec::new();
-    for check in checks {
-        if check.status == DoctorStatus::Pass {
-            continue;
-        }
-        if let Some(fix) = &check.fix {
-            if !steps.contains(fix) {
-                steps.push(fix.clone());
-            }
-        }
-    }
-    steps
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,6 +385,7 @@ mod tests {
             bmaptool: true,
             dd: true,
             is_linux: true,
+            is_windows: false,
         }
     }
 
@@ -363,9 +423,8 @@ mod tests {
         assert!(report.checks.iter().any(|c| c.name == "zephyrSdk"));
     }
 
-    #[test]
-    fn missing_tools_warn_with_next_steps() {
-        let probe = BuildToolProbe {
+    fn probe_none_present() -> BuildToolProbe {
+        BuildToolProbe {
             west: false,
             cmake: false,
             ninja: false,
@@ -374,11 +433,154 @@ mod tests {
             bmaptool: false,
             dd: false,
             is_linux: true,
-        };
-        let report = build_readiness_report("t".to_string(), vec![BuildOs::Zephyr], &probe);
+            is_windows: false,
+        }
+    }
+
+    #[test]
+    fn missing_tools_warn_with_next_steps() {
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_none_present(),
+        );
         assert!(report.summary.warn >= 4); // west, cmake, ninja, zephyrSdk
         assert_eq!(report.summary.fail, 0);
         assert!(!report.next_steps.is_empty());
+    }
+
+    #[test]
+    fn a_clean_host_reports_missing_prerequisites_as_null_never_empty() {
+        // `[]` would mean "checked, nothing missing" in a vocabulary where
+        // `null` already means exactly that -- one fact, one spelling, shared
+        // with the `doctor` and `bootstrap` envelopes.
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr, BuildOs::Yocto, BuildOs::Baremetal],
+            &probe_all_present(),
+        );
+        assert_eq!(report.missing_prerequisites, None);
+    }
+
+    #[test]
+    fn a_missing_tool_carries_its_winget_command_on_windows() {
+        // The whole point of the field: `alp-sdk-vscode` calls only
+        // `tan doctor --build`, and its Fix button needs something RUNNABLE.
+        let probe = BuildToolProbe {
+            is_linux: false,
+            is_windows: true,
+            ..probe_none_present()
+        };
+        let report = build_readiness_report("t".to_string(), vec![BuildOs::Zephyr], &probe);
+        assert_eq!(
+            report.missing_prerequisites,
+            Some(vec![
+                // `west` is pip-installed into the venv by `tan bootstrap`, so
+                // there is no package-manager one-liner to give -- named with a
+                // `null` command rather than dropped or invented.
+                MissingPrerequisite {
+                    tool: "west".to_string(),
+                    command: None,
+                },
+                MissingPrerequisite {
+                    tool: "cmake".to_string(),
+                    command: Some("winget install -e --id Kitware.CMake".to_string()),
+                },
+                MissingPrerequisite {
+                    tool: "ninja".to_string(),
+                    command: Some("winget install -e --id Ninja-build.Ninja".to_string()),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn a_non_windows_host_is_never_handed_a_winget_command() {
+        // `install_command` is `bootstrap.ps1`'s `$Prereqs`. Handing a Linux or
+        // macOS user `winget install …` behind a button is worse than `null`.
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_none_present(),
+        );
+        let missing = report.missing_prerequisites.expect("tools are missing");
+        assert!(missing.iter().all(|m| m.command.is_none()), "{missing:?}");
+        let tools: Vec<&str> = missing.iter().map(|m| m.tool.as_str()).collect();
+        assert_eq!(tools, ["west", "cmake", "ninja"]);
+    }
+
+    #[test]
+    fn missing_prerequisites_covers_only_path_tools_and_respects_the_os_gate() {
+        // Two rules in one: a Zephyr-only project must never be told to install
+        // `bitbake` (the check is not even emitted), and the non-PATH checks --
+        // `zephyrSdk` (env-var detection, docs-URL fix), `bmaptool` (two tools,
+        // one advisory, `dd` fallback), `vendorToolchain` (no tool name at all)
+        // -- must stay out, since no `{tool, command}` pair can carry them.
+        let zephyr_only = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_none_present(),
+        );
+        let tools: Vec<String> = zephyr_only
+            .missing_prerequisites
+            .expect("tools are missing")
+            .into_iter()
+            .map(|m| m.tool)
+            .collect();
+        assert_eq!(tools, ["west", "cmake", "ninja"]);
+
+        // Yocto declared AND a Linux host -> `bitbake` is checked, so it is
+        // reportable; it has no install one-liner, so `command` is `null`.
+        let probe = BuildToolProbe {
+            is_windows: true,
+            ..probe_none_present()
+        };
+        let yocto = build_readiness_report("t".to_string(), vec![BuildOs::Yocto], &probe);
+        assert_eq!(
+            yocto.missing_prerequisites,
+            Some(vec![MissingPrerequisite {
+                tool: "bitbake".to_string(),
+                command: None,
+            }])
+        );
+
+        // Yocto declared on a NON-Linux host -> the `bitbake` check is replaced
+        // by `yoctoHost`, and nothing is reported as installable.
+        let non_linux = BuildToolProbe {
+            is_linux: false,
+            ..probe_none_present()
+        };
+        let off_host = build_readiness_report("t".to_string(), vec![BuildOs::Yocto], &non_linux);
+        assert_eq!(off_host.missing_prerequisites, None);
+    }
+
+    #[test]
+    fn a_tool_needed_by_two_declared_oses_is_reported_once() {
+        // Same dedup the checks get -- `missing` is filled inside `push_tool`,
+        // after the `seen` guard, precisely so the two cannot drift.
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr, BuildOs::Baremetal],
+            &probe_none_present(),
+        );
+        let tools: Vec<String> = report
+            .missing_prerequisites
+            .expect("tools are missing")
+            .into_iter()
+            .map(|m| m.tool)
+            .collect();
+        assert_eq!(tools.iter().filter(|t| *t == "cmake").count(), 1);
+    }
+
+    #[test]
+    fn the_build_report_serializes_the_field_as_an_explicit_null() {
+        // No `skip_serializing_if`, matching `doctor`'s and `bootstrap`'s: the
+        // key is in every captured envelope, so a consumer can see it exists
+        // without reaching for a schema.
+        let report =
+            build_readiness_report("t".to_string(), vec![BuildOs::Zephyr], &probe_all_present());
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"missingPrerequisites\":null"), "{json}");
     }
 
     #[test]

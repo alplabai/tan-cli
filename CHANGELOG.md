@@ -8,6 +8,45 @@ All notable changes to `tan` are documented here. Format follows
 ## [0.4.0] — 2026-07-25
 
 ### Added
+- **`tan doctor` reports a missing host prerequisite without `--fix`.**
+  `check_prerequisites` had no caller outside `tan bootstrap`, so the only way
+  a missing `ninja` surfaced was `tan doctor --build --fix`, which runs
+  bootstrap to find out — and in the extension a missing `ninja` therefore read
+  as `failed to launch (exit code: 1)` from the bootstrap terminal. Plain
+  `tan doctor` now runs bootstrap's own gate (not a second copy of it) and
+  reports a `hostPrerequisites` check. The CHECK is on the plain report only,
+  not `--build`: prerequisites are a HOST fact needing no `board.yaml`, no
+  workspace and no SDK, and alp-sdk ADR 0021's Lane 1 P0a runs `tan doctor`
+  *before* the bootstrap terminal exists — while `--build` already probes
+  `ninja`/`cmake` through `BuildToolProbe` and would report them twice. (One
+  fact, one check — but `--build` does carry the machine-readable
+  `missingPrerequisites` data derived from those probes; see Changed.) The
+  check's detail names which tool list it checked against — the SDK's
+  `metadata/bootstrap.json` or tan's built-in fallback — so a run with no
+  resolvable SDK still checks the host and says which list it used, rather
+  than implying it read the SDK's. A manifest that resolved but was REFUSED
+  (unsupported `schemaVersion`, unparseable) is a third case, not the second:
+  the refusal message `tan bootstrap` treats as a fatal `ValidationFailure` is
+  now carried into the check's detail as
+  `metadata/bootstrap.json rejected: …` and downgrades the check to `Warn`
+  (a refusal still outranks it as `Fail`). `tan doctor` is the command a user
+  runs to find out why `tan bootstrap` refuses, so it is the last one that may
+  swallow the reason — it reports it without repeating bootstrap's exit code.
+  The same check is appended to `tan support-bundle`'s doctor payload, for the
+  reason below. Two caveats worth stating plainly: **the `ninja` case above is
+  Windows-only**, because the tool list is — the manifest's
+  `prerequisites.posix` is `[git, cmake, python3]` and names no `ninja`, while
+  `prerequisites.windows` adds it, an asymmetry the manifest records faithfully
+  rather than unifying (on Linux/macOS a missing `ninja` still surfaces only
+  through `tan doctor --build`'s `BuildToolProbe`, which probes it by name on
+  every platform); and the gate **spawns interpreter subprocesses**
+  (`probe_host_python`, which is what makes this check a strict superset of the
+  retired `python` one), so plain `tan doctor` and `tan support-bundle` now cost
+  ~0.5 s per invocation where they previously did PATH lookups only (measured
+  516/548/516 ms for `tan --format json doctor`, debug build, Windows host).
+  That is the price of the check, not a regression — but the extension may call
+  plain `doctor` on activation, so it is recorded here rather than
+  misdiagnosed later. (alp-sdk ADR 0021 P0a)
 - **`tan bootstrap` reports its missing prerequisites as structured data.**
   The envelope's issue message is the message lines joined with a space, and
   an install command contains the same spaces the join used — so
@@ -43,6 +82,82 @@ All notable changes to `tan` are documented here. Format follows
   the project's own `build` root. (#52)
 
 ### Changed
+- **The `doctor` envelope gained `data.missingPrerequisites` and a
+  `doctor.hostPrerequisites` issue code.** The new check (see Added) reports
+  `Fail` on every prerequisite refusal — each one blocks a build, and bootstrap
+  itself refuses to run against exactly these — so **a host missing a
+  prerequisite now makes plain `tan doctor` exit `4` (`doctorFailure`) where it
+  previously passed**, and raises a `doctor.hostPrerequisites` error issue. The
+  structured half rides on `data.missingPrerequisites`, deliberately the same
+  key, the same `[{tool, command}]` element and the same `null`-never-`[]` rule
+  as the `bootstrap` envelope's field, so one fact does not get two
+  vocabularies. The code is `doctor.*`, not the `bootstrap.prerequisites-missing`
+  a consumer may already match: in this CLI an issue code's prefix is the
+  command that emitted the envelope, without exception, and a `bootstrap.*` code
+  inside a `doctor` envelope would tell a consumer a command ran that did not.
+  `missingPrerequisites` is present on **both** `doctor` payloads — the plain
+  report (including its error envelopes) and `--build`'s `BuildReadinessReport`
+  — always as an explicit key, `null` when there is no missing TOOL to name.
+  What differs is where each gets its list from, and that is deliberate:
+  - **plain `tan doctor`** carries the `hostPrerequisites` CHECK and fills the
+    field from its refusal. `null` on a clean host, on an error envelope that
+    never reached the probe, and on the two Python-floor refusals, whose fix no
+    `{tool, command}` pair can carry.
+  - **`tan doctor --build`** carries the field as **data only — there is no
+    `hostPrerequisites` check in that mode.** It already probes
+    `west`/`cmake`/`ninja`/`bitbake` through `BuildToolProbe` and reports each
+    as its own check, so mirroring the aggregate check would report the same
+    tool twice under two names. The field is derived from exactly those
+    PATH-binary checks, so it inherits their OS gating (a Zephyr-only project is
+    never told to install `bitbake`; a non-Linux host gets `yoctoHost` instead
+    of a `bitbake` entry) and their dedup (`cmake`, needed by two declared OSes,
+    appears once). Excluded on purpose: `zephyrSdk` (env-var detection, its fix
+    is a docs URL), `bmaptool` (two tools, one advisory, working `dd`
+    fallback), `yoctoHost` and `vendorToolchain` (no tool name at all) — none
+    has a single `{tool, command}` pair that could carry it. `command` is the
+    `winget` one-liner only on Windows and only for a tool tan knows one for;
+    `west` and `bitbake` report `command: null` rather than an invented ID.
+    This is what `alp-sdk-vscode` needs: it calls only `tan doctor --build`
+    (`src/toolchain.ts:219`, `:248`), and its `runToolchainFix` previously had
+    nothing runnable to put behind a Fix button, so a missing `ninja` reached
+    the user as `failed to launch (exit code: 1)`.
+
+  `--build`'s payload `schemaVersion` stays `"1"`: the field is additive and
+  optional, and its other keys (`generatedAt`/`osSet`/`summary`/`checks`/
+  `nextSteps`) are unchanged. (alp-sdk ADR 0021 P0a)
+- **The retired `doctor` `python` check.** Plain `tan doctor` no longer emits a
+  `python` check. It probed `context.python_binary`, which in this CLI is always
+  the bare `python3`/`python` — literally the tool `hostPrerequisites` now probes
+  off the manifest's prerequisite list — so one host fact landed twice under two
+  names with two severities (`Warn` vs `Fail`) and two different exit-code
+  consequences. The retired one was also the weaker probe: no `pythonMinVersion`
+  floor, and no `py`-launcher widening, so a Windows host with only the launcher
+  installed got a `python` `Warn` beside a `hostPrerequisites` `Pass` about the
+  same interpreter. **A consumer matching the `python` check name or the
+  `doctor.python` issue code must move to `hostPrerequisites` /
+  `doctor.hostPrerequisites`**, which reports the same fact as a `Fail`.
+  `tan doctor --build` is unaffected (it never had this check).
+- **`tan support-bundle`'s doctor payload gained `missingPrerequisites` and the
+  `hostPrerequisites` check.** The bundle (payload `schemaVersion` `"1"`) built
+  its `DoctorReport` without ever running the prerequisite gate, so it serialized
+  `"missingPrerequisites": null` — which that field defines as "checked, nothing
+  missing" — for a host nobody probed. A bundle is what a user attaches
+  *precisely when bootstrap failed*, so it both hid the missing `ninja` and
+  asserted the host was fine. It now runs the same gate, which also means **a
+  missing prerequisite makes `tan support-bundle` exit `4` and emit a
+  `support-bundle.hostPrerequisites` error issue** (the bundle file is still
+  written). Payload `schemaVersion` stays `"1"`: additive and optional.
+- **`nextSteps` now includes the remediation of every appended check.**
+  `nextSteps` was computed once inside the report builders, before `tan-cli`
+  appends the checks that need IO — `hostPrerequisites`, `sdkProvenance`, and
+  on `--build` the project/workspace preflight and the `--fix` bootstrap outcome
+  — so those checks' `fix` strings never reached the field the envelope
+  documents as "deduplicated remediation steps for non-passing checks" and the
+  extension renders as a Fix button. Appending a check now re-derives the field
+  as part of the same call (`tan_core::append_doctor_check` /
+  `prepend_doctor_checks`), so there is no trailing recompute statement left for
+  a caller to forget. **`nextSteps` gains entries and follows check order**; on
+  `--build` the preflight's `tan sdk switch <path>` / `tan init` now lead it.
 - **`tan bootstrap`'s two Python-floor refusals report under their own issue
   codes.** A host whose `python` does not run now raises
   `bootstrap.python-not-runnable`, and one below `pythonMinVersion` raises
@@ -54,6 +169,55 @@ All notable changes to `tan` are documented here. Format follows
   the missing-tool case it originally described. (#70)
 
 ### Fixed
+- **`tan sdk list` failed behind an HTTP proxy or a TLS-intercepting
+  middlebox.** Two independent causes on the only command that makes an
+  **in-process HTTP** request. It called a bare `ureq::get`, and ureq 2.x's
+  default agent neither reads `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (that
+  needs `AgentBuilder` + `try_proxy_from_env`) nor consults the OS trust store
+  — its rustls config trusts only the bundled webpki roots, so a corporate
+  middlebox re-signing with a private CA from the Windows/macOS/Linux system
+  store failed the handshake outright. Every in-process HTTP call now goes
+  through one shared agent that honours the proxy environment (SOCKS included —
+  ureq reads `ALL_PROXY` first, so its `socks-proxy` feature is now on;
+  without it a `socks5://` tunnel would have hard-failed where it previously
+  went direct) and trusts the bundled webpki roots **and** the system store
+  (ureq's own `native-certs` feature would have swapped one for the other,
+  breaking a host with an empty OS store instead). The agent also caps a whole
+  request at 60 s — proxied now, a black-hole proxy would otherwise hang `tan`
+  forever, and the extension waits on process exit.
+  **Scheme-correct by choice.** Only `ALL_PROXY`/`HTTPS_PROXY` (and their
+  lowercase aliases) select the proxy, in that precedence order.
+  `HTTP_PROXY`/`http_proxy` are *not* applied to these `https://` requests, even
+  though ureq's own `try_proxy_from_env` would apply them regardless of scheme:
+  curl, git and Python all treat `HTTP_PROXY` as plain-HTTP-only, and a
+  corporate host exporting just that one would otherwise have its GitHub request
+  pushed through a proxy that may refuse `CONNECT` — breaking a machine that
+  worked going direct. An empty value (`HTTPS_PROXY=`) counts as unset.
+  **`NO_PROXY` is honoured**, for the same reason — ureq 2.12 has no support for
+  it, and without it a host that sets both `HTTPS_PROXY` and a `NO_PROXY`
+  covering GitHub would go from working-direct to proxied. Matching follows
+  curl/git/Python: `*` bypasses everything; the list is comma-separated with
+  whitespace and empty entries ignored; comparison is case-insensitive; an entry
+  matches the host exactly or as a suffix **on a label boundary**, so both
+  `github.com` and `.github.com` cover `api.github.com` while `hub.com` covers
+  neither; and a `:port` on an entry is ignored (every request here is 443).
+  The subprocesses `tan` spawns for network work (`git clone` in
+  `tan sdk install`, `pip`/`west update` in `tan bootstrap`) are untouched by
+  any of this: they inherit the proxy environment and use their own trust
+  stores.
+  A handshake or proxy failure — including `tan sdk install`'s `git clone` —
+  now names the likely cause, a proxy or an untrusted corporate CA (without
+  naming a specific knob — git's `http.sslCAInfo` would be wrong advice on the
+  in-process path that shares the sentence), rather than
+  surfacing a raw error a user reads as "the network is down"; a proxy that is
+  set but unreachable is named too, from the environment, since ureq reports
+  that as a plain connect failure that never says "proxy". That sentence names
+  `ALL_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and deliberately not `HTTP_PROXY`: both
+  paths that reach it are `https://` (the API GET and the `git clone`), neither
+  applies `HTTP_PROXY` to those, and a user who followed the advice and edited
+  it would see no effect. Only the message text of the `sdk.fetch-failed` /
+  `sdk.install-failed` issues gains that sentence; no issue code or `data` field
+  changed. Absent proxy environment variables behave exactly as before.
 - **`tan sdk switch` left `.west/config` pinned to the old SDK version.**
   The reconciliation that keeps `<topdir>/.west/config`'s `manifest.path` in
   sync already existed for `tan bootstrap` (#31), but `sdk switch` only ever
