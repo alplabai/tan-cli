@@ -49,7 +49,13 @@ pub struct SdkRelease {
 /// the environment (IO) and tells us; `tan-cli`'s `http::proxy_configured` is it.
 pub fn describe_network_error(error: &str, proxy_configured: bool) -> String {
     let lower = error.to_ascii_lowercase();
-    let proxy_hint = "Check ALL_PROXY/HTTPS_PROXY/HTTP_PROXY — the configured proxy refused or could not complete the connection.";
+    // Names only the variables that actually steer these requests. Both paths
+    // that reach here are `https://` — the in-process API GET and `sdk install`'s
+    // `git clone` — and neither `tan` nor git applies `HTTP_PROXY` to an https
+    // URL, so naming it sent the user to edit a variable that changes nothing.
+    // `NO_PROXY` is named instead because it is the knob that *fixes* this exact
+    // failure when the host is reachable directly.
+    let proxy_hint = "Check ALL_PROXY/HTTPS_PROXY/NO_PROXY — the configured proxy refused or could not complete the connection.";
     // Named-proxy first: a proxy CONNECT/auth failure that also mentions TLS is
     // still a proxy problem to look at first, so it must beat the certificate
     // arm. A certificate/TLS failure comes next even when a proxy IS set — the

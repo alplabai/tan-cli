@@ -33,11 +33,15 @@
 //! precedence rule is pure and lives in `tan_core::select_https_proxy`; reading
 //! the environment is the IO part and stays here.
 //!
-//! **Known limitation: `NO_PROXY` is not honoured.** ureq 2.12 has no support
-//! for it at all, and the only host this module ever talks to is GitHub's API —
-//! an external host, which is not what a `NO_PROXY` list is for. Implementing it
-//! here would mean building the agent per-URL instead of once per process; if a
-//! second, possibly-internal endpoint ever appears, do that then.
+//! `NO_PROXY` is honoured for the same reason. ureq 2.12 has no support for it,
+//! and without it a corporate host that sets both `HTTPS_PROXY` and a `NO_PROXY`
+//! covering GitHub would go from working-direct to proxied — the same
+//! broke-a-working-machine failure the `HTTP_PROXY` rule avoids, aimed at the
+//! population this module exists to help. The matching rules live with the
+//! precedence rule in `tan_core::select_https_proxy`. Applying them costs
+//! nothing here because `GITHUB_RELEASES_URL` is the only URL any in-process
+//! call requests, so the one process-wide agent has exactly one target host; a
+//! second endpoint would need the agent built per-host instead.
 //!
 //! Reading the OS trust store and the process environment is IO, so this lives
 //! in `tan-cli`; the pure "what does this transport error probably mean" mapping
@@ -65,8 +69,9 @@ pub fn agent() -> &'static ureq::Agent {
 /// Split out from [`agent`] purely so both of those parts are testable: the
 /// 60 s production cap is far too long to drive from a test, and the proxy comes
 /// from the process environment, which a test must not mutate. With them as
-/// arguments a test can point a 1 s agent at a local socket instead.
-fn build_agent(timeout: Duration, proxy: Option<ureq::Proxy>) -> ureq::Agent {
+/// arguments a test can point a 1 s agent at a local socket instead — which
+/// `commands::sdk`'s `fetch_releases` test also does, hence `pub(crate)`.
+pub(crate) fn build_agent(timeout: Duration, proxy: Option<ureq::Proxy>) -> ureq::Agent {
     let mut builder = ureq::AgentBuilder::new()
         .timeout(timeout)
         .tls_config(Arc::new(tls_config()));
@@ -76,29 +81,38 @@ fn build_agent(timeout: Duration, proxy: Option<ureq::Proxy>) -> ureq::Agent {
     builder.build()
 }
 
-/// The proxy URL for our (always `https://`) requests, per the environment.
-fn env_proxy_url() -> Option<String> {
-    tan_core::select_https_proxy(|key| std::env::var(key).ok())
-}
-
-/// The same, parsed. An unparseable value degrades to a direct connection rather
-/// than failing the command: `ureq::Proxy::new` rejects e.g. a `pac+http://`
-/// URL, and going direct is what happened before we read the environment at all.
+/// The proxy this process should route its requests through, parsed, or `None`
+/// for a direct connection.
+///
+/// Reading the environment is the only IO here; which variable wins, and whether
+/// `NO_PROXY` exempts the target, are decided by the pure rule in `tan-core`.
+/// Called with [`tan_core::GITHUB_RELEASES_URL`] because that is the only URL
+/// any in-process request targets — see the module docs.
+///
+/// An unparseable value degrades to a direct connection rather than failing the
+/// command: `ureq::Proxy::new` rejects e.g. a `pac+http://` URL, and going
+/// direct is what happened before we read the environment at all.
 fn env_proxy() -> Option<ureq::Proxy> {
-    ureq::Proxy::new(env_proxy_url()?).ok()
+    let url =
+        tan_core::select_https_proxy(tan_core::GITHUB_RELEASES_URL, |key| std::env::var(key).ok())?;
+    ureq::Proxy::new(url).ok()
 }
 
-/// Whether this process is configured to reach the network through a proxy.
+/// Whether this process will actually reach the network through a proxy.
 ///
 /// The one bit `tan_core::describe_network_error` cannot see for itself: a proxy
 /// that is unreachable, refused or firewalled fails as a plain `ConnectionFailed`
 /// that never says the word "proxy", so the raw string alone cannot tell that
-/// case apart from a genuinely dead network. Scheme-aware for the same reason
-/// [`env_proxy`] is: both callers are `https://` URLs (the API GET here and
-/// `git clone` in `sdk install`, which applies `HTTP_PROXY` per-scheme too), so
-/// an `HTTP_PROXY`-only host has no proxy in play and must not be told it does.
+/// case apart from a genuinely dead network. Deliberately the *same* answer
+/// [`env_proxy`] gives rather than a second reading of the environment: a
+/// scheme-only or `NO_PROXY`-exempt or unparseable value means the request went
+/// direct, and telling the user to go check their proxy settings then sends them
+/// to a knob that had no effect on the failure they are looking at. The one
+/// approximation left: `sdk install`'s `git clone` targets `github.com`, not
+/// `api.github.com`, so a `NO_PROXY` naming only the API host would make this
+/// under-report for that caller — a missing hint, never a wrong one.
 pub fn proxy_configured() -> bool {
-    env_proxy_url().is_some()
+    env_proxy().is_some()
 }
 
 /// rustls config trusting the bundled webpki roots **and** the OS trust store.
@@ -163,6 +177,17 @@ mod tests {
             .map(|outcome| outcome.expect("a black hole never answers, so this cannot succeed"))
     }
 
+    /// Covers [`root_store`] only — **not** the CA fix end to end.
+    ///
+    /// Worth stating plainly, because "the CA merge is tested" is the easy
+    /// misreading: this proves the merged store contains both sets of anchors,
+    /// and nothing here proves [`build_agent`] installs that store on the agent.
+    /// Delete `.tls_config(…)` from `build_agent` and the agent silently reverts
+    /// to bundled-roots-only — the whole fix undone — with this test still green.
+    /// Closing that gap needs a TLS server with a throwaway CA (rcgen + a rustls
+    /// listener), which is a dependency and a fixture out of proportion to a
+    /// three-line builder call; if this module ever grows a second TLS concern,
+    /// build it then.
     #[test]
     fn the_os_trust_store_is_merged_in_on_top_of_the_bundled_roots() {
         let merged = root_store();
@@ -194,6 +219,7 @@ mod tests {
             );
         }
         // …and the config actually builds with them (ring provider available).
+        // Note this is still only `tls_config`, not the agent — see above.
         let _ = tls_config();
     }
 
