@@ -522,6 +522,39 @@ boot_order: []
         std::fs::remove_dir_all(&cwd).ok();
     }
 
+    /// The producer half of a cross-module assumption. `resolve_zephyr_artefact`
+    /// is tan's ONLY writer of a slice's `output_artefact` (alp-sdk is
+    /// planner/emit-only and never writes it), and it names `zephyr.elf` for
+    /// EVERY zephyr slice — native_sim included, where the runnable is the
+    /// sibling `zephyr.exe`. `tan run` and `tan debug-config` both depend on
+    /// that: each resolves the host binary by swapping the filename
+    /// (`tan_core::run::native_sim_exe_beside`). #83 shipped a `program`
+    /// pointing at the ELF precisely because its test fixture asserted a
+    /// `.exe` manifest this function cannot produce, and nothing on this side
+    /// contradicted it. So pin it HERE, where the string is actually decided:
+    /// add a native_sim `.exe` branch above and this fails, instead of two
+    /// consumer fixtures quietly going stale.
+    #[test]
+    fn resolve_zephyr_artefact_names_the_elf_even_for_a_native_sim_slice() {
+        let cwd = unique_temp_dir("alp-resolve-native-sim");
+        let _ = std::fs::remove_dir_all(&cwd);
+        let out_dir = cwd.join("build").join("zephyr");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // What a real native_sim build leaves behind: BOTH files, side by side.
+        std::fs::write(out_dir.join("zephyr.elf"), b"elf").unwrap();
+        std::fs::write(out_dir.join("zephyr.exe"), b"exe").unwrap();
+
+        let (artefact, _) = resolve_zephyr_artefact(&cwd, &[]);
+        let artefact = artefact.expect("a built slice resolves an artefact");
+        assert!(
+            artefact.ends_with("zephyr.elf"),
+            "the manifest must record the ELF even when a runnable .exe sits \
+             beside it — consumers resolve the host binary from it: {artefact}"
+        );
+
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
     #[test]
     fn sdk_stamp_round_trips_through_write_and_read() {
         let cwd = unique_temp_dir("alp-sdk-stamp-roundtrip");

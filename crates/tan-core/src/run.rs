@@ -31,12 +31,14 @@
 //! could not establish a target at all (the SDK emit itself failed to
 //! produce/parse) — treated as unconfirmed, not as "not native_sim".
 
+use std::path::{Path, PathBuf};
+
 use crate::system_manifest::{Slice, SystemManifest};
 
 /// The literal binary Zephyr's `native_sim` target produces — a fixed name on
 /// every host OS (Zephyr's own native-target naming, not a Windows suffix). It
 /// sits beside `zephyr.elf` in the build's `zephyr/` output dir.
-pub const NATIVE_SIM_EXE: &str = "zephyr.exe";
+pub(crate) const NATIVE_SIM_EXE: &str = "zephyr.exe";
 
 /// The Zephyr board target of a `native_sim` slice — the robust discriminator
 /// for the host build (an actual `board` value from the manifest, not a
@@ -145,6 +147,47 @@ pub fn native_sim_slice(manifest: &SystemManifest) -> Option<&Slice> {
 /// board-qualifier syntax instead of an arbitrary substring.
 fn is_native_sim_board(board: &str) -> bool {
     board == NATIVE_SIM_BOARD || board.starts_with("native_sim/")
+}
+
+/// Swap a native_sim slice's `output_artefact` for the runnable
+/// [`NATIVE_SIM_EXE`] that sits beside it, as a STRING — for a value that
+/// gets emitted (`tan debug-config`'s `program`, read by a debug adapter out
+/// of `launch.json`). Pure: no IO, nothing is probed.
+///
+/// A manifest NEVER records the `.exe`. `resolve_zephyr_artefact`
+/// (`tan-cli`'s `build/execute/manifest.rs`, pinned by
+/// `resolve_zephyr_artefact_names_the_elf_even_for_a_native_sim_slice`) is
+/// the only writer of `output_artefact` in tan — alp-sdk is planner/emit-only
+/// and never writes it — and it stores `<slice-cwd>/build/zephyr/zephyr.elf`
+/// unconditionally, for every zephyr slice including native_sim. There is no
+/// `.exe` branch. So every consumer that wants the host runnable has to make
+/// this swap, and they must all make the SAME one: `tan run` carrying its own
+/// copy of the rule while `tan debug-config` took the artefact verbatim is
+/// exactly how #83 landed a `program` pointing at an unlaunchable
+/// `zephyr.elf`. [`NATIVE_SIM_EXE`] is deliberately crate-private so these
+/// two functions are the ONLY way to spell the rule — a third caller cannot
+/// hand-roll `parent().join(NATIVE_SIM_EXE)` again.
+///
+/// Splits on the separator the path itself uses rather than going through
+/// `Path::with_file_name`, which on Windows rejoins with `\` and would turn a
+/// `/`-authored manifest path into a mixed `a/b\zephyr.exe` — visible, since
+/// this form's output ships to a consumer verbatim.
+pub fn native_sim_exe_beside(elf: &str) -> String {
+    match elf.rfind(['/', '\\']) {
+        Some(sep) => format!("{}{NATIVE_SIM_EXE}", &elf[..=sep]),
+        None => NATIVE_SIM_EXE.to_string(),
+    }
+}
+
+/// [`native_sim_exe_beside`] for a value that is PROBED rather than emitted
+/// (`tan run` stats the result and executes it). Same rule, `Path` in and
+/// `Path` out so it is lossless: a build dir with a non-UTF-8 component would
+/// come back U+FFFD-mangled through the string form, `is_file()` would then
+/// say false, and `tan run` would report no runnable for a slice that built
+/// perfectly well. Nothing here is emitted, so the separator fidelity the
+/// string form buys is not needed — `with_file_name` is exactly right.
+pub fn native_sim_exe_beside_path(elf: &Path) -> PathBuf {
+    elf.with_file_name(NATIVE_SIM_EXE)
 }
 
 #[cfg(test)]
@@ -362,5 +405,30 @@ boot_order: []
                          ok\nipc: []\nhelper_mcus: []\nboot_order: []\n";
         let m = parse_system_manifest(manifest).unwrap();
         assert!(native_sim_slice(&m).is_none());
+    }
+
+    #[test]
+    fn native_sim_exe_replaces_only_the_elf_filename() {
+        // The shape `resolve_zephyr_artefact` actually writes.
+        assert_eq!(
+            native_sim_exe_beside("/ws/build/native_sim-zephyr/build/zephyr/zephyr.elf"),
+            format!("/ws/build/native_sim-zephyr/build/zephyr/{NATIVE_SIM_EXE}")
+        );
+        // A bare filename has no directory to preserve; a path already naming
+        // the exe is idempotent; a `\`-authored path keeps its own separator
+        // instead of coming back mixed.
+        assert_eq!(native_sim_exe_beside("zephyr.elf"), NATIVE_SIM_EXE);
+        assert_eq!(native_sim_exe_beside("a/zephyr.exe"), "a/zephyr.exe");
+        assert_eq!(
+            native_sim_exe_beside(r"C:\ws\build\zephyr\zephyr.elf"),
+            r"C:\ws\build\zephyr\zephyr.exe"
+        );
+        // The lossless `Path` form (`tan run`, probe-only) must agree with the
+        // string form (`tan debug-config`, emitted) on a native-separator
+        // path — one rule, two representations, and nothing else may spell it.
+        assert_eq!(
+            native_sim_exe_beside_path(Path::new("/ws/build/zephyr/zephyr.elf")),
+            PathBuf::from(native_sim_exe_beside("/ws/build/zephyr/zephyr.elf"))
+        );
     }
 }
