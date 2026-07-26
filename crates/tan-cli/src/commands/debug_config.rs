@@ -488,7 +488,8 @@ fn resolve_from_build(
         // included: `resolve_zephyr_artefact` (build/execute/manifest.rs) is
         // tan's only writer of `output_artefact` and stores
         // `<slice-cwd>/build/zephyr/zephyr.elf` unconditionally — there is no
-        // `.exe` branch, and alp-sdk (planner-only) writes the field at all.
+        // `.exe` branch, and alp-sdk (planner-only) never writes the field at
+        // all.
         // So a host target needs the sibling swap, via the same tan-core
         // helper `tan run` uses; every other target kind genuinely wants the
         // artefact verbatim. #83 took it verbatim here too, which pointed
@@ -648,10 +649,18 @@ mod tests {
     /// BOTH slices record `zephyr.elf`, because that is the only thing tan
     /// ever writes: `resolve_zephyr_artefact` (build/execute/manifest.rs)
     /// stores `<slice-cwd>/build/zephyr/zephyr.elf` unconditionally, with no
-    /// `.exe` branch for native_sim, and alp-sdk writes `output_artefact` at
-    /// all. This fixture originally wrote `zephyr.exe` on the native_sim
+    /// `.exe` branch for native_sim, and alp-sdk NEVER writes `output_artefact`
+    /// at all. This fixture originally wrote `zephyr.exe` on the native_sim
     /// slice — a manifest tan cannot produce — which is precisely why it
     /// could not see that `resolve_from_build` was taking the ELF verbatim.
+    ///
+    /// That `.elf` claim is not prose here: it is pinned on the PRODUCER side
+    /// by `build::execute::manifest`'s
+    /// `resolve_zephyr_artefact_names_the_elf_even_for_a_native_sim_slice`.
+    /// If a `.exe` branch is ever added there, that test fails and this
+    /// fixture gets revisited — rather than both silently drifting back to
+    /// encoding a manifest tan cannot produce, which is the blind spot itself
+    /// and not merely #83's instance of it.
     fn manifest_mcu_then_native_sim(workspace: &Path) -> String {
         let root = workspace.to_string_lossy().replace('\\', "/");
         format!(

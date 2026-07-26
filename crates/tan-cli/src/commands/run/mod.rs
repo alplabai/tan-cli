@@ -45,7 +45,7 @@ use std::process::Command;
 use serde_json::{Value, json};
 use tan_core::ProjectContext;
 use tan_core::flash::resolve_artefact_path;
-use tan_core::run::{RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice};
+use tan_core::run::{RunAction, decide_run_action, native_sim_exe_beside_path, native_sim_slice};
 use tan_core::system_manifest::parse_system_manifest;
 
 use super::CommandRun;
@@ -245,8 +245,11 @@ fn find_native_sim_exe(g: &GlobalArgs, base: &Path) -> Option<PathBuf> {
     // dir. The swap itself is `tan-core`'s, shared with `tan debug-config` —
     // this used to be a local `parent()/NATIVE_SIM_EXE` and debug-config had
     // no equivalent at all, which is how #83 shipped a `program` pointing at
-    // the ELF.
-    let exe = PathBuf::from(native_sim_exe_beside(&elf_path.to_string_lossy()));
+    // the ELF. The `_path` form because this value is only probed: it must
+    // survive a non-UTF-8 path component that a `String` round-trip would
+    // mangle into U+FFFD, making `is_file()` false and reporting no runnable
+    // for a slice that built fine.
+    let exe = native_sim_exe_beside_path(&elf_path);
     exe.is_file().then_some(exe)
 }
 

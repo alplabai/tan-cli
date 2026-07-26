@@ -39,6 +39,17 @@ One directory per case, mirroring the retired `cli-rs/contract` harness:
 SDK checkout tree consumed by `crates/tan-cli/src/commands/presets.rs`'s own
 unit tests, not an envelope golden.
 
+## What a golden does NOT cover: key ORDER
+
+The diff is `assert_eq!` on two `serde_json::Value`s, and under this
+workspace's `preserve_order` feature `Map`'s equality is **order-insensitive**
+(it is `IndexMap`'s). So a golden pins the key **set** and the values, never
+the order they are emitted in — swapping `serde_json::Map::shift_remove` for
+the order-scrambling `remove` in `debug_launch.rs` leaves all twelve cases
+green while failing named `tan-core` unit tests. Key order is a real contract
+for the commands that mirror the TS CLI's output; pin it with a serialized-
+string assertion in the owning module's own tests, not here.
+
 ## Determinism
 
 The harness makes every case reproducible on any machine or CI runner, not
