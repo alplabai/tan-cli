@@ -73,7 +73,7 @@ _tan() {
           _arguments '--path[Field path]' '--format[Output format]:format:(text json)'
           ;;
         debug-config)
-          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--preview[Preview only]' '--format[Output format]:format:(text json)'
+          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--core[Build slice core id]' '--pre-launch-task[VS Code task to run before launching]' '--preview[Preview only]' '--format[Output format]:format:(text json)'
           ;;
         support-bundle)
           _arguments '--destination[Output directory]:path:_files -/' '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--path[Field path]' '--format[Output format]:format:(text json)'

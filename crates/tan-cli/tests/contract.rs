@@ -35,7 +35,11 @@ const PATH_KEYS: &[&str] = &[
     "sdkPinned",
     "written",
     "unchanged",
+    "launchJsonPath",
 ];
+
+/// The placeholder a golden spells the case's own scratch directory as.
+const WORK_DIR_TOKEN: &str = "__WORKDIR__";
 
 /// Recursively normalizes `\`→`/` on path-shaped fields only (see
 /// `PATH_KEYS`) so a golden captured on one OS matches a capture on any
@@ -45,21 +49,33 @@ const PATH_KEYS: &[&str] = &[
 /// an array inherits its own key so e.g. every string in `written: [...]`
 /// is still recognized. Goldens are authored with forward slashes; only the
 /// freshly captured side needs normalizing before the diff.
-fn normalize(value: &mut serde_json::Value, key: Option<&str>) {
+fn normalize(value: &mut serde_json::Value, key: Option<&str>, work_dir_marker: &str) {
     match value {
         serde_json::Value::String(s) => {
             if key.is_some_and(|k| PATH_KEYS.contains(&k)) {
                 *s = s.replace('\\', "/");
+                // Some commands reflect the ABSOLUTE working directory back
+                // (`debug-config` reports `project.root` and the launch.json
+                // path it would write). That value is machine-specific AND
+                // pid-specific, so it can only be pinned as a token. Anchor on
+                // the case's own unique scratch-dir marker rather than on the
+                // harness's `work_dir` string: on macOS `$TMPDIR` is a symlink
+                // (`/var/…`) that `std::env::current_dir()` resolves through
+                // (`/private/var/…`), so a whole-prefix comparison would miss
+                // there and only there.
+                if let Some(at) = s.find(work_dir_marker) {
+                    *s = format!("{WORK_DIR_TOKEN}{}", &s[at + work_dir_marker.len()..]);
+                }
             }
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                normalize(item, key);
+                normalize(item, key, work_dir_marker);
             }
         }
         serde_json::Value::Object(map) => {
             for (k, v) in map.iter_mut() {
-                normalize(v, Some(k.as_str()));
+                normalize(v, Some(k.as_str()), work_dir_marker);
             }
         }
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
@@ -172,7 +188,9 @@ fn run_case(case_name: &str) {
 
     let mut actual: serde_json::Value = serde_json::from_str(stdout.trim())
         .unwrap_or_else(|e| panic!("{case_name}: stdout is not valid JSON: {e}\n---\n{stdout}"));
-    normalize(&mut actual, None);
+    // Mirrors `fresh_dir`'s layout: `<temp>/tan-contract-<case>-<pid>/root`.
+    let work_dir_marker = format!("tan-contract-{case_name}-{}/root", std::process::id());
+    normalize(&mut actual, None, &work_dir_marker);
     let expected: serde_json::Value = serde_json::from_str(expected_json.trim())
         .unwrap_or_else(|e| panic!("{case_name}: expected.json is not valid JSON: {e}"));
 
@@ -203,6 +221,27 @@ contract_case!(
 contract_case!(sdk_current_no_sdk, "sdk-current-no-sdk");
 contract_case!(sdk_unknown_subcommand, "sdk-unknown-subcommand");
 contract_case!(generate_board_yaml_missing, "generate-board-yaml-missing");
+// One profile per `--target-kind`. The four `configuration` objects ARE the
+// product of this command — alp-sdk-vscode#342 writes them into launch.json
+// verbatim — so the golden pins the emitted KEY SET, not just the envelope
+// wrapper: an added key (a `preLaunchTask` naming a task nothing provides) or
+// a changed `program`/`executable` fails here instead of reaching a consumer.
+contract_case!(
+    debug_config_preview_zephyr_mcu,
+    "debug-config-preview-zephyr-mcu"
+);
+contract_case!(
+    debug_config_preview_baremetal_mcu,
+    "debug-config-preview-baremetal-mcu"
+);
+contract_case!(
+    debug_config_preview_yocto_userspace,
+    "debug-config-preview-yocto-userspace"
+);
+contract_case!(
+    debug_config_preview_native_host,
+    "debug-config-preview-native-host"
+);
 
 /// Not a golden-diff case: `tan --version`'s first stdout line is its own
 /// small contract (the vscode extension parses it to gate feature

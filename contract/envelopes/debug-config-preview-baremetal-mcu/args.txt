@@ -1,0 +1,8 @@
+--format
+json
+debug-config
+--target-kind
+baremetal-mcu
+--server
+openocd
+--preview

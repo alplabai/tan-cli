@@ -1,0 +1,8 @@
+--format
+json
+debug-config
+--target-kind
+yocto-userspace
+--server
+gdbserver
+--preview
