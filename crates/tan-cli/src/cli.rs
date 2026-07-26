@@ -214,9 +214,11 @@ pub struct SizeArgs {
 /// Args for `renode`: boot the built system-manifest's single Zephyr slice in
 /// headless Renode. Native — mirrors the retired `west alp-renode` flags
 /// (positional `app_path`, `--build-root`, `--board`, `--image-bundle`, `--log`,
-/// `--timeout`, `--expect`, `--sim-mode`). `--sim-mode` is wired for surface
-/// stability but errors "not yet ported" (studio sim gateway, deferred as
-/// `tan-cli#77`; historical contract `alp-sdk#674`, cited as prior art only).
+/// `--timeout`, `--expect`, `--sim-mode`). `--sim-mode` serves the studio sim
+/// gateway's SOCKET contract (`tan-cli#77`, ported from the retired Python);
+/// the `ram_console_buf` UART streamer and the per-SKU sim profiles behind the
+/// descriptor's `framebuffers`/`peripherals` remain deferred on that issue.
+/// Historical contract `alp-sdk#674` (closed) — always with its owning repo.
 #[derive(Debug, Args)]
 pub struct RenodeArgs {
     /// Application source directory (default: `.`). Used to derive the default
@@ -252,14 +254,18 @@ pub struct RenodeArgs {
     /// line; exit 1 if the run ends without it.
     #[arg(long, value_name = "STR")]
     pub expect: Option<String>,
-    /// DEFERRED studio hardware-simulator mode (`tan-cli#77`): wired for
-    /// surface stability but errors "not yet ported" until studio is
-    /// repointed to `tan`. Historical contract `alp-sdk#674` (closed).
+    /// Studio hardware-simulator mode: boot `--image-bundle`'s firmware
+    /// headless and serve the control + UART sockets named by the bundle's
+    /// `sim-descriptor.json`. Requires `--image-bundle`; `--expect` is ignored.
     // NOT a doc comment: clap prints the lines above verbatim in `tan renode
-    // --help`, so repo-internal citation policy does not belong there. Both
-    // issue numbers carry their repo because a bare `#674` is what let three
-    // alp-sdk workflows drift into linking `tan-cli#674` — an issue that has
-    // never existed here and 404s.
+    // --help`, so repo-internal citation policy does not belong there. The
+    // socket half is implemented (`tan-cli#77`, ported from the retired Python
+    // `west alp-renode --sim-mode`); the ram_console → UART streamer, the
+    // wired-UART console path and the per-SKU sim profiles stay deferred on the
+    // same issue, which is why the UART socket is silent for now. The
+    // historical contract is `alp-sdk#674`. Both issue numbers carry their repo
+    // because a bare `#674` is what let three alp-sdk workflows drift into
+    // linking `tan-cli#674` — an issue that has never existed here and 404s.
     #[arg(long = "sim-mode")]
     pub sim_mode: bool,
 }
