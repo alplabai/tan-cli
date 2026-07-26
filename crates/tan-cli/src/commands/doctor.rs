@@ -218,6 +218,14 @@ fn assemble_doctor_report(
 /// gate and report its verdict, so a missing `ninja` is visible from plain
 /// `tan doctor` (alp-sdk ADR 0021, Lane 1 P0a).
 ///
+/// The `ninja` case is WINDOWS-ONLY, because the tool list is: the manifest's
+/// `prerequisites.posix` is `[git, cmake, python3]` and names no `ninja` at all
+/// (`prerequisites.windows` adds it). The manifest records that asymmetry
+/// faithfully rather than unifying the two lists, and so does this — on a
+/// Linux/macOS host a missing `ninja` still surfaces only through
+/// `tan doctor --build`'s `BuildToolProbe`, which probes it by name on every
+/// platform.
+///
 /// PLAIN `tan doctor`, not `--build`, deliberately. Prerequisites are a HOST
 /// fact — they need no `board.yaml`, no workspace, no SDK — and P0a runs this
 /// BEFORE the bootstrap terminal exists, when there is nothing project-shaped to
@@ -668,8 +676,14 @@ fn null_project() -> Project {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use tan_core::bootstrap::{MissingPrerequisite, posix_refusal, windows_refusal};
+
+    /// A tool name no host can have, so the refusal path below is reached on
+    /// every platform instead of only on whichever host forgot to install
+    /// something.
+    const ABSENT_TOOL: &str = "tan-no-such-tool-xyz";
 
     /// A temp directory that removes itself on drop.
     ///
@@ -683,18 +697,22 @@ mod tests {
     /// of ONE process, so two tests sharing the pid-only name would collide
     /// non-deterministically (one's `remove_dir_all` deleting the other's tree
     /// mid-assertion).
-    struct TempTree(std::path::PathBuf);
+    ///
+    /// `pub(crate)` so `commands::support_bundle`'s own wiring test uses this
+    /// guard rather than a second copy of it — the label keying above already
+    /// makes it safe across modules.
+    pub(crate) struct TempTree(std::path::PathBuf);
 
     impl TempTree {
-        fn new(label: &str) -> Self {
+        pub(crate) fn new(label: &str) -> Self {
             let path =
-                std::env::temp_dir().join(format!("tan-doctor-{label}-{}", std::process::id()));
+                std::env::temp_dir().join(format!("tan-test-{label}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&path);
             std::fs::create_dir_all(&path).unwrap();
             Self(path)
         }
 
-        fn path(&self) -> &Path {
+        pub(crate) fn path(&self) -> &Path {
             &self.0
         }
     }
@@ -703,6 +721,39 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// `--format json` global args, optionally rooted at a scratch project.
+    /// `sdk_root: None` on purpose — the tests below assert on wiring that must
+    /// hold with no SDK resolved, which is also the state the extension calls
+    /// `tan doctor` in before anything is bootstrapped.
+    fn json_global(project: Option<&Path>) -> GlobalArgs {
+        GlobalArgs {
+            project: project.map(|p| p.to_string_lossy().into_owned()),
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: crate::cli::Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    /// The `data.checks[].name` list out of a serialized doctor envelope, in
+    /// order — the two `run` tests below assert on the checks the COMMAND
+    /// emitted, not on what a helper returns when called directly.
+    fn envelope_check_names(json: &str) -> Vec<String> {
+        let value: serde_json::Value = serde_json::from_str(json).expect("envelope is JSON");
+        value["data"]["checks"]
+            .as_array()
+            .expect("data.checks is an array")
+            .iter()
+            .map(|c| c["name"].as_str().unwrap_or_default().to_string())
+            .collect()
     }
 
     #[test]
@@ -737,19 +788,7 @@ mod tests {
 
     #[test]
     fn unsupported_server_emits_doctor_failure_envelope() {
-        let g = GlobalArgs {
-            project: None,
-            board_yaml: None,
-            sdk_root: None,
-            target: None,
-            all: false,
-            format: crate::cli::Format::Json,
-            verbose: false,
-            quiet: false,
-            no_color: false,
-            non_interactive: false,
-            ci: false,
-        };
+        let g = json_global(None);
         let run = unsupported_server(
             &g,
             "1970-01-01T00:00:00.000Z",
@@ -903,6 +942,139 @@ mod tests {
         // its fix has to be in the field the extension renders as a Fix button.
         // `next_steps` was computed by the report builder BEFORE this append.
         assert_eq!(report.next_steps, vec![fix]);
+    }
+
+    #[test]
+    fn a_refused_host_carries_the_structured_pairs_and_this_platforms_wording() {
+        // The two tests above run the gate on a CLEAN host, where `refusal` is
+        // always `None` -- so `refusal.map(|f| f.missing).unwrap_or_default()`
+        // could be replaced by `Vec::new()` and nothing failed, leaving
+        // `missingPrerequisites` permanently `null` even on a `Fail`. That is
+        // the exact "consumer must re-parse the prose" defect this branch
+        // removes, so the refusal has to be FORCED rather than waited for.
+        //
+        // Forced through a manifest, not a hand-made `PrereqFailure`: this is
+        // the one test that drives the whole `load_facts` -> probe ->
+        // `apply_prerequisite_check` chain the binary runs.
+        let root = TempTree::new("refused");
+        let metadata = root.path().join("metadata");
+        std::fs::create_dir_all(&metadata).unwrap();
+        // The REAL vendored manifest with only the two prerequisite lists
+        // repointed, so the fixture stays schema-valid as the manifest grows
+        // (a manifest tan REFUSED would take a different path entirely -- that
+        // one is `a_skewed_bootstrap_manifest_reaches_the_check_...` above).
+        let mut doc: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../contract/fixtures/bootstrap/manifest.json"
+        ))
+        .unwrap();
+        doc["prerequisites"]["posix"] = serde_json::json!([ABSENT_TOOL]);
+        doc["prerequisites"]["windows"] = serde_json::json!([ABSENT_TOOL]);
+        std::fs::write(metadata.join("bootstrap.json"), doc.to_string()).unwrap();
+
+        let mut report = empty_report(
+            "1970-01-01T00:00:00.000Z",
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            Vec::new(),
+        );
+        report.summary.fail = 0;
+        append_host_prerequisites(&mut report, Some(&root.path().to_string_lossy()));
+
+        assert_eq!(report.checks[0].name, "hostPrerequisites");
+        assert_eq!(report.checks[0].status, DoctorStatus::Fail);
+        // The headline field of the whole change: the machine half of the
+        // verdict, reaching the report from the SAME refusal the prose came
+        // from. `command: null` because tan knows no install one-liner for an
+        // unlisted tool -- and prose in that field is a button that fails.
+        assert_eq!(
+            report.missing_prerequisites,
+            Some(vec![MissingPrerequisite {
+                tool: ABSENT_TOOL.to_string(),
+                command: None,
+            }])
+        );
+        // `is_windows` wiring: the two refusals word themselves differently
+        // (Windows lists a per-tool hint line and a reopen-PowerShell tail),
+        // so hard-coding either side -- or letting `cfg!(windows)` decay to
+        // `false` -- shows up here rather than as a silently POSIX-shaped
+        // report on a Windows host.
+        let expected = if cfg!(windows) {
+            windows_refusal(&[ABSENT_TOOL])
+        } else {
+            posix_refusal(&[ABSENT_TOOL])
+        };
+        assert!(
+            report.checks[0]
+                .detail
+                .starts_with(&expected.lines.join(" ")),
+            "{}",
+            report.checks[0].detail
+        );
+        assert!(
+            report.checks[0]
+                .detail
+                .ends_with("(facts from alp-sdk metadata/bootstrap.json)"),
+            "{}",
+            report.checks[0].detail
+        );
+    }
+
+    #[test]
+    fn the_doctor_command_emits_the_host_prerequisite_check() {
+        // The wiring seam itself: `run` -> `assemble_doctor_report`. Swapping
+        // that one call for the bare `build_doctor_report` ships a binary with
+        // no `hostPrerequisites` check and `"missingPrerequisites": null` --
+        // the whole feature absent -- and every test above still passes,
+        // because they call the helper directly. Asserting on the emitted
+        // ENVELOPE is what closes it.
+        let tree = TempTree::new("run-plain");
+        let g = json_global(Some(tree.path()));
+        let run = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: false,
+                fix: false,
+            },
+        );
+        let json = run.json.expect("json envelope");
+        let names = envelope_check_names(&json);
+        assert!(names.iter().any(|n| n == "hostPrerequisites"), "{names:?}");
+    }
+
+    #[test]
+    fn doctor_build_reports_the_project_preflight_before_the_host_tool_probes() {
+        // Same seam, `--build` side: deleting the `prepend_doctor_checks(...,
+        // probe_build_preflight(...))` call leaves a report that probes host
+        // tools but never asks whether a build could start at all, and no test
+        // noticed. The ORDER is the assertion because prepending is the point:
+        // "no SDK selected" has to reach the user ahead of "west not found",
+        // which is merely its consequence.
+        let tree = TempTree::new("run-build");
+        let g = json_global(Some(tree.path()));
+        let run = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        );
+        let json = run.json.expect("json envelope");
+        let names = envelope_check_names(&json);
+        let west = names
+            .iter()
+            .position(|n| n == "west")
+            .unwrap_or_else(|| panic!("{names:?}"));
+        for name in ["sdk", "boardYaml", "workspace"] {
+            let at = names
+                .iter()
+                .position(|n| n == name)
+                .unwrap_or_else(|| panic!("{name} missing from {names:?}"));
+            assert!(at < west, "{name} must precede west: {names:?}");
+        }
     }
 
     #[test]

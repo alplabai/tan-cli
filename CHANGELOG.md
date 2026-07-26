@@ -33,7 +33,20 @@ All notable changes to `tan` are documented here. Format follows
   runs to find out why `tan bootstrap` refuses, so it is the last one that may
   swallow the reason — it reports it without repeating bootstrap's exit code.
   The same check is appended to `tan support-bundle`'s doctor payload, for the
-  reason below. (alp-sdk ADR 0021 P0a)
+  reason below. Two caveats worth stating plainly: **the `ninja` case above is
+  Windows-only**, because the tool list is — the manifest's
+  `prerequisites.posix` is `[git, cmake, python3]` and names no `ninja`, while
+  `prerequisites.windows` adds it, an asymmetry the manifest records faithfully
+  rather than unifying (on Linux/macOS a missing `ninja` still surfaces only
+  through `tan doctor --build`'s `BuildToolProbe`, which probes it by name on
+  every platform); and the gate **spawns interpreter subprocesses**
+  (`probe_host_python`, which is what makes this check a strict superset of the
+  retired `python` one), so plain `tan doctor` and `tan support-bundle` now cost
+  ~0.5 s per invocation where they previously did PATH lookups only (measured
+  516/548/516 ms for `tan --format json doctor`, debug build, Windows host).
+  That is the price of the check, not a regression — but the extension may call
+  plain `doctor` on activation, so it is recorded here rather than
+  misdiagnosed later. (alp-sdk ADR 0021 P0a)
 - **`tan bootstrap` reports its missing prerequisites as structured data.**
   The envelope's issue message is the message lines joined with a space, and
   an install command contains the same spaces the join used — so

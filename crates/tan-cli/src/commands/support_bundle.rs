@@ -477,6 +477,7 @@ fn null_project() -> Project {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::doctor::tests::TempTree;
 
     fn context() -> DebugWorkspaceContext {
         DebugWorkspaceContext {
@@ -538,6 +539,57 @@ mod tests {
         // Counted, not just appended -- the exit code is `summary.fail > 0`.
         let counted = doctor.summary.pass + doctor.summary.warn + doctor.summary.fail;
         assert_eq!(counted as usize, doctor.checks.len());
+    }
+
+    #[test]
+    fn the_written_bundle_file_carries_the_prerequisite_verdict() {
+        // The wiring seam: `run` -> `bundle_doctor_report`. Swapping that one
+        // call for the bare `build_doctor_report` writes a bundle whose doctor
+        // section has no `hostPrerequisites` check and `"missingPrerequisites":
+        // null` -- which that field DEFINES as "checked, nothing missing" --
+        // for a host nobody probed, and the test above still passes because it
+        // calls the helper directly. A bundle is attached PRECISELY when
+        // bootstrap failed, so it is the last artifact that may assert a host
+        // is clean without looking; assert on the file the command actually
+        // wrote.
+        let tree = TempTree::new("bundle-run");
+        let g = GlobalArgs {
+            project: Some(tree.path().to_string_lossy().into_owned()),
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: crate::cli::Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: false,
+            ci: false,
+        };
+        let run = run(
+            &g,
+            &SupportBundleArgs {
+                target_kind: None,
+                server: None,
+                path: None,
+                destination: Some(tree.path().to_string_lossy().into_owned()),
+            },
+        );
+        let json = run.json.expect("json envelope");
+        let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+        let output_path = envelope["data"]["outputPath"]
+            .as_str()
+            .expect("the bundle path is reported");
+        let bundle: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(output_path).expect("bundle written"))
+                .expect("bundle is JSON");
+        let names: Vec<&str> = bundle["doctor"]["checks"]
+            .as_array()
+            .expect("doctor.checks is an array")
+            .iter()
+            .map(|c| c["name"].as_str().unwrap_or_default())
+            .collect();
+        assert!(names.contains(&"hostPrerequisites"), "{names:?}");
     }
 
     #[test]
