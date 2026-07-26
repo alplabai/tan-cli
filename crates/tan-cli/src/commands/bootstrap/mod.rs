@@ -8,9 +8,9 @@
 //! No `bash` anywhere — native Windows is a first-class host (#49), so the two
 //! scripts are the parity oracle for CONTROL FLOW and message strings, not a
 //! runtime dependency. The FACTS come from `<sdkRoot>/metadata/bootstrap.json`
-//! (alp-sdk#917) — its own `_comment` (as vendored) still calls tan only an
-//! INTENDED future consumer that no code reads yet; `tan_core::bootstrap`'s
-//! `parse_bootstrap_manifest` is what makes that stale. The compiler
+//! (alp-sdk#917) — its own `_comment` names tan a real reader of those facts
+//! since tan-cli PR #55, and `tan_core::bootstrap`'s
+//! `parse_bootstrap_manifest` is that reader. The compiler
 //! toolchains (Zephyr SDK, vendor SDKs) stay out of scope; `doctor` detects +
 //! points to those.
 //!
@@ -422,7 +422,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         sdk_root: &sdk,
         workspace_dir: &ws,
     };
-    let mut text = optional_libs_block(&facts, host, &native(&paths.workspace_dir));
+    let mut text = optional_libs_block(&facts, host);
     text.push(String::new());
     // Deliberately NOT the oracles' "Bootstrap complete." — `doctor`'s
     // `bootstrap_fix_doctor_check` folds this exact line into its `bootstrapFix`
@@ -911,7 +911,7 @@ mod tests {
         // No metadata/bootstrap.json at all -> legacy SDK -> fallback constants.
         let legacy = load_facts(&sdk.to_string_lossy()).expect("absent manifest must fall back");
         assert!(!legacy.from_manifest);
-        assert_eq!(legacy.zephyr_version, "v4.4.0");
+        assert_eq!(legacy.zephyr_version, "v4.4.1");
 
         // Present and supported -> its values win.
         let metadata = sdk.join("metadata");

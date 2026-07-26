@@ -30,13 +30,12 @@ checked in the same order as `scaffold_byte_parity.py`: `--sdk`, then
 
 A SECOND, narrower non-failure case: the fixture existing on disk in the
 resolved alp-sdk checkout but NOT at the pinned ref `parity.yml`'s
-`seam1-plan-shape` job checks out. alp-sdk#893/#894 (the `--emit kconfig`
-feature) and its fixture (alp-sdk#897) postdate `PINNED_SDK_TAG` at the time
-this script was added -- there is no real SHA to pin to yet that carries the
-fixture, so a ref that never had it is "not yet applicable", logged as a
-NOTICE and treated as passing. This is temporary: once `PINNED_SDK_TAG` is
-bumped past alp-sdk#897 landing, a fixture missing upstream starts failing
-for real (see `run`'s docstring-adjacent comment). A byte MISMATCH (fixture
+`seam1-plan-shape` job checks out. A ref that never had the fixture is "not
+yet applicable", logged as a NOTICE and treated as passing. `PINNED_SDK_TAG`
+is now past alp-sdk#893/#894 (the `--emit kconfig` feature) and #897 (its
+fixture), so that branch is dead in CI today and only fires for an OLDER ref
+used locally; against the current pin a fixture missing upstream is a real
+removal and fails loudly. A byte MISMATCH (fixture
 present upstream, content differs) always fails regardless of the pin --
 that is the actual drift this gate exists to catch.
 """
@@ -86,14 +85,13 @@ def run(sdk_root: Path) -> bool:
         print(f"FAIL: vendored fixture missing at {VENDORED_PATH}")
         return False
     if not upstream_path.is_file():
-        # NOT a fail: `PINNED_SDK_TAG` (parity.yml) is a fixed ref that can
-        # legitimately predate alp-sdk#897 landing this fixture (the ref is
-        # bumped by hand -- see parity.yml's PINNED_SDK_TAG comment for the
-        # same lag on other Phase fields). A ref that never HAD this fixture
-        # is "not yet applicable", not drift -- unlike a byte MISMATCH below,
-        # which means the fixture existed and something about it changed,
-        # always a real fail. Once the pin bumps past #897 this branch stops
-        # firing and a real removal starts failing loudly instead.
+        # NOT a fail: `PINNED_SDK_TAG` (parity.yml) is a hand-bumped fixed ref,
+        # and a ref predating alp-sdk#897 landing this fixture has no such file
+        # at all. A ref that never HAD this fixture is "not yet applicable",
+        # not drift -- unlike a byte MISMATCH below, which means the fixture
+        # existed and something about it changed, always a real fail. The
+        # current pin is past #897, so in CI this branch is dead; it only fires
+        # for an older ref used locally.
         print(f"NOTICE: no fixture at {upstream_path} in this alp-sdk ref -- "
               f"pinned ref predates alp-sdk#893/#894/#897 landing the "
               f"canonical `--emit kconfig` contract anchor; not treated as "

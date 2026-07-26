@@ -32,14 +32,22 @@ env:
   # exactly as immutable as a tag without waiting on alp-sdk to cut one.
   # Carries the Phase-1 fields, the one allowed delta (debug.probe
   # openocd->null), the tokened-plan reconciliation branch `normalize_plan`
-  # exercises, alp-sdk#893/#894/#897 (the `--emit kconfig` fixture), AND
+  # exercises, alp-sdk#893/#894/#897 (the `--emit kconfig` fixture), and
   # alp-sdk#917/#928 (the `metadata/bootstrap.json` manifest + its
-  # `manualInstallHints` split) -- all four parity steps below verified PASS
-  # against this exact SHA (bootstrap-manifest 3180 bytes, kconfig 814 bytes,
-  # scaffold 6 trees, seam1 field diff clean). Re-bump (to a released tag once
-  # alp-sdk cuts one at or after this SHA, or straight to a later SHA) on
-  # every alp-sdk change this repo's parity gate should track.
-  PINNED_SDK_TAG: 8b216a04e0595cca64c7db65c3255c9b35bd63e0
+  # `manualInstallHints` split). Bumped past #917 to alp-sdk#961 (Arm-toolchain
+  # scoping, merged a27757b8f654b2d8d32a1a2a3f3ce640e9bade0c) and #967
+  # (dtc/gperf settled, merged at this very SHA), which together rewrote
+  # `manualInstallHints.windows.note` from one sentence to five elements and
+  # bumped `zephyr.version` to v4.4.1 -- the re-vendor that let tan-cli#82
+  # delete `optional_libs_block`'s duplicate hardcoded Arm/Zephyr-SDK block.
+  # Bootstrap manifest is 5473 bytes at this SHA (was 3180) and its byte-parity
+  # step is verified PASS locally against it; the kconfig / scaffold / seam1
+  # steps were verified at the previous SHA and are NOT re-verified at this one
+  # (they need an emit-capable Linux runner), so this bump is the first CI run
+  # that proves them here. Re-bump (to a released tag once alp-sdk cuts one at
+  # or after this SHA, or straight to a later SHA) on every alp-sdk change this
+  # repo's parity gate should track.
+  PINNED_SDK_TAG: 0ed078a6d04f4072ab00d8ce92cb2ac82f7adcbc
 
 jobs:
   seam1-plan-shape:

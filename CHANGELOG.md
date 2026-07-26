@@ -578,6 +578,33 @@ All notable changes to `tan` are documented here. Format follows
   (`.github/workflows/parity.yml`) is now pinned to that same commit, so the
   bootstrap-manifest byte-parity gate actually gates instead of
   NOTICE-and-passing. (#69)
+- **`tan bootstrap` printed the Arm GNU Toolchain URL and its PATH tip twice on
+  native Windows.** `contract/fixtures/bootstrap/manifest.json` is re-vendored
+  byte-for-byte from alp-sdk `0ed078a6` — past alp-sdk#961 (Arm-toolchain
+  scoping) and #967 (dtc/gperf settled), which between them rewrote
+  `manualInstallHints.windows.note` from one terse sentence into five elements
+  and bumped `zephyr.version` to `v4.4.1`. Note element 4 now carries the Arm
+  installer URL and the "tick 'Add path to environment variable'" tip verbatim,
+  and element 1 carries the Zephyr-SDK `west sdk install` fact together with its
+  workspace locator as prose — so `optional_libs_block`'s hardcoded
+  Arm/Zephyr-SDK block, kept only for as long as the vendored fixture predated
+  #961, became a word-for-word duplicate of the note printed immediately under
+  it. Deleted: the Windows arm is now the heading plus the manifest note and
+  nothing else, and the function no longer takes a `workspace_dir` (#961 dropped
+  the interpolated resolved path upstream as well, so `bootstrap.ps1` prints no
+  path there either — tan follows the oracle it mirrors rather than re-adding a
+  locator the SDK deliberately replaced with prose). The hand-ported fallback
+  constants, `ZEPHYR_VERSION` and `PINNED_SDK_TAG` move with the fixture. Note
+  element 3 also retires the deleted heading's "host tools like dtc", which was
+  simply wrong on Windows: the Zephyr SDK's native-Windows hosttools bundle
+  ships neither `dtc` nor `gperf`. No released SDK loses anything and every one
+  gains: `metadata/bootstrap.json` has never existed on alp-sdk `origin/main`
+  (absent from its whole history and from `v0.13.0`), so a customer on a release
+  takes the fallback-constants path, which this change upgrades to the same five
+  elements — picking up the 7-Zip prerequisite, the dtc/gperf correction and the
+  Arm-toolchain scoping. The single degraded case is an alp-sdk `dev` checkout
+  between #917 and #961, where the manifest exists but still has the
+  one-sentence note; it is dev-only and customer-unreachable. (#82)
 
 ### Added
 - **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
