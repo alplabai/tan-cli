@@ -219,12 +219,13 @@ mod tests {
     //
     // The `DELIBERATE_OMISSIONS` escape hatch this gate used to carry is
     // gone: it held zero entries, and its one proposed candidate —
-    // `renode --sim-mode` (cli.rs), DEFERRED and errors "not yet ported" —
-    // isn't an omission at all. It's a real flag clap accepts (wired for
-    // CLI surface stability per the doc comment on `RenodeArgs::sim_mode`),
-    // so completing it is correct; erroring is a property of *running* it,
-    // not of whether it should tab-complete. If a future flag genuinely
-    // needs a script-side exception, reintroduce the mechanism then.
+    // `renode --sim-mode` (cli.rs), then DEFERRED and erroring "not yet
+    // ported" — wasn't an omission at all. It was a real flag clap accepts,
+    // so completing it was correct; erroring was a property of *running* it,
+    // not of whether it should tab-complete. The flag has since been
+    // implemented (tan-cli#77's socket half), which is exactly the outcome
+    // that would have made a script-side exemption stale and wrong. If a
+    // future flag genuinely needs one, reintroduce the mechanism then.
     //
     // A round-3 adversarial review then found the per-arm loop above STILL
     // exempted one thing: `root.get_subcommands()` only walks the 31

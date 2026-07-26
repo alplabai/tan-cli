@@ -8,6 +8,70 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`tan renode --sim-mode` serves the studio hardware-simulator socket contract
+  (#77, socket half).** The flag existed for CLI-surface stability but errored
+  "not yet ported", so studio had nothing to connect to. It now boots the
+  `--image-bundle`'s firmware in headless Renode and exposes the two sockets the
+  gateway needs. The contract was ported from the RETIRED Python
+  (`west alp-renode --sim-mode`, deleted in `alp-sdk@df312cec` under ADR-0020
+  Phase 4), not re-derived from issue prose — the prose omits four things the
+  implementation carries, and all four are honoured: the `ERR <reason>` reply,
+  the `ready (timeout <N>s).` readiness marker, LOWERCASE `0xnn` reply hex, and
+  the Secure `SCB->VTOR` (0xE000ED08) write the generated boot script needs on
+  ARMv8-M + TrustZone, where `LoadELF` does not seed it and the core otherwise
+  HardFault-storms from address 0.
+  - Both listeners are bound on ephemeral `127.0.0.1` ports **before** the
+    descriptor names them, so a client that reads `sim-descriptor.json` and
+    connects at once can never race into an `ECONNREFUSED`. They are bound on
+    port 0 and their assigned ports read back rather than picked-then-rebound,
+    which removes the Python's bind-then-close TOCTOU window outright.
+  - `<bundle>/sim-descriptor.json` carries exactly the schema's four keys —
+    `control_socket`, `uart_socket` (`tcp://127.0.0.1:<port>` URIs),
+    `framebuffers`, `peripherals`.
+  - The control socket is line-oriented, one request → one reply, with three
+    verbs: `sysbus ReadBytes <base> <count>` (reply normalised from Renode's
+    bracketed UPPER-case list to `count` space-separated lowercase `0xnn`
+    tokens, scoped to the brackets so an echoed command address cannot leak in
+    as a phantom byte, and a short read is an error never a padded answer);
+    `sysbus WriteBytes <base> <hex…>` (expanded to per-byte `sysbus WriteByte
+    <base+i>`, because Renode's own `WriteBytes` takes `(bytes, addr)` — the
+    reverse of studio's order); and any other line forwarded verbatim. A
+    malformed line or monitor fault answers `ERR <reason>` and keeps the
+    connection, and every reply is flattened to a single line so a client can
+    never desynchronise.
+  - The `data` payload records `descriptor`, `controlPort` and `uartPort`, so a
+    JSON consumer reads the descriptor's path and the two ports out of the
+    envelope instead of assuming `<bundle>/sim-descriptor.json` and parsing them
+    back out of the file it first has to find.
+  - A CPU that halts on its first instruction fetch fails the run with an
+    `renode.cpu-halted` error issue and exit 1, matching the plain smoke's latch
+    (issue #64). In sim mode the monitor owns Renode's stdout, so the halt is
+    latched in the pump thread — a halt landing between two client commands
+    belongs to no command's collection window, and previously would have
+    resurfaced at best as an `ERR` on whichever command came next while `tan`
+    still exited 0. Sim mode is exactly where a mis-seeded VTOR shows up this way.
+  - Teardown sends the monitor's `quit`, polls up to 1 s for Renode to act on it,
+    and only then kills — the Python's `terminate()` + `wait(10)` + `kill` on a
+    shorter budget. Killing immediately after the flush gave the emulation no
+    time to close its sockets or flush its log.
+  - **DEFERRED to a follow-up on the same issue, which stays OPEN:** the
+    `ram_console_buf` RAM-ring → UART-socket streamer, the wired-UART console
+    path (Renode's own socket terminal), and the per-SKU sim profiles that fill
+    `framebuffers`/`peripherals` — empty for now. The UART socket accepts and
+    holds connections while streaming nothing, exactly as the Python did for an
+    image carrying no `ram_console_buf` symbol, so studio's serial view connects
+    and stays empty rather than failing to connect. `--expect` is reported as
+    ignored in sim mode rather than silently dropped: the console goes to the
+    socket, so there is no console text to scan.
+  - **That deferral is never silent.** Every sim run carries a
+    `renode.sim-profile-deferred` **warning** issue (and prints it in text mode)
+    stating that `framebuffers`/`peripherals` are both empty and that the UART
+    socket streams nothing, so an empty descriptor cannot read as a successful
+    one — the Python REFUSED a SKU with no profile outright, and `tan` keeps
+    exit 0 only because the control socket genuinely works without one. For
+    `E1M-AEN801` — the first-target SKU, whose Python console was a WIRED
+    hardware UART served by Renode's own socket terminal — the warning names that
+    deferred path as a second, independent reason its UART is silent.
 - **Shell completions are gated against clap (#92).** The three scripts under
   `completion_scripts/` are hand-maintained and nothing compared them to the
   `#[arg(long)]` definitions, so flags drifted silently — `--core` was missing

@@ -6,14 +6,19 @@
 //! (`scripts/west_commands/alp_renode.py`); under ADR-0020 Phase 4 `tan` owns
 //! this and the Python is retired.
 //!
-//! SCOPE: the PLAIN (non-sim) headless smoke only. `--sim-mode` (the studio sim
-//! gateway) is DEFERRED and tracked as `tan-cli#77` — the flag is wired for
-//! surface stability but errors "not yet ported". The historical contract it
-//! would have to satisfy is `alp-sdk#674` (CLOSED; the Python that closed it
-//! is deleted, so cite it only as prior art). Never cite a bare `#674` here:
-//! read from this repo it means `tan-cli#674`, which has never existed and
-//! 404s — that exact ambiguity is what let three alp-sdk workflows drift into
-//! citing it. Always carry the owning repo.
+//! SCOPE: this file is the PLAIN (non-sim) headless smoke. `--sim-mode` (the
+//! studio sim gateway) lives in [`sim`], with its monitor bridge in [`monitor`]
+//! — the SOCKET half of `tan-cli#77` is implemented there (two ephemeral
+//! listeners, `sim-descriptor.json`, the readiness marker, the three-verb
+//! control protocol); the `ram_console_buf` → UART-socket streamer, the
+//! wired-UART console path, and the per-SKU sim profiles behind the
+//! descriptor's `framebuffers`/`peripherals` stay DEFERRED on that same issue.
+//! The contract was ported from the retired Python, not from issue prose. The
+//! historical contract is `alp-sdk#674` (CLOSED; the Python that closed it is
+//! deleted, so it is reachable only through git history). Never cite a bare
+//! `#674` here: read from this repo it means `tan-cli#674`, which has never
+//! existed and 404s — that exact ambiguity is what let three alp-sdk workflows
+//! drift into citing it. Always carry the owning repo.
 //!
 //! Divergences from the Python source, all deliberate:
 //!   - user-facing prose names `tan renode` / `tan build`, never
@@ -23,6 +28,9 @@
 //!   - `--timeout` is enforced even on a SILENT child (reader thread + deadline),
 //!     fixing the Python latent hang where a wedged-but-alive Renode blocked the
 //!     `for line in proc.stdout` read until EOF.
+
+mod monitor;
+mod sim;
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -54,7 +62,9 @@ struct RenodeReport {
     platform_stem: String,
     /// Resolved `.repl` descriptor path.
     repl: String,
-    /// Resolved `.resc` descriptor path.
+    /// Resolved `.resc` descriptor path — the SDK's for the plain smoke, or the
+    /// GENERATED `<bundle>/.sim-boot.resc` under `--sim-mode`, which writes its
+    /// own boot script instead of including the SDK's.
     resc: String,
     /// Resolved Zephyr ELF path.
     elf: String,
@@ -68,6 +78,18 @@ struct RenodeReport {
     expect_found: bool,
     /// The exact headless Renode argv that ran (empty on a pre-flight failure).
     renode_argv: Vec<String>,
+    /// `--sim-mode` only: the `sim-descriptor.json` written for the studio
+    /// gateway. Empty on the plain smoke, and on a sim failure before it was
+    /// written. A JSON consumer reads it from here rather than assuming
+    /// `<bundle>/sim-descriptor.json`.
+    descriptor: String,
+    /// `--sim-mode` only: the bound control-socket port. 0 on the plain smoke and
+    /// before the listeners are bound. The matching `tcp://127.0.0.1:<port>` URI
+    /// is in the descriptor.
+    control_port: u16,
+    /// `--sim-mode` only: the bound UART-socket port, same conventions as
+    /// [`Self::control_port`].
+    uart_port: u16,
 }
 
 /// `tan renode` entry.
@@ -112,19 +134,10 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
         ..Default::default()
     };
 
-    // --sim-mode: DEFERRED (tan-cli#77). Wired for surface stability; errors
-    // until studio is repointed to `tan renode --sim-mode`. The historical
-    // contract is alp-sdk#674 (closed; cited as prior art only — a bare
-    // `#674` read from this repo means `tan-cli#674`, which does not exist).
+    // --sim-mode branches FIRST: it resolves everything from `--image-bundle`,
+    // not from the build root, so none of the manifest work below applies.
     if args.sim_mode {
-        return fail(
-            g,
-            project,
-            report,
-            "renode.sim-mode-unported",
-            "renode --sim-mode is not yet ported (studio sim gateway, tracked as \
-             tan-cli#77; historical contract alp-sdk#674); use the plain headless smoke",
-        );
+        return sim::run(g, args, project, report);
     }
 
     // SDK-root guard — faithful to `find_sdk_root` None → die.
