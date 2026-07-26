@@ -73,6 +73,24 @@ pub struct DoctorReport {
     /// Deduplicated remediation steps for non-passing checks.
     #[serde(rename = "nextSteps")]
     pub next_steps: Vec<String>,
+    /// Per-tool form of the `hostPrerequisites` check's refusal, so a consumer
+    /// never has to parse a rendered line back apart.
+    ///
+    /// Deliberately the SAME key, the same element type, and the same
+    /// `null`-never-`[]` rule as the `bootstrap` envelope's
+    /// `data.missingPrerequisites` (see
+    /// [`reported_missing`](crate::bootstrap::reported_missing)): one fact
+    /// reported by two commands must not have two vocabularies, or a consumer
+    /// that learned it from `bootstrap` gets it wrong on `doctor`.
+    ///
+    /// `null` whenever there is no missing TOOL to name — a clean host, an
+    /// error envelope that never reached the probe, and the two Python-floor
+    /// refusals, which have no `{tool, command}` pair that could carry the fix.
+    /// No `skip_serializing_if`, for the same reason bootstrap has none: the key
+    /// is then in every sample, so a consumer can see it exists without
+    /// reaching for a schema.
+    #[serde(rename = "missingPrerequisites")]
+    pub missing_prerequisites: Option<Vec<crate::bootstrap::MissingPrerequisite>>,
 }
 
 /// A companion viewer extension surfaced as an MCU debug-readiness check.
@@ -141,6 +159,18 @@ pub fn build_doctor_report(
     let has_workspace = is_present(&context.workspace_root);
     let has_sdk = is_present(&context.sdk_root);
 
+    // No `python` check here any more. It probed `context.python_binary` — which
+    // in this CLI is ALWAYS the bare `python3`/`python` (`python_path` is never
+    // configured; that setting is the extension's), i.e. literally the same name
+    // `hostPrerequisites` probes off the manifest's prerequisite list. Two names
+    // for one host fact is bad enough; the two also DISAGREED — `Warn` here
+    // versus `Fail` there, with two different exit-code consequences — and this
+    // one was the weaker probe: no `pythonMinVersion` floor, and no `py`
+    // launcher widening, so a Windows host with only the launcher installed got
+    // a `python` Warn next to a `hostPrerequisites` Pass about the same
+    // interpreter. `hostPrerequisites` (appended by `tan-cli`, see
+    // `bootstrap::doctor_prerequisite_check`) is a strict superset, so this one
+    // is retired rather than left to contradict it.
     let mut checks: Vec<DoctorCheck> = vec![
         DoctorCheck::new(
             "workspaceRoot",
@@ -175,15 +205,6 @@ pub fn build_doctor_report(
             fix_when(
                 !context.board_yaml_exists,
                 "Create board.yaml or configure alpSdk.boardYamlPath.",
-            ),
-        ),
-        DoctorCheck::new(
-            "python",
-            status_pass_warn(runtime.python_available),
-            format!("Interpreter probe: {}", context.python_binary),
-            fix_when(
-                !runtime.python_available,
-                "Install the configured Python interpreter or update alpSdk.pythonPath.",
             ),
         ),
     ];
@@ -324,6 +345,9 @@ fn finalize_report(
         summary,
         checks,
         next_steps,
+        // The prerequisite probe walks PATH and spawns interpreters, so it is
+        // appended by `tan-cli` after this pure report is built, never here.
+        missing_prerequisites: None,
     }
 }
 
@@ -331,7 +355,73 @@ fn count_status(checks: &[DoctorCheck], status: DoctorStatus) -> u32 {
     checks.iter().filter(|c| c.status == status).count() as u32
 }
 
-fn unique_next_steps(checks: &[DoctorCheck]) -> Vec<String> {
+/// Count one check into a summary.
+fn count_into(summary: &mut DoctorSummary, status: DoctorStatus) {
+    match status {
+        DoctorStatus::Pass => summary.pass += 1,
+        DoctorStatus::Warn => summary.warn += 1,
+        DoctorStatus::Fail => summary.fail += 1,
+    }
+}
+
+/// Fold a check produced AFTER a report builder finalized back into that
+/// report's derived fields: count it in `summary`, push it onto `checks`, and
+/// re-derive `next_steps` over the FINAL list.
+///
+/// The counting and the re-derivation are ONE call deliberately. `tan-cli`
+/// appends four checks it can only build with IO (`hostPrerequisites`,
+/// `sdkProvenance`, the `--build` preflight, the `--fix` bootstrap outcome),
+/// each of which used to hand-roll the summary `match` and rely on a separate,
+/// trailing `next_steps = unique_next_steps(...)` statement. That statement was
+/// deletable with no test noticing — the only test covering it called
+/// `unique_next_steps` directly and never went through an append. Making the
+/// append itself own the re-derivation removes the statement (and the bug it
+/// carried) rather than testing around it: there is no longer an ordering for a
+/// caller to get wrong.
+///
+/// Takes the three fields rather than a report, because the two report types
+/// that need it (`DoctorReport` and
+/// [`BuildReadinessReport`](crate::BuildReadinessReport)) share these fields but
+/// not a type — and a trait over two structs would be more machinery than the
+/// three-argument call it replaces.
+pub fn append_doctor_check(
+    summary: &mut DoctorSummary,
+    checks: &mut Vec<DoctorCheck>,
+    next_steps: &mut Vec<String>,
+    check: DoctorCheck,
+) {
+    count_into(summary, check.status);
+    checks.push(check);
+    *next_steps = unique_next_steps(checks);
+}
+
+/// As [`append_doctor_check`], but the checks land at the FRONT of the list,
+/// keeping their relative order.
+///
+/// `tan doctor --build` prepends the project/workspace preflight ahead of the
+/// host-tool probes: "can a build even start" outranks "is `ninja` installed",
+/// and `nextSteps` follows check order, so the preflight's `tan sdk switch
+/// <path>` / `tan init` must lead it.
+pub fn prepend_doctor_checks(
+    summary: &mut DoctorSummary,
+    checks: &mut Vec<DoctorCheck>,
+    next_steps: &mut Vec<String>,
+    prepended: Vec<DoctorCheck>,
+) {
+    for check in prepended.into_iter().rev() {
+        count_into(summary, check.status);
+        checks.insert(0, check);
+    }
+    *next_steps = unique_next_steps(checks);
+}
+
+/// Deduplicated `fix` strings of every non-passing check, in check order.
+///
+/// `pub` and deliberately re-runnable: `finalize_report` computes this once,
+/// but [`append_doctor_check`] re-derives it on every later append, because
+/// `tan-cli` adds checks that need IO long after the pure builder ran.
+/// Idempotent by construction, so recomputing costs nothing.
+pub fn unique_next_steps(checks: &[DoctorCheck]) -> Vec<String> {
     let mut steps: Vec<String> = Vec::new();
     for check in checks {
         if check.status == DoctorStatus::Pass {
@@ -403,7 +493,6 @@ mod tests {
 
     fn runtime_all_present() -> DebugRuntimeCapabilities {
         DebugRuntimeCapabilities {
-            python_available: true,
             jlink_executable: Some("JLinkGDBServerCL".to_string()),
             open_ocd_executable: Some("openocd".to_string()),
             pyocd_executable: Some("pyocd".to_string()),
@@ -414,7 +503,6 @@ mod tests {
 
     fn runtime_none() -> DebugRuntimeCapabilities {
         DebugRuntimeCapabilities {
-            python_available: false,
             jlink_executable: None,
             open_ocd_executable: None,
             pyocd_executable: None,
@@ -431,9 +519,12 @@ mod tests {
             DebugServerKind::None,
             &runtime_all_present(),
         );
-        // 4 base checks + codeLLDBExtension + lldb = 6 checks, all pass.
-        assert_eq!(report.checks.len(), 6);
-        assert_eq!(report.summary.pass, 6);
+        // 3 base checks + codeLLDBExtension + lldb = 5 checks, all pass. The
+        // retired `python` check is now `hostPrerequisites`, appended by
+        // `tan-cli` because it probes PATH.
+        assert_eq!(report.checks.len(), 5);
+        assert!(!report.checks.iter().any(|c| c.name == "python"));
+        assert_eq!(report.summary.pass, 5);
         assert_eq!(report.summary.warn, 0);
         assert_eq!(report.summary.fail, 0);
         assert!(report.next_steps.is_empty());
@@ -448,7 +539,7 @@ mod tests {
             DebugServerKind::Jlink,
             &runtime_none(),
         );
-        // 4 base (python warn) + cortexDebugExtension pass + jlinkBackend warn.
+        // 3 base + cortexDebugExtension pass + jlinkBackend warn.
         let backend = report
             .checks
             .iter()
@@ -456,8 +547,9 @@ mod tests {
             .expect("backend check present");
         assert_eq!(backend.status, DoctorStatus::Warn);
         assert!(backend.detail.contains("No jlink executable"));
-        // python warn + backend warn.
-        assert_eq!(report.summary.warn, 2);
+        // Backend warn only: the missing interpreter is `hostPrerequisites`'
+        // business now, and it reports one as a `Fail`, not a second `Warn`.
+        assert_eq!(report.summary.warn, 1);
         assert_eq!(report.summary.fail, 0);
         assert!(
             report
@@ -499,8 +591,8 @@ mod tests {
         assert_eq!(compat.status, DoctorStatus::Fail);
         assert_eq!(compat.detail, "jlink is not supported for native-host.");
         assert_eq!(report.summary.fail, 1);
-        // base 4 checks + serverCompatibility, no target-specific checks.
-        assert_eq!(report.checks.len(), 5);
+        // base 3 checks + serverCompatibility, no target-specific checks.
+        assert_eq!(report.checks.len(), 4);
     }
 
     #[test]
@@ -649,5 +741,131 @@ mod tests {
                 target.as_str()
             );
         }
+    }
+
+    fn check(name: &str, status: DoctorStatus, fix: Option<&str>) -> DoctorCheck {
+        DoctorCheck {
+            name: name.to_string(),
+            status,
+            detail: format!("{name} detail"),
+            fix: fix.map(str::to_string),
+        }
+    }
+
+    /// A finalized report: `next_steps` already computed (and empty, because
+    /// its one check passes), exactly the state `tan-cli` starts appending to.
+    fn finalized() -> (DoctorSummary, Vec<DoctorCheck>, Vec<String>) {
+        let checks = vec![check("boardYaml", DoctorStatus::Pass, None)];
+        let next_steps = unique_next_steps(&checks);
+        assert!(next_steps.is_empty());
+        (
+            DoctorSummary {
+                pass: 1,
+                warn: 0,
+                fail: 0,
+            },
+            checks,
+            next_steps,
+        )
+    }
+
+    #[test]
+    fn an_appended_checks_fix_reaches_next_steps() {
+        // The regression: `next_steps` is computed by the report BUILDER, so
+        // every check `tan-cli` appends afterwards (it needs IO to build them)
+        // landed with its `fix` missing from the field the envelope documents
+        // as "deduplicated remediation steps for non-passing checks" and the
+        // extension renders as a Fix button. Deleting the re-derivation inside
+        // `append_doctor_check` has to fail HERE.
+        let (mut summary, mut checks, mut steps) = finalized();
+        append_doctor_check(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            check(
+                "hostPrerequisites",
+                DoctorStatus::Fail,
+                Some("Install the missing prerequisites, then run `tan bootstrap`."),
+            ),
+        );
+
+        assert_eq!(
+            steps,
+            vec!["Install the missing prerequisites, then run `tan bootstrap`."]
+        );
+        // Counted exactly once, in the right bucket -- swapping the summary
+        // arms would make a clean host exit 4.
+        assert_eq!((summary.pass, summary.warn, summary.fail), (1, 0, 1));
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[1].name, "hostPrerequisites");
+    }
+
+    #[test]
+    fn appending_a_passing_check_adds_no_step_and_keeps_the_earlier_ones() {
+        // The re-derivation runs over the WHOLE list, so it must not be a
+        // "clear and rebuild from the new check" either: an earlier appender's
+        // step has to survive a later, passing append.
+        let (mut summary, mut checks, mut steps) = finalized();
+        append_doctor_check(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            check("sdkProvenance", DoctorStatus::Warn, Some("git pull")),
+        );
+        append_doctor_check(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            check("bootstrapFix", DoctorStatus::Pass, None),
+        );
+
+        assert_eq!(steps, vec!["git pull"]);
+        assert_eq!((summary.pass, summary.warn, summary.fail), (2, 1, 0));
+    }
+
+    #[test]
+    fn a_repeated_fix_is_not_duplicated_across_appends() {
+        let (mut summary, mut checks, mut steps) = finalized();
+        for name in ["west", "cmake"] {
+            append_doctor_check(
+                &mut summary,
+                &mut checks,
+                &mut steps,
+                check(name, DoctorStatus::Warn, Some("Run `tan bootstrap`.")),
+            );
+        }
+        assert_eq!(steps, vec!["Run `tan bootstrap`."]);
+        assert_eq!(summary.warn, 2);
+    }
+
+    #[test]
+    fn prepended_checks_keep_their_order_and_lead_next_steps() {
+        // `--build` puts the project/workspace preflight ahead of the host-tool
+        // probes, and `nextSteps` follows check order -- so `tan sdk switch` /
+        // `tan init` must LEAD, not trail, an already-appended tool fix.
+        let (mut summary, mut checks, mut steps) = finalized();
+        append_doctor_check(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            check("west", DoctorStatus::Warn, Some("Install west.")),
+        );
+        prepend_doctor_checks(
+            &mut summary,
+            &mut checks,
+            &mut steps,
+            vec![
+                check("sdk", DoctorStatus::Fail, Some("tan sdk switch <path>")),
+                check("workspace", DoctorStatus::Fail, Some("tan init")),
+            ],
+        );
+
+        let names: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["sdk", "workspace", "boardYaml", "west"]);
+        assert_eq!(
+            steps,
+            vec!["tan sdk switch <path>", "tan init", "Install west."]
+        );
+        assert_eq!((summary.pass, summary.warn, summary.fail), (1, 1, 2));
     }
 }

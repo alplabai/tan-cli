@@ -55,9 +55,10 @@ pub use debug::{
     DebugGenerationTraceDecision, DebugResolvedValue, DebugRuntimeCapabilities, DebugServerKind,
     DebugTargetKind, DebugTraceOutcome, DebugValueSource, DebugWorkspaceContext,
     DebuggerExtensionsState, DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary,
-    build_doctor_report, collect_resolved_values, collect_runtime_capabilities_from_commands,
-    create_debug_workspace_context, is_server_supported_for_target, parse_server_kind,
-    parse_target_kind, server_choices_for_target,
+    append_doctor_check, build_doctor_report, collect_resolved_values,
+    collect_runtime_capabilities_from_commands, create_debug_workspace_context,
+    is_server_supported_for_target, parse_server_kind, parse_target_kind, prepend_doctor_checks,
+    server_choices_for_target, unique_next_steps,
 };
 pub use debug_launch::{
     LaunchJsonWritePlan, LaunchResolution, apply_launch_resolution, create_launch_draft,

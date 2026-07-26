@@ -18,7 +18,10 @@ pub use context::{
     DebugRuntimeCapabilities, DebugWorkspaceContext, DebuggerExtensionsState,
     collect_runtime_capabilities_from_commands, create_debug_workspace_context,
 };
-pub use doctor::{DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, build_doctor_report};
+pub use doctor::{
+    DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, append_doctor_check,
+    build_doctor_report, prepend_doctor_checks, unique_next_steps,
+};
 pub use inspect::{DebugResolvedValue, DebugValueSource, collect_resolved_values};
 pub use target::{
     DebugServerKind, DebugTargetKind, is_server_supported_for_target, parse_server_kind,
