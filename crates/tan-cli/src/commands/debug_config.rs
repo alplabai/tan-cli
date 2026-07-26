@@ -78,7 +78,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         Ok(s) => s,
         Err(message) => return internal_failure(g, &generated_at, message, cwd_launch_path()),
     };
-    let mut draft = match create_launch_draft(target, server) {
+    let mut draft = match create_launch_draft(target, server, args.pre_launch_task.as_deref()) {
         Ok(d) => d,
         Err(message) => return internal_failure(g, &generated_at, message, cwd_launch_path()),
     };
@@ -605,6 +605,7 @@ mod tests {
             core: None,
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
+            pre_launch_task: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -754,6 +755,42 @@ mod tests {
         assert_eq!(
             resolution.executable.as_deref(),
             Some("${workspaceFolder}/build/native_sim-zephyr/build/zephyr/zephyr.exe")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    // Bug 1 at the command boundary: the envelope's `data.configuration` — the
+    // very object alp-sdk-vscode#342 writes into launch.json — must carry no
+    // `preLaunchTask` unless one was asked for. Nothing in this repo, in
+    // alp-sdk-vscode, or in a generated project defines a task, and VS Code
+    // aborts pre-launch on a name it cannot resolve, so a default here means
+    // the emitted configuration cannot start a session at all.
+    #[test]
+    fn envelope_configuration_carries_a_pre_launch_task_only_when_opted_in() {
+        let dir = tmp("prelaunch-optin");
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let mut args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            preview: true,
+        };
+
+        let default_json = run(&g, &args).json.expect("json envelope");
+        assert!(
+            !default_json.contains("preLaunchTask"),
+            "default debug-config output must not name a task nothing defines:
+{default_json}"
+        );
+
+        args.pre_launch_task = Some("alpRun: build".to_string());
+        let opted_in: Value = serde_json::from_str(&run(&g, &args).json.expect("json envelope"))
+            .expect("envelope is JSON");
+        assert_eq!(
+            opted_in["data"]["configuration"]["preLaunchTask"],
+            "alpRun: build"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

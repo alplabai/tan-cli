@@ -8,6 +8,27 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`tan debug-config --pre-launch-task <TASK>`.** Opt-in re-entry for the
+  `preLaunchTask` the command used to emit unconditionally (see Changed). The
+  flag carries the task NAME rather than being a bare on/off switch, for two
+  reasons: a consumer that has actually registered a `TaskProvider` will use
+  its own name, not one of ours, so a boolean would keep a tan-owned string
+  baked into a file the consumer owns; and with the name supplied from
+  outside, the four hardcoded task strings leave the contract entirely instead
+  of surviving as a default nobody can change. Off by default — nothing is
+  emitted unless a name is passed.
+- **`contract/envelopes/` pins `debug-config --preview`.** Four goldens, one
+  per `--target-kind` (`debug-config-preview-{zephyr-mcu,baremetal-mcu,
+  yocto-userspace,native-host}`). Unlike the seven existing cases these pin a
+  `data` value that is itself a consumer ARTEFACT rather than a report:
+  alp-sdk-vscode#342 writes `data.configuration` into the user's `launch.json`
+  verbatim, so the golden pins the emitted key SET. The `preLaunchTask` bug
+  below was reachable only by reading two repos by hand; it would now fail
+  `cargo test`. `--preview` reads no `board.yaml`, spawns no Python and probes
+  no PATH (the reason `bootstrap`/`doctor` have no golden), so it is
+  legitimately host-independent; the one absolute path it reflects back
+  (`project.root` / `launchJsonPath`) is tokenized as `__WORKDIR__` by the
+  harness.
 - **`tan doctor` reports a missing host prerequisite without `--fix`.**
   `check_prerequisites` had no caller outside `tan bootstrap`, so the only way
   a missing `ninja` surfaced was `tan doctor --build --fix`, which runs
@@ -82,6 +103,19 @@ All notable changes to `tan` are documented here. Format follows
   the project's own `build` root. (#52)
 
 ### Changed
+- **`tan debug-config` no longer emits `preLaunchTask` by default — it was
+  naming a task nothing defines.** Every generated profile carried one of
+  `alp: build active target`, `alp: build baremetal target`, `alp: deploy and
+  start gdbserver` or `alp: build native_sim target`. No `tasks.json` in this
+  repo or in a generated project defines them, and alp-sdk-vscode contributes
+  only `{"type":"alpRun"}` with no `TaskProvider` registered for any of the
+  four. VS Code resolves `preLaunchTask` BEFORE launching, fails to find the
+  task, and aborts pre-launch — so the session never started, out of a
+  `launch.json` that reads perfectly. Consumer-visible payload change:
+  `data.configuration` (and the written `launch.json`) has one fewer key.
+  Build-before-debug is still the behaviour we want, which is why the
+  capability came back as `--pre-launch-task` above rather than being deleted;
+  it just cannot be the default while nothing provides the task.
 - **The `doctor` envelope gained `data.missingPrerequisites` and a
   `doctor.hostPrerequisites` issue code.** The new check (see Added) reports
   `Fail` on every prerequisite refusal — each one blocks a build, and bootstrap
@@ -169,6 +203,15 @@ All notable changes to `tan` are documented here. Format follows
   the missing-tool case it originally described. (#70)
 
 ### Fixed
+- **`debug-config` emitted its launch configuration with scrambled key
+  order.** Dropping the two unresolved `svdFile`/`svdPath` placeholders used
+  `serde_json::Map::remove`, which under this workspace's `preserve_order`
+  feature is a SWAP-remove: the last two keys were dragged up into the vacated
+  slots, so every `zephyr-mcu` profile shipped as `…interface, device,
+  servertype` instead of `…servertype, device, interface`. Harmless to a debug
+  adapter, but key order matching the TS CLI is this module's stated contract,
+  and the new goldens would otherwise have pinned the scrambled form as
+  correct. `shift_remove` now.
 - **`tan debug-config --target-kind native-host` pointed the debugger at a
   Cortex-M ELF.** The manifest slice was chosen by `os`, and native-host mapped
   to `zephyr` — so on a board that builds a real Zephyr MCU slice as well as a

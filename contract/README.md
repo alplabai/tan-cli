@@ -74,11 +74,22 @@ just the one that captured it:
   `\` → `/` on the freshly captured side before diffing, but only on the
   known path-shaped fields (`root`, `boardYaml`, `boardYamlPath`,
   `destination`, `relativePath`, `sdkPath`, `sdkPinned`, `written`,
-  `unchanged` — see `PATH_KEYS` in `contract.rs`), not every string leaf.
-  A blanket rewrite would also launder a real drift inside `issues[].message`
-  or any other value that happens to contain a backslash — exactly the kind
-  of change this gate exists to catch. Committed goldens are authored with
-  forward slashes in those fields, matching the normalized form.
+  `unchanged`, `launchJsonPath` — see `PATH_KEYS` in `contract.rs`), not every
+  string leaf. A blanket rewrite would also launder a real drift inside
+  `issues[].message` or any other value that happens to contain a backslash —
+  exactly the kind of change this gate exists to catch. Committed goldens are
+  authored with forward slashes in those fields, matching the normalized form.
+- **`__WORKDIR__` for a reflected absolute path** — the one case the
+  "no absolute paths in argv" rule above cannot cover: `debug-config` reports
+  the working directory it resolved (`project.root`) and the `launch.json`
+  path it would write, absolute, whatever the argv. Those two fields are
+  substituted down to the `__WORKDIR__` token on the captured side. The
+  substitution anchors on the case's unique scratch-dir marker
+  (`tan-contract-<case>-<pid>/root`) rather than on the harness's own
+  `work_dir` string, because on macOS `$TMPDIR` is a symlink that
+  `std::env::current_dir()` resolves through (`/var/…` → `/private/var/…`) and
+  a whole-prefix comparison would silently stop matching there. Like the
+  separator rewrite, it applies to `PATH_KEYS` fields only.
 
 ## Cases pinned today
 
@@ -91,6 +102,10 @@ just the one that captured it:
 | `sdk-current-no-sdk` | `sdk current --format json` | 0 | Reports `sourceTier: "none"` in a workspace with no SDK configured — offline, host-independent given the isolated `HOME`. |
 | `sdk-unknown-subcommand` | `sdk bogus --format json` | 1 | Runtime-failure envelope shape; the only offline path that exercises exit code 1 in this set. |
 | `generate-board-yaml-missing` | `generate --format json` (no `board.yaml` present) | 2 | `generate`'s `data` schema (`{schemaVersion,targets,written,failed}`) is distinct from `init`'s and was otherwise completely unguarded — this is `generate`'s first guard clause (`commands/generate.rs`'s `run()`), needing no board/SDK/Python/network to reach. |
+| `debug-config-preview-zephyr-mcu` | `debug-config --target-kind zephyr-mcu --server jlink --preview` | 0 | |
+| `debug-config-preview-baremetal-mcu` | `debug-config --target-kind baremetal-mcu --server openocd --preview` | 0 | |
+| `debug-config-preview-yocto-userspace` | `debug-config --target-kind yocto-userspace --server gdbserver --preview` | 0 | |
+| `debug-config-preview-native-host` | `debug-config --target-kind native-host --server none --preview` | 0 | One profile per `--target-kind`. Unlike the other cases these pin a `data` value that is itself a consumer ARTEFACT, not a report: alp-sdk-vscode#342 writes `data.configuration` into `launch.json` verbatim, so the golden pins the emitted key SET — an added key (the `preLaunchTask` these fixtures were added after, which named a task nothing defines and made VS Code abort pre-launch) or a changed `program`/`executable` fails here instead of shipping. `--preview` reads no `board.yaml`, spawns no Python and probes no PATH; the only host-dependent output is the absolute working directory, tokenized as `__WORKDIR__` above. |
 | `version_first_line_matches_contract` (in `contract.rs`, no fixture dir) | `--version` | 0 | Not a golden diff — `tan MAJOR.MINOR.PATCH` would need editing on every release if pinned literally, so the test asserts the *format* instead. |
 
 Deliberately not covered: `sdk list` (hits the GitHub releases API — network),
@@ -106,7 +121,7 @@ init/generate templates, sdk), not full command coverage.
 ## Regenerating a golden after a *deliberate* envelope change
 
 There is no `--bless` flag (the retired shell harness had one; the Rust
-suite doesn't need the extra code for six fixtures). To update a golden on
+suite doesn't need the extra code at this fixture count). To update a golden on
 purpose:
 
 1. Build `tan` and run the case's `args.txt` by hand from an empty directory,
