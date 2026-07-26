@@ -5,7 +5,7 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.4.0] — 2026-07-25
+## [0.4.0] — 2026-07-26
 
 ### Added
 - **`tan doctor` reports a missing host prerequisite without `--fix`.**
@@ -80,6 +80,15 @@ All notable changes to `tan` are documented here. Format follows
   reported as `build.sdk-switch-pristine` naming both SDK roots. The wipe
   skips any slice with an explicit `-d`/`--build-dir` and only fires under
   the project's own `build` root. (#52)
+- **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
+  project in the headless smoke. A manifest with more than one Zephyr slice (an
+  E1M-AEN801's `m55_hp` + `m55_he`) was refused outright with "the Renode smoke
+  boots a single-Zephyr-slice system", leaving no way to smoke-test such a
+  project at all. `--core` narrows the zephyr set before the runnable filter, so
+  an explicitly named blocked/skipped slice still boots exactly like a lone one
+  does (the smoke touches no hardware). A name matching no zephyr slice fails
+  with `UnknownCore`, listing the manifest's zephyr cores. The refusal message
+  now names the flag. Unchanged for a single-slice project.
 
 ### Changed
 - **The `doctor` envelope gained `data.missingPrerequisites` and a
@@ -334,17 +343,6 @@ All notable changes to `tan` are documented here. Format follows
   (`.github/workflows/parity.yml`) is now pinned to that same commit, so the
   bootstrap-manifest byte-parity gate actually gates instead of
   NOTICE-and-passing. (#69)
-
-### Added
-- **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
-  project in the headless smoke. A manifest with more than one Zephyr slice (an
-  E1M-AEN801's `m55_hp` + `m55_he`) was refused outright with "the Renode smoke
-  boots a single-Zephyr-slice system", leaving no way to smoke-test such a
-  project at all. `--core` narrows the zephyr set before the runnable filter, so
-  an explicitly named blocked/skipped slice still boots exactly like a lone one
-  does (the smoke touches no hardware). A name matching no zephyr slice fails
-  with `UnknownCore`, listing the manifest's zephyr cores. The refusal message
-  now names the flag. Unchanged for a single-slice project.
 
 ## [0.3.1] — 2026-07-25
 
