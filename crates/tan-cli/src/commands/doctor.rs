@@ -10,11 +10,11 @@ use std::path::Path;
 
 use tan_core::{
     BuildOs, BuildToolProbe, DebugServerKind, DebugTargetKind, DebuggerExtensionsState,
-    DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, ProjectContext, append_doctor_check,
-    board_os_set, build_doctor_report, build_readiness_report,
+    DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, HostEnvProbe, ProjectContext,
+    append_doctor_check, board_os_set, build_doctor_report, build_readiness_report,
     collect_runtime_capabilities_from_commands, create_debug_workspace_context,
-    is_server_supported_for_target, parse_board_model, parse_server_kind, parse_target_kind,
-    prepend_doctor_checks,
+    host_environment_checks, is_server_supported_for_target, parse_board_model, parse_server_kind,
+    parse_target_kind, prepend_doctor_checks,
 };
 
 use tan_core::bootstrap::{apply_prerequisite_check, doctor_prerequisite_check, fallback_facts};
@@ -184,16 +184,17 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
     CommandRun { exit, text, json }
 }
 
-/// The plain `tan doctor` report: the pure check set, plus the two checks that
-/// can only be built with IO.
+/// The plain `tan doctor` report: the pure check set, plus the checks that can
+/// only be built with IO — the host prerequisite gate, the host-environment
+/// probes, and the SDK provenance.
 ///
 /// Its own function rather than four inline lines in `run` so the appends are
 /// reachable from a test. `run` resolves a real project and shells `git`, so a
 /// dropped `append_host_prerequisites` call inline there was invisible to the
 /// suite — the same hole `support_bundle::bundle_doctor_report` closes.
 ///
-/// Both appends land AFTER `build_doctor_report` computed `nextSteps`, so both
-/// go through `append_doctor_check`, which re-derives it. That is why there is
+/// Every append lands AFTER `build_doctor_report` computed `nextSteps`, so each
+/// goes through `append_doctor_check`, which re-derives it. That is why there is
 /// no trailing `next_steps = unique_next_steps(...)` statement here: a
 /// statement a caller can forget is a bug waiting to be re-introduced, and this
 /// one already was one.
@@ -205,6 +206,7 @@ fn assemble_doctor_report(
 ) -> DoctorReport {
     let mut report = build_doctor_report(context, target, server, runtime);
     append_host_prerequisites(&mut report, context.sdk_root.as_deref());
+    append_host_environment(&mut report);
     append_sdk_provenance(
         &mut report.summary,
         &mut report.checks,
@@ -280,6 +282,231 @@ pub(crate) fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Opt
         check,
         refusal.map(|f| f.missing).unwrap_or_default(),
     );
+}
+
+/// Append the host-environment checks — `zephyrSdkHost`, `longPaths`
+/// (Windows only) and `homePath` (alp-sdk ADR 0021, "Cross-cutting
+/// requirements").
+///
+/// This function is the IO half and nothing else: three probes, then one call
+/// into the pure `tan_core::host_env`. The split is what makes the checks
+/// testable at all — the verdicts depend entirely on which machine is running,
+/// so a test that called this would only ever exercise the branch this host
+/// sits in (a served `windows-x86_64`/`linux-x86_64`, always). All four host
+/// tags and both registry states are driven directly against the pure
+/// functions instead; see `tan_core::host_env`'s tests.
+///
+/// PLAIN `tan doctor`, not `--build`, for the same reason
+/// [`append_host_prerequisites`] is: these need no `board.yaml`, no workspace
+/// and no SDK, and ADR 0021 Lane 1 P0a runs `tan doctor` before anything
+/// project-shaped exists. `--build` deliberately does NOT get them.
+/// `zephyrSdkHost` looks adjacent to `--build`'s `zephyrSdk` probe but answers
+/// the opposite question — "can an SDK be installed on this host at all" versus
+/// "is one installed here" — and reporting the SDK story twice under two names
+/// is exactly the trap #81 documents.
+///
+/// `pub(crate)`: `commands::support_bundle` builds the same report and must
+/// carry the same facts. A bundle from a `windows-arm64` or Intel-Mac host that
+/// omitted the reason nothing can be provisioned would send a maintainer
+/// hunting through a build log for a fact the host already knew.
+pub(crate) fn append_host_environment(report: &mut DoctorReport) {
+    let home = host_home();
+    let probe = HostEnvProbe {
+        // `OS` is safe as a constant — a Windows binary does not run on macOS.
+        // `ARCH` is NOT (see `host_arch`).
+        os: std::env::consts::OS,
+        arch: host_arch(),
+        long_paths_enabled: long_paths_enabled(),
+        home: home.as_deref(),
+    };
+    for check in host_environment_checks(&probe) {
+        append_doctor_check(
+            &mut report.summary,
+            &mut report.checks,
+            &mut report.next_steps,
+            check,
+        );
+    }
+}
+
+/// The user's home directory: `USERPROFILE` on Windows else `HOME`, matching
+/// [`crate::util::home_alp_dir`]'s resolution so the path this check reports a
+/// space in is the same one tan would actually put `~/.alp` under.
+///
+/// No `.` fallback here, unlike `home_alp_dir`: "unset" is a real, reportable
+/// state for a doctor check, and reporting `.` would claim a clean home nobody
+/// resolved.
+fn host_home() -> Option<String> {
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+        .map(|v| v.to_string_lossy().into_owned())
+}
+
+/// The arch of the MACHINE, which is not `std::env::consts::ARCH`.
+///
+/// `ARCH` is fixed at compile time — it names the target the binary was built
+/// for. `.github/workflows/release.yml` ships `x86_64-pc-windows-msvc` and
+/// `x86_64-apple-darwin` as separate assets from their aarch64 siblings, and
+/// both of those x86_64 binaries run on aarch64 hardware:
+///
+/// * **Windows on ARM emulates x64 transparently**, so the x86_64 asset is the
+///   likeliest way tan runs there at all. On the constant it reports
+///   `windows-x86_64`, a served host — which would make the `windows-aarch64`
+///   arm this whole check exists for almost unreachable in practice.
+/// * **Rosetta** runs the x86_64 asset on Apple silicon. On the constant it
+///   reports `macos-x86_64` and FAILS a fully served machine, exiting 4 and
+///   telling its owner to go find a Linux box.
+///
+/// Both OSes will say so if asked, and the mapping from what they answer to an
+/// arch token is pure ([`tan_core::host_env::arch_for_image_file_machine`],
+/// [`tan_core::host_env::arch_for_proc_translated`]) and unit-tested there. The
+/// constant survives only as the fallback for a query that fails or names a
+/// machine type tan has no token for — inventing a tag there would fail a host
+/// merely because tan could not name it.
+///
+/// Linux is left on the constant deliberately: tan ships no Linux asset whose
+/// arch can differ from its host's, and box64-style emulation is not a
+/// configuration Alp Lab supports.
+#[cfg(windows)]
+fn host_arch() -> &'static str {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, IsWow64Process2};
+
+    let mut process_machine: u16 = 0;
+    let mut native_machine: u16 = 0;
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no close
+    // and is always valid; both out-parameters are live `u16`s. The call
+    // returns 0 on failure, in which case `native_machine` is untouched — so
+    // the result is only read when it returned non-zero.
+    let ok = unsafe {
+        IsWow64Process2(
+            GetCurrentProcess(),
+            &mut process_machine,
+            &mut native_machine,
+        )
+    };
+    if ok == 0 {
+        return std::env::consts::ARCH;
+    }
+    tan_core::host_env::arch_for_image_file_machine(native_machine)
+        .unwrap_or(std::env::consts::ARCH)
+}
+
+/// macOS: `sysctl.proc_translated` is 1 exactly when this process is an x86_64
+/// binary running under Rosetta, which only exists on Apple silicon — so it is
+/// a direct statement that the machine is `aarch64`. The sysctl is absent on
+/// older systems, where the call fails and a native binary's own arch is the
+/// right answer anyway.
+///
+/// Declared rather than pulled in through `libc`: it is one `extern` line
+/// against `libSystem`, which every macOS binary already links, and the crate
+/// has no `libc` edge today.
+#[cfg(target_os = "macos")]
+fn host_arch() -> &'static str {
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const std::ffi::c_char,
+            oldp: *mut std::ffi::c_void,
+            oldlenp: *mut usize,
+            newp: *mut std::ffi::c_void,
+            newlen: usize,
+        ) -> std::ffi::c_int;
+    }
+
+    let mut translated: std::ffi::c_int = 0;
+    let mut size = std::mem::size_of::<std::ffi::c_int>();
+    // SAFETY: the name is a NUL-terminated literal; `translated`/`size` are a
+    // live `c_int` and its byte length; `newp`/`newlen` are null/0, which is
+    // the documented form for a READ. A non-zero return means the sysctl is
+    // absent (pre-Big Sur), and `translated` keeps its initialised 0.
+    let rc = unsafe {
+        sysctlbyname(
+            c"sysctl.proc_translated".as_ptr(),
+            std::ptr::from_mut(&mut translated).cast(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    tan_core::host_env::arch_for_proc_translated(rc == 0 && translated == 1, std::env::consts::ARCH)
+}
+
+/// Linux and everything else: the binary's arch is the machine's. See the
+/// Windows arm above for why the other two are not.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn host_arch() -> &'static str {
+    std::env::consts::ARCH
+}
+
+/// Read `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled`.
+///
+/// The registry API, not `reg query`: shelling out costs a process, inherits
+/// whatever `PATH` the caller has (the one thing a broken host is likely to
+/// have wrong), and turns a typed DWORD into text that then has to be parsed
+/// back. `windows-sys` is already resolved in the lock tree, so this is a
+/// direct edge onto a crate that was being built anyway, target-gated to
+/// Windows.
+///
+/// The three-way mapping from the returned status is NOT here — it is
+/// [`tan_core::host_env::classify_long_paths`], which is unit-tested on every
+/// host. What is left below is the `RegGetValueW` call and nothing else, so
+/// the untested region is the FFI alone rather than the branching that decides
+/// what a user is told.
+///
+/// `HKLM\SYSTEM\...` is not subject to WOW64 registry redirection, so no
+/// `KEY_WOW64_*` flag is needed for a 32-bit `tan` on a 64-bit host.
+#[cfg(windows)]
+fn long_paths_enabled() -> Option<bool> {
+    use windows_sys::Win32::System::Registry::{
+        HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RegGetValueW,
+    };
+
+    /// NUL-terminated UTF-16, as the `W` entry points require.
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let subkey = wide(tan_core::host_env::LONG_PATHS_KEY.trim_start_matches(r"HKLM\"));
+    let value = wide("LongPathsEnabled");
+    let mut data: u32 = 0;
+    let mut size: u32 = std::mem::size_of::<u32>() as u32;
+    // SAFETY: `subkey`/`value` are NUL-terminated UTF-16 buffers that outlive
+    // the call; `data`/`size` are a live `u32` and its byte length, and
+    // `RRF_RT_REG_DWORD` makes the API reject any value whose type is not a
+    // 4-byte DWORD rather than overrun the buffer. A null `pdwtype` is
+    // documented as "do not return the type".
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            subkey.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            std::ptr::from_mut(&mut data).cast(),
+            &mut size,
+        )
+    };
+    tan_core::host_env::classify_long_paths(status, data)
+}
+
+/// `classify_long_paths` compares against `winerror.h` values re-declared in
+/// `tan-core` (which must stay platform-neutral and cannot import
+/// `windows-sys`). These two asserts are what stop the copies drifting: they
+/// are checked at compile time against the real headers, on the one target
+/// where the real headers exist.
+#[cfg(windows)]
+const _: () = {
+    assert!(tan_core::host_env::WIN_ERROR_SUCCESS == windows_sys::Win32::Foundation::ERROR_SUCCESS);
+    assert!(
+        tan_core::host_env::WIN_ERROR_FILE_NOT_FOUND
+            == windows_sys::Win32::Foundation::ERROR_FILE_NOT_FOUND
+    );
+};
+
+/// No such registry value off Windows. `host_environment_checks` never reaches
+/// the `longPaths` check on a non-Windows `os`, so this is only ever the unused
+/// field of the probe struct.
+#[cfg(not(windows))]
+fn long_paths_enabled() -> Option<bool> {
+    None
 }
 
 /// Append an SDK-provenance check (conformance Issue 4 + 6): records the SDK
@@ -1001,6 +1228,42 @@ pub(crate) mod tests {
         let json = run.json.expect("json envelope");
         let names = envelope_check_names(&json);
         assert!(names.iter().any(|n| n == "hostPrerequisites"), "{names:?}");
+        // Same seam, the host-environment appends: dropping
+        // `append_host_environment` from `assemble_doctor_report` ships a
+        // binary with none of the three checks and every other test still
+        // green, because they drive the pure functions directly. The ENVELOPE
+        // is what closes it. Names only -- the statuses are this host's.
+        assert!(names.iter().any(|n| n == "zephyrSdkHost"), "{names:?}");
+        assert!(names.iter().any(|n| n == "homePath"), "{names:?}");
+        assert_eq!(
+            names.iter().any(|n| n == "longPaths"),
+            cfg!(windows),
+            "longPaths is Windows-only: {names:?}"
+        );
+    }
+
+    #[test]
+    fn doctor_build_does_not_repeat_the_host_environment_checks() {
+        // The deliberate NEGATIVE half of the placement decision (#81's "one
+        // fact, one check" trap). `--build` already carries a `zephyrSdk` probe
+        // -- "is an SDK installed here" -- and `zephyrSdkHost` answers the
+        // opposite question. Adding these there later, by reflex, would report
+        // the SDK story twice under two names; this fails if someone does.
+        let tree = TempTree::new("run-build-no-hostenv");
+        let g = json_global(Some(tree.path()));
+        let run = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        );
+        let names = envelope_check_names(&run.json.expect("json envelope"));
+        for name in ["zephyrSdkHost", "longPaths", "homePath"] {
+            assert!(!names.contains(&name.to_string()), "{name} in {names:?}");
+        }
     }
 
     #[test]
@@ -1035,6 +1298,40 @@ pub(crate) mod tests {
                 .unwrap_or_else(|| panic!("{name} missing from {names:?}"));
             assert!(at < west, "{name} must precede west: {names:?}");
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn host_arch_agrees_with_what_windows_itself_reports() {
+        // An INDEPENDENT oracle for the `IsWow64Process2` result: Windows sets
+        // `PROCESSOR_ARCHITEW6432` to the NATIVE arch in an emulated/WOW64
+        // process and leaves it unset in a native one, where
+        // `PROCESSOR_ARCHITECTURE` is already native. Nothing in `host_arch`
+        // reads either variable, so this is a real cross-check and not a
+        // restatement — swapping the ARM64/AMD64 arms of
+        // `arch_for_image_file_machine` fails here on any Windows host.
+        //
+        // What it CANNOT catch on an x64 host is `host_arch()` being replaced
+        // wholesale by `std::env::consts::ARCH`, because the two agree here by
+        // construction; that mutation is caught by
+        // `an_emulated_process_resolves_the_machines_arch_not_its_own` in
+        // tan-core, which drives the mapping over both machine types.
+        let native = std::env::var("PROCESSOR_ARCHITEW6432")
+            .or_else(|_| std::env::var("PROCESSOR_ARCHITECTURE"))
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        let expected = match native.as_str() {
+            "ARM64" => "aarch64",
+            "AMD64" => "x86_64",
+            // x86 / IA64 / an unset environment: tan has no token, and the
+            // fallback is whatever it was built for. Nothing to assert.
+            _ => return,
+        };
+        assert_eq!(
+            host_arch(),
+            expected,
+            "host_arch must report the machine Windows reports ({native})"
+        );
     }
 
     #[test]

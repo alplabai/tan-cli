@@ -237,6 +237,11 @@ fn bundle_doctor_report(
 ) -> DoctorReport {
     let mut doctor = build_doctor_report(context, target, server, runtime);
     crate::commands::doctor::append_host_prerequisites(&mut doctor, context.sdk_root.as_deref());
+    // Same reasoning as the line above: a bundle is attached precisely when
+    // something failed, and "this host has no Zephyr SDK build at all" /
+    // "long paths are off" are facts the maintainer would otherwise reconstruct
+    // from a build log.
+    crate::commands::doctor::append_host_environment(&mut doctor);
     doctor
 }
 
@@ -537,6 +542,31 @@ mod tests {
             check.detail
         );
         // Counted, not just appended -- the exit code is `summary.fail > 0`.
+        let counted = doctor.summary.pass + doctor.summary.warn + doctor.summary.fail;
+        assert_eq!(counted as usize, doctor.checks.len());
+    }
+
+    #[test]
+    fn the_bundles_doctor_section_carries_the_host_environment_checks() {
+        // Same hole, one line down: deleting `append_host_environment` leaves a
+        // bundle from a windows-arm64 or Intel-Mac host that never says the
+        // pinned toolchain has no build for it -- the single most useful fact
+        // in the file, and the one a maintainer would otherwise spend a build
+        // log looking for. Names only; the statuses are whatever THIS host is.
+        let doctor = bundle_doctor_report(
+            &context(),
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime(),
+        );
+        let names: Vec<&str> = doctor.checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"zephyrSdkHost"), "{names:?}");
+        assert!(names.contains(&"homePath"), "{names:?}");
+        assert_eq!(
+            names.contains(&"longPaths"),
+            cfg!(windows),
+            "longPaths is Windows-only: {names:?}"
+        );
         let counted = doctor.summary.pass + doctor.summary.warn + doctor.summary.fail;
         assert_eq!(counted as usize, doctor.checks.len());
     }

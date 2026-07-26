@@ -15,6 +15,7 @@ pub mod debug;
 pub mod debug_launch;
 pub mod diff;
 pub mod flash;
+pub mod host_env;
 pub mod image_bundle;
 pub mod kconfig;
 pub mod loader;
@@ -71,6 +72,7 @@ pub use flash::{
     plan_swd_probe, plan_xspi_flashwriter, plan_yocto_wic, plan_zephyr_west_flash, registry_keys,
     resolve_artefact_path, tool_gate,
 };
+pub use host_env::{HostEnvProbe, ZEPHYR_SDK_HOSTS, host_environment_checks};
 pub use image_bundle::{
     BundleHelperEntry, BundleManifest, BundleSliceEntry, assemble_bundle_manifest,
     helper_artefact_rel, raw_passthrough, slice_archive_name, slice_artefact_rel,
