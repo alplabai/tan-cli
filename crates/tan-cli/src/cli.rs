@@ -418,7 +418,8 @@ pub struct SdkArgs {
     /// Positional argument (version for install, version|path for switch).
     #[arg(value_name = "ARG")]
     pub arg: Option<String>,
-    /// Cache root for `install` (default: ~/.alp/sdk-cache).
+    /// Cache root to install into, and the first root `switch <version>` looks
+    /// in (default: ~/.alp/sdk-cache).
     #[arg(long)]
     pub destination: Option<String>,
     /// With `switch`: pin the machine-global default (`~/.alp/sdk-default`)

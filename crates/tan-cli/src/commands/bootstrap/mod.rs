@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use tan_core::ManifestReconcile;
 use tan_core::bootstrap::{
     BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, ExistingWorkspace, HostOs, MissingPrerequisite,
     Tokens, WorkspaceChoice, YoctoGate, decide_workspace_reuse, fallback_facts, in_play_runtimes,
@@ -50,13 +51,14 @@ use west_config::same_directory;
 pub(crate) use steps::check_prerequisites;
 // Re-exported at crate visibility (rather than the module's own `pub(super)`)
 // so `commands::sdk`'s `run_switch` can chain the SAME reconciliation (#62) —
-// `west_config` itself stays a private submodule; only these two names need a
+// `west_config` itself stays a private submodule; only these names need a
 // wider audience than `bootstrap` alone. `run_switch` uses the guarded
-// `_for_switch` variant (below), never the unconditional one directly — that
-// stays `bootstrap`-only since only bootstrap's job IS the workspace under
-// its topdir.
+// `_for_switch` variant, never the unconditional one directly — that stays
+// `bootstrap`-only since only bootstrap's job IS the workspace under its
+// topdir. `workspace_synced_to` is the read half of the sync record bootstrap
+// writes below; the OUTCOME type itself is `tan_core::ManifestReconcile`.
 pub(crate) use west_config::{
-    SwitchReconcile, reconcile_west_manifest_path, reconcile_west_manifest_path_for_switch,
+    reconcile_west_manifest_path_for_switch, record_workspace_sdk, workspace_synced_to,
 };
 
 /// `data` payload for the `bootstrap` envelope: the resolved SDK root, the
@@ -340,15 +342,39 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         // west.yml. Pointless (and a stray write) when an existing workspace is
         // reused, since that path touches neither west nor this topdir.
         if !reuse {
-            if let Some((config_path, old_rel, new_rel)) = reconcile_west_manifest_path(&sdk_root) {
-                log.warn(
+            match west_config::reconcile_west_manifest_path(&sdk_root) {
+                ManifestReconcile::Rewrote {
+                    config_path,
+                    old_rel,
+                    new_rel,
+                } => log.warn(
                     "west-config-reconciled",
                     &format!(
                         "reconciled {} manifest.path {old_rel} -> {new_rel} (it named a different \
                          SDK checkout under this topdir, #31)",
                         config_path.display()
                     ),
-                );
+                ),
+                // Silent here would be the worst of the three callers: `west
+                // update` is about to run against whatever manifest that
+                // unrewritten pointer names -- i.e. the WRONG SDK's west.yml,
+                // the exact #31 failure this call exists to prevent.
+                ManifestReconcile::Failed {
+                    config_path,
+                    old_rel,
+                    reason,
+                } => log.warn(
+                    "west-config-reconcile-failed",
+                    &format!(
+                        "could not rewrite {}'s manifest.path{} ({reason}); `west update` will \
+                         resolve the manifest from whatever that pointer still names",
+                        config_path.display(),
+                        old_rel.map_or(String::new(), |old| format!(" (still {old})")),
+                    ),
+                ),
+                ManifestReconcile::NotApplicable
+                | ManifestReconcile::AlreadyMatches
+                | ManifestReconcile::Blocked { .. } => {}
             }
         }
         if let Err(message) = west_phase(&workspace, venv, &mut log, &runner, reuse) {
@@ -356,6 +382,15 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
             issues.extend(log.take_issues());
             let data = data_for(args, &sdk_root, &paths, &facts, &pin);
             return fatal(g, project, data, issues, message);
+        }
+        // `west update` just materialised this topdir's trees from THIS SDK's
+        // manifest -- the one fact nothing else on disk records, and the one
+        // `tan sdk switch` needs to stop recommending a bootstrap that already
+        // happened. Only on the `!reuse` path: a reused workspace was left
+        // untouched (and, when adopted via `$ZEPHYR_BASE`, is not even under
+        // this topdir).
+        if !reuse {
+            record_workspace_sdk(&paths.workspace_dir, &sdk_root);
         }
     }
 

@@ -8,6 +8,20 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`sdk.west-config-reconcile-failed` (new issue code, `tan sdk switch`).**
+  `.west/config`'s reconciliation reported every failure — an unreadable
+  config, a read-only one, one held open by another process (the routine
+  Windows shape) — identically to "already correct", so the user was told the
+  switch was clean while `west` kept resolving its manifest from the stale
+  pointer. The three-way outcome (`tan_core::ManifestReconcile`) makes the
+  failure distinguishable, and it now surfaces in text and in the envelope with
+  the OS's own reason and what to do about it. Severity `error` with exit code
+  `0`: the switch itself DID happen (the active-SDK pointer is written) and
+  failing would block the escape hatch out of a broken workspace — but nothing
+  weaker than an error describes a workspace still pointing at the old SDK.
+  `tan bootstrap` gained the same distinction as a `west-config-reconcile-failed`
+  warning, where it matters most: `west update` is about to run against whatever
+  manifest that unrewritten pointer names.
 - **`tan doctor` reports a missing host prerequisite without `--fix`.**
   `check_prerequisites` had no caller outside `tan bootstrap`, so the only way
   a missing `ninja` surfaced was `tan doctor --build --fix`, which runs
@@ -82,6 +96,35 @@ All notable changes to `tan` are documented here. Format follows
   the project's own `build` root. (#52)
 
 ### Changed
+- **`tan sdk switch <version>` resolves the bare version against more than one
+  cache root (#62).** It joined `~/.alp/sdk-cache` and nothing else, while the
+  layout that reported #62 keeps its SDKs under `~/.alp/sdk` (the VS Code
+  extension's install root) — so `tan sdk switch v0.13.0` failed with
+  `path-not-found` on a version sitting right there on disk, and the whole
+  `.west/config` reconciliation shipped in #74 was unreachable for exactly the
+  users who needed it. Three roots are tried in a fixed order, first real
+  checkout wins: `--destination` (now honoured by `switch`, not just
+  `install`), then `~/.alp/sdk-cache` (so `install X && switch X` selects what
+  the install just wrote), then the parent directory of the currently active
+  SDK — no config declares a cache root, so where the active SDK sits is the
+  only authoritative record of where this machine keeps them. Not a filesystem
+  search: three named roots, each of which the user can point at.
+- **`sdk.bootstrap-recommended` is derived from workspace state, not from
+  whether a rewrite fired.** It was latched to the `.west/config` rewrite
+  happening, so a *second* `tan sdk switch` — pointer already reconciled by the
+  first, `topdir/zephyr` and `modules/` still the previous SDK's trees — went
+  silent exactly when the user had not acted on the advice yet. It now fires
+  whenever the workspace cannot be shown to match the selected SDK: the pointer
+  must name it AND a `tan bootstrap` `west update` must have been recorded
+  against it. `tan bootstrap` writes that record (`<topdir>/.west/
+  tan-workspace-sdk`) after an update that actually ran; nothing else on disk
+  answers "which SDK's manifest were these trees checked out from", since
+  `.west/config` is rewritten by the reconcile itself without the trees
+  changing. **A workspace bootstrapped before this record existed has none, so
+  the first `sdk switch` after upgrading advises a bootstrap it may not need —
+  one `tan bootstrap` run clears it for good.** The message wording follows the
+  evidence: a diverged pointer *proves* the workspace belongs to another SDK, a
+  matching one with no record only means it cannot be confirmed.
 - **The `doctor` envelope gained `data.missingPrerequisites` and a
   `doctor.hostPrerequisites` issue code.** The new check (see Added) reports
   `Fail` on every prerequisite refusal — each one blocks a build, and bootstrap

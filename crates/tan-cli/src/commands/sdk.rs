@@ -11,12 +11,13 @@ use std::process::Command;
 
 use serde::Serialize;
 use tan_core::{
-    GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
-    check_sdk_readiness, describe_network_error, is_plain_relative, parse_remote_sdk_releases,
+    GITHUB_RELEASES_URL, ManifestReconcile, SdkReadinessReport, SdkReadinessState, SdkRelease,
+    SdkSourceTier, check_sdk_readiness, describe_network_error, is_plain_relative,
+    parse_remote_sdk_releases, resolve_sdk_version_root, workspace_needs_bootstrap,
 };
 
 use super::CommandRun;
-use super::bootstrap::{SwitchReconcile, reconcile_west_manifest_path_for_switch};
+use super::bootstrap::{reconcile_west_manifest_path_for_switch, workspace_synced_to};
 use crate::cli::{GlobalArgs, SdkArgs};
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
@@ -430,11 +431,21 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     // an absolute argument survives that `join` unchanged (`PathBuf::push`
     // discards the base for an absolute pushed path), so the two branches
     // collapse cleanly into one `join` + `normalize_path`.
+    //
+    // The bare-version branch used to join ONE root, `default_cache_root()`.
+    // That is why #62's fix could not reach the layout that reported it: those
+    // SDKs live under `~/.alp/sdk` (the extension's install root), so `tan sdk
+    // switch v0.13.0` resolved a `~/.alp/sdk-cache/v0.13.0` that does not exist
+    // and failed with `path-not-found` before any reconciliation. It now tries
+    // every root this machine is known to keep SDKs in (see
+    // [`switch_cache_roots`]); `is_plain_relative` above still guarantees the
+    // argument is a single path segment, so none of those joins can escape.
     let sdk_path = if is_plain_relative(Path::new(&version_or_path)) {
-        Path::new(&default_cache_root())
-            .join(&version_or_path)
-            .to_string_lossy()
-            .to_string()
+        resolve_sdk_version_root(
+            &version_or_path,
+            &switch_cache_roots(g, args),
+            |candidate| crate::util::has_loader_script(Path::new(candidate)),
+        )
     } else {
         tan_core::normalize_path(&crate::util::cli_workspace_root(g).join(&version_or_path))
             .to_string_lossy()
@@ -543,21 +554,16 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     // block the escape hatch -- worse than the staleness it replaces. Safe to
     // call unconditionally: a no-op whenever the pointer already matches.
     let mut issues: Vec<Issue> = Vec::new();
-    match reconcile_west_manifest_path_for_switch(&sdk_path) {
-        Some(SwitchReconcile::Rewrote {
+    let outcome = reconcile_west_manifest_path_for_switch(&sdk_path);
+    match &outcome {
+        ManifestReconcile::Rewrote {
             config_path,
             old_rel,
             new_rel,
-        }) => {
-            // A reconcile firing at all means this topdir's `.west/` was read
-            // successfully and its `path` did NOT already name `sdk_path` --
-            // i.e. the workspace under it was bootstrapped for a DIFFERENT SDK.
-            // `west update` never ran against the newly selected one's manifest,
-            // so the checked-out zephyr/HAL trees still reflect the old SDK; a
-            // bare "switched" success here would read as nothing left to do.
+        } => {
             let old_existed = Path::new(&sdk_path)
                 .parent()
-                .is_some_and(|topdir| topdir.join(&old_rel).exists());
+                .is_some_and(|topdir| topdir.join(old_rel).exists());
             // Distinguish "pointed at a still-present sibling SDK checkout" from
             // the state #62 reported -- `path` naming a directory that no longer
             // exists on disk at all, which the reporter called unambiguously
@@ -581,21 +587,11 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 severity: "warning".to_string(),
                 message,
             });
-            text.push(
-                "  next    run `tan bootstrap` to sync the workspace to the new SDK.".to_string(),
-            );
-            issues.push(Issue {
-                code: "sdk.bootstrap-recommended".to_string(),
-                severity: "warning".to_string(),
-                message: "this topdir's workspace was bootstrapped for a different SDK version; \
-                          run `tan bootstrap` to sync it to the newly selected one."
-                    .to_string(),
-            });
         }
-        Some(SwitchReconcile::Blocked {
+        ManifestReconcile::Blocked {
             config_path,
             old_rel,
-        }) => {
+        } => {
             // `old_rel` exists on disk but is not an alp-sdk checkout -- a real,
             // unrelated directory (e.g. a plain Zephyr workspace) sharing this
             // topdir with the SDK just switched to. Rewriting it would hand
@@ -615,7 +611,67 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 message,
             });
         }
-        None => {}
+        ManifestReconcile::Failed {
+            config_path,
+            old_rel,
+            reason,
+        } => {
+            // The repair did NOT happen. Every failure arm used to look exactly
+            // like "already correct" from here, so the user was told the switch
+            // was clean while `west` kept resolving its manifest from the stale
+            // pointer -- the #62 breakage, now merely unreported. Severity
+            // `error` with a Success exit is deliberate and not a contradiction:
+            // the switch itself DID happen (the active-SDK pointer is written),
+            // and failing the command would block the very escape hatch a user
+            // runs to get out of a broken workspace -- but the workspace is
+            // still broken, and nothing weaker than an error says so.
+            let message = format!(
+                "could not rewrite {}'s manifest.path{} ({reason}) -- `west` will keep resolving \
+                 the manifest from the stale pointer. Close anything holding the file open (or \
+                 clear its read-only flag) and run `tan bootstrap`.",
+                config_path.display(),
+                old_rel
+                    .as_ref()
+                    .map_or(String::new(), |old| format!(" (still {old})")),
+            );
+            text.push(format!("  error   {message}"));
+            issues.push(Issue {
+                code: "sdk.west-config-reconcile-failed".to_string(),
+                severity: "error".to_string(),
+                message,
+            });
+        }
+        ManifestReconcile::NotApplicable | ManifestReconcile::AlreadyMatches => {}
+    }
+
+    // The `tan bootstrap` advice used to be latched to the rewrite above having
+    // FIRED, so a second `sdk switch` -- pointer already correct, `topdir/zephyr`
+    // and `modules/` still the previous SDK's trees -- went silent exactly when
+    // the user had not acted on it yet. It is derived from workspace state
+    // instead: the pointer (via `outcome`) AND whether a `tan bootstrap`
+    // `west update` ever ran against THIS SDK (the record beside `.west/config`).
+    if workspace_needs_bootstrap(&outcome, workspace_synced_to(&sdk_path)) {
+        // Two wordings, both assertable. A diverged pointer PROVES the workspace
+        // belongs to another SDK; a matching one with no sync record only means
+        // we cannot confirm it -- claiming more there would be a guess (every
+        // workspace bootstrapped before the record existed looks like this).
+        let message = match &outcome {
+            ManifestReconcile::AlreadyMatches => format!(
+                "this topdir's workspace has no record of being synced to {sdk_path}; run `tan \
+                 bootstrap` to bring its zephyr/ and modules/ trees to the selected SDK."
+            ),
+            _ => "this topdir's workspace was bootstrapped for a different SDK version; run `tan \
+                  bootstrap` to sync it to the newly selected one."
+                .to_string(),
+        };
+        text.push(
+            "  next    run `tan bootstrap` to sync the workspace to the new SDK.".to_string(),
+        );
+        issues.push(Issue {
+            code: "sdk.bootstrap-recommended".to_string(),
+            severity: "warning".to_string(),
+            message,
+        });
     }
 
     emit_success(
@@ -630,6 +686,48 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
         issues,
         text,
     )
+}
+
+/// Cache roots a BARE `tan sdk switch <version>` may resolve against, most
+/// authoritative first. `resolve_sdk_version_root` takes the first that holds
+/// a real checkout of that version, so order is the whole design:
+///
+/// 1. `--destination` — the user said, on this very command line, where their
+///    SDKs are. Nothing outranks that. (It was `install`-only before; a flag
+///    that names the cache root is exactly what the version form needs, and
+///    `install --destination X` then `switch --destination X` now agree.)
+/// 2. `default_cache_root()` (`~/.alp/sdk-cache`) — where `tan sdk install`
+///    puts a clone, so `install v0.13.0 && switch v0.13.0` selects the checkout
+///    the install just wrote, never a same-named one elsewhere.
+/// 3. The parent of the CURRENTLY ACTIVE SDK. There is no config that declares
+///    a cache root, so the only authoritative record of where this machine's
+///    SDKs actually live is where the active one sits — `~/.alp/sdk` for #62's
+///    reporter, whose SDKs the extension installed. Resolved through the same
+///    four-tier chain (`--sdk-root` > project pin > global default > discovery)
+///    every other command uses, rather than a second answer to "which SDK".
+///
+/// Deliberately NOT a filesystem search: three named roots, tried in a fixed
+/// order, each of which the user can point at. A `--sdk-root` that names a
+/// non-checkout still cannot hijack the argument — it only contributes its
+/// parent as a candidate, and a candidate only wins by holding a real checkout.
+fn switch_cache_roots(g: &GlobalArgs, args: &SdkArgs) -> Vec<String> {
+    let mut roots = Vec::new();
+    if let Some(destination) = args.destination.as_deref().map(str::trim) {
+        if !destination.is_empty() {
+            roots.push(destination.to_string());
+        }
+    }
+    roots.push(default_cache_root());
+    let (active, _) = crate::util::resolve_sdk_tiered(g, &crate::util::cli_workspace_root(g));
+    if let Some(parent) = active
+        .as_deref()
+        .map(Path::new)
+        .and_then(Path::parent)
+        .map(|p| p.to_string_lossy().to_string())
+    {
+        roots.push(parent);
+    }
+    roots
 }
 
 /// Writes the active-SDK pointer JSON (`sdkPath` + `updatedAt`) to `path`,
@@ -1107,6 +1205,142 @@ mod tests {
             .collect();
         assert!(codes.contains(&"sdk.west-config-not-reconciled".to_string()));
         assert!(!codes.contains(&"sdk.west-config-reconciled".to_string()));
+    }
+
+    /// Every issue code from a run's envelope.
+    fn issue_codes(run: &CommandRun) -> Vec<String> {
+        json_data(run)["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|issue| issue["code"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// A `sdk switch <arg>` run against `g`, the shape every test below drives.
+    fn switch(g: &GlobalArgs, arg: &str) -> CommandRun {
+        run_switch(
+            g,
+            &SdkArgs {
+                subcommand: Some("switch".to_string()),
+                arg: Some(arg.to_string()),
+                destination: None,
+                global: false,
+            },
+        )
+    }
+
+    #[test]
+    fn switch_resolves_a_bare_version_in_the_root_the_active_sdk_lives_in() {
+        // #62's layout, and why its fix could not fire there: the reporter's
+        // SDKs sit under `~/.alp/sdk` (the extension's install root), not
+        // `~/.alp/sdk-cache`. Joining the cache root ALONE made `tan sdk switch
+        // v0.13.0` fail with `path-not-found` on a version that is right there
+        // on disk -- so the whole `.west/config` reconciliation was unreachable
+        // for exactly the users who reported needing it.
+        //
+        // The version is pid-tagged so the developer's REAL `~/.alp/sdk-cache`
+        // (an earlier, higher-precedence root) cannot happen to hold it.
+        let ws = tmp("switch-version-root-ws");
+        let root = tmp("switch-version-root-cache");
+        let version = format!("v0.13.0-tan-test-{}", std::process::id());
+        let active = root.join("v0.11.0");
+        make_sdk_root(&active);
+        let wanted = root.join(&version);
+        make_sdk_root(&wanted);
+        // `--sdk-root` names the ACTIVE SDK; its parent is the root this
+        // machine actually keeps SDKs in.
+        let g = global(&ws, Some(&active), Format::Json);
+
+        let run = switch(&g, &version);
+
+        assert_eq!(run.exit, ExitCode::Success);
+        assert_eq!(
+            Path::new(json_data(&run)["data"]["sdkPath"].as_str().unwrap()),
+            wanted,
+            "a bare version must resolve in the root the active SDK lives in, not only in \
+             ~/.alp/sdk-cache"
+        );
+    }
+
+    #[test]
+    fn switch_surfaces_a_west_config_it_could_not_rewrite() {
+        // Gap 2: every failure arm of the reconcile used to return the same
+        // `None` as "already correct", so a `.west/config` that could not be
+        // rewritten -- read-only, or (routinely, on Windows) held open by
+        // another process -- reported a clean switch over a workspace still
+        // pointing at the old SDK. Occupying the atomic temp path with a
+        // directory forces that failure portably.
+        let ws = tmp("switch-reconcile-failed-ws");
+        let topdir = tmp("switch-reconcile-failed-topdir");
+        let new_sdk = topdir.join("v0.13.0");
+        make_sdk_root(&new_sdk);
+        let west_dir = topdir.join(".west");
+        std::fs::create_dir_all(&west_dir).unwrap();
+        let original = "[manifest]\npath = v0.11.0\nfile = west.yml\n";
+        std::fs::write(west_dir.join("config"), original).unwrap();
+        std::fs::create_dir_all(west_dir.join(format!("config.{}.tan-tmp", std::process::id())))
+            .unwrap();
+        let g = global(&ws, None, Format::Json);
+
+        let run = switch(&g, &new_sdk.to_string_lossy());
+
+        // The switch itself succeeded (the active-SDK pointer IS written) --
+        // hard-failing would block the escape hatch. But the workspace is still
+        // broken and the envelope has to say so.
+        assert_eq!(run.exit, ExitCode::Success);
+        assert_eq!(
+            std::fs::read_to_string(west_dir.join("config")).unwrap(),
+            original
+        );
+        let codes = issue_codes(&run);
+        assert!(
+            codes.contains(&"sdk.west-config-reconcile-failed".to_string()),
+            "a rewrite that did not happen must not look like a no-op: {codes:?}"
+        );
+        assert!(
+            codes.contains(&"sdk.bootstrap-recommended".to_string()),
+            "a pointer still naming another SDK is stale whatever any sync record says"
+        );
+    }
+
+    #[test]
+    fn switch_keeps_recommending_bootstrap_until_the_workspace_is_actually_synced() {
+        // Gap 3: the advice used to be latched to the rewrite FIRING, so the
+        // second `tan sdk switch v0.13.0` -- config already reconciled by the
+        // first, `zephyr/` and `modules/` still the old SDK's trees -- said
+        // nothing at all. It is derived from workspace state now, so it keeps
+        // firing until a `tan bootstrap` `west update` actually syncs the trees.
+        let ws = tmp("switch-advice-state-ws");
+        let topdir = tmp("switch-advice-state-topdir");
+        let new_sdk = topdir.join("v0.13.0");
+        make_sdk_root(&new_sdk);
+        let west_dir = topdir.join(".west");
+        std::fs::create_dir_all(&west_dir).unwrap();
+        // Already reconciled -- exactly the state a second switch sees.
+        std::fs::write(
+            west_dir.join("config"),
+            "[manifest]\npath = v0.13.0\nfile = west.yml\n",
+        )
+        .unwrap();
+        let g = global(&ws, None, Format::Json);
+
+        let before = switch(&g, &new_sdk.to_string_lossy());
+        assert_eq!(before.exit, ExitCode::Success);
+        assert!(
+            issue_codes(&before).contains(&"sdk.bootstrap-recommended".to_string()),
+            "a matching pointer over unsynced trees is still a stale workspace"
+        );
+
+        // What `tan bootstrap` records once its `west update` has run.
+        crate::commands::bootstrap::record_workspace_sdk(&topdir, &new_sdk.to_string_lossy());
+
+        let after = switch(&g, &new_sdk.to_string_lossy());
+        assert_eq!(after.exit, ExitCode::Success);
+        assert!(
+            !issue_codes(&after).contains(&"sdk.bootstrap-recommended".to_string()),
+            "a workspace provably synced to this SDK must not be nagged"
+        );
     }
 
     #[test]
