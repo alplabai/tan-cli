@@ -203,6 +203,25 @@ All notable changes to `tan` are documented here. Format follows
   the missing-tool case it originally described. (#70)
 
 ### Fixed
+- **`tan debug-config --target-kind native-host` pointed `program` at
+  `zephyr.elf`, correcting #83.** #83 fixed the slice SELECTION (native_sim is
+  found by board, not by `os`) but then took that slice's `output_artefact`
+  verbatim. A manifest never records the host runnable: `resolve_zephyr_artefact`
+  (`build/execute/manifest.rs`) is tan's ONLY writer of `output_artefact` — the
+  field's "populated by `Orchestrator.fan_out`" lineage is stale, alp-sdk has
+  been planner/emit-only since alp-sdk#848 retired `fan_out` — and it stores
+  `<slice-cwd>/build/zephyr/zephyr.elf` unconditionally for every zephyr slice,
+  native_sim included. There is no `.exe` branch anywhere. So `ALP: Native Sim
+  Debug` handed CodeLLDB an ELF it cannot launch: the same failure #83 set out
+  to fix, one directory entry over. `tan run` had it right all along
+  (`find_native_sim_exe` swaps in the sibling `zephyr.exe`), and the reason the
+  two drifted is that each path carried its own idea of the runnable — so the
+  swap is now one pure `tan_core::run::native_sim_exe_beside`, called by BOTH.
+  #83's test fixtures wrote `output_artefact: …/zephyr.exe`, a manifest tan
+  cannot produce, which is exactly why they could not see this; they now write
+  `zephyr.elf` and assert the resolved `program` is the sibling `.exe`. Only
+  the `native-host` arm transforms — `zephyr-mcu`, `baremetal-mcu` and
+  `yocto-userspace` still want their artefact verbatim.
 - **`debug-config` emitted its launch configuration with scrambled key
   order.** Dropping the two unresolved `svdFile`/`svdPath` placeholders used
   `serde_json::Map::remove`, which under this workspace's `preserve_order`

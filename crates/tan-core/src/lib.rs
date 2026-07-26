@@ -103,7 +103,10 @@ pub use renode::{
     platform_files_for_sku, platform_stem_for_sku, renode_rejected_argv, select_sku, sku_family,
     soc_family_token, zephyr_elf_from_manifest,
 };
-pub use run::{NATIVE_SIM_BOARD, NATIVE_SIM_EXE, RunAction, decide_run_action, native_sim_slice};
+pub use run::{
+    NATIVE_SIM_BOARD, NATIVE_SIM_EXE, RunAction, decide_run_action, native_sim_exe_beside,
+    native_sim_slice,
+};
 pub use sdk::{
     GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
     check_sdk_readiness, describe_network_error, parse_remote_sdk_releases, resolve_active_sdk,

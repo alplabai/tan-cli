@@ -147,6 +147,30 @@ fn is_native_sim_board(board: &str) -> bool {
     board == NATIVE_SIM_BOARD || board.starts_with("native_sim/")
 }
 
+/// Swap a native_sim slice's `output_artefact` for the runnable
+/// [`NATIVE_SIM_EXE`] that sits beside it. Pure: no IO, nothing is probed.
+///
+/// A manifest NEVER records the `.exe`. `resolve_zephyr_artefact`
+/// (`tan-cli`'s `build/execute/manifest.rs`) is the only writer of
+/// `output_artefact` in tan — alp-sdk is planner/emit-only and writes none —
+/// and it stores `<slice-cwd>/build/zephyr/zephyr.elf` unconditionally, for
+/// every zephyr slice including native_sim. There is no `.exe` branch. So
+/// every consumer that wants the host runnable has to make this swap, and
+/// they must all make the SAME one: `tan run` carrying its own copy of the
+/// rule while `tan debug-config` took the artefact verbatim is exactly how
+/// #83 landed a `program` pointing at an ARM-less-but-unlaunchable
+/// `zephyr.elf`. One function, both callers.
+///
+/// Splits on the separator the path itself uses rather than going through
+/// `Path::with_file_name`, which on Windows rejoins with `\` and would turn a
+/// `/`-authored manifest path into a mixed `a/b\zephyr.exe`.
+pub fn native_sim_exe_beside(elf: &str) -> String {
+    match elf.rfind(['/', '\\']) {
+        Some(sep) => format!("{}{NATIVE_SIM_EXE}", &elf[..=sep]),
+        None => NATIVE_SIM_EXE.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,5 +386,23 @@ boot_order: []
                          ok\nipc: []\nhelper_mcus: []\nboot_order: []\n";
         let m = parse_system_manifest(manifest).unwrap();
         assert!(native_sim_slice(&m).is_none());
+    }
+
+    #[test]
+    fn native_sim_exe_replaces_only_the_elf_filename() {
+        // The shape `resolve_zephyr_artefact` actually writes.
+        assert_eq!(
+            native_sim_exe_beside("/ws/build/native_sim-zephyr/build/zephyr/zephyr.elf"),
+            format!("/ws/build/native_sim-zephyr/build/zephyr/{NATIVE_SIM_EXE}")
+        );
+        // A bare filename has no directory to preserve; a path already naming
+        // the exe is idempotent; a `\`-authored path keeps its own separator
+        // instead of coming back mixed.
+        assert_eq!(native_sim_exe_beside("zephyr.elf"), NATIVE_SIM_EXE);
+        assert_eq!(native_sim_exe_beside("a/zephyr.exe"), "a/zephyr.exe");
+        assert_eq!(
+            native_sim_exe_beside(r"C:\ws\build\zephyr\zephyr.elf"),
+            r"C:\ws\build\zephyr\zephyr.exe"
+        );
     }
 }
