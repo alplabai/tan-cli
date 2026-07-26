@@ -39,14 +39,22 @@ fn a_home_path_with_a_space_is_reported_with_the_path_itself() {
     // name the user never chose.
     let home = fresh_dir("home-space-home", "Jane Doe");
 
+    // Only the variable THIS platform's `host_home` is supposed to read, with
+    // the other one removed. Setting both would pass either way, leaving the
+    // `cfg!(windows)` choice free to be wrong — and reading `HOME` on native
+    // Windows resolves nothing on a normal host, so the check would silently
+    // report "could not resolve" for everyone.
+    let (used, ignored) = if cfg!(windows) {
+        ("USERPROFILE", "HOME")
+    } else {
+        ("HOME", "USERPROFILE")
+    };
     let output = Command::new(env!("CARGO_BIN_EXE_tan"))
         .args(["--format", "json", "doctor"])
         .current_dir(&work_dir)
         .env("SOURCE_DATE_EPOCH", "0")
-        // Both, because `host_home` picks ONE of them by platform and the test
-        // must pass on either host without asserting which.
-        .env("HOME", &home)
-        .env("USERPROFILE", &home)
+        .env(used, &home)
+        .env_remove(ignored)
         .output()
         .expect("failed to spawn tan");
 
