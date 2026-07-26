@@ -105,7 +105,14 @@ pub use renode::{
     platform_files_for_sku, platform_stem_for_sku, renode_rejected_argv, select_sku, sku_family,
     soc_family_token, zephyr_elf_from_manifest,
 };
-pub use run::{NATIVE_SIM_BOARD, NATIVE_SIM_EXE, RunAction, decide_run_action, native_sim_slice};
+// `NATIVE_SIM_EXE` is deliberately NOT re-exported: it is `pub(crate)` in
+// `run`, so `native_sim_exe_beside{,_path}` are the only ways to name the
+// native_sim runnable. A third caller hand-rolling `parent().join(…)` is the
+// drift that put an unlaunchable `zephyr.elf` in `debug-config`'s `program`.
+pub use run::{
+    NATIVE_SIM_BOARD, RunAction, decide_run_action, native_sim_exe_beside,
+    native_sim_exe_beside_path, native_sim_slice,
+};
 pub use sdk::{
     GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
     check_sdk_readiness, describe_network_error, parse_remote_sdk_releases, resolve_active_sdk,

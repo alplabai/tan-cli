@@ -32,6 +32,8 @@ complete -c tan -n '__fish_seen_subcommand_from inspect trace support-bundle' -l
 complete -c tan -n '__fish_seen_subcommand_from inspect' -l show-origin -d 'Include source metadata'
 complete -c tan -n '__fish_seen_subcommand_from debug-config' -l target-kind -d 'Debug target kind' -a 'zephyr-mcu baremetal-mcu yocto-userspace native-host'
 complete -c tan -n '__fish_seen_subcommand_from debug-config' -l server -d 'Debug server' -a 'jlink openocd pyocd gdbserver none'
+complete -c tan -n '__fish_seen_subcommand_from debug-config' -l core -d 'Build slice core id'
+complete -c tan -n '__fish_seen_subcommand_from debug-config' -l pre-launch-task -d 'VS Code task to run before launching'
 complete -c tan -n '__fish_seen_subcommand_from debug-config' -l preview -d 'Preview only'
 complete -c tan -n '__fish_seen_subcommand_from support-bundle' -l destination -d 'Destination path'
 complete -c tan -n '__fish_seen_subcommand_from support-bundle' -l target-kind -d 'Debug target kind' -a 'zephyr-mcu baremetal-mcu yocto-userspace native-host'

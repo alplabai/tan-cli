@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use tan_core::run::native_sim_slice;
+use tan_core::run::{native_sim_exe_beside, native_sim_slice};
 use tan_core::runners::{parse_runners_config, runner_arg_value, runner_arg_values};
 use tan_core::system_manifest::{Slice, SystemManifest, parse_system_manifest};
 use tan_core::{
@@ -78,7 +78,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         Ok(s) => s,
         Err(message) => return internal_failure(g, &generated_at, message, cwd_launch_path()),
     };
-    let mut draft = match create_launch_draft(target, server) {
+    let mut draft = match create_launch_draft(target, server, args.pre_launch_task.as_deref()) {
         Ok(d) => d,
         Err(message) => return internal_failure(g, &generated_at, message, cwd_launch_path()),
     };
@@ -484,7 +484,21 @@ fn resolve_from_build(
     };
 
     if let Some(artefact) = slice.output_artefact.as_deref().filter(|a| !a.is_empty()) {
-        resolution.executable = Some(workspace_relative(workspace_root, artefact));
+        // A manifest records the ELF for EVERY zephyr slice, native_sim
+        // included: `resolve_zephyr_artefact` (build/execute/manifest.rs) is
+        // tan's only writer of `output_artefact` and stores
+        // `<slice-cwd>/build/zephyr/zephyr.elf` unconditionally — there is no
+        // `.exe` branch, and alp-sdk (planner-only) never writes the field at
+        // all.
+        // So a host target needs the sibling swap, via the same tan-core
+        // helper `tan run` uses; every other target kind genuinely wants the
+        // artefact verbatim. #83 took it verbatim here too, which pointed
+        // `ALP: Native Sim Debug` at a `zephyr.elf` CodeLLDB cannot launch.
+        let artefact = match target {
+            DebugTargetKind::NativeHost => native_sim_exe_beside(artefact),
+            _ => artefact.to_string(),
+        };
+        resolution.executable = Some(workspace_relative(workspace_root, &artefact));
     }
 
     let Some(build_dir) = slice.build_dir.as_deref().filter(|b| !b.is_empty()) else {
@@ -605,6 +619,7 @@ mod tests {
             core: None,
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
+            pre_launch_task: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -630,6 +645,22 @@ mod tests {
     /// slice SECOND — the exact ordering that broke `native-host` resolution
     /// before this fix (the old `os`-keyed match took the first `os: zephyr`
     /// slice, which on this manifest is the MCU one, not the host binary).
+    ///
+    /// BOTH slices record `zephyr.elf`, because that is the only thing tan
+    /// ever writes: `resolve_zephyr_artefact` (build/execute/manifest.rs)
+    /// stores `<slice-cwd>/build/zephyr/zephyr.elf` unconditionally, with no
+    /// `.exe` branch for native_sim, and alp-sdk NEVER writes `output_artefact`
+    /// at all. This fixture originally wrote `zephyr.exe` on the native_sim
+    /// slice — a manifest tan cannot produce — which is precisely why it
+    /// could not see that `resolve_from_build` was taking the ELF verbatim.
+    ///
+    /// That `.elf` claim is not prose here: it is pinned on the PRODUCER side
+    /// by `build::execute::manifest`'s
+    /// `resolve_zephyr_artefact_names_the_elf_even_for_a_native_sim_slice`.
+    /// If a `.exe` branch is ever added there, that test fails and this
+    /// fixture gets revisited — rather than both silently drifting back to
+    /// encoding a manifest tan cannot produce, which is the blind spot itself
+    /// and not merely #83's instance of it.
     fn manifest_mcu_then_native_sim(workspace: &Path) -> String {
         let root = workspace.to_string_lossy().replace('\\', "/");
         format!(
@@ -637,7 +668,7 @@ mod tests {
              - core_id: m55_hp\n  os: zephyr\n  board: alp_e1m_aen701_m55_hp\n  status: ok\n  \
              output_artefact: {root}/build/m55_hp-zephyr/build/zephyr/zephyr.elf\n\
              - core_id: native_sim\n  os: zephyr\n  board: native_sim\n  status: ok\n  \
-             output_artefact: {root}/build/native_sim-zephyr/build/zephyr/zephyr.exe\n\
+             output_artefact: {root}/build/native_sim-zephyr/build/zephyr/zephyr.elf\n\
              ipc: []\nhelper_mcus: []\nboot_order: []\n"
         )
     }
@@ -647,6 +678,11 @@ mod tests {
     // native_sim artefact, never fall through to the MCU one — the old
     // `os`-keyed match took the first `os: zephyr` slice regardless of which
     // one it was, pointing `ALP: Native Sim Debug` at a Cortex-M ELF.
+    //
+    // And it must resolve the RUNNABLE: the slice records `zephyr.elf` (all
+    // tan ever writes), so `program` has to be the sibling `zephyr.exe`.
+    // Taking `output_artefact` verbatim hands CodeLLDB an ELF it cannot
+    // launch — the same class of failure, one directory entry over.
     #[test]
     fn native_host_resolves_native_sim_slice_not_the_first_zephyr_slice() {
         let dir = tmp("native-host-mixed");
@@ -739,7 +775,7 @@ mod tests {
         let manifest = format!(
             "schema_version: 1\nhw_info:\n  sku: E1M-AEN701\nslices:\n\
              - core_id: native_sim\n  os: zephyr\n  board: native_sim/native/64\n  status: \
-             ok\n  output_artefact: {root}/build/native_sim-zephyr/build/zephyr/zephyr.exe\n\
+             ok\n  output_artefact: {root}/build/native_sim-zephyr/build/zephyr/zephyr.elf\n\
              ipc: []\nhelper_mcus: []\nboot_order: []\n"
         );
         write_manifest(&dir, &manifest);
@@ -754,6 +790,43 @@ mod tests {
         assert_eq!(
             resolution.executable.as_deref(),
             Some("${workspaceFolder}/build/native_sim-zephyr/build/zephyr/zephyr.exe")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Bug 1 at the command boundary: the envelope's `data.configuration` — the
+    // very object alp-sdk-vscode#342 writes into launch.json — must carry no
+    // `preLaunchTask` unless one was asked for. Nothing in this repo, in
+    // alp-sdk-vscode, or in a generated project defines a task, and VS Code
+    // aborts pre-launch on a name it cannot resolve, so a default here means
+    // the emitted configuration cannot start a session at all.
+    #[test]
+    fn envelope_configuration_carries_a_pre_launch_task_only_when_opted_in() {
+        let dir = tmp("prelaunch-optin");
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let mut args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            preview: true,
+        };
+
+        let default_json = run(&g, &args).json.expect("json envelope");
+        assert!(
+            !default_json.contains("preLaunchTask"),
+            "default debug-config output must not name a task nothing defines:
+{default_json}"
+        );
+
+        args.pre_launch_task = Some("alpRun: build".to_string());
+        let opted_in: Value = serde_json::from_str(&run(&g, &args).json.expect("json envelope"))
+            .expect("envelope is JSON");
+        assert_eq!(
+            opted_in["data"]["configuration"]["preLaunchTask"],
+            "alpRun: build"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

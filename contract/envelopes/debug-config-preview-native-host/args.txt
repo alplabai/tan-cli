@@ -1,0 +1,8 @@
+--format
+json
+debug-config
+--target-kind
+native-host
+--server
+none
+--preview

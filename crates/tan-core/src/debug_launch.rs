@@ -23,9 +23,22 @@ fn server_label(server: DebugServerKind) -> &'static str {
 /// Build the VS Code launch configuration draft for a target/server, mirroring
 /// TS `createDebugProfile` → `debugProfileToLaunchDraft`. Errors (with the TS
 /// message) when the server is not valid for the target.
+///
+/// `pre_launch_task` names the VS Code task to run before the session starts,
+/// and is emitted ONLY when the caller supplies one. Every draft used to carry
+/// a hardcoded `preLaunchTask` (`alp: build active target` and three siblings)
+/// that **nothing in any of the three repos defines** — no `tasks.json`, no
+/// `TaskProvider` registration in the extension. VS Code resolves
+/// `preLaunchTask` before launching, fails to find the task, and aborts
+/// pre-launch, so the session never starts: a `launch.json` that reads
+/// perfectly and cannot run. Build-before-debug is still the behaviour we want,
+/// which is why the capability survives as an opt-in rather than a deletion —
+/// but it can only be the default once something actually provides the task,
+/// and the NAME then belongs to whoever registered the provider, not to us.
 pub fn create_launch_draft(
     target: DebugTargetKind,
     server: DebugServerKind,
+    pre_launch_task: Option<&str>,
 ) -> Result<Value, String> {
     if !is_server_supported_for_target(target, server) {
         return Err(format!(
@@ -46,7 +59,7 @@ pub fn create_launch_draft(
                     "cwd": "${workspaceFolder}",
                     "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
                     "runToEntryPoint": "main",
-                    "preLaunchTask": "alp: build active target",
+                    "preLaunchTask": pre_launch_task,
                     "svdFile": "<resolved-svd>",
                     "svdPath": "<resolved-svd>",
                     "servertype": "openocd",
@@ -59,7 +72,7 @@ pub fn create_launch_draft(
                     "cwd": "${workspaceFolder}",
                     "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
                     "runToEntryPoint": "main",
-                    "preLaunchTask": "alp: build active target",
+                    "preLaunchTask": pre_launch_task,
                     "svdFile": "<resolved-svd>",
                     "svdPath": "<resolved-svd>",
                     "servertype": "pyocd",
@@ -72,7 +85,7 @@ pub fn create_launch_draft(
                     "cwd": "${workspaceFolder}",
                     "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
                     "runToEntryPoint": "main",
-                    "preLaunchTask": "alp: build active target",
+                    "preLaunchTask": pre_launch_task,
                     "svdFile": "<resolved-svd>",
                     "svdPath": "<resolved-svd>",
                     "servertype": "jlink",
@@ -90,7 +103,7 @@ pub fn create_launch_draft(
             "executable": "${workspaceFolder}/build/baremetal/app.elf",
             "device": "<resolved-device>",
             "interface": "swd",
-            "preLaunchTask": "alp: build baremetal target",
+            "preLaunchTask": pre_launch_task,
             "svdFile": "<resolved-svd>",
             "svdPath": "<resolved-svd>",
         }),
@@ -104,7 +117,7 @@ pub fn create_launch_draft(
             "miDebuggerServerAddress": "<host>:<port>",
             "miDebuggerPath": "<resolved-gdb>",
             "setupCommands": [{ "text": "-enable-pretty-printing" }],
-            "preLaunchTask": "alp: deploy and start gdbserver",
+            "preLaunchTask": pre_launch_task,
         }),
         DebugTargetKind::NativeHost => json!({
             "name": "ALP: Native Sim Debug",
@@ -112,10 +125,24 @@ pub fn create_launch_draft(
             "request": "launch",
             "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
             "cwd": "${workspaceFolder}",
-            "preLaunchTask": "alp: build native_sim target",
+            "preLaunchTask": pre_launch_task,
         }),
     };
-    Ok(draft)
+    Ok(drop_absent_pre_launch_task(draft))
+}
+
+/// `json!` renders a `None` task name as `null`, and a literal
+/// `"preLaunchTask": null` is worse than no key at all (VS Code's schema
+/// rejects it). Drop the key instead — `shift_remove`, not `remove`, because
+/// under `preserve_order` the latter is a swap-remove that would scramble the
+/// key order the whole module exists to preserve.
+fn drop_absent_pre_launch_task(mut draft: Value) -> Value {
+    if let Some(map) = draft.as_object_mut() {
+        if map.get("preLaunchTask") == Some(&Value::Null) {
+            map.shift_remove("preLaunchTask");
+        }
+    }
+    draft
 }
 
 /// What a real build knows about itself, filled in over the draft's
@@ -218,7 +245,14 @@ pub fn apply_launch_resolution(draft: &mut Value, resolution: &LaunchResolution)
         None => {
             for key in ["svdFile", "svdPath"] {
                 if map.get(key).and_then(Value::as_str) == Some("<resolved-svd>") {
-                    map.remove(key);
+                    // `shift_remove`, not `remove`: under `preserve_order`
+                    // the latter is a SWAP-remove, so dropping the two svd
+                    // keys mid-object dragged the last two keys up into their
+                    // slots. Every emitted zephyr-mcu config came out with
+                    // `interface`/`device`/`servertype` in scrambled order —
+                    // harmless to the debug adapter, but this module's stated
+                    // contract is that the key order matches the TS CLI's.
+                    map.shift_remove(key);
                 }
             }
         }
@@ -430,7 +464,7 @@ mod resolution_tests {
     use crate::debug::{DebugServerKind, DebugTargetKind};
 
     fn jlink_draft() -> Value {
-        create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink).unwrap()
+        create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap()
     }
 
     #[test]
@@ -470,12 +504,18 @@ mod resolution_tests {
         apply_launch_resolution(&mut draft, &LaunchResolution::default());
         assert!(draft.get("svdFile").is_none());
         assert!(draft.get("svdPath").is_none());
+        // …and the surviving keys keep their order: a swap-remove here used to
+        // drag `interface` and `device` up into the two vacated slots.
+        assert!(serde_json::to_string(&draft).unwrap().ends_with(
+            "\"servertype\":\"jlink\",\"device\":\"<resolved-device>\",\"interface\":\"swd\"}"
+        ));
     }
 
     #[test]
     fn openocd_gets_server_paths_and_every_config_file() {
         let mut draft =
-            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Openocd).unwrap();
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Openocd, None)
+                .unwrap();
         apply_launch_resolution(
             &mut draft,
             &LaunchResolution {
@@ -534,15 +574,15 @@ mod tests {
 
     #[test]
     fn unsupported_server_errors() {
-        let err =
-            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::Jlink).unwrap_err();
+        let err = create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::Jlink, None)
+            .unwrap_err();
         assert!(err.contains("Unsupported debug backend 'jlink' for target 'native-host'"));
     }
 
     #[test]
     fn zephyr_jlink_draft_key_order_preserved() {
         let draft =
-            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink).unwrap();
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
         let json = serde_json::to_string(&draft).unwrap();
         // Keys must stay in insertion order (preserve_order), not sorted.
         assert!(json.starts_with(
@@ -560,26 +600,85 @@ mod tests {
             DebugServerKind::Openocd,
             DebugServerKind::Pyocd,
         ] {
-            let draft = create_launch_draft(DebugTargetKind::ZephyrMcu, server).unwrap();
+            let draft = create_launch_draft(DebugTargetKind::ZephyrMcu, server, None).unwrap();
             assert_eq!(draft["svdFile"], "<resolved-svd>");
             assert_eq!(draft["svdPath"], "<resolved-svd>");
-            // Key order: svdFile + svdPath sit after preLaunchTask, before servertype.
+            // Key order: svdFile + svdPath close the gap the dropped
+            // preLaunchTask left, and still sit before servertype.
             let json = serde_json::to_string(&draft).unwrap();
             assert!(json.contains(
-                "\"preLaunchTask\":\"alp: build active target\",\"svdFile\":\"<resolved-svd>\",\"svdPath\":\"<resolved-svd>\",\"servertype\":"
+                "\"runToEntryPoint\":\"main\",\"svdFile\":\"<resolved-svd>\",\"svdPath\":\"<resolved-svd>\",\"servertype\":"
             ));
         }
     }
 
     #[test]
-    fn baremetal_draft_emits_svd_file_and_path_after_prelaunch() {
+    fn baremetal_draft_emits_svd_file_and_path_last() {
         let draft =
-            create_launch_draft(DebugTargetKind::BaremetalMcu, DebugServerKind::Jlink).unwrap();
+            create_launch_draft(DebugTargetKind::BaremetalMcu, DebugServerKind::Jlink, None)
+                .unwrap();
         assert_eq!(draft["svdFile"], "<resolved-svd>");
         assert_eq!(draft["svdPath"], "<resolved-svd>");
         let json = serde_json::to_string(&draft).unwrap();
         assert!(json.ends_with(
-            "\"preLaunchTask\":\"alp: build baremetal target\",\"svdFile\":\"<resolved-svd>\",\"svdPath\":\"<resolved-svd>\"}"
+            "\"interface\":\"swd\",\"svdFile\":\"<resolved-svd>\",\"svdPath\":\"<resolved-svd>\"}"
+        ));
+    }
+
+    /// The Bug-1 regression: no profile may name a task by default, because
+    /// nothing in tan-cli, alp-sdk-vscode or a generated project defines one.
+    /// VS Code aborts pre-launch on an unresolvable `preLaunchTask`, so a
+    /// default here means the emitted `launch.json` cannot start a session at
+    /// all — and it looks perfectly fine while failing.
+    #[test]
+    fn no_profile_names_a_pre_launch_task_by_default() {
+        for (target, server) in [
+            (DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink),
+            (DebugTargetKind::ZephyrMcu, DebugServerKind::Openocd),
+            (DebugTargetKind::ZephyrMcu, DebugServerKind::Pyocd),
+            (DebugTargetKind::BaremetalMcu, DebugServerKind::Jlink),
+            (DebugTargetKind::YoctoUserspace, DebugServerKind::Gdbserver),
+            (DebugTargetKind::NativeHost, DebugServerKind::None),
+        ] {
+            let draft = create_launch_draft(target, server, None).unwrap();
+            assert!(
+                draft.get("preLaunchTask").is_none(),
+                "{} + {}: preLaunchTask must be absent, not null, when unnamed",
+                target.as_str(),
+                server.as_str()
+            );
+            // Belt and braces: `null` would serialize as a key too.
+            assert!(
+                !serde_json::to_string(&draft)
+                    .unwrap()
+                    .contains("preLaunchTask")
+            );
+        }
+    }
+
+    /// The opt-in: a consumer that HAS registered a task provider names its own
+    /// task, and gets it verbatim — no tan-owned string is baked in.
+    #[test]
+    fn an_opted_in_pre_launch_task_is_emitted_verbatim_in_place() {
+        for (target, server) in [
+            (DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink),
+            (DebugTargetKind::BaremetalMcu, DebugServerKind::Jlink),
+            (DebugTargetKind::YoctoUserspace, DebugServerKind::Gdbserver),
+            (DebugTargetKind::NativeHost, DebugServerKind::None),
+        ] {
+            let draft = create_launch_draft(target, server, Some("alpRun: build")).unwrap();
+            assert_eq!(draft["preLaunchTask"], "alpRun: build");
+        }
+        // …and in its original position, not appended at the end.
+        let draft = create_launch_draft(
+            DebugTargetKind::ZephyrMcu,
+            DebugServerKind::Jlink,
+            Some("t"),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&draft).unwrap();
+        assert!(json.contains(
+            "\"runToEntryPoint\":\"main\",\"preLaunchTask\":\"t\",\"svdFile\":\"<resolved-svd>\""
         ));
     }
 
@@ -589,7 +688,7 @@ mod tests {
             (DebugTargetKind::YoctoUserspace, DebugServerKind::Gdbserver),
             (DebugTargetKind::NativeHost, DebugServerKind::None),
         ] {
-            let draft = create_launch_draft(target, server).unwrap();
+            let draft = create_launch_draft(target, server, None).unwrap();
             assert!(draft.get("svdFile").is_none());
             assert!(draft.get("svdPath").is_none());
         }
@@ -598,7 +697,7 @@ mod tests {
     #[test]
     fn write_plan_appends_then_replaces_by_name() {
         let draft =
-            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None).unwrap();
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
         let plan = create_launch_json_write_plan(None, &draft).unwrap();
         assert!(!plan.replaced);
         assert!(plan.content.ends_with("\n"));
@@ -615,7 +714,7 @@ mod tests {
     fn preserves_unknown_top_level_keys() {
         let existing = "{\"version\":\"0.1.0\",\"inputs\":[],\"configurations\":[]}";
         let draft =
-            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None).unwrap();
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
         let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
         // `inputs` is preserved; version kept as the (valid) existing value.
         assert!(plan.content.contains("\"inputs\""));
@@ -636,7 +735,7 @@ mod tests {
         // serde_json::from_str used to reject this file outright.
         let existing = "\u{feff}{\n  // Use IntelliSense to learn about possible attributes.\n  \"version\": \"0.2.0\",\n  \"configurations\": [],\n}\n";
         let draft =
-            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None).unwrap();
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
         let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
         assert!(!plan.replaced);
         let doc: Value = serde_json::from_str(&plan.content).unwrap();

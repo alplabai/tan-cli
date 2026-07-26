@@ -484,6 +484,13 @@ pub struct DebugConfigArgs {
     /// on a single-core board; needed to pick a side on a multicore one.
     #[arg(long, value_name = "CORE_ID")]
     pub core: Option<String>,
+    /// Emit `preLaunchTask: <TASK>` on the generated configuration. Off by
+    /// default: nothing in this repo, in alp-sdk-vscode, or in a generated
+    /// project contributes a task, and VS Code aborts pre-launch (so the
+    /// session never starts) on a `preLaunchTask` it cannot resolve. Pass the
+    /// name your own `tasks.json` or `TaskProvider` registers.
+    #[arg(long = "pre-launch-task", value_name = "TASK")]
+    pub pre_launch_task: Option<String>,
     /// Print the launch configuration without writing launch.json.
     #[arg(long)]
     pub preview: bool,
