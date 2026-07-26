@@ -54,6 +54,55 @@ All notable changes to `tan` are documented here. Format follows
   the missing-tool case it originally described. (#70)
 
 ### Fixed
+- **`tan sdk list` failed behind an HTTP proxy or a TLS-intercepting
+  middlebox.** Two independent causes on the only command that makes an
+  **in-process HTTP** request. It called a bare `ureq::get`, and ureq 2.x's
+  default agent neither reads `ALL_PROXY`/`HTTPS_PROXY`/`HTTP_PROXY` (that
+  needs `AgentBuilder` + `try_proxy_from_env`) nor consults the OS trust store
+  — its rustls config trusts only the bundled webpki roots, so a corporate
+  middlebox re-signing with a private CA from the Windows/macOS/Linux system
+  store failed the handshake outright. Every in-process HTTP call now goes
+  through one shared agent that honours the proxy environment (SOCKS included —
+  ureq reads `ALL_PROXY` first, so its `socks-proxy` feature is now on;
+  without it a `socks5://` tunnel would have hard-failed where it previously
+  went direct) and trusts the bundled webpki roots **and** the system store
+  (ureq's own `native-certs` feature would have swapped one for the other,
+  breaking a host with an empty OS store instead). The agent also caps a whole
+  request at 60 s — proxied now, a black-hole proxy would otherwise hang `tan`
+  forever, and the extension waits on process exit.
+  **Scheme-correct by choice.** Only `ALL_PROXY`/`HTTPS_PROXY` (and their
+  lowercase aliases) select the proxy, in that precedence order.
+  `HTTP_PROXY`/`http_proxy` are *not* applied to these `https://` requests, even
+  though ureq's own `try_proxy_from_env` would apply them regardless of scheme:
+  curl, git and Python all treat `HTTP_PROXY` as plain-HTTP-only, and a
+  corporate host exporting just that one would otherwise have its GitHub request
+  pushed through a proxy that may refuse `CONNECT` — breaking a machine that
+  worked going direct. An empty value (`HTTPS_PROXY=`) counts as unset.
+  **`NO_PROXY` is honoured**, for the same reason — ureq 2.12 has no support for
+  it, and without it a host that sets both `HTTPS_PROXY` and a `NO_PROXY`
+  covering GitHub would go from working-direct to proxied. Matching follows
+  curl/git/Python: `*` bypasses everything; the list is comma-separated with
+  whitespace and empty entries ignored; comparison is case-insensitive; an entry
+  matches the host exactly or as a suffix **on a label boundary**, so both
+  `github.com` and `.github.com` cover `api.github.com` while `hub.com` covers
+  neither; and a `:port` on an entry is ignored (every request here is 443).
+  The subprocesses `tan` spawns for network work (`git clone` in
+  `tan sdk install`, `pip`/`west update` in `tan bootstrap`) are untouched by
+  any of this: they inherit the proxy environment and use their own trust
+  stores.
+  A handshake or proxy failure — including `tan sdk install`'s `git clone` —
+  now names the likely cause, a proxy or an untrusted corporate CA (without
+  naming a specific knob — git's `http.sslCAInfo` would be wrong advice on the
+  in-process path that shares the sentence), rather than
+  surfacing a raw error a user reads as "the network is down"; a proxy that is
+  set but unreachable is named too, from the environment, since ureq reports
+  that as a plain connect failure that never says "proxy". That sentence names
+  `ALL_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and deliberately not `HTTP_PROXY`: both
+  paths that reach it are `https://` (the API GET and the `git clone`), neither
+  applies `HTTP_PROXY` to those, and a user who followed the advice and edited
+  it would see no effect. Only the message text of the `sdk.fetch-failed` /
+  `sdk.install-failed` issues gains that sentence; no issue code or `data` field
+  changed. Absent proxy environment variables behave exactly as before.
 - **`tan sdk switch` left `.west/config` pinned to the old SDK version.**
   The reconciliation that keeps `<topdir>/.west/config`'s `manifest.path` in
   sync already existed for `tan bootstrap` (#31), but `sdk switch` only ever

@@ -30,6 +30,56 @@ pub struct SdkRelease {
     pub release_notes: String,
 }
 
+/// Append the likely environmental cause to a raw network error.
+///
+/// rustls reports a middlebox-signed certificate as a bare "tls connection init
+/// failed: invalid peer certificate: UnknownIssuer", and ureq reports an
+/// unreachable proxy as a bare connect error. Both read to a user as "the
+/// network is down", so they go hunting in the wrong place — the actual answer
+/// is almost always "your corporate CA is not in this machine's trust store" or
+/// "your proxy env vars are wrong". alp-sdk ADR 0021 makes this explicit for the
+/// download path: a failure behind a TLS-intercepting middlebox must say
+/// *proxy/CA interference*, never blame the payload. One sentence appended to
+/// the error we already surface — deliberately not a diagnostic-code scheme.
+///
+/// `proxy_configured` is the one bit the error string cannot carry: an
+/// unreachable, refused or firewalled proxy fails as a plain `ConnectionFailed`
+/// that never contains the word "proxy" (ureq only says it for the CONNECT
+/// stage), and that is the single most common misconfiguration. The caller reads
+/// the environment (IO) and tells us; `tan-cli`'s `http::proxy_configured` is it.
+pub fn describe_network_error(error: &str, proxy_configured: bool) -> String {
+    let lower = error.to_ascii_lowercase();
+    // Names only the variables that actually steer these requests. Both paths
+    // that reach here are `https://` — the in-process API GET and `sdk install`'s
+    // `git clone` — and neither `tan` nor git applies `HTTP_PROXY` to an https
+    // URL, so naming it sent the user to edit a variable that changes nothing.
+    // `NO_PROXY` is named instead because it is the knob that *fixes* this exact
+    // failure when the host is reachable directly.
+    let proxy_hint = "Check ALL_PROXY/HTTPS_PROXY/NO_PROXY — the configured proxy refused or could not complete the connection.";
+    // Named-proxy first: a proxy CONNECT/auth failure that also mentions TLS is
+    // still a proxy problem to look at first, so it must beat the certificate
+    // arm. A certificate/TLS failure comes next even when a proxy IS set — the
+    // middlebox is reachable, it is its CA that is untrusted, and pointing at
+    // the proxy env vars there would send the user to the wrong knob. Only then
+    // do we treat a bare connect failure as the proxy's fault, and only when
+    // there is a proxy to blame.
+    let hint = if lower.contains("proxy") {
+        Some(proxy_hint)
+    } else if lower.contains("certificate") || lower.contains("tls") {
+        Some(
+            "This is usually a TLS-intercepting proxy or a corporate CA that this machine does not trust, not a broken connection.",
+        )
+    } else if proxy_configured && lower.contains("connect") {
+        Some(proxy_hint)
+    } else {
+        None
+    };
+    match hint {
+        Some(hint) => format!("{error} {hint}"),
+        None => error.to_string(),
+    }
+}
+
 /// Parse the GitHub Releases API payload into typed releases (mirror of
 /// `listRemoteSdkReleases`'s mapping). Errors on a non-array response.
 pub fn parse_remote_sdk_releases(raw: &Value) -> Result<Vec<SdkRelease>, String> {
@@ -267,6 +317,41 @@ mod tests {
         assert_eq!(releases[0].tag, "v1.5.0");
         assert_eq!(releases[0].release_notes_summary, "First line.");
         assert_eq!(releases[0].release_notes, "First line.\n\nrest");
+    }
+
+    #[test]
+    fn network_error_names_the_likely_cause() {
+        // The real rustls string a TLS-intercepting middlebox produces. Still the
+        // CA answer WITH a proxy configured: the proxy answered, its CA is the
+        // problem.
+        for proxy_set in [false, true] {
+            let tls = describe_network_error(
+                "https://api.github.com/…: tls connection init failed: invalid peer certificate: UnknownIssuer",
+                proxy_set,
+            );
+            assert!(tls.contains("corporate CA"), "{tls}");
+        }
+        // Proxy wins over the certificate arm — a proxy CONNECT failure that also
+        // mentions TLS is still a proxy problem to go look at first.
+        let proxy = describe_network_error("proxy: tls connection failed", false);
+        assert!(proxy.contains("HTTPS_PROXY"), "{proxy}");
+        assert!(!proxy.contains("corporate CA"), "{proxy}");
+        // The most common misconfiguration of all: a proxy that is set but
+        // unreachable/refused. ureq raises that as a plain ConnectionFailed with
+        // no mention of a proxy anywhere — verbatim from `HTTPS_PROXY=http://127.0.0.1:9`.
+        let refused = "https://api.github.com/repos/alplabai/alp-sdk/releases: Connection Failed: Connect error: No connection could be made because the target machine actively refused it. (os error 10061)";
+        assert!(
+            describe_network_error(refused, true).contains("HTTPS_PROXY"),
+            "a refused proxy must be named"
+        );
+        // …and the identical string is left alone with no proxy configured: then
+        // it really is just an unreachable host.
+        assert_eq!(describe_network_error(refused, false), refused);
+        // Anything else is passed through untouched — no invented diagnosis.
+        assert_eq!(
+            describe_network_error("dns: failed to lookup address", true),
+            "dns: failed to lookup address"
+        );
     }
 
     #[test]
