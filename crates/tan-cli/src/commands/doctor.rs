@@ -130,7 +130,7 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         cmake: command_on_path("cmake"),
         ninja: command_on_path("ninja"),
         bitbake: command_on_path("bitbake"),
-        zephyr_sdk: zephyr_sdk_detected(),
+        zephyr_sdk: crate::toolchain::zephyr_sdk_detected(),
         bmaptool: command_on_path("bmaptool"),
         dd: command_on_path("dd"),
         is_linux: cfg!(target_os = "linux"),
@@ -657,46 +657,6 @@ fn bootstrap_envelope_issue_message(json: &str) -> Option<String> {
         .get("message")?
         .as_str()
         .map(str::to_string)
-}
-
-/// Detect a Zephyr SDK install without spawning anything: honor
-/// `ZEPHYR_SDK_INSTALL_DIR` (only when the directory it names still exists --
-/// the variable is exported from a shell profile and routinely outlives the
-/// SDK it once pointed at, e.g. after `rm -rf ~/zephyr-sdk-0.16.5`; trusting
-/// presence alone reported a false Pass here and the real failure surfaced
-/// later as a raw CMake toolchain error, exactly what this preflight exists
-/// to catch early), else look for a `zephyr-sdk-*` directory in the usual
-/// install roots (home + `/opt`).
-fn zephyr_sdk_detected() -> bool {
-    if let Some(dir) = std::env::var_os("ZEPHYR_SDK_INSTALL_DIR") {
-        if env_dir_still_exists(&dir) {
-            return true;
-        }
-    }
-    let mut roots: Vec<std::path::PathBuf> = vec![std::path::PathBuf::from("/opt")];
-    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        roots.push(std::path::PathBuf::from(home));
-    }
-    roots.iter().any(|root| {
-        std::fs::read_dir(root)
-            .map(|entries| {
-                entries.flatten().any(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with("zephyr-sdk")
-                })
-            })
-            .unwrap_or(false)
-    })
-}
-
-/// `true` when `env_value` (a raw `ZEPHYR_SDK_INSTALL_DIR` value) names a
-/// directory that is actually present. Split out of `zephyr_sdk_detected` so
-/// the "don't trust a stale env var" guard is unit-testable without mutating
-/// process-global env state (which cargo test's parallel threads would race).
-fn env_dir_still_exists(env_value: &std::ffi::OsStr) -> bool {
-    Path::new(env_value).is_dir()
 }
 
 /// Render the `--build` readiness report as human-readable lines, with the
@@ -1372,16 +1332,6 @@ pub(crate) mod tests {
             expected,
             "host_arch must report the machine Windows reports ({native})"
         );
-    }
-
-    #[test]
-    fn env_dir_still_exists_requires_the_directory_to_be_present() {
-        let missing = TempTree::new("missing-sdk");
-        std::fs::remove_dir_all(missing.path()).unwrap();
-        assert!(!env_dir_still_exists(missing.path().as_os_str()));
-
-        let present = TempTree::new("present-sdk");
-        assert!(env_dir_still_exists(present.path().as_os_str()));
     }
 
     #[test]

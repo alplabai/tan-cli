@@ -71,6 +71,23 @@ All notable changes to `tan` are documented here. Format follows
   or Intel-Mac host — which compounds the exit-4 change below, and is the
   honest verdict for a machine no pinned toolchain serves.
   (alp-sdk ADR 0021, tan-cli#70)
+- **`sdk.west-config-reconcile-failed` (new issue code, `tan sdk switch`).**
+  `.west/config`'s reconciliation reported every failure — an unreadable
+  config, a read-only one, one held open by another process (the routine
+  Windows shape) — identically to "already correct", so the user was told the
+  switch was clean while `west` kept resolving its manifest from the stale
+  pointer. The three-way outcome (`tan_core::ManifestReconcile`) makes the
+  failure distinguishable, and it now surfaces in text and in the envelope with
+  the OS's own reason and what to do about it. Severity `warning` at exit code
+  `0`, matching `clean.remove-failed` and `build.sdk-switch-pristine-failed` —
+  a best-effort repair that failed while the command carried on. The exit code
+  is deliberate: the switch itself DID happen (the active-SDK pointer is
+  written) and failing it would block the escape hatch out of a broken
+  workspace. `tan bootstrap` gained the same distinction as a
+  `west-config-reconcile-failed` warning, where it matters most: `west update`
+  is about to run against whatever manifest that unrewritten pointer names —
+  and a bootstrap whose reconcile failed no longer records the workspace as
+  synced, since that update resolved the OLD SDK's manifest.
 - **`tan debug-config --pre-launch-task <TASK>`.** Opt-in re-entry for the
   `preLaunchTask` the command used to emit unconditionally (see Changed). The
   flag carries the task NAME rather than being a bare on/off switch, for two
@@ -166,6 +183,35 @@ All notable changes to `tan` are documented here. Format follows
   the project's own `build` root. (#52)
 
 ### Changed
+- **`tan sdk switch <version>` resolves the bare version against more than one
+  cache root (#62).** It joined `~/.alp/sdk-cache` and nothing else, while the
+  layout that reported #62 keeps its SDKs under `~/.alp/sdk` (the VS Code
+  extension's install root) — so `tan sdk switch v0.13.0` failed with
+  `path-not-found` on a version sitting right there on disk, and the whole
+  `.west/config` reconciliation shipped in #74 was unreachable for exactly the
+  users who needed it. Three roots are tried in a fixed order, first real
+  checkout wins: `--destination` (now honoured by `switch`, not just
+  `install`), then `~/.alp/sdk-cache` (so `install X && switch X` selects what
+  the install just wrote), then the parent directory of the currently active
+  SDK — no config declares a cache root, so where the active SDK sits is the
+  only authoritative record of where this machine keeps them. Not a filesystem
+  search: three named roots, each of which the user can point at.
+- **`sdk.bootstrap-recommended` is derived from workspace state, not from
+  whether a rewrite fired.** It was latched to the `.west/config` rewrite
+  happening, so a *second* `tan sdk switch` — pointer already reconciled by the
+  first, `topdir/zephyr` and `modules/` still the previous SDK's trees — went
+  silent exactly when the user had not acted on the advice yet. It now fires
+  whenever the workspace cannot be shown to match the selected SDK: the pointer
+  must name it AND a `tan bootstrap` `west update` must have been recorded
+  against it. `tan bootstrap` writes that record (`<topdir>/.west/
+  tan-workspace-sdk`) after an update that actually ran; nothing else on disk
+  answers "which SDK's manifest were these trees checked out from", since
+  `.west/config` is rewritten by the reconcile itself without the trees
+  changing. **A workspace bootstrapped before this record existed has none, so
+  the first `sdk switch` after upgrading advises a bootstrap it may not need —
+  one `tan bootstrap` run clears it for good.** The message wording follows the
+  evidence: a diverged pointer *proves* the workspace belongs to another SDK, a
+  matching one with no record only means it cannot be confirmed.
 - **`tan debug-config` no longer emits `preLaunchTask` by default — it was
   naming a task nothing defines.** Every generated profile carried one of
   `alp: build active target`, `alp: build baremetal target`, `alp: deploy and
@@ -372,7 +418,11 @@ All notable changes to `tan` are documented here. Format follows
   when it fires, and guards the rewrite on the old target being either a real
   alp-sdk checkout or missing entirely (#62's reported state) — never a real,
   unrelated directory that merely shares the same parent as the SDK just
-  switched to. (#62)
+  switched to. As first shipped this reached only the path form (`tan sdk
+  switch /path/to/sdk`): the bare-version form resolved `~/.alp/sdk-cache`
+  alone and never got that far for the `~/.alp/sdk` layout that reported it —
+  see the version-resolution entry under Changed, which lands in this same
+  release. (#62)
 - **`tan flash` could not find `west`'s out-of-tree runners.** No spawned
   backend ever set a child `current_dir`, so it inherited whatever directory
   invoked `tan flash`. `west`'s runner registration

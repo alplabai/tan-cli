@@ -246,6 +246,42 @@ pub fn resolve_global_default_sdk(
         .map(str::to_string)
 }
 
+/// Resolve a BARE version argument (`tan sdk switch v0.13.0`) to an on-disk
+/// path by trying each candidate cache root in order and taking the first that
+/// actually holds an SDK checkout for that version.
+///
+/// One root — `~/.alp/sdk-cache`, tan's own install target — used to be the
+/// only one consulted, which is why #62's fix could never fire for the layout
+/// that reported it: those SDKs live under `~/.alp/sdk` (the VS Code
+/// extension's install root), so `tan sdk switch v0.13.0` resolved
+/// `~/.alp/sdk-cache/v0.13.0`, found nothing, and failed with `path-not-found`
+/// before any reconciliation was reachable. Nothing on this machine DECLARES a
+/// cache root; the authoritative record of where its SDKs actually live is the
+/// active-SDK pointer's own parent directory, which the caller passes as a
+/// lower-precedence root.
+///
+/// Deterministic by construction: roots are tried in the given order and the
+/// FIRST that holds a real checkout wins, so the same command on the same disk
+/// always resolves the same path. `is_sdk` (not mere existence) is the test, so
+/// a leftover empty directory in an earlier root cannot shadow a real checkout
+/// in a later one. When no root holds it, `roots[0]` is returned so the
+/// `path-not-found` message names the canonical location rather than the last
+/// long-shot guess.
+pub fn resolve_sdk_version_root(
+    version: &str,
+    roots: &[String],
+    is_sdk: impl Fn(&str) -> bool,
+) -> String {
+    let Some(first) = roots.first() else {
+        return version.to_string();
+    };
+    roots
+        .iter()
+        .map(|root| join_path(root, version))
+        .find(|candidate| is_sdk(candidate))
+        .unwrap_or_else(|| join_path(first, version))
+}
+
 /// Which precedence tier produced the active SDK path — `tan sdk current
 /// --json`'s `sourceTier`, and the precedence `tan init` pins the new project
 /// against.
@@ -444,5 +480,41 @@ mod tests {
         let (path, tier) = resolve_sdk_source_tier(None, None, None, None);
         assert_eq!(path, None);
         assert_eq!(tier, SdkSourceTier::None);
+    }
+
+    /// Both roots of the layout that reported #62: tan's own install cache and
+    /// the extension's install root, where the SDKs actually were.
+    fn roots() -> Vec<String> {
+        vec![
+            "/home/u/.alp/sdk-cache".to_string(),
+            "/home/u/.alp/sdk".to_string(),
+        ]
+    }
+
+    #[test]
+    fn version_root_falls_through_to_the_root_that_actually_holds_the_version() {
+        // #62's layout: `~/.alp/sdk-cache` is empty, the SDKs live in
+        // `~/.alp/sdk`. Resolving against the first root ONLY is what put the
+        // bare-version form out of reach of the whole reconciliation.
+        let real = join_path("/home/u/.alp/sdk", "v0.13.0");
+        let got = resolve_sdk_version_root("v0.13.0", &roots(), |candidate| candidate == real);
+        assert_eq!(got, real);
+    }
+
+    #[test]
+    fn version_root_prefers_the_first_root_holding_the_version() {
+        // Both roots hold it -> the earlier one wins, deterministically:
+        // `tan sdk install v0.13.0 && tan sdk switch v0.13.0` must select the
+        // checkout the install just wrote.
+        let got = resolve_sdk_version_root("v0.13.0", &roots(), |_| true);
+        assert_eq!(got, join_path("/home/u/.alp/sdk-cache", "v0.13.0"));
+    }
+
+    #[test]
+    fn version_root_falls_back_to_the_canonical_root_when_nothing_holds_it() {
+        // Nothing found anywhere -> the `path-not-found` message names the
+        // canonical install location, not the last root tried.
+        let got = resolve_sdk_version_root("v9.9.9", &roots(), |_| false);
+        assert_eq!(got, join_path("/home/u/.alp/sdk-cache", "v9.9.9"));
     }
 }
