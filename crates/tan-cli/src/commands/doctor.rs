@@ -351,7 +351,12 @@ fn host_home() -> Option<String> {
 /// `Some(false)` for an ABSENT value, not `None`: absent IS the Windows
 /// default-off state and by far the most common one, so reporting it as
 /// "could not read" would make the check useless on the majority of hosts.
-/// `None` is reserved for a read that actually failed.
+/// `ERROR_FILE_NOT_FOUND` covers an absent SUBKEY as well as an absent value —
+/// the API does not distinguish them — which is verified behaviour, not an
+/// assumption, and is the right verdict either way: a host with no `FileSystem`
+/// key has no long-path support to claim. `None` is left for a read that failed
+/// for some other reason (an access denial, a value of the wrong type), where
+/// tan genuinely does not know.
 ///
 /// `HKLM\SYSTEM\...` is not subject to WOW64 registry redirection, so no
 /// `KEY_WOW64_*` flag is needed for a 32-bit `tan` on a 64-bit host.
