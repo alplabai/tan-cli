@@ -114,7 +114,7 @@ pub use run::{
 pub use sdk::{
     GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
     check_sdk_readiness, describe_network_error, parse_remote_sdk_releases, resolve_active_sdk,
-    resolve_global_default_sdk, resolve_sdk_source_tier,
+    resolve_global_default_sdk, resolve_sdk_source_tier, resolve_sdk_version_root,
 };
 pub use sdk_catalogue::{
     AcceleratorAvail, BoardPreset, ChipChoice, ChipDef, ChipKconfig, I2cDevice, MemorySpec,
@@ -133,4 +133,7 @@ pub use validate::{
     analyze_validation_result, classify_validation_outcome, parse_board_model,
     validate_board_yaml_local,
 };
-pub use west_config::{get_manifest_path, set_manifest_path};
+pub use west_config::{
+    ManifestReconcile, describe_reconcile_failure, get_manifest_path, set_manifest_path,
+    workspace_needs_bootstrap,
+};
