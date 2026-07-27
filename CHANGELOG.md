@@ -541,6 +541,30 @@ All notable changes to `tan` are documented here. Format follows
   an in-flight contract-surface change).
 
 ### Fixed
+- **A pre-release tag would have shipped to every customer as `latest`.**
+  `release.yml` set neither `prerelease` nor `make_latest`, so a `v0.4.0-rc1`
+  tag's classification rested entirely on the action's default -- and
+  `install.sh` fetches `releases/latest/download/<asset>` directly, which
+  GitHub excludes a pre-release from ONLY when the flag is set. Both flags are
+  now derived from the one fact that distinguishes them, the hyphen in the tag,
+  so they cannot disagree with each other or with the tag.
+  - `publish_crates` and `publish_npm` skip a pre-release. npm was the sharpest
+    of the three: `npm publish` passes no `--tag`, so it defaults to the
+    `latest` dist-tag, and an unguarded rc would have become plain
+    `npm i -g @alplabai/tan` -- with npm unpublish far more restricted than a
+    crates.io yank. Skipping keeps an rc fully retractable, which is the reason
+    to cut one; `--tag next` is the documented relaxation.
+  - `docs/release-contract.md` gains the pre-release contract, and its Linux
+    target table is corrected: it documented `linux/x64`+`linux/arm64` as
+    consuming the `-gnu` assets with musl "not (yet) wired into"
+    `releaseAssetForTarget`, while the extension has mapped both to `-musl`
+    because the `-gnu` assets carry a glibc floor. The doc now separates the
+    zigbuild PIN (`2.31`) from the MEASURED floor of the shipped binary
+    (`GLIBC_2.30`, per `readelf -V`), and warns off the "2.31 floor /
+    GLIBC_2.39 not found" wording the extension still carries -- the
+    phenomenon is real but both numbers in it are wrong
+    (alp-sdk-vscode#370).
+    alp-sdk fixed the same mix-up in its own install docs in alp-sdk#990.
 - **`tan explain --template edge-ai-starter` described a project that is not
   the one `tan init` writes (#124).** `project_template_details` read the
   wizard registry's `libs` field unconditionally, but that field is

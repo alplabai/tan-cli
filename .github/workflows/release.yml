@@ -263,12 +263,28 @@ jobs:
             `gh attestation verify <downloaded-file> --repo alplabai/tan-cli`
           NOTES
           echo "----- release_notes.md -----"; cat release_notes.md
+      # A SemVer pre-release tag carries a hyphen in its version (`v0.4.0-rc1`);
+      # a real release never does. Both flags are derived from that one fact so
+      # they cannot disagree with each other or with the tag.
+      #
+      # This is load-bearing, not hygiene. `install.sh` fetches
+      # `releases/latest/download/<asset>` directly, and GitHub excludes a
+      # release from `/latest` ONLY when it is marked `prerelease`. Publishing an
+      # rc without these flags therefore hands it to every customer running the
+      # documented install command. Neither flag was set before, so the
+      # classification rested entirely on the action's default -- an
+      # unacceptable place for that blast radius to live.
+      #
+      # `make_latest` is spelled as an explicit "true"/"false" string because the
+      # action takes a string, not a boolean.
       - name: publish release
         uses: softprops/action-gh-release@v2
         with:
           files: assets/*
           fail_on_unmatched_files: true
           body_path: release_notes.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
 
   # crates.io — `cargo install alp-tan-cli` (the crate is `alp-tan-cli` because
   # `tan`/`tan-cli` are already taken on crates.io; the built binary is still
@@ -277,10 +293,18 @@ jobs:
   # path-depends on it). Gated on
   # CARGO_REGISTRY_TOKEN; skipped (not failed) when the secret is unset so a
   # fork/CI run without publish credentials still goes green.
+  #
+  # A pre-release tag is deliberately NOT published to crates.io. crates.io
+  # allows a SemVer pre-release version and `cargo install` / `^` ranges do skip
+  # one by default, so this is a conservative call rather than a forced one --
+  # but a crates.io publish can only ever be YANKED, never deleted, while a
+  # GitHub pre-release can be removed outright. Keeping an rc off crates.io
+  # keeps it fully retractable, which is the whole point of cutting one. Relax
+  # this the day we want an rc installable via `cargo install --version`.
   publish_crates:
     name: publish · crates.io
     needs: release
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -308,10 +332,22 @@ jobs:
   # npm shim — `npm i -g @alplabai/tan` / `npx @alplabai/tan`. One release tag
   # scheme (v*), one workflow. Gated on NPM_TOKEN; skipped (not failed) when
   # unset, mirroring the crates.io gating above.
+  #
+  # A pre-release tag is skipped here too, and this path was the sharpest of the
+  # three: `npm publish` below passes no `--tag`, so npm defaults the release to
+  # the `latest` dist-tag. An unguarded rc would therefore become plain
+  # `npm i -g @alplabai/tan` for every consumer -- and npm unpublish is far more
+  # restricted than a crates.io yank (72-hour window, refused outright once
+  # anything depends on it).
+  #
+  # The relaxation, when we want an rc installable: publish it with
+  # `--tag next` so `npm i @alplabai/tan@next` reaches it while `latest` stays
+  # on the last real release. Skipping is the smaller change and keeps the rc
+  # fully retractable, which is the point of cutting one.
   publish_npm:
     name: publish · npm shim
     needs: release
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
