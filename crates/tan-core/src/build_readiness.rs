@@ -339,17 +339,19 @@ pub fn build_readiness_report(
 /// resolves `install.linux` and gets `apt-get` lines, and no branch can hand it
 /// `winget`.
 ///
-/// KNOWN CEILING, on POSIX. The tools looked up here are the ones `--build`
-/// probes — `west`, `cmake`, `ninja`, `bitbake` — but the map's key set is
-/// schema-constrained to equal `prerequisites.<os>`, and `prerequisites.posix` is
-/// `[git, cmake, python3]`. So on Linux and macOS only `cmake` can ever resolve:
-/// `ninja` stays `null` here even though the probe above fails it and both `apt`
-/// and `brew` package it. Not a regression (every POSIX entry was `null` before
-/// alp-sdk#959) and `null` is the safe degrade — an invented `apt-get install -y
-/// ninja-build` behind a Fix button is worse. Nothing in tan can lift it: an
-/// actionable POSIX `ninja` needs alp-sdk to widen `prerequisites.posix` and the
-/// matching `prerequisites.install.linux`/`.macos` maps, and tan picks it up with
-/// no change here the day it does.
+/// KNOWN CEILING, on POSIX — now only for the compiled-in fallback. The map's
+/// key set is schema-constrained to equal `prerequisites.<os>`, and alp-sdk#971
+/// widened `prerequisites.posix` to `[git, cmake, python3, ninja]` with
+/// `install.linux.ninja` / `install.macos.ninja`, so a live SDK checkout
+/// resolves an actionable POSIX `ninja` here with no change in tan. What still
+/// lags is tan's own vendored copy — `contract/fixtures/bootstrap/manifest.json`
+/// and the [`fallback_facts`](crate::bootstrap::fallback_facts) constants pinned
+/// byte-equal to it — which is a separate cross-repo re-vendor (fixture +
+/// constants + `PINNED_SDK_TAG`), not part of this severity fix. Until it lands,
+/// `ninja` resolves to `null` on POSIX only when the manifest could not be read
+/// at all. `null` stays the safe degrade — an invented `apt-get install -y
+/// ninja-build` behind a Fix button is worse — and it does NOT soften the
+/// severity: see [`BUILD_BLOCKING`].
 #[allow(clippy::too_many_arguments)]
 fn push_tool(
     checks: &mut Vec<DoctorCheck>,
@@ -364,16 +366,19 @@ fn push_tool(
     if !seen.insert(name) {
         return;
     }
+    let command = install.get(name).cloned();
     if !present {
         missing.push(MissingPrerequisite {
             tool: name.to_string(),
-            command: install.get(name).cloned(),
+            command: command.clone(),
         });
     }
     checks.push(DoctorCheck {
         name: name.to_string(),
         status: if present {
             DoctorStatus::Pass
+        } else if BUILD_BLOCKING.contains(&name) {
+            DoctorStatus::Fail
         } else {
             DoctorStatus::Warn
         },
@@ -382,9 +387,60 @@ fn push_tool(
         } else {
             format!("{name} not found on PATH — needed for {need} builds.")
         },
-        fix: if present { None } else { Some(fix.to_string()) },
+        fix: if present {
+            None
+        } else {
+            // The manifest's one-liner rides in the PROSE too, not just in
+            // `missingPrerequisites[].command`. Text mode renders `checks` and
+            // `nextSteps` and nothing else (`doctor::format_build_text` ->
+            // `style::render_report`), so a terminal user was reading "Install
+            // Ninja." while the extension's Fix button got the runnable string
+            // from the same report — the command half of #103, unfixed for
+            // everyone not driving tan from VS Code. Appended rather than
+            // substituted, because the prose carries constraints the command
+            // does not (`cmake (>=3.20)`), and omitted entirely when the map has
+            // no entry, which is the same "never invent one" rule as `command`.
+            Some(match &command {
+                Some(command) => format!("{fix} `{command}`"),
+                None => fix.to_string(),
+            })
+        },
     });
 }
+
+/// Tools whose absence does not degrade a build but STOPS it, so [`push_tool`]
+/// reports them absent as `Fail` rather than `Warn` (#103). `ninja` is the
+/// generator CMake picks by default on every Zephyr host, so without it
+/// `west build` dies outright — rating that `Warn` told the user their host was
+/// ready and then failed the build anyway.
+///
+/// Widened past the `ninja` #103 names because `cmake` is capped by the very
+/// same line and is at least as blocking (Zephyr AND baremetal). Deliberately
+/// NOT the rest of the probe set, on two different grounds:
+///
+/// * `west` — build-blocking, but this check probes BARE PATH while the executor
+///   resolves west from the workspace venv (`venv::west_program`), which is where
+///   `tan bootstrap` puts it. A correctly bootstrapped host that builds fine
+///   routinely has no `west` on PATH, so failing here would be a false negative
+///   that exits `tan doctor --build` non-zero on a working machine. The
+///   venv-aware verdict is the preflight's `westResolved` check, which the same
+///   report already carries.
+/// * `bitbake`, and the non-`push_tool` checks `zephyrSdk` / `bmaptool` /
+///   `vendorToolchain` — optional or advisory by design; #103 is explicit that
+///   their `Warn` is correct.
+///
+/// The set that survives is exactly the manifest's own `prerequisites`, so
+/// `--build` now agrees with plain `doctor`, whose `hostPrerequisites` check has
+/// always called a missing prerequisite `Fail`
+/// ([`doctor_prerequisite_check`](crate::bootstrap::doctor_prerequisite_check)).
+/// Two modes, one verdict on the same host fact.
+///
+/// Severity is deliberately INDEPENDENT of whether `install` carries a one-liner:
+/// a `null` command means tan cannot offer a button, not that the build will
+/// somehow succeed, and the check's `fix` prose still says what to do. Gating the
+/// `Fail` on a resolvable command would instead make the severity vary by host
+/// and silently downgrade itself the day a manifest key moved.
+const BUILD_BLOCKING: [&str; 2] = ["cmake", "ninja"];
 
 fn count(checks: &[DoctorCheck], status: DoctorStatus) -> u32 {
     checks.iter().filter(|c| c.status == status).count() as u32
@@ -470,16 +526,116 @@ mod tests {
     }
 
     #[test]
-    fn missing_tools_warn_with_next_steps() {
+    fn missing_tools_report_with_next_steps() {
         let report = build_readiness_report(
             "t".to_string(),
             vec![BuildOs::Zephyr],
             &probe_none_present(),
             &install(HostOs::Linux),
         );
-        assert!(report.summary.warn >= 4); // west, cmake, ninja, zephyrSdk
-        assert_eq!(report.summary.fail, 0);
+        // west + zephyrSdk stay advisory; cmake + ninja block the build (#103).
+        assert_eq!(report.summary.warn, 2);
+        assert_eq!(report.summary.fail, 2);
         assert!(!report.next_steps.is_empty());
+    }
+
+    #[test]
+    fn a_build_blocking_tool_fails_and_an_optional_one_warns() {
+        // #103: `ninja` is CMake's default generator on every Zephyr host, so a
+        // missing one does not degrade the build, it stops it -- reporting that
+        // `Warn` let `tan doctor --build` exit 0 on a host that cannot build.
+        // `cmake` is capped by the same line and is at least as blocking.
+        //
+        // `west` stays `Warn` on purpose: this check probes bare PATH, but the
+        // executor resolves west from the workspace venv, so a bootstrapped host
+        // that builds fine routinely fails this probe. `zephyrSdk` and
+        // `vendorToolchain` are advisory by design.
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr, BuildOs::Baremetal],
+            &probe_none_present(),
+            &install(HostOs::Linux),
+        );
+        let status = |name: &str| {
+            report
+                .checks
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("no {name} check"))
+                .status
+        };
+        assert_eq!(status("ninja"), DoctorStatus::Fail);
+        assert_eq!(status("cmake"), DoctorStatus::Fail);
+        assert_eq!(status("west"), DoctorStatus::Warn);
+        assert_eq!(status("zephyrSdk"), DoctorStatus::Warn);
+        assert_eq!(status("vendorToolchain"), DoctorStatus::Warn);
+
+        // A Yocto host: `bitbake` is build-blocking for Yocto but #103 is
+        // explicit its `Warn` is correct -- widening must not have swept it up.
+        let yocto = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Yocto],
+            &probe_none_present(),
+            &install(HostOs::Linux),
+        );
+        assert!(
+            yocto
+                .checks
+                .iter()
+                .any(|c| c.name == "bitbake" && c.status == DoctorStatus::Warn)
+        );
+        assert_eq!(yocto.summary.fail, 0);
+
+        // Present tools are still clean -- the severity change touches the
+        // absent branch only.
+        let clean = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_all_present(),
+            &install(HostOs::Linux),
+        );
+        assert_eq!(clean.summary.fail, 0);
+    }
+
+    #[test]
+    fn the_fix_prose_carries_the_manifest_command_when_there_is_one() {
+        // The other half of #103. `missingPrerequisites[].command` has been
+        // manifest-sourced since #95, but text mode renders only `checks` and
+        // `nextSteps`, so a terminal user saw "Install CMake (>=3.20)." and never
+        // the runnable string the extension's Fix button gets from the same
+        // report. Appended, not substituted: `(>=3.20)` is a constraint the
+        // command does not carry.
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_none_present(),
+            &install(HostOs::Linux),
+        );
+        let fix_for = |name: &str| {
+            report
+                .checks
+                .iter()
+                .find(|c| c.name == name)
+                .and_then(|c| c.fix.clone())
+                .unwrap_or_else(|| panic!("no {name} fix"))
+        };
+        assert_eq!(
+            fix_for("cmake"),
+            "Install CMake (>=3.20). `sudo apt-get install -y cmake`"
+        );
+        // No entry in the map -> the prose stays bare rather than inventing one,
+        // the same rule `command` follows. `west` is pip-installed into the venv
+        // by `tan bootstrap`, so no OS's map lists it.
+        assert_eq!(fix_for("west"), "Install west via `tan bootstrap`.");
+        // Every fix hint reaches the user's terminal through `nextSteps`.
+        assert!(
+            report
+                .next_steps
+                .iter()
+                .any(|s| s.contains("sudo apt-get install -y cmake")),
+            "{:?}",
+            report.next_steps
+        );
     }
 
     #[test]
@@ -542,6 +698,15 @@ mod tests {
         // so `ninja` (absent from `prerequisites.posix`, hence from both POSIX
         // install maps) stays `null` while `cmake` becomes runnable, and the two
         // hosts get DIFFERENT commands for it.
+        //
+        // The `ninja` expectation below is CROSS-REPO DATA, not a tan rule:
+        // alp-sdk#971 has since widened `prerequisites.posix` to include `ninja`
+        // and added `install.linux.ninja` / `install.macos.ninja`. This asserts
+        // against `fallback_facts`, i.e. tan's VENDORED copy of that manifest,
+        // which is still on the older pin -- so it is green here and will go red
+        // the moment the fixture + constants + `PINNED_SDK_TAG` are re-vendored.
+        // That red is the gate doing its job: update the expectation to the two
+        // new commands then, do not weaken or delete the assertion.
         for (host, cmake_command) in [
             (HostOs::Linux, Some("sudo apt-get install -y cmake")),
             (HostOs::MacOs, Some("brew install cmake")),
