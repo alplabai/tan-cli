@@ -159,7 +159,7 @@ pub fn parse_zephyr_version_file(body: &str) -> Option<String> {
             _ => {}
         }
     }
-    Some(format!("{}.{}", major?, minor?))
+    Some(format!("{}.{}.{}", major?, minor?, patch))
 }
 
 /// Extract the Zephyr pin as `MAJOR.MINOR.PATCH` from a `west.yml` body: the
@@ -214,7 +214,7 @@ pub fn parse_version_tag(revision: &str) -> Option<String> {
         .and_then(|p| p.split(|c: char| !c.is_ascii_digit()).next())
         .and_then(|p| p.parse().ok())
         .unwrap_or(0);
-    Some(format!("{major}.{minor}"))
+    Some(format!("{major}.{minor}.{patch}"))
 }
 
 /// A build is blocked when any check failed.
