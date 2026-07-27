@@ -1766,18 +1766,25 @@ pub(crate) mod tests {
         let bin_dir = tree.path().join(".venv").join(bin_sub);
         std::fs::create_dir_all(&bin_dir).unwrap();
         let west_path = bin_dir.join(west_name);
-        // A real, already-built, self-contained executable stands in for
-        // `west`: `tool_version` only cares that `<program> --version` prints
-        // a dotted number, and `env!("CARGO")` -- the cargo binary that built
-        // this very test -- is guaranteed present and needs no companion DLL.
-        std::fs::copy(env!("CARGO"), &west_path).expect("copy cargo as a west stand-in");
+        // The stand-in only has to print a dotted number for `--version`.
+        // On unix that is a `sh` script, NOT a copy of a real binary: copying
+        // rustup's `cargo` out of its toolchain dir breaks the `$ORIGIN/../lib`
+        // RPATH it resolves `libstd-*.so` through, so the copy fails to start
+        // and `tool_version` reports `None` (green on Windows and macOS, red on
+        // Linux). On Windows the venv west must be a real `west.exe` -- a
+        // script cannot carry that name -- and a Rust binary there links std
+        // statically, so the copy does run.
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&west_path, "#!/bin/sh\necho 'West version: v99.98.97'\n")
+                .expect("write the west stand-in script");
             let mut perms = std::fs::metadata(&west_path).unwrap().permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(&west_path, perms).unwrap();
         }
+        #[cfg(windows)]
+        std::fs::copy(env!("CARGO"), &west_path).expect("copy cargo as a west stand-in");
         let expected = crate::util::tool_version(&west_path.to_string_lossy())
             .expect("the copied cargo binary reports its own --version");
 
