@@ -436,6 +436,29 @@ All notable changes to `tan` are documented here. Format follows
   unchanged and the fallback commands are still real.
 
 ### Fixed
+- **`tan doctor --build` rated a missing `ninja` or `cmake` `warn`, so it exited
+  0 on a host that cannot build (#103).** `ninja` is the generator CMake picks by
+  default on every Zephyr host, so its absence does not degrade a build, it stops
+  `west build` outright; `cmake` is at least as blocking (Zephyr AND baremetal).
+  Both now report `fail` when absent, which also makes `--build` agree with plain
+  `tan doctor`, whose `hostPrerequisites` check has always called a missing
+  prerequisite `fail`. Deliberately NOT widened further: `west` stays `warn`
+  because this check probes bare PATH while the executor resolves west from the
+  workspace venv, so a correctly bootstrapped host that builds fine routinely
+  fails the probe (the venv-aware verdict is the preflight's `westResolved`
+  check, already in the same report); `bitbake`, `zephyrSdk`, `bmaptool` and
+  `vendorToolchain` are optional or advisory by design. Severity is independent
+  of whether the manifest carries an install one-liner — a `null` command means
+  tan cannot offer a button, not that the build will succeed.
+- **A terminal user never saw the runnable install command `tan doctor --build`
+  already had (#103).** `missingPrerequisites[].command` has been sourced from
+  the SDK manifest's `prerequisites.install.<os>` since #95, but text mode
+  renders only `checks` and `nextSteps`, so the CLI showed `Install Ninja.` while
+  the VS Code extension's Fix button got `sudo apt-get install -y ninja-build`
+  from the same report. The command is now appended to each check's `fix` prose —
+  appended, not substituted, because the prose carries constraints the command
+  does not (`cmake (>=3.20)`) — and omitted when the manifest lists none, the
+  same "never invent one" rule `command` follows.
 - **The documented Quickstart `tan --project examples/<cat>/<name> build`, run
   from an alp-sdk checkout root, failed with `no SDK selected` (#101).** SDK
   auto-discovery only ever probed the workspace root itself and two named
