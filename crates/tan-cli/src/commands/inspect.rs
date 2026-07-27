@@ -9,8 +9,7 @@ use std::path::Path;
 
 use serde_json::Value;
 use tan_core::{
-    DebugResolvedValue, DebugValueSource, DebuggerExtensionsState, collect_resolved_values,
-    create_debug_workspace_context,
+    DebugResolvedValue, DebugValueSource, collect_resolved_values, create_debug_workspace_context,
 };
 
 use super::CommandRun;
@@ -49,13 +48,9 @@ pub fn run(g: &GlobalArgs, args: &InspectArgs) -> CommandRun {
         &project,
         generated_at.clone(),
         |path| Path::new(path).exists(),
-        DebuggerExtensionsState {
-            cortex_debug: true,
-            peripheral_viewer: true,
-            memory_view: true,
-            cpp_tools: true,
-            code_lldb: true,
-        },
+        crate::commands::doctor::project_selected(g),
+        // Not meaningful in the standalone binary — see the constructor.
+        crate::commands::doctor::standalone_debugger_extensions(),
     );
 
     let mut issues = Vec::new();

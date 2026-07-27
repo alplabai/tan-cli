@@ -204,11 +204,10 @@ pub fn preflight_summary(checks: &[DoctorCheck]) -> DoctorSummary {
         fail: 0,
     };
     for check in checks {
-        match check.status {
-            DoctorStatus::Pass => summary.pass += 1,
-            DoctorStatus::Warn => summary.warn += 1,
-            DoctorStatus::Fail => summary.fail += 1,
-        }
+        // The same tally `append_doctor_check` uses, not a second copy of the
+        // status→bucket mapping — two of them drifted the moment a fourth
+        // status existed.
+        crate::debug::count_into(&mut summary, check.status);
     }
     summary
 }

@@ -17,6 +17,22 @@ pub enum DoctorStatus {
     Warn,
     /// Blocking failure.
     Fail,
+    /// The running binary could not observe the thing at all, so there is no
+    /// verdict to report — reported, but deliberately counted in NONE of the
+    /// summary buckets and raising no issue.
+    ///
+    /// The one producer today is the VS Code extension-presence set: the
+    /// standalone `tan` cannot see a marketplace extension, and rendering that
+    /// unverifiable assumption as `Pass` printed "is installed." as observed
+    /// fact on hosts with no VS Code and inflated the "N passed" count (#102).
+    /// Unknown is not `Warn`: a warning says something is wrong, and nothing
+    /// here is — the question simply was not askable.
+    ///
+    /// Consequence, deliberately: `summary.pass + warn + fail` can be smaller
+    /// than `checks.len()`. Adding a fourth summary count instead would change
+    /// the `tan doctor --build` envelope's key set, which `alp-sdk-vscode`
+    /// parses; `--build` emits no unknown check, so it never sees one.
+    Unknown,
 }
 
 /// A single doctor check with its status and an optional remediation.
@@ -100,10 +116,8 @@ struct McuCompanionViewer {
     installed: fn(&DebuggerExtensionsState) -> bool,
     /// Stable check name (e.g. `peripheralViewerExtension`).
     name: &'static str,
-    /// Detail shown when the viewer is installed.
-    installed_detail: &'static str,
-    /// Detail shown when the viewer is missing.
-    missing_detail: &'static str,
+    /// Marketplace identifier, which is also the subject of every detail line.
+    id: &'static str,
     /// Remediation shown when the viewer is missing.
     fix: &'static str,
 }
@@ -114,36 +128,56 @@ const MCU_COMPANION_VIEWERS: [McuCompanionViewer; 2] = [
     McuCompanionViewer {
         installed: |ext| ext.peripheral_viewer,
         name: "peripheralViewerExtension",
-        installed_detail: "mcu-debug.peripheral-viewer is installed.",
-        missing_detail: "mcu-debug.peripheral-viewer is not installed.",
+        id: "mcu-debug.peripheral-viewer",
         fix: "Install mcu-debug.peripheral-viewer for SVD-backed peripheral/register views.",
     },
     McuCompanionViewer {
         installed: |ext| ext.memory_view,
         name: "memoryViewExtension",
-        installed_detail: "mcu-debug.memory-view is installed.",
-        missing_detail: "mcu-debug.memory-view is not installed.",
+        id: "mcu-debug.memory-view",
         fix: "Install mcu-debug.memory-view for low-level memory inspection.",
     },
 ];
 
-/// Mirror of TS `createMcuCompanionViewerDoctorChecks`: one `pass`/`warn` check
-/// per MCU companion viewer, warning (never failing) when a viewer is missing.
+/// One VS Code extension-presence check.
+///
+/// `observed` is `None` when the running binary cannot see VS Code at all — the
+/// standalone `tan`, which is every caller in this repo. That renders as
+/// [`DoctorStatus::Unknown`]: not a pass, not counted, and worded so it never
+/// claims an install state nobody looked at (#102). Only a real `Some(false)`
+/// carries a fix — there is nothing to repair about a question never asked.
+fn extension_check(
+    name: &str,
+    id: &str,
+    observed: Option<bool>,
+    missing: DoctorStatus,
+    fix: &str,
+) -> DoctorCheck {
+    let (status, detail) = match observed {
+        Some(true) => (DoctorStatus::Pass, format!("{id} is installed.")),
+        Some(false) => (missing, format!("{id} is not installed.")),
+        None => (
+            DoctorStatus::Unknown,
+            format!(
+                "{id}: unknown — the standalone tan binary cannot see VS Code's installed extensions."
+            ),
+        ),
+    };
+    DoctorCheck::new(name, status, detail, fix_when(observed == Some(false), fix))
+}
+
+/// Mirror of TS `createMcuCompanionViewerDoctorChecks`: one check per MCU
+/// companion viewer, warning (never failing) when a viewer is observed missing.
 fn create_mcu_companion_viewer_checks(extensions: &DebuggerExtensionsState) -> Vec<DoctorCheck> {
     MCU_COMPANION_VIEWERS
         .iter()
         .map(|viewer| {
-            let installed = (viewer.installed)(extensions);
-            DoctorCheck::new(
+            extension_check(
                 viewer.name,
-                status_pass_warn(installed),
-                if installed {
-                    viewer.installed_detail
-                } else {
-                    viewer.missing_detail
-                }
-                .to_string(),
-                fix_when(!installed, viewer.fix),
+                viewer.id,
+                extensions.observed((viewer.installed)(extensions)),
+                DoctorStatus::Warn,
+                viewer.fix,
             )
         })
         .collect()
@@ -187,26 +221,21 @@ pub fn build_doctor_report(
         DoctorCheck::new(
             "sdkRoot",
             status_pass_fail(has_sdk),
-            context.sdk_root.clone().unwrap_or_else(|| {
-                "The extension could not resolve an alp-sdk checkout.".to_string()
-            }),
+            // NOT "The extension could not resolve …": this line is reachable
+            // from the standalone binary, where no extension is running and
+            // `tan` itself did the resolving (#102). Named generically rather
+            // than as a candidate list — the discovery half of that list is
+            // owned elsewhere, and a message enumerating it would drift.
+            context
+                .sdk_root
+                .clone()
+                .unwrap_or_else(|| "No alp-sdk checkout resolved.".to_string()),
             fix_when(
                 !has_sdk,
-                "Configure alpSdk.path or open a workspace near an alp-sdk checkout.",
+                "Run `tan sdk switch <path>` or pass `--sdk-root <path>`.",
             ),
         ),
-        DoctorCheck::new(
-            "boardYaml",
-            status_pass_fail(context.board_yaml_exists),
-            context
-                .board_yaml_path
-                .clone()
-                .unwrap_or_else(|| "board.yaml path is unresolved.".to_string()),
-            fix_when(
-                !context.board_yaml_exists,
-                "Create board.yaml or configure alpSdk.boardYamlPath.",
-            ),
-        ),
+        board_yaml_check(context),
     ];
 
     if !is_server_supported_for_target(target, server) {
@@ -223,19 +252,15 @@ pub fn build_doctor_report(
         return finalize_report(context.generated_at.clone(), target, server, checks);
     }
 
+    let ext = &context.debugger_extensions;
     match target {
         DebugTargetKind::ZephyrMcu | DebugTargetKind::BaremetalMcu => {
-            let installed = context.debugger_extensions.cortex_debug;
-            checks.push(DoctorCheck::new(
+            checks.push(extension_check(
                 "cortexDebugExtension",
-                status_pass_fail(installed),
-                if installed {
-                    "marus25.cortex-debug is installed."
-                } else {
-                    "marus25.cortex-debug is not installed."
-                }
-                .to_string(),
-                fix_when(!installed, "Install marus25.cortex-debug."),
+                "marus25.cortex-debug",
+                ext.observed(ext.cortex_debug),
+                DoctorStatus::Fail,
+                "Install marus25.cortex-debug.",
             ));
             checks.extend(create_mcu_companion_viewer_checks(
                 &context.debugger_extensions,
@@ -243,17 +268,12 @@ pub fn build_doctor_report(
             checks.push(create_backend_check(server, runtime));
         }
         DebugTargetKind::YoctoUserspace => {
-            let installed = context.debugger_extensions.cpp_tools;
-            checks.push(DoctorCheck::new(
+            checks.push(extension_check(
                 "cppToolsExtension",
-                status_pass_fail(installed),
-                if installed {
-                    "ms-vscode.cpptools is installed."
-                } else {
-                    "ms-vscode.cpptools is not installed."
-                }
-                .to_string(),
-                fix_when(!installed, "Install ms-vscode.cpptools."),
+                "ms-vscode.cpptools",
+                ext.observed(ext.cpp_tools),
+                DoctorStatus::Fail,
+                "Install ms-vscode.cpptools.",
             ));
             let gdb = runtime.gdb_executable.clone();
             checks.push(DoctorCheck::new(
@@ -267,17 +287,12 @@ pub fn build_doctor_report(
             ));
         }
         DebugTargetKind::NativeHost => {
-            let installed = context.debugger_extensions.code_lldb;
-            checks.push(DoctorCheck::new(
+            checks.push(extension_check(
                 "codeLLDBExtension",
-                status_pass_fail(installed),
-                if installed {
-                    "vadimcn.vscode-lldb is installed."
-                } else {
-                    "vadimcn.vscode-lldb is not installed."
-                }
-                .to_string(),
-                fix_when(!installed, "Install vadimcn.vscode-lldb."),
+                "vadimcn.vscode-lldb",
+                ext.observed(ext.code_lldb),
+                DoctorStatus::Fail,
+                "Install vadimcn.vscode-lldb.",
             ));
             let lldb = runtime.lldb_executable.clone();
             checks.push(DoctorCheck::new(
@@ -293,6 +308,52 @@ pub fn build_doctor_report(
     }
 
     finalize_report(context.generated_at.clone(), target, server, checks)
+}
+
+/// The `boardYaml` check, whose severity depends on whether the user actually
+/// named a project.
+///
+/// A missing `board.yaml` is a hard failure only when it was ASKED about —
+/// `--project <dir>` or `--board-yaml <path>`. With neither flag the path is a
+/// guess at the working directory, and the working directory alp-sdk's own
+/// `bootstrap` tells a customer to run `tan doctor` from is the SDK checkout
+/// root, which has no `board.yaml` and needs none: a project/example directory
+/// owns that file. Failing there made the very first command a new customer
+/// types report `1 failed` and exit 4 for a non-problem (#100).
+///
+/// It stays a check rather than disappearing, because "no project selected" is
+/// itself worth saying — every project-shaped verdict below it is provisional.
+///
+/// `tan doctor --build`'s own `boardYaml` (`crate::preflight`) is deliberately
+/// untouched and still a hard fail: that mode answers "can this build run", and
+/// no build runs without one. Plain `doctor` folds `--build`'s preflight in but
+/// drops its duplicate of this check, so only one `boardYaml` is ever emitted.
+fn board_yaml_check(context: &DebugWorkspaceContext) -> DoctorCheck {
+    let path = context
+        .board_yaml_path
+        .clone()
+        .unwrap_or_else(|| "board.yaml path is unresolved.".to_string());
+
+    if context.board_yaml_exists {
+        return DoctorCheck::new("boardYaml", DoctorStatus::Pass, path, None);
+    }
+    if context.project_selected {
+        return DoctorCheck::new(
+            "boardYaml",
+            DoctorStatus::Fail,
+            path,
+            Some("Create board.yaml or pass `--board-yaml <path>`.".to_string()),
+        );
+    }
+    DoctorCheck::new(
+        "boardYaml",
+        DoctorStatus::Warn,
+        format!("no project selected — no board.yaml at {path}"),
+        Some(
+            "Select a project with `--project <dir>` (or `--board-yaml <path>`) to check one."
+                .to_string(),
+        ),
+    )
 }
 
 fn create_backend_check(
@@ -355,12 +416,14 @@ fn count_status(checks: &[DoctorCheck], status: DoctorStatus) -> u32 {
     checks.iter().filter(|c| c.status == status).count() as u32
 }
 
-/// Count one check into a summary.
-fn count_into(summary: &mut DoctorSummary, status: DoctorStatus) {
+/// Count one check into a summary. [`DoctorStatus::Unknown`] lands in no
+/// bucket — see the variant's own note for why it gets no count of its own.
+pub(crate) fn count_into(summary: &mut DoctorSummary, status: DoctorStatus) {
     match status {
         DoctorStatus::Pass => summary.pass += 1,
         DoctorStatus::Warn => summary.warn += 1,
         DoctorStatus::Fail => summary.fail += 1,
+        DoctorStatus::Unknown => {}
     }
 }
 
@@ -424,7 +487,10 @@ pub fn prepend_doctor_checks(
 pub fn unique_next_steps(checks: &[DoctorCheck]) -> Vec<String> {
     let mut steps: Vec<String> = Vec::new();
     for check in checks {
-        if check.status == DoctorStatus::Pass {
+        // `Unknown` alongside `Pass`: a check nobody could run has nothing to
+        // remediate, and a next step for one would send a user chasing a
+        // verdict that was never reached.
+        if matches!(check.status, DoctorStatus::Pass | DoctorStatus::Unknown) {
             continue;
         }
         if let Some(fix) = &check.fix {
@@ -468,6 +534,9 @@ fn fix_when_owned(unhealthy: bool, fix: String) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// An EXTENSION host's state: it really did enumerate its own extensions,
+    /// so the flags are observations. The standalone binary's counterpart is
+    /// `extensions_unobservable` below.
     fn extensions_all_installed() -> DebuggerExtensionsState {
         DebuggerExtensionsState {
             cortex_debug: true,
@@ -475,6 +544,16 @@ mod tests {
             memory_view: true,
             cpp_tools: true,
             code_lldb: true,
+            observable: true,
+        }
+    }
+
+    /// What the standalone `tan` binary passes: the same inherited `true`s, but
+    /// nothing observed them (`tan-cli`'s `standalone_debugger_extensions`).
+    fn extensions_unobservable() -> DebuggerExtensionsState {
+        DebuggerExtensionsState {
+            observable: false,
+            ..extensions_all_installed()
         }
     }
 
@@ -487,6 +566,7 @@ mod tests {
             west_cwd: Some("/work/proj".to_string()),
             python_binary: "python3".to_string(),
             board_yaml_exists: true,
+            project_selected: true,
             debugger_extensions: extensions_all_installed(),
         }
     }
@@ -614,11 +694,9 @@ mod tests {
 
     fn extensions_missing_viewers() -> DebuggerExtensionsState {
         DebuggerExtensionsState {
-            cortex_debug: true,
             peripheral_viewer: false,
             memory_view: false,
-            cpp_tools: true,
-            code_lldb: true,
+            ..extensions_all_installed()
         }
     }
 
@@ -741,6 +819,185 @@ mod tests {
                 target.as_str()
             );
         }
+    }
+
+    #[test]
+    fn an_unobservable_host_reports_every_extension_check_as_unknown() {
+        // #102: the standalone binary cannot see VS Code, so a hardcoded `true`
+        // must not print "is installed." as observed fact, must not join the
+        // pass total, and must raise no remediation. All four extension checks
+        // -- one per target branch -- go through `extension_check`, so all four
+        // are driven here rather than only the `native-host` one the bug report
+        // happened to capture.
+        let mut ctx = healthy_context();
+        ctx.debugger_extensions = extensions_unobservable();
+
+        for (target, server, name) in [
+            (
+                DebugTargetKind::NativeHost,
+                DebugServerKind::None,
+                "codeLLDBExtension",
+            ),
+            (
+                DebugTargetKind::ZephyrMcu,
+                DebugServerKind::Jlink,
+                "cortexDebugExtension",
+            ),
+            (
+                DebugTargetKind::ZephyrMcu,
+                DebugServerKind::Jlink,
+                "peripheralViewerExtension",
+            ),
+            (
+                DebugTargetKind::YoctoUserspace,
+                DebugServerKind::Gdbserver,
+                "cppToolsExtension",
+            ),
+        ] {
+            let report = build_doctor_report(&ctx, target, server, &runtime_all_present());
+            let check = report
+                .checks
+                .iter()
+                .find(|c| c.name == name)
+                .unwrap_or_else(|| panic!("{name} missing for {}", target.as_str()));
+            assert_eq!(check.status, DoctorStatus::Unknown, "{name}");
+            assert!(
+                !check.detail.contains("is installed."),
+                "{name} must not claim an install state nobody probed: {}",
+                check.detail
+            );
+            assert!(check.fix.is_none(), "{name} has nothing to repair");
+            // Counted in NO bucket -- the whole point is that "5 passed" stops
+            // including a check the CLI never ran.
+            let counted = report.summary.pass + report.summary.warn + report.summary.fail;
+            assert!(
+                (counted as usize) < report.checks.len(),
+                "{name}: unknown must not be counted ({counted} vs {})",
+                report.checks.len()
+            );
+            assert!(
+                !report.next_steps.iter().any(|s| s.contains("Install ")),
+                "{name} raised a next step for an unasked question: {:?}",
+                report.next_steps
+            );
+        }
+    }
+
+    #[test]
+    fn an_observing_caller_still_gets_a_pass_or_a_fail() {
+        // The negative half: `observable: true` is the EXTENSION's state, where
+        // `true` is a real observation. Rendering everything `Unknown`
+        // unconditionally would silently disarm the check for the one caller
+        // that can actually answer it.
+        let installed = build_doctor_report(
+            &healthy_context(),
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime_all_present(),
+        );
+        let check = installed
+            .checks
+            .iter()
+            .find(|c| c.name == "codeLLDBExtension")
+            .expect("codeLLDBExtension present");
+        assert_eq!(check.status, DoctorStatus::Pass);
+        assert_eq!(check.detail, "vadimcn.vscode-lldb is installed.");
+
+        let mut ctx = healthy_context();
+        ctx.debugger_extensions = DebuggerExtensionsState {
+            code_lldb: false,
+            ..extensions_all_installed()
+        };
+        let missing = build_doctor_report(
+            &ctx,
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime_all_present(),
+        );
+        let check = missing
+            .checks
+            .iter()
+            .find(|c| c.name == "codeLLDBExtension")
+            .expect("codeLLDBExtension present");
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert_eq!(check.detail, "vadimcn.vscode-lldb is not installed.");
+        assert_eq!(check.fix.as_deref(), Some("Install vadimcn.vscode-lldb."));
+    }
+
+    #[test]
+    fn a_missing_board_yaml_warns_until_a_project_is_selected() {
+        // #100(b): at an alp-sdk checkout root -- where `bootstrap`'s printed
+        // next steps send every new customer -- there is no `board.yaml` and no
+        // reason for one, yet it was the single hard failure and the exit code
+        // was 4. It is a failure only once the user NAMED a project.
+        let mut unselected = healthy_context();
+        unselected.board_yaml_exists = false;
+        unselected.project_selected = false;
+        let report = build_doctor_report(
+            &unselected,
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime_all_present(),
+        );
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "boardYaml")
+            .expect("boardYaml present");
+        assert_eq!(check.status, DoctorStatus::Warn);
+        assert!(check.detail.contains("no project selected"), "{check:?}");
+        // The exit code the CLI derives is `summary.fail > 0`, so this is the
+        // assertion that keeps `tan doctor` from exiting 4 at an SDK root.
+        assert_eq!(report.summary.fail, 0, "{:?}", report.checks);
+
+        let mut selected = unselected.clone();
+        selected.project_selected = true;
+        let report = build_doctor_report(
+            &selected,
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime_all_present(),
+        );
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "boardYaml")
+            .expect("boardYaml present");
+        assert_eq!(check.status, DoctorStatus::Fail);
+        assert_eq!(report.summary.fail, 1);
+    }
+
+    #[test]
+    fn sdk_root_failure_names_no_extension() {
+        // #102's smaller symptom: "The extension could not resolve an alp-sdk
+        // checkout." is reachable from the standalone binary, where nothing but
+        // `tan` is running.
+        let mut ctx = healthy_context();
+        ctx.sdk_root = None;
+        let report = build_doctor_report(
+            &ctx,
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime_all_present(),
+        );
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "sdkRoot")
+            .expect("sdkRoot present");
+        assert!(!check.detail.contains("extension"), "{}", check.detail);
+        assert_eq!(
+            check.fix.as_deref(),
+            Some("Run `tan sdk switch <path>` or pass `--sdk-root <path>`.")
+        );
+    }
+
+    #[test]
+    fn unknown_serializes_as_its_own_status_token() {
+        // A consumer that only knows pass/warn/fail must see a value it can
+        // reject, not a `pass` it would render as a green tick.
+        let json = serde_json::to_string(&DoctorStatus::Unknown).unwrap();
+        assert_eq!(json, "\"unknown\"");
     }
 
     fn check(name: &str, status: DoctorStatus, fix: Option<&str>) -> DoctorCheck {

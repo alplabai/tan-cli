@@ -96,7 +96,7 @@ pub enum Command {
     Scaffold(ScaffoldArgs),
     /// List the SDK's ready-made example projects (source for `tan init --from-example`).
     Examples,
-    /// Diagnose debug readiness for a target/server combination.
+    /// Diagnose host build readiness plus debug readiness for a target/server pair.
     Doctor(DoctorArgs),
     /// Emit a shell completion script (bash, zsh, or fish).
     Completion(CompletionArgs),
@@ -455,7 +455,13 @@ pub struct DoctorArgs {
     pub build: bool,
     /// With `--build`: auto-repair a fixable blocker — run `tan bootstrap` when no
     /// Zephyr workspace is resolved, then re-check.
-    #[arg(long)]
+    ///
+    /// `requires`: `run()` reads this flag only inside its `--build` branch, so
+    /// `tan doctor --fix` used to parse, be accepted, and produce output
+    /// line-for-line identical to a plain `tan doctor` — no "fixed N", no
+    /// "nothing to fix", no error (#100). A usage error is the honest answer;
+    /// `--build --fix` is unaffected.
+    #[arg(long, requires = "build")]
     pub fix: bool,
 }
 
@@ -610,4 +616,44 @@ pub struct ScaffoldArgs {
     /// Allow overwriting existing files.
     #[arg(long)]
     pub force: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `clap`'s own consistency pass over the whole command tree — it panics on
+    /// a `requires`/`conflicts_with` naming an argument id that does not exist,
+    /// which is the one way the `--fix` relationship below could silently
+    /// become a no-op again.
+    #[test]
+    fn the_command_tree_is_internally_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn doctor_fix_is_a_usage_error_without_build() {
+        // #100(a): `tan doctor --fix` used to parse, be accepted, and produce
+        // output line-for-line identical to a plain `tan doctor` — `run()`
+        // reads the flag only inside its `--build` branch. Dropping the
+        // `requires = "build"` attribute fails here.
+        let err = Cli::try_parse_from(["tan", "doctor", "--fix"])
+            .expect_err("`--fix` without `--build` must be rejected");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{err}"
+        );
+        assert!(err.to_string().contains("--build"), "{err}");
+
+        // The supported spelling still parses, and plain `doctor` is untouched.
+        for argv in [
+            vec!["tan", "doctor", "--build", "--fix"],
+            vec!["tan", "doctor", "--build"],
+            vec!["tan", "doctor"],
+        ] {
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        }
+    }
 }

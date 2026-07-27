@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-//! `tan doctor` — diagnose debug readiness for a target/server combination.
+//! `tan doctor` — diagnose host build readiness plus debug readiness for a
+//! target/server combination.
 //!
 //! Mirrors the TypeScript `runDoctorCommand`: resolve the project context,
 //! probe runtime capabilities (binaries on PATH), and build a doctor report.
+//! It additionally folds in [`probe_build_preflight`] — the scope the docs
+//! always claimed for it (#100); see [`assemble_doctor_report`].
 //! Exit code is `doctorFailure` (4) when any check fails, `internalFailure`
 //! (5) on an invalid `--target-kind`/`--server`, and `success` (0) otherwise.
 
@@ -39,7 +42,8 @@ pub fn run(g: &GlobalArgs, args: &DoctorArgs) -> CommandRun {
     if args.build {
         return run_build_readiness(g, &generated_at, args.fix);
     }
-    let context = resolve_context(g, &generated_at);
+    let project = resolve_cli_project_context(g);
+    let context = resolve_context(g, &project, &generated_at);
 
     // Resolved project paths are reported on the success path only (mirrors TS).
     let resolved_project = Project {
@@ -61,7 +65,13 @@ pub fn run(g: &GlobalArgs, args: &DoctorArgs) -> CommandRun {
     }
 
     let runtime = collect_runtime_capabilities_from_commands(command_on_path);
-    let report = assemble_doctor_report(&context, target, server, &runtime);
+    let report = assemble_doctor_report(
+        &context,
+        target,
+        server,
+        &runtime,
+        probe_build_preflight(g, &project),
+    );
 
     let exit = if report.summary.fail > 0 {
         ExitCode::DoctorFailure
@@ -228,7 +238,32 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
 
 /// The plain `tan doctor` report: the pure check set, plus the checks that can
 /// only be built with IO — the host prerequisite gate, the host-environment
-/// probes, and the SDK provenance.
+/// probes, the SDK provenance, and the shared build-readiness preflight.
+///
+/// The preflight is folded in because alp-sdk's onboarding path points every
+/// new customer at PLAIN `tan doctor` — `bootstrap`'s printed next steps,
+/// `README.md`'s Quickstart ("catches a missing toolchain/HAL before it bites
+/// later"), `docs/cli.md`, `docs/getting-started.md` — and none of them names
+/// `--build`. Without it this command probed nothing about whether a build
+/// could run and printed byte-identical output across four materially
+/// different host states (#100). It is [`probe_build_preflight`], the same
+/// call `tan build` and `tan doctor --build` make, not a second copy of the
+/// rules.
+///
+/// `--build` is NOT thereby a superset and the two stay distinct: it resolves
+/// its OS set from the active `board.yaml` (`zephyr · yocto · baremetal`) and
+/// layers a `BuildToolProbe` on top, where plain doctor stays a
+/// `native-host · none` debug report that has gained build-readiness facts.
+///
+/// Prepended, matching `--build`: "can a build even start" outranks the debug
+/// tooling, and `nextSteps` follows check order.
+///
+/// The preflight's own `boardYaml` is DROPPED — it and the debug report's ask
+/// the same question, and emitting both would report one fact twice under one
+/// name. The debug one survives because it is the one shared with `inspect` /
+/// `support-bundle` and the one whose severity is project-selection aware (see
+/// `tan_core::debug::doctor`'s `board_yaml_check`); `--build`'s copy is
+/// untouched.
 ///
 /// Its own function rather than four inline lines in `run` so the appends are
 /// reachable from a test. `run` resolves a real project and shells `git`, so a
@@ -245,8 +280,18 @@ fn assemble_doctor_report(
     target: DebugTargetKind,
     server: DebugServerKind,
     runtime: &tan_core::DebugRuntimeCapabilities,
+    preflight: Vec<DoctorCheck>,
 ) -> DoctorReport {
     let mut report = build_doctor_report(context, target, server, runtime);
+    prepend_doctor_checks(
+        &mut report.summary,
+        &mut report.checks,
+        &mut report.next_steps,
+        preflight
+            .into_iter()
+            .filter(|c| c.name != "boardYaml")
+            .collect(),
+    );
     append_host_prerequisites(&mut report, context.sdk_root.as_deref());
     append_host_environment(&mut report);
     append_sdk_provenance(
@@ -739,32 +784,66 @@ fn format_build_text(g: &GlobalArgs, report: &tan_core::BuildReadinessReport) ->
 }
 
 /// Resolve the debug workspace context, mirroring TS `resolveCliDebugContext`.
-fn resolve_context(g: &GlobalArgs, generated_at: &str) -> tan_core::DebugWorkspaceContext {
-    let project = resolve_cli_project_context(g);
+fn resolve_context(
+    g: &GlobalArgs,
+    project: &ProjectContext,
+    generated_at: &str,
+) -> tan_core::DebugWorkspaceContext {
+    create_debug_workspace_context(
+        project,
+        generated_at.to_string(),
+        |path| Path::new(path).exists(),
+        project_selected(g),
+        standalone_debugger_extensions(),
+    )
+}
 
-    // The CLI assumes the marquee debugger extensions are present (it cannot
-    // probe VS Code), matching the TS CLI's resolveCliDebugContext.
-    let extensions = DebuggerExtensionsState {
+/// Whether the user NAMED a project, rather than letting resolution default to
+/// the working directory: `--project` or `--board-yaml`, either one non-empty.
+///
+/// Those two flags are the whole selection surface —
+/// `resolve_cli_project_context` defaults them to `.` and `board.yaml` — so
+/// with neither given the resolved `board.yaml` path is a guess, not a request.
+pub(crate) fn project_selected(g: &GlobalArgs) -> bool {
+    [g.project.as_deref(), g.board_yaml.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty())
+}
+
+/// The `DebuggerExtensionsState` for the standalone `tan` binary.
+///
+/// The five flags are NOT MEANINGFUL here and nothing may read them as facts:
+/// only a VS Code extension host can enumerate its own marketplace extensions,
+/// so these are an inherited assumption from the TS `resolveCliDebugContext`
+/// (where `true` is correct, because that code CAN introspect its host). They
+/// are kept so the port stays faithful, and `observable: false` is what stops
+/// them being reported — every derived check renders `unknown` instead of
+/// printing "vadimcn.vscode-lldb is installed." on a headless container and
+/// counting itself among the passes (#102).
+///
+/// `pub(crate)`: `inspect` and `support-bundle` build the same context and must
+/// carry the same disclaimer, not a third copy of the literal.
+pub(crate) fn standalone_debugger_extensions() -> DebuggerExtensionsState {
+    DebuggerExtensionsState {
         cortex_debug: true,
         peripheral_viewer: true,
         memory_view: true,
         cpp_tools: true,
         code_lldb: true,
-    };
-    create_debug_workspace_context(
-        &project,
-        generated_at.to_string(),
-        |path| Path::new(path).exists(),
-        extensions,
-    )
+        observable: false,
+    }
 }
 
-/// Map non-passing `DoctorCheck`s to envelope `Issue`s, prefixing the check name
-/// with `doctor.` and mapping `Fail`/`Warn` status to `error`/`warning` severity.
+/// Map `Fail`/`Warn` `DoctorCheck`s to envelope `Issue`s, prefixing the check
+/// name with `doctor.` and mapping the status to `error`/`warning` severity.
+///
+/// `Unknown` raises nothing, for the same reason it counts nothing: an issue is
+/// a claim, and the CLI never observed the thing.
 fn checks_to_issues(checks: &[DoctorCheck]) -> Vec<Issue> {
     checks
         .iter()
-        .filter(|c| c.status != DoctorStatus::Pass)
+        .filter(|c| matches!(c.status, DoctorStatus::Warn | DoctorStatus::Fail))
         .map(|c| Issue {
             code: format!("doctor.{}", c.name),
             severity: if c.status == DoctorStatus::Fail {
@@ -1071,13 +1150,8 @@ pub(crate) mod tests {
             west_cwd: None,
             python_binary: "python3".to_string(),
             board_yaml_exists: true,
-            debugger_extensions: DebuggerExtensionsState {
-                cortex_debug: true,
-                peripheral_viewer: true,
-                memory_view: true,
-                cpp_tools: true,
-                code_lldb: true,
-            },
+            project_selected: true,
+            debugger_extensions: standalone_debugger_extensions(),
         };
         let runtime = tan_core::DebugRuntimeCapabilities {
             jlink_executable: None,
@@ -1092,14 +1166,22 @@ pub(crate) mod tests {
             DebugTargetKind::NativeHost,
             DebugServerKind::None,
             &runtime,
+            Vec::new(),
         );
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"hostPrerequisites"), "{names:?}");
         assert!(names.contains(&"sdkProvenance"), "{names:?}");
-        // Every appended check is counted, or the exit code (`fail > 0`) and
-        // the rendered summary disagree with the list they summarize.
+        // Every check is counted EXCEPT the unobservable extension ones, which
+        // are counted nowhere by design (#102) -- otherwise the exit code
+        // (`fail > 0`) and the rendered summary disagree with the list they
+        // summarize.
         let counted = report.summary.pass + report.summary.warn + report.summary.fail;
-        assert_eq!(counted as usize, report.checks.len());
+        let unknown = report
+            .checks
+            .iter()
+            .filter(|c| c.status == DoctorStatus::Unknown)
+            .count();
+        assert_eq!(counted as usize + unknown, report.checks.len());
         // The retired `python` check must not come back alongside it.
         assert!(!names.contains(&"python"), "{names:?}");
     }
@@ -1300,6 +1382,277 @@ pub(crate) mod tests {
             cfg!(windows),
             "longPaths is Windows-only: {names:?}"
         );
+    }
+
+    /// One check's `detail` out of a serialized doctor envelope.
+    fn envelope_check_detail(json: &str, name: &str) -> String {
+        let value: serde_json::Value = serde_json::from_str(json).expect("envelope is JSON");
+        value["data"]["checks"]
+            .as_array()
+            .expect("data.checks is an array")
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no `{name}` check in {json}"))["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// Every `(name, detail)` pair of a serialized doctor envelope, in order —
+    /// the machine form of the rendered report a user reads.
+    fn envelope_check_rows(json: &str) -> Vec<(String, String)> {
+        let value: serde_json::Value = serde_json::from_str(json).expect("envelope is JSON");
+        value["data"]["checks"]
+            .as_array()
+            .expect("data.checks is an array")
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().unwrap_or_default().to_string(),
+                    c["detail"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plain_doctor_probes_the_build_environment_and_tells_two_hosts_apart() {
+        // #100's headline: plain `tan doctor` printed BYTE-IDENTICAL output
+        // across four materially different host states, including the pair that
+        // differed by whether the documented example build worked at all. It
+        // ran no build-environment probe whatsoever.
+        //
+        // Differentiated on the `workspace` check specifically, because that is
+        // a fact ONLY the folded-in preflight can see. Picking `sdk` or
+        // `boardYaml` instead would prove nothing: the debug report already
+        // carries `sdkRoot`/`boardYaml`, so those two states differ with or
+        // without the fold, and the test would stay green through the mutation
+        // it exists to catch. Deleting the `prepend_doctor_checks(...,
+        // preflight)` call in `assemble_doctor_report` removes the `workspace`
+        // check entirely and `envelope_check_detail` panics.
+        let without = TempTree::new("plain-no-workspace");
+        let with = TempTree::new("plain-with-workspace");
+        // The one difference between the two hosts: a west workspace marker.
+        std::fs::create_dir_all(with.path().join(".west")).unwrap();
+
+        let args = || DoctorArgs {
+            target_kind: None,
+            server: None,
+            build: false,
+            fix: false,
+        };
+        let a = run(&json_global(Some(without.path())), &args())
+            .json
+            .expect("json envelope");
+        let b = run(&json_global(Some(with.path())), &args())
+            .json
+            .expect("json envelope");
+
+        // Absolute: the state that HAS a workspace says so, naming its own dir.
+        // Matched on the leaf name — the reported path is separator-normalized
+        // (forward slashes even on Windows), so the raw `PathBuf` string does
+        // not appear verbatim.
+        let with_detail = envelope_check_detail(&b, "workspace");
+        let leaf = with
+            .path()
+            .file_name()
+            .expect("temp dir has a name")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            with_detail.starts_with("Zephyr workspace at") && with_detail.ends_with(&leaf),
+            "{with_detail}"
+        );
+        // Relative, so the assertion holds on a host with an ambient
+        // `$ZEPHYR_BASE` (which would give state A a workspace of its own — a
+        // different one, never state B's).
+        assert_ne!(
+            envelope_check_detail(&a, "workspace"),
+            with_detail,
+            "plain `tan doctor` must not report the same workspace verdict for \
+             a host with a west workspace and one without"
+        );
+        // And the reports as a whole are not byte-identical, which is the
+        // symptom the issue actually filed.
+        assert_ne!(envelope_check_rows(&a), envelope_check_rows(&b));
+
+        // The preflight-only names are all present — the fold is the whole
+        // preflight, not one cherry-picked row.
+        let names = envelope_check_names(&b);
+        for name in ["sdk", "workspace", "westResolved"] {
+            assert!(names.contains(&name.to_string()), "{name} in {names:?}");
+        }
+        // ...minus the preflight's own `boardYaml`, which collides by NAME with
+        // the debug report's. Exactly one is emitted, and it is the
+        // project-selection-aware one (`--project` is set here but the file
+        // does not exist, so it is the hard-fail wording, not the preflight's
+        // "run `tan init`").
+        assert_eq!(
+            names.iter().filter(|n| *n == "boardYaml").count(),
+            1,
+            "{names:?}"
+        );
+        assert!(
+            !envelope_check_detail(&b, "boardYaml").contains("tan init"),
+            "the surviving boardYaml must be the debug report's"
+        );
+    }
+
+    #[test]
+    fn plain_doctor_does_not_fail_at_a_checkout_root_with_no_project_selected() {
+        // #100(b) at the command level: `bootstrap` prints `tan doctor` as the
+        // customer's very next command, run from the SDK checkout root it just
+        // set up — which has no `board.yaml` and needs none. With no
+        // `--project`/`--board-yaml`, `boardYaml` must warn, not fail.
+        //
+        // No `--project` is the whole point, so this run resolves against the
+        // test process's own cwd — the `tan-cli` package root, which carries no
+        // `board.yaml` (nor does the repo root above it), the same shape as an
+        // alp-sdk checkout root.
+        assert!(!project_selected(&json_global(None)));
+        assert!(project_selected(&json_global(Some(Path::new("/proj")))));
+        let json = run(
+            &json_global(None),
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: false,
+                fix: false,
+            },
+        )
+        .json
+        .expect("json envelope");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+        let board = value["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "boardYaml")
+            .unwrap_or_else(|| panic!("{json}"));
+        assert_eq!(board["status"], "warn", "{json}");
+        // ...and it raises a `warning`, not an `error`, in the envelope a
+        // consumer reads.
+        let issue = value["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["code"] == "doctor.boardYaml")
+            .unwrap_or_else(|| panic!("{json}"));
+        assert_eq!(issue["severity"], "warning");
+    }
+
+    #[test]
+    fn plain_doctor_reports_the_vscode_extension_check_as_unknown() {
+        // #102 at the command level: on a headless host the standalone binary
+        // printed `[+] codeLLDBExtension  vadimcn.vscode-lldb is installed.`
+        // and counted it among "5 passed". Reverting
+        // `standalone_debugger_extensions` to `observable: true` fails here.
+        let tree = TempTree::new("plain-unknown-ext");
+        let json = run(
+            &json_global(Some(tree.path())),
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: false,
+                fix: false,
+            },
+        )
+        .json
+        .expect("json envelope");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+        let check = value["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "codeLLDBExtension")
+            .unwrap_or_else(|| panic!("{json}"));
+        assert_eq!(check["status"], "unknown", "{json}");
+        assert!(
+            !check["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("is installed."),
+            "{json}"
+        );
+        // Raises no issue and appears in no next step: the CLI observed nothing.
+        assert!(
+            !value["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|i| i["code"] == "doctor.codeLLDBExtension"),
+            "{json}"
+        );
+    }
+
+    #[test]
+    fn doctor_build_envelope_keys_are_unchanged() {
+        // The live cross-repo contract. `alp-sdk-vscode` shells ONLY
+        // `tan doctor --build` (`src/toolchain.ts:280`, `:353`) and parses this
+        // envelope; plain `tan doctor` has no consumer there, which is what
+        // makes the fold above safe. So plain doctor's shape may move and this
+        // one may NOT. Renaming any key below — `osSet`, `nextSteps`,
+        // `missingPrerequisites`, `exitCode`, … — fails here.
+        let tree = TempTree::new("build-envelope-keys");
+        let json = run(
+            &json_global(Some(tree.path())),
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        )
+        .json
+        .expect("json envelope");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+
+        let keys = |v: &serde_json::Value| -> Vec<String> {
+            let mut k: Vec<String> = v
+                .as_object()
+                .expect("a JSON object")
+                .keys()
+                .cloned()
+                .collect();
+            k.sort();
+            k
+        };
+        assert_eq!(
+            keys(&value),
+            ["command", "data", "exitCode", "issues", "ok", "project"]
+        );
+        assert_eq!(keys(&value["project"]), ["boardYaml", "root"]);
+        assert_eq!(
+            keys(&value["data"]),
+            [
+                "checks",
+                "generatedAt",
+                "missingPrerequisites",
+                "nextSteps",
+                "osSet",
+                "schemaVersion",
+                "summary",
+            ]
+        );
+        assert_eq!(keys(&value["data"]["summary"]), ["fail", "pass", "warn"]);
+        assert_eq!(value["command"], "doctor");
+
+        // Every check keeps `{name, status, detail}` (+ optional `fix`), and no
+        // `--build` check is ever `unknown` — the new status is produced only by
+        // the VS Code extension-presence set, which this mode does not emit. A
+        // consumer that only knows pass/warn/fail must stay correct here.
+        for check in value["data"]["checks"].as_array().expect("checks array") {
+            for key in ["name", "status", "detail"] {
+                assert!(check.get(key).is_some(), "{key} missing from {check}");
+            }
+            assert!(
+                keys(check)
+                    .iter()
+                    .all(|k| ["detail", "fix", "name", "status"].contains(&k.as_str())),
+                "unexpected key in {check}"
+            );
+            assert_ne!(check["status"], "unknown", "{check}");
+        }
     }
 
     #[test]

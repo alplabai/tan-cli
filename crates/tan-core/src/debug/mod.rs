@@ -18,6 +18,9 @@ pub use context::{
     DebugRuntimeCapabilities, DebugWorkspaceContext, DebuggerExtensionsState,
     collect_runtime_capabilities_from_commands, create_debug_workspace_context,
 };
+/// Crate-internal: the single status→summary-bucket mapping, shared with
+/// `crate::preflight` so the two tallies cannot disagree about a new status.
+pub(crate) use doctor::count_into;
 pub use doctor::{
     DoctorCheck, DoctorReport, DoctorStatus, DoctorSummary, append_doctor_check,
     build_doctor_report, prepend_doctor_checks, unique_next_steps,

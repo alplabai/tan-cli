@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tan_core::{
     ALL_EMIT_MODES, DebugGenerationTraceDecision, DebugServerKind, DebugTargetKind,
-    DebugTraceOutcome, DebugWorkspaceContext, DebuggerExtensionsState, DoctorCheck, DoctorReport,
-    DoctorStatus, ProjectContext, build_doctor_report, collect_resolved_values,
+    DebugTraceOutcome, DebugWorkspaceContext, DoctorCheck, DoctorReport, DoctorStatus,
+    ProjectContext, build_doctor_report, collect_resolved_values,
     collect_runtime_capabilities_from_commands, create_debug_workspace_context, create_loader_plan,
     generation_target_support, is_server_supported_for_target, parse_server_kind,
     parse_target_kind,
@@ -113,13 +113,9 @@ pub fn run(g: &GlobalArgs, args: &SupportBundleArgs) -> CommandRun {
         &project,
         generated_at.clone(),
         |path| Path::new(path).exists(),
-        DebuggerExtensionsState {
-            cortex_debug: true,
-            peripheral_viewer: true,
-            memory_view: true,
-            cpp_tools: true,
-            code_lldb: true,
-        },
+        crate::commands::doctor::project_selected(g),
+        // Not meaningful in the standalone binary — see the constructor.
+        crate::commands::doctor::standalone_debugger_extensions(),
     );
 
     let target = match parse_target_kind(args.target_kind.as_deref()) {
@@ -349,12 +345,13 @@ fn timestamp_for_file(iso_timestamp: &str) -> String {
         .collect()
 }
 
-/// Maps non-`Pass` doctor checks to envelope `Issue`s, coding each as
+/// Maps `Fail`/`Warn` doctor checks to envelope `Issue`s, coding each as
 /// `support-bundle.<name>` and severity `error` for `Fail`, `warning` otherwise.
+/// `Unknown` raises nothing — the CLI observed nothing to report.
 fn doctor_checks_to_issues(checks: &[DoctorCheck]) -> Vec<Issue> {
     checks
         .iter()
-        .filter(|c| c.status != DoctorStatus::Pass)
+        .filter(|c| matches!(c.status, DoctorStatus::Warn | DoctorStatus::Fail))
         .map(|c| Issue {
             code: format!("support-bundle.{}", c.name),
             severity: if c.status == DoctorStatus::Fail {
@@ -495,14 +492,24 @@ mod tests {
             west_cwd: Some("/work/proj".to_string()),
             python_binary: "python3".to_string(),
             board_yaml_exists: true,
-            debugger_extensions: DebuggerExtensionsState {
-                cortex_debug: true,
-                peripheral_viewer: true,
-                memory_view: true,
-                cpp_tools: true,
-                code_lldb: true,
-            },
+            project_selected: true,
+            debugger_extensions: crate::commands::doctor::standalone_debugger_extensions(),
         }
+    }
+
+    /// Every check landed in exactly one summary bucket, except the
+    /// deliberately uncounted [`DoctorStatus::Unknown`] rows (the VS Code
+    /// extension-presence set — see `tan_core::debug::DoctorStatus`). The exit
+    /// code is `summary.fail > 0`, so an APPENDED check that skipped the tally
+    /// silently changes it.
+    fn every_check_is_accounted_for(report: &DoctorReport) {
+        let counted = report.summary.pass + report.summary.warn + report.summary.fail;
+        let unknown = report
+            .checks
+            .iter()
+            .filter(|c| c.status == DoctorStatus::Unknown)
+            .count();
+        assert_eq!(counted as usize + unknown, report.checks.len());
     }
 
     fn runtime() -> tan_core::DebugRuntimeCapabilities {
@@ -542,8 +549,7 @@ mod tests {
             check.detail
         );
         // Counted, not just appended -- the exit code is `summary.fail > 0`.
-        let counted = doctor.summary.pass + doctor.summary.warn + doctor.summary.fail;
-        assert_eq!(counted as usize, doctor.checks.len());
+        every_check_is_accounted_for(&doctor);
     }
 
     #[test]
@@ -567,8 +573,7 @@ mod tests {
             cfg!(windows),
             "longPaths is Windows-only: {names:?}"
         );
-        let counted = doctor.summary.pass + doctor.summary.warn + doctor.summary.fail;
-        assert_eq!(counted as usize, doctor.checks.len());
+        every_check_is_accounted_for(&doctor);
     }
 
     #[test]
