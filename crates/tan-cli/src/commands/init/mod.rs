@@ -74,7 +74,7 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
 
     // From-example path: copy an existing SDK example verbatim. Short-circuits
     // before template resolution so it never engages the non-interactive
-    // MinimalApp default; --som/--cores are ignored (the example ships its own
+    // ZephyrApp default; --som/--cores are ignored (the example ships its own
     // board.yaml).
     if let Some(src) = args.from_example.as_deref() {
         return run_from_example(g, args, src, is_interactive);

@@ -273,7 +273,15 @@ mod tests {
             destination: ".".to_string(),
             som_sku: None,
         });
-        assert!(board_yaml_of(&plan).contains("sku: E1M-AEN701"));
+        // Asserted against the constant, not a re-typed literal: this test is
+        // about "an unset --som lands DEFAULT_SOM_SKU in board.yaml", not
+        // about which SKU that happens to be (it moved E1M-AEN701 ->
+        // E1M-AEN801 in tan-cli #97, for a SoM that has a board tree).
+        assert!(
+            board_yaml_of(&plan).contains(&format!("sku: {}", crate::DEFAULT_SOM_SKU)),
+            "got: {}",
+            board_yaml_of(&plan)
+        );
     }
 
     #[test]

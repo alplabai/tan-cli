@@ -4,7 +4,16 @@
 /// Default SoM SKU written into a scaffolded `board.yaml` when none is supplied
 /// (`alp init` without `--som`). Single source of truth for the literal, shared
 /// by the wizard (`wizard::service`) and the CLI's app-core guard.
-pub const DEFAULT_SOM_SKU: &str = "E1M-AEN701";
+///
+/// Must name a SoM with a QUALIFIED board tree in alp-sdk, or the very first
+/// `tan build` after `tan init` fails on a board that doesn't exist. This was
+/// `E1M-AEN701` (tan-cli #97), which has only two loose overlays
+/// (`zephyr/boards/alp_e1m_aen701_m55_{he,hp}.overlay`) and no board tree —
+/// so its `m55_he` slice died with `No board named 'alp_e1m_aen701_m55_he'
+/// found`. `E1M-AEN801` is the lead part and the only AEN SKU with BOTH
+/// `zephyr/boards/alp/e1m_aen801_m55_he` and `…_m55_hp`. AEN701 remains a
+/// perfectly valid `--som` value; it is just not a sane out-of-the-box default.
+pub const DEFAULT_SOM_SKU: &str = "E1M-AEN801";
 
 pub mod bootstrap;
 pub mod build_plan;

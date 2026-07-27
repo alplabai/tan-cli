@@ -650,6 +650,39 @@ pub(crate) fn execute_slices_outcome(
                 }
             }
         };
+        // Zephyr-boilerplate guard (tan-cli #97). A `zephyr` slice whose
+        // CMake configure never loaded Zephyr's boilerplate is NOT a
+        // successful build, whatever the tool's exit code says: the app's
+        // CMakeLists.txt was treated as a plain host project, the board name
+        // was never validated (nothing loaded the code that validates it),
+        // and what linked is a host executable. The out-of-the-box scaffold
+        // hit exactly this and was reported `[+] ok` for an x86-64 binary.
+        // Refuse it here, at the one seam that knows both the declared
+        // backend and the build dir — a guard in the executor survives any
+        // change to the default template or SKU. Skipped when the slice
+        // redirects west's build dir (`-d`/`--build-dir`), where the evidence
+        // lives somewhere this cannot see.
+        let (status, reason) = if status == "ok"
+            && slice.backend == tan_core::build_plan::Backend::Zephyr
+            && !build_dir_overridden
+            && !manifest::zephyr_boilerplate_loaded(&cwd)
+        {
+            let detail = format!(
+                "core `{}` is declared `os: zephyr`, but the build in `{}` never loaded Zephyr \
+                 (no ZEPHYR_BASE in its CMakeCache.txt and no zephyr/ output) — its \
+                 CMakeLists.txt must call `find_package(Zephyr REQUIRED HINTS \
+                 $ENV{{ZEPHYR_BASE}})` before `project()`; without it CMake builds a plain host \
+                 binary, not firmware. Scaffold a working app with `tan init --template \
+                 zephyr-app`, or point the core's `app:` at one that does.",
+                slice.core_id, cmd.cwd
+            );
+            if text_mode {
+                eprintln!("{}", theme.slice_result(DoctorStatus::Fail, &detail));
+            }
+            ("failed", Some(detail))
+        } else {
+            (status, reason)
+        };
         if status == "failed" {
             any_failed = true;
         }
@@ -861,6 +894,14 @@ mod tests {
         std::env::temp_dir().join(format!("{tag}-{}", std::process::id()))
     }
 
+    /// Plant the Zephyr-configure evidence the #97 guard looks for under a
+    /// slice's plan cwd, so a stand-in `exit 0` command reads as the real
+    /// Zephyr build these tests are pretending it is. Without it every fake
+    /// `backend: "zephyr"` slice below is (correctly) refused as a host build.
+    fn plant_zephyr_output(base: &Path, slice_cwd: &str) {
+        std::fs::create_dir_all(base.join(slice_cwd).join("build").join("zephyr")).unwrap();
+    }
+
     #[test]
     fn normalized_sdk_root_str_treats_a_relative_and_absolute_form_as_equal() {
         // The reported thrash: `--sdk-root ../alp-sdk` (returned verbatim by
@@ -904,6 +945,7 @@ mod tests {
         let base = unique_temp_dir("alp-exec");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
 
         let project = Project {
             root: None,
@@ -1118,6 +1160,7 @@ mod tests {
         let base = unique_temp_dir("alp-exec-toolchain-demoted-skip");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
 
         let project = Project {
             root: None,
@@ -1201,6 +1244,7 @@ mod tests {
         let base = unique_temp_dir("alp-exec-toolchain-demoted-fail");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
 
         let project = Project {
             root: None,
@@ -1486,6 +1530,7 @@ mod tests {
         let base = unique_temp_dir("alp-exec-manifest-warn");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
 
         let project = Project {
             root: None,
@@ -1599,6 +1644,7 @@ mod tests {
         let base = unique_temp_dir("alp-exec-outcome-threading");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
 
         let project = Project {
             root: None,
@@ -1890,5 +1936,247 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&sdk_a).ok();
         std::fs::remove_dir_all(&sdk_b).ok();
+    }
+
+    #[test]
+    fn native_execute_refuses_a_zephyr_slice_whose_configure_never_loaded_zephyr() {
+        // The tan-cli #97 defect, end to end: a core declared `os: zephyr`
+        // whose CMakeLists.txt never calls `find_package(Zephyr ...)` still
+        // configures and links under `west build -b <board>` (CMake only
+        // warns about the missing `project()`), so the tool exits 0 and the
+        // executor used to report `[+] ok` for a host x86-64 binary with no
+        // `zephyr/` build output at all. Exit 0 from the tool is NOT enough:
+        // with no Zephyr evidence in the build dir the slice must fail.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "m55_hp", "backend": "zephyr", "buildDir": "build/m55_hp-zephyr",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/m55_hp-zephyr" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-zephyr-boilerplate-missing");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // Deliberately NO `plant_zephyr_output` — this is the host-build shape.
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 1, "a host binary must not pass as zephyr");
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], false);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "failed");
+        // The message must name the customer-actionable cause, not just an rc.
+        let reason = slices[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("os: zephyr"), "got: {reason}");
+        assert!(reason.contains("find_package(Zephyr"), "got: {reason}");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_accepts_a_zephyr_slice_evidenced_by_the_cmake_cache() {
+        // The other half of the #97 guard: it must not fail a REAL Zephyr
+        // build. `ZEPHYR_BASE:` in the build dir's own CMakeCache.txt is the
+        // primary signal (what `find_package(Zephyr)` caches), so pin it here
+        // WITHOUT the directory fallback present — a verified real Zephyr
+        // slice build dir carried `ZEPHYR_BASE:PATH=…` and had NO `zephyr/`
+        // directory, so this is the combination that actually occurs.
+        //
+        // `--sysbuild` is covered separately by
+        // `native_execute_accepts_a_sysbuild_slice_evidenced_one_level_down`:
+        // do NOT fold it in here by asserting the superbuild's top-level cache
+        // carries `ZEPHYR_BASE:`. That is unestablished — Zephyr's
+        // `share/sysbuild/CMakeLists.txt` calls `find_package(Sysbuild …)`,
+        // not `find_package(Zephyr)`.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "m55_hp", "backend": "zephyr", "buildDir": "build/m55_hp-zephyr",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/m55_hp-zephyr" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-zephyr-boilerplate-cached");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("m55_hp-zephyr").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("CMakeCache.txt"),
+            "CMAKE_PROJECT_NAME:STATIC=zephyr
+ZEPHYR_BASE:PATH=/work/zephyr
+",
+        )
+        .unwrap();
+        assert!(!nested.join("zephyr").exists(), "cache-only evidence");
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 0);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "ok");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_accepts_a_sysbuild_slice_evidenced_one_level_down() {
+        // `--sysbuild` is a LIVE path here — the V2N plan carries
+        // `-DSB_CONF_FILE=…/zephyr/sysbuild/v2n/sysbuild.conf`. Its superbuild
+        // project owns the top-level build dir and nests the real per-image
+        // Zephyr builds one directory deeper, so the top level has NEITHER a
+        // `zephyr/` directory NOR (as far as anything establishes) a
+        // `ZEPHYR_BASE:` cache entry: `share/sysbuild/CMakeLists.txt` declares
+        // `project(sysbuild_toplevel LANGUAGES)` and calls
+        // `find_package(Sysbuild …)`, not `find_package(Zephyr)`.
+        //
+        // Without the one-level-down look this guard FAILS A CORRECT V2N
+        // BUILD. That is the regression this test exists to prevent, so the
+        // fixture deliberately leaves the top level bare.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "m33_sm", "backend": "zephyr", "buildDir": "build/m33_sm-zephyr",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/m33_sm-zephyr" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-zephyr-sysbuild-nested");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Superbuild layout: top level bare, the real Zephyr image one down.
+        let top = base.join("build/m33_sm-zephyr").join("build");
+        let image = top.join("alp_app");
+        std::fs::create_dir_all(image.join("zephyr")).unwrap();
+        assert!(
+            !top.join("zephyr").exists() && !top.join("CMakeCache.txt").exists(),
+            "the top level must stay bare or this test proves nothing"
+        );
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(
+            run.exit.code(),
+            0,
+            "a real sysbuild slice must not be failed by the #97 guard"
+        );
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "ok");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_skips_the_zephyr_guard_when_the_build_dir_is_overridden() {
+        // Same refusal `resolve_zephyr_artefact` and the sdk-switch wipe both
+        // already make: with `-d`/`--build-dir` west wrote somewhere this
+        // cannot see, so there is no evidence to judge — the guard must stand
+        // down rather than fail a build it cannot inspect.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0", "-d", "../elsewhere"]"#)
+        } else {
+            ("true", r#"["-d", "../elsewhere"]"#)
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "m55_hp", "backend": "zephyr", "buildDir": "build/m55_hp-zephyr",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/m55_hp-zephyr" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-zephyr-guard-overridden");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 0);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["data"]["slices"][0]["status"], "ok");
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

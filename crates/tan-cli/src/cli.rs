@@ -557,7 +557,8 @@ pub struct GenerateArgs {
 /// Args for `init`: template, naming, destination, SoM/cores selection, and preview/force toggles.
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Project template id (e.g. minimal-app, sensor-starter).
+    /// Project template id (e.g. zephyr-app, sensor-starter); defaults to
+    /// zephyr-app when not given and there is no TTY to prompt on.
     #[arg(long)]
     pub template: Option<String>,
     /// Copy an existing SDK example project verbatim instead of expanding a
@@ -575,7 +576,8 @@ pub struct InitArgs {
     /// Destination directory (default: current directory or --project).
     #[arg(long)]
     pub destination: Option<String>,
-    /// Target SoM SKU written into the generated board.yaml (e.g. E1M-AEN701).
+    /// Target SoM SKU written into the generated board.yaml (e.g. E1M-AEN801,
+    /// the default).
     #[arg(long)]
     pub som: Option<String>,
     /// Comma-separated cores for a heterogeneous project, `id[:os]`

@@ -110,7 +110,8 @@ required.
 # `tan sdk install <version> && tan sdk switch <version>`.
 tan bootstrap --sdk-root ./alp-sdk    # west + Zephyr workspace + Python deps
                                       # (Linux, macOS and native Windows alike)
-tan init --template minimal-app --som E1M-AEN701 --name my-app
+tan init --name my-app                # defaults to --template zephyr-app
+                                      # --som E1M-AEN801
 cd my-app                             # sibling ../alp-sdk resolves automatically
 
 tan validate                          # schema + semantic checks on board.yaml
