@@ -436,6 +436,34 @@ All notable changes to `tan` are documented here. Format follows
   unchanged and the fallback commands are still real.
 
 ### Fixed
+- **The documented Quickstart `tan --project examples/<cat>/<name> build`, run
+  from an alp-sdk checkout root, failed with `no SDK selected` (#101).** SDK
+  auto-discovery only ever probed the workspace root itself and two named
+  SIBLINGS (`alp-sdk`, `alp-sdk-upstream`), never walking UP — and
+  `cli_workspace_root` is `cwd.join(--project)`, so the Quickstart's nested
+  example put the workspace root three levels BELOW the very checkout the
+  command was invoked from, where no lateral candidate can exist. Discovery now
+  falls back to the nearest ENCLOSING checkout (`tan_core::nearest_ancestor_sdk`,
+  walking parents for `scripts/alp_project.py` and stopping at the first match
+  or the filesystem root). The tier is shared by both discovery paths —
+  `util::discover_sdk_root` (build/validate/doctor) and
+  `tan_core::discover_workspace_sdk` (`tan sdk current`'s `sourceTier`) — so the
+  documented "`sourceTier` never claims `discovery` for a path build won't
+  resolve" invariant still holds. It is a strict fallback: it only runs when
+  nothing lateral answered, so every workspace that resolved before resolves to
+  exactly the same path, and because the walk stops at the first match it
+  contributes at most ONE candidate and can never trip `project.rs`'s
+  deliberate two-or-more-is-ambiguous rule.
+- **`no SDK selected` pointed at a remedy that reports success and fixes
+  nothing (#101).** The `.alp/sdk-path` pointer `tan sdk switch` writes is scoped
+  per `--project` (deliberately — pinned by
+  `switch_and_current_use_project_scoped_workspace_root_not_process_cwd`), so a
+  bare `tan sdk switch <path>` printed `Switched project SDK to …`, visibly
+  changed `tan sdk current`, and then left a `tan --project <p> …` build failing
+  byte-for-byte identically. Under `--project` the check now names the scoped
+  invocation (`tan --project <p> sdk switch <path>`) and `--sdk-root`, the one
+  flag that always works and which the message never mentioned. The scoping
+  itself is unchanged.
 - **A `zephyr` slice that never loaded Zephyr was reported `[+] ok` for a host
   x86-64 binary (#97).** The out-of-the-box path — `tan init
   --non-interactive` then `tan build --native` — scaffolded the `minimal-app`

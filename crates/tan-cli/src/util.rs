@@ -373,10 +373,13 @@ pub fn resolve_sdk_root(g: &GlobalArgs, workspace_root: &Path) -> Option<PathBuf
 
 /// Sibling/workspace auto-discovery: the workspace root itself, then sibling
 /// `alp-sdk` / `alp-sdk-upstream` directories, first one with the loader
-/// script wins. The tail of [`resolve_sdk_root`]'s precedence chain (the
-/// generate/init/examples family) — deliberately NOT what
-/// [`resolve_sdk_tiered`]'s discovery tier reports; see
-/// [`tan_core::discover_workspace_sdk`] for that.
+/// script wins — and failing all three, the nearest ENCLOSING checkout
+/// ([`tan_core::nearest_ancestor_sdk`]), which is what resolves the documented
+/// Quickstart `tan --project examples/<cat>/<name> build` whose workspace root
+/// sits levels below the checkout it was invoked from (issue #101). The
+/// ancestor tier is shared with [`tan_core::discover_workspace_sdk`] so the two
+/// keep agreeing (see [`resolve_sdk_tiered`]); the lateral candidate set stays
+/// deliberately wider here (`alp-sdk-upstream`, first-match-wins).
 fn discover_sdk_root(workspace_root: &Path) -> Option<PathBuf> {
     let parent = workspace_root.parent().map(Path::to_path_buf);
     let candidates = [
@@ -391,7 +394,15 @@ fn discover_sdk_root(workspace_root: &Path) -> Option<PathBuf> {
             .unwrap_or_else(|| PathBuf::from("alp-sdk-upstream")),
     ];
 
-    candidates.into_iter().find(|c| has_loader_script(c))
+    candidates
+        .into_iter()
+        .find(|c| has_loader_script(c))
+        .or_else(|| {
+            tan_core::nearest_ancestor_sdk(&workspace_root.to_string_lossy(), |p| {
+                Path::new(p).exists()
+            })
+            .map(PathBuf::from)
+        })
 }
 
 /// Resolve the active SDK path across the full four-tier precedence chain

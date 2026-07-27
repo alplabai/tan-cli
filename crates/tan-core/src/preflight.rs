@@ -29,6 +29,13 @@ pub struct PreflightInput {
     /// `None` when unresolved or the pin is a branch/SHA (no `MAJOR.MINOR` to
     /// compare).
     pub sdk_zephyr_pin: Option<String>,
+    /// The `--project` value this invocation ran with, when it had one. Only
+    /// the `sdk` remediation reads it, and only to stay honest: the `.alp/
+    /// sdk-path` pointer `tan sdk switch` writes is scoped to
+    /// `cli_workspace_root` (cwd joined with `--project`), so a bare `tan sdk
+    /// switch <path>` does NOT fix a `tan --project <p> …` invocation — it
+    /// reports success and changes nothing about the failure (issue #101).
+    pub project_scope: Option<String>,
 }
 
 /// Ordered build-readiness checks. A `Fail` blocks the build; a `Warn` is
@@ -41,9 +48,24 @@ pub fn build_preflight_checks(input: &PreflightInput) -> Vec<DoctorCheck> {
     // binary, and these strings land verbatim in issues[].message / nextSteps[]
     // that the vscode extension renders. Telling a user to run a binary that no
     // longer exists (`command not found: alp`) is a dead end, not a fix.
-    checks.push(match &input.sdk_root {
-        Some(root) => pass("sdk", format!("alp-sdk at {root}")),
-        None => fail(
+    // The `--project` variant is not cosmetic. The pointer `tan sdk switch`
+    // writes is scoped per `--project` (pinned by
+    // `switch_and_current_use_project_scoped_workspace_root_not_process_cwd`),
+    // so suggesting a bare `tan sdk switch <path>` to someone who ran
+    // `tan --project <p> …` sends them to a command that prints "Switched
+    // project SDK to …", visibly updates `tan sdk current`, and then fails
+    // byte-for-byte identically. Name the scope, and name `--sdk-root` — the
+    // one flag that always works and which this message never mentioned.
+    checks.push(match (&input.sdk_root, &input.project_scope) {
+        (Some(root), _) => pass("sdk", format!("alp-sdk at {root}")),
+        (None, Some(project)) => fail(
+            "sdk",
+            &format!(
+                "no SDK selected — the `.alp/sdk-path` pointer is scoped to `--project`, so run `tan --project {project} sdk switch <path>` (or pass `--sdk-root <path>`)"
+            ),
+            &format!("tan --project {project} sdk switch <path>"),
+        ),
+        (None, None) => fail(
             "sdk",
             "no SDK selected — run `tan sdk switch <path>` or `tan sdk install <ver>`",
             "tan sdk switch <path>",
@@ -246,6 +268,7 @@ mod tests {
             west_available: true,
             workspace_zephyr_version: Some("4.4".to_string()),
             sdk_zephyr_pin: Some("4.4".to_string()),
+            project_scope: None,
         }
     }
 
@@ -331,6 +354,31 @@ mod tests {
             preflight_next_steps(&checks)
                 .iter()
                 .any(|s| s.contains("tan sdk switch"))
+        );
+    }
+
+    #[test]
+    fn missing_sdk_under_project_scope_names_the_scoped_switch() {
+        // Issue #101: a bare `tan sdk switch <path>` reports success and leaves
+        // a `tan --project <p> …` build failing byte-for-byte identically,
+        // because the pointer it writes is scoped to `--project`. The hint has
+        // to carry the scope, and has to name `--sdk-root`.
+        let input = PreflightInput {
+            sdk_root: None,
+            project_scope: Some("examples/peripheral-io/gpio-button-led".to_string()),
+            ..ready()
+        };
+        let checks = build_preflight_checks(&input);
+        let sdk = checks.iter().find(|c| c.name == "sdk").unwrap();
+        assert_eq!(sdk.status, DoctorStatus::Fail);
+        assert!(
+            sdk.detail
+                .contains("tan --project examples/peripheral-io/gpio-button-led sdk switch <path>")
+        );
+        assert!(sdk.detail.contains("--sdk-root"));
+        assert_eq!(
+            sdk.fix.as_deref(),
+            Some("tan --project examples/peripheral-io/gpio-button-led sdk switch <path>")
         );
     }
 
