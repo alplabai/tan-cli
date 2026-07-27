@@ -453,11 +453,18 @@ fn fallback_install_commands() -> InstallCommands {
             ("git", "sudo apt-get install -y git"),
             ("cmake", "sudo apt-get install -y cmake"),
             ("python3", "sudo apt-get install -y python3"),
+            // Zephyr's default CMake generator on every host, so its absence
+            // stops `west build` outright rather than degrading it. Transcribed
+            // from alp-sdk's manifest (alp-sdk#971/#981, merged as d6fd3a18);
+            // note the PACKAGE name differs from the binary name, which is
+            // exactly why this lives in data rather than being guessed.
+            ("ninja", "sudo apt-get install -y ninja-build"),
         ]),
         macos: map(&[
             ("git", "brew install git"),
             ("cmake", "brew install cmake"),
             ("python3", "brew install python3"),
+            ("ninja", "brew install ninja"),
         ]),
         windows: map(&[
             ("git", "winget install -e --id Git.Git"),
@@ -537,7 +544,14 @@ pub fn fallback_facts(min_python: (u32, u32)) -> BootstrapFacts {
         venv_dir_name: ".venv".to_string(),
         venv_posix_bin_dir: posix.bin_dir.to_string(),
         venv_windows_bin_dir: windows.bin_dir.to_string(),
-        prerequisites_posix: owned(&["git", "cmake", "python3"]),
+        // `ninja` is POSIX too, not Windows-only. Zephyr picks Ninja as its
+        // default CMake generator on every host, so a POSIX box without it
+        // fails `west build` with a CMake error naming nothing useful. The
+        // asymmetry here was the fallback half of alp-sdk#971/#981: the
+        // manifest was fixed upstream (d6fd3a18) and the fixture re-vendored,
+        // while THIS hand-ported copy -- the one a legacy SDK with no manifest
+        // actually uses -- still said Windows-only.
+        prerequisites_posix: owned(&["git", "cmake", "python3", "ninja"]),
         prerequisites_windows: owned(&["git", "cmake", "python", "ninja"]),
         python_min_version: min_python,
         install: fallback_install_commands(),
@@ -667,7 +681,13 @@ mod tests {
         assert_eq!(facts.venv_dir_name, ".venv");
         assert_eq!(facts.venv_posix_bin_dir, "bin");
         assert_eq!(facts.venv_windows_bin_dir, "Scripts");
-        assert_eq!(facts.prerequisites_posix, ["git", "cmake", "python3"]);
+        // `ninja` joined the POSIX list in alp-sdk#971/#981 (d6fd3a18); this
+        // fixture was re-vendored past it. The expectation moves because the
+        // upstream manifest moved, not to make the suite green.
+        assert_eq!(
+            facts.prerequisites_posix,
+            ["git", "cmake", "python3", "ninja"]
+        );
         assert_eq!(
             facts.prerequisites_windows,
             ["git", "cmake", "python", "ninja"]

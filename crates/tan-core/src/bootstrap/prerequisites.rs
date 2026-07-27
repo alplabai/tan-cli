@@ -464,10 +464,16 @@ mod tests {
             vec!["Missing required tools: cmake ninja.  Install them and re-run."]
         );
         // Issue #90's "also still true": every POSIX entry reported
-        // `command: null` because this side had no install commands at all. It
-        // has them now -- per tool, so `ninja` (which `prerequisites.posix` does
-        // not even list, hence no `install.linux` entry) stays `null` while
-        // `cmake` becomes runnable.
+        // `command: null` because this side had no install commands at all.
+        // It has them now, per tool -- and as of alp-sdk#971/#981 that includes
+        // `ninja`, which used to be the standing exception here precisely
+        // BECAUSE `prerequisites.posix` did not list it. Both halves are fixed:
+        // the manifest declares it upstream and this fallback now transcribes
+        // it, so the last commandless POSIX entry is gone.
+        //
+        // Note the package name is `ninja-build`, not `ninja` -- which is the
+        // whole argument for carrying these as data instead of deriving them
+        // from the binary name.
         assert_eq!(
             refusal.missing,
             vec![
@@ -477,7 +483,7 @@ mod tests {
                 },
                 MissingPrerequisite {
                     tool: "ninja".to_string(),
-                    command: None,
+                    command: Some("sudo apt-get install -y ninja-build".to_string()),
                 },
             ]
         );
