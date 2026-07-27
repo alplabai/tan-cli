@@ -449,9 +449,16 @@ All notable changes to `tan` are documented here. Format follows
   - The executor now refuses such a slice. After a `zephyr` slice exits 0 it
     checks the build dir for evidence that Zephyr's boilerplate actually ran —
     a `ZEPHYR_BASE:` entry in `<cwd>/build/CMakeCache.txt` (what
-    `find_package(Zephyr)` caches, and the signal that also holds for a
-    `--sysbuild` slice whose superbuild has no top-level `zephyr/` of its own)
-    or, as a fallback, a `<cwd>/build/zephyr/` directory. Both are generated
+    `find_package(Zephyr)` caches — verified present, at line 42, in a real
+    Zephyr slice build dir, and absent from a baremetal plain-CMake build's
+    complete 339-line cache) or, as a fallback, a `<cwd>/build/zephyr/`
+    directory. Both signals are checked at the top of the build dir AND across
+    its immediate subdirectories, because `--sysbuild` is a live path here (the
+    V2N plan carries `-DSB_CONF_FILE=…/zephyr/sysbuild/v2n/sysbuild.conf`) and
+    its superbuild owns the top-level dir while the real per-image Zephyr builds
+    nest one level deeper — without that look the guard would fail a correct
+    V2N build. One level is enough; sysbuild nests per-image, not recursively.
+    Both are generated
     build artefacts, deliberately NOT configure-log text: a grep for
     `ZephyrConfig.cmake` breaks the moment CMake rewords a line. With neither
     present the slice fails with the customer-actionable cause — its
