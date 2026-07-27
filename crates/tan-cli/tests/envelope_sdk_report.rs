@@ -63,24 +63,41 @@ fn run_size(cwd: &Path, home: &Path, sdk_root_flag: Option<&Path>) -> serde_json
         .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{stdout}"))
 }
 
-/// The posix path the CLI will actually report for a root it reached through
-/// the filesystem rather than through an argument.
+/// The posix tail a cwd-derived root must end with: `/<unique-parent>/root`.
 ///
-/// A discovery-tier root is derived from the subprocess's own cwd, and the OS
-/// resolves symlinks when a process adopts a directory as its cwd — on macOS
-/// `std::env::temp_dir()` is under `/var/folders/...`, which is a symlink to
-/// `/private/var/folders/...`, so the CLI honestly reports the resolved form
-/// while the test's own handle still holds the unresolved one. Windows'
-/// `canonicalize` returns an extended-length `\\?\` prefix the CLI never
-/// emits, so drop it.
+/// A discovery-tier root comes from the subprocess's own cwd, and what the OS
+/// hands a process as its cwd is NOT the string the test passed in — in two
+/// opposite directions, both of which have failed CI here:
 ///
-/// Only the EXPECTED side goes through this. The reported side is always
-/// compared unmodified, so `sdk_report::record`'s own separator normalization
-/// still has to be right.
-fn expected_posix(path: &Path) -> String {
-    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let posix = resolved.to_string_lossy().replace('\\', "/");
-    posix.strip_prefix("//?/").unwrap_or(&posix).to_string()
+/// - macOS resolves symlinks. `std::env::temp_dir()` is under
+///   `/var/folders/...`, a symlink to `/private/var/folders/...`, so the CLI
+///   honestly reports the resolved form while the test's handle holds the
+///   unresolved one.
+/// - Windows does NOT expand 8.3 short names. The GitHub runner's `TEMP` is
+///   `C:\Users\RUNNER~1\AppData\Local\Temp`, which the CLI reports verbatim
+///   while `std::fs::canonicalize` would expand it to `runneradmin`.
+///
+/// So the full path is not predictable from here and canonicalizing is wrong
+/// on one platform whichever way it is done. The parent directory name is
+/// unique per process, which is what the assertion actually needs. The leading
+/// `/` keeps this a real check on `sdk_report::record`'s separator
+/// normalization — a backslash regression fails it.
+///
+/// Only the EXPECTED side is built this way; the reported side is always
+/// compared unmodified.
+fn expected_tail(dir: &Path) -> String {
+    let parent = dir
+        .parent()
+        .and_then(Path::file_name)
+        .expect("scratch dir always has a named parent")
+        .to_string_lossy()
+        .into_owned();
+    let leaf = dir
+        .file_name()
+        .expect("scratch dir always has a name")
+        .to_string_lossy()
+        .into_owned();
+    format!("/{parent}/{leaf}")
 }
 
 fn cleanup(dirs: &[&Path]) {
@@ -117,17 +134,19 @@ fn workspace_root_self_discovery_is_reported_as_discovery() {
     // No --sdk-root, no pin — cwd IS the sdk checkout, resolved purely by
     // self-discovery.
     let envelope = run_size(&sdk, &home, None);
-    // Resolve BEFORE cleanup — `expected_posix` reads the filesystem.
-    let expected_root = expected_posix(&sdk);
+    let tail = expected_tail(&sdk);
     cleanup(&[&sdk, &home]);
 
     assert_eq!(envelope["sdk"]["sourceTier"], "discovery", "{envelope}");
-    // Same rationale as `explicit_sdk_root_flag_is_reported_verbatim`: expected
-    // side normalized from the known input, reported side compared unmodified.
-    // Unlike that test, this root arrives via the cwd rather than an argument,
-    // so it comes back symlink-resolved — see `expected_posix`.
+    // Reported side compared unmodified, as in
+    // `explicit_sdk_root_flag_is_reported_verbatim`. Unlike that test this root
+    // arrives via the cwd rather than an argument, so its leading component is
+    // whatever the OS handed the subprocess — see `expected_tail`.
     let reported_root = envelope["sdk"]["root"].as_str().unwrap_or_default();
-    assert_eq!(reported_root, expected_root, "{envelope}");
+    assert!(
+        reported_root.ends_with(&tail),
+        "expected the self-discovered checkout {tail:?}, got {reported_root:?}: {envelope}"
+    );
 }
 
 #[test]
