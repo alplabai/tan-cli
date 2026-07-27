@@ -33,6 +33,13 @@ Download URL is fully deterministic:
 https://github.com/alplabai/tan-cli/releases/download/<tag>/<asset>
 ```
 
+Plus two non-binary assets, carrying the same build-provenance attestation:
+
+| Asset | Contents |
+| --- | --- |
+| `checksums.txt` | sha256 of every other asset. |
+| `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one golden envelope per command family (`contract/envelopes/`), so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. See [`contract/README.md`](../contract/README.md). |
+
 ## Targets published
 
 | VS Code `process.platform` | `process.arch` | Target triple                | Asset name                          |

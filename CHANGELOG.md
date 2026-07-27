@@ -8,6 +8,40 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **The JSON envelope vocabulary alp-sdk-vscode gates on is now a frozen,
+  tested, published contract (#106).** The extension matches four issue codes
+  with `===` and reads a dozen `data` field names behind `?? []` fallbacks, and
+  **every one of those matches fails open** — rename any and the extension does
+  not error, does not log and does not warn, it silently skips the check or
+  renders stale data, CI green on both sides. The headline case: rename
+  `data.soms` and the New Project wizard falls back to a static catalogue that
+  carries no `cores`, so a heterogeneous SoM scaffolds single-core with no IPC.
+  The reference part E1M-AEN801 is multi-core, so that is the default path, not
+  an edge case.
+  - `contract/issue-codes.json` is the single source for the frozen codes
+    (`bootstrap.windows-unsupported` — retired but RESERVED,
+    `bootstrap.yocto-host`, `bootstrap.prerequisites-missing`,
+    `presets.sdk-root-unresolved`), gated by `frozen_issue_codes` in
+    `crates/tan-cli/tests/contract.rs`. The consumer is deliberately NOT
+    loosened to prefix matching: a prefix match on `bootstrap.` would swallow
+    codes it has no verdict for.
+  - Four new golden envelopes extend the existing `contract/envelopes/` suite
+    (12 → 18 tests): `presets-no-sdk`, `presets-heterogeneous-som` (an `a55`
+    yocto + `m33` zephyr fixture SoM — the worked example above, made
+    executable), `explain-overview`, and `examples-catalog`. A case fixture can
+    now be a directory tree, so a case can carry a synthetic `sdk/` checkout
+    and pass `--sdk-root ./sdk`.
+  - `doctor --build`'s `data` keys get a key-set assertion rather than a golden
+    (its values are host facts): `summary.{pass,warn,fail}`, `nextSteps`,
+    `checks[].{name,status}`, and the literal check name `workspace`.
+  - Tagged releases now publish **`envelope-contract.json`** beside the
+    binaries — the frozen codes plus one golden envelope per command family —
+    so the extension's contract test can diff against a published artefact
+    instead of a hand-copied fixture.
+  - Two consumer fields stay UNCOVERED and are documented as such in
+    `contract/README.md` rather than quietly omitted: `build --materialise`'s
+    `data.written` (needs a resolvable SDK + a Python spawn) and `sdk list`'s
+    `data.releases` (network).
 - **`tan sdk list` carries GitHub's `draft`/`prerelease` flags through (#122).**
   Both booleans were already in the Releases API response `tan` parses but were
   dropped before reaching either the JSON envelope or the text table — a
