@@ -287,8 +287,14 @@ pub struct LaunchJsonWritePlan {
     pub replaced: bool,
 }
 
-/// Merge `draft` into an existing `launch.json` (or a fresh document), replacing
-/// any configuration with the same `name`. Mirrors TS `createLaunchJsonWritePlan`.
+/// Merge `draft` into an existing `launch.json` (or a fresh document), merging
+/// over any configuration with the same `name`. Mirrors TS
+/// `createLaunchJsonWritePlan`.
+///
+/// It MERGES rather than replaces because this runs before every session while
+/// the configuration names are fixed per target/server, so a wholesale replace
+/// hands the user's own file back to them with their work undone. See
+/// `merge_configuration` for the rule.
 pub fn create_launch_json_write_plan(
     existing_content: Option<&str>,
     draft: &Value,
@@ -307,7 +313,7 @@ pub fn create_launch_json_write_plan(
 
     let replaced = match existing_index {
         Some(index) => {
-            configs[index] = draft.clone();
+            configs[index] = merge_configuration(&configs[index], draft);
             true
         }
         None => {
@@ -321,6 +327,106 @@ pub fn create_launch_json_write_plan(
         serde_json::to_string_pretty(&document).expect("launch document is serializable")
     );
     Ok(LaunchJsonWritePlan { content, replaced })
+}
+
+/// Merge the freshly generated configuration OVER the one already in the file
+/// instead of replacing it.
+///
+/// The rule is narrow: **an incoming `<placeholder>` never overwrites a value
+/// that is already resolved.** A customer told to hand-fill
+/// `"device": "AE822F4M55_HP"` used to get it silently reset to
+/// `"<resolved-device>"` on their next F5 — data loss on their own file, with no
+/// confirm and no backup, and an unexitable loop around the advice they had just
+/// been given.
+///
+/// Everything else still refreshes — `type`, `executable`, `cwd`, `servertype` —
+/// so a repair such as `codelldb` → `lldb` still lands on an existing entry.
+/// Keys the user added that this crate never writes (`serverArgs`, …) survive
+/// untouched, and key order follows the existing entry with any new key
+/// appended (`serde_json`'s `preserve_order` makes that hold).
+///
+/// Port of TS `mergeConfiguration` in
+/// `packages/alp-core/src/debug/launchJsonCore.ts`.
+fn merge_configuration(existing: &Value, next: &Value) -> Value {
+    let (Some(existing_map), Some(next_map)) = (existing.as_object(), next.as_object()) else {
+        // A non-object entry under this name is not something to merge into.
+        return next.clone();
+    };
+    let mut merged = existing_map.clone();
+    for (key, value) in next_map {
+        merged.insert(key.clone(), merge_value(existing_map.get(key), value));
+    }
+    Value::Object(merged)
+}
+
+/// One key's worth of the merge rule above. `existing` is `None` when the key is
+/// new, in which case the incoming value always wins.
+fn merge_value(existing: Option<&Value>, next: &Value) -> Value {
+    // Arrays (cortex-debug `configFiles`, OpenOCD `searchDir`): an
+    // all-placeholder incoming list keeps the existing list WHOLE — a
+    // hand-added second `.cfg` would otherwise be lost to a per-index merge
+    // against a one-element draft. A mixed list still merges per element, so a
+    // resolved entry this crate computed wins.
+    if let (Some(next_items), Some(existing_items)) =
+        (next.as_array(), existing.and_then(Value::as_array))
+    {
+        if !next_items.is_empty()
+            && !existing_items.is_empty()
+            && next_items.iter().all(is_unresolved_string)
+        {
+            return Value::Array(existing_items.clone());
+        }
+        return Value::Array(
+            next_items
+                .iter()
+                .enumerate()
+                .map(|(index, entry)| merge_value(existing_items.get(index), entry))
+                .collect(),
+        );
+    }
+
+    match existing {
+        Some(existing) if is_unresolved_string(next) && is_resolved_string(existing) => {
+            existing.clone()
+        }
+        _ => next.clone(),
+    }
+}
+
+/// A string this crate considers FILLED IN. Mirrors TS `isResolvedValue`
+/// (`/<[^<>]*>/`), which the preflight checks use too — the merge that protects
+/// a user's hand-typed value must agree, key for key, with what preflight calls
+/// unresolved. An empty string is not resolved (TS treats `""` as falsy).
+fn is_resolved_string(value: &Value) -> bool {
+    value
+        .as_str()
+        .is_some_and(|text| !text.is_empty() && !contains_placeholder(text))
+}
+
+/// A string that still needs resolving — including `""`, matching TS, where
+/// `isUnresolvedString` is `typeof value === "string" && !isResolvedValue(value)`.
+fn is_unresolved_string(value: &Value) -> bool {
+    value.is_string() && !is_resolved_string(value)
+}
+
+/// `true` when `text` contains a `<…>` run with no nested angle bracket — the
+/// Rust spelling of TS's `/<[^<>]*>/`. Catches `<resolved-device>` and the
+/// two-placeholder `"<host>:<port>"`, and does NOT catch a lone `<` or `>`
+/// (a `>` inside a path or a shell-ish `serverArgs` entry stays resolved).
+fn contains_placeholder(text: &str) -> bool {
+    let mut rest = text;
+    while let Some(open) = rest.find('<') {
+        let after = &rest[open + 1..];
+        match after.find(['<', '>']) {
+            // A closing bracket with nothing but plain text in between.
+            Some(index) if after.as_bytes()[index] == b'>' => return true,
+            // Another opening bracket: restart the scan from IT, so
+            // `<<resolved-device>` still matches on the inner pair.
+            Some(index) => rest = &after[index..],
+            None => return false,
+        }
+    }
+    false
 }
 
 /// Strip a leading UTF-8 BOM plus `//` / `/* */` comments from JSONC text,
@@ -692,6 +798,172 @@ mod tests {
             assert!(draft.get("svdFile").is_none());
             assert!(draft.get("svdPath").is_none());
         }
+    }
+
+    /// Build a one-configuration `launch.json` around `configuration`, the way
+    /// a user's file looks after a first write plus their own edits.
+    fn launch_json_with(configuration: Value) -> String {
+        serde_json::to_string(&json!({
+            "version": "0.2.0",
+            "configurations": [configuration],
+        }))
+        .unwrap()
+    }
+
+    /// The merged configuration under `name`, for asserting field by field.
+    fn merged_configuration(content: &str, name: &str) -> Value {
+        let document: Value = serde_json::from_str(content).unwrap();
+        document["configurations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == json!(name))
+            .expect("configuration is present")
+            .clone()
+    }
+
+    #[test]
+    fn a_hand_resolved_value_survives_the_next_write() {
+        // THE regression (#105): a customer is told to hand-fill `device`, and
+        // the next F5 used to reset it to `<resolved-device>`.
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        let mut existing = draft.clone();
+        existing["device"] = json!("AE822F4M55_HP");
+        // …while a field this crate DOES resolve is stale in their file.
+        existing["type"] = json!("stale-adapter");
+
+        let plan =
+            create_launch_json_write_plan(Some(&launch_json_with(existing)), &draft).unwrap();
+        assert!(plan.replaced);
+        let merged = merged_configuration(&plan.content, draft["name"].as_str().unwrap());
+
+        // The hand-typed value stands; the stale one refreshes.
+        assert_eq!(merged["device"], json!("AE822F4M55_HP"));
+        assert_eq!(merged["type"], json!("cortex-debug"));
+        // A placeholder we could not resolve is still written where the user
+        // has nothing of their own.
+        assert_eq!(merged["svdFile"], json!("<resolved-svd>"));
+    }
+
+    #[test]
+    fn keys_the_user_added_are_never_dropped() {
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        let mut existing = draft.clone();
+        existing["serverArgs"] = json!(["-select", "usb=603000869"]);
+        existing["preLaunchTask"] = json!("my own build task");
+
+        let plan =
+            create_launch_json_write_plan(Some(&launch_json_with(existing)), &draft).unwrap();
+        let merged = merged_configuration(&plan.content, draft["name"].as_str().unwrap());
+
+        assert_eq!(merged["serverArgs"], json!(["-select", "usb=603000869"]));
+        assert_eq!(merged["preLaunchTask"], json!("my own build task"));
+    }
+
+    #[test]
+    fn an_all_placeholder_array_keeps_the_users_list_whole() {
+        // `configFiles` is the case that bites: the draft carries ONE
+        // placeholder, so a per-index merge would silently drop a second .cfg
+        // the user added by hand.
+        let draft = create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Openocd, None)
+            .unwrap();
+        let mut existing = draft.clone();
+        existing["configFiles"] = json!(["board/alp_aen.cfg", "interface/cmsis-dap.cfg"]);
+
+        let plan =
+            create_launch_json_write_plan(Some(&launch_json_with(existing)), &draft).unwrap();
+        let merged = merged_configuration(&plan.content, draft["name"].as_str().unwrap());
+
+        assert_eq!(
+            merged["configFiles"],
+            json!(["board/alp_aen.cfg", "interface/cmsis-dap.cfg"])
+        );
+    }
+
+    #[test]
+    fn a_resolved_array_entry_still_wins_per_element() {
+        let mut draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Openocd, None)
+                .unwrap();
+        // A mixed incoming list: element 0 resolved by the build, element 1 not.
+        draft["configFiles"] = json!([
+            "/opt/openocd/board/real.cfg",
+            "<resolved-openocd-board-cfg>"
+        ]);
+        let mut existing = draft.clone();
+        existing["configFiles"] = json!(["board/stale.cfg", "interface/mine.cfg"]);
+
+        let plan =
+            create_launch_json_write_plan(Some(&launch_json_with(existing)), &draft).unwrap();
+        let merged = merged_configuration(&plan.content, draft["name"].as_str().unwrap());
+
+        assert_eq!(
+            merged["configFiles"],
+            json!(["/opt/openocd/board/real.cfg", "interface/mine.cfg"])
+        );
+    }
+
+    #[test]
+    fn placeholder_detection_matches_the_typescript_predicate() {
+        assert!(is_unresolved_string(&json!("<resolved-device>")));
+        // Two placeholders in one value — the Yocto `miDebuggerServerAddress`.
+        assert!(is_unresolved_string(&json!("<host>:<port>")));
+        // Empty is not "filled in" (TS treats "" as falsy in isResolvedValue).
+        assert!(is_unresolved_string(&json!("")));
+        assert!(is_resolved_string(&json!("AE822F4M55_HP")));
+        // A lone angle bracket is not a placeholder: a real path keeps its
+        // right to contain one.
+        assert!(is_resolved_string(&json!("/opt/x>y/openocd.cfg")));
+        assert!(is_resolved_string(&json!("2 < 3")));
+        // Non-strings are neither.
+        assert!(!is_unresolved_string(&json!(7)));
+        assert!(!is_resolved_string(&json!(7)));
+    }
+
+    #[test]
+    fn an_empty_existing_value_is_overwritten() {
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        let mut existing = draft.clone();
+        existing["device"] = json!("");
+
+        let plan =
+            create_launch_json_write_plan(Some(&launch_json_with(existing)), &draft).unwrap();
+        let merged = merged_configuration(&plan.content, draft["name"].as_str().unwrap());
+
+        // "" is not something the user resolved, so the placeholder replaces it
+        // and preflight can name it.
+        assert_eq!(merged["device"], json!("<resolved-device>"));
+    }
+
+    #[test]
+    fn merge_keeps_the_existing_key_order_and_appends_new_keys() {
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        // The user's file has our keys in a different order plus one of theirs.
+        let existing = json!({
+            "name": draft["name"],
+            "cwd": "${workspaceFolder}",
+            "myOwnKey": true,
+            "type": "codelldb",
+        });
+
+        let plan =
+            create_launch_json_write_plan(Some(&launch_json_with(existing)), &draft).unwrap();
+        let merged = merged_configuration(&plan.content, draft["name"].as_str().unwrap());
+        let keys: Vec<&str> = merged
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+
+        // Existing order first, then whatever the draft adds.
+        assert_eq!(&keys[..4], &["name", "cwd", "myOwnKey", "type"]);
+        assert!(keys.contains(&"request"));
+        assert!(keys.contains(&"program"));
     }
 
     #[test]
