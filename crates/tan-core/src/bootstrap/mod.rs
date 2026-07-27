@@ -47,7 +47,7 @@ pub use runtime::{
 /// `zephyr.version` carries, since dev is the only place the manifest exists;
 /// it deliberately does NOT match what the refs taking this path pin, as those
 /// predate the manifest and still say `revision: v4.4.0` in `west.yml` — which
-/// is exactly why [`resolve_pin_major_minor`] prefers `west.yml` over this
+/// is exactly why [`resolve_zephyr_pin`] prefers `west.yml` over this
 /// constant, and why the live value comes from
 /// [`BootstrapFacts::zephyr_version`] whenever a manifest is present.
 pub const ZEPHYR_VERSION: &str = "v4.4.1";
@@ -119,11 +119,18 @@ pub fn python_candidates(is_windows: bool) -> &'static [&'static [&'static str]]
     }
 }
 
-/// `"v4.4.0"` -> `"4.4"` — the pin's MAJOR.MINOR, which is all the
-/// workspace-reuse test compares (`bootstrap.sh`'s `PIN_MM` / `bootstrap.ps1`'s
-/// `$PinMM`). `None` for a branch/SHA revision with no leading `MAJOR.MINOR`.
-pub fn pin_major_minor(version: &str) -> Option<String> {
-    crate::preflight::parse_major_minor_tag(version)
+/// `"v4.4.1"` -> `"4.4.1"` — the pin's full `MAJOR.MINOR.PATCH`, which is what
+/// the workspace-reuse test compares. `None` for a branch/SHA revision with no
+/// leading `MAJOR.MINOR`.
+///
+/// DELIBERATE DIVERGENCE from the two oracle scripts, which truncate to
+/// MAJOR.MINOR (`bootstrap.sh`'s `PIN_MM` / `bootstrap.ps1`'s `$PinMM`). That
+/// truncation is #98: `v4.4.0` and `v4.4.1` compare equal, so re-running
+/// bootstrap after a patch-level SDK pin bump reused the old workspace and the
+/// build went green against the previous Zephyr — and the previous `hal_alif`,
+/// `cmsis`, `mcuboot`, … which `west update` would have moved with it.
+pub fn pin_version(version: &str) -> Option<String> {
+    crate::preflight::parse_version_tag(version)
 }
 
 /// The ONE Zephyr pin the workspace-reuse test compares against: the SDK's own
@@ -137,11 +144,14 @@ pub fn pin_major_minor(version: &str) -> Option<String> {
 /// while `build`'s auto-bootstrap fires ON that warning. With two pin sources,
 /// an SDK pin bump made bootstrap ADOPT a workspace ("Existing workspace
 /// reused") that preflight simultaneously called stale — an auto-bootstrap loop
-/// that never converges. One authority, one verdict.
-pub fn resolve_pin_major_minor(west_yml: Option<&str>, facts_version: &str) -> String {
+/// that never converges. One authority, one verdict — and, since #98, one
+/// GRANULARITY too: both sides read the full `MAJOR.MINOR.PATCH` through
+/// [`crate::preflight::parse_version_tag`], so neither can call a tree current
+/// that the other calls stale.
+pub fn resolve_zephyr_pin(west_yml: Option<&str>, facts_version: &str) -> String {
     west_yml
         .and_then(crate::preflight::parse_west_zephyr_pin)
-        .or_else(|| pin_major_minor(facts_version))
+        .or_else(|| pin_version(facts_version))
         .unwrap_or_default()
 }
 
@@ -158,43 +168,73 @@ pub struct ExistingWorkspace<'a> {
     pub manifest_is_sdk: bool,
 }
 
-/// What to do with the `$ZEPHYR_BASE` workspace — the three outcomes both
-/// scripts distinguish, each with its own message.
+/// What to do with the `$ZEPHYR_BASE` workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceChoice {
-    /// Compatible AND alp-sdk-manifested: reuse it untouched. Skips `west init`
-    /// / `west update` AND the #769 legibility guard.
+    /// Current AND alp-sdk-manifested: reuse it untouched. Skips `west init` /
+    /// `west update` AND the #769 legibility guard.
     Reuse {
-        /// The reused tree's Zephyr `MAJOR.MINOR`, for the ok message.
-        major_minor: String,
+        /// The reused tree's Zephyr `MAJOR.MINOR.PATCH`, for the ok message.
+        version: String,
+    },
+    /// An alp-sdk-manifested west workspace sitting on a DIFFERENT Zephyr than
+    /// the SDK now pins: adopt it, but refresh it with `west update` instead of
+    /// skipping straight past (#98).
+    Stale {
+        /// The adopted tree's current Zephyr `MAJOR.MINOR.PATCH`, for the
+        /// diagnostic that names what is about to move.
+        version: String,
     },
     /// A matching-version west workspace whose manifest is NOT alp-sdk's
     /// `west.yml` — reusing it would leave `west alp-migrate` unknown (#769).
     ManifestMismatch,
-    /// Not a `<pin>.x` west workspace at all — ignore it so it cannot hijack
+    /// Not a usable west workspace at all — ignore it so it cannot hijack
     /// `west init`, and build an isolated workspace.
     Incompatible,
 }
 
-/// Decide the workspace-selection outcome from already-gathered facts. Mirrors
-/// the "workspace selection (reuse a compatible ZEPHYR_BASE)" section of both
-/// scripts exactly: reuse needs ALL THREE of a `.west/` topdir, a MAJOR.MINOR
-/// match against the pin, and a manifest that resolves to the SDK root.
-pub fn decide_workspace_reuse(
-    existing: &ExistingWorkspace,
-    pin_major_minor: &str,
-) -> WorkspaceChoice {
-    let existing_mm = crate::preflight::parse_zephyr_version_file(existing.version_file);
-    let version_matches = existing_mm.as_deref() == Some(pin_major_minor);
-    if existing.top_is_west_workspace && version_matches {
-        if existing.manifest_is_sdk {
-            return WorkspaceChoice::Reuse {
-                major_minor: existing_mm.unwrap_or_default(),
-            };
-        }
-        return WorkspaceChoice::ManifestMismatch;
+/// Decide the workspace-selection outcome from already-gathered facts.
+///
+/// The reuse contract, as amended by #98: untouched reuse needs ALL THREE of a
+/// `.west/` topdir, a manifest that resolves to the SDK root, and an EXACT
+/// `MAJOR.MINOR.PATCH` match against the pin. A tree that clears the first two
+/// but not the third is [`WorkspaceChoice::Stale`] — it is this SDK's own
+/// workspace, so `west update` against this SDK's own `west.yml` is precisely
+/// what brings it back to the pins, and adopting it is far cheaper (and less
+/// surprising) than cloning a second Zephyr elsewhere.
+///
+/// This is a DOCUMENTED CONTRACT CHANGE, not a bug in the transcription. Both
+/// oracle scripts compare only MAJOR.MINOR and this function used to as well;
+/// the previous doc comment stated that three-part contract explicitly. The
+/// truncation is what let `v4.4.0` reuse satisfy a `v4.4.1` pin, silently.
+///
+/// STILL NOT COVERED: only `zephyr`'s pin is compared. A bump that touches only
+/// a non-`zephyr` `west.yml` project — `hal_alif`, `cmsis`, `mcuboot` — leaves
+/// the version identical, so this still returns `Reuse` and those trees stay
+/// where they are. Tracked separately; `Stale` fixes it only as a side effect
+/// of a Zephyr bump dragging the whole `west update` along.
+pub fn decide_workspace_reuse(existing: &ExistingWorkspace, pin: &str) -> WorkspaceChoice {
+    let Some(version) = crate::preflight::parse_zephyr_version_file(existing.version_file) else {
+        // No readable VERSION — nothing to judge, so it cannot be adopted.
+        return WorkspaceChoice::Incompatible;
+    };
+    if !existing.top_is_west_workspace {
+        return WorkspaceChoice::Incompatible;
     }
-    WorkspaceChoice::Incompatible
+    if !existing.manifest_is_sdk {
+        // #769 stays version-gated: a foreign tree on some unrelated Zephyr is
+        // simply not this workspace, and gets the plain "ignoring it" message.
+        return if version == pin {
+            WorkspaceChoice::ManifestMismatch
+        } else {
+            WorkspaceChoice::Incompatible
+        };
+    }
+    if version == pin {
+        WorkspaceChoice::Reuse { version }
+    } else {
+        WorkspaceChoice::Stale { version }
+    }
 }
 
 #[cfg(test)]
@@ -225,10 +265,13 @@ mod tests {
     }
 
     #[test]
-    fn pin_parses_to_major_minor() {
-        assert_eq!(pin_major_minor(ZEPHYR_VERSION).as_deref(), Some("4.4"));
-        assert_eq!(pin_major_minor("4.4.0").as_deref(), Some("4.4"));
-        assert_eq!(pin_major_minor("main"), None);
+    fn pin_parses_to_the_full_version_not_a_truncation() {
+        // #98: this used to assert `Some("4.4")` for both, which is what made a
+        // v4.4.0 workspace satisfy a v4.4.1 pin. The PATCH is the whole point —
+        // the two lines below MUST differ.
+        assert_eq!(pin_version(ZEPHYR_VERSION).as_deref(), Some("4.4.1"));
+        assert_eq!(pin_version("4.4.0").as_deref(), Some("4.4.0"));
+        assert_eq!(pin_version("main"), None);
     }
 
     /// `west.yml` as the SDK ships it, pinning `revision` for the zephyr project.
@@ -248,8 +291,8 @@ mod tests {
         // comparing against its own hardcoded "4.4" it would ADOPT the very
         // workspace preflight calls stale, and the two would never converge.
         let bumped = west_yml("v4.5.0");
-        let pin = resolve_pin_major_minor(Some(&bumped), ZEPHYR_VERSION);
-        assert_eq!(pin, "4.5", "west.yml must win over the fallback constant");
+        let pin = resolve_zephyr_pin(Some(&bumped), ZEPHYR_VERSION);
+        assert_eq!(pin, "4.5.0", "west.yml must win over the fallback constant");
         assert_eq!(
             crate::preflight::parse_west_zephyr_pin(&bumped).as_deref(),
             Some(pin.as_str()),
@@ -257,14 +300,47 @@ mod tests {
         );
 
         let stale_workspace = ExistingWorkspace {
-            version_file: VERSION_44,
+            version_file: VERSION_440,
             top_is_west_workspace: true,
             manifest_is_sdk: true,
         };
         assert_eq!(
             decide_workspace_reuse(&stale_workspace, &pin),
-            WorkspaceChoice::Incompatible,
-            "a 4.4 workspace must not be reused once the SDK pins 4.5"
+            WorkspaceChoice::Stale {
+                version: "4.4.0".to_string()
+            },
+            "a 4.4.0 workspace must not be reused untouched once the SDK pins 4.5.0"
+        );
+    }
+
+    #[test]
+    fn a_patch_level_pin_bump_is_stale_not_a_reuse() {
+        // #98, the entire bug. alp-sdk dev bumped zephyr v4.4.0 -> v4.4.1 (and
+        // hal_alif v2.2.0 -> v2.3.0 alongside it). Both Zephyr pins truncate to
+        // "4.4", so the reuse test called the old tree current, skipped `west
+        // update`, and the build went green against the PREVIOUS Zephyr and the
+        // previous hal_alif — with nothing anywhere exiting non-zero.
+        let bumped = west_yml("v4.4.1");
+        let pin = resolve_zephyr_pin(Some(&bumped), ZEPHYR_VERSION);
+        assert_eq!(pin, "4.4.1");
+
+        let workspace = ExistingWorkspace {
+            version_file: VERSION_440,
+            top_is_west_workspace: true,
+            manifest_is_sdk: true,
+        };
+        assert_eq!(
+            decide_workspace_reuse(&workspace, &pin),
+            WorkspaceChoice::Stale {
+                version: "4.4.0".to_string()
+            },
+            "a patch-level bump must refresh the workspace, not reuse it"
+        );
+        // And `preflight`'s zephyrVersion check — the other route into the same
+        // blind spot, the one `build`'s auto-bootstrap fires on — must agree.
+        assert_ne!(
+            crate::preflight::parse_zephyr_version_file(VERSION_440),
+            crate::preflight::parse_west_zephyr_pin(&bumped),
         );
     }
 
@@ -272,68 +348,78 @@ mod tests {
     fn the_reuse_pin_falls_back_when_west_yml_is_absent_or_a_branch() {
         // No west.yml (or a branch/SHA revision with no MAJOR.MINOR) -> the
         // manifest's zephyr.version, which itself falls back to ZEPHYR_VERSION.
-        assert_eq!(resolve_pin_major_minor(None, ZEPHYR_VERSION), "4.4");
+        assert_eq!(resolve_zephyr_pin(None, ZEPHYR_VERSION), "4.4.1");
         assert_eq!(
-            resolve_pin_major_minor(Some(&west_yml("main")), ZEPHYR_VERSION),
-            "4.4"
+            resolve_zephyr_pin(Some(&west_yml("main")), ZEPHYR_VERSION),
+            "4.4.1"
         );
         // A manifest that bumped ahead of an unreadable west.yml still wins
         // over the compiled-in constant.
-        assert_eq!(resolve_pin_major_minor(None, "v4.6.0"), "4.6");
+        assert_eq!(resolve_zephyr_pin(None, "v4.6.0"), "4.6.0");
     }
 
     /// A real Zephyr `VERSION` file body (extra fields present, order as shipped).
-    const VERSION_44: &str =
+    const VERSION_440: &str =
         "VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = 0\nEXTRAVERSION =\n";
 
     #[test]
     fn reuse_needs_workspace_version_and_manifest() {
         let facts = ExistingWorkspace {
-            version_file: VERSION_44,
+            version_file: VERSION_440,
             top_is_west_workspace: true,
             manifest_is_sdk: true,
         };
         assert_eq!(
-            decide_workspace_reuse(&facts, "4.4"),
+            decide_workspace_reuse(&facts, "4.4.0"),
             WorkspaceChoice::Reuse {
-                major_minor: "4.4".to_string()
+                version: "4.4.0".to_string()
             }
         );
     }
 
     #[test]
     fn matching_version_with_a_foreign_manifest_is_a_mismatch_not_a_reuse() {
-        // #769: reusing this would leave `west alp-migrate` unknown.
+        // #769: reusing this would leave `west alp-migrate` unknown. A foreign
+        // manifest is NEVER `Stale` — `west update` there would drive someone
+        // else's workspace off alp-sdk's manifest.
         let facts = ExistingWorkspace {
-            version_file: VERSION_44,
+            version_file: VERSION_440,
             top_is_west_workspace: true,
             manifest_is_sdk: false,
         };
         assert_eq!(
-            decide_workspace_reuse(&facts, "4.4"),
+            decide_workspace_reuse(&facts, "4.4.0"),
             WorkspaceChoice::ManifestMismatch
+        );
+        assert_eq!(
+            decide_workspace_reuse(&facts, "4.5.0"),
+            WorkspaceChoice::Incompatible
         );
     }
 
     #[test]
-    fn a_stale_version_or_missing_dot_west_is_incompatible() {
-        let stale = ExistingWorkspace {
+    fn a_missing_dot_west_or_unreadable_version_is_incompatible() {
+        // An alp-sdk-manifested tree on an old Zephyr is refreshable, not
+        // disposable — the v3.7.0-vs-v4.4.0 incident's tree included.
+        let old = ExistingWorkspace {
             version_file: "VERSION_MAJOR = 3\nVERSION_MINOR = 7\n",
             top_is_west_workspace: true,
             manifest_is_sdk: true,
         };
         assert_eq!(
-            decide_workspace_reuse(&stale, "4.4"),
-            WorkspaceChoice::Incompatible
+            decide_workspace_reuse(&old, "4.4.1"),
+            WorkspaceChoice::Stale {
+                version: "3.7.0".to_string()
+            }
         );
 
         let no_west = ExistingWorkspace {
-            version_file: VERSION_44,
+            version_file: VERSION_440,
             top_is_west_workspace: false,
             manifest_is_sdk: true,
         };
         assert_eq!(
-            decide_workspace_reuse(&no_west, "4.4"),
+            decide_workspace_reuse(&no_west, "4.4.0"),
             WorkspaceChoice::Incompatible
         );
 
@@ -343,7 +429,7 @@ mod tests {
             manifest_is_sdk: true,
         };
         assert_eq!(
-            decide_workspace_reuse(&unparseable, "4.4"),
+            decide_workspace_reuse(&unparseable, "4.4.0"),
             WorkspaceChoice::Incompatible
         );
     }
