@@ -164,7 +164,7 @@ fn fetch_releases(agent: &ureq::Agent, url: &str) -> Result<Vec<SdkRelease>, Str
     parse_remote_sdk_releases(&value)
 }
 
-/// Formats releases into human-readable lines (tag, publish date, truncated notes).
+/// Formats releases into human-readable lines (tag, publish date, flags, truncated notes).
 fn format_release_table(releases: &[SdkRelease]) -> Vec<String> {
     if releases.is_empty() {
         return vec!["No SDK releases found.".to_string()];
@@ -177,7 +177,18 @@ fn format_release_table(releases: &[SdkRelease]) -> Vec<String> {
         } else {
             format!("   {}", truncate(&rel.release_notes_summary, 60))
         };
-        lines.push(format!("  {:<12} {date}{notes}", rel.tag));
+        // #122: GitHub's draft/prerelease flags were parsed but never shown —
+        // a terminal reader asking "what is the latest SDK?" could not tell a
+        // release candidate or an unpublished draft from a real release.
+        // Placed after `notes` (not between the fixed-width date and notes)
+        // so the notes column start stays put regardless of flag width.
+        let flags = match (rel.draft, rel.prerelease) {
+            (true, true) => " [draft, prerelease]",
+            (true, false) => " [draft]",
+            (false, true) => " [prerelease]",
+            (false, false) => "",
+        };
+        lines.push(format!("  {:<12} {date}{notes}{flags}", rel.tag));
     }
     lines
 }
@@ -1530,7 +1541,8 @@ mod tests {
         let body = concat!(
             r#"[{"tag_name":"v9.9.9","published_at":"2026-01-02T03:04:05Z","#,
             r#""tarball_url":"https://example.invalid/v9.9.9.tar.gz","#,
-            r#""body":"Head line.\n\nDetail that is not the summary."}]"#
+            r#""body":"Head line.\n\nDetail that is not the summary.","#,
+            r#""draft":true,"prerelease":true}]"#
         );
         let addr = serve_one_response(body);
         // A no-proxy agent with a short cap: the environment must not steer a
@@ -1546,5 +1558,59 @@ mod tests {
         assert_eq!(releases[0].published_at, "2026-01-02T03:04:05Z");
         // First paragraph only — proves the `tan-core` parse ran on OUR body.
         assert_eq!(releases[0].release_notes_summary, "Head line.");
+        // #122: draft/prerelease must travel the full parse path over a real
+        // socket, not just through the in-process unit test.
+        assert!(releases[0].draft);
+        assert!(releases[0].prerelease);
+    }
+
+    #[test]
+    fn format_release_table_shows_draft_and_prerelease_flags() {
+        // #122: a terminal reader of `tan sdk list` must be able to see that a
+        // release is flagged — the table must not silently drop what
+        // `fetch_releases` already parsed.
+        let releases = vec![
+            SdkRelease {
+                tag: "v1.5.0".to_string(),
+                published_at: "2024-01-02T00:00:00Z".to_string(),
+                tarball_url: "u".to_string(),
+                release_notes_summary: String::new(),
+                release_notes: String::new(),
+                draft: false,
+                prerelease: false,
+            },
+            SdkRelease {
+                tag: "v2.0.0-rc1".to_string(),
+                published_at: "2024-02-03T00:00:00Z".to_string(),
+                tarball_url: "u".to_string(),
+                release_notes_summary: String::new(),
+                release_notes: String::new(),
+                draft: false,
+                prerelease: true,
+            },
+            SdkRelease {
+                tag: "v3.0.0-draft".to_string(),
+                published_at: "2024-03-04T00:00:00Z".to_string(),
+                tarball_url: "u".to_string(),
+                release_notes_summary: String::new(),
+                release_notes: String::new(),
+                draft: true,
+                prerelease: false,
+            },
+            SdkRelease {
+                tag: "v4.0.0-rc1".to_string(),
+                published_at: "2024-04-05T00:00:00Z".to_string(),
+                tarball_url: "u".to_string(),
+                release_notes_summary: String::new(),
+                release_notes: String::new(),
+                draft: true,
+                prerelease: true,
+            },
+        ];
+        let lines = format_release_table(&releases);
+        assert!(lines[1].contains("v1.5.0") && !lines[1].contains('['));
+        assert!(lines[2].contains("v2.0.0-rc1") && lines[2].contains("[prerelease]"));
+        assert!(lines[3].contains("v3.0.0-draft") && lines[3].contains("[draft]"));
+        assert!(lines[4].contains("v4.0.0-rc1") && lines[4].contains("[draft, prerelease]"));
     }
 }

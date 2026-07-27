@@ -28,6 +28,13 @@ pub struct SdkRelease {
     pub release_notes_summary: String,
     /// Full release body (Markdown), for an expandable changelog.
     pub release_notes: String,
+    /// Whether GitHub has this release marked as a draft (unpublished).
+    /// Defaults to `false` when the field is absent or not a boolean —
+    /// absent means "not flagged", never a reason to drop the release.
+    pub draft: bool,
+    /// Whether GitHub has this release marked as a pre-release. Same
+    /// missing/non-boolean default as `draft`.
+    pub prerelease: bool,
 }
 
 /// Append the likely environmental cause to a raw network error.
@@ -98,12 +105,15 @@ pub fn parse_remote_sdk_releases(raw: &Value) -> Result<Vec<SdkRelease>, String>
                     .to_string()
             };
             let body = item.get("body").and_then(Value::as_str).unwrap_or("");
+            let bool_field = |key: &str| item.get(key).and_then(Value::as_bool).unwrap_or(false);
             SdkRelease {
                 tag: str_field("tag_name"),
                 published_at: str_field("published_at"),
                 tarball_url: str_field("tarball_url"),
                 release_notes_summary: extract_first_paragraph(body),
                 release_notes: body.trim().to_string(),
+                draft: bool_field("draft"),
+                prerelease: bool_field("prerelease"),
             }
         })
         .collect())
@@ -353,6 +363,77 @@ mod tests {
         assert_eq!(releases[0].tag, "v1.5.0");
         assert_eq!(releases[0].release_notes_summary, "First line.");
         assert_eq!(releases[0].release_notes, "First line.\n\nrest");
+        // #122: absent draft/prerelease keys must default to false, never drop
+        // the release or panic.
+        assert!(!releases[0].draft);
+        assert!(!releases[0].prerelease);
+    }
+
+    #[test]
+    fn parses_draft_and_prerelease_flags() {
+        // #122: GitHub's `draft`/`prerelease` booleans must survive the parse
+        // so a consumer can tell a release candidate or an unpublished draft
+        // apart from a real latest release, instead of tan silently dropping
+        // the fact.
+        let raw = json!([
+            {"tag_name": "v2.0.0-rc1", "published_at": "t", "tarball_url": "u", "body": "b",
+             "draft": true, "prerelease": true},
+        ]);
+        let releases = parse_remote_sdk_releases(&raw).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert!(releases[0].draft);
+        assert!(releases[0].prerelease);
+    }
+
+    #[test]
+    fn draft_and_prerelease_default_false_when_absent_or_non_boolean() {
+        let raw = json!([
+            {"tag_name": "v1.0.0", "published_at": "t", "tarball_url": "u", "body": "b"},
+            {"tag_name": "v1.0.1", "published_at": "t", "tarball_url": "u", "body": "b",
+             "draft": "yes", "prerelease": 1},
+        ]);
+        let releases = parse_remote_sdk_releases(&raw).unwrap();
+        // Neither a missing key nor a non-boolean value drops the release.
+        assert_eq!(releases.len(), 2);
+        assert!(!releases[0].draft);
+        assert!(!releases[0].prerelease);
+        assert!(!releases[1].draft);
+        assert!(!releases[1].prerelease);
+    }
+
+    #[test]
+    fn sdk_release_json_keys_are_exactly_the_seven_fields() {
+        // The membership test #122 asks for: pins the emitted per-release key
+        // set so a later silent rename or drop (the #106 failure class) is
+        // caught here, since no golden covers `sdk list` at all.
+        let release = SdkRelease {
+            tag: "v1.5.0".to_string(),
+            published_at: "2024-01-02T00:00:00Z".to_string(),
+            tarball_url: "u".to_string(),
+            release_notes_summary: "s".to_string(),
+            release_notes: "s".to_string(),
+            draft: false,
+            prerelease: true,
+        };
+        let value = serde_json::to_value(&release).unwrap();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "tag",
+                "publishedAt",
+                "tarballUrl",
+                "releaseNotesSummary",
+                "releaseNotes",
+                "draft",
+                "prerelease",
+            ])
+        );
     }
 
     #[test]
