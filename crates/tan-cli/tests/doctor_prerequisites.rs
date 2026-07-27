@@ -78,9 +78,16 @@ fn an_absent_tool_carries_this_platforms_install_command() {
     // the host resolution would silently do (a `winget` line behind a Fix button
     // on Linux is worse than no button at all).
     //
-    // `ninja` is Windows-only: `prerequisites.posix` does not list it, so neither
-    // POSIX install map carries one and the field stays `null` there even though
-    // `--build` probes the tool on every platform.
+    // `ninja` used to be Windows-only here: `prerequisites.posix` did not list
+    // it, so neither POSIX install map carried one and the field stayed `null`
+    // even though `--build` probes the tool on every platform. alp-sdk#971/#981
+    // widened it, and tan's fallback + vendored fixture now agree, so every
+    // served host carries a real command.
+    //
+    // This assertion is HOST-DEPENDENT -- it runs `tan` on the actual OS -- so
+    // the Windows leg cannot see a Linux/macOS regression here and vice versa.
+    // That is not incidental: this exact test is what caught the POSIX half,
+    // because a Windows-only local run passed while ubuntu and macOS went red.
     if cfg!(windows) {
         assert_eq!(command_for("cmake"), "winget install -e --id Kitware.CMake");
         assert_eq!(
@@ -89,10 +96,10 @@ fn an_absent_tool_carries_this_platforms_install_command() {
         );
     } else if cfg!(target_os = "linux") {
         assert_eq!(command_for("cmake"), "sudo apt-get install -y cmake");
-        assert_eq!(command_for("ninja"), serde_json::Value::Null);
+        assert_eq!(command_for("ninja"), "sudo apt-get install -y ninja-build");
     } else if cfg!(target_os = "macos") {
         assert_eq!(command_for("cmake"), "brew install cmake");
-        assert_eq!(command_for("ninja"), serde_json::Value::Null);
+        assert_eq!(command_for("ninja"), "brew install ninja");
     } else {
         // A POSIX host the manifest does not serve: every command `null`, which
         // is what every POSIX host reported before alp-sdk#959.
