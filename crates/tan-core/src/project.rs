@@ -104,7 +104,15 @@ fn collect_sdk_candidates(
     };
 
     for folder in workspace_folders {
-        let lateral_before = candidates.len();
+        // Whether THIS folder's own lateral probes answered — deliberately not
+        // `candidates.len()` before/after. Two folders routinely name the same
+        // SDK (folder A *is* the checkout, folder B has it as a sibling), and
+        // `push_unique` then leaves the length unchanged for a folder that
+        // resolved perfectly well. A length-based guard reads that as "found
+        // nothing", runs the ancestor walk anyway, and can add an enclosing
+        // checkout as a second candidate — turning an unambiguous multi-root
+        // workspace into "ambiguous" -> None, which is a regression, not a fix.
+        let mut lateral_hit = false;
         // Check both the workspace root and the conventional sibling alp-sdk folder.
         if contains_loader_script(folder, path_exists) {
             // Normalize before dedup: the sibling probe below always pushes a
@@ -117,12 +125,14 @@ fn collect_sdk_candidates(
             // though only one SDK root exists. Normalize both sides the same
             // way before comparing.
             push_unique(to_posix(Path::new(folder)), &mut candidates);
+            lateral_hit = true;
         }
 
         if let Some(parent) = Path::new(folder).parent() {
             let sibling = to_posix(&parent.join("alp-sdk"));
             if contains_loader_script(&sibling, path_exists) {
                 push_unique(sibling, &mut candidates);
+                lateral_hit = true;
             }
         }
 
@@ -130,7 +140,7 @@ fn collect_sdk_candidates(
         // checkout. Kept a strict fallback so the established self/sibling
         // precedence is untouched — a workspace that already resolves keeps
         // resolving to exactly what it resolved to before.
-        if candidates.len() == lateral_before {
+        if !lateral_hit {
             if let Some(ancestor) = nearest_ancestor_sdk(folder, path_exists) {
                 push_unique(ancestor, &mut candidates);
             }
@@ -355,6 +365,27 @@ mod tests {
                     || p == "/work/alp-sdk/scripts/alp_project.py"
             });
         assert_eq!(ctx.sdk_root, None);
+    }
+
+    #[test]
+    fn a_second_folder_answered_laterally_does_not_trigger_the_ancestor_walk() {
+        // Issue #101 follow-up. The ancestor walk is meant to be a strict
+        // fallback: it may only run for a folder whose OWN lateral probes found
+        // nothing. Guarding that on `candidates.len()` being unchanged conflates
+        // "this folder found nothing" with "this folder found something already
+        // in the list" — and `push_unique` makes the second case common, since
+        // sibling probes from different folders routinely name the same SDK.
+        //
+        // Here both folders resolve laterally to `/w/alp-sdk` (folder 1 is that
+        // checkout; folder 2 is its sibling), so nothing should walk up. With a
+        // length-based guard folder 2's deduped push looks like "found nothing",
+        // the walk runs, `/w` is a checkout too, and a perfectly unambiguous
+        // single-SDK workspace regresses to two candidates -> ambiguous -> None.
+        let ctx = resolve_project_context(
+            &input(&["/w/alp-sdk", "/w/proj"], ProjectSettings::default()),
+            |p| p == "/w/alp-sdk/scripts/alp_project.py" || p == "/w/scripts/alp_project.py",
+        );
+        assert_eq!(ctx.sdk_root.as_deref(), Some("/w/alp-sdk"));
     }
 
     #[cfg(windows)]
