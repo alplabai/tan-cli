@@ -470,6 +470,36 @@ All notable changes to `tan` are documented here. Format follows
   an in-flight contract-surface change).
 
 ### Fixed
+- **`tan bootstrap` reused a workspace across a patch-level Zephyr bump, so the
+  next build was green against the wrong Zephyr AND the wrong hal_alif (#98).**
+  The reuse test compared only `MAJOR.MINOR`, so upgrading alp-sdk `v0.13.0` ->
+  `dev` (zephyr `v4.4.0` -> `v4.4.1`, hal_alif `v2.2.0` -> `v2.3.0`) printed
+  `Reusing compatible alp-sdk workspace` and skipped `west update` entirely.
+  `parse_zephyr_version_file` and `parse_west_zephyr_pin` now carry
+  `MAJOR.MINOR.PATCH` and `decide_workspace_reuse` compares the whole pin, with
+  a new `Stale` outcome for a tree that IS this SDK's, just left behind.
+  - Stale runs `west update` rather than only warning: a warning alone leaves
+    the next build green against the wrong Zephyr, which is the defect itself.
+    It is not the aggressive reading either -- it is byte-for-byte the command a
+    bootstrap with no `$ZEPHYR_BASE` would run over the same topdir, gated on a
+    manifest that already proved the tree belongs to this SDK. It also fixes the
+    part a zephyr-only comparison never could: `west update` moves `hal_alif`,
+    `cmsis` and `mcuboot` to their pins too.
+  - The second route is closed as well. `tan build`'s auto-bootstrap fires on
+    `is_warn("zephyrVersion")`, which compared two `MAJOR.MINOR` values, so
+    `4.4` == `4.4` and no re-bootstrap fired -- making `--no-auto-bootstrap`'s
+    own `--help` text ("by default a text-mode build with ... a stale one, runs
+    `tan bootstrap` first") a false promise. It now reaches that branch.
+- **An unreadable `metadata/bootstrap.json` was indistinguishable from an absent
+  one (#99).** `load_facts` treated EVERY read error as "legacy SDK", so a
+  `chmod 000` manifest on a `dev` tree and a released tree with no manifest
+  produced envelopes identical in every field carrying a verdict: `ok:true`,
+  `exitCode:0`, `factsFromManifest:false`, empty `issues`. The conflation was
+  deliberate and its comment said why ("every released alp-sdk today has no
+  manifest at all") -- a premise that expired when `dev` shipped one. Only
+  `ErrorKind::NotFound` falls back now; every other kind is a hard error naming
+  the path and the OS error, in the same shape `parse_bootstrap_manifest`
+  already produces.
 - **Plain `tan doctor` probed nothing about the build environment and printed
   byte-identical output across four materially different host states (#100).**
   It is the command alp-sdk's `bootstrap` prints as the customer's very next
