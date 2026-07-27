@@ -10,13 +10,47 @@ them only in lockstep with the extension's `releaseAssetForTarget`.
 ## Tag scheme
 
 ```
-v<major>.<minor>.<patch>        e.g. v0.1.0
+v<major>.<minor>.<patch>              e.g. v0.1.0     release
+v<major>.<minor>.<patch>-<pre>        e.g. v0.4.0-rc1 pre-release
 ```
 
 - SemVer, `v`-prefixed.
 - The tag (minus the `v`) MUST equal the `tan` crate version in the workspace
   `Cargo.toml` (`[workspace.package] version`). The `verify-version` job fails
-  the release if they differ, so a mismatched tag never publishes assets.
+  the release if they differ, so a mismatched tag never publishes assets. This
+  holds for a pre-release too: `v0.4.0-rc1` requires `version = "0.4.0-rc1"`.
+
+### Pre-releases
+
+**The hyphen is the whole signal.** `release.yml` derives both flags from it, so
+they cannot disagree with each other or with the tag:
+
+| Tag | `prerelease` | `make_latest` | crates.io |
+| --- | --- | --- | --- |
+| `v0.4.0` | `false` | `true` | published |
+| `v0.4.0-rc1` | `true` | `false` | **skipped** |
+
+The npm shim is skipped for a pre-release too, and that path was the
+sharpest: `npm publish` passes no `--tag`, so npm defaults to the `latest`
+dist-tag -- an unguarded rc would become plain `npm i -g @alplabai/tan` for
+every consumer, and npm unpublish is far more restricted than a crates.io
+yank. The relaxation, when an rc should be installable, is `--tag next`.
+
+This is load-bearing rather than cosmetic. [`install.sh`](../install.sh) fetches
+`releases/latest/download/<asset>` directly, and GitHub excludes a release from
+`/latest` **only when it is marked `prerelease`**. So an unflagged rc becomes
+`latest` and is handed to every customer running the documented install command.
+
+crates.io is skipped for a pre-release deliberately: a crates.io publish can
+only be **yanked**, never deleted, while a GitHub pre-release can be removed
+outright. Keeping an rc off crates.io keeps it fully retractable, which is the
+reason to cut one at all. (crates.io does accept SemVer pre-release versions,
+and `cargo install` / `^` ranges skip them by default — so this is a
+conservative call, not a forced one.)
+
+Note that `tan sdk list` flags **alp-sdk** draft/pre-releases (tan-cli#122) —
+that is a different release stream from tan's own, and neither protects the
+other.
 
 ## Asset names
 
@@ -46,8 +80,8 @@ Plus two non-binary assets, carrying the same build-provenance attestation:
 | -------------------------- | -------------- | ---------------------------- | ----------------------------------- |
 | `win32`                    | `x64`          | `x86_64-pc-windows-msvc`     | `tan-x86_64-pc-windows-msvc.exe`    |
 | `win32`                    | `arm64`        | `aarch64-pc-windows-msvc`    | `tan-aarch64-pc-windows-msvc.exe`   |
-| `linux`                    | `x64`          | `x86_64-unknown-linux-gnu`   | `tan-x86_64-unknown-linux-gnu`      |
-| `linux`                    | `arm64`        | `aarch64-unknown-linux-gnu`  | `tan-aarch64-unknown-linux-gnu`     |
+| `linux`                    | `x64`          | `x86_64-unknown-linux-musl`  | `tan-x86_64-unknown-linux-musl`     |
+| `linux`                    | `arm64`        | `aarch64-unknown-linux-musl` | `tan-aarch64-unknown-linux-musl`    |
 | `darwin`                   | `x64`          | `x86_64-apple-darwin`        | `tan-x86_64-apple-darwin`           |
 | `darwin`                   | `arm64`        | `aarch64-apple-darwin`       | `tan-aarch64-apple-darwin`          |
 
@@ -55,20 +89,31 @@ Windows ships **both** x64 and arm64 assets — the extension picks by
 `process.arch` (`win32`+`x64` vs `win32`+`arm64`). After download on a Unix host
 the extension must `chmod +x` the raw binary.
 
-### Additional Linux assets (musl, static)
+### Additional Linux assets (glibc)
 
-Two more assets ship per release, not (yet) wired into the vscode
-`releaseAssetForTarget` map above — they exist for `cargo binstall` / container
-/ Alpine consumers, and to cover `linux/arm64` without an arm runner:
+Two more assets ship per release. **They are NOT what the extension downloads**
+— they exist for consumers that specifically want a glibc build:
 
 | Target triple                | Asset name                       |
 | ----------------------------- | --------------------------------- |
-| `x86_64-unknown-linux-musl`  | `tan-x86_64-unknown-linux-musl`  |
-| `aarch64-unknown-linux-musl` | `tan-aarch64-unknown-linux-musl` |
+| `x86_64-unknown-linux-gnu`   | `tan-x86_64-unknown-linux-gnu`   |
+| `aarch64-unknown-linux-gnu`  | `tan-aarch64-unknown-linux-gnu`  |
 
-Both are fully static (no libc floor to track) and run on any distro/libc,
-including glibc hosts — the extension's `linux/arm64` entry can later repoint
-from `aarch64-unknown-linux-gnu` to the static musl build.
+The `-gnu` assets cross-build via `cargo-zigbuild` pinned to
+`x86_64-unknown-linux-gnu.2.31`, i.e. a **glibc 2.31 floor**. That floor is the
+reason the extension maps both Linux targets to `-musl` instead, verbatim from
+`alp-sdk-vscode/src/alpCli/service.ts:32-38`:
+
+> musl (static), not gnu: the `-gnu` assets carry a glibc 2.31 floor and fail
+> with "GLIBC_2.39 not found" on older distros (including the `-gnu` asset's own
+> build host). `-musl` is fully static, so it runs on any distro/libc.
+
+**This section previously said the opposite** — that `linux/x64` and
+`linux/arm64` consumed the `-gnu` assets and that the musl assets were "not
+(yet) wired into" `releaseAssetForTarget`. That has not been true since the
+extension repointed to `-musl`. Corrected here rather than left to mislead the
+next reader of the contract; `alp-sdk` documented the same `-gnu`/`-musl`
+mix-up in its own install docs and fixed it in alp-sdk#990.
 
 ### Reference `releaseAssetForTarget` (vscode side)
 
@@ -77,8 +122,10 @@ function releaseAssetForTarget(platform: NodeJS.Platform, arch: string): string 
   const triple = {
     "win32:x64": "x86_64-pc-windows-msvc",
     "win32:arm64": "aarch64-pc-windows-msvc",
-    "linux:x64": "x86_64-unknown-linux-gnu",
-    "linux:arm64": "aarch64-unknown-linux-gnu",
+    // musl, NOT gnu — see the glibc floor below. Changing these two back
+    // reintroduces `GLIBC_2.39 not found` on older distros.
+    "linux:x64": "x86_64-unknown-linux-musl",
+    "linux:arm64": "aarch64-unknown-linux-musl",
     "darwin:x64": "x86_64-apple-darwin",
     "darwin:arm64": "aarch64-apple-darwin",
   }[`${platform}:${arch}`];
