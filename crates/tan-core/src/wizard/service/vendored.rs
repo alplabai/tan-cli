@@ -16,12 +16,18 @@
 //! change.
 //!
 //! `WizardTemplateId::ZephyrApp` (-> SDK `minimal`),
-//! `WizardTemplateId::SensorStarter` (-> SDK `sensor`), and
-//! `WizardTemplateId::EdgeAiStarter` (-> SDK `edge-ai`) are mapped today; see
-//! the manifest for which tan templates were left on their existing
-//! hand-written generator and why. `edge-ai` is the first HETEROGENEOUS
-//! (multi-core) vendored template: its `board.yaml` carries a companion core
-//! (`os: "off"`) alongside the app core, see `vendored_app_core_key` below.
+//! `WizardTemplateId::SensorStarter` (-> SDK `sensor`),
+//! `WizardTemplateId::EdgeAiStarter` (-> SDK `edge-ai`),
+//! `WizardTemplateId::BoardDiagnostics` (-> SDK `diagnostics`), and
+//! `WizardTemplateId::IotStarter` (-> SDK `iot`) are mapped today; see the
+//! manifest for which tan templates were left on their existing hand-written
+//! generator and why (`minimal-app` is the only one left, deliberately
+//! deferred). `edge-ai` is the first HETEROGENEOUS (multi-core) vendored
+//! template: its `board.yaml` carries a companion core (`os: "off"`)
+//! alongside the app core, see `vendored_app_core_key` below. `iot` is the
+//! first SINGLE-SKU vendored template: the SDK catalog's `iot` entry covers
+//! only `E1M-AEN801` (`status: preview`), so it has no `FamilyTrees` split --
+//! see `IOT_STARTER_SUPPORTED_SKU`.
 
 use super::example_catalog::retarget_board_yaml_som;
 use crate::wizard::models::WizardTemplateId;
@@ -146,9 +152,70 @@ const EDGE_AI_V2N: &[VendoredFile] = vendored_tree!(
     ]
 );
 
+/// Vendored `diagnostics` scaffold (SDK's real board self-test app -- SoM/SoC
+/// identity, RUN operating-point profile, on-module I2C management-bus scan)
+/// for the Alif Ensemble family.
+const DIAGNOSTICS_AEN: &[VendoredFile] = vendored_tree!(
+    "diagnostics",
+    "E1M-AEN801",
+    [
+        "CMakeLists.txt",
+        "README.md",
+        "board.yaml",
+        "prj.conf",
+        "src/main.c",
+        "testcase.yaml",
+    ]
+);
+
+/// Vendored `diagnostics` scaffold for the Renesas RZ/V2N family.
+const DIAGNOSTICS_V2N: &[VendoredFile] = vendored_tree!(
+    "diagnostics",
+    "E1M-V2N101",
+    [
+        "CMakeLists.txt",
+        "README.md",
+        "board.yaml",
+        "prj.conf",
+        "src/main.c",
+        "testcase.yaml",
+    ]
+);
+
+/// Vendored `iot` scaffold (SDK's real Wi-Fi + `mqtts://` MQTT/TLS telemetry
+/// app on the CC3501E Wi-Fi6+BLE bridge) -- the SDK catalog's `iot` entry
+/// covers exactly ONE SoM SKU (`status: preview`), unlike every other mapped
+/// template's two-family split, so there is no matching `_V2N` tree and no
+/// `FamilyTrees` tuple below: the Renesas V2N Wi-Fi transport does not exist
+/// yet (see `vendored/MANIFEST.md`).
+const IOT_AEN: &[VendoredFile] = vendored_tree!(
+    "iot",
+    "E1M-AEN801",
+    [
+        "CMakeLists.txt",
+        "README.md",
+        "board.yaml",
+        "prj.conf",
+        "src/main.c",
+        "testcase.yaml",
+    ]
+);
+
+/// The vendored `iot-starter` template's only supported SoM SKU. The SDK
+/// catalog's `iot` entry gates `supported.som_skus` to exactly this
+/// one-item set -- the CC3501E Wi-Fi6+BLE bridge transport this template's
+/// app depends on is silicon-validated only on `E1M-AEN801`; the
+/// `E1M-V2N101` Wi-Fi path does not exist yet (see `vendored/MANIFEST.md`).
+/// `tan init`'s upfront guard (`commands/init/mod.rs`) rejects any other
+/// `--som` before a single file is planned -- never a silent fall-back onto
+/// a hand-written generator, which is the exact drift issue #14 retires on
+/// every other template.
+pub const IOT_STARTER_SUPPORTED_SKU: &str = "E1M-AEN801";
+
 const MINIMAL: FamilyTrees = (MINIMAL_AEN, MINIMAL_V2N);
 const SENSOR: FamilyTrees = (SENSOR_AEN, SENSOR_V2N);
 const EDGE_AI: FamilyTrees = (EDGE_AI_AEN, EDGE_AI_V2N);
+const DIAGNOSTICS: FamilyTrees = (DIAGNOSTICS_AEN, DIAGNOSTICS_V2N);
 
 /// Pick the vendored family bucket for `sku` out of `trees`. Mirrors
 /// `app_core_for_sku`'s own family split: V2N/V2M -> the Renesas tree,
@@ -356,6 +423,28 @@ pub fn vendored_edge_ai_app_core_for_sku(sku: &str) -> &'static str {
     vendored_app_core_in(EDGE_AI, sku)
 }
 
+/// The vendored `diagnostics` scaffold's real app-core id for `sku` -- same
+/// derivation as `vendored_app_core_for_sku`, off the `diagnostics` tree
+/// instead of `minimal`.
+pub fn vendored_diagnostics_app_core_for_sku(sku: &str) -> &'static str {
+    vendored_app_core_in(DIAGNOSTICS, sku)
+}
+
+/// The vendored `iot` scaffold's app-core id -- always `m55_hp` (Alif
+/// Ensemble E8), since the template covers only one SoM SKU
+/// (`IOT_STARTER_SUPPORTED_SKU`). `_sku` is accepted-but-unread purely to
+/// keep `app_core_for_template`'s (`commands/init/resolve.rs`) per-template
+/// match arms uniform in shape; the real gate on `sku` is the CLI's upfront
+/// guard, not this lookup.
+pub fn vendored_iot_app_core_for_sku(_sku: &str) -> &'static str {
+    let board_yaml = IOT_AEN
+        .iter()
+        .find(|(path, _)| *path == "board.yaml")
+        .map(|(_, content)| *content)
+        .expect("iot vendored tree has a board.yaml entry");
+    vendored_app_core_key(board_yaml).expect("iot vendored board.yaml has a non-empty cores: block")
+}
+
 /// `trees`' declared `(core id, os)` pairs for `sku` — app core plus any
 /// pre-declared companions, read from `trees`' own vendored `board.yaml`.
 fn vendored_core_ids_in(trees: FamilyTrees, sku: &str) -> Vec<(String, String)> {
@@ -379,12 +468,16 @@ fn vendored_core_ids_in(trees: FamilyTrees, sku: &str) -> Vec<(String, String)> 
 /// `tan validate`/serde_yaml; the SDK Python loader takes last-wins). A
 /// non-vendored (hand-generated) template's board.yaml only ever starts with
 /// its app core — no pre-declared companion for `--cores` to collide with —
-/// so this returns empty for it.
+/// so this returns empty for it. `iot-starter` is vendored too but, like
+/// `minimal`/`sensor`/`diagnostics`, is single-core with no pre-declared
+/// companion, so it is intentionally left in the catch-all rather than
+/// routed through a `FamilyTrees` it doesn't have.
 pub fn vendored_core_ids_for(template_id: WizardTemplateId, sku: &str) -> Vec<(String, String)> {
     let trees = match template_id {
         WizardTemplateId::ZephyrApp => MINIMAL,
         WizardTemplateId::SensorStarter => SENSOR,
         WizardTemplateId::EdgeAiStarter => EDGE_AI,
+        WizardTemplateId::BoardDiagnostics => DIAGNOSTICS,
         _ => return Vec::new(),
     };
     vendored_core_ids_in(trees, sku)
@@ -435,6 +528,42 @@ pub(super) fn vendored_edge_ai_files(
     cores: &[(String, String)],
 ) -> Vec<(String, String)> {
     vendored_scaffold_files(EDGE_AI, sku, cores)
+}
+
+/// Plan the `board-diagnostics` template's files from the vendored SDK
+/// `diagnostics` scaffold.
+pub(super) fn vendored_diagnostics_files(
+    sku: &str,
+    cores: &[(String, String)],
+) -> Vec<(String, String)> {
+    vendored_scaffold_files(DIAGNOSTICS, sku, cores)
+}
+
+/// Plan the `iot-starter` template's files from the vendored SDK `iot`
+/// scaffold. Unlike `vendored_minimal_files`/`vendored_sensor_files`/
+/// `vendored_edge_ai_files`, there is only ONE vendored tree here (no
+/// `family_bucket` call): the SDK catalog's `iot` entry covers exactly
+/// `IOT_STARTER_SUPPORTED_SKU`. Callers MUST reject any other `sku` before
+/// calling this (`tan init`'s upfront guard in `commands/init/mod.rs` does);
+/// `retarget_board_yaml_som` still runs for defense in depth, which is a
+/// byte-exact no-op for the one supported SKU.
+pub(super) fn vendored_iot_files(sku: &str, cores: &[(String, String)]) -> Vec<(String, String)> {
+    debug_assert_eq!(
+        sku, IOT_STARTER_SUPPORTED_SKU,
+        "vendored_iot_files called with an unsupported sku -- callers MUST reject any \
+         other sku before reaching here (see the doc comment above)"
+    );
+    IOT_AEN
+        .iter()
+        .map(|(path, content)| {
+            let content = if *path == "board.yaml" {
+                splice_companion_cores(&retarget_board_yaml_som(content, sku), cores)
+            } else {
+                (*content).to_string()
+            };
+            (path.to_string(), content)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -655,5 +784,83 @@ mod tests {
         // No hand-generated board.yaml ever pre-declares a companion -- the
         // --cores collision guard has nothing to check for these templates.
         assert!(vendored_core_ids_for(WizardTemplateId::MinimalApp, "E1M-V2N101").is_empty());
+    }
+
+    #[test]
+    fn canonical_diagnostics_skus_are_a_byte_exact_passthrough() {
+        let aen = vendored_diagnostics_files("E1M-AEN801", &[]);
+        let aen_board = &aen.iter().find(|(p, _)| p == "board.yaml").unwrap().1;
+        assert_eq!(aen_board.as_str(), DIAGNOSTICS_AEN[2].1);
+
+        let v2n = vendored_diagnostics_files("E1M-V2N101", &[]);
+        let v2n_board = &v2n.iter().find(|(p, _)| p == "board.yaml").unwrap().1;
+        assert_eq!(v2n_board.as_str(), DIAGNOSTICS_V2N[2].1);
+    }
+
+    #[test]
+    fn diagnostics_family_bucket_picks_the_right_tree_and_retargets_sku() {
+        let files = vendored_diagnostics_files("E1M-V2M101", &[]);
+        let board = &files.iter().find(|(p, _)| p == "board.yaml").unwrap().1;
+        assert!(board.contains("sku: E1M-V2M101"));
+        assert!(board.contains("preset: e1m-x-evk"));
+
+        let files = vendored_diagnostics_files("E1M-NX9101", &[]);
+        let board = &files.iter().find(|(p, _)| p == "board.yaml").unwrap().1;
+        assert!(board.contains("preset: e1m-evk"));
+    }
+
+    #[test]
+    fn vendored_diagnostics_app_core_matches_each_familys_board_yaml() {
+        // The ground truth `commands/init/resolve.rs`'s upfront --cores check
+        // must agree with for the board-diagnostics template.
+        assert_eq!(
+            vendored_diagnostics_app_core_for_sku("E1M-V2N101"),
+            "m33_sm"
+        );
+        assert_eq!(
+            vendored_diagnostics_app_core_for_sku("E1M-V2M101"),
+            "m33_sm"
+        );
+        assert_eq!(
+            vendored_diagnostics_app_core_for_sku("E1M-AEN801"),
+            "m55_hp"
+        );
+        assert_eq!(
+            vendored_diagnostics_app_core_for_sku("E1M-NX9101"),
+            "m55_hp"
+        );
+    }
+
+    #[test]
+    fn vendored_core_ids_for_diagnostics_is_just_its_own_app_core() {
+        // diagnostics is single-core (no pre-declared companion), same as
+        // minimal/sensor -- the returned entry is filtered out by the init
+        // guard (id == app_core), so routing it through the FamilyTrees
+        // match is a harmless passthrough, not a functional requirement.
+        let ids = vendored_core_ids_for(WizardTemplateId::BoardDiagnostics, "E1M-V2N101");
+        assert_eq!(ids, vec![("m33_sm".to_string(), "zephyr".to_string())]);
+    }
+
+    #[test]
+    fn iot_is_a_byte_exact_passthrough_for_its_supported_sku() {
+        let files = vendored_iot_files(IOT_STARTER_SUPPORTED_SKU, &[]);
+        let board = &files.iter().find(|(p, _)| p == "board.yaml").unwrap().1;
+        assert_eq!(board.as_str(), IOT_AEN[2].1);
+    }
+
+    #[test]
+    fn vendored_iot_app_core_is_m55_hp() {
+        assert_eq!(
+            vendored_iot_app_core_for_sku(IOT_STARTER_SUPPORTED_SKU),
+            "m55_hp"
+        );
+    }
+
+    #[test]
+    fn vendored_core_ids_for_iot_starter_is_empty() {
+        // iot-starter is vendored but single-core with no pre-declared
+        // companion -- same reasoning as minimal/sensor, but left in the
+        // catch-all (no FamilyTrees tuple exists for a single-SKU template).
+        assert!(vendored_core_ids_for(WizardTemplateId::IotStarter, "E1M-AEN801").is_empty());
     }
 }

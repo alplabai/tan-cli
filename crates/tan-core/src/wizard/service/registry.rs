@@ -71,30 +71,37 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
     WizardTemplateDefinition {
         id: WizardTemplateId::IotStarter,
         label: "IoT starter",
-        description: "Connectivity-oriented starter with Wi-Fi and MQTT defaults.",
-        libs: &["mbedtls", "fmt"],
+        description: "West-buildable Wi-Fi + MQTT/TLS telemetry app wired to board.yaml via the SDK loader (E1M-AEN801 only).",
+        // Files are vendored from the SDK's `iot` scaffold-catalog entry
+        // (alp-sdk#864/#903, see wizard/vendored/MANIFEST.md), not
+        // hand-generated -- prj_conf_extras/feature_files/body_line* are
+        // unread for this template (see gen_c_project_files). Unlike the
+        // other vendored templates, `libs`/`features` are NOT blanked here:
+        // `tan explain` (a fourth consumer of this registry -- explain.rs --
+        // reads these two fields directly) would otherwise describe a
+        // starter with no libraries/features even though this template's
+        // vendored board.yaml genuinely declares `libraries: [mbedtls]` +
+        // `iot: {wifi: true, tls: true}`. `mqtt: true` here even though the
+        // vendored board.yaml has no separate `iot.mqtt` toggle line (MQTT is
+        // inherent to this app, not board.yaml-gated): `features` feeds only
+        // `tan explain`'s "Default features" summary for this template, and
+        // that summary describing an MQTT/TLS telemetry app as `mqtt=false`
+        // contradicts the very line above it.
+        libs: &["mbedtls"],
         features: Some(WizardFeatureFlags {
             wifi: true,
             mqtt: true,
             ble: false,
             tls: true,
         }),
-        prj_conf_extras: &[
-            "CONFIG_NETWORKING=y",
-            "CONFIG_NET_IPV4=y",
-            "CONFIG_MQTT_LIB=y",
-            "CONFIG_MBEDTLS=y",
-        ],
-        feature_files: &[FeatureFileSpec {
-            path: "src/features/connectivity_pipeline.c",
-            unit_name: "connectivity_pipeline",
-            todo_line: "TODO: bring up Wi-Fi, establish MQTT session, and publish telemetry.",
-        }],
-        body_line1: "ALP IoT starter boot",
-        body_line2: "TODO: connect Wi-Fi and start MQTT session",
+        prj_conf_extras: &[],
+        feature_files: &[],
+        body_line1: "",
+        body_line2: "",
         explanation: &[
-            "Starter defaults include Wi-Fi, MQTT, and TLS-friendly settings in board.yaml.",
-            "src/main.c highlights connectivity boot and MQTT session bring-up steps.",
+            "Real Zephyr app vendored from the SDK's `iot` scaffold: brings up Wi-Fi via the CC3501E bridge and publishes an mqtts:// (TLS) MQTT telemetry reading on a cadence, through the portable <alp/iot.h> surface.",
+            "AEN-only + preview: E1M-AEN801's CC3501E Wi-Fi transport is silicon-validated; the E1M-V2N101 Wi-Fi path does not exist yet, so --som is fixed to E1M-AEN801 for this template.",
+            "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your alp-sdk checkout>`.",
         ],
     },
     WizardTemplateDefinition {
@@ -122,26 +129,15 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
     WizardTemplateDefinition {
         id: WizardTemplateId::BoardDiagnostics,
         label: "Board diagnostics",
-        description: "Bring-up oriented starter for board and peripheral checks.",
-        libs: &["fmt", "doctest"],
-        features: None,
-        prj_conf_extras: &["CONFIG_LOG=y", "LOG_MODE_DEFERRED=y", "LOG_DEFAULT_LEVEL=4"],
-        feature_files: &[FeatureFileSpec {
-            path: "src/features/diagnostics_checks.c",
-            unit_name: "diagnostics_checks",
-            todo_line: "TODO: run board bring-up checks and report failing subsystems.",
-        }],
-        body_line1: "ALP board diagnostics starter boot",
-        body_line2: "TODO: run bring-up checks and report failures",
-        explanation: &[
-            "Template enables diagnostics-friendly defaults for bring-up and fault tracking.",
-            "src/main.c is oriented toward check-list style board validation routines.",
-        ],
-    },
-    WizardTemplateDefinition {
-        id: WizardTemplateId::HostToolingStarter,
-        label: "Host tooling starter",
-        description: "Monorepo scaffold for a host-side ALP tool: shared core package, standalone CLI, and VS Code extension surface.",
+        description: "West-buildable board self-test app wired to board.yaml via the SDK loader.",
+        // Files are vendored from the SDK's `diagnostics` scaffold-catalog
+        // entry (alp-sdk#864/#903, see wizard/vendored/MANIFEST.md), not
+        // hand-generated from these fields -- libs/features/prj_conf_extras/
+        // feature_files/body_line* are unread for this template (see
+        // gen_c_project_files). `libs: &[]`/`features: None` are left as-is
+        // (not just blanked): the SDK catalog's `diagnostics` entry genuinely
+        // declares no libraries and no `iot:` toggles, so `tan explain` (a
+        // fourth consumer of this registry, explain.rs) stays accurate too.
         libs: &[],
         features: None,
         prj_conf_extras: &[],
@@ -149,9 +145,9 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
         body_line1: "",
         body_line2: "",
         explanation: &[
-            "Scaffolds a monorepo with packages/core (shared domain), packages/cli (standalone npm CLI), and root src/ (VS Code extension).",
-            "Follows the one-core-many-surfaces principle: validation, generation, and scaffolding logic lives in the core package.",
-            "File generation for this template is planned and not yet available.",
+            "Real Zephyr app vendored from the SDK's `diagnostics` scaffold: reads the SoM/SoC identity, the RUN operating-point profile, and scans the on-module I2C management bus for a pass/fail bring-up report.",
+            "Portable <alp/*> APIs only -- no chip driver -- so the same source runs on every E1M family; a check a backend can't service reports SKIP, not FAIL.",
+            "Build with `west build -b <board>` after `export ALP_SDK_ROOT=<your alp-sdk checkout>`.",
         ],
     },
 ];

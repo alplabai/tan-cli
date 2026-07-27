@@ -3,7 +3,10 @@
 
 use std::path::PathBuf;
 
-use tan_core::wizard::{WizardPlanInput, create_wizard_plan_with_cores, vendored_core_ids_for};
+use tan_core::wizard::{
+    IOT_STARTER_SUPPORTED_SKU, WizardPlanInput, WizardTemplateId, create_wizard_plan_with_cores,
+    vendored_core_ids_for,
+};
 
 use super::CommandRun;
 use crate::cli::{GlobalArgs, InitArgs};
@@ -94,6 +97,26 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
         }
     };
 
+    // 1b. iot-starter's vendored tree covers exactly one SoM SKU -- the SDK
+    // catalog's `iot` entry is AEN-only + preview (its Wi-Fi transport is the
+    // CC3501E bridge, silicon-validated only on E1M-AEN801; see
+    // wizard/vendored/MANIFEST.md). Reject any other --som right here, before
+    // an interactive user is prompted for name/destination (steps 2-3) for
+    // nothing -- `sku` depends only on `args.som`, never on those prompts --
+    // instead of silently falling back onto a hand-written generator, the
+    // exact drift issue #14 retires on every other template.
+    let sku = args.som.as_deref().unwrap_or(tan_core::DEFAULT_SOM_SKU);
+    if template_id == WizardTemplateId::IotStarter && sku != IOT_STARTER_SUPPORTED_SKU {
+        return error_run(
+            g,
+            ExitCode::ValidationFailure,
+            "init.invalid-som",
+            &format!(
+                "Template 'iot-starter' supports only SoM SKU '{IOT_STARTER_SUPPORTED_SKU}'; got '{sku}'."
+            ),
+        );
+    }
+
     // 2. Resolve name (optional).
     let name = match resolve_name(args.name.as_deref(), is_interactive) {
         Ok(n) => n,
@@ -129,8 +152,8 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
     // The app core's runtime is fixed (the scaffolded src/ + prj.conf are
     // Zephyr); reject a contradictory --cores request instead of silently
     // overriding it. See `app_core_for_template` for why this must NOT
-    // uniformly call `app_core_for_sku`.
-    let sku = args.som.as_deref().unwrap_or(tan_core::DEFAULT_SOM_SKU);
+    // uniformly call `app_core_for_sku`. (`sku` and the iot-starter --som
+    // guard are resolved back in step 1b, before the interactive prompts.)
     let app_core = app_core_for_template(template_id, sku);
     if let Some((_, os)) = cores
         .iter()
@@ -179,8 +202,9 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
     // 5b. Honor --board-yaml: emit the caller's board.yaml verbatim instead of the
     // generated stub. This lets Alp Studio adopt `tan init` as its project render --
     // it passes a fully-resolved board.yaml and expects it copied through untouched
-    // (alp-sdk-vscode#64). Templates that emit no board.yaml (host-tooling-starter)
-    // have nothing to override, so pairing them with --board-yaml is a hard error
+    // (alp-sdk-vscode#64). A template that emits no board.yaml (none does today,
+    // now that host-tooling-starter -- the previous example -- is retired) would
+    // have nothing to override, so pairing one with --board-yaml is a hard error
     // rather than a silent no-op that would drop the caller's file.
     if let Some(path) = g.board_yaml.as_deref() {
         match std::fs::read_to_string(path) {
@@ -341,5 +365,50 @@ mod tests {
             assert!(message.contains("edge-ai-starter"), "message: {message}");
             assert!(!ws.exists(), "a rejected --cores must not write any files");
         }
+    }
+
+    #[test]
+    fn iot_starter_rejects_a_non_aen801_sku_and_names_the_supported_set() {
+        // iot-starter's vendored tree covers exactly one SoM SKU
+        // (E1M-AEN801 -- the SDK catalog's `iot` entry is AEN-only + preview,
+        // its Wi-Fi transport is the CC3501E bridge). Any other --som must be
+        // rejected before a single file is planned, never silently rendered
+        // against the AEN tree -- that's the exact drift issue #14 retires
+        // on every other template.
+        let g = GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: true,
+            ci: false,
+        };
+        let ws = std::env::temp_dir().join(format!("iot-starter-bad-sku-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ws);
+        let args = InitArgs {
+            template: Some("iot-starter".to_string()),
+            from_example: None,
+            name: Some("proj".to_string()),
+            destination: Some(ws.to_string_lossy().into_owned()),
+            som: Some("E1M-V2N101".to_string()),
+            cores: None,
+            preview: false,
+            force: false,
+        };
+
+        let result = run(&g, &args);
+        assert_eq!(result.exit, ExitCode::ValidationFailure);
+        let json: serde_json::Value =
+            serde_json::from_str(result.json.as_deref().expect("json envelope")).unwrap();
+        assert_eq!(json["issues"][0]["code"].as_str(), Some("init.invalid-som"));
+        let message = json["issues"][0]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("E1M-AEN801"), "message: {message}");
+        assert!(message.contains("E1M-V2N101"), "message: {message}");
+        assert!(!ws.exists(), "a rejected --som must not write any files");
     }
 }
