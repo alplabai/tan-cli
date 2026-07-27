@@ -2000,10 +2000,17 @@ mod tests {
     fn native_execute_accepts_a_zephyr_slice_evidenced_by_the_cmake_cache() {
         // The other half of the #97 guard: it must not fail a REAL Zephyr
         // build. `ZEPHYR_BASE:` in the build dir's own CMakeCache.txt is the
-        // primary signal (what `find_package(Zephyr)` caches), and it is the
-        // one that also holds for a `--sysbuild` slice, whose superbuild has
-        // no top-level `zephyr/` directory of its own — so pin it here
-        // WITHOUT the directory fallback present.
+        // primary signal (what `find_package(Zephyr)` caches), so pin it here
+        // WITHOUT the directory fallback present — a verified real Zephyr
+        // slice build dir carried `ZEPHYR_BASE:PATH=…` and had NO `zephyr/`
+        // directory, so this is the combination that actually occurs.
+        //
+        // `--sysbuild` is covered separately by
+        // `native_execute_accepts_a_sysbuild_slice_evidenced_one_level_down`:
+        // do NOT fold it in here by asserting the superbuild's top-level cache
+        // carries `ZEPHYR_BASE:`. That is unestablished — Zephyr's
+        // `share/sysbuild/CMakeLists.txt` calls `find_package(Sysbuild …)`,
+        // not `find_package(Zephyr)`.
         use clap::Parser;
         let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
 
@@ -2048,6 +2055,75 @@ ZEPHYR_BASE:PATH=/work/zephyr
             base.to_str().unwrap(),
         );
         assert_eq!(run.exit.code(), 0);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "ok");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_accepts_a_sysbuild_slice_evidenced_one_level_down() {
+        // `--sysbuild` is a LIVE path here — the V2N plan carries
+        // `-DSB_CONF_FILE=…/zephyr/sysbuild/v2n/sysbuild.conf`. Its superbuild
+        // project owns the top-level build dir and nests the real per-image
+        // Zephyr builds one directory deeper, so the top level has NEITHER a
+        // `zephyr/` directory NOR (as far as anything establishes) a
+        // `ZEPHYR_BASE:` cache entry: `share/sysbuild/CMakeLists.txt` declares
+        // `project(sysbuild_toplevel LANGUAGES)` and calls
+        // `find_package(Sysbuild …)`, not `find_package(Zephyr)`.
+        //
+        // Without the one-level-down look this guard FAILS A CORRECT V2N
+        // BUILD. That is the regression this test exists to prevent, so the
+        // fixture deliberately leaves the top level bare.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "m33_sm", "backend": "zephyr", "buildDir": "build/m33_sm-zephyr",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/m33_sm-zephyr" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-zephyr-sysbuild-nested");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Superbuild layout: top level bare, the real Zephyr image one down.
+        let top = base.join("build/m33_sm-zephyr").join("build");
+        let image = top.join("alp_app");
+        std::fs::create_dir_all(image.join("zephyr")).unwrap();
+        assert!(
+            !top.join("zephyr").exists() && !top.join("CMakeCache.txt").exists(),
+            "the top level must stay bare or this test proves nothing"
+        );
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(
+            run.exit.code(),
+            0,
+            "a real sysbuild slice must not be failed by the #97 guard"
+        );
 
         let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
         let slices = env["data"]["slices"].as_array().unwrap();

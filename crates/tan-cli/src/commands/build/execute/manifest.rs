@@ -281,22 +281,51 @@ pub(super) fn cmake_cache_configured(slice_cwd: &Path) -> bool {
 ///    the primary signal and the closest thing to the fact being asserted —
 ///    `find_package(Zephyr)` is what caches it, a plain host configure never
 ///    does (verified against a real `<slice>/build/CMakeCache.txt`, which
-///    carries `ZEPHYR_BASE:PATH=…`, versus a baremetal one, which has no
-///    `ZEPHYR_BASE` line at all). It also holds for a `--sysbuild` slice,
-///    whose superbuild has its own top-level cache.
+///    carries `ZEPHYR_BASE:PATH=…` on line 42, versus a baremetal one, whose
+///    complete 339-line cache has no `ZEPHYR_BASE` line at all).
 /// 2. A `zephyr/` subdirectory under the build dir — Zephyr's boilerplate
 ///    binary dir. Kept as an OR fallback rather than the primary signal so
 ///    the guard can only ever fail a build it is SURE about: a real Zephyr
 ///    tree that somehow shipped no readable `CMakeCache.txt` still passes.
+///    Do NOT promote this to the primary signal: the verified real Zephyr
+///    slice dir above carried `ZEPHYR_BASE:` and had NO `zephyr/` directory,
+///    so signal 1 is the one doing the work.
+///
+/// Both signals are also checked one level down, because `--sysbuild` is a
+/// live path here (`-DSB_CONF_FILE=…/zephyr/sysbuild/v2n/sysbuild.conf` for
+/// V2N) and its superbuild nests the real per-image Zephyr builds one
+/// directory deeper. An earlier revision of this function asserted that a
+/// sysbuild top-level cache carries `ZEPHYR_BASE:` too; that is NOT
+/// established. Zephyr's `share/sysbuild/CMakeLists.txt` declares
+/// `project(sysbuild_toplevel LANGUAGES)` and calls
+/// `find_package(Sysbuild …)`, not `find_package(Zephyr)` — and the only
+/// `set(ZEPHYR_BASE … CACHE)` in the tree is in `cmake/modules/unittest.cmake`.
+/// Without the nested look, a legitimate V2N sysbuild slice would have no
+/// top-level `ZEPHYR_BASE:` and no top-level `zephyr/`, and this guard would
+/// fail a correct build. One level is enough (sysbuild nests per-image, not
+/// recursively) and keeps the cost bounded.
 ///
 /// Callers must skip this check when `build_dir_overridden` — west then wrote
 /// somewhere this can't see, same refusal `resolve_zephyr_artefact` already
 /// makes.
 pub(super) fn zephyr_boilerplate_loaded(slice_cwd: &Path) -> bool {
     let build = slice_cwd.join("build");
-    std::fs::read_to_string(build.join("CMakeCache.txt"))
+    if dir_shows_zephyr(&build) {
+        return true;
+    }
+    // sysbuild superbuild: the real Zephyr builds are one level down.
+    std::fs::read_dir(&build).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_type().is_ok_and(|t| t.is_dir()) && dir_shows_zephyr(&e.path()))
+    })
+}
+
+/// The two per-directory signals behind [`zephyr_boilerplate_loaded`].
+fn dir_shows_zephyr(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("CMakeCache.txt"))
         .is_ok_and(|c| c.lines().any(|l| l.starts_with("ZEPHYR_BASE:")))
-        || build.join("zephyr").is_dir()
+        || dir.join("zephyr").is_dir()
 }
 
 /// Absolute, lossy-string form of a path (no filesystem round-trip beyond
