@@ -675,15 +675,26 @@ const BUILD_BLOCKING: [&str; 3] = ["cmake", "ninja", "git"];
 /// `python`'s manifest install-command key differs by host —
 /// `prerequisites.install.linux`/`.macos` list it as `python3`,
 /// `prerequisites.install.windows` as bare `python`
-/// (`contract/fixtures/bootstrap/manifest.json`) — while the check name stays
-/// the stable `python` on every host. `install` is already resolved for ONE
-/// host by the caller, so only one of the two keys is ever actually present;
-/// trying both avoids needing a `HostOs` parameter just for this lookup.
-fn python_install_command(install: &BTreeMap<String, String>) -> Option<String> {
-    install
-        .get("python")
-        .or_else(|| install.get("python3"))
-        .cloned()
+/// (`contract/fixtures/bootstrap/manifest.json`) — while the DoctorCheck name
+/// stays the stable `python` on every host (`push_python`'s own `NAME`). The
+/// two used to diverge on `missingPrerequisites[].tool` too: this always
+/// named it `python`, so a POSIX entry could not be re-keyed back into
+/// `prerequisites.install`, and it disagreed with `tan bootstrap`'s own
+/// `posix_refusal`, which reports the very same missing tool as `python3` —
+/// two names for one tool across two modes of the same binary.
+///
+/// `install` is already resolved for ONE host by the caller, so which key is
+/// actually present in it doubles as the host signal (no `HostOs` parameter
+/// needed): a served POSIX map only ever carries `python3`, a served Windows
+/// map only ever carries `python`. An UNSERVED host (no `install` entry for
+/// either key, e.g. `HostOs::Other`) falls back to `python` — the check's own
+/// stable name — which is harmless precisely because `command` is `None`
+/// there regardless of which spelling `tool` carries.
+fn python_prerequisite(install: &BTreeMap<String, String>) -> (&'static str, Option<String>) {
+    match install.get("python3") {
+        Some(command) => ("python3", Some(command.clone())),
+        None => ("python", install.get("python").cloned()),
+    }
 }
 
 /// The `python` doctor check (tan-cli#120): a VERSION FLOOR, not bare
@@ -716,7 +727,7 @@ fn push_python(
     if let Some((major, minor)) = probe_version {
         check_versions.insert(NAME.to_string(), format!("{major}.{minor}"));
     }
-    let command = python_install_command(install);
+    let (tool, command) = python_prerequisite(install);
     let (status, detail) = match probe_version {
         Some(found) if found >= floor => (
             DoctorStatus::Pass,
@@ -736,7 +747,7 @@ fn push_python(
     };
     if status != DoctorStatus::Pass {
         missing.push(MissingPrerequisite {
-            tool: NAME.to_string(),
+            tool: tool.to_string(),
             command: command.clone(),
         });
     }
@@ -1096,22 +1107,26 @@ mod tests {
         // the moment the fixture + constants + `PINNED_SDK_TAG` are re-vendored.
         // That red is the gate doing its job: update the expectation to the two
         // new commands then, do not weaken or delete the assertion.
-        for (host, cmake_command, git_command, python_command) in [
+        for (host, cmake_command, git_command, python_tool, python_command) in [
             (
                 HostOs::Linux,
                 Some("sudo apt-get install -y cmake"),
                 Some("sudo apt-get install -y git"),
+                "python3",
                 Some("sudo apt-get install -y python3"),
             ),
             (
                 HostOs::MacOs,
                 Some("brew install cmake"),
                 Some("brew install git"),
+                "python3",
                 Some("brew install python3"),
             ),
             // A POSIX host the manifest does not serve keeps the old all-`null`
-            // behaviour rather than being handed the nearest OS's commands.
-            (HostOs::Other, None, None, None),
+            // behaviour rather than being handed the nearest OS's commands --
+            // and, with no `python3` key to read the host signal off of
+            // either, `tool` falls back to the check's own stable `python`.
+            (HostOs::Other, None, None, "python", None),
         ] {
             let report = build_readiness_report(
                 "t".to_string(),
@@ -1124,7 +1139,7 @@ mod tests {
             let tools: Vec<&str> = missing.iter().map(|m| m.tool.as_str()).collect();
             assert_eq!(
                 tools,
-                ["git", "python", "west", "cmake", "ninja", "dtc", "gperf"],
+                ["git", python_tool, "west", "cmake", "ninja", "dtc", "gperf"],
                 "{host:?}"
             );
             let command_for = |tool: &str| {
@@ -1135,7 +1150,11 @@ mod tests {
             };
             assert_eq!(command_for("cmake"), cmake_command, "{host:?}");
             assert_eq!(command_for("git"), git_command, "{host:?}");
-            assert_eq!(command_for("python"), python_command, "{host:?}");
+            // `python`'s `tool` self-resolves back into the SAME per-host
+            // `install` map -- `python3` on a served POSIX host, matching
+            // `tan bootstrap`'s own `posix_refusal` naming for the identical
+            // missing tool (the divergence a doctor-vs-bootstrap review found).
+            assert_eq!(command_for(python_tool), python_command, "{host:?}");
             assert_eq!(command_for("west"), None, "{host:?}");
             assert_eq!(command_for("ninja"), None, "{host:?}");
             // No POSIX install map lists either -- same "no invented command"
@@ -1143,6 +1162,52 @@ mod tests {
             assert_eq!(command_for("dtc"), None, "{host:?}");
             assert_eq!(command_for("gperf"), None, "{host:?}");
         }
+    }
+
+    #[test]
+    fn doctor_and_bootstrap_name_the_same_missing_python_the_same_way_on_posix() {
+        // The two modes of the SAME binary must "cannot word one verdict two
+        // ways" (this file's own stated goal, `append_host_prerequisites`'s
+        // doc comment) for a tool as basic as python. `tan bootstrap`'s
+        // `posix_refusal` names it straight from the manifest's
+        // `prerequisites.posix` (`python3`); before this fix `push_python`
+        // named the identical missing tool `python` regardless of host,
+        // disagreeing with bootstrap and leaving a POSIX consumer unable to
+        // re-key `missingPrerequisites[].tool` back into
+        // `prerequisites.install`.
+        let facts = fallback_facts(FLOOR);
+        let install = facts.install.for_host(HostOs::Linux);
+
+        let bootstrap_missing = crate::bootstrap::posix_refusal(
+            &facts
+                .prerequisites(false)
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            install,
+        )
+        .missing;
+        let bootstrap_python = bootstrap_missing
+            .iter()
+            .find(|m| m.tool.starts_with("python"))
+            .expect("bootstrap names a missing python tool");
+
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_none_present(),
+            install,
+            FLOOR,
+        );
+        let doctor_python = report
+            .missing_prerequisites
+            .expect("tools are missing")
+            .into_iter()
+            .find(|m| m.tool.starts_with("python"))
+            .expect("doctor names a missing python tool");
+
+        assert_eq!(doctor_python.tool, bootstrap_python.tool);
+        assert_eq!(doctor_python.command, bootstrap_python.command);
     }
 
     #[test]
@@ -1166,8 +1231,11 @@ mod tests {
             .map(|m| m.tool)
             .collect();
         assert_eq!(
+            // `python3`, not `python`: `install(HostOs::Linux)` is a served
+            // POSIX map, so `tool` self-resolves into it (see
+            // `a_posix_host_gets_its_own_package_manager_and_never_winget`).
             tools,
-            ["git", "python", "west", "cmake", "ninja", "dtc", "gperf"]
+            ["git", "python3", "west", "cmake", "ninja", "dtc", "gperf"]
         );
 
         // Yocto declared AND a Linux host -> `bitbake` is checked, so it is

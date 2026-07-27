@@ -1737,6 +1737,77 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn doctor_build_reports_westresolved_version_from_the_resolved_venv_not_bare_path() {
+        // tan-cli#123's exact bug, guarded end-to-end: `westResolved`'s
+        // reported version must come from `resolve_west_resolved_version`'s
+        // OWN `west_program` lookup, never a re-probe of a bare-PATH `west`
+        // (`BuildToolProbe::west_version`) that can be a different binary
+        // entirely. Before this test, deleting `resolve_west_resolved_version`'s
+        // `&west` argument (regressing it to a bare `"west"`) or deleting the
+        // `report.check_versions.insert("westResolved", ...)` call in
+        // `run_build_readiness` both left the full suite green.
+        //
+        // Precondition, not an assumption: a bare-PATH `west` that itself
+        // reports a version would make the assertion below pass under BOTH
+        // the correct code and the `tool_version("west")` regression, proving
+        // nothing. Skip on the rare host where one is globally installed --
+        // `west` normally lives only inside a bootstrapped venv (`venv.rs`'s
+        // module doc).
+        if crate::util::tool_version("west").is_some() {
+            return;
+        }
+
+        let tree = TempTree::new("west-resolved-version");
+        let (bin_sub, west_name) = if cfg!(windows) {
+            ("Scripts", "west.exe")
+        } else {
+            ("bin", "west")
+        };
+        let bin_dir = tree.path().join(".venv").join(bin_sub);
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let west_path = bin_dir.join(west_name);
+        // A real, already-built, self-contained executable stands in for
+        // `west`: `tool_version` only cares that `<program> --version` prints
+        // a dotted number, and `env!("CARGO")` -- the cargo binary that built
+        // this very test -- is guaranteed present and needs no companion DLL.
+        std::fs::copy(env!("CARGO"), &west_path).expect("copy cargo as a west stand-in");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&west_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&west_path, perms).unwrap();
+        }
+        let expected = crate::util::tool_version(&west_path.to_string_lossy())
+            .expect("the copied cargo binary reports its own --version");
+
+        let json = run(
+            &json_global(Some(tree.path())),
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        )
+        .json
+        .expect("json envelope");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+        let west_resolved = value["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "westResolved")
+            .unwrap_or_else(|| panic!("westResolved missing: {json}"));
+        assert_eq!(
+            west_resolved["version"].as_str(),
+            Some(expected.as_str()),
+            "westResolved must carry the RESOLVED venv west's version, not a \
+             bare-PATH re-probe: {json}"
+        );
+    }
+
+    #[test]
     fn doctor_build_does_not_repeat_the_host_environment_checks() {
         // The deliberate NEGATIVE half of the placement decision (#81's "one
         // fact, one check" trap). `--build` already carries a `zephyrSdk` probe

@@ -74,6 +74,11 @@ All notable changes to `tan` are documented here. Format follows
     version comes from the SAME workspace-venv resolver its status does,
     kept independent of `west`'s bare-PATH version so the two rows can never
     be attributed to the wrong resolver.
+  - `missingPrerequisites[].tool` for python is now host-correct — `python3`
+    on a served POSIX host, `python` on Windows — matching `prerequisites.
+    install.linux`/`.macos`'s own key and `tan bootstrap`'s `posix_refusal`
+    naming for the identical missing tool, instead of always `python`, which
+    a POSIX consumer could not re-key back into that same install map.
 - **Vendor `board-diagnostics` and `iot-starter` from the SDK scaffold catalog
   (#14).** Closes out the last two vendorable entries from alp-sdk#864's
   scaffold catalog (added by alp-sdk#903): `board-diagnostics` now emits the
