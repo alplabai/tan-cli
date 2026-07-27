@@ -102,7 +102,11 @@ than a clean 1:1:
   SDK's canonical Zephyr scaffold. Folding it onto the same vendored tree as
   `zephyr-app` would make the two templates byte-identical in the wizard's
   template picker — a product decision (merge/deprecate one), not something
-  to invent here.
+  to invent here. Because that stub is non-west-buildable, `minimal-app` is
+  **not** the non-interactive `tan init` default — `zephyr-app` is (tan-cli
+  #97). Do not restore it as the default without vendoring it first: a
+  `board.yaml` declaring `os: zephyr` over a plain-CMake tree is exactly the
+  silent host-binary build that issue reports.
 - **`iot-starter`** — no SDK catalog template covers Wi-Fi/MQTT/TLS at all
   (`gateway` is Modbus, not IoT connectivity).
 - **`board-diagnostics`** — no SDK catalog template is diagnostics/bring-up

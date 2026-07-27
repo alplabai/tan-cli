@@ -436,6 +436,45 @@ All notable changes to `tan` are documented here. Format follows
   unchanged and the fallback commands are still real.
 
 ### Fixed
+- **A `zephyr` slice that never loaded Zephyr was reported `[+] ok` for a host
+  x86-64 binary (#97).** The out-of-the-box path — `tan init
+  --non-interactive` then `tan build --native` — scaffolded the `minimal-app`
+  template, whose hand-generated `CMakeLists.txt` never calls
+  `find_package(Zephyr ...)`. `west build -b <board> <project>/src` configures
+  such a tree anyway (CMake only emits a *dev* warning about the missing
+  `project()` call), so the board name was never validated, `ninja` linked a
+  host executable, the tool exited 0, and the executor reported `[+] ok
+  (rc=0)` for an artefact `readelf -h` calls `Machine: Advanced Micro Devices
+  X86-64` with no `zephyr/` build output at all. Two fixes, both required:
+  - The executor now refuses such a slice. After a `zephyr` slice exits 0 it
+    checks the build dir for evidence that Zephyr's boilerplate actually ran —
+    a `ZEPHYR_BASE:` entry in `<cwd>/build/CMakeCache.txt` (what
+    `find_package(Zephyr)` caches, and the signal that also holds for a
+    `--sysbuild` slice whose superbuild has no top-level `zephyr/` of its own)
+    or, as a fallback, a `<cwd>/build/zephyr/` directory. Both are generated
+    build artefacts, deliberately NOT configure-log text: a grep for
+    `ZephyrConfig.cmake` breaks the moment CMake rewords a line. With neither
+    present the slice fails with the customer-actionable cause — its
+    `CMakeLists.txt` must call `find_package(Zephyr REQUIRED HINTS
+    $ENV{ZEPHYR_BASE})` before `project()` — instead of an rc. The guard
+    stands down when the slice redirects west's build dir (`-d`/`--build-dir`),
+    where the evidence lives somewhere tan cannot see, the same refusal
+    `resolve_zephyr_artefact` and the SDK-switch wipe already make. Living in
+    the executor, it survives any future change to the default template or SKU.
+  - The non-interactive `tan init` defaults are now a buildable pair:
+    `zephyr-app` (vendored from the SDK's `minimal` scaffold, real
+    `find_package(Zephyr)` + `board.yaml` → `alp.conf` via `EXTRA_CONF_FILE`)
+    instead of `minimal-app`, and `DEFAULT_SOM_SKU` `E1M-AEN801` instead of
+    `E1M-AEN701`. AEN701 has no qualified board tree in alp-sdk — only the two
+    loose `zephyr/boards/alp_e1m_aen701_m55_{he,hp}.overlay` files — so its
+    sibling `m55_he` slice died with `No board named
+    'alp_e1m_aen701_m55_he' found`; AEN801 is the lead part and the only AEN
+    SKU carrying both `zephyr/boards/alp/e1m_aen801_m55_he` and `…_m55_hp`.
+    `minimal-app` and `E1M-AEN701` both remain valid explicit `--template` /
+    `--som` values. This half shipped WITH the guard, never before it: alone it
+    would have removed the `m55_he` failure that was the only reason the run
+    exited non-zero, turning a red run into a green one with the host binary
+    still in place.
 - **A slice-confined unresolved `${TOOLCHAIN_ROOT}` failed the WHOLE plan,
   not just the slice that needed it.** `substitute_plan_tokens` inspected
   only the FIRST `${...}`-shaped token in each field and, on an unresolved

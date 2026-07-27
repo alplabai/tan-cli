@@ -97,7 +97,7 @@ pub(super) enum ResolveErr {
 use ResolveErr::*;
 
 /// Resolve the template id from `--template`, an interactive picker, or the
-/// `MinimalApp` default in non-interactive mode.
+/// `ZephyrApp` default in non-interactive mode.
 pub(super) fn resolve_template(
     arg: Option<&str>,
     interactive: bool,
@@ -123,7 +123,16 @@ pub(super) fn resolve_template(
             Err(_) => Err(Cancelled),
         };
     }
-    Ok(WizardTemplateId::MinimalApp)
+    // `ZephyrApp`, not `MinimalApp` (tan-cli #97). `minimal-app` is
+    // HAND-GENERATED: its CMakeLists.txt never calls `find_package(Zephyr
+    // ...)`, so the very first `tan build` after a bare `tan init
+    // --non-interactive` pointed west at a plain host CMake project and
+    // linked an x86-64 binary for a core declared `os: zephyr`. `zephyr-app`
+    // is vendored from the SDK's `minimal` scaffold and does the right thing
+    // (find_package(Zephyr) + board.yaml -> alp.conf via EXTRA_CONF_FILE), so
+    // the out-of-the-box path is buildable. `minimal-app` stays available via
+    // an explicit `--template` and in the interactive picker.
+    Ok(WizardTemplateId::ZephyrApp)
 }
 
 /// Resolve the optional project name from `--name` or an interactive prompt;
@@ -199,7 +208,28 @@ pub(super) fn resolve_destination(
 
 #[cfg(test)]
 mod tests {
-    use super::{WizardTemplateId, app_core_for_template, parse_cores, resolve_name};
+    use super::{
+        WizardTemplateId, app_core_for_template, parse_cores, resolve_name, resolve_template,
+    };
+
+    #[test]
+    fn the_non_interactive_default_template_is_a_real_zephyr_app() {
+        // tan-cli #97: the non-interactive default used to be `MinimalApp`,
+        // whose hand-generated CMakeLists.txt never calls
+        // `find_package(Zephyr ...)` -- so a bare `tan init
+        // --non-interactive` followed by `tan build` linked a host x86-64
+        // binary for a core declared `os: zephyr`. The default must name a
+        // template that actually loads Zephyr.
+        assert_eq!(
+            resolve_template(None, false).unwrap(),
+            WizardTemplateId::ZephyrApp
+        );
+        // An explicit --template still wins, minimal-app included.
+        assert_eq!(
+            resolve_template(Some("minimal-app"), false).unwrap(),
+            WizardTemplateId::MinimalApp
+        );
+    }
 
     #[test]
     fn app_core_for_template_uses_the_vendored_core_for_zephyr_app() {

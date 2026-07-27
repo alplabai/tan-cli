@@ -262,6 +262,43 @@ pub(super) fn cmake_cache_configured(slice_cwd: &Path) -> bool {
     slice_cwd.join("build").join("CMakeCache.txt").is_file()
 }
 
+/// Whether this slice's build dir shows that Zephyr's CMake boilerplate was
+/// actually loaded — the signal behind the `os: zephyr` guard (tan-cli #97).
+///
+/// The reported defect: a project whose `CMakeLists.txt` never calls
+/// `find_package(Zephyr ...)` still configures and links fine under `west
+/// build -b <board>` (CMake only emits a *dev* warning about the missing
+/// `project()` call), so a core declared `os: zephyr` produced a host x86-64
+/// executable and the executor reported it `[+] ok`. The board name is never
+/// even validated, because nothing loaded the code that would validate it.
+///
+/// Two signals, either of which proves the boilerplate ran; both are
+/// generated build artefacts, NOT log text (a configure-log grep for
+/// `ZephyrConfig.cmake` breaks the moment CMake rewords a line, and
+/// log-scraping gates are a failure class this repo has been burned by):
+///
+/// 1. A `ZEPHYR_BASE:` entry in the build dir's own `CMakeCache.txt`. This is
+///    the primary signal and the closest thing to the fact being asserted —
+///    `find_package(Zephyr)` is what caches it, a plain host configure never
+///    does (verified against a real `<slice>/build/CMakeCache.txt`, which
+///    carries `ZEPHYR_BASE:PATH=…`, versus a baremetal one, which has no
+///    `ZEPHYR_BASE` line at all). It also holds for a `--sysbuild` slice,
+///    whose superbuild has its own top-level cache.
+/// 2. A `zephyr/` subdirectory under the build dir — Zephyr's boilerplate
+///    binary dir. Kept as an OR fallback rather than the primary signal so
+///    the guard can only ever fail a build it is SURE about: a real Zephyr
+///    tree that somehow shipped no readable `CMakeCache.txt` still passes.
+///
+/// Callers must skip this check when `build_dir_overridden` — west then wrote
+/// somewhere this can't see, same refusal `resolve_zephyr_artefact` already
+/// makes.
+pub(super) fn zephyr_boilerplate_loaded(slice_cwd: &Path) -> bool {
+    let build = slice_cwd.join("build");
+    std::fs::read_to_string(build.join("CMakeCache.txt"))
+        .is_ok_and(|c| c.lines().any(|l| l.starts_with("ZEPHYR_BASE:")))
+        || build.join("zephyr").is_dir()
+}
+
 /// Absolute, lossy-string form of a path (no filesystem round-trip beyond
 /// `std::path::absolute`; falls back to the path as-is if that fails).
 fn abs_string(p: &Path) -> Option<String> {
