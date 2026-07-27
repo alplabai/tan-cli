@@ -184,15 +184,23 @@ jobs:
       - name: read Zephyr SDK pin
         run: |
           set -euo pipefail
+          # Bind to plain locals before formatting. Inlining the subscripts as
+          # f"...{sdk[\"version\"]}..." needs backslash escapes inside the
+          # f-string expression, which is a SyntaxError -- and it is what broke
+          # this step on its first run. alp-sdk's pr-renode-aen-smoke.yml has
+          # this exact shape for this exact reason; do not re-compress it.
           python3 -c '
           import json
           d = json.load(open("alp-sdk/metadata/toolchains.json"))
           sdk = d["zephyrSdk"]
           art = next(a for a in sdk["artifacts"]
                      if a["host"] == "linux-x86_64" and a["component"] == "minimal-sdk")
-          print(f"ZEPHYR_SDK_VERSION={sdk[\"version\"]}")
-          print(f"ZEPHYR_SDK_URL={sdk[\"baseUrl\"] + art[\"filename\"]}")
-          print(f"ZEPHYR_SDK_SHA256={art[\"sha256\"]}")
+          version = sdk["version"]
+          url = sdk["baseUrl"] + art["filename"]
+          sha256 = art["sha256"]
+          print(f"ZEPHYR_SDK_VERSION={version}")
+          print(f"ZEPHYR_SDK_URL={url}")
+          print(f"ZEPHYR_SDK_SHA256={sha256}")
           ' >> "$GITHUB_ENV"
 
       - name: install Zephyr SDK (arm-zephyr-eabi)
