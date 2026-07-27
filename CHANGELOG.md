@@ -502,6 +502,18 @@ All notable changes to `tan` are documented here. Format follows
   registry-sourced): a vendored `board.yaml` has no representation for
   `iot-starter`'s inherent `mqtt: true`, so deriving that line fully is not
   possible without reintroducing a different self-contradiction.
+  - Follow-up hardening (review of #137): `vendored_library_names` parsed the
+    vendored `board.yaml`'s `libraries:` block with a hand-rolled line scan
+    that matched only the `- name: <value>` spelling, not the bare-shorthand
+    `- <value>` form `tan_core::model`'s own `LibraryEntry` already accepts —
+    a future re-vendor shipping the shorthand form would have silently gone
+    back to "Default libraries: (none)" with no test catching it. It now
+    parses through `tan_core::model::BoardModel`/`LibraryEntry` directly, so
+    both spellings are covered. Also widened
+    `vendored_library_names_matches_across_families` from asserting only the
+    `edge-ai` AEN/V2N pair to all four (`minimal`/`sensor`/`edge-ai`/
+    `diagnostics`) — the doc comment already claimed family-invariance for
+    every vendored template, but only one pair was checked.
 - **`tan bootstrap` reused a workspace across a patch-level Zephyr bump, so the
   next build was green against the wrong Zephyr AND the wrong hal_alif (#98).**
   The reuse test compared only `MAJOR.MINOR`, so upgrading alp-sdk `v0.13.0` ->
