@@ -70,6 +70,28 @@ fn resolve_workspace_root(workspace_folders: &[String]) -> Option<String> {
     workspace_folders.first().map(|f| to_posix(Path::new(f)))
 }
 
+/// Nearest ENCLOSING SDK checkout: walk `start`'s parents upward, first one
+/// carrying the loader marker wins, stopping at the filesystem root. `start`
+/// itself is deliberately not probed — every caller checks it first.
+///
+/// This is what makes the documented Quickstart work: `tan --project
+/// examples/<cat>/<name> build` sets the workspace root three levels BELOW the
+/// alp-sdk checkout it was invoked from, and before this the lateral
+/// self-or-sibling probe could never see the enclosing checkout (issue #101).
+/// The walk yields at most ONE path — the nearest enclosing root — so it can
+/// never turn an otherwise-unambiguous resolution into an "ambiguous" `None`.
+pub fn nearest_ancestor_sdk(start: &str, path_exists: impl Fn(&str) -> bool) -> Option<String> {
+    let mut current = Path::new(start).parent();
+    while let Some(dir) = current {
+        let posix = to_posix(dir);
+        if contains_loader_script(&posix, &path_exists) {
+            return Some(posix);
+        }
+        current = dir.parent();
+    }
+    None
+}
+
 fn collect_sdk_candidates(
     workspace_folders: &[String],
     path_exists: &impl Fn(&str) -> bool,
@@ -82,6 +104,7 @@ fn collect_sdk_candidates(
     };
 
     for folder in workspace_folders {
+        let lateral_before = candidates.len();
         // Check both the workspace root and the conventional sibling alp-sdk folder.
         if contains_loader_script(folder, path_exists) {
             // Normalize before dedup: the sibling probe below always pushes a
@@ -102,6 +125,16 @@ fn collect_sdk_candidates(
                 push_unique(sibling, &mut candidates);
             }
         }
+
+        // Only when nothing lateral answered for THIS folder: the enclosing
+        // checkout. Kept a strict fallback so the established self/sibling
+        // precedence is untouched — a workspace that already resolves keeps
+        // resolving to exactly what it resolved to before.
+        if candidates.len() == lateral_before {
+            if let Some(ancestor) = nearest_ancestor_sdk(folder, path_exists) {
+                push_unique(ancestor, &mut candidates);
+            }
+        }
     }
 
     candidates
@@ -110,7 +143,9 @@ fn collect_sdk_candidates(
 /// Auto-discover the SDK for a single workspace root using the exact same
 /// candidate set + exactly-one-or-none rule `resolve_project_context` applies
 /// (the workspace root itself, or its sibling `alp-sdk` — **not**
-/// `alp-sdk-upstream`; two or more candidates is ambiguous, not a choice).
+/// `alp-sdk-upstream` — else the nearest ENCLOSING checkout via
+/// [`nearest_ancestor_sdk`]; two or more candidates is ambiguous, not a
+/// choice, and the ancestor walk contributes at most one).
 /// Exposed standalone so a caller that only needs "what would build/validate/
 /// doctor/etc. resolve here" (e.g. `tan sdk current`'s `sourceTier`) can ask
 /// without threading a full [`ProjectResolutionInput`] through.
@@ -356,6 +391,52 @@ mod tests {
             p == "/work/alp-sdk-upstream/scripts/alp_project.py"
         });
         assert_eq!(found, None);
+    }
+
+    #[test]
+    fn discover_workspace_sdk_walks_up_to_the_enclosing_checkout() {
+        // Issue #101, the Quickstart layout: `--project examples/<cat>/<name>`
+        // puts the workspace root three levels below the alp-sdk checkout, and
+        // no lateral candidate exists (`examples/peripheral-io/alp-sdk` is not
+        // a thing an alp-sdk checkout contains).
+        let found = discover_workspace_sdk(
+            "/work/alp-sdk/examples/peripheral-io/gpio-button-led",
+            |p| p == "/work/alp-sdk/scripts/alp_project.py",
+        );
+        assert_eq!(found.as_deref(), Some("/work/alp-sdk"));
+    }
+
+    #[test]
+    fn discover_workspace_sdk_ancestor_walk_stops_at_the_nearest_match() {
+        // Two nested checkouts: the walk stops at the first one going up, so the
+        // outer one is never even a candidate and the exactly-one-or-none rule
+        // is not tripped into reporting "ambiguous".
+        let found = discover_workspace_sdk("/work/alp-sdk/vendor/alp-sdk/examples/x", |p| {
+            p == "/work/alp-sdk/scripts/alp_project.py"
+                || p == "/work/alp-sdk/vendor/alp-sdk/scripts/alp_project.py"
+        });
+        assert_eq!(found.as_deref(), Some("/work/alp-sdk/vendor/alp-sdk"));
+    }
+
+    #[test]
+    fn discover_workspace_sdk_with_no_sdk_anywhere_up_the_tree_is_none() {
+        // The negative the walk must not break: nothing above the workspace
+        // root carries the marker, so the walk runs out at the filesystem root
+        // and reports None rather than latching onto something unrelated.
+        let found = discover_workspace_sdk("/home/dev/scratch/proj", |_| false);
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn nearest_ancestor_sdk_never_returns_the_start_itself() {
+        // The start dir is every caller's tier-1 probe; the walk owns parents
+        // only, so it cannot double-push the workspace root as a second
+        // candidate and make an unambiguous resolution ambiguous.
+        assert_eq!(
+            nearest_ancestor_sdk("/work/alp-sdk", |p| p
+                == "/work/alp-sdk/scripts/alp_project.py"),
+            None
+        );
     }
 
     #[test]

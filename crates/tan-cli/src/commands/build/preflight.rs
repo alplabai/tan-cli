@@ -46,6 +46,7 @@ pub(crate) fn probe_build_preflight(g: &GlobalArgs, context: &ProjectContext) ->
         west_available,
         workspace_zephyr_version: read_workspace_zephyr_version(workspace.as_deref()),
         sdk_zephyr_pin: read_sdk_zephyr_pin(sdk_root.as_deref()),
+        project_scope: g.project.clone(),
     };
     build_preflight_checks(&input)
 }
