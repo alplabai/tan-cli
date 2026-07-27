@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "_comment": [
+    "FROZEN issue codes: the exact `issues[].code` strings alp-sdk-vscode",
+    "matches with `===` to gate real behaviour. Every one of those matches",
+    "FAILS OPEN -- an unrecognised code is indistinguishable from 'no",
+    "problem', so a rename here is silent on both sides with CI green. See",
+    "alplabai/tan-cli#106.",
+    "",
+    "This file is the single source: `crates/tan-cli/tests/contract.rs`",
+    "(`frozen_issue_codes`) gates it against the emitting sources, and the",
+    "release workflow folds it into the published `envelope-contract.json`",
+    "asset so the extension's own contract test can diff against an artefact",
+    "instead of a hand-copied fixture.",
+    "",
+    "Adding a code here is cheap. REMOVING or RENAMING one is a breaking",
+    "wire change: bump the CLI MAJOR/MINOR, say so in CHANGELOG.md, and open",
+    "the matching issue on alp-sdk-vscode. Do not 'fix' a rename by",
+    "loosening the consumer to a prefix match -- `bootstrap.` would swallow",
+    "codes it has no verdict for."
+  ],
+  "issueCodes": [
+    {
+      "code": "bootstrap.windows-unsupported",
+      "status": "retired",
+      "severity": "error",
+      "consumer": "alp-sdk-vscode src/alpCli/service.ts :: bootstrapHostVerdict",
+      "consumerEffect": "Refuses the Windows bootstrap and offers 'Reopen in WSL'.",
+      "note": "Emitted by tan v0.3.0 and EARLIER only (the retired commands/bootstrap.rs, which shelled the SDK's POSIX bootstrap.sh). Native Windows bootstrap shipped in v0.3.1, so current tan never emits it -- but the consumer branch is permanent back-compat for anyone pinned to an old binary via alpSdk.cliPath. RESERVED: this spelling must never be reused for a different verdict, which is what the gate asserts."
+    },
+    {
+      "code": "bootstrap.yocto-host",
+      "status": "frozen",
+      "severity": "error",
+      "consumer": "alp-sdk-vscode src/alpCli/service.ts :: bootstrapHostVerdict",
+      "consumerEffect": "Refuses to bootstrap a Yocto-only project on a non-Linux host. Renamed, the project is sent into a bootstrap that cannot work here.",
+      "emittedBy": "crates/tan-cli/src/commands/bootstrap/mod.rs",
+      "literal": "\"yocto-host\"",
+      "note": "The consumer ALSO requires severity 'error'. The mixed-board WARNING reuses this same suffix at severity 'warning' and must stay a warning -- promoting it would refuse a board that can bootstrap its Zephyr cores."
+    },
+    {
+      "code": "bootstrap.prerequisites-missing",
+      "status": "frozen",
+      "severity": "error",
+      "consumer": "alp-sdk-vscode src/alpCli/service.ts :: prerequisitesMissingIssue",
+      "consumerEffect": "Stops the extension spawning the real bootstrap terminal after tan already refused. Renamed, the customer watches the identical failure scroll past with the install guidance lost.",
+      "emittedBy": "crates/tan-core/src/bootstrap/prerequisites.rs",
+      "literal": "code: \"prerequisites-missing\"",
+      "note": "The `bootstrap.` prefix is applied by `failure()` in crates/tan-cli/src/commands/bootstrap/mod.rs. NOT the only refusal from that gate: `bootstrap.python-not-runnable` and `bootstrap.python-too-old` are separate codes (no missing TOOL to report) and a consumer wanting those two must match them by name."
+    },
+    {
+      "code": "presets.sdk-root-unresolved",
+      "status": "frozen",
+      "severity": "warning",
+      "consumer": "alp-sdk-vscode src/ideHub/newProjectFlowPanel.ts",
+      "consumerEffect": "Warns that the Hardware list carries no core topology. Renamed, the New Project wizard silently falls back to its static E1M_MODULES catalogue and a HETEROGENEOUS SoM scaffolds single-core with no IPC -- the reference part E1M-AEN801 is multi-core, so that is the default path.",
+      "emittedBy": "crates/tan-cli/src/commands/presets.rs",
+      "literal": "\"presets.sdk-root-unresolved\"",
+      "note": "Also pinned end-to-end by the `presets-no-sdk` golden envelope, which is the stronger gate: it asserts the code actually reaches the wire, not just that the string survives in the source."
+    }
+  ]
+}

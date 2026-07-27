@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# `discover_examples` keys on the presence of a board.yaml; nothing in this
+# case parses it, so the minimum valid document is enough.
+schema_version: 2

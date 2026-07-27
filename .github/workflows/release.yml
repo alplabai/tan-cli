@@ -17,8 +17,10 @@
 #                   tan-<target-triple>.exe     (Windows)
 #                Download URL is therefore deterministic:
 #                   https://github.com/alplabai/tan-cli/releases/download/<tag>/<asset>
-#                Plus `checksums.txt` (sha256 of every binary) and a GitHub
-#                build-provenance attestation covering all of the above —
+#                Plus `checksums.txt` (sha256 of every binary),
+#                `envelope-contract.json` (the frozen issue codes + one golden
+#                envelope per command family — see contract/README.md), and a
+#                GitHub build-provenance attestation covering all of the above —
 #                verify with `gh attestation verify <file> --repo alplabai/tan-cli`.
 #
 #   Targets    : win32  x64   -> tan-x86_64-pc-windows-msvc.exe
@@ -176,6 +178,50 @@ jobs:
         with:
           path: assets
           merge-multiple: true
+      # The JSON envelope contract, as a downloadable artefact (issue #106).
+      # alp-sdk-vscode gates real behaviour on exact issue-code strings and
+      # unversioned `data` field names, and every one of those matches fails
+      # open — a rename is indistinguishable from "no problem" on the consumer
+      # side. Publishing the goldens lets the extension's own contract test
+      # diff against THIS instead of a hand-copied fixture that drifts.
+      #
+      # Pure re-packaging: every input is a committed file already gated by
+      # `cargo test -p alp-tan-cli --test contract`, so there is no fact here
+      # that can be right in the repo and wrong in the asset. Run it locally
+      # with `python3` from the repo root to see exactly what ships.
+      - name: Bundle the envelope contract
+        shell: bash
+        run: |
+          python3 - "${GITHUB_REF_NAME#v}" > assets/envelope-contract.json <<'PY'
+          import json, pathlib, sys
+
+          root = pathlib.Path("contract")
+          registry = json.loads((root / "issue-codes.json").read_text(encoding="utf-8"))
+          envelopes = {}
+          for case in sorted(p for p in (root / "envelopes").iterdir() if p.is_dir()):
+              envelopes[case.name] = {
+                  "args": [
+                      line.strip()
+                      for line in (case / "args.txt").read_text(encoding="utf-8").splitlines()
+                      if line.strip()
+                  ],
+                  "exitCode": int((case / "expected.exit").read_text(encoding="utf-8").strip()),
+                  "envelope": json.loads((case / "expected.json").read_text(encoding="utf-8")),
+              }
+          json.dump(
+              {
+                  "schemaVersion": 1,
+                  "tanVersion": sys.argv[1],
+                  "issueCodes": registry["issueCodes"],
+                  "envelopes": envelopes,
+              },
+              sys.stdout,
+              indent=2,
+          )
+          PY
+          python3 -c "import json,sys; d=json.load(open('assets/envelope-contract.json')); \
+            assert d['envelopes'] and d['issueCodes'], 'empty bundle'; \
+            print('bundled', len(d['envelopes']), 'envelopes,', len(d['issueCodes']), 'issue codes')"
       - name: Generate checksums.txt
         shell: bash
         working-directory: assets
