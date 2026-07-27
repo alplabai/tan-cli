@@ -1099,21 +1099,26 @@ mod tests {
         // install maps) stays `null` while `cmake` becomes runnable, and the two
         // hosts get DIFFERENT commands for it.
         //
-        // The `ninja` expectation below is CROSS-REPO DATA, not a tan rule:
-        // alp-sdk#971 has since widened `prerequisites.posix` to include `ninja`
-        // and added `install.linux.ninja` / `install.macos.ninja`. This asserts
-        // against `fallback_facts`, i.e. tan's VENDORED copy of that manifest,
-        // which is still on the older pin -- so it is green here and will go red
-        // the moment the fixture + constants + `PINNED_SDK_TAG` are re-vendored.
-        // That red is the gate doing its job: update the expectation to the two
-        // new commands then, do not weaken or delete the assertion.
-        for (host, cmake_command, git_command, python_tool, python_command) in [
+        // The `ninja` expectation below is CROSS-REPO DATA, not a tan rule.
+        // This assertion previously expected `None` and carried a note saying
+        // it would go red once alp-sdk#971's widened `prerequisites.posix` was
+        // re-vendored, with the instruction to update the expectation rather
+        // than weaken it. That is what happened, and this is that update.
+        //
+        // Worth keeping precise, because it was mis-stated more than once: the
+        // map read here is `fallback_facts` (via `fn install(host)`), tan's
+        // HAND-PORTED copy of the manifest -- not `contract/fixtures/bootstrap/
+        // manifest.json`. Re-vendoring the fixture alone never moves this;
+        // fixing the hand-ported constants is what does. The two being separate
+        // is exactly how they drifted apart.
+        for (host, cmake_command, git_command, python_tool, python_command, ninja_command) in [
             (
                 HostOs::Linux,
                 Some("sudo apt-get install -y cmake"),
                 Some("sudo apt-get install -y git"),
                 "python3",
                 Some("sudo apt-get install -y python3"),
+                Some("sudo apt-get install -y ninja-build"),
             ),
             (
                 HostOs::MacOs,
@@ -1121,12 +1126,13 @@ mod tests {
                 Some("brew install git"),
                 "python3",
                 Some("brew install python3"),
+                Some("brew install ninja"),
             ),
             // A POSIX host the manifest does not serve keeps the old all-`null`
             // behaviour rather than being handed the nearest OS's commands --
             // and, with no `python3` key to read the host signal off of
             // either, `tool` falls back to the check's own stable `python`.
-            (HostOs::Other, None, None, "python", None),
+            (HostOs::Other, None, None, "python", None, None),
         ] {
             let report = build_readiness_report(
                 "t".to_string(),
@@ -1156,7 +1162,7 @@ mod tests {
             // missing tool (the divergence a doctor-vs-bootstrap review found).
             assert_eq!(command_for(python_tool), python_command, "{host:?}");
             assert_eq!(command_for("west"), None, "{host:?}");
-            assert_eq!(command_for("ninja"), None, "{host:?}");
+            assert_eq!(command_for("ninja"), ninja_command, "{host:?}");
             // No POSIX install map lists either -- same "no invented command"
             // rule, on every host including the ones that do serve cmake/git.
             assert_eq!(command_for("dtc"), None, "{host:?}");

@@ -541,6 +541,29 @@ All notable changes to `tan` are documented here. Format follows
   an in-flight contract-surface change).
 
 ### Fixed
+- **`ninja` was a Windows-only prerequisite in tan's own fallback, so a POSIX
+  host on a legacy SDK still hit the original defect (#121).** alp-sdk declared
+  `ninja` a POSIX prerequisite with real `install.linux`/`install.macos`
+  commands in #971/#981 (merged `d6fd3a18`), but the fact lives in THREE places
+  and only one had moved:
+  - `metadata/bootstrap.json` upstream -- fixed there;
+  - `contract/fixtures/bootstrap/manifest.json`, tan's vendored copy -- now
+    re-vendored byte-exact (sha256 `5202025aac269040f1893c843b2071d69f0a7f4bdd7b91755d832aa706466c7a`,
+    5577 bytes, LF) with `PINNED_SDK_TAG` moved `0ed078a6` -> `3ffd8774`,
+    20 commits forward;
+  - **`fallback_facts`, the hand-ported constants a legacy SDK with no manifest
+    actually uses** -- which still said `prerequisites_posix: [git, cmake,
+    python3]` and served no POSIX `ninja` command. Fixed here. That third copy
+    is the one a customer on a released SDK hits.
+  - Three expectations moved with it, each because the data moved and not to
+    make the suite green: `parses_every_field_of_the_real_manifest` (reads the
+    re-vendored fixture), `the_posix_refusal_stays_one_line_but_now_carries_real_commands`
+    (whose name had outrun its assertion -- `ninja` was the last commandless
+    POSIX entry), and `a_posix_host_gets_its_own_package_manager_and_never_winget`,
+    which carried a written prediction that it would go red on exactly this
+    change, with instructions not to weaken it.
+  - Note `ninja-build` vs `ninja`: the package name differs from the binary
+    name, which is the whole argument for carrying these as data.
 - **A pre-release tag would have shipped to every customer as `latest`.**
   `release.yml` set neither `prerelease` nor `make_latest`, so a `v0.4.0-rc1`
   tag's classification rested entirely on the action's default -- and
