@@ -30,6 +30,7 @@
 //! see `IOT_STARTER_SUPPORTED_SKU`.
 
 use super::example_catalog::retarget_board_yaml_som;
+use crate::model::{BoardModel, LibraryEntry};
 use crate::wizard::models::WizardTemplateId;
 
 /// One vendored file: its path relative to the project root, and its exact
@@ -272,29 +273,28 @@ fn vendored_app_core_key(board_yaml: &str) -> Option<&str> {
     None
 }
 
-/// Every `name:` value declared inside a vendored board.yaml's top-level
+/// Every library name declared inside a vendored board.yaml's top-level
 /// `libraries:` block, in file order (e.g. `["tflite-micro"]` for `edge-ai`,
-/// `["mbedtls"]` for `iot`). Comment lines and each entry's `cores:` child
-/// line are skipped — only the `  - name: <value>` line itself matches. A
-/// vendored board.yaml with no `libraries:` block at all (`minimal`/`sensor`/
-/// `diagnostics`) returns empty, which is the real answer for those
-/// templates, not an unset default.
-fn vendored_library_names(board_yaml: &str) -> Vec<&str> {
-    let mut in_libraries = false;
-    let mut names = Vec::new();
-    for line in board_yaml.lines() {
-        if !in_libraries {
-            in_libraries = line == "libraries:";
-            continue;
-        }
-        if !line.is_empty() && !line.starts_with(' ') {
-            break; // The next top-level key ends the libraries: block.
-        }
-        if let Some(name) = line.trim_start().strip_prefix("- name: ") {
-            names.push(name.trim());
-        }
-    }
-    names
+/// `["mbedtls"]` for `iot`). Parsed through the same `BoardModel`/
+/// `LibraryEntry` model a user's own board.yaml goes through (`crate::model`)
+/// rather than a hand-rolled line scan, so both `LibraryEntry` spellings --
+/// the bare shorthand (`- tflite-micro`) and the scoped object (`- name:
+/// tflite-micro`) -- are covered, not just the one the vendored trees happen
+/// to use today. A vendored board.yaml with no `libraries:` block at all
+/// (`minimal`/`sensor`/`diagnostics`) returns empty, which is the real
+/// answer for those templates, not an unset default.
+fn vendored_library_names(board_yaml: &str) -> Vec<String> {
+    let model: BoardModel =
+        serde_yaml::from_str(board_yaml).expect("vendored board.yaml parses as YAML");
+    model
+        .libraries
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| match entry {
+            LibraryEntry::Name(name) => name,
+            LibraryEntry::Scoped { name, .. } => name,
+        })
+        .collect()
 }
 
 /// The vendored board.yaml text for a fixed `(template, sku)` file table --
@@ -310,8 +310,8 @@ fn board_yaml_text(tree: &'static [VendoredFile]) -> &'static str {
 /// `template_id`: `Some(..)` (even an empty vec) for every template that has
 /// a vendored SDK scaffold, read straight from its Alif-Ensemble-family
 /// `board.yaml` -- the `libraries:` block does not vary by SoM family for any
-/// vendored template today (edge-ai's AEN and V2N trees both declare
-/// `tflite-micro`; see `vendored_library_names_matches_across_families`
+/// of the four family-split templates today (all four AEN/V2N pairs are
+/// asserted equal by `vendored_library_names_matches_across_families`
 /// below), so the AEN tree is a safe stand-in and `tan explain` has no `--som`
 /// to pick a specific one anyway. `None` for `minimal-app`, the one template
 /// still hand-generated with no vendored tree to read (callers keep using the
@@ -325,7 +325,7 @@ fn board_yaml_text(tree: &'static [VendoredFile]) -> &'static str {
 /// `tflite-micro`. Deriving from the vendored text instead of a second
 /// hand-synced registry field means a future re-vendor can't leave this
 /// summary stale the way it did here.
-pub fn vendored_library_names_for(template_id: WizardTemplateId) -> Option<Vec<&'static str>> {
+pub fn vendored_library_names_for(template_id: WizardTemplateId) -> Option<Vec<String>> {
     let board_yaml = match template_id {
         WizardTemplateId::MinimalApp => return None,
         WizardTemplateId::ZephyrApp => board_yaml_text(MINIMAL_AEN),
@@ -937,7 +937,7 @@ mod tests {
         // and must not be what `tan explain` reads.
         assert_eq!(
             vendored_library_names_for(WizardTemplateId::EdgeAiStarter),
-            Some(vec!["tflite-micro"])
+            Some(vec!["tflite-micro".to_string()])
         );
     }
 
@@ -945,7 +945,7 @@ mod tests {
     fn vendored_library_names_for_iot_starter_reports_mbedtls() {
         assert_eq!(
             vendored_library_names_for(WizardTemplateId::IotStarter),
-            Some(vec!["mbedtls"])
+            Some(vec!["mbedtls".to_string()])
         );
     }
 
@@ -981,13 +981,34 @@ mod tests {
 
     #[test]
     fn vendored_library_names_matches_across_families() {
-        // `vendored_library_names_for` reads only the AEN tree -- this only
-        // stays a safe stand-in for the V2N tree as long as the two trees
-        // agree. edge-ai is the one vendored template with a non-empty
-        // `libraries:` block on both families today.
+        // `vendored_library_names_for` reads only the AEN tree for every
+        // family-split template -- this only stays a safe stand-in for the
+        // V2N sibling as long as every pair agrees, so assert all four
+        // (MINIMAL/SENSOR/EDGE_AI/DIAGNOSTICS), not just edge-ai (the one
+        // with a non-empty `libraries:` block on both families today). A
+        // future re-vendor that adds a `libraries:` block to one family
+        // without its sibling must fail this, not silently leave the
+        // un-read family stale.
+        for (aen, v2n) in [MINIMAL, SENSOR, EDGE_AI, DIAGNOSTICS] {
+            assert_eq!(
+                vendored_library_names(board_yaml_text(aen)),
+                vendored_library_names(board_yaml_text(v2n)),
+            );
+        }
+    }
+
+    #[test]
+    fn vendored_library_names_accepts_bare_shorthand() {
+        // `tan_core::model`'s `LibraryEntry` accepts a bare `- <name>` entry
+        // as shorthand for a project-wide library
+        // (`libraries_accepts_bare_name_or_scoped_object` in
+        // `crate::model`), and a future re-vendor is free to ship that form
+        // -- this must parse it the same as the scoped `- name: <name>` form,
+        // not silently drop it.
+        let board_yaml = "libraries:\n  - tflite-micro\n  - name: mbedtls\n    cores: [m33_sm]\n";
         assert_eq!(
-            vendored_library_names(board_yaml_text(EDGE_AI_AEN)),
-            vendored_library_names(board_yaml_text(EDGE_AI_V2N)),
+            vendored_library_names(board_yaml),
+            vec!["tflite-micro", "mbedtls"]
         );
     }
 

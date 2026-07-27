@@ -252,7 +252,7 @@ fn project_template_details(pt: &WizardTemplateDefinition) -> Vec<String> {
 /// (none)" while its vendored board.yaml declares `tflite-micro`.
 fn template_library_names(pt: &WizardTemplateDefinition) -> Vec<String> {
     match vendored_library_names_for(pt.id) {
-        Some(names) => names.into_iter().map(str::to_string).collect(),
+        Some(names) => names,
         None => pt.libs.iter().map(|s| s.to_string()).collect(),
     }
 }
