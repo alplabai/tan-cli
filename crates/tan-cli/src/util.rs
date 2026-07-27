@@ -139,6 +139,51 @@ pub fn python_version(binary: &str) -> Option<(u32, u32)> {
     parse_python_version(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Probe `program`'s version by spawning `program --version` and extracting
+/// the first dotted-number token from its output (stdout, falling back to
+/// stderr for a tool that banners there). `None` when the program cannot be
+/// spawned or nothing in its output looks like a version.
+///
+/// The version tan-cli#123's `doctor --build` reports: WHATEVER TAN ITSELF
+/// RESOLVED for `program`, never a second, independent re-probe a consumer
+/// would have to reconcile against the presence check beside it. Presence
+/// still comes from [`command_on_path`]/[`tool_available`]; this is purely the
+/// extra, optional fact.
+///
+/// `ponytail:` one shared `--version` flag plus a generic first-dotted-token
+/// scan, not a per-tool parser — every tool this feeds today (`git`, `cmake`,
+/// `ninja`, `west`, `bitbake`, `dtc`, `gperf`) accepts long `--version`, and a
+/// banner with an unrelated dotted number ahead of the real one would
+/// misparse; add a per-tool parser if that's ever observed in practice.
+pub fn tool_version(program: &str) -> Option<String> {
+    let output = Command::new(program).arg("--version").output().ok()?;
+    let text = if !output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    } else {
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    first_version_token(&text)
+}
+
+/// The leading `v`-optional dotted-number run of the first whitespace token
+/// that has one, e.g. `"West version: v1.5.0"` -> `"1.5.0"`, `"cmake version
+/// 3.28.1\n\n..."` -> `"3.28.1"`, `"Version: DTC 1.7.0-g0c1e5cb"` -> `"1.7.0"`.
+/// `None` when no token qualifies — requiring a literal `.` means a bare
+/// year/count (e.g. a copyright line) is never mistaken for a version.
+fn first_version_token(text: &str) -> Option<String> {
+    for raw in text.split_whitespace() {
+        let word = raw.trim_start_matches(['v', 'V']);
+        let digits: String = word
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if digits.contains('.') && digits.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            return Some(digits.trim_end_matches('.').to_string());
+        }
+    }
+    None
+}
+
 /// A user-facing error string when `binary` is a Python older than
 /// [`MIN_PYTHON`]; `None` when it is new enough OR its version can't be
 /// determined (don't block on an unknown — let the real call run and surface
@@ -540,6 +585,41 @@ mod tests {
         assert_eq!(parse_python_version("noise\n3.12\n"), Some((3, 12)));
         assert_eq!(parse_python_version(""), None);
         assert_eq!(parse_python_version("python 3"), None);
+    }
+
+    #[test]
+    fn first_version_token_handles_real_tool_banners() {
+        assert_eq!(
+            first_version_token("West version: v1.5.0\n"),
+            Some("1.5.0".to_string())
+        );
+        assert_eq!(
+            first_version_token(
+                "cmake version 3.28.1\n\nCMake suite maintained and supported by Kitware."
+            ),
+            Some("3.28.1".to_string())
+        );
+        assert_eq!(first_version_token("1.11.1\n"), Some("1.11.1".to_string()));
+        assert_eq!(
+            first_version_token("git version 2.43.0"),
+            Some("2.43.0".to_string())
+        );
+        assert_eq!(
+            first_version_token("GNU gperf 3.1\nCopyright (C) 2024 Free Software Foundation"),
+            Some("3.1".to_string())
+        );
+        // A trailing git-describe suffix must not swallow the version with it.
+        assert_eq!(
+            first_version_token("Version: DTC 1.7.0-g0c1e5cb\n"),
+            Some("1.7.0".to_string())
+        );
+        // A bare year/count is never mistaken for a version (no `.`).
+        assert_eq!(
+            first_version_token("Copyright (C) 2024 Free Software Foundation"),
+            None
+        );
+        assert_eq!(first_version_token("no digits here"), None);
+        assert_eq!(first_version_token(""), None);
     }
 
     #[test]
