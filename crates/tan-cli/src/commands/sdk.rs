@@ -360,6 +360,13 @@ fn run_current(g: &GlobalArgs) -> CommandRun {
     // actually consult for that project.
     let workspace_root = crate::util::cli_workspace_root(g);
     let (sdk_path, source_tier) = crate::util::resolve_sdk_tiered(g, &workspace_root);
+    // `resolve_sdk_tiered` no longer records itself (its OTHER call site,
+    // `switch_cache_roots`, only wants this as a candidate cache root, not the
+    // envelope's "active SDK") — this is the one place that result actually
+    // IS the active SDK the command reports, so it records here.
+    if let Some(root) = &sdk_path {
+        crate::sdk_report::record(root, source_tier);
+    }
     let readiness = sdk_path.as_deref().map(readiness_for);
 
     let text = match (&sdk_path, &readiness) {

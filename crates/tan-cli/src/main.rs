@@ -7,6 +7,7 @@ mod envelope;
 mod exit;
 mod http;
 mod progress;
+mod sdk_report;
 mod style;
 mod toolchain;
 mod util;

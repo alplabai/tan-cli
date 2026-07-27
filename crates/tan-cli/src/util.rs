@@ -286,9 +286,13 @@ pub fn home_alp_dir() -> PathBuf {
 /// default pointer (`~/.alp/sdk-default`, written by `tan sdk switch
 /// --global`). Both pointers are best-effort: each is only used when it still
 /// points at a real checkout (`has_loader`), so a stale pointer silently falls
-/// through to the next tier instead of locking the user out. Returns `""` when
-/// nothing applies (core auto-discovery in `tan_core::project` takes it from
-/// there). Pure — filesystem access is injected for unit testing.
+/// through to the next tier instead of locking the user out. Returns `("",
+/// None)` when nothing applies here (core auto-discovery in `tan_core::project`
+/// takes it from there — the caller reports that as `Discovery` once core
+/// actually resolves something). The second element names WHICH of these three
+/// branches produced a non-empty path, for `resolve_cli_project_context` to
+/// hand to [`crate::sdk_report`] without a second resolution. Pure —
+/// filesystem access is injected for unit testing.
 fn effective_sdk_path_with(
     sdk_root_arg: Option<&str>,
     workspace_root: &str,
@@ -296,28 +300,29 @@ fn effective_sdk_path_with(
     has_loader: &impl Fn(&str) -> bool,
     path_exists: &impl Fn(&str) -> bool,
     read_file: &impl Fn(&str) -> Option<String>,
-) -> String {
+) -> (String, Option<SdkSourceTier>) {
     if let Some(root) = sdk_root_arg {
         if !root.trim().is_empty() {
-            return root.to_string();
+            return (root.to_string(), Some(SdkSourceTier::SdkRootFlag));
         }
     }
     if let Some(pointer) = resolve_active_sdk(workspace_root, path_exists, read_file) {
         if has_loader(&pointer) {
-            return pointer;
+            return (pointer, Some(SdkSourceTier::ProjectPin));
         }
     }
     if let Some(pointer) = resolve_global_default_sdk(global_default_dir, path_exists, read_file) {
         if has_loader(&pointer) {
-            return pointer;
+            return (pointer, Some(SdkSourceTier::GlobalDefault));
         }
     }
-    String::new()
+    (String::new(), None)
 }
 
 /// Filesystem-backed [`effective_sdk_path_with`]: `--sdk-root` > `.alp/sdk-path`
-/// pointer (best-effort) > `~/.alp/sdk-default` (best-effort) > `""` (auto-discovery).
-fn effective_sdk_path(g: &GlobalArgs, workspace_root: &Path) -> String {
+/// pointer (best-effort) > `~/.alp/sdk-default` (best-effort) > `("",
+/// None)` (auto-discovery).
+fn effective_sdk_path(g: &GlobalArgs, workspace_root: &Path) -> (String, Option<SdkSourceTier>) {
     effective_sdk_path_with(
         g.sdk_root.as_deref(),
         &workspace_root.to_string_lossy(),
@@ -337,6 +342,7 @@ pub fn resolve_sdk_root(g: &GlobalArgs, workspace_root: &Path) -> Option<PathBuf
     if let Some(root) = &g.sdk_root {
         let candidate = PathBuf::from(root);
         if has_loader_script(&candidate) {
+            record_resolved_sdk_root(&candidate, SdkSourceTier::SdkRootFlag);
             return Some(candidate);
         }
         return None;
@@ -351,6 +357,7 @@ pub fn resolve_sdk_root(g: &GlobalArgs, workspace_root: &Path) -> Option<PathBuf
     ) {
         let candidate = PathBuf::from(&pointer);
         if has_loader_script(&candidate) {
+            record_resolved_sdk_root(&candidate, SdkSourceTier::ProjectPin);
             return Some(candidate);
         }
     }
@@ -364,11 +371,23 @@ pub fn resolve_sdk_root(g: &GlobalArgs, workspace_root: &Path) -> Option<PathBuf
     ) {
         let candidate = PathBuf::from(&pointer);
         if has_loader_script(&candidate) {
+            record_resolved_sdk_root(&candidate, SdkSourceTier::GlobalDefault);
             return Some(candidate);
         }
     }
 
-    discover_sdk_root(workspace_root)
+    let discovered = discover_sdk_root(workspace_root);
+    if let Some(candidate) = &discovered {
+        record_resolved_sdk_root(candidate, SdkSourceTier::Discovery);
+    }
+    discovered
+}
+
+/// Report the SDK root + tier a [`resolve_sdk_root`] branch actually returned,
+/// to [`crate::sdk_report`] — never a fresh resolution (see that module: this
+/// is the branch that already ran, not a second lookup).
+fn record_resolved_sdk_root(path: &Path, tier: SdkSourceTier) {
+    crate::sdk_report::record(&path.to_string_lossy(), tier);
 }
 
 /// Sibling/workspace auto-discovery: the workspace root itself, then sibling
@@ -416,6 +435,15 @@ fn discover_sdk_root(workspace_root: &Path) -> Option<PathBuf> {
 /// resolve for this workspace (no `alp-sdk-upstream`, ambiguous is `None`) —
 /// so `sourceTier` never claims `discovery` for a path build/validate/doctor
 /// won't actually resolve. Used by `tan sdk current --json`'s `sourceTier`.
+///
+/// Deliberately does NOT call [`crate::sdk_report::record`] itself — unlike
+/// [`resolve_sdk_root`] and [`resolve_cli_project_context`], this resolver has
+/// a second call site (`sdk.rs`'s `switch_cache_roots`) that only wants the
+/// active SDK as a CANDIDATE CACHE ROOT for a `tan sdk switch` that is about
+/// to repoint the pin to something else entirely; recording there reported
+/// the SDK `switch` was replacing, not the one it switched to. The one call
+/// site that treats this result as "the active SDK" (`sdk.rs`'s
+/// `run_current`) records it explicitly at its own call.
 pub fn resolve_sdk_tiered(
     g: &GlobalArgs,
     workspace_root: &Path,
@@ -462,9 +490,12 @@ pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
         .to_string_lossy()
         .to_string();
 
+    // `--sdk-root` > `.alp/sdk-path` pointer > `~/.alp/sdk-default` > `("",
+    // None)` (core auto-discovery below). `sdk_tier_hint` names which of
+    // those three branches produced `sdk_path`, when one did.
+    let (sdk_path, sdk_tier_hint) = effective_sdk_path(g, Path::new(&workspace_root));
     let settings = ProjectSettings {
-        // `--sdk-root` > `.alp/sdk-path` pointer > `""` (core auto-discovery).
-        sdk_path: effective_sdk_path(g, Path::new(&workspace_root)),
+        sdk_path,
         python_path: String::new(),
         board_yaml_path: g
             .board_yaml
@@ -472,14 +503,28 @@ pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
             .unwrap_or_else(|| "board.yaml".to_string()),
         west_cwd: String::new(),
     };
-    resolve_project_context(
+    let context = resolve_project_context(
         &ProjectResolutionInput {
             workspace_folders: vec![workspace_root],
             settings,
             is_windows: cfg!(windows),
         },
         |p| Path::new(p).exists(),
-    )
+    );
+
+    // Report to `sdk_report` what THIS call actually resolved — never a
+    // fresh resolution. `sdk_tier_hint` is only a hint from `effective_sdk_path`'s
+    // own branch; core's `resolve_project_context` re-validates the loader
+    // marker, so a hinted tier whose validation failed must not be reported
+    // (`context.sdk_root` stayed `None`, nothing to record). When the hint was
+    // empty (no `--sdk-root`/pointer applied) but `context.sdk_root` still
+    // resolved, that came from core's own self/sibling/ancestor-walk
+    // auto-discovery, i.e. `Discovery`.
+    if let Some(root) = &context.sdk_root {
+        crate::sdk_report::record(root, sdk_tier_hint.unwrap_or(SdkSourceTier::Discovery));
+    }
+
+    context
 }
 
 #[cfg(test)]
@@ -608,7 +653,7 @@ mod tests {
         let (exists, read) = pointer_fs("/from/pointer");
         // Explicit --sdk-root is terminal and returned verbatim, even ahead of a
         // valid pointer; the caller's own loader check validates it.
-        let got = effective_sdk_path_with(
+        let (got, tier) = effective_sdk_path_with(
             Some("/explicit"),
             "/work",
             "/home/.alp",
@@ -617,12 +662,13 @@ mod tests {
             &read,
         );
         assert_eq!(got, "/explicit");
+        assert_eq!(tier, Some(SdkSourceTier::SdkRootFlag));
     }
 
     #[test]
     fn blank_sdk_root_arg_falls_through_to_pointer() {
         let (exists, read) = pointer_fs("/from/pointer");
-        let got = effective_sdk_path_with(
+        let (got, tier) = effective_sdk_path_with(
             Some("   "),
             "/work",
             "/home/.alp",
@@ -631,12 +677,13 @@ mod tests {
             &read,
         );
         assert_eq!(got, "/from/pointer");
+        assert_eq!(tier, Some(SdkSourceTier::ProjectPin));
     }
 
     #[test]
     fn valid_pointer_is_used_when_no_sdk_root_arg() {
         let (exists, read) = pointer_fs("/from/pointer");
-        let got = effective_sdk_path_with(
+        let (got, tier) = effective_sdk_path_with(
             None,
             "/work",
             "/home/.alp",
@@ -645,6 +692,7 @@ mod tests {
             &read,
         );
         assert_eq!(got, "/from/pointer");
+        assert_eq!(tier, Some(SdkSourceTier::ProjectPin));
     }
 
     #[test]
@@ -652,17 +700,20 @@ mod tests {
         let (exists, read) = pointer_fs("/gone");
         // Pointer resolves but its target has no loader script -> best-effort skip,
         // and the global-default lookup here has no matching pointer file either.
-        let got = effective_sdk_path_with(None, "/work", "/home/.alp", &|_| false, &exists, &read);
+        let (got, tier) =
+            effective_sdk_path_with(None, "/work", "/home/.alp", &|_| false, &exists, &read);
         assert_eq!(got, "");
+        assert_eq!(tier, None);
     }
 
     #[test]
     fn no_arg_and_no_pointer_yields_empty() {
-        let got =
+        let (got, tier) =
             effective_sdk_path_with(None, "/work", "/home/.alp", &|_| true, &|_| false, &|_| {
                 None
             });
         assert_eq!(got, "");
+        assert_eq!(tier, None);
     }
 
     /// A `~/.alp/sdk-default` pointer that resolves to `sdk_path`, present + readable.
@@ -679,7 +730,7 @@ mod tests {
     #[test]
     fn global_default_used_when_no_project_pointer() {
         let (exists, read) = global_default_fs("/from/global");
-        let got = effective_sdk_path_with(
+        let (got, tier) = effective_sdk_path_with(
             None,
             "/work",
             "/home/.alp",
@@ -688,14 +739,17 @@ mod tests {
             &read,
         );
         assert_eq!(got, "/from/global");
+        assert_eq!(tier, Some(SdkSourceTier::GlobalDefault));
     }
 
     #[test]
     fn stale_global_default_falls_through_to_empty() {
         let (exists, read) = global_default_fs("/gone");
         // Pointer resolves but its target has no loader script -> best-effort skip.
-        let got = effective_sdk_path_with(None, "/work", "/home/.alp", &|_| false, &exists, &read);
+        let (got, tier) =
+            effective_sdk_path_with(None, "/work", "/home/.alp", &|_| false, &exists, &read);
         assert_eq!(got, "");
+        assert_eq!(tier, None);
     }
 
     #[test]

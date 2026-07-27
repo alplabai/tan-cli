@@ -19,6 +19,20 @@ All notable changes to `tan` are documented here. Format follows
   - `iot-starter` narrows `--som` to `E1M-AEN801`: any other SKU is rejected
     with `init.invalid-som` before a single file is planned, never a silent
     fall-back onto the retired hand-written generator.
+- **The JSON envelope now names which alp-sdk root a command actually
+  resolved (#110).** A new optional top-level `sdk: { root, sourceTier }` key
+  reports the exact path + precedence tier (`sdkRootFlag`/`projectPin`/
+  `globalDefault`/`discovery`) the command used — so a consumer (the vscode
+  extension) can finally tell which SDK produced a result instead of guessing,
+  especially on the unpinned/first-run path where discovery now walks up to
+  an enclosing checkout (#101).
+  - Populated from a value RECORDED at the moment one of `tan`'s three
+    resolvers actually resolved something, never from a second, fresh
+    resolution — the three resolvers have different candidate sets, so
+    re-resolving to fill the envelope could report a path the command never
+    actually used.
+  - Absent entirely (not `null`) when nothing resolved, keeping every
+    existing contract golden byte-identical.
 - **`tan renode --sim-mode` serves the studio hardware-simulator socket contract
   (#77, socket half).** The flag existed for CLI-surface stability but errored
   "not yet ported", so studio had nothing to connect to. It now boots the

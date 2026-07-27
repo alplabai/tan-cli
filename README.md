@@ -165,9 +165,10 @@ warning that the Yocto core itself needs WSL2 or a Linux host.
 | `--quiet` / `--verbose` / `--no-color` | Output volume and styling. |
 
 `--format json` emits the stable envelope
-`{command, ok, exitCode, project, data, issues}` — the contract the
-alp-sdk-vscode extension consumes. Text output is for humans and may change;
-the envelope is the API.
+`{command, ok, exitCode, project, sdk, data, issues}` — the contract the
+alp-sdk-vscode extension consumes (`sdk` is optional: present only when the
+command actually resolved an alp-sdk root). Text output is for humans and may
+change; the envelope is the API.
 
 ## Where it sits (three repos, one executor)
 
