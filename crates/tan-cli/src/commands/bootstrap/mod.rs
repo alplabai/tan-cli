@@ -33,7 +33,7 @@ use tan_core::bootstrap::{
     BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, ExistingWorkspace, HostOs, MissingPrerequisite,
     Tokens, WorkspaceChoice, YoctoGate, decide_workspace_reuse, fallback_facts, in_play_runtimes,
     next_steps_block, optional_libs_block, parse_bootstrap_manifest, print_env_block,
-    reported_missing, resolve_pin_major_minor, yocto_gate, yocto_mixed_warning, yocto_only_refusal,
+    reported_missing, resolve_zephyr_pin, yocto_gate, yocto_mixed_warning, yocto_only_refusal,
 };
 use tan_core::sdk_catalogue::TopologyCore;
 
@@ -92,7 +92,9 @@ struct BootstrapData {
     /// needs to know which side it read.
     #[serde(rename = "factsFromManifest")]
     facts_from_manifest: bool,
-    /// The Zephyr `MAJOR.MINOR` the workspace-reuse test compared against.
+    /// The Zephyr version the workspace-reuse test compared against. Full
+    /// `MAJOR.MINOR.PATCH` since #98 — it read `"4.4"` before, which is exactly
+    /// the truncation that let a `v4.4.1` pin adopt a `v4.4.0` tree.
     #[serde(rename = "zephyrPin")]
     zephyr_pin: String,
     /// `--no-pip` (skip the Python dependency installs).
@@ -216,7 +218,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     // `venv.dirName` is a manifest fact, so the venv path is only final now.
     paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
     // ONE pin authority, shared with `preflight`'s zephyrVersion check.
-    let pin = resolve_pin_major_minor(
+    let pin = resolve_zephyr_pin(
         std::fs::read_to_string(paths.repo_root.join("west.yml"))
             .ok()
             .as_deref(),
@@ -301,9 +303,20 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         ));
         log.line(&format!("Detected OS:     {}", os_label(host)));
     }
+    // #99: `factsFromManifest` lived only in the `--format json` envelope, so a
+    // customer on the default text UI had no way to tell a run against a real
+    // legacy SDK — where every pin, tool list and env line came from tan's
+    // hand-ported constants — from one driven by the SDK's own declared facts.
+    // A `line`, not a `warn`: on a released SDK this is the correct, expected
+    // path, not a defect.
+    if !facts.from_manifest {
+        log.line(&format!(
+            "Facts:           tan's built-in fallbacks ({BOOTSTRAP_MANIFEST_REL_PATH} absent -- \
+             this SDK predates alp-sdk#917)"
+        ));
+    }
 
-    let (reuse, clear_zephyr_base) =
-        select_workspace(&mut log, is_windows, &pin, &facts, &mut paths);
+    let plan = select_workspace(&mut log, is_windows, &pin, &facts, &mut paths);
 
     let workspace = Workspace {
         is_windows,
@@ -314,7 +327,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     };
     let runner = Runner {
         json: g.is_json(),
-        clear_zephyr_base,
+        clear_zephyr_base: plan.clear_zephyr_base,
     };
 
     // The venv backs BOTH later phases, so it is created when either will run.
@@ -344,7 +357,14 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         //
         // The outcome outlives this block: it is also what decides whether the
         // sync record below may be written at all.
-        let reconciled = (!reuse).then(|| west_config::reconcile_west_manifest_path(&sdk_root));
+        //
+        // Gated on ADOPTION, not on reuse: `reconcile` derives its topdir as
+        // `<sdkRoot>/..`, which on an adopted `$ZEPHYR_BASE` is not the topdir
+        // `west update` is about to run in — and the adopted one needs no
+        // reconciling anyway, since `manifest_is_sdk` (a precondition of both
+        // Reuse and Stale) already proved its `manifest.path` resolves here.
+        let reconciled =
+            (!plan.adopted).then(|| west_config::reconcile_west_manifest_path(&sdk_root));
         match &reconciled {
             Some(ManifestReconcile::Rewrote {
                 config_path,
@@ -376,7 +396,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
             ),
             _ => {}
         }
-        if let Err(message) = west_phase(&workspace, venv, &mut log, &runner, reuse) {
+        if let Err(message) = west_phase(&workspace, venv, &mut log, &runner, plan.reuse) {
             let mut issues = issues;
             issues.extend(log.take_issues());
             let data = data_for(args, &sdk_root, &paths, &facts, &pin);
@@ -386,8 +406,9 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         // manifest -- the one fact nothing else on disk records, and the one
         // `tan sdk switch` needs to stop recommending a bootstrap that already
         // happened. Only on the `!reuse` path: a reused workspace was left
-        // untouched (and, when adopted via `$ZEPHYR_BASE`, is not even under
-        // this topdir).
+        // untouched. A STALE adoption (#98) DID run `west update`, over
+        // `paths.workspace_dir`, which `select_workspace` already repointed at
+        // the adopted topdir -- so the record lands on the tree it describes.
         //
         // NOT after a Failed reconcile, which is the subtle one: the update
         // above resolved its manifest from the STALE pointer, and a stale
@@ -398,7 +419,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         // pointer plus `synced = true`, would suppress the bootstrap advice
         // over those trees. That is the gap this branch exists to close,
         // re-entered through the failure path.
-        if !matches!(reconciled, Some(ManifestReconcile::Failed { .. })) && !reuse {
+        if !matches!(reconciled, Some(ManifestReconcile::Failed { .. })) && !plan.reuse {
             record_workspace_sdk(&paths.workspace_dir, &sdk_root);
         }
     }
@@ -445,10 +466,18 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
 /// constants when the SDK predates alp-sdk#917.
 ///
 /// Version-skew guard, matching `parse_build_plan`: an ABSENT manifest is the
-/// legacy path and falls back; a manifest present with an unsupported
-/// `schemaVersion` (or one that cannot be parsed) is a hard `Err` naming why.
-/// Falling back THERE would silently re-introduce hand-ported behaviour against
-/// an SDK that explicitly declared something else — the RFC #843 drift.
+/// legacy path and falls back; a manifest present but unusable — unreadable, or
+/// carrying an unsupported `schemaVersion`, or unparseable — is a hard `Err`
+/// naming why. Falling back THERE would silently re-introduce hand-ported
+/// behaviour against an SDK that explicitly declared something else — the RFC
+/// #843 drift.
+///
+/// `NotFound` is the ONLY kind that falls back (#99). This used to be a blanket
+/// `Err(_)`, on the stated premise that "every released alp-sdk today has no
+/// manifest at all" — true when it was written, expired now that `dev` ships
+/// `metadata/bootstrap.json`. A `chmod 000` manifest on a dev tree produced an
+/// envelope identical in every verdict-bearing field (`ok:true`, `exitCode:0`,
+/// `factsFromManifest:false`, `issues:[]`) to a genuine legacy SDK's.
 ///
 /// `pub(crate)`: `commands::doctor` reads the same facts for the same gate, and
 /// a second reader with its own skew rule is exactly the drift this guard
@@ -457,39 +486,71 @@ pub(crate) fn load_facts(sdk_root: &str) -> Result<BootstrapFacts, String> {
     let path = Path::new(sdk_root).join(BOOTSTRAP_MANIFEST_REL_PATH);
     match std::fs::read_to_string(&path) {
         Ok(text) => parse_bootstrap_manifest(&text).map_err(|e| e.to_string()),
-        // Any read failure (absent, unreadable) is treated as "legacy SDK":
-        // every released alp-sdk today has no manifest at all.
-        Err(_) => Ok(fallback_facts(MIN_PYTHON)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(fallback_facts(MIN_PYTHON)),
+        // Same shape as the parse-failure message `parse_bootstrap_manifest`
+        // produces, so a consumer sees one wording for "this manifest is here
+        // and I cannot use it", whichever way it is unusable.
+        Err(e) => Err(format!(
+            "{BOOTSTRAP_MANIFEST_REL_PATH} could not be read: {e}"
+        )),
     }
 }
 
-/// Workspace selection: reuse the `$ZEPHYR_BASE` tree only when it is a
-/// `<pin>.x` west workspace whose manifest IS this alp-sdk checkout. Returns
-/// `(reuse, clear_zephyr_base)` and, on reuse, repoints `paths.workspace_dir` /
-/// `paths.venv_dir` at the adopted tree. The rejected cases clear
-/// `$ZEPHYR_BASE` from every child so a stale tree cannot hijack `west init`.
+/// What [`select_workspace`] decided about `$ZEPHYR_BASE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspacePlan {
+    /// Skip `west init` / `west update` entirely — the adopted tree is already
+    /// on the pinned Zephyr, so bootstrap leaves it untouched.
+    reuse: bool,
+    /// A `$ZEPHYR_BASE` topdir was taken over (reused untouched OR refreshed in
+    /// place), so `paths` now name it rather than `<sdkRoot>/..`.
+    adopted: bool,
+    /// Drop `$ZEPHYR_BASE` from every child — set only when the ambient value
+    /// was REFUSED, so a foreign tree cannot hijack `west init`.
+    clear_zephyr_base: bool,
+}
+
+impl WorkspacePlan {
+    /// No `$ZEPHYR_BASE` in play at all: bootstrap `<sdkRoot>/..` normally.
+    const FRESH: Self = WorkspacePlan {
+        reuse: false,
+        adopted: false,
+        clear_zephyr_base: false,
+    };
+}
+
+/// Workspace selection over the `$ZEPHYR_BASE` tree, and, when it is adopted,
+/// repoints `paths.workspace_dir` / `paths.venv_dir` at it. The refused cases
+/// clear `$ZEPHYR_BASE` from every child so a foreign tree cannot hijack
+/// `west init`.
 ///
-/// Both rejection outcomes are recorded as warnings, not just printed: a JSON
-/// consumer otherwise could not tell that its `$ZEPHYR_BASE` was refused and a
-/// second workspace built somewhere else entirely.
+/// Three outcomes for a tree whose manifest IS this alp-sdk checkout: on the
+/// pinned Zephyr it is reused untouched; on a DIFFERENT one it is adopted and
+/// refreshed by the ordinary `west update` (#98) rather than reused-and-skipped
+/// or abandoned for a second clone elsewhere; and a foreign-manifest tree is
+/// refused as before (#769).
+///
+/// Every non-reuse outcome is recorded as a warning, not just printed: a JSON
+/// consumer otherwise could not tell that its `$ZEPHYR_BASE` was refreshed, or
+/// refused and a second workspace built somewhere else entirely.
 fn select_workspace(
     log: &mut Log,
     is_windows: bool,
     pin: &str,
     facts: &BootstrapFacts,
     paths: &mut RunPaths,
-) -> (bool, bool) {
+) -> WorkspacePlan {
     // Read the ENVIRONMENT VARIABLE only -- never a shell rc file -- so this
     // behaves identically under bash / zsh / fish / PowerShell / WSL.
     let Some(zephyr_base) = std::env::var("ZEPHYR_BASE")
         .ok()
         .filter(|v| !v.trim().is_empty())
     else {
-        return (false, false);
+        return WorkspacePlan::FRESH;
     };
     let zephyr_base_path = PathBuf::from(&zephyr_base);
     let Ok(version_file) = std::fs::read_to_string(zephyr_base_path.join("VERSION")) else {
-        return (false, false);
+        return WorkspacePlan::FRESH;
     };
     let top = zephyr_base_path.parent().map(Path::to_path_buf);
     let var = if is_windows {
@@ -505,29 +566,67 @@ fn select_workspace(
             .is_some_and(|t| manifest_points_at(t, &paths.repo_root)),
     };
     match decide_workspace_reuse(&existing, pin) {
-        WorkspaceChoice::Reuse { major_minor } => {
+        WorkspaceChoice::Reuse { version } => {
             // Never modify the user's tree: adopt it and skip init/update.
             paths.workspace_dir = top.unwrap_or_else(|| paths.workspace_dir.clone());
             paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
             log.line(&format!(
-                "Reusing compatible alp-sdk workspace from {var}: {} (Zephyr {major_minor}.x)",
+                "Reusing compatible alp-sdk workspace from {var}: {} (Zephyr {version})",
                 native(&paths.workspace_dir)
             ));
-            (true, false)
+            WorkspacePlan {
+                reuse: true,
+                adopted: true,
+                clear_zephyr_base: false,
+            }
+        }
+        WorkspaceChoice::Stale { version } => {
+            // This IS bootstrap's own workspace (its .west/config manifest.path
+            // resolves to this checkout), just left behind by an SDK pin bump.
+            // Adopt it and let the ordinary west phase run `west init -l` (a
+            // no-op here) + `west update`, which is what moves zephyr AND every
+            // other project to what this SDK's west.yml now pins.
+            //
+            // `west update` over a diagnostic: a warning alone leaves the next
+            // build green against the wrong Zephyr, which IS the #98 defect. It
+            // is not the aggressive option either -- it is byte-for-byte the
+            // command a bootstrap with no $ZEPHYR_BASE set would run over this
+            // same topdir, and it is gated on a manifest that already proved
+            // the tree belongs to this SDK.
+            paths.workspace_dir = top.unwrap_or_else(|| paths.workspace_dir.clone());
+            paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
+            log.warn(
+                "zephyr-base-stale",
+                &format!(
+                    "{var} workspace ({}) is on Zephyr {version} but this alp-sdk pins {pin} -- \
+                     refreshing it with 'west update' (this also moves the other west.yml projects \
+                     to their pins)",
+                    native(&paths.workspace_dir)
+                ),
+            );
+            WorkspacePlan {
+                reuse: false,
+                adopted: true,
+                clear_zephyr_base: false,
+            }
         }
         WorkspaceChoice::ManifestMismatch => {
             let existing = native(top.as_deref().unwrap_or(&zephyr_base_path));
             log.warn(
                 "zephyr-base-manifest-mismatch",
                 &format!(
-                    "{var} workspace ({existing}) is a {pin}.x tree but its manifest is not \
+                    "{var} workspace ({existing}) is a Zephyr {pin} tree but its manifest is not \
                      alp-sdk's west.yml -- not reusing it (would leave 'west {}' unknown, #769); \
                      building an alp-sdk workspace at {}",
                     facts.west_extension_guard,
                     native(&paths.workspace_dir)
                 ),
             );
-            (false, true)
+            WorkspacePlan {
+                reuse: false,
+                adopted: false,
+                clear_zephyr_base: true,
+            }
         }
         WorkspaceChoice::Incompatible => {
             // bootstrap.sh's message carries a tail bootstrap.ps1's does not.
@@ -539,10 +638,15 @@ fn select_workspace(
             log.warn(
                 "zephyr-base-incompatible",
                 &format!(
-                    "{var} ({zephyr_base}) is not a {pin}.x west workspace -- ignoring it{tail}"
+                    "{var} ({zephyr_base}) is not an alp-sdk Zephyr {pin} west workspace -- \
+                     ignoring it{tail}"
                 ),
             );
-            (false, true)
+            WorkspacePlan {
+                reuse: false,
+                adopted: false,
+                clear_zephyr_base: true,
+            }
         }
     }
 }
@@ -946,6 +1050,29 @@ mod tests {
         .unwrap();
         let err = load_facts(&sdk.to_string_lossy()).expect_err("skew must not fall back");
         assert!(err.contains("schemaVersion 99"), "{err}");
+        let _ = std::fs::remove_dir_all(&sdk);
+    }
+
+    #[test]
+    fn a_manifest_that_is_present_but_unreadable_is_not_an_absent_one() {
+        // #99: every read error used to reach the fallback arm, so a manifest
+        // that exists and cannot be read produced an envelope identical in
+        // every verdict-bearing field (ok/exitCode/factsFromManifest/issues) to
+        // a genuine legacy SDK's. Only NotFound is the legacy path now.
+        //
+        // A DIRECTORY at the manifest's path is the portable stand-in for the
+        // reported `chmod 000`: it is present, `read_to_string` fails, and the
+        // kind is never NotFound — on Windows, where a mode-000 file is not
+        // reproducible and the real world's equivalent is a sharing violation
+        // or an ACL denial, this is the only shape a unit test can force.
+        let sdk = tmp("unreadable");
+        std::fs::create_dir_all(sdk.join(BOOTSTRAP_MANIFEST_REL_PATH)).unwrap();
+
+        let err = load_facts(&sdk.to_string_lossy())
+            .expect_err("a present-but-unreadable manifest must not fall back");
+        // Names the file, in the same shape as the parse-failure message.
+        assert!(err.starts_with(BOOTSTRAP_MANIFEST_REL_PATH), "{err}");
+        assert!(err.contains("could not be read"), "{err}");
         let _ = std::fs::remove_dir_all(&sdk);
     }
 
