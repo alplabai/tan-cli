@@ -16,7 +16,6 @@ pub enum WizardTemplateId {
     IotStarter,
     EdgeAiStarter,
     BoardDiagnostics,
-    HostToolingStarter,
 }
 
 impl WizardTemplateId {
@@ -29,7 +28,6 @@ impl WizardTemplateId {
             WizardTemplateId::IotStarter => "iot-starter",
             WizardTemplateId::EdgeAiStarter => "edge-ai-starter",
             WizardTemplateId::BoardDiagnostics => "board-diagnostics",
-            WizardTemplateId::HostToolingStarter => "host-tooling-starter",
         }
     }
 
@@ -43,7 +41,6 @@ impl WizardTemplateId {
             "iot-starter" => Some(WizardTemplateId::IotStarter),
             "edge-ai-starter" => Some(WizardTemplateId::EdgeAiStarter),
             "board-diagnostics" => Some(WizardTemplateId::BoardDiagnostics),
-            "host-tooling-starter" => Some(WizardTemplateId::HostToolingStarter),
             _ => None,
         }
     }

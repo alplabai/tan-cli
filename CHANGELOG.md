@@ -8,6 +8,17 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **Vendor `board-diagnostics` and `iot-starter` from the SDK scaffold catalog
+  (#14).** Closes out the last two vendorable entries from alp-sdk#864's
+  scaffold catalog (added by alp-sdk#903): `board-diagnostics` now emits the
+  SDK's real board self-test app (SoM/SoC identity, RUN operating-point
+  profile, on-module I2C management-bus scan) for both
+  `E1M-AEN801`/`E1M-V2N101`, and `iot-starter` emits the SDK's real Wi-Fi +
+  `mqtts://` MQTT/TLS telemetry app on the CC3501E bridge — `E1M-AEN801` only,
+  matching the SDK catalog's AEN-only + preview status.
+  - `iot-starter` narrows `--som` to `E1M-AEN801`: any other SKU is rejected
+    with `init.invalid-som` before a single file is planned, never a silent
+    fall-back onto the retired hand-written generator.
 - **`tan renode --sim-mode` serves the studio hardware-simulator socket contract
   (#77, socket half).** The flag existed for CLI-surface stability but errored
   "not yet ported", so studio had nothing to connect to. It now boots the
@@ -435,6 +446,15 @@ All notable changes to `tan` are documented here. Format follows
   the version-skew guard exists to prevent. `warn`, not `fail`: the exit code is
   unchanged and the fallback commands are still real.
 
+### Removed
+- **`tan init --template host-tooling-starter` (#14).** Retired entirely
+  while closing out the SDK scaffold catalog — its `WizardTemplateId`
+  variant, generator, and registry entry are gone, not just left unvendored.
+  `tan init --template host-tooling-starter` now exits 2 with
+  `init.invalid-template`. `minimal-app` is now the only template left
+  hand-generated, deliberately deferred (its `contract/` golden is owned by
+  an in-flight contract-surface change).
+
 ### Fixed
 - **Plain `tan doctor` probed nothing about the build environment and printed
   byte-identical output across four materially different host states (#100).**
@@ -552,6 +572,11 @@ All notable changes to `tan` are documented here. Format follows
   appended, not substituted, because the prose carries constraints the command
   does not (`cmake (>=3.20)`) — and omitted when the manifest lists none, the
   same "never invent one" rule `command` follows.
+- **A latent `retarget_board_yaml_som` bug the vendored `iot` scaffold's
+  column-aligned `som.sku:` comment exposed (#14).** Retargeting onto a
+  tree's own SKU (a claimed byte-exact no-op) used to collapse the comment's
+  alignment to a fixed two-space gap. It now replaces only the value token,
+  leaving the rest of the line untouched.
 - **The documented Quickstart `tan --project examples/<cat>/<name> build`, run
   from an alp-sdk checkout root, failed with `no SDK selected` (#101).** SDK
   auto-discovery only ever probed the workspace root itself and two named

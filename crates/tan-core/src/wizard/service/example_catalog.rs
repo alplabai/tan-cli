@@ -86,13 +86,34 @@ pub fn retarget_board_yaml_som(content: &str, sku: &str) -> String {
                 // A new top-level key: entering `som:`, or leaving it.
                 in_som = trimmed.starts_with("som:");
             } else if in_som && trimmed.starts_with("sku:") {
+                // Replace ONLY the value token after `sku:`, leaving the rest
+                // of the line -- the gap before a trailing comment included
+                // -- byte-for-byte untouched. A prior version reconstructed
+                // the whole tail as a fixed two-space gap + comment, which
+                // silently collapsed a column-aligned inline comment (e.g.
+                // `sku: E1M-AEN801           # ...`) even when `sku` was a
+                // byte-exact no-op -- exactly the vendored `iot` scaffold's
+                // som.sku line.
                 let indent = &line[..line.len() - trimmed.len()];
-                let comment = line.find('#').map(|i| &line[i..]).unwrap_or("");
-                lines.push(if comment.is_empty() {
-                    format!("{indent}sku: {sku}")
+                let after_key = &trimmed["sku:".len()..];
+                let ws_len = after_key.len() - after_key.trim_start().len();
+                let leading_ws = &after_key[..ws_len];
+                let after_ws = &after_key[ws_len..];
+                if after_ws.is_empty() || after_ws.starts_with('#') {
+                    // No value token to replace -- `sku:` with nothing after
+                    // it, or `sku:  # comment` with the comment but no value.
+                    // Splicing at a fixed "first whitespace run" position
+                    // here would either glue the value onto `sku:` with no
+                    // separating space (read back as a scalar, not a mapping
+                    // entry) or eat the `#` into the value. Insert the value
+                    // with a single space and leave the rest of the line
+                    // (any comment, and its gap) exactly as found.
+                    lines.push(format!("{indent}sku: {sku}{after_key}"));
                 } else {
-                    format!("{indent}sku: {sku}  {comment}")
-                });
+                    let value_len = after_ws.find(char::is_whitespace).unwrap_or(after_ws.len());
+                    let tail = &after_ws[value_len..];
+                    lines.push(format!("{indent}sku:{leading_ws}{sku}{tail}"));
+                }
                 done = true;
                 continue;
             }
@@ -162,6 +183,43 @@ mod example_catalog_tests {
         assert_eq!(
             super::retarget_board_yaml_som("foo: bar\n", "X"),
             "foo: bar\n"
+        );
+    }
+
+    #[test]
+    fn retarget_som_preserves_a_column_aligned_trailing_comment_when_the_sku_is_unchanged() {
+        // Regression: a prior version reconstructed the sku line's tail as a
+        // fixed two-space gap + comment, so a byte-exact no-op (retargeting
+        // onto the SAME sku) still silently collapsed a column-aligned
+        // inline comment -- exactly what the vendored `iot` scaffold's
+        // `som.sku` line has.
+        let src = "som:\n  sku: E1M-AEN801           # Alif Ensemble E8\npreset: e1m-evk\n";
+        assert_eq!(super::retarget_board_yaml_som(src, "E1M-AEN801"), src);
+    }
+
+    #[test]
+    fn retarget_som_inserts_a_separating_space_for_a_valueless_sku_line() {
+        // Regression: a valueless `sku:` line has no whitespace run after the
+        // key, so the value-token splice used to glue the replacement
+        // directly onto `sku:` with no space -- `sku:E1M-AEN801` reads back
+        // as a plain YAML scalar, not a `sku` mapping entry.
+        let src = "som:\n  sku:\npreset: e1m-evk\n";
+        assert_eq!(
+            super::retarget_board_yaml_som(src, "E1M-AEN801"),
+            "som:\n  sku: E1M-AEN801\npreset: e1m-evk\n"
+        );
+    }
+
+    #[test]
+    fn retarget_som_preserves_a_comment_on_a_valueless_sku_line() {
+        // Regression: with no value before the comment, the splice's
+        // "first whitespace run" search matched inside the comment text
+        // itself, so the leading `#` was overwritten by the new value and
+        // the rest of the comment text rode along after it.
+        let src = "som:\n  sku:  # TODO: fill in\npreset: e1m-evk\n";
+        assert_eq!(
+            super::retarget_board_yaml_som(src, "E1M-AEN801"),
+            "som:\n  sku: E1M-AEN801  # TODO: fill in\npreset: e1m-evk\n"
         );
     }
 }

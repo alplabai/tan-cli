@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 //! C-project (plain-CMake + Zephyr) file-content generators.
 
-use super::vendored::{vendored_edge_ai_files, vendored_minimal_files, vendored_sensor_files};
+use super::vendored::{
+    vendored_diagnostics_files, vendored_edge_ai_files, vendored_iot_files, vendored_minimal_files,
+    vendored_sensor_files,
+};
 use crate::wizard::models::{WizardPlannedFile, WizardTemplateDefinition, WizardTemplateId};
 
 pub(super) fn gen_c_project_files(
@@ -9,12 +12,12 @@ pub(super) fn gen_c_project_files(
     som_sku: Option<&str>,
     cores: &[(String, String)],
 ) -> Vec<WizardPlannedFile> {
-    // zephyr-app, sensor-starter, and edge-ai-starter are vendored from the
-    // SDK's `minimal`/`sensor`/`edge-ai` scaffold-catalog entries
-    // (alp-sdk#864) instead of hand-generated -- see
-    // `wizard/vendored/MANIFEST.md`. These are the only templates mapped onto
-    // a vendored tree today; every other template below still hand-generates
-    // its files (no clean 1:1 SDK catalog equivalent -- see the manifest).
+    // zephyr-app, sensor-starter, edge-ai-starter, board-diagnostics, and
+    // iot-starter are vendored from the SDK's `minimal`/`sensor`/`edge-ai`/
+    // `diagnostics`/`iot` scaffold-catalog entries (alp-sdk#864/#903) instead
+    // of hand-generated -- see `wizard/vendored/MANIFEST.md`. `minimal-app`
+    // is the only template left on this hand-generated path, deliberately
+    // deferred (see the manifest).
     let vendored_files = match def.id {
         WizardTemplateId::ZephyrApp => {
             let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
@@ -27,6 +30,14 @@ pub(super) fn gen_c_project_files(
         WizardTemplateId::EdgeAiStarter => {
             let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
             Some(vendored_edge_ai_files(sku, cores))
+        }
+        WizardTemplateId::BoardDiagnostics => {
+            let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
+            Some(vendored_diagnostics_files(sku, cores))
+        }
+        WizardTemplateId::IotStarter => {
+            let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
+            Some(vendored_iot_files(sku, cores))
         }
         _ => None,
     };
@@ -78,13 +89,6 @@ pub(super) fn gen_c_project_files(
         });
     }
 
-    if def.id == WizardTemplateId::IotStarter {
-        files.push(WizardPlannedFile {
-            relative_path: "config/iot.env.example".to_string(),
-            content: gen_iot_env_example().to_string(),
-        });
-    }
-
     files
 }
 
@@ -127,11 +131,11 @@ pub fn infer_runtime_for_core_id(id: &str) -> &'static str {
 /// Emit a board.yaml conforming to the SDK board schema (v0.6+): `som` + `cores`
 /// are the only required top-level keys; population/OS is per-core. Template
 /// connectivity tuning lives under the app core's `core_entry` (edge-ai-starter's
-/// inference tuning moved with it to the vendored `edge-ai` scaffold, see
-/// `wizard/vendored/MANIFEST.md`), but `libraries` is a project-wide, top-level
+/// and board-diagnostics's tuning moved with them to their vendored scaffolds,
+/// see `wizard/vendored/MANIFEST.md`), but `libraries` is a project-wide, top-level
 /// key (`core_entry` only allows
 /// `extra_libraries`, additionalProperties: false) mapping each library to the
-/// cores that use it; project-wide diagnostics is a sanctioned top-level key.
+/// cores that use it.
 fn gen_board_yaml(
     def: &WizardTemplateDefinition,
     som_sku: Option<&str>,
@@ -192,12 +196,6 @@ fn gen_board_yaml(
         s.push_str("    name: alp_default_rpmsg\n");
         s.push_str(&format!("    endpoints: [{core}, {companion}]\n"));
         s.push_str("    carve_out_kb: 512\n");
-    }
-
-    if def.id == WizardTemplateId::BoardDiagnostics {
-        s.push_str("diagnostics:\n");
-        s.push_str("  last_error: true\n");
-        s.push_str("  log_level: debug\n");
     }
 
     s
@@ -306,33 +304,38 @@ fn gen_feature_file(unit_name: &str, todo_line: &str) -> String {
     )
 }
 
-fn gen_iot_env_example() -> &'static str {
-    "# Copy to iot.env and provide real values.\n\
-     WIFI_SSID=<ssid>\n\
-     WIFI_PASSWORD=<password>\n\
-     MQTT_ENDPOINT=<host>\n\
-     MQTT_PORT=8883\n"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::wizard::models::WizardTemplateId;
-    use crate::wizard::service::registry::list_wizard_templates;
 
     /// `libraries:` must be a top-level key (list of `{name, cores}`), never
     /// nested under `cores.<core>` -- `core_entry` in the board schema only
     /// allows `extra_libraries` and forbids unknown keys.
     #[test]
     fn board_yaml_libraries_are_top_level_not_under_core_entry() {
-        // sensor-starter is now vendored (see `wizard/vendored/MANIFEST.md`),
-        // so this hand-generator regression check picks another hand-generated
-        // template that still declares `libs`.
-        let def = list_wizard_templates()
-            .into_iter()
-            .find(|d| d.id == WizardTemplateId::BoardDiagnostics)
-            .expect("board-diagnostics template registered");
-        let files = gen_c_project_files(def, None, &[]);
+        // board-diagnostics is now vendored too (see
+        // `wizard/vendored/MANIFEST.md`), leaving `minimal-app` the only
+        // hand-generated template -- and its registry entry declares no
+        // `libs` at all (`&[]`), so there is no live registry entry left to
+        // drive this hand-generator regression check through. Exercise
+        // `gen_board_yaml`'s libs-rendering directly against a synthetic
+        // definition instead of depending on the registry happening to carry
+        // one with non-empty `libs` -- the honest fix, not a weakened
+        // assertion.
+        let def = WizardTemplateDefinition {
+            id: WizardTemplateId::MinimalApp,
+            label: "test",
+            description: "test",
+            libs: &["fmt"],
+            features: None,
+            prj_conf_extras: &[],
+            feature_files: &[],
+            body_line1: "",
+            body_line2: "",
+            explanation: &[],
+        };
+        let files = gen_c_project_files(&def, None, &[]);
         let board_yaml = &files
             .iter()
             .find(|f| f.relative_path == "board.yaml")

@@ -3,7 +3,6 @@
 
 mod c_project;
 mod example_catalog;
-mod host_tooling;
 mod module_scaffold;
 mod plan;
 mod registry;
@@ -20,8 +19,9 @@ pub use plan::{
 };
 pub use registry::{list_module_templates, list_wizard_templates};
 pub use vendored::{
-    vendored_app_core_for_sku, vendored_core_ids_for, vendored_edge_ai_app_core_for_sku,
-    vendored_sensor_app_core_for_sku,
+    IOT_STARTER_SUPPORTED_SKU, vendored_app_core_for_sku, vendored_core_ids_for,
+    vendored_diagnostics_app_core_for_sku, vendored_edge_ai_app_core_for_sku,
+    vendored_iot_app_core_for_sku, vendored_sensor_app_core_for_sku,
 };
 
 // ---------------------------------------------------------------------------
@@ -57,8 +57,25 @@ mod tests {
     }
 
     #[test]
-    fn list_templates_has_seven_entries() {
-        assert_eq!(list_wizard_templates().len(), 7);
+    fn list_wizard_templates_has_the_expected_ids() {
+        // Membership, not just a count: a real defect once shipped in the
+        // sibling extension because a list had ten of eleven expected
+        // entries and every test asserted only its length, so it stayed
+        // green. Six entries after `host-tooling-starter`'s retirement
+        // (tan-cli#14) -- order matches the registry (the wizard picker's
+        // display order).
+        let ids: Vec<WizardTemplateId> = list_wizard_templates().iter().map(|d| d.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                WizardTemplateId::MinimalApp,
+                WizardTemplateId::ZephyrApp,
+                WizardTemplateId::SensorStarter,
+                WizardTemplateId::IotStarter,
+                WizardTemplateId::EdgeAiStarter,
+                WizardTemplateId::BoardDiagnostics,
+            ]
+        );
     }
 
     #[test]
@@ -232,6 +249,160 @@ mod tests {
         assert!(board.contains("  a55_cluster:\n    os: \"off\"\n"));
         assert!(board.contains("  m33_sm:\n    app: ./src\n"));
         assert!(!board.contains("ipc:"));
+    }
+
+    #[test]
+    fn board_diagnostics_scaffold_is_west_buildable() {
+        // board-diagnostics is vendored from the SDK's `diagnostics`
+        // scaffold-catalog entry (alp-sdk#903) -- board.yaml's `som.sku:` is
+        // retargeted onto the non-canonical SKU below, everything else is
+        // the vendored Alif-Ensemble-family tree byte-for-byte.
+        let plan = create_wizard_plan(&WizardPlanInput {
+            template_id: WizardTemplateId::BoardDiagnostics,
+            project_name: "bdemo".to_string(),
+            destination: ".".to_string(),
+            som_sku: Some("E1M-AEN701".to_string()),
+        });
+        let by_path = |p: &str| {
+            plan.files
+                .iter()
+                .find(|f| f.relative_path == p)
+                .map(|f| f.content.as_str())
+        };
+        let cmake = by_path("CMakeLists.txt").expect("CMakeLists.txt is generated");
+        assert!(cmake.contains("find_package(Zephyr REQUIRED"));
+        assert!(cmake.contains("--emit zephyr-conf --core"));
+        assert!(cmake.contains("EXTRA_CONF_FILE"));
+        assert!(cmake.contains("target_sources(app PRIVATE src/main.c)"));
+        assert!(by_path("src/CMakeLists.txt").is_none());
+        assert!(by_path("src/main.c").is_some());
+        assert!(by_path("testcase.yaml").is_some());
+        let board = by_path("board.yaml").expect("board.yaml is generated");
+        assert!(board.contains("sku: E1M-AEN701"));
+    }
+
+    #[test]
+    fn board_diagnostics_scaffold_is_byte_exact_for_the_vendored_sku() {
+        // Same guarantee as sensor_scaffold_is_byte_exact_for_the_vendored_sku:
+        // for a vendored (template, sku) pair, `tan init`'s plan must match
+        // `alp-sdk --emit scaffold`'s output byte-for-byte -- no Rust
+        // re-derivation. Both vendored SKUs (see wizard/vendored/MANIFEST.md).
+        for sku in ["E1M-AEN801", "E1M-V2N101"] {
+            let plan = create_wizard_plan(&WizardPlanInput {
+                template_id: WizardTemplateId::BoardDiagnostics,
+                project_name: String::new(),
+                destination: ".".to_string(),
+                som_sku: Some(sku.to_string()),
+            });
+            let manifest_dir = env!("CARGO_MANIFEST_DIR");
+            for file in &plan.files {
+                let vendored_path = std::path::Path::new(manifest_dir)
+                    .join("src/wizard/vendored/diagnostics")
+                    .join(sku)
+                    .join(&file.relative_path);
+                let vendored = std::fs::read_to_string(&vendored_path)
+                    .unwrap_or_else(|e| panic!("reading {}: {e}", vendored_path.display()));
+                assert_eq!(
+                    file.content, vendored,
+                    "{sku}: {} is not byte-identical to the vendored tree",
+                    file.relative_path
+                );
+            }
+            let mut paths: Vec<&str> = plan
+                .files
+                .iter()
+                .map(|f| f.relative_path.as_str())
+                .collect();
+            paths.sort_unstable();
+            assert_eq!(
+                paths,
+                vec![
+                    "CMakeLists.txt",
+                    "README.md",
+                    "board.yaml",
+                    "prj.conf",
+                    "src/main.c",
+                    "testcase.yaml",
+                ],
+                "{sku}: vendored file set drifted"
+            );
+        }
+    }
+
+    #[test]
+    fn iot_starter_scaffold_is_west_buildable() {
+        // iot-starter is vendored from the SDK's `iot` scaffold-catalog
+        // entry (alp-sdk#903) -- this template supports only E1M-AEN801 (see
+        // IOT_STARTER_SUPPORTED_SKU), so unlike the family-split templates
+        // there is no non-canonical retarget case to exercise here.
+        let plan = create_wizard_plan(&WizardPlanInput {
+            template_id: WizardTemplateId::IotStarter,
+            project_name: "iotdemo".to_string(),
+            destination: ".".to_string(),
+            som_sku: Some(IOT_STARTER_SUPPORTED_SKU.to_string()),
+        });
+        let by_path = |p: &str| {
+            plan.files
+                .iter()
+                .find(|f| f.relative_path == p)
+                .map(|f| f.content.as_str())
+        };
+        let cmake = by_path("CMakeLists.txt").expect("CMakeLists.txt is generated");
+        assert!(cmake.contains("find_package(Zephyr REQUIRED"));
+        assert!(cmake.contains("--emit zephyr-conf --core"));
+        assert!(cmake.contains("EXTRA_CONF_FILE"));
+        assert!(cmake.contains("target_sources(app PRIVATE src/main.c)"));
+        assert!(by_path("src/CMakeLists.txt").is_none());
+        assert!(by_path("src/main.c").is_some());
+        assert!(by_path("testcase.yaml").is_some());
+        let board = by_path("board.yaml").expect("board.yaml is generated");
+        assert!(board.contains("sku: E1M-AEN801"));
+    }
+
+    #[test]
+    fn iot_starter_scaffold_is_byte_exact_for_the_vendored_sku() {
+        // Same guarantee as the other vendored templates -- byte-for-byte
+        // against alp-sdk's live `--emit scaffold`, re-checked by
+        // `tests/parity/scaffold_byte_parity.py`. Only one SKU is vendored
+        // (see wizard/vendored/MANIFEST.md).
+        let plan = create_wizard_plan(&WizardPlanInput {
+            template_id: WizardTemplateId::IotStarter,
+            project_name: String::new(),
+            destination: ".".to_string(),
+            som_sku: Some(IOT_STARTER_SUPPORTED_SKU.to_string()),
+        });
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        for file in &plan.files {
+            let vendored_path = std::path::Path::new(manifest_dir)
+                .join("src/wizard/vendored/iot")
+                .join(IOT_STARTER_SUPPORTED_SKU)
+                .join(&file.relative_path);
+            let vendored = std::fs::read_to_string(&vendored_path)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", vendored_path.display()));
+            assert_eq!(
+                file.content, vendored,
+                "{} is not byte-identical to the vendored tree",
+                file.relative_path
+            );
+        }
+        let mut paths: Vec<&str> = plan
+            .files
+            .iter()
+            .map(|f| f.relative_path.as_str())
+            .collect();
+        paths.sort_unstable();
+        assert_eq!(
+            paths,
+            vec![
+                "CMakeLists.txt",
+                "README.md",
+                "board.yaml",
+                "prj.conf",
+                "src/main.c",
+                "testcase.yaml",
+            ],
+            "vendored file set drifted"
+        );
     }
 
     #[test]
@@ -418,18 +589,20 @@ mod tests {
         ];
 
         // One per SoM family: the app core must match the family's topology.
-        // edge-ai-starter is now vendored (see wizard/vendored/MANIFEST.md),
-        // so this hand-generator regression check picks another
-        // hand-generated template for the V2N family.
+        // edge-ai-starter, board-diagnostics, and iot-starter are all now
+        // vendored (see wizard/vendored/MANIFEST.md) -- `minimal-app` is the
+        // only hand-generated template left, so all three rows below (one
+        // per SoM family) use it, keeping this a regression check on
+        // `gen_board_yaml` itself rather than on a vendored passthrough.
         let cases = [
-            (WizardTemplateId::IotStarter, None, "m55_hp"),
+            (WizardTemplateId::MinimalApp, None, "m55_hp"),
             (
                 WizardTemplateId::MinimalApp,
                 Some("E1M-V2N101".to_string()),
                 "m33_sm",
             ),
             (
-                WizardTemplateId::BoardDiagnostics,
+                WizardTemplateId::MinimalApp,
                 Some("E1M-NX9101".to_string()),
                 "m33",
             ),
@@ -518,39 +691,5 @@ mod tests {
             destination: ".".to_string(),
         });
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn iot_starter_has_env_example() {
-        let plan = create_wizard_plan(&WizardPlanInput {
-            template_id: WizardTemplateId::IotStarter,
-            project_name: String::new(),
-            destination: ".".to_string(),
-            som_sku: None,
-        });
-        let paths: Vec<&str> = plan
-            .files
-            .iter()
-            .map(|f| f.relative_path.as_str())
-            .collect();
-        assert!(paths.contains(&"config/iot.env.example"));
-    }
-
-    #[test]
-    fn host_tooling_starter_generates_ts_files() {
-        let plan = create_wizard_plan(&WizardPlanInput {
-            template_id: WizardTemplateId::HostToolingStarter,
-            project_name: String::new(),
-            destination: ".".to_string(),
-            som_sku: None,
-        });
-        let paths: Vec<&str> = plan
-            .files
-            .iter()
-            .map(|f| f.relative_path.as_str())
-            .collect();
-        assert!(paths.contains(&"package.json"));
-        assert!(paths.contains(&"src/extension.ts"));
-        assert!(paths.contains(&"packages/core/src/index.ts"));
     }
 }
