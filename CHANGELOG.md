@@ -436,6 +436,56 @@ All notable changes to `tan` are documented here. Format follows
   unchanged and the fallback commands are still real.
 
 ### Fixed
+- **`debug-config` emitted `"type": "codelldb"`, a debug type no extension
+  registers, so F5 refused every native_sim session (#104).**
+  `vadimcn.vscode-lldb` v1.12.2 declares
+  `contributes.debuggers[0].type = "lldb"` — `codelldb` is the extension's
+  marketplace NAME, not a debug type, and VS Code answered `Configured debug
+  type 'codelldb' is not supported.` native_sim is the only debug target
+  reachable with no probe and no board, i.e. the first debugging experience any
+  customer has, so this had never worked. The value is now `lldb`, taken from
+  CodeLLDB's own manifest rather than from what the code used to say. The class
+  is detectable from here on: `every_emitted_debug_type_is_one_an_extension_contributes`
+  walks every target kind × server and checks the emitted `type` against a
+  hardcoded table of the three types tan can emit — `cortex-debug`
+  (`marus25.cortex-debug` v1.12.1), `cppdbg` (`ms-vscode.cpptools` v1.23.6),
+  `lldb` (`vadimcn.vscode-lldb` v1.12.2), exactly the extensions `debug doctor`
+  declares — each row naming the extension and version it was verified against,
+  and a compile-time guard failing the build if a new `DebugTargetKind` is added
+  without listing it.
+- **`debug-config` overwrote a hand-resolved `launch.json` value with a
+  `<resolved-…>` placeholder on every write (#105).** A same-named configuration
+  was replaced wholesale, so a customer told to hand-fill
+  `"device": "AE822F4M55_HP"` got `"device": "<resolved-device>"` written back
+  over it on their next F5 — data loss on their own file, with no confirm and no
+  backup, and an unexitable loop around the advice they had just been given. The
+  same held for every `<resolved-…>` this command emits (`svdFile`/`svdPath`/
+  `gdbPath`/`serverpath`/`searchDir`/`configFiles`/`miDebuggerPath`). The write
+  plan now merges key-by-key over the existing entry under one narrow rule: an
+  incoming unresolved placeholder never overwrites a concrete existing value.
+  That rule is also what separates "the customer set this deliberately" from
+  "this is our old output" — our output for a field we cannot resolve is
+  *literally* an angle-bracket token, so anything concrete in the file is real.
+  The inverse still works: whenever a run CAN resolve a field the incoming value
+  is concrete and overwrites unconditionally, so a stale value that is now wrong
+  is still updateable (the `codelldb` → `lldb` repair above lands on existing
+  entries for exactly this reason). Arrays follow the same rule with a
+  whole-list case: an all-placeholder incoming `configFiles` keeps the existing
+  list intact, or a hand-added second `.cfg` would be lost to a per-index merge
+  against a one-element draft. Key order follows the existing entry with new
+  keys appended, and keys the customer added that tan never writes
+  (`preLaunchTask`, `serverArgs`, …) are untouched.
+- **The placeholder predicate called `<host>:<port>` a resolved value.** It
+  tested for the `<resolved-` PREFIX, so the yocto draft's two-token
+  `miDebuggerServerAddress` passed as a real address. Concretely: a yocto config
+  whose `<resolved-gdb>` did resolve lost the "Placeholder fields … still need
+  resolution" note while its gdbserver address was still unusable — the note
+  going silent on exactly the config that cannot launch. The test is now any
+  angle-bracket token (`is_unresolved_placeholder`, matching the extension's
+  `/<[^<>]*>/`), and `${workspaceFolder}`-style VS Code substitutions still
+  count as resolved because they carry no angle bracket. One predicate in
+  `tan-core` now backs both the note and the merge, so "still needs resolution"
+  and "do not overwrite this by hand-filled value" cannot disagree.
 - **`tan doctor --build` rated a missing `ninja` or `cmake` `warn`, so it exited
   0 on a host that cannot build (#103).** `ninja` is the generator CMake picks by
   default on every Zephyr host, so its absence does not degrade a build, it stops
