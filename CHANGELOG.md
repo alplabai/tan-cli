@@ -8,6 +8,17 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Added
+- **`tan sdk list` carries GitHub's `draft`/`prerelease` flags through (#122).**
+  Both booleans were already in the Releases API response `tan` parses but were
+  dropped before reaching either the JSON envelope or the text table — every
+  consumer asking "what is the latest SDK?" would silently offer a release
+  candidate or an unpublished draft as latest, with no error and no log line.
+  `SdkRelease` now carries `draft`/`prerelease` (default `false` when GitHub
+  omits or misencodes either key, never a reason to drop the release), and the
+  `tan sdk list` table marks a flagged entry with `[draft]`/`[prerelease]`.
+  tan does not filter on either flag or add a `--include-prereleases` switch —
+  the consumer decides what "latest" means; tan's job is only to publish the
+  fact it already has instead of destroying it.
 - **Vendor `board-diagnostics` and `iot-starter` from the SDK scaffold catalog
   (#14).** Closes out the last two vendorable entries from alp-sdk#864's
   scaffold catalog (added by alp-sdk#903): `board-diagnostics` now emits the
