@@ -120,8 +120,11 @@ tan size                              # footprint vs the SoM memory budget
 tan run --flash                       # build, then run (host) or program (hardware)
 ```
 
-`tan doctor --build --fix` diagnoses (and repairs what it can) a build
-environment that is not ready. `tan completion --shell zsh` emits a completion
+`tan doctor` sanity-checks the host: build readiness (SDK, Zephyr workspace,
+west) alongside debug readiness for the selected target/server. `tan doctor
+--build --fix` goes further, resolving the OS set from `board.yaml` and
+diagnosing (and repairing what it can) a build environment that is not ready;
+`--fix` requires `--build`. `tan completion --shell zsh` emits a completion
 script.
 
 `bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; it

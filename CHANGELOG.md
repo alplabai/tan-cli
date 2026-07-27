@@ -436,6 +436,49 @@ All notable changes to `tan` are documented here. Format follows
   unchanged and the fallback commands are still real.
 
 ### Fixed
+- **Plain `tan doctor` probed nothing about the build environment and printed
+  byte-identical output across four materially different host states (#100).**
+  It is the command alp-sdk's `bootstrap` prints as the customer's very next
+  step and `README.md`'s Quickstart documents as the health check that "catches
+  a missing toolchain/HAL", yet it ran only the debug-readiness set — the same
+  seven checks, same summary, same exit 4 on a host whose documented example
+  build failed on both Zephyr slices and on the host where it succeeded. It now
+  folds in `probe_build_preflight`, the same call `tan build` and
+  `tan doctor --build` already make, so `sdk` / `workspace` / `westResolved`
+  appear in plain `tan doctor` too. `--build` is unchanged: it keeps its own
+  `board.yaml`-derived OS-set resolution and its `BuildToolProbe` layer, and its
+  envelope key set is now pinned by a test — it is the live cross-repo contract
+  `alp-sdk-vscode` shells (`["doctor","--build"]`, `["doctor","--build","--fix"]`),
+  and it has no plain-`doctor` consumer, which is what makes the fold safe. The
+  preflight's own `boardYaml` is dropped from the fold so exactly one check of
+  that name is ever emitted.
+- **`tan doctor --fix` parsed, was accepted, and did nothing (#100).** `run()`
+  reads the flag only inside its `--build` branch, so `tan doctor --fix`
+  produced output line-for-line identical to plain `tan doctor` — no "fixed N",
+  no "nothing to fix", no error. It is now `requires = "build"` at the clap
+  level and fails as a usage error. `--build --fix` is unaffected.
+- **`boardYaml` hard-failed with exit 4 at an alp-sdk checkout root, where there
+  is no `board.yaml` and no reason for one (#100).** That is exactly where
+  `bootstrap` tells a customer to run `tan doctor`, so the first command a new
+  user typed reported `1 failed` for a non-problem. A missing `board.yaml` is
+  now a warning when no project was named and a failure once `--project` or
+  `--board-yaml` selected one. `tan doctor --build`'s own `boardYaml` stays a
+  hard fail — that mode answers "can this build run", and none can without it.
+- **`tan doctor` claimed `vadimcn.vscode-lldb is installed.` on hosts with no
+  VS Code and counted it among the passes (#102).** The standalone binary cannot
+  enumerate a marketplace extension; the `DebuggerExtensionsState` all-`true`
+  literal at three call sites was an inherited assumption from the extension's
+  `resolveCliDebugContext`, where `true` IS correct because that code can
+  introspect its own host. The four extension-presence checks
+  (`codeLLDBExtension`, `cortexDebugExtension`, `cppToolsExtension`, the MCU
+  companion viewers) now render a new `unknown` status outside VS Code: not a
+  pass, counted in no summary bucket, raising no issue and no next step. The
+  pass-through `true` defaults stay in `tan-core` for the extension's use.
+  `--build` emits no `unknown` check, so its envelope is untouched.
+- **`sdkRoot`'s failure text named "The extension" from the standalone binary
+  (#102).** `tan` itself did the resolving; the message now says
+  `No alp-sdk checkout resolved.` and points at `tan sdk switch <path>` /
+  `--sdk-root <path>`.
 - **`debug-config` emitted `"type": "codelldb"`, a debug type no extension
   registers, so F5 refused every native_sim session (#104).**
   `vadimcn.vscode-lldb` v1.12.2 declares
