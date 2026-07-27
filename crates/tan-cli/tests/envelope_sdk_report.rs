@@ -63,6 +63,26 @@ fn run_size(cwd: &Path, home: &Path, sdk_root_flag: Option<&Path>) -> serde_json
         .unwrap_or_else(|e| panic!("stdout is not JSON: {e}\n{stdout}"))
 }
 
+/// The posix path the CLI will actually report for a root it reached through
+/// the filesystem rather than through an argument.
+///
+/// A discovery-tier root is derived from the subprocess's own cwd, and the OS
+/// resolves symlinks when a process adopts a directory as its cwd — on macOS
+/// `std::env::temp_dir()` is under `/var/folders/...`, which is a symlink to
+/// `/private/var/folders/...`, so the CLI honestly reports the resolved form
+/// while the test's own handle still holds the unresolved one. Windows'
+/// `canonicalize` returns an extended-length `\\?\` prefix the CLI never
+/// emits, so drop it.
+///
+/// Only the EXPECTED side goes through this. The reported side is always
+/// compared unmodified, so `sdk_report::record`'s own separator normalization
+/// still has to be right.
+fn expected_posix(path: &Path) -> String {
+    let resolved = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let posix = resolved.to_string_lossy().replace('\\', "/");
+    posix.strip_prefix("//?/").unwrap_or(&posix).to_string()
+}
+
 fn cleanup(dirs: &[&Path]) {
     for dir in dirs {
         let _ = std::fs::remove_dir_all(dir.parent().unwrap_or(dir));
@@ -97,12 +117,15 @@ fn workspace_root_self_discovery_is_reported_as_discovery() {
     // No --sdk-root, no pin — cwd IS the sdk checkout, resolved purely by
     // self-discovery.
     let envelope = run_size(&sdk, &home, None);
+    // Resolve BEFORE cleanup — `expected_posix` reads the filesystem.
+    let expected_root = expected_posix(&sdk);
     cleanup(&[&sdk, &home]);
 
     assert_eq!(envelope["sdk"]["sourceTier"], "discovery", "{envelope}");
     // Same rationale as `explicit_sdk_root_flag_is_reported_verbatim`: expected
     // side normalized from the known input, reported side compared unmodified.
-    let expected_root = sdk.to_string_lossy().replace('\\', "/");
+    // Unlike that test, this root arrives via the cwd rather than an argument,
+    // so it comes back symlink-resolved — see `expected_posix`.
     let reported_root = envelope["sdk"]["root"].as_str().unwrap_or_default();
     assert_eq!(reported_root, expected_root, "{envelope}");
 }
