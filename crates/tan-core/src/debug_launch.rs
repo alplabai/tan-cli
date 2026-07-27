@@ -121,7 +121,13 @@ pub fn create_launch_draft(
         }),
         DebugTargetKind::NativeHost => json!({
             "name": "ALP: Native Sim Debug",
-            "type": "codelldb",
+            // `lldb`, NOT `codelldb`: `vadimcn.vscode-lldb` contributes the
+            // debug TYPE `lldb`; `CodeLLDB` is the extension's marketplace
+            // NAME. VS Code refuses an unregistered type outright —
+            // `Configured debug type 'codelldb' is not supported.` — and
+            // native_sim is the one target reachable with no probe and no
+            // board, i.e. the first debugging experience anyone has.
+            "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
             "cwd": "${workspaceFolder}",
@@ -195,7 +201,7 @@ pub fn apply_launch_resolution(draft: &mut Value, resolution: &LaunchResolution)
     };
     let is_cortex = map.get("type").and_then(Value::as_str) == Some("cortex-debug");
 
-    // `executable` (cortex-debug) / `program` (cppdbg, codelldb) name the same
+    // `executable` (cortex-debug) / `program` (cppdbg, lldb) name the same
     // thing under different adapters; replace whichever this draft uses.
     if let Some(exe) = &resolution.executable {
         for key in ["executable", "program"] {
@@ -692,6 +698,18 @@ mod tests {
             assert!(draft.get("svdFile").is_none());
             assert!(draft.get("svdPath").is_none());
         }
+    }
+
+    #[test]
+    fn native_sim_emits_a_debug_type_vs_code_can_resolve() {
+        // The value is not cosmetic: VS Code refuses a type no extension
+        // registers with `Configured debug type 'codelldb' is not supported.`,
+        // and `codelldb` is the NAME of the extension that contributes `lldb`.
+        // Asserted by literal rather than against the emitter, so a revert has
+        // to change this line too instead of moving with the code.
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        assert_eq!(draft["type"], json!("lldb"));
     }
 
     #[test]
