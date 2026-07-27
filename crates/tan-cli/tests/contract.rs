@@ -450,10 +450,15 @@ fn collect_rust_sources(dir: &Path, out: &mut Vec<(PathBuf, String)>) {
                 continue;
             }
             collect_rust_sources(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs")
-            && let Ok(text) = std::fs::read_to_string(&path)
-        {
-            out.push((path, text));
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            // Deliberately NOT a `&& let` chain: let-chains stabilised in Rust
+            // 1.88 and this workspace pins `rust-version = "1.86"`, so the msrv
+            // job rejects them with E0658 even though a current toolchain
+            // compiles them without complaint. Local `cargo test` cannot catch
+            // that -- only the msrv leg can.
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push((path, text));
+            }
         }
     }
 }
