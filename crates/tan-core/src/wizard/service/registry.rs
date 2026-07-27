@@ -74,20 +74,21 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
         description: "West-buildable Wi-Fi + MQTT/TLS telemetry app wired to board.yaml via the SDK loader (E1M-AEN801 only).",
         // Files are vendored from the SDK's `iot` scaffold-catalog entry
         // (alp-sdk#864/#903, see wizard/vendored/MANIFEST.md), not
-        // hand-generated -- prj_conf_extras/feature_files/body_line* are
-        // unread for this template (see gen_c_project_files). Unlike the
-        // other vendored templates, `libs`/`features` are NOT blanked here:
-        // `tan explain` (a fourth consumer of this registry -- explain.rs --
-        // reads these two fields directly) would otherwise describe a
-        // starter with no libraries/features even though this template's
-        // vendored board.yaml genuinely declares `libraries: [mbedtls]` +
-        // `iot: {wifi: true, tls: true}`. `mqtt: true` here even though the
-        // vendored board.yaml has no separate `iot.mqtt` toggle line (MQTT is
-        // inherent to this app, not board.yaml-gated): `features` feeds only
-        // `tan explain`'s "Default features" summary for this template, and
-        // that summary describing an MQTT/TLS telemetry app as `mqtt=false`
-        // contradicts the very line above it.
-        libs: &["mbedtls"],
+        // hand-generated -- libs/prj_conf_extras/feature_files/body_line*
+        // are unread for this template (see gen_c_project_files). `libs` is
+        // ALSO unread by `tan explain` now (tan-cli#124): its "Default
+        // libraries" line derives straight from this template's vendored
+        // board.yaml (`vendored_library_names_for`, wizard/service/
+        // vendored.rs) instead of this field, so it stays correct across a
+        // re-vendor without a second hand edit here. `features` below is
+        // NOT blanked, unlike every other vendored template: `tan explain`'s
+        // "Default features" line still reads it directly, and the vendored
+        // board.yaml alone can't supply `mqtt` -- `iot: {wifi: true, tls:
+        // true}` has no separate `iot.mqtt` toggle (MQTT is inherent to this
+        // app, not board.yaml-gated). Leaving `mqtt: false` here would
+        // describe an MQTT/TLS telemetry app as `mqtt=false`, contradicting
+        // the explanation line right above it.
+        libs: &[],
         features: Some(WizardFeatureFlags {
             wifi: true,
             mqtt: true,
@@ -112,6 +113,11 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
         // (alp-sdk#864, see wizard/vendored/MANIFEST.md), not hand-generated
         // from these fields -- libs/features/prj_conf_extras/feature_files/
         // body_line* are unread for this template (see gen_c_project_files).
+        // `libs: &[]` here does NOT mean `tan explain` reports no libraries
+        // (tan-cli#124 was exactly that bug): its "Default libraries" line
+        // now derives from this template's vendored board.yaml instead
+        // (`vendored_library_names_for`, wizard/service/vendored.rs), which
+        // declares `tflite-micro`.
         // FIRST heterogeneous (multi-core) vendored template: a companion
         // Cortex-A cluster (`os: "off"`) ships alongside the Cortex-M app core.
         libs: &[],
@@ -134,10 +140,14 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
         // entry (alp-sdk#864/#903, see wizard/vendored/MANIFEST.md), not
         // hand-generated from these fields -- libs/features/prj_conf_extras/
         // feature_files/body_line* are unread for this template (see
-        // gen_c_project_files). `libs: &[]`/`features: None` are left as-is
-        // (not just blanked): the SDK catalog's `diagnostics` entry genuinely
-        // declares no libraries and no `iot:` toggles, so `tan explain` (a
-        // fourth consumer of this registry, explain.rs) stays accurate too.
+        // gen_c_project_files). `libs` is ALSO unread by `tan explain` now
+        // (tan-cli#124): its "Default libraries" line derives from the
+        // vendored board.yaml instead (`vendored_library_names_for`,
+        // wizard/service/vendored.rs), which for `diagnostics` genuinely
+        // declares no libraries too -- `Some(vec![])`, not this field.
+        // `features: None` here is still what `tan explain`'s "Default
+        // features" line reads directly, and stays correct: the SDK
+        // catalog's `diagnostics` entry declares no `iot:` toggles either.
         libs: &[],
         features: None,
         prj_conf_extras: &[],

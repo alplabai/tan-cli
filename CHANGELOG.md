@@ -470,6 +470,24 @@ All notable changes to `tan` are documented here. Format follows
   an in-flight contract-surface change).
 
 ### Fixed
+- **`tan explain --template edge-ai-starter` described a project that is not
+  the one `tan init` writes (#124).** `project_template_details` read the
+  wizard registry's `libs` field unconditionally, but that field is
+  deliberately blanked for a vendored template (its files come from the SDK's
+  `--emit scaffold` tree instead) — `edge-ai-starter` reported "Default
+  libraries: (none)" while its vendored `board.yaml` declares
+  `libraries: [tflite-micro]`, one line under prose that names TFLite-Micro
+  directly. `iot-starter` and `board-diagnostics` had already been hand-synced
+  correct ahead of this fix (#128); `edge-ai-starter` was the one live wrong
+  answer. `explain`'s "Default libraries" line now derives from the vendored
+  `board.yaml`'s own `libraries:` block (`vendored_library_names_for`, new in
+  `tan-core::wizard::service::vendored`) for every vendored template, instead
+  of a second hand-synced registry field that can drift from it — the
+  registry's `libs` stays authoritative only for `minimal-app`, the one
+  template left hand-generated. "Default features" is unchanged (still
+  registry-sourced): a vendored `board.yaml` has no representation for
+  `iot-starter`'s inherent `mqtt: true`, so deriving that line fully is not
+  possible without reintroducing a different self-contradiction.
 - **`tan bootstrap` reused a workspace across a patch-level Zephyr bump, so the
   next build was green against the wrong Zephyr AND the wrong hal_alif (#98).**
   The reuse test compared only `MAJOR.MINOR`, so upgrading alp-sdk `v0.13.0` ->

@@ -20,5 +20,5 @@ pub use service::{
     infer_runtime_for_core_id, list_module_templates, list_wizard_templates, normalize_module_name,
     retarget_board_yaml_som, vendored_app_core_for_sku, vendored_core_ids_for,
     vendored_diagnostics_app_core_for_sku, vendored_edge_ai_app_core_for_sku,
-    vendored_iot_app_core_for_sku, vendored_sensor_app_core_for_sku,
+    vendored_iot_app_core_for_sku, vendored_library_names_for, vendored_sensor_app_core_for_sku,
 };
