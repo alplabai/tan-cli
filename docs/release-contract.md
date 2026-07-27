@@ -100,13 +100,27 @@ Two more assets ship per release. **They are NOT what the extension downloads**
 | `aarch64-unknown-linux-gnu`  | `tan-aarch64-unknown-linux-gnu`  |
 
 The `-gnu` assets cross-build via `cargo-zigbuild` pinned to
-`x86_64-unknown-linux-gnu.2.31`, i.e. a **glibc 2.31 floor**. That floor is the
-reason the extension maps both Linux targets to `-musl` instead, verbatim from
-`alp-sdk-vscode/src/alpCli/service.ts:32-38`:
+`x86_64-unknown-linux-gnu.2.31`, so they carry a glibc floor. **That floor is
+the reason the extension maps both Linux targets to `-musl` instead** — a `-musl`
+build is fully static and runs on any distro/libc.
 
-> musl (static), not gnu: the `-gnu` assets carry a glibc 2.31 floor and fail
-> with "GLIBC_2.39 not found" on older distros (including the `-gnu` asset's own
-> build host). `-musl` is fully static, so it runs on any distro/libc.
+Two numbers here, and they are not the same number:
+
+| | Value | Source |
+| --- | --- | --- |
+| zigbuild **pin** | `2.31` | `release.yml`'s `--target …-gnu.2.31` |
+| **measured** floor of the shipped v0.3.1 binary | `GLIBC_2.30` | `readelf -V`, plus a live matrix |
+
+The pin caps which symbols may be used; the binary happened to need nothing
+above 2.30. Measured behaviour on the v0.3.1 `-gnu` asset: runs fine on
+`ubuntu:24.04` (2.39), `ubuntu:22.04` (2.35) and `debian:11` (2.31); fails on
+`ubuntu:18.04` (2.27) with `version 'GLIBC_2.30' not found`. The `-musl` asset
+ran on all four.
+
+**Do not repeat the "2.31 floor / `GLIBC_2.39` not found" wording** that
+`alp-sdk-vscode/src/alpCli/service.ts` currently carries — the phenomenon is
+real but both numbers in it are wrong, tracked as alp-sdk-vscode#370. This table
+is the measured version.
 
 **This section previously said the opposite** — that `linux/x64` and
 `linux/arm64` consumed the `-gnu` assets and that the musl assets were "not
@@ -123,7 +137,8 @@ function releaseAssetForTarget(platform: NodeJS.Platform, arch: string): string 
     "win32:x64": "x86_64-pc-windows-msvc",
     "win32:arm64": "aarch64-pc-windows-msvc",
     // musl, NOT gnu — see the glibc floor below. Changing these two back
-    // reintroduces `GLIBC_2.39 not found` on older distros.
+    // reintroduces the -gnu asset's glibc floor (measured GLIBC_2.30 on
+    // v0.3.1), which breaks pre-Ubuntu-20.04 / pre-Debian-11 consumers.
     "linux:x64": "x86_64-unknown-linux-musl",
     "linux:arm64": "aarch64-unknown-linux-musl",
     "darwin:x64": "x86_64-apple-darwin",
@@ -143,6 +158,13 @@ ubuntu-latest runner's own glibc (2.39 on ubuntu-24.04, which produces a
 binary that fails with `GLIBC_2.39 not found` on older distros such as Debian
 bookworm/2.36). 2.31 is the floor the retired `alp` CLI's `release-cli-rs.yml`
 pipeline used (issue #6's cited prior art).
+
+Note the distinction drawn in the `-gnu` asset section above: **2.31 is the
+zigbuild pin, not the measured floor.** The shipped v0.3.1 `-gnu` binary needs
+nothing above `GLIBC_2.30` (`readelf -V`), so it runs on Debian 11 and fails
+only below roughly Ubuntu 20.04. The `GLIBC_2.39` figure in this paragraph is
+the counterfactual — what building on the raw runner *without* the pin would
+produce — not what the shipped asset does.
 
 ## Build provenance
 

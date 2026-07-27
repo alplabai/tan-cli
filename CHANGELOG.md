@@ -535,7 +535,12 @@ All notable changes to `tan` are documented here. Format follows
     target table is corrected: it documented `linux/x64`+`linux/arm64` as
     consuming the `-gnu` assets with musl "not (yet) wired into"
     `releaseAssetForTarget`, while the extension has mapped both to `-musl`
-    since the glibc-2.31 floor made `-gnu` fail with `GLIBC_2.39 not found`.
+    because the `-gnu` assets carry a glibc floor. The doc now separates the
+    zigbuild PIN (`2.31`) from the MEASURED floor of the shipped binary
+    (`GLIBC_2.30`, per `readelf -V`), and warns off the "2.31 floor /
+    GLIBC_2.39 not found" wording the extension still carries -- the
+    phenomenon is real but both numbers in it are wrong
+    (alp-sdk-vscode#370).
     alp-sdk fixed the same mix-up in its own install docs in alp-sdk#990.
 - **`tan explain --template edge-ai-starter` described a project that is not
   the one `tan init` writes (#124).** `project_template_details` read the
