@@ -138,17 +138,6 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         .map(|board| board_os_set(&board))
         .unwrap_or_else(|| vec![BuildOs::Zephyr, BuildOs::Yocto, BuildOs::Baremetal]);
 
-    let probe = BuildToolProbe {
-        west: command_on_path("west"),
-        cmake: command_on_path("cmake"),
-        ninja: command_on_path("ninja"),
-        bitbake: command_on_path("bitbake"),
-        zephyr_sdk: crate::toolchain::zephyr_sdk_detected(),
-        bmaptool: command_on_path("bmaptool"),
-        dd: command_on_path("dd"),
-        is_linux: cfg!(target_os = "linux"),
-    };
-
     // `missingPrerequisites[].command` — the one field the extension's
     // `runToolchainFix` puts behind a Fix button — comes from the SDK's
     // `prerequisites.install`, so `--build` reads the same facts the prerequisite
@@ -167,13 +156,57 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
     // same message into `hostPrerequisites`' detail tail; this mode has no such
     // check, so it gets its own, sharing the wording constants so the two modes
     // cannot word one verdict two ways.
+    //
+    // Resolved BEFORE the probe below (not after, as originally): the `python`
+    // check (#120) needs `facts.python_min_version` — the SAME floor `tan
+    // bootstrap` enforces — to decide Pass vs Fail, not a second, tan-compiled-in
+    // one that could drift from it.
     let (facts, manifest_error) = resolve_bootstrap_facts(context.sdk_root.as_deref());
+
+    let probe = BuildToolProbe {
+        west: command_on_path("west"),
+        west_version: crate::util::tool_version("west"),
+        cmake: command_on_path("cmake"),
+        cmake_version: crate::util::tool_version("cmake"),
+        ninja: command_on_path("ninja"),
+        ninja_version: crate::util::tool_version("ninja"),
+        bitbake: command_on_path("bitbake"),
+        bitbake_version: crate::util::tool_version("bitbake"),
+        zephyr_sdk: crate::toolchain::zephyr_sdk_detected(),
+        bmaptool: command_on_path("bmaptool"),
+        dd: command_on_path("dd"),
+        is_linux: cfg!(target_os = "linux"),
+        git: command_on_path("git"),
+        git_version: crate::util::tool_version("git"),
+        // Resolved via bootstrap's own multi-candidate probe (`py -3`, `python3`,
+        // `python`, ...) against the manifest floor, so this check's Pass/Fail is
+        // driven by the EXACT SAME resolution `tan bootstrap` itself uses (#120)
+        // — not a second, independent guess at which interpreter tan would run.
+        python_version: crate::util::probe_host_python(facts.python_min_version).map(|h| h.version),
+        dtc: command_on_path("dtc"),
+        dtc_version: crate::util::tool_version("dtc"),
+        gperf: command_on_path("gperf"),
+        gperf_version: crate::util::tool_version("gperf"),
+    };
+
     let mut report = build_readiness_report(
         generated_at.to_string(),
         os_set,
         &probe,
         facts.install.for_host(HostOs::detect(std::env::consts::OS)),
+        facts.python_min_version,
     );
+    // `westResolved`'s check (from `probe_build_preflight`, appended below by
+    // `prepend_doctor_checks`) reports only PRESENCE. Its version (#123) is
+    // resolved independently here, through the IDENTICAL `west_program` lookup
+    // that check's own probe used — never `probe.west_version` (bare PATH) —
+    // so the two rows can never be attributed to the wrong resolver, which is
+    // precisely the bug tan-cli#123 was filed over.
+    if let Some(version) = resolve_west_resolved_version(g, &context) {
+        report
+            .check_versions
+            .insert("westResolved".to_string(), version);
+    }
     if let Some(message) = manifest_error {
         // `Warn`, matching what plain `doctor` downgrades the same rejection to:
         // a read-only report should not be the thing that exits `DoctorFailure`
@@ -234,6 +267,21 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         .then(|| Envelope::new("doctor", resolved_project, report, issues, exit.code()).to_json());
 
     CommandRun { exit, text, json }
+}
+
+/// The version of the SAME `west` `westResolved`'s check verified is present:
+/// the workspace-venv binary [`crate::venv::west_program`] resolves, not
+/// bare PATH's. `probe_build_preflight` (which builds the `westResolved`
+/// check itself) reports only presence, not a version, so this resolves the
+/// identical lookup independently rather than threading a version back out of
+/// that call — the two must never end up naming different binaries (tan-cli#123:
+/// the reported bug was exactly a version read off a DIFFERENT resolver than
+/// the one the verdict came from).
+fn resolve_west_resolved_version(g: &GlobalArgs, context: &ProjectContext) -> Option<String> {
+    let base = crate::commands::build::base_dir(context);
+    let sdk_root = crate::util::resolve_sdk_root(g, &crate::util::cli_workspace_root(g));
+    let west = crate::venv::west_program(&base, sdk_root.as_deref());
+    crate::util::tool_version(&west)
 }
 
 /// The plain `tan doctor` report: the pure check set, plus the checks that can
@@ -1637,10 +1685,11 @@ pub(crate) mod tests {
         assert_eq!(keys(&value["data"]["summary"]), ["fail", "pass", "warn"]);
         assert_eq!(value["command"], "doctor");
 
-        // Every check keeps `{name, status, detail}` (+ optional `fix`), and no
-        // `--build` check is ever `unknown` — the new status is produced only by
-        // the VS Code extension-presence set, which this mode does not emit. A
-        // consumer that only knows pass/warn/fail must stay correct here.
+        // Every check keeps `{name, status, detail}` (+ optional `fix`, +
+        // optional `version` since tan-cli#123), and no `--build` check is ever
+        // `unknown` — the new status is produced only by the VS Code
+        // extension-presence set, which this mode does not emit. A consumer
+        // that only knows pass/warn/fail must stay correct here.
         for check in value["data"]["checks"].as_array().expect("checks array") {
             for key in ["name", "status", "detail"] {
                 assert!(check.get(key).is_some(), "{key} missing from {check}");
@@ -1648,10 +1697,42 @@ pub(crate) mod tests {
             assert!(
                 keys(check)
                     .iter()
-                    .all(|k| ["detail", "fix", "name", "status"].contains(&k.as_str())),
+                    .all(|k| ["detail", "fix", "name", "status", "version"].contains(&k.as_str())),
                 "unexpected key in {check}"
             );
             assert_ne!(check["status"], "unknown", "{check}");
+        }
+    }
+
+    #[test]
+    fn doctor_build_wires_git_python_dtc_and_gperf_into_the_real_envelope() {
+        // Integration proof for tan-cli#120/#123's actual wiring (the pure
+        // logic is unit-tested exhaustively in `tan_core::build_readiness`;
+        // this is the ONE test that proves `BuildToolProbe`'s new fields are
+        // actually populated by `run_build_readiness`, not just accepted by
+        // its signature). No `board.yaml` -> `os_set` defaults to all three
+        // backends, so `dtc`/`gperf` (Zephyr-gated) are reachable too.
+        let tree = TempTree::new("build-new-checks-wired");
+        let json = run(
+            &json_global(Some(tree.path())),
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        )
+        .json
+        .expect("json envelope");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+        let names: Vec<&str> = value["data"]["checks"]
+            .as_array()
+            .expect("checks array")
+            .iter()
+            .map(|c| c["name"].as_str().unwrap_or_default())
+            .collect();
+        for expected in ["git", "python", "dtc", "gperf"] {
+            assert!(names.contains(&expected), "{expected} missing: {names:?}");
         }
     }
 
