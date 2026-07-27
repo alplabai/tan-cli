@@ -14,8 +14,8 @@ use tan_core::runners::{parse_runners_config, runner_arg_value, runner_arg_value
 use tan_core::system_manifest::{Slice, SystemManifest, parse_system_manifest};
 use tan_core::{
     DebugServerKind, DebugTargetKind, LaunchResolution, apply_launch_resolution,
-    create_launch_draft, create_launch_json_write_plan, launch_preview_document,
-    launch_preview_notes, parse_server_kind, parse_target_kind,
+    create_launch_draft, create_launch_json_write_plan, is_unresolved_placeholder,
+    launch_preview_document, launch_preview_notes, parse_server_kind, parse_target_kind,
 };
 
 use super::CommandRun;
@@ -532,11 +532,18 @@ fn resolve_from_build(
     (resolution, runners.runners.clone())
 }
 
-/// Whether any `<resolved-…>` placeholder survived resolution, anywhere in the
-/// draft — including inside `configFiles`, which is an array.
+/// Whether any `<…>` placeholder survived resolution, anywhere in the draft —
+/// including inside `configFiles`, which is an array.
+///
+/// The string test is [`is_unresolved_placeholder`], the SAME predicate the
+/// launch.json merge uses, so "keep the still-needs-resolution note" and "do
+/// not overwrite this by hand-filled value" can never disagree. It used to be
+/// `s.contains("<resolved-")`, which called the two-token `<host>:<port>` a
+/// real address: a yocto config whose `<resolved-gdb>` resolved then dropped
+/// the note while `miDebuggerServerAddress` was still unusable.
 fn has_placeholder(value: &Value) -> bool {
     match value {
-        Value::String(s) => s.contains("<resolved-"),
+        Value::String(s) => is_unresolved_placeholder(s),
         Value::Array(items) => items.iter().any(has_placeholder),
         Value::Object(map) => map.values().any(has_placeholder),
         _ => false,
@@ -632,6 +639,36 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The `<host>:<port>` hole in the note logic: a yocto draft whose
+    // `<resolved-gdb>` DID resolve has no `<resolved-` string left, so the
+    // prefix-only predicate dropped the "still needs resolution" note while
+    // `miDebuggerServerAddress` was still the unusable `<host>:<port>` — the
+    // note goes silent on exactly the config that cannot launch.
+    #[test]
+    fn the_placeholder_note_survives_an_unresolved_host_port() {
+        let mut draft = create_launch_draft(
+            DebugTargetKind::YoctoUserspace,
+            DebugServerKind::Gdbserver,
+            None,
+        )
+        .unwrap();
+        apply_launch_resolution(
+            &mut draft,
+            &LaunchResolution {
+                gdb_path: Some("/opt/gdb/bin/aarch64-poky-linux-gdb".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(draft["miDebuggerServerAddress"], "<host>:<port>");
+        assert!(!has_placeholder(&draft["miDebuggerPath"]));
+
+        let notes = preview_notes_for(&draft, &[], DebugServerKind::Gdbserver);
+        assert!(
+            notes.iter().any(|n| n.starts_with("Placeholder fields")),
+            "an unresolved <host>:<port> must keep the note: {notes:?}"
+        );
     }
 
     /// Write a `system-manifest.yaml` at `<workspace>/build/system-manifest.yaml`.

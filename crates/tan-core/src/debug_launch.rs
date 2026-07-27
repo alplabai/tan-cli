@@ -121,7 +121,15 @@ pub fn create_launch_draft(
         }),
         DebugTargetKind::NativeHost => json!({
             "name": "ALP: Native Sim Debug",
-            "type": "codelldb",
+            // `lldb`, not `codelldb`, because CodeLLDB's own manifest says so:
+            // `vadimcn.vscode-lldb` v1.12.2 declares
+            // `contributes.debuggers[0].type = "lldb"`. `codelldb` is the
+            // extension's marketplace NAME; no extension registers it as a
+            // debug type, so VS Code refused every session outright with
+            // `Configured debug type 'codelldb' is not supported.` (#104).
+            // native_sim is the only target reachable with no probe and no
+            // board — the first debugging experience a customer has.
+            "type": "lldb",
             "request": "launch",
             "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
             "cwd": "${workspaceFolder}",
@@ -195,7 +203,7 @@ pub fn apply_launch_resolution(draft: &mut Value, resolution: &LaunchResolution)
     };
     let is_cortex = map.get("type").and_then(Value::as_str) == Some("cortex-debug");
 
-    // `executable` (cortex-debug) / `program` (cppdbg, codelldb) name the same
+    // `executable` (cortex-debug) / `program` (cppdbg, lldb) name the same
     // thing under different adapters; replace whichever this draft uses.
     if let Some(exe) = &resolution.executable {
         for key in ["executable", "program"] {
@@ -287,8 +295,107 @@ pub struct LaunchJsonWritePlan {
     pub replaced: bool,
 }
 
-/// Merge `draft` into an existing `launch.json` (or a fresh document), replacing
-/// any configuration with the same `name`. Mirrors TS `createLaunchJsonWritePlan`.
+/// Whether a string is one of OUR "nobody filled this in yet" markers.
+///
+/// The two brace styles in a launch configuration mean opposite things, and
+/// that is the trap:
+///
+/// - `${…}` is a VS Code **variable substitution** (`${workspaceFolder}`,
+///   `${env:HOME}`). VS Code expands it itself at launch, so it is fully
+///   resolved as far as we are concerned. No angle bracket is involved.
+/// - `<…>` is ours — `<resolved-device>`, `<resolved-svd>`,
+///   `<resolved-openocd-board-cfg>`, `<resolved-gdb>`, `<resolved-target-id>`,
+///   and the two-token `<host>:<port>`. Nothing expands these; handed to a
+///   debug adapter verbatim they are a literal device name / path / TCP
+///   address.
+///
+/// So the test is any angle-bracket token, NOT a `<resolved-` prefix. The
+/// prefix test passed `<host>:<port>` as a real address — the hole
+/// alp-sdk-vscode found, where a yocto profile reported launchable with an
+/// unusable gdbserver address. Same hole here: `has_placeholder` in
+/// `debug-config` suppressed the "still needs resolution" note on exactly
+/// that config.
+pub fn is_unresolved_placeholder(value: &str) -> bool {
+    // Equivalent to the TS `/<[^<>]*>/`: after splitting on `<`, no fragment
+    // can contain another `<`, so a fragment holding a `>` IS a `<…>` token.
+    value.split('<').skip(1).any(|rest| rest.contains('>'))
+}
+
+fn is_unresolved(value: &Value) -> bool {
+    value.as_str().is_some_and(is_unresolved_placeholder)
+}
+
+fn is_resolved(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_str)
+        .is_some_and(|s| !is_unresolved_placeholder(s))
+}
+
+/// Merge one incoming value over what the file already holds.
+///
+/// The whole rule: **an incoming unresolved `<…>` placeholder never overwrites
+/// a concrete existing value.** That is also what tells "the customer set this
+/// deliberately" apart from "this is our old output" — our output for a field
+/// we could not resolve is *literally* an angle-bracket token, so anything
+/// concrete in the file is either the customer's or a real value we computed.
+/// The inverse still works: whenever this run CAN resolve a field, the
+/// incoming value is concrete and overwrites unconditionally, so a stale value
+/// that is now wrong is still updateable.
+fn merge_value(existing: Option<&Value>, next: &Value) -> Value {
+    if let (Value::Array(next_items), Some(Value::Array(existing_items))) = (next, existing) {
+        // cortex-debug `configFiles`: an all-placeholder incoming list keeps
+        // the existing list WHOLE, or a hand-added second `.cfg` is lost to a
+        // per-index merge against a one-element draft. A mixed list still
+        // merges per element, so an entry we did resolve wins.
+        if !next_items.is_empty()
+            && !existing_items.is_empty()
+            && next_items.iter().all(is_unresolved)
+        {
+            return Value::Array(existing_items.clone());
+        }
+        return Value::Array(
+            next_items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| merge_value(existing_items.get(i), item))
+                .collect(),
+        );
+    }
+    if is_unresolved(next) && is_resolved(existing) {
+        existing.expect("is_resolved implies Some").clone()
+    } else {
+        next.clone()
+    }
+}
+
+/// Merge the freshly generated configuration OVER the one already in the file
+/// (see [`merge_value`] for the rule), instead of replacing it.
+///
+/// This runs before every session and the configuration names are fixed per
+/// target/server, so a wholesale replace meant a customer told to hand-fill
+/// `"device": "AE822F4M55_HP"` got it reset to `"<resolved-device>"` on their
+/// next F5 — data loss on their own file, no confirm, no backup, and an
+/// unexitable loop around the advice we had just given them (#105).
+///
+/// Key order follows the existing entry with new keys appended (insert over a
+/// clone, under `preserve_order`), and keys the customer added that we never
+/// write (`preLaunchTask`, `serverArgs`, …) are left untouched because only
+/// the draft's own keys are visited.
+fn merge_configuration(existing: &Value, next: &Value) -> Value {
+    let (Some(existing_map), Some(next_map)) = (existing.as_object(), next.as_object()) else {
+        return next.clone();
+    };
+    let mut merged = existing_map.clone();
+    for (key, value) in next_map {
+        let m = merge_value(existing_map.get(key), value);
+        merged.insert(key.clone(), m);
+    }
+    Value::Object(merged)
+}
+
+/// Merge `draft` into an existing `launch.json` (or a fresh document), merging
+/// key-by-key over any configuration with the same `name`. Mirrors TS
+/// `createLaunchJsonWritePlan`.
 pub fn create_launch_json_write_plan(
     existing_content: Option<&str>,
     draft: &Value,
@@ -307,7 +414,7 @@ pub fn create_launch_json_write_plan(
 
     let replaced = match existing_index {
         Some(index) => {
-            configs[index] = draft.clone();
+            configs[index] = merge_configuration(&configs[index], draft);
             true
         }
         None => {
@@ -694,6 +801,65 @@ mod tests {
         }
     }
 
+    /// Every debug type tan can emit, and the extension that actually
+    /// contributes it — verified against each extension's own `package.json`
+    /// `contributes.debuggers[].type`:
+    ///
+    /// | emitted type   | extension            | version verified |
+    /// |----------------|----------------------|------------------|
+    /// | `cortex-debug` | `marus25.cortex-debug` | v1.12.1        |
+    /// | `cppdbg`       | `ms-vscode.cpptools`   | v1.23.6        |
+    /// | `lldb`         | `vadimcn.vscode-lldb`  | v1.12.2        |
+    ///
+    /// These three are exactly the extensions `debug::doctor` declares and
+    /// checks for. A table can be wrong; a table is at least checkable, which
+    /// is more than `"codelldb"` ever was — that value named an extension
+    /// rather than a type and VS Code refused every native_sim session for the
+    /// whole life of the code (#104).
+    const CONTRIBUTED_DEBUG_TYPES: [(&str, &str); 3] = [
+        ("cortex-debug", "marus25.cortex-debug v1.12.1"),
+        ("cppdbg", "ms-vscode.cpptools v1.23.6"),
+        ("lldb", "vadimcn.vscode-lldb v1.12.2"),
+    ];
+
+    /// Adding a `DebugTargetKind` fails to compile here until it is also added
+    /// to `every_emitted_debug_type_is_one_an_extension_contributes` below.
+    fn _target_kinds_are_all_covered(target: DebugTargetKind) {
+        match target {
+            DebugTargetKind::ZephyrMcu
+            | DebugTargetKind::BaremetalMcu
+            | DebugTargetKind::YoctoUserspace
+            | DebugTargetKind::NativeHost => {}
+        }
+    }
+
+    #[test]
+    fn every_emitted_debug_type_is_one_an_extension_contributes() {
+        for target in [
+            DebugTargetKind::ZephyrMcu,
+            DebugTargetKind::BaremetalMcu,
+            DebugTargetKind::YoctoUserspace,
+            DebugTargetKind::NativeHost,
+        ] {
+            for &server in crate::debug::server_choices_for_target(target) {
+                let draft = create_launch_draft(target, server, None).unwrap();
+                let emitted = draft["type"].as_str().expect("every draft names a type");
+                assert!(
+                    CONTRIBUTED_DEBUG_TYPES.iter().any(|(t, _)| *t == emitted),
+                    "{} + {} emits debug type '{}', which no extension tan's \
+                     doctor declares contributes. VS Code answers 'Configured \
+                     debug type '{}' is not supported.' and the session never \
+                     starts. Known-good: {:?}",
+                    target.as_str(),
+                    server.as_str(),
+                    emitted,
+                    emitted,
+                    CONTRIBUTED_DEBUG_TYPES,
+                );
+            }
+        }
+    }
+
     #[test]
     fn write_plan_appends_then_replaces_by_name() {
         let draft =
@@ -708,6 +874,203 @@ mod tests {
         assert!(plan2.replaced);
         let doc: Value = serde_json::from_str(&plan2.content).unwrap();
         assert_eq!(doc["configurations"].as_array().unwrap().len(), 1);
+    }
+
+    /// Serialize `{version, configurations:[config]}` as an existing file.
+    fn existing_with(config: Value) -> String {
+        serde_json::to_string_pretty(&json!({
+            "version": "0.2.0",
+            "configurations": [config],
+        }))
+        .unwrap()
+    }
+
+    /// Re-read the single merged configuration out of a write plan.
+    fn merged_config(plan: &LaunchJsonWritePlan) -> Value {
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 1);
+        configs[0].clone()
+    }
+
+    #[test]
+    fn a_hand_filled_value_survives_the_next_write_while_stale_fields_refresh() {
+        // The #105 report: the customer is told to fill in `device`, does, and
+        // the next F5 writes `<resolved-device>` back over it.
+        let existing = existing_with(json!({
+            "name": "ALP: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/stale/zephyr.elf",
+            "device": "AE822F4M55_HP",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        assert_eq!(draft["device"], "<resolved-device>");
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(plan.replaced);
+        let merged = merged_config(&plan);
+        assert_eq!(merged["device"], "AE822F4M55_HP");
+        // …and everything this run DOES know still refreshes.
+        assert_eq!(
+            merged["executable"],
+            "${workspaceFolder}/build/app/zephyr/zephyr.elf"
+        );
+        // Key order follows the existing entry, new keys appended.
+        let keys: Vec<&str> = merged
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            &keys[..6],
+            &["name", "type", "request", "cwd", "executable", "device"]
+        );
+    }
+
+    #[test]
+    fn a_stale_value_is_still_updateable_and_a_broken_type_is_still_repaired() {
+        // The inverse of the rule above: a concrete incoming value overwrites
+        // unconditionally, so a value that is now WRONG is not frozen in — the
+        // `codelldb` → `lldb` repair (#104) has to land on an entry that
+        // already exists, which is every entry after the first write.
+        let existing = existing_with(json!({
+            "name": "ALP: Native Sim Debug",
+            "type": "codelldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
+            "cwd": "${workspaceFolder}",
+        }));
+        let mut draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        apply_launch_resolution(
+            &mut draft,
+            &LaunchResolution {
+                executable: Some("${workspaceFolder}/build/native_sim-zephyr/zephyr.exe".into()),
+                ..Default::default()
+            },
+        );
+
+        let merged =
+            merged_config(&create_launch_json_write_plan(Some(&existing), &draft).unwrap());
+        assert_eq!(merged["type"], "lldb");
+        assert_eq!(
+            merged["program"],
+            "${workspaceFolder}/build/native_sim-zephyr/zephyr.exe"
+        );
+    }
+
+    #[test]
+    fn a_hand_typed_gdbserver_address_survives_the_host_port_placeholder() {
+        // `<host>:<port>` carries no `<resolved-` prefix — the exact hole the
+        // extension found. A prefix-only predicate calls it a real address and
+        // overwrites the one the customer typed.
+        let existing = existing_with(json!({
+            "name": "ALP: Yocto Remote Debug",
+            "type": "cppdbg",
+            "miDebuggerServerAddress": "192.168.10.42:3333",
+            "miDebuggerPath": "/opt/gdb/bin/aarch64-poky-linux-gdb",
+        }));
+        let draft = create_launch_draft(
+            DebugTargetKind::YoctoUserspace,
+            DebugServerKind::Gdbserver,
+            None,
+        )
+        .unwrap();
+        assert_eq!(draft["miDebuggerServerAddress"], "<host>:<port>");
+
+        let merged =
+            merged_config(&create_launch_json_write_plan(Some(&existing), &draft).unwrap());
+        assert_eq!(merged["miDebuggerServerAddress"], "192.168.10.42:3333");
+        assert_eq!(
+            merged["miDebuggerPath"],
+            "/opt/gdb/bin/aarch64-poky-linux-gdb"
+        );
+    }
+
+    #[test]
+    fn an_all_placeholder_config_files_list_keeps_the_existing_list_whole() {
+        // A per-index merge against the one-element draft would drop the
+        // customer's hand-added second `.cfg` entirely.
+        let existing = existing_with(json!({
+            "name": "ALP: Zephyr Debug (OpenOCD)",
+            "type": "cortex-debug",
+            "servertype": "openocd",
+            "configFiles": ["/boards/alp/board.cfg", "/boards/alp/extra.cfg"],
+        }));
+        let draft = create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Openocd, None)
+            .unwrap();
+        assert_eq!(
+            draft["configFiles"],
+            json!(["<resolved-openocd-board-cfg>"])
+        );
+
+        let merged =
+            merged_config(&create_launch_json_write_plan(Some(&existing), &draft).unwrap());
+        assert_eq!(
+            merged["configFiles"],
+            json!(["/boards/alp/board.cfg", "/boards/alp/extra.cfg"])
+        );
+
+        // A list this run DID resolve still replaces it.
+        let mut resolved_draft = draft.clone();
+        apply_launch_resolution(
+            &mut resolved_draft,
+            &LaunchResolution {
+                config_files: vec!["/zephyr/boards/real.cfg".into()],
+                ..Default::default()
+            },
+        );
+        let merged = merged_config(
+            &create_launch_json_write_plan(Some(&existing), &resolved_draft).unwrap(),
+        );
+        assert_eq!(merged["configFiles"], json!(["/zephyr/boards/real.cfg"]));
+    }
+
+    #[test]
+    fn keys_the_customer_added_that_tan_never_writes_are_untouched() {
+        let existing = existing_with(json!({
+            "name": "ALP: Native Sim Debug",
+            "type": "lldb",
+            "preLaunchTask": "my own build task",
+            "initCommands": ["settings set target.x86-disassembly-flavor intel"],
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        assert!(draft.get("preLaunchTask").is_none());
+
+        let merged =
+            merged_config(&create_launch_json_write_plan(Some(&existing), &draft).unwrap());
+        assert_eq!(merged["preLaunchTask"], "my own build task");
+        assert_eq!(
+            merged["initCommands"],
+            json!(["settings set target.x86-disassembly-flavor intel"])
+        );
+    }
+
+    #[test]
+    fn placeholder_predicate_separates_our_markers_from_vs_code_substitutions() {
+        for ours in [
+            "<resolved-device>",
+            "<resolved-openocd-board-cfg>",
+            "<host>:<port>",
+        ] {
+            assert!(is_unresolved_placeholder(ours), "{ours} is a placeholder");
+        }
+        for theirs in [
+            "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+            "AE822F4M55_HP",
+            "192.168.10.42:3333",
+            "",
+        ] {
+            assert!(
+                !is_unresolved_placeholder(theirs),
+                "{theirs} is a real value"
+            );
+        }
     }
 
     #[test]
