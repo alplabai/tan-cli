@@ -56,6 +56,29 @@ All notable changes to `tan` are documented here. Format follows
   sends no `Authorization` header, and GitHub returns `draft: true` entries
   only to a caller with push access, so against the public `alp-sdk` repo
   `[draft]` never renders today — it activates the moment a token is added.
+- **`tan doctor --build` checks `git`, `python`, `dtc` and `gperf`, and every
+  check can now carry a resolved `version` (#120, #123).** Four of the six
+  host tools a build needs were previously invisible to `data.checks[]`; `git`
+  and `python` are checked unconditionally (every backend's build-plan
+  emission runs `alp_project.py` through both, not just Zephyr's), `dtc` and
+  `gperf` are gated on the Zephyr entry in `data.osSet` (Yocto/baremetal-only
+  projects never see them) and — matching the retired `alp doctor`'s own
+  `_check_dtc`/`_check_gperf` — stay `warn` rather than `fail`. `python`
+  reports a version FLOOR, not bare presence: an interpreter below the
+  manifest's `pythonMinVersion` fails with its own detail, distinct from "not
+  found".
+  - Each `data.checks[]` entry gains an optional `version` — absent, never
+    `null`, when unresolved or not meaningful (`zephyrSdk`, `vendorToolchain`)
+    — reporting whatever tan itself resolved rather than leaving a consumer to
+    re-probe PATH and risk a second, disagreeing answer. `westResolved`'s
+    version comes from the SAME workspace-venv resolver its status does,
+    kept independent of `west`'s bare-PATH version so the two rows can never
+    be attributed to the wrong resolver.
+  - `missingPrerequisites[].tool` for python is now host-correct — `python3`
+    on a served POSIX host, `python` on Windows — matching `prerequisites.
+    install.linux`/`.macos`'s own key and `tan bootstrap`'s `posix_refusal`
+    naming for the identical missing tool, instead of always `python`, which
+    a POSIX consumer could not re-key back into that same install map.
 - **Vendor `board-diagnostics` and `iot-starter` from the SDK scaffold catalog
   (#14).** Closes out the last two vendorable entries from alp-sdk#864's
   scaffold catalog (added by alp-sdk#903): `board-diagnostics` now emits the
