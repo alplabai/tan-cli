@@ -53,6 +53,22 @@ pub fn list_generation_target_support() -> &'static [GenerationTargetSupport] {
     GENERATION_TARGET_CATALOG
 }
 
+/// `som.sku` + core id -> the SDK's `--emit zephyr-board` directory name.
+/// Mirrors `gen_zephyr_board._board_dir_name` verbatim: `E1M-AEN801` +
+/// `m55_hp` -> `alp_e1m_aen801_m55_hp`. `alp_project.py` keys every generated
+/// file under exactly this name and strips it before joining onto `--output`
+/// (`docs/porting-new-som.md` Step 7 pairs `--output
+/// build/boards/alp_e1m_aen901_m55_hp/` with `--board-root build/boards`), so
+/// `--output` must BE this directory -- a bare core id collides across SoMs
+/// that share a core id (tan-cli#116 review).
+///
+/// `None` when `sku` does not start with `E1M-` (mirrors the SDK's own
+/// `unrecognised SKU prefix` guard).
+pub fn zephyr_board_dir_name(sku: &str, core_id: &str) -> Option<String> {
+    let slug = sku.strip_prefix("E1M-")?.to_lowercase();
+    Some(format!("alp_e1m_{slug}_{core_id}"))
+}
+
 /// Looks up a target by its `emit` key; `None` if no target matches.
 pub fn generation_target_support(emit: &str) -> Option<&'static GenerationTargetSupport> {
     GENERATION_TARGET_CATALOG.iter().find(|t| t.emit == emit)
@@ -123,5 +139,25 @@ mod tests {
             Some("CMake args")
         );
         assert!(generation_target_support("bogus").is_none());
+    }
+
+    #[test]
+    fn zephyr_board_dir_name_matches_the_sdk_convention() {
+        assert_eq!(
+            zephyr_board_dir_name("E1M-AEN801", "m55_hp").as_deref(),
+            Some("alp_e1m_aen801_m55_hp")
+        );
+        // Two different SKUs sharing a core id must never collide: the
+        // FAILING case this whole function exists to prevent (tan-cli#116
+        // review finding 1).
+        assert_ne!(
+            zephyr_board_dir_name("E1M-AEN801", "m55_hp"),
+            zephyr_board_dir_name("E1M-AEN901", "m55_hp"),
+        );
+    }
+
+    #[test]
+    fn zephyr_board_dir_name_rejects_a_non_e1m_sku() {
+        assert_eq!(zephyr_board_dir_name("BOGUS-SKU", "m55_hp"), None);
     }
 }

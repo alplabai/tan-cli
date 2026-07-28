@@ -38,6 +38,34 @@ const ALL_EMIT_MODES: [&str; 7] = [
     "west-libraries",
 ];
 
+/// Targets `--core` optionally scopes, beyond `zephyr-board` (which hard-
+/// requires it). Verbatim from `alp_project.py`'s own `--core` help at the
+/// pinned SDK tag: for the per-core modes (`zephyr-conf`/`yocto-conf`/
+/// `cmake-args`) it picks the single slice to emit; for the project-wide
+/// modes (`dts-overlay`/`west-libraries`) it scopes the union calculation to
+/// one slice. The SDK itself hard-errors when `--core` names a core outside
+/// a per-core mode's OS class (e.g. `--emit yocto-conf --core <a-zephyr-core>`),
+/// so `tan` does not need to re-validate that compatibility here.
+///
+/// `carrier-netlist` and `native-sim-overlay` are deliberately NOT in this
+/// set: both are board-/SoM-mounting facts `alp_project.py` never reads
+/// `--core` for at all, so passing it would silently do nothing -- the
+/// footgun `resolve_generate_targets` refuses instead of tolerating.
+const CORE_SCOPABLE_TARGETS: [&str; 5] = [
+    "zephyr-conf",
+    "yocto-conf",
+    "cmake-args",
+    "dts-overlay",
+    "west-libraries",
+];
+
+/// True when `emit` accepts `--core` as an optional scoping flag (in addition
+/// to `zephyr-board`, which hard-requires it and is handled separately by
+/// both `resolve_generate_targets` and the command-building loop).
+fn target_accepts_core(emit: &str) -> bool {
+    CORE_SCOPABLE_TARGETS.contains(&emit)
+}
+
 /// JSON `data` payload for the `generate` envelope.
 #[derive(serde::Serialize)]
 struct GenerateData {
@@ -94,6 +122,13 @@ pub fn run(g: &GlobalArgs, args: &GenerateArgs) -> CommandRun {
         );
     };
 
+    // Every `resolve_generate_targets` error is a user-supplied argument-shape
+    // mistake (an unknown --target, or --core paired with a target that
+    // doesn't accept it) -- never an internal fault -- so this reports
+    // ExitCode::ValidationFailure (2) / "generate.invalid-target", not
+    // ExitCode::InternalFailure (5) / "generate.internal-failure" (tan-cli#117
+    // review finding 3: an ordinary usage mistake used to surface identically
+    // to a genuine bug).
     let targets = match resolve_generate_targets(g.target.as_deref(), g.all, args.core.as_deref()) {
         Ok(t) => t,
         Err(message) => {
@@ -101,14 +136,65 @@ pub fn run(g: &GlobalArgs, args: &GenerateArgs) -> CommandRun {
             return failure(
                 g,
                 project,
-                ExitCode::InternalFailure,
-                "internal-failure",
+                ExitCode::ValidationFailure,
+                "invalid-target",
                 &message,
                 empty_data(),
-                vec!["generate: internal failure".to_string(), copy],
+                vec![
+                    "generate: invalid target/argument combination".to_string(),
+                    copy,
+                ],
             );
         }
     };
+
+    // zephyr-board is always resolved alone (see resolve_generate_targets), so
+    // deriving its output directory name once here, up front, covers the one
+    // iteration of the emit loop below that needs it. `--core` is Some here:
+    // resolve_generate_targets already refused `--target zephyr-board` with
+    // no `--core`.
+    //
+    // tan-cli#116 review finding 1: this used to be a bare `core` id
+    // (`build/boards/<core>/`), not the SDK's own `alp_e1m_<sku-slug>_<core>`
+    // board-directory convention -- so two SoMs sharing a core id (e.g. a
+    // project retargeted from E1M-AEN901 to E1M-AEN801, both with `m55_hp`)
+    // collided in the same `build/boards/m55_hp/`, each run's files landing
+    // beside the other SoM's stale ones instead of a fresh directory.
+    let mut zephyr_board_dir_name: Option<String> = None;
+    if targets.contains(&"zephyr-board") {
+        let core = args
+            .core
+            .as_deref()
+            .expect("resolve_generate_targets requires --core for zephyr-board");
+        let sku = std::fs::read_to_string(&board_path)
+            .ok()
+            .and_then(|text| tan_core::parse_board_model(&text).ok())
+            .and_then(|model| model.som)
+            .and_then(|som| som.sku);
+        match sku
+            .as_deref()
+            .and_then(|sku| tan_core::zephyr_board_dir_name(sku, core))
+        {
+            Some(name) => zephyr_board_dir_name = Some(name),
+            None => {
+                return failure(
+                    g,
+                    project,
+                    ExitCode::ValidationFailure,
+                    "board-sku-unresolved",
+                    "board.yaml's som.sku is missing or is not an E1M-* SKU; `--target \
+                     zephyr-board` needs it to name the generated board directory \
+                     (alp-sdk's `alp_e1m_<sku-slug>_<core>` convention).",
+                    empty_data(),
+                    vec![
+                        "generate: som.sku is missing or unrecognised; cannot name the \
+                         zephyr-board directory."
+                            .to_string(),
+                    ],
+                );
+            }
+        }
+    }
 
     // native-sim-overlay is the one target that writes into the hand-editable
     // app source tree (boards/, not build/generated/ -- see output_path_for_emit).
@@ -153,7 +239,8 @@ pub fn run(g: &GlobalArgs, args: &GenerateArgs) -> CommandRun {
     let mut issues = Vec::<Issue>::new();
 
     for emit in &targets {
-        let output_path = output_path_for_emit(&workspace_root, emit, args.core.as_deref());
+        let output_path =
+            output_path_for_emit(&workspace_root, emit, zephyr_board_dir_name.as_deref());
         let output_str = output_path.to_string_lossy().to_string();
         let mut command = Command::new(python);
         command
@@ -164,10 +251,13 @@ pub fn run(g: &GlobalArgs, args: &GenerateArgs) -> CommandRun {
             .arg(emit)
             .arg("--output")
             .arg(&output_str);
-        // zephyr-board is the one target `alp_project.py` requires --core for
-        // (resolve_generate_targets already refused this target with no
-        // --core, so this is always Some here).
-        if *emit == "zephyr-board" {
+        // zephyr-board hard-requires --core (resolve_generate_targets already
+        // refused this target with no --core, so this is always Some here);
+        // the CORE_SCOPABLE_TARGETS accept it optionally -- forwarding it is
+        // what makes e.g. `tan generate --target zephyr-conf --core m55_hp`
+        // byte-identical to what the planner's build-plan `configArtefacts`
+        // materialises for the same core (tan-cli#117 review finding 2).
+        if *emit == "zephyr-board" || target_accepts_core(emit) {
             if let Some(core) = &args.core {
                 command.arg("--core").arg(core);
             }
@@ -243,12 +333,15 @@ fn resolve_board_path(g: &GlobalArgs, workspace_root: &Path) -> PathBuf {
 /// Resolve which emit modes to run: all modes when `all` is set or no `--target`
 /// is given, otherwise the single matching mode, or an error for an unknown target.
 ///
-/// `--core` (tan-cli#116) is meaningful for exactly one target, `zephyr-board`
-/// -- it picks which core's Zephyr board tree `alp_project.py --emit
-/// zephyr-board` generates, and the emit REQUIRES it (there is no
-/// sum-across-cores fallback the way there is for e.g. `west-libraries`).
-/// Passing `--core` with any other target (or with none/`--all`, which never
-/// resolves to `zephyr-board` alone) is refused rather than silently ignored --
+/// `--core` (tan-cli#116) is REQUIRED for `zephyr-board` (it picks which
+/// core's Zephyr board tree `alp_project.py --emit zephyr-board` generates;
+/// there is no sum-across-cores fallback the way there is for e.g.
+/// `west-libraries`), and is optionally accepted -- passed through, not
+/// required -- for [`CORE_SCOPABLE_TARGETS`] (tan-cli#116 review finding 2:
+/// `alp_project.py`'s own `--core` help documents it as meaningful for five
+/// more targets than the single one this used to allow). Passing `--core`
+/// with any other target (or with none/`--all`, which never resolves to a
+/// single core-aware target alone) is refused rather than silently ignored --
 /// silently ignoring it would let a user believe `--core` scoped a target it
 /// does nothing for.
 fn resolve_generate_targets(
@@ -256,8 +349,19 @@ fn resolve_generate_targets(
     all: bool,
     core: Option<&str>,
 ) -> Result<Vec<&'static str>, String> {
-    if target != Some("zephyr-board") && core.is_some() {
-        return Err("`--core` is only valid with `--target zephyr-board`.".to_string());
+    if core.is_some() {
+        let core_is_valid_here = match target {
+            Some("zephyr-board") => true,
+            Some(t) if !all => target_accepts_core(t),
+            _ => false,
+        };
+        if !core_is_valid_here {
+            return Err(format!(
+                "`--core` is only valid with `--target zephyr-board` (required), or one \
+                 of {} (optional scoping); it does nothing for the default/--all target set.",
+                CORE_SCOPABLE_TARGETS.join(", ")
+            ));
+        }
     }
 
     if all || target.is_none() {
@@ -288,23 +392,34 @@ fn resolve_generate_targets(
 /// `boards/native_sim_native_64.overlay` in the app source tree so
 /// `west build -b native_sim/native/64` auto-discovers it. `zephyr-board`
 /// writes a DIRECTORY of files (tan-cli#116), not one file: one subdirectory
-/// per `--core`, under `build/boards/`, so `west build --board-root
-/// build/boards` (docs/porting-new-som.md Step 7) finds every generated core's
-/// tree without them colliding. `core` is `None` for every other target.
-fn output_path_for_emit(workspace_root: &Path, emit: &str, core: Option<&str>) -> PathBuf {
+/// per SDK board-dir name, under `build/boards/`, so `west build
+/// --board-root build/boards` (docs/porting-new-som.md Step 7, which pairs
+/// `--output build/boards/alp_e1m_aen901_m55_hp/` with `--board-root
+/// build/boards`) finds every generated board's tree without them colliding.
+/// `board_dir_name` (the caller's already-resolved
+/// [`tan_core::zephyr_board_dir_name`] result, e.g.
+/// `alp_e1m_aen801_m55_hp` -- NOT a bare core id: two SoMs sharing a core id
+/// must never collide, tan-cli#116 review finding 1) is `None` for every
+/// other target.
+fn output_path_for_emit(
+    workspace_root: &Path,
+    emit: &str,
+    board_dir_name: Option<&str>,
+) -> PathBuf {
     if emit == "native-sim-overlay" {
         return workspace_root
             .join("boards")
             .join("native_sim_native_64.overlay");
     }
     if emit == "zephyr-board" {
-        // `resolve_generate_targets` refuses this target without `--core`, so
-        // by the time this runs `core` is always Some; the fallback name is
-        // only reached from a direct unit-test call.
+        // `run` always resolves `board_dir_name` before reaching this target
+        // (returning a validation failure otherwise), so it is always Some in
+        // the real call path; the fallback is only reached from a direct
+        // unit-test call.
         return workspace_root
             .join("build")
             .join("boards")
-            .join(core.unwrap_or("board"));
+            .join(board_dir_name.unwrap_or("board"));
     }
 
     let file_name = match emit {
@@ -413,6 +528,7 @@ fn failure(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::Format;
 
     #[test]
     fn target_resolution_defaults_to_all() {
@@ -496,22 +612,69 @@ mod tests {
     }
 
     #[test]
-    fn target_resolution_rejects_core_on_other_targets() {
+    fn target_resolution_rejects_core_on_targets_that_dont_consume_it() {
         // The footgun this guards: --core silently doing nothing for a target
-        // that doesn't consume it.
-        let err = resolve_generate_targets(Some("cmake-args"), false, Some("m55_hp")).unwrap_err();
+        // that doesn't consume it (carrier-netlist/native-sim-overlay are
+        // board-/SoM-mounting facts alp_project.py never reads --core for),
+        // or for the default/--all set (which mixes core-scoped and
+        // core-blind targets in one run).
+        let err =
+            resolve_generate_targets(Some("carrier-netlist"), false, Some("m55_hp")).unwrap_err();
+        assert!(err.contains("--core"), "{err}");
+        let err = resolve_generate_targets(Some("native-sim-overlay"), false, Some("m55_hp"))
+            .unwrap_err();
         assert!(err.contains("--core"), "{err}");
         let err = resolve_generate_targets(None, false, Some("m55_hp")).unwrap_err();
+        assert!(err.contains("--core"), "{err}");
+        let err = resolve_generate_targets(Some("cmake-args"), true, Some("m55_hp")).unwrap_err();
         assert!(err.contains("--core"), "{err}");
     }
 
     #[test]
-    fn zephyr_board_writes_a_per_core_directory_under_build_boards() {
-        let path = output_path_for_emit(Path::new("/ws"), "zephyr-board", Some("m55_hp"));
-        assert!(path.ends_with("build/boards/m55_hp"), "{path:?}");
-        // A different core must land in a different directory -- concurrent
-        // `--target zephyr-board` runs for two cores must never collide.
-        let other = output_path_for_emit(Path::new("/ws"), "zephyr-board", Some("a55_cluster"));
+    fn target_resolution_accepts_core_for_the_scopable_targets() {
+        // tan-cli#116 review finding 2: --core used to be hard-refused for
+        // every target except zephyr-board, contradicting alp_project.py's
+        // own --core help at the pinned SDK tag, which documents it as
+        // meaningful for these five as well. The FAILING case this guards:
+        // `--target zephyr-conf --core m55_hp` used to be refused outright.
+        for target in CORE_SCOPABLE_TARGETS {
+            let resolved = resolve_generate_targets(Some(target), false, Some("m55_hp")).unwrap();
+            assert_eq!(resolved, vec![target], "target={target}");
+        }
+    }
+
+    #[test]
+    fn target_accepts_core_matches_the_scopable_set() {
+        assert!(target_accepts_core("zephyr-conf"));
+        assert!(target_accepts_core("yocto-conf"));
+        assert!(target_accepts_core("cmake-args"));
+        assert!(target_accepts_core("dts-overlay"));
+        assert!(target_accepts_core("west-libraries"));
+        // The FAILING case: a target --core does nothing for must stay false,
+        // or the command-building loop would silently forward a flag the SDK
+        // never reads for it.
+        assert!(!target_accepts_core("carrier-netlist"));
+        assert!(!target_accepts_core("native-sim-overlay"));
+        assert!(!target_accepts_core("zephyr-board"));
+    }
+
+    #[test]
+    fn zephyr_board_writes_under_the_sdk_board_dir_name_not_a_bare_core_id() {
+        // tan-cli#116 review finding 1: the directory must be the SDK's own
+        // `alp_e1m_<sku-slug>_<core>` convention, not a bare core id.
+        let dir_name = tan_core::zephyr_board_dir_name("E1M-AEN801", "m55_hp").unwrap();
+        let path = output_path_for_emit(Path::new("/ws"), "zephyr-board", Some(&dir_name));
+        assert!(
+            path.ends_with("build/boards/alp_e1m_aen801_m55_hp"),
+            "{path:?}"
+        );
+
+        // The FAILING case the bare-core-id naming produced: two projects on
+        // the SAME core but DIFFERENT SoMs (a first-class SoM-swap flow) used
+        // to collide in one `build/boards/m55_hp/` directory. With the SKU
+        // folded into the name they never collide.
+        let other_dir_name = tan_core::zephyr_board_dir_name("E1M-AEN901", "m55_hp").unwrap();
+        let other = output_path_for_emit(Path::new("/ws"), "zephyr-board", Some(&other_dir_name));
         assert_ne!(path, other);
     }
 
@@ -551,5 +714,99 @@ mod tests {
         ));
 
         let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// Turns `dir` into a directory `has_loader_script` accepts, without
+    /// needing a real `alp_project.py` -- these `run()`-level tests all fail
+    /// out before ever spawning it.
+    fn make_sdk_root(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir.join("scripts")).unwrap();
+        std::fs::write(dir.join("scripts").join("alp_project.py"), "").unwrap();
+    }
+
+    fn global(
+        project: &std::path::Path,
+        sdk_root: &std::path::Path,
+        target: Option<&str>,
+    ) -> GlobalArgs {
+        GlobalArgs {
+            project: Some(project.to_string_lossy().into_owned()),
+            board_yaml: None,
+            sdk_root: Some(sdk_root.to_string_lossy().into_owned()),
+            target: target.map(str::to_string),
+            all: false,
+            format: Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    #[test]
+    fn zephyr_board_without_core_is_a_validation_failure_not_internal() {
+        // tan-cli#116 review finding 3: an ordinary usage mistake (here,
+        // `--target zephyr-board` with no `--core`, which alp_project.py
+        // itself hard-requires) must not surface as
+        // ExitCode::InternalFailure ("bug/unreachable state"). FAILING case:
+        // this used to be exit code 5 with issue code
+        // "generate.internal-failure".
+        let ws = unique_temp_dir("no-core-validation-ws");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("board.yaml"), "som:\n  sku: E1M-AEN801\n").unwrap();
+        let sdk = unique_temp_dir("no-core-validation-sdk");
+        let _ = std::fs::remove_dir_all(&sdk);
+        make_sdk_root(&sdk);
+
+        let g = global(&ws, &sdk, Some("zephyr-board"));
+        let result = run(
+            &g,
+            &GenerateArgs {
+                force: false,
+                core: None,
+            },
+        );
+
+        assert_eq!(result.exit, ExitCode::ValidationFailure);
+        let json: serde_json::Value =
+            serde_json::from_str(result.json.as_deref().expect("json envelope")).unwrap();
+        assert_eq!(json["exitCode"], 2);
+        assert_ne!(json["issues"][0]["code"], "generate.internal-failure");
+
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&sdk);
+    }
+
+    #[test]
+    fn zephyr_board_with_a_non_e1m_sku_is_refused_before_naming_a_directory() {
+        // tan-cli#116 review finding 1's guard: without a resolvable
+        // `alp_e1m_<sku-slug>_<core>` name, `run()` must refuse rather than
+        // fall back to the collision-prone bare-core-id directory.
+        let ws = unique_temp_dir("bad-sku-ws");
+        let _ = std::fs::remove_dir_all(&ws);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("board.yaml"), "som:\n  sku: BOGUS-SKU\n").unwrap();
+        let sdk = unique_temp_dir("bad-sku-sdk");
+        let _ = std::fs::remove_dir_all(&sdk);
+        make_sdk_root(&sdk);
+
+        let g = global(&ws, &sdk, Some("zephyr-board"));
+        let result = run(
+            &g,
+            &GenerateArgs {
+                force: false,
+                core: Some("m55_hp".to_string()),
+            },
+        );
+
+        assert_eq!(result.exit, ExitCode::ValidationFailure);
+        let json: serde_json::Value =
+            serde_json::from_str(result.json.as_deref().expect("json envelope")).unwrap();
+        assert_eq!(json["issues"][0]["code"], "generate.board-sku-unresolved");
+
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&sdk);
     }
 }

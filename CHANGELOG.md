@@ -24,11 +24,26 @@
   `.yaml`, `_defconfig`, two `Kconfig.*`, the pinctrl `.dtsi`, `board.yml`)
   rather than one fixed file, so it is deliberately NOT part of the
   default/`--all` set -- reachable only via an explicit `--target
-  zephyr-board --core <id>`, landing under its own fixed convention,
-  `build/boards/<core>/`. `--core` is refused on every other target rather
-  than silently ignored.
+  zephyr-board --core <id>`, landing under `build/boards/<board-dir>/` where
+  `<board-dir>` is the SDK's own `alp_e1m_<sku-slug>_<core>` board-directory
+  name (matching `docs/porting-new-som.md` Step 7's own `--output
+  build/boards/alp_e1m_aen901_m55_hp/` example), never a bare core id -- two
+  SoMs that share a core id (a first-class SoM-swap flow) write to different
+  directories instead of colliding in one. `--core` is required for this
+  target, optionally accepted -- forwarded straight through to
+  `alp_project.py` -- on `zephyr-conf`/`yocto-conf`/`cmake-args`/
+  `dts-overlay`/`west-libraries` (`alp_project.py`'s own `--core` help
+  documents it as meaningful there too, at the pinned SDK tag), and refused
+  on every other target (`carrier-netlist`, `native-sim-overlay`, and the
+  default/`--all` set, none of which the SDK ever reads `--core` for).
 
 ### Fixed
+- **`tan generate`'s argument-shape errors (`--core` paired with a target it
+  doesn't scope; `--target zephyr-board` with no `--core`) now exit
+  `ValidationFailure` (2) with issue code `generate.invalid-target`, not
+  `InternalFailure` (5) with `generate.internal-failure`.** An ordinary usage
+  mistake used to be indistinguishable from a genuine internal bug on both
+  the exit code and the wire.
 - **`tan bootstrap`'s printed next steps still told the user to reinstall via
   the retired, unpinned `cargo install --git https://github.com/alplabai/tan-cli
   --bin tan` (#117).** alp-sdk#988 replaced every such site repo-wide with the
