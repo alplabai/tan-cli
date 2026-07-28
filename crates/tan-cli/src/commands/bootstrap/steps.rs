@@ -617,26 +617,47 @@ mod tests {
         );
     }
 
-    /// Real `/bin/true` / `/bin/false` stand in for a venv whose `pip` works vs.
-    /// one whose `-m pip --version` fails, without needing a real Python venv
-    /// on the test host (both ignore whatever args are appended and exit
-    /// 0/1 respectively).
+    /// An executable `#!/bin/sh` stand-in that ignores its arguments and exits
+    /// with `code`. Deliberately NOT `/bin/true` / `/bin/false`: macOS ships
+    /// neither under `/bin` (they live in `/usr/bin`), so hardcoding the Linux
+    /// path passed ubuntu and windows and failed only the macos-latest leg
+    /// with `failed to launch /bin/true: No such file or directory (os error
+    /// 2)`. A script written into the test's own temp dir depends on no host
+    /// layout at all.
+    #[cfg(unix)]
+    fn exit_code_shim(dir: &std::path::Path, name: &str, code: i32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Stand-ins for a venv whose `pip` works vs. one whose `-m pip --version`
+    /// fails, without needing a real Python venv on the test host (both ignore
+    /// whatever args are appended and exit 0/1 respectively).
     #[cfg(unix)]
     #[test]
     fn venv_has_usable_pip_reads_the_probe_exit_status() {
+        let root = tmp("venv-usable-probe");
+        let ok = exit_code_shim(&root, "python-ok", 0);
         let healthy = VenvBin {
-            python: PathBuf::from("/bin/true"),
-            west: PathBuf::from("/bin/true"),
+            python: ok.clone(),
+            west: ok,
             bin_dir: "bin".to_string(),
         };
         assert!(venv_has_usable_pip(&healthy));
 
+        let bad = exit_code_shim(&root, "python-bad", 1);
         let broken = VenvBin {
-            python: PathBuf::from("/bin/false"),
-            west: PathBuf::from("/bin/false"),
+            python: bad.clone(),
+            west: bad,
             bin_dir: "bin".to_string(),
         };
         assert!(!venv_has_usable_pip(&broken));
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A venv interpreter that cannot even be spawned (missing entirely) fails
@@ -661,7 +682,7 @@ mod tests {
     /// `bin/python`, no working pip) must be REMOVED and recreated, not
     /// silently reused -- reuse is exactly what made the reporter's second
     /// `tan bootstrap` fail identically to the first, with nothing new to act
-    /// on. `host` is `/bin/true` here (a real, always-succeeding binary) so
+    /// on. `host` is an always-succeeding `#!/bin/sh` stand-in here so
     /// `create_venv`'s spawn "succeeds" without needing a real Python on the
     /// test host; it does not write real venv files, which is fine -- what
     /// this test proves is that the WRECKAGE is gone, i.e. a recreate was
@@ -701,15 +722,19 @@ mod tests {
             clear_zephyr_base: false,
         };
         let host = HostPython {
-            argv: vec!["/bin/true".to_string()],
+            argv: vec![
+                exit_code_shim(&root, "host-python", 0)
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
             version: (3, 10),
         };
 
         let result = ensure_venv(&ws, &mut log, &runner, &host);
         assert!(result.is_ok(), "{result:?}");
-        // The broken interpreter must be GONE -- `/bin/true -m venv <dir>`
-        // writes nothing, so its continued presence would mean the corpse was
-        // reused rather than removed.
+        // The broken interpreter must be GONE -- the always-succeeding host
+        // stand-in writes nothing, so its continued presence would mean the
+        // corpse was reused rather than removed.
         assert!(
             !python_path.exists(),
             "the broken venv should have been removed, not reused"
