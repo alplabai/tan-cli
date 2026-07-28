@@ -50,6 +50,46 @@ pub fn is_plain_relative(path: &Path) -> bool {
     components.all(|c| matches!(c, Component::Normal(_)))
 }
 
+/// Resolve a user-supplied `--workspace <path>` value against `cwd` into an
+/// absolute, textually-normalized directory — validation only: no filesystem
+/// writes, and no requirement that the directory exist yet.
+///
+/// `Err` for:
+///   * an empty/whitespace-only value — `--workspace ""`, the classic
+///     unset-`$WS`-variable shell accident, must never silently resolve to
+///     `cwd` itself. The caller (`tan bootstrap`'s workspace-parent guard,
+///     tan-cli#185) renames a customer's git checkout onto the result, so a
+///     wrong guess here is not a recoverable mistake the way a misread would
+///     be;
+///   * a value that `has_root()` but is not `is_absolute()` — on Windows
+///     that is `/x` or `\x` (see [`is_plain_relative`]'s doc for why
+///     `is_absolute()` alone under-detects this). An MSYS-style `/e/foo/ws`
+///     silently resolved to whichever drive the process happened to be
+///     running from — proven live to move a checkout to a drive nobody
+///     named. Refused outright rather than guessed at.
+///
+/// A genuinely relative value (`ws`, `../ws`) is joined onto `cwd`; an
+/// already-absolute one (`C:\ws`, `/opt/ws`) is normalized and returned as
+/// given.
+pub fn resolve_workspace_target(raw: &str, cwd: &Path) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("--workspace requires a non-empty path".to_string());
+    }
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() {
+        return Ok(normalize(candidate));
+    }
+    if candidate.has_root() {
+        return Err(format!(
+            "--workspace '{trimmed}' has a root but no drive, which is ambiguous on this host \
+             (it would resolve against whichever drive the process happens to be running \
+             from); pass a full absolute path instead"
+        ));
+    }
+    Ok(normalize(&cwd.join(candidate)))
+}
+
 /// True when recursively removing `target` would take out far more than a build
 /// tree, and the caller must refuse.
 ///
@@ -112,6 +152,53 @@ mod tests {
             );
         }
         assert!(!is_plain_relative(Path::new(r"C:\windows")));
+    }
+
+    #[test]
+    fn workspace_target_rejects_empty_or_whitespace() {
+        assert!(resolve_workspace_target("", Path::new("/cwd")).is_err());
+        assert!(resolve_workspace_target("   ", Path::new("/cwd")).is_err());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn workspace_target_resolves_relative_and_absolute_values_posix() {
+        assert_eq!(
+            resolve_workspace_target("ws", Path::new("/home/u")).unwrap(),
+            PathBuf::from("/home/u/ws")
+        );
+        assert_eq!(
+            resolve_workspace_target("../ws", Path::new("/home/u/proj")).unwrap(),
+            PathBuf::from("/home/u/ws")
+        );
+        assert_eq!(
+            resolve_workspace_target("/opt/ws", Path::new("/home/u")).unwrap(),
+            PathBuf::from("/opt/ws")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_target_resolves_relative_and_absolute_values_windows() {
+        assert_eq!(
+            resolve_workspace_target("ws", Path::new(r"E:\home\u")).unwrap(),
+            PathBuf::from(r"E:\home\u\ws")
+        );
+        assert_eq!(
+            resolve_workspace_target(r"C:\opt\ws", Path::new(r"E:\home\u")).unwrap(),
+            PathBuf::from(r"C:\opt\ws")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_target_rejects_a_drive_relative_root_rather_than_guessing() {
+        // The proven bug: `/e/foo/ws` is not `is_absolute()` on Windows, so it
+        // would otherwise resolve against whichever drive the process happens
+        // to run from -- silently moving the checkout to the wrong place.
+        assert!(!Path::new("/e/foo/ws").is_absolute());
+        assert!(resolve_workspace_target("/e/foo/ws", Path::new(r"E:\cwd")).is_err());
+        assert!(resolve_workspace_target(r"\temp\ws", Path::new(r"E:\cwd")).is_err());
     }
 
     #[test]

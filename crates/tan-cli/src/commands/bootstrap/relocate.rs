@@ -52,20 +52,23 @@ pub(super) enum Resolution {
 }
 
 /// Resolve where the west workspace belongs, relocating the checkout if
-/// needed. `explicit` is `--workspace <path>`: when given, it answers the
-/// question outright — the guard is never even evaluated, matching the issue
-/// ("no guard at all"). Otherwise the guard fires only when
-/// `parent_needs_workspace_guard` says so, and `interactive` decides whether
-/// that becomes a prompt or an immediate refusal.
+/// needed. `explicit` is an already-validated, already-absolutised
+/// `--workspace <path>` (see `tan_core::path_guard::resolve_workspace_target`
+/// — the caller in `mod.rs` resolves it before any of this IO runs): when
+/// given, it answers the question outright — the guard is never even
+/// evaluated, matching the issue ("no guard at all"). Otherwise the guard
+/// fires only when `parent_needs_workspace_guard` says so, and `interactive`
+/// decides whether that becomes a prompt or an immediate refusal.
 pub(super) fn resolve_workspace(
     repo_root: &Path,
     workspace_dir: &Path,
-    explicit: Option<&str>,
+    explicit: Option<&Path>,
     interactive: bool,
+    venv_dir_name: &str,
 ) -> Resolution {
     let target_parent = match explicit {
-        Some(raw) => PathBuf::from(raw),
-        None => match default_relocation_target(repo_root, workspace_dir) {
+        Some(path) => path.to_path_buf(),
+        None => match default_relocation_target(repo_root, workspace_dir, venv_dir_name) {
             Some(target) => {
                 if !interactive {
                     return Resolution::Refuse {
@@ -81,8 +84,8 @@ pub(super) fn resolve_workspace(
                             exit: ExitCode::RuntimeFailure,
                             code: "workspace-guard",
                             message: "Relocation declined; nothing was written. Re-run and \
-                                      accept, pass --workspace <path>, or clone alp-sdk into a \
-                                      dedicated directory."
+                                      accept, run `tan bootstrap --workspace <path>`, or clone \
+                                      alp-sdk into a dedicated directory."
                                 .to_string(),
                         };
                     }
@@ -112,14 +115,18 @@ pub(super) fn resolve_workspace(
     }
 }
 
-/// The refusal text for a `--non-interactive` (or `--ci`/`--format json`) run
-/// that hit the guard: names the two remedies verbatim (tan-cli#185).
+/// The refusal text for a `--non-interactive` (or `--ci`/`--format json`, or
+/// a non-TTY stdin) run that hit the guard: names the two remedies verbatim
+/// (tan-cli#185). Names `tan bootstrap --workspace <path>` explicitly, not
+/// bare `--workspace <path>` — this same refusal is inherited by `tan build`
+/// and `tan doctor --build --fix` (tan-cli#185 review finding 8), neither of
+/// which has a `--workspace` flag of its own to pass.
 fn workspace_guard_refusal(workspace_dir: &Path, target: &Path) -> String {
     format!(
         "{} holds more than this checkout, and is not itself an existing west workspace; \
          refusing to write the west workspace (zephyr/modules/.west/venv) there without asking. \
-         Re-run interactively to move the checkout into {}, pass --workspace <path>, or clone \
-         alp-sdk into a dedicated directory.",
+         Re-run interactively to move the checkout into {}, run `tan bootstrap --workspace \
+         <path>`, or clone alp-sdk into a dedicated directory.",
         native(workspace_dir),
         native(target),
     )
@@ -129,13 +136,27 @@ fn workspace_guard_refusal(workspace_dir: &Path, target: &Path) -> String {
 /// `None` when it does not (nothing to relocate to). `workspace_dir ==
 /// repo_root` (the rootless-`repo_root` fallback `mod.rs` uses when
 /// `repo_root.parent()` is `None`) has no real parent to guard at all.
-fn default_relocation_target(repo_root: &Path, workspace_dir: &Path) -> Option<PathBuf> {
+fn default_relocation_target(
+    repo_root: &Path,
+    workspace_dir: &Path,
+    venv_dir_name: &str,
+) -> Option<PathBuf> {
     if workspace_dir == repo_root {
         return None;
     }
     let checkout_name = repo_root.file_name()?.to_string_lossy().into_owned();
     let entries = list_entries(workspace_dir)?;
-    if parent_needs_workspace_guard(&entries, &checkout_name) {
+    // A TYPED check, not a name match: `.west` is only "an existing west
+    // workspace" when `west init -l` actually wrote a readable config there
+    // (tan-cli#185 review finding 4) — a plain file or an empty directory
+    // happening to be named `.west` is foreign content like anything else.
+    let dot_west_is_workspace = workspace_dir.join(".west").join("config").is_file();
+    if parent_needs_workspace_guard(
+        &entries,
+        &checkout_name,
+        venv_dir_name,
+        dot_west_is_workspace,
+    ) {
         Some(workspace_dir.join(DEFAULT_WORKSPACE_DIR_NAME))
     } else {
         None
@@ -233,12 +254,35 @@ fn relocate_checkout(repo_root: &Path, target_parent: &Path) -> Result<PathBuf, 
     })?;
     std::fs::rename(repo_root, &destination).map_err(|e| {
         format!(
-            "could not move the checkout from {} to {}: {e} (the checkout was left in place)",
+            "could not move the checkout from {} to {}: {e}{} (the checkout was left in place)",
             native(repo_root),
-            native(&destination)
+            native(&destination),
+            rename_failure_hint(&e),
         )
     })?;
     Ok(destination)
+}
+
+/// A one-line remedy appended to a failed rename's message, when the OS error
+/// names a fixable cause (tan-cli#185 review finding 11) — `""` for every
+/// other error, since most causes (permissions, a full disk) have no such
+/// one-liner.
+///
+///   * Windows `ERROR_SHARING_VIOLATION` (32): something inside the checkout
+///     is open — often the invoking shell's own cwd, verified live by running
+///     the move from inside the checkout being moved.
+///   * A cross-device move: Windows `ERROR_NOT_SAME_DEVICE` (17), POSIX
+///     `EXDEV` (18) — `rename(2)`/`MoveFileExW` cannot cross a volume or
+///     filesystem boundary, verified live moving across drives.
+fn rename_failure_hint(e: &std::io::Error) -> &'static str {
+    match e.raw_os_error() {
+        Some(32) if cfg!(windows) => " -- re-run from outside the checkout (e.g. `cd ..` first)",
+        Some(17) if cfg!(windows) => " -- pick a --workspace on the same drive as the checkout",
+        Some(18) if !cfg!(windows) => {
+            " -- pick a --workspace on the same filesystem as the checkout"
+        }
+        _ => "",
+    }
 }
 
 #[cfg(test)]
@@ -262,14 +306,19 @@ mod tests {
         let clean = tmp("default-target-clean");
         let repo_root = clean.join("alp-sdk");
         std::fs::create_dir_all(&repo_root).unwrap();
-        assert!(default_relocation_target(&repo_root, &clean).is_none());
+        assert!(default_relocation_target(&repo_root, &clean, ".venv").is_none());
 
         let workspace = tmp("default-target-workspace");
         let repo_root = workspace.join("alp-sdk");
         std::fs::create_dir_all(&repo_root).unwrap();
         std::fs::create_dir_all(workspace.join(".west")).unwrap();
+        std::fs::write(
+            workspace.join(".west").join("config"),
+            b"[manifest]\npath = alp-sdk\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(workspace.join("zephyr")).unwrap();
-        assert!(default_relocation_target(&repo_root, &workspace).is_none());
+        assert!(default_relocation_target(&repo_root, &workspace, ".venv").is_none());
 
         let _ = std::fs::remove_dir_all(&clean);
         let _ = std::fs::remove_dir_all(&workspace);
@@ -282,8 +331,39 @@ mod tests {
         std::fs::create_dir_all(&repo_root).unwrap();
         std::fs::write(dirty.join("unrelated.txt"), b"").unwrap();
 
-        let target = default_relocation_target(&repo_root, &dirty).expect("guard must fire");
+        let target =
+            default_relocation_target(&repo_root, &dirty, ".venv").expect("guard must fire");
         assert_eq!(target, dirty.join(DEFAULT_WORKSPACE_DIR_NAME));
+
+        let _ = std::fs::remove_dir_all(&dirty);
+    }
+
+    #[test]
+    fn a_dot_west_that_is_a_plain_file_still_guards() {
+        // tan-cli#185 review finding 4: a FILE (or an empty directory with no
+        // readable config) named `.west` is not a confirmed workspace.
+        let dirty = tmp("default-target-dot-west-file");
+        let repo_root = dirty.join("alp-sdk");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        std::fs::write(dirty.join(".west"), b"not a workspace").unwrap();
+
+        let target =
+            default_relocation_target(&repo_root, &dirty, ".venv").expect("guard must fire");
+        assert_eq!(target, dirty.join(DEFAULT_WORKSPACE_DIR_NAME));
+
+        let _ = std::fs::remove_dir_all(&dirty);
+    }
+
+    #[test]
+    fn bootstraps_own_venv_needs_no_relocation() {
+        // tan-cli#185 review finding 2: a bootstrap that created the venv but
+        // died before `west init` ever wrote `.west` must not be refused on
+        // retry over its own state.
+        let dirty = tmp("default-target-own-venv");
+        let repo_root = dirty.join("alp-sdk");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        std::fs::create_dir_all(dirty.join(".venv")).unwrap();
+        assert!(default_relocation_target(&repo_root, &dirty, ".venv").is_none());
 
         let _ = std::fs::remove_dir_all(&dirty);
     }
@@ -299,7 +379,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&ghost_parent);
         let repo_root = ghost_parent.join("alp-sdk");
-        assert!(default_relocation_target(&repo_root, &ghost_parent).is_none());
+        assert!(default_relocation_target(&repo_root, &ghost_parent, ".venv").is_none());
     }
 
     #[test]
@@ -309,7 +389,7 @@ mod tests {
         std::fs::create_dir_all(&repo_root).unwrap();
         std::fs::write(dirty.join("unrelated.txt"), b"").unwrap();
 
-        match resolve_workspace(&repo_root, &dirty, None, false) {
+        match resolve_workspace(&repo_root, &dirty, None, false, ".venv") {
             Resolution::Refuse {
                 exit,
                 code,
@@ -340,7 +420,7 @@ mod tests {
         std::fs::create_dir_all(&repo_root).unwrap();
 
         assert!(matches!(
-            resolve_workspace(&repo_root, &clean, None, false),
+            resolve_workspace(&repo_root, &clean, None, false, ".venv"),
             Resolution::Unchanged
         ));
 
@@ -359,8 +439,9 @@ mod tests {
         match resolve_workspace(
             &repo_root,
             &dirty,
-            Some(target_parent.to_string_lossy().as_ref()),
+            Some(target_parent.as_path()),
             false, // non-interactive -- must still succeed with NO prompt
+            ".venv",
         ) {
             Resolution::Relocated {
                 repo_root: new_root,
@@ -398,8 +479,9 @@ mod tests {
         match resolve_workspace(
             &repo_root,
             &dirty,
-            Some(target_parent.to_string_lossy().as_ref()),
+            Some(target_parent.as_path()),
             false,
+            ".venv",
         ) {
             Resolution::MoveFailed(message) => {
                 assert!(message.contains("already exists"), "{message}");
@@ -425,16 +507,38 @@ mod tests {
         std::fs::create_dir_all(&repo_root).unwrap();
 
         assert!(matches!(
-            resolve_workspace(
-                &repo_root,
-                &parent,
-                Some(parent.to_string_lossy().as_ref()),
-                false,
-            ),
+            resolve_workspace(&repo_root, &parent, Some(parent.as_path()), false, ".venv"),
             Resolution::Unchanged
         ));
         assert!(repo_root.is_dir());
 
         let _ = std::fs::remove_dir_all(&parent);
+    }
+
+    #[test]
+    fn rename_failure_hint_names_the_remedy_for_a_sharing_violation_or_cross_device_move() {
+        #[cfg(windows)]
+        {
+            assert!(
+                rename_failure_hint(&std::io::Error::from_raw_os_error(32))
+                    .contains("outside the checkout")
+            );
+            assert!(
+                rename_failure_hint(&std::io::Error::from_raw_os_error(17)).contains("same drive")
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(
+                rename_failure_hint(&std::io::Error::from_raw_os_error(18))
+                    .contains("same filesystem")
+            );
+        }
+        // An unrelated error (e.g. EACCES/ERROR_ACCESS_DENIED, 13) has no
+        // one-line fix -- the hint stays empty rather than guessing.
+        assert_eq!(
+            rename_failure_hint(&std::io::Error::from_raw_os_error(13)),
+            ""
+        );
     }
 }

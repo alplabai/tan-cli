@@ -112,7 +112,7 @@ pub use presets::{PresetCatalogueDefaults, empty_preset_catalogue};
 pub use preview::{EffectiveConfigPreviewPayload, create_effective_config_preview_payload};
 pub use project::{
     ProjectContext, ProjectResolutionInput, ProjectSettings, discover_workspace_sdk,
-    nearest_ancestor_sdk, resolve_project_context,
+    nearest_ancestor_sdk, rebase_under_relocated_sdk, resolve_project_context,
 };
 pub use proxy::select_https_proxy;
 pub use renode::{
