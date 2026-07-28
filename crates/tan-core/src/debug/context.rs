@@ -12,16 +12,12 @@ use crate::project::ProjectContext;
 pub struct DebuggerExtensionsState {
     /// `marus25.cortex-debug` is installed.
     pub cortex_debug: bool,
-    /// `mcu-debug.peripheral-viewer` is installed.
-    pub peripheral_viewer: bool,
-    /// `mcu-debug.memory-view` is installed.
-    pub memory_view: bool,
     /// `ms-vscode.cpptools` is installed.
     pub cpp_tools: bool,
     /// `vadimcn.vscode-lldb` is installed.
     #[serde(rename = "codeLLDB")]
     pub code_lldb: bool,
-    /// Whether the five flags above were OBSERVED at all.
+    /// Whether the three flags above were OBSERVED at all.
     ///
     /// `false` in the standalone `tan` binary, where they are not meaningful:
     /// only an extension host can enumerate its own marketplace extensions, so

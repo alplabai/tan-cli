@@ -57,9 +57,9 @@ pub fn collect_resolved_values(context: &DebugWorkspaceContext) -> Vec<DebugReso
                 DebugValueSource::Unresolved
             },
             detail: if context.workspace_root.is_some() {
-                "Resolved from the active workspace folder."
+                "Resolved project directory (cwd, or --project <dir>)."
             } else {
-                "No workspace folder is open."
+                "No project directory resolved — pass --project <dir>."
             }
             .to_string(),
         },
@@ -74,7 +74,8 @@ pub fn collect_resolved_values(context: &DebugWorkspaceContext) -> Vec<DebugReso
             detail: if context.sdk_root.is_some() {
                 "Resolved alp-sdk root used for scripts and schemas."
             } else {
-                "Set alpSdk.path when automatic discovery is ambiguous."
+                "Set with --sdk-root <path> or `tan sdk switch <path>` when \
+                 automatic discovery is ambiguous."
             }
             .to_string(),
         },
@@ -87,7 +88,7 @@ pub fn collect_resolved_values(context: &DebugWorkspaceContext) -> Vec<DebugReso
                 DebugValueSource::Unresolved
             },
             detail: if context.board_yaml_path.is_some() {
-                "Resolved board.yaml path from project settings."
+                "Resolved board.yaml path (default location, or --board-yaml <path>)."
             } else {
                 "board.yaml path is unresolved."
             }
@@ -130,4 +131,74 @@ pub fn collect_resolved_values(context: &DebugWorkspaceContext) -> Vec<DebugReso
             detail: "Interpreter used for loader and validation scripts.".to_string(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::context::DebuggerExtensionsState;
+    use super::*;
+
+    fn extensions() -> DebuggerExtensionsState {
+        DebuggerExtensionsState {
+            cortex_debug: true,
+            cpp_tools: true,
+            code_lldb: true,
+            observable: false,
+        }
+    }
+
+    fn context_with(workspace_root: Option<&str>, sdk_root: Option<&str>) -> DebugWorkspaceContext {
+        DebugWorkspaceContext {
+            generated_at: "1970-01-01T00:00:00.000Z".to_string(),
+            workspace_root: workspace_root.map(str::to_string),
+            sdk_root: sdk_root.map(str::to_string),
+            board_yaml_path: None,
+            west_cwd: None,
+            python_binary: "python3".to_string(),
+            board_yaml_exists: false,
+            project_selected: false,
+            debugger_extensions: extensions(),
+        }
+    }
+
+    /// #134: the unresolved details used to be "No workspace folder is open."
+    /// and "Set alpSdk.path when automatic discovery is ambiguous." -- both VS
+    /// Code phrasing that a terminal reader, who has no such setting, cannot
+    /// act on. They must name a `tan` flag instead.
+    #[test]
+    fn unresolved_values_name_a_cli_flag_not_a_vscode_setting() {
+        let values = collect_resolved_values(&context_with(None, None));
+
+        let workspace = values.iter().find(|v| v.key == "workspaceRoot").unwrap();
+        assert!(
+            !workspace.detail.contains("workspace folder"),
+            "{}",
+            workspace.detail
+        );
+        assert!(
+            workspace.detail.contains("--project"),
+            "{}",
+            workspace.detail
+        );
+
+        let sdk = values.iter().find(|v| v.key == "sdkRoot").unwrap();
+        assert!(!sdk.detail.contains("alpSdk"), "{}", sdk.detail);
+        assert!(
+            sdk.detail.contains("--sdk-root") && sdk.detail.contains("tan sdk switch"),
+            "{}",
+            sdk.detail
+        );
+    }
+
+    #[test]
+    fn resolved_values_still_read_correctly() {
+        let values =
+            collect_resolved_values(&context_with(Some("/work/proj"), Some("/work/alp-sdk")));
+        let workspace = values.iter().find(|v| v.key == "workspaceRoot").unwrap();
+        assert_eq!(
+            workspace.value,
+            serde_json::Value::String("/work/proj".to_string())
+        );
+        assert_eq!(workspace.source, DebugValueSource::Workspace);
+    }
 }

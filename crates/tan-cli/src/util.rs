@@ -193,8 +193,8 @@ pub fn python_too_old(binary: &str) -> Option<String> {
     match python_version(binary) {
         Some(found) if found < MIN_PYTHON => Some(format!(
             "Python {}.{} found at `{}`, but alp-sdk requires Python {}.{}+. \
-             Put a newer `python` on PATH (or set alpSdk.pythonPath in the \
-             VS Code extension).",
+             Put a newer `python` first on PATH (VS Code users can instead set \
+             alpSdk.pythonPath).",
             found.0, found.1, binary, MIN_PYTHON.0, MIN_PYTHON.1
         )),
         _ => None,

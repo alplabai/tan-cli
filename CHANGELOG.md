@@ -59,6 +59,71 @@
   own negative-matrix suite (`tests/parity/test_seam1_field_diff.py`) now also
   runs in CI, ahead of the live comparator, so a future comparator regression
   fails before it is trusted to judge alp-sdk.
+- **`tan debug-config` wrote `"ALP: ..."` launch-configuration names while the
+  `alp-sdk-vscode` extension writes the same four configurations `"Alp: ..."`
+  (#133).** Both sides merge into `.vscode/launch.json` by exact `name` match,
+  so the two spellings never matched and every debug configuration a customer
+  generated with both tools ended up duplicated. `tan` now emits `Alp:` --
+  byte-for-byte identical to the extension's four names.
+
+  **One-time migration note:** an `ALP: ...` entry a previous `tan` already
+  wrote into `.vscode/launch.json` is left in place, not rewritten or removed
+  -- the next `tan debug-config` (or the extension's own regenerate) now
+  matches and merges into the correctly-spelled `Alp: ...` entry going
+  forward, but the stale `ALP:` duplicate has to be deleted by hand once.
+  Anyone who ran `tan debug-config` before this release should remove the
+  `ALP: ...` entries from `.vscode/launch.json`.
+
+  The company is "Alp Lab" (never "ALP Lab"), and the same misspelling had
+  spread to other user-facing strings: the `tan sdk list` spinner and table
+  header ("Fetching ALP SDK releases...", "ALP SDK releases (N)"), the
+  `sdk.rs` error contradicting its own "Alp SDK: ..." string 79 lines above it
+  ("... is not a valid ALP SDK root."), and the New Project / module-scaffold
+  wizard's generated `README.md` headings ("# ALP Starter Project", "# ALP
+  Module Scaffold") and its `body_line1` for the minimal template, which
+  reaches the device console via `puts()`. All corrected to `Alp`. Left
+  untouched, deliberately: the `ALP_SDK_ROOT`/`ALP_FLASH_FORCE` env vars, the
+  `__ALP_SIM_DONE_N__` Renode sentinel, the `ALP-B*` diagnostic codes, and the
+  `ALP_*`/`CONFIG_ALP_*` C/Kconfig identifiers in vendored scaffold sources --
+  those are identifiers, not brand prose, and renaming them breaks real
+  behaviour.
+
+- **Doctor/inspect prose that named a VS Code setting on a path a terminal
+  user hits, finishing the sweep #127 started (#134).** Four sites still told
+  a `tan`-only user to "set `alpSdk.pythonPath`" or "open a workspace" -- a
+  setting and an editor action neither exists for them. `util.rs`'s
+  `python_too_old` (read by `build`, `validate`, `generate`, and the SDK
+  passthrough commands, and landing in `issues[].message` under `--format
+  json`, so it stays useful to both readers) now names the CLI remedy first
+  and keeps the VS Code setting as a parenthetical. `tan inspect`'s
+  `sdkRoot`/`workspaceRoot` details and `tan doctor`'s plain (non-`--build`)
+  `workspaceRoot` check -- both unreached by the extension, which only ever
+  shells `--build` -- now point at `--project <dir>` / `--sdk-root <path>` /
+  `tan sdk switch <path>`, reusing the vocabulary `build_preflight_checks`
+  already uses for the same facts.
+
+- **doctor: retired the permanently-`unknown` `peripheralViewerExtension` /
+  `memoryViewExtension` checks (#132).** Both mirrored a TS
+  `MCU_COMPANION_VIEWERS` constant that does not exist on any shipped
+  `alp-sdk-vscode` branch, and `marus25.cortex-debug` force-installs both
+  `mcu-debug.peripheral-viewer` and `mcu-debug.memory-view` as hard
+  `extensionDependencies` regardless -- `cortexDebugExtension` already covers
+  the same ground on the only host that can actually answer the question.
+  Neither check code is in the frozen `contract/issue-codes.json` registry, so
+  nothing on the wire contract changes.
+
+- **doctor: the native-host `lldb` check no longer warns and recommends
+  installing a debugger CodeLLDB already ships (#131).** `vadimcn.vscode-lldb`
+  bundles a complete LLDB inside its own extension directory and never reads
+  PATH, so a bare-PATH miss used to `Warn` and suggest "Install LLDB or
+  lldb-dap for native-host debug flows" -- a no-op remedy that fired on
+  essentially every customer machine, immediately under a line that (post-#102)
+  already said "vadimcn.vscode-lldb: unknown -- the standalone tan binary
+  cannot see VS Code's installed extensions." The check is now informational
+  and always `Pass`, mirroring `alp-sdk-vscode`'s own fix for this exact class
+  (PR #369): no `fix`, so nothing lands in `nextSteps` and no `doctor.lldb`
+  issue is raised. The resolved executable name is still reported when one is
+  found on PATH -- only the verdict and the advice for a miss were wrong.
 
 All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is

@@ -105,7 +105,7 @@ pub fn run(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
 
 /// Fetches the GitHub releases and renders them as a table; surfaces fetch errors as a failure.
 fn run_list(g: &GlobalArgs) -> CommandRun {
-    let pb = crate::progress::spinner(g, "Fetching ALP SDK releases…");
+    let pb = crate::progress::spinner(g, "Fetching Alp SDK releases…");
     let result = fetch_releases(crate::http::agent(), GITHUB_RELEASES_URL);
     pb.finish_and_clear();
     let releases = match result {
@@ -169,7 +169,7 @@ fn format_release_table(releases: &[SdkRelease]) -> Vec<String> {
     if releases.is_empty() {
         return vec!["No SDK releases found.".to_string()];
     }
-    let mut lines = vec![format!("ALP SDK releases ({})", releases.len())];
+    let mut lines = vec![format!("Alp SDK releases ({})", releases.len())];
     for rel in releases {
         let date: String = rel.published_at.chars().take(10).collect();
         let notes = if rel.release_notes_summary.is_empty() {
