@@ -36,7 +36,9 @@ vendored copy parses and carries a version matching the constant, without an
 SDK checkout -- a local dev-loop run with no reachable alp-sdk is a clean
 no-op, not a failure. Reachability is resolved in the same order: `--sdk`,
 then `$ALP_SDK_ROOT`, then an `alp-sdk` checkout next to this tan-cli
-checkout.
+checkout -- but an explicit `--sdk` that does not resolve is a hard FAIL, not
+a fall-through to the other two (tan-cli#172 review; see
+`_sdk_checkout.sdk_root_or_exit_code`).
 
 A byte MISMATCH (vendored copy differs from the pinned upstream file) always
 fails -- that is the actual drift this gate exists to catch. There is no
@@ -49,37 +51,15 @@ the pinned ref would itself be a real regression, not a legitimate skip.
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
+
+from _sdk_checkout import sdk_root_or_exit_code
 
 # The paths differ per repo: SDK metadata upstream, a test fixture here.
 UPSTREAM_RELPATH = Path("metadata/toolchains.json")
 VENDORED_RELPATH = Path("contract/fixtures/toolchains/toolchains.json")
 
 VENDORED_PATH = Path(__file__).resolve().parent.parent.parent / VENDORED_RELPATH
-
-
-def _looks_like_sdk_checkout(path: Path) -> bool:
-    return (path / "scripts" / "alp_orchestrate").is_dir()
-
-
-def resolve_sdk_root(explicit: Path | None) -> Path | None:
-    """Find a reachable alp-sdk checkout: `--sdk`, then `$ALP_SDK_ROOT`, then a
-    `../alp-sdk` sibling of this tan-cli checkout. `None` if none resolves --
-    the caller treats that as a clean skip, not a failure."""
-    candidates = []
-    if explicit is not None:
-        candidates.append(explicit)
-    env_root = os.environ.get("ALP_SDK_ROOT")
-    if env_root:
-        candidates.append(Path(env_root))
-    candidates.append(Path(__file__).resolve().parent.parent.parent.parent / "alp-sdk")
-
-    for candidate in candidates:
-        candidate = candidate.resolve()
-        if _looks_like_sdk_checkout(candidate):
-            return candidate
-    return None
 
 
 def run(sdk_root: Path) -> bool:
@@ -118,12 +98,16 @@ def main(argv: list[str] | None = None) -> int:
                               "to this tan-cli checkout.")
     args = parser.parse_args(argv)
 
-    sdk_root = resolve_sdk_root(args.sdk)
-    if sdk_root is None:
-        print("SKIP: no alp-sdk checkout reachable (--sdk / $ALP_SDK_ROOT / "
-              "a sibling alp-sdk checkout); toolchain-lock byte-parity not "
-              "checked this run.")
-        return 0
+    sdk_root, exit_code = sdk_root_or_exit_code(
+        args.sdk,
+        self_skip_message=(
+            "SKIP: no alp-sdk checkout reachable (--sdk / $ALP_SDK_ROOT / "
+            "a sibling alp-sdk checkout); toolchain-lock byte-parity not "
+            "checked this run."
+        ),
+    )
+    if exit_code is not None:
+        return exit_code
 
     return 0 if run(sdk_root) else 1
 

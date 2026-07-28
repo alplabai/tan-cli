@@ -259,10 +259,12 @@ pub fn zephyr_sdk_host_check(os: &str, arch: &str) -> DoctorCheck {
                  substitute — Rosetta translates x86_64 for Apple silicon, not the reverse — and \
                  macOS has no WSL2 equivalent to fall back to."
             ),
-            "Build on a Linux host: a linux-x86_64 VM or container on this Mac, or a remote Linux \
-             builder. Pinning an older Zephyr SDK is not an option — the pinned Zephyr requires \
-             1.0.1, which is past the release that dropped macos-x86_64."
-                .to_string(),
+            format!(
+                "Build on a Linux host: a linux-x86_64 VM or container on this Mac, or a remote \
+                 Linux builder. Pinning an older Zephyr SDK is not an option — the pinned Zephyr \
+                 requires {ZEPHYR_SDK_INSTALL_VERSION}, which is past the release that dropped \
+                 macos-x86_64."
+            ),
         ),
         _ => (
             format!("The Zephyr SDK publishes no host build for {tag}. Served hosts are {served}."),
