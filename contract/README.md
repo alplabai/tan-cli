@@ -54,17 +54,21 @@ contract belongs to whoever owns the envelope: this repo.
 ### Frozen issue codes (`issue-codes.json`)
 
 `issue-codes.json` is the single source; `contract.rs`'s `frozen_issue_codes`
-gates it, and the release workflow publishes it. Renaming or removing one of
-these is a **breaking wire change** — bump the CLI MAJOR/MINOR, record it in
-`CHANGELOG.md`, and open the matching alp-sdk-vscode issue.
+gates it, and the release workflow publishes it. Renaming or removing a
+`status: "frozen"` code is a **breaking wire change** — bump the CLI
+MAJOR/MINOR, record it in `CHANGELOG.md`, and open the matching
+alp-sdk-vscode issue. A `status: "reserved"` code has no consumer yet
+(`consumer: "none"`): the gate still checks the spelling exists at the
+emission site, but renaming or dropping it costs nothing on the wire —
+promote it to `frozen` the moment a consumer actually binds to it.
 
-| Code | Consumer effect if renamed |
-|---|---|
-| `bootstrap.windows-unsupported` (severity `error`) | **Retired** — emitted by tan ≤ v0.3.0 only. The consumer branch is permanent back-compat for anyone pinned to an old binary via `alpSdk.cliPath`, so the spelling is RESERVED and must never be re-used for a different verdict. |
-| `bootstrap.yocto-host` (severity `error`) | A Yocto-only project is sent into a bootstrap that cannot work on this host. The mixed-board case reuses the suffix at severity `warning` and must stay a warning. |
-| `bootstrap.prerequisites-missing` (severity `error`) | tan's own refusal is not recognised, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost. |
-| `presets.sdk-root-unresolved` (severity `warning`) | The New Project wizard silently falls back to its static catalogue, which carries no `cores`, so a **heterogeneous SoM scaffolds single-core with no IPC**. The reference part E1M-AEN801 is multi-core, so that is the default path. |
-| `debug-config.legacy-entry-migrated` (severity `info`) | No consumer yet — reserved. A stale pre-#155 `"ALP: ..."` launch-configuration entry was folded into the maintained `"Alp: ..."` one, carrying across any hand-resolved fields (tan-cli#133). |
+| Code | Status | Consumer effect if renamed |
+|---|---|---|
+| `bootstrap.windows-unsupported` (severity `error`) | retired | Emitted by tan ≤ v0.3.0 only. The consumer branch is permanent back-compat for anyone pinned to an old binary via `alpSdk.cliPath`, so the spelling is RESERVED and must never be re-used for a different verdict. |
+| `bootstrap.yocto-host` (severity `error`) | frozen | A Yocto-only project is sent into a bootstrap that cannot work on this host. The mixed-board case reuses the suffix at severity `warning` and must stay a warning. |
+| `bootstrap.prerequisites-missing` (severity `error`) | frozen | tan's own refusal is not recognised, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost. |
+| `presets.sdk-root-unresolved` (severity `warning`) | frozen | The New Project wizard silently falls back to its static catalogue, which carries no `cores`, so a **heterogeneous SoM scaffolds single-core with no IPC**. The reference part E1M-AEN801 is multi-core, so that is the default path. |
+| `debug-config.legacy-entry-migrated` (severity `info`) | reserved | None yet — no consumer matches it. A stale pre-#155 `"ALP: ..."` launch-configuration entry was folded into the maintained `"Alp: ..."` one: a hand-resolved value on an unresolved-placeholder field carried across, while every other field tan owns refreshed to this run's values (tan-cli#133). |
 
 `bootstrap.python-not-runnable` and `bootstrap.python-too-old` are separate
 codes carrying no missing TOOL; a consumer that wants those two must match

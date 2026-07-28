@@ -210,10 +210,11 @@ fn legacy_entry_migrated_issue(from: &str, to: &str) -> Issue {
         code: "debug-config.legacy-entry-migrated".to_string(),
         severity: "info".to_string(),
         message: format!(
-            "Migrated the legacy launch-configuration entry \"{from}\" into \"{to}\", \
-             carrying across any values (device, executable, …) you had hand-filled in \
-             on the old entry. The old entry is gone; nothing else in .vscode/launch.json \
-             was changed."
+            "Migrated the legacy launch-configuration entry \"{from}\" into \"{to}\". \
+             Any value you had hand-filled in on the old entry for an unresolved-\
+             placeholder field (device, miDebuggerServerAddress, configFiles, …) \
+             carried across; every other field tan owns was refreshed to this run's \
+             values, same as an ordinary re-run. The old entry is gone."
         ),
     }
 }

@@ -383,7 +383,7 @@ fn code_lines(source: &str) -> String {
 /// The frozen `issues[].code` strings alp-sdk-vscode matches with `===`
 /// (tan-cli#106), gated against `contract/issue-codes.json`.
 ///
-/// WHY a source-literal assertion and not a golden envelope: of the four
+/// WHY a source-literal assertion and not a golden envelope: of the five
 /// codes, only `presets.sdk-root-unresolved` is reachable from a hermetic,
 /// host-independent subprocess (it has a golden — `presets-no-sdk` — and
 /// that golden is the stronger gate). The `bootstrap.*` codes are not:
@@ -452,6 +452,37 @@ fn frozen_issue_codes() {
                      to a prefix match."
                 );
             }
+            "reserved" => {
+                // Pre-consumer: the spelling exists at the emission site (kept
+                // honest against source, same as `frozen`) but nothing matches
+                // it with `===` yet, so unlike `frozen` a rename here costs
+                // nothing on the wire -- enforced by requiring `consumer`
+                // stays "none" while the status does.
+                let consumer = entry["consumer"].as_str().unwrap_or_default();
+                assert!(
+                    consumer == "none" || consumer.starts_with("none "),
+                    "{code}: status `reserved` requires `consumer: \"none\"` -- a code \
+                     with a real consumer must be `frozen` instead, or it can be \
+                     silently renamed out from under that consumer"
+                );
+                let rel = entry["emittedBy"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{code}: a reserved code needs `emittedBy`"));
+                let literal = entry["literal"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{code}: a reserved code needs `literal`"));
+                let path = repo_root().join(rel);
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{code}: cannot read {rel}: {e}"));
+                assert!(
+                    code_lines(&source).contains(literal),
+                    "RESERVED ISSUE CODE `{code}` is gone: {rel} no longer contains \
+                     {literal:?} outside comments. No consumer matches it yet, so \
+                     dropping or renaming it is not a breaking wire change -- but the \
+                     registry entry is now stale. Update contract/issue-codes.json to \
+                     match, or restore the emission."
+                );
+            }
             "retired" => {
                 // A retired code is not emitted any more, but the consumer branch
                 // that matches it is permanent back-compat for old pinned binaries.
@@ -472,7 +503,7 @@ fn frozen_issue_codes() {
                     );
                 }
             }
-            other => panic!("{code}: unknown status {other:?} (expected frozen|retired)"),
+            other => panic!("{code}: unknown status {other:?} (expected frozen|reserved|retired)"),
         }
     }
 }

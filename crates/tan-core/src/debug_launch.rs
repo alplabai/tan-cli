@@ -1026,6 +1026,53 @@ mod tests {
         );
     }
 
+    /// #177 review finding #2: every migration test above pins only `device`
+    /// -- an unresolved-placeholder-backed field, which is the ONE thing the
+    /// merge protects. None pins the other side of the same trade-off: a
+    /// hand-tuned field the draft does NOT leave as a `<resolved-…>`
+    /// placeholder (`cwd`, `executable`, `runToEntryPoint`) is refreshed to
+    /// this run's fresh value on migration, exactly like an ordinary
+    /// same-name re-run -- migration is not a "preserve everything" mode.
+    /// Reproduces the exact #177 review transcript (hand-tuned `cwd`,
+    /// `executable`, `runToEntryPoint` on the legacy entry) so both
+    /// directions are asserted on the SAME input rather than assumed from
+    /// `merge_configuration`'s ordinary-re-run behaviour.
+    #[test]
+    fn legacy_migration_refreshes_tan_owned_fields_while_keeping_the_hand_filled_placeholder_backed_ones()
+     {
+        let existing = existing_with(json!({
+            "name": "ALP: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/app",
+            "executable": "${workspaceFolder}/build/m55_hp/zephyr/zephyr.elf",
+            "runToEntryPoint": "app_main",
+            "servertype": "jlink",
+            "device": "AE822F4M55_HP",
+            "interface": "swd",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(
+            plan.migrated_from.as_deref(),
+            Some("ALP: Zephyr Debug (J-Link)")
+        );
+        let merged = merged_config(&plan);
+
+        // Placeholder-backed field: the hand-filled value survives.
+        assert_eq!(merged["device"], "AE822F4M55_HP");
+        // tan-owned fields, none of them placeholder-backed in the draft:
+        // refreshed to this run's fresh values, same as any ordinary re-run.
+        assert_eq!(merged["cwd"], "${workspaceFolder}");
+        assert_eq!(
+            merged["executable"],
+            "${workspaceFolder}/build/app/zephyr/zephyr.elf"
+        );
+        assert_eq!(merged["runToEntryPoint"], "main");
+    }
+
     /// #133 reopened, "the dangerous branch": both a maintained `"Alp: ..."`
     /// entry (placeholder device, per the reported transcript) AND the legacy
     /// `"ALP: ..."` entry (the customer's real hand-filled device) exist at

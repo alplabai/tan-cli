@@ -354,12 +354,16 @@
   kept the unresolved placeholder -- so the advice to delete it would have
   thrown away the working value. `tan debug-config` now adopts a legacy
   `ALP: ...` entry onto its `Alp: ...` counterpart the first time it runs
-  after this fix, carrying across any hand-filled fields via the same merge
-  an ordinary re-run already uses, and reports the migration as a
-  `debug-config.legacy-entry-migrated` issue (severity `info`) so an
-  automated consumer or a `--format json` reader can tell why the file
-  changed. No manual deletion is needed, and none should be done. The one
-  case left alone on purpose: a workspace that already has BOTH a maintained
+  after this fix, via the same merge an ordinary re-run already uses: a
+  hand-filled value on an unresolved-placeholder field (`device`,
+  `miDebuggerServerAddress`, `configFiles`, ...) carries across, while every
+  other field tan owns (`executable`, `cwd`, `runToEntryPoint`, ...)
+  refreshes to this run's values exactly as on an ordinary re-run. It
+  reports the migration as a `debug-config.legacy-entry-migrated` issue
+  (severity `info`) so an automated consumer or a `--format json` reader can
+  tell why the file changed. No manual deletion is needed, and none should
+  be done. The one case left alone on purpose: a workspace that already has
+  BOTH a maintained
   `Alp: ...` entry and a legacy `ALP: ...` one (from running `tan
   debug-config` both before and after this fix) keeps the legacy entry
   exactly as it is -- nothing here decides which of two possibly-hand-edited

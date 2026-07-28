@@ -13,11 +13,18 @@
     "asset so the extension's own contract test can diff against an artefact",
     "instead of a hand-copied fixture.",
     "",
-    "Adding a code here is cheap. REMOVING or RENAMING one is a breaking",
+    "Adding a `frozen` code is cheap. REMOVING or RENAMING one is a breaking",
     "wire change: bump the CLI MAJOR/MINOR, say so in CHANGELOG.md, and open",
     "the matching issue on alp-sdk-vscode. Do not 'fix' a rename by",
     "loosening the consumer to a prefix match -- `bootstrap.` would swallow",
-    "codes it has no verdict for."
+    "codes it has no verdict for.",
+    "",
+    "A `reserved` code is the pre-consumer state: the spelling exists at the",
+    "emission site (the gate still checks that) but `consumer` is \"none\" --",
+    "nobody matches it with `===` yet, so renaming or dropping it costs",
+    "nothing on the wire. Promote a `reserved` code to `frozen` the moment a",
+    "consumer binds to it (fill in `consumer`/`consumerEffect` for real); do",
+    "not invent a third status for that transition."
   ],
   "issueCodes": [
     {
@@ -60,10 +67,10 @@
     },
     {
       "code": "debug-config.legacy-entry-migrated",
-      "status": "frozen",
+      "status": "reserved",
       "severity": "info",
       "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
-      "consumerEffect": "None today. Reserved for alp-sdk-vscode to surface a one-time notice that a stale pre-#155 `\"ALP: ...\"` launch-configuration entry was folded into the maintained `\"Alp: ...\"` one, carrying across any hand-resolved fields the customer had filled in on the orphan (tan-cli#133, reopened).",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to surface a one-time notice that a stale pre-#155 `\"ALP: ...\"` launch-configuration entry was folded into the maintained `\"Alp: ...\"` one: any hand-resolved value on an unresolved-placeholder field (device, miDebuggerServerAddress, configFiles, ...) the customer had filled in on the orphan carried across, while every other field tan owns was refreshed to this run's values (tan-cli#133, reopened).",
       "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
       "literal": "\"debug-config.legacy-entry-migrated\"",
       "note": "Fires only on the one-time migration path in `tan_core::debug_launch::create_launch_json_write_plan`: an exact-name miss against the current `\"Alp: ...\"` name that then hits the ONE legacy spelling of that same name. It never fires when a current-named entry already exists (whether or not a legacy one also still sits in the file) -- that branch deliberately leaves any leftover legacy entry untouched rather than guessing which of two possibly-hand-edited entries is authoritative."
