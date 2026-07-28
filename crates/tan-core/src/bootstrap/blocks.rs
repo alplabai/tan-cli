@@ -230,10 +230,27 @@ pub fn next_steps_block(
     lines.push(String::new());
     lines.push("  # Make Zephyr reachable for builds:".to_string());
     lines.extend(render_env_lines(&facts.env, tokens, "  ", is_windows));
+    // The pinned install.sh/install.ps1 one-liner (README.md's own "Automatic"
+    // section) -- NOT `cargo install --git ...` (issue #117): that built
+    // unpinned HEAD and was retired repo-wide by alp-sdk#988 except here, where
+    // it lived as a hardcoded copy in the Rust binary rather than in a doc or
+    // script alp-sdk#988 could reach. `tan doctor` (not `--build`): since #100
+    // plain doctor already folds in the build-readiness preflight (see
+    // `assemble_doctor_report`'s doc comment), and bootstrap's next-steps is
+    // explicitly one of the sites that fold was written to cover -- so the
+    // plain form is already the right advice; only the install command needed
+    // to change.
+    let install_line = if is_windows {
+        "  # for: irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1 | iex):"
+            .to_string()
+    } else {
+        "  # for: curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh):"
+            .to_string()
+    };
     lines.extend([
         String::new(),
         "  # Sanity-check the host environment (needs tan on PATH -- see README.md".to_string(),
-        "  # for `cargo install --git https://github.com/alplabai/tan-cli --bin tan`):".to_string(),
+        install_line,
         "  tan doctor".to_string(),
         String::new(),
     ]);
@@ -609,6 +626,50 @@ bootstrap: Optional native libraries unlock the Yocto-side backends:
         );
         // native_sim does not exist on native Windows — must NOT be suggested.
         assert!(!win.contains("native_sim"), "{win}");
+    }
+
+    /// #117: the retired, unpinned `cargo install --git ... --bin tan` must
+    /// never reappear, and each platform must name ITS OWN install one-liner
+    /// (the same two commands README.md documents) -- not the other OS's.
+    #[test]
+    fn next_steps_names_the_pinned_install_one_liner_not_the_retired_git_form() {
+        let facts = manifest_facts();
+        let tokens = Tokens {
+            sdk_root: "/ws/alp-sdk",
+            workspace_dir: "/ws",
+        };
+        let posix = next_steps_block(&facts, tokens, "/ws/.venv", "bin", false).join("\n");
+        let win = next_steps_block(&facts, tokens, "C:\\ws\\.venv", "Scripts", true).join("\n");
+        for rendered in [&posix, &win] {
+            assert!(
+                !rendered.contains("cargo install --git"),
+                "retired install command resurfaced: {rendered}"
+            );
+        }
+        assert!(
+            posix.contains(
+                "curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh"
+            ),
+            "{posix}"
+        );
+        assert!(!posix.contains("install.ps1"), "{posix}");
+        assert!(
+            win.contains(
+                "irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1 | iex"
+            ),
+            "{win}"
+        );
+        assert!(!win.contains("install.sh"), "{win}");
+        // The suggested next command stays plain `tan doctor`: since #100 it
+        // already folds in the build-readiness preflight, and this site is one
+        // of the ones that decision deliberately targets (see
+        // `assemble_doctor_report`'s doc comment in tan-cli's doctor.rs).
+        assert!(
+            posix.contains("  tan doctor\n") || posix.ends_with("  tan doctor"),
+            "{posix}"
+        );
+        assert!(!posix.contains("tan doctor --build"), "{posix}");
+        assert!(!win.contains("tan doctor --build"), "{win}");
     }
 
     /// The reuse path repoints WORKSPACE_DIR after `--print-env` has returned;

@@ -3,7 +3,71 @@
 
 ## [Unreleased]
 
+### Added
+- **`tan generate --target west-libraries`** (#114) — the `west.yml` library
+  auto-pin fragment `scripts/alp_project.py --emit west-libraries` produces,
+  listing the Zephyr modules and exact west project pins a project's
+  `board.yaml` `libraries:` declarations require. Drops into the existing
+  single-file target shape exactly like the other five, writing to
+  `build/generated/alp-west-libs.yml` (alp-sdk's own documented convention,
+  `docs/board-config-emit.md`) and included in the default (`tan generate` /
+  `--all`) target set. Companion gap #113 (`hw-info-h`) is the same shape but
+  is NOT addressed by this change.
+- **`tan generate --target zephyr-board --core <id>`** (#116) — the tan front
+  door for the per-core Zephyr board tree generator
+  (`scripts/gen_zephyr_board.py` via `--emit zephyr-board`), the step
+  alp-sdk's `docs/porting-new-som.md` documents right after `tan new-som`
+  scaffolds a new SoM. Previously reachable only via a raw
+  `python -m alp_cli emit zephyr-board --core <id> --output <dir>` that `tan`
+  otherwise never requires. Unlike every other `generate` target this one
+  hard-requires `--core` and writes a DIRECTORY of files (`<board>.dts`,
+  `.yaml`, `_defconfig`, two `Kconfig.*`, the pinctrl `.dtsi`, `board.yml`)
+  rather than one fixed file, so it is deliberately NOT part of the
+  default/`--all` set -- reachable only via an explicit `--target
+  zephyr-board --core <id>`, landing under `build/boards/<board-dir>/` where
+  `<board-dir>` is the SDK's own `alp_e1m_<sku-slug>_<core>` board-directory
+  name (matching `docs/porting-new-som.md` Step 7's own `--output
+  build/boards/alp_e1m_aen901_m55_hp/` example), never a bare core id -- two
+  SoMs that share a core id (a first-class SoM-swap flow) write to different
+  directories instead of colliding in one. `--core` is required for this
+  target, optionally accepted -- forwarded straight through to
+  `alp_project.py` -- on `zephyr-conf`/`yocto-conf`/`cmake-args`/
+  `dts-overlay`/`west-libraries` (`alp_project.py`'s own `--core` help
+  documents it as meaningful there too, at the pinned SDK tag), and refused
+  on every other target (`carrier-netlist`, `native-sim-overlay`, and the
+  default/`--all` set, none of which the SDK ever reads `--core` for).
+
 ### Fixed
+- **`tan generate`'s argument-shape errors (`--core` paired with a target it
+  doesn't scope; `--target zephyr-board` with no `--core`) now exit
+  `ValidationFailure` (2) with issue code `generate.invalid-target`, not
+  `InternalFailure` (5) with `generate.internal-failure`.** An ordinary usage
+  mistake used to be indistinguishable from a genuine internal bug on both
+  the exit code and the wire.
+- **`tan bootstrap`'s printed next steps still told the user to reinstall via
+  the retired, unpinned `cargo install --git https://github.com/alplabai/tan-cli
+  --bin tan` (#117).** alp-sdk#988 replaced every such site repo-wide with the
+  pinned `install.sh`/`install.ps1` one-liner except this one, which lives in
+  the Rust binary rather than a doc or script alp-sdk#988's sweep could reach.
+  Now prints the same platform-appropriate one-liner README.md's own
+  "Automatic" section documents -- verified live (`curl`/`irm` against both
+  raw GitHub URLs answer HTTP 200; `cargo install alp-tan-cli` was checked too
+  and still 404s on crates.io, per #151, so it was deliberately NOT used as
+  the replacement). Left as plain `tan doctor`, not `--build`: since #100
+  plain doctor already folds in the build-readiness preflight, and
+  `bootstrap`'s next-steps block is explicitly one of the sites that fold was
+  written to cover (see `assemble_doctor_report`'s doc comment).
+- **`tan doctor --build` stays accepted, permanently, as a deliberate
+  compatibility surface (#112).** #100 folded build-readiness into plain `tan
+  doctor`, making `--build` read as redundant -- but both `alp-sdk-vscode`
+  call sites (pinned to `SUPPORTED_CLI_VERSION "0.4.0"`) hardcode literal
+  `["doctor", "--build"]` / `["doctor", "--build", "--fix"]` argv with no
+  fallback. Removing the flag, or turning it into a usage error, would break
+  the Toolchain Doctor panel and its "Bootstrap now" remedy -- the primary
+  recovery path from a failed readiness check -- at the same moment. No
+  deprecation window and no planned removal date: the two commands stay
+  permanently distinct (own OS-set resolution, own check vocabulary), not a
+  shim scheduled to collapse into one.
 - **A release can no longer report a registry publish it did not perform
   (#151).** `publish · crates.io` and `publish · npm shim` each emitted a
   `::warning::` and exited **0** when their token was unset, so the v0.4.0 run
