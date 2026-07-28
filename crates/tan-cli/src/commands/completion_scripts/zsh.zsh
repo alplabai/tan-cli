@@ -83,6 +83,9 @@ _tan() {
         explain)
           _arguments '--template[Template id]' "${global_args[@]}"
           ;;
+        examples)
+          _arguments '--filter[Substring match on id/title]' "${global_args[@]}"
+          ;;
         init)
           _arguments '--template[Template id]' '--from-example[Example source dir]' '--name[Name value]' '--destination[Output directory]:path:_files -/' '--som[SoM SKU]' '--cores[Cores list]' '--preview[Preview only]' '--force[Overwrite existing files]' "${global_args[@]}"
           ;;

@@ -28,6 +28,63 @@ use crate::model::BoardModel;
 pub const YOCTO_HOST_DETAIL: &str =
     "Yocto builds are Linux-only; use WSL2 or a Linux host/container.";
 
+/// The `zephyrSdk` check: is the Zephyr SDK toolchain actually installed HERE
+/// (`ZEPHYR_SDK_INSTALL_DIR` / a scanned install dir — [`crate::toolchain`] on
+/// the `tan-cli` side), as opposed to `zephyrSdkAvailableForHost`'s "COULD one
+/// be provisioned on this machine at all". Pulled out to a function (tan-cli#160)
+/// so plain `tan doctor` can carry the SAME check `--build` does: nothing
+/// before `tan build` itself ever said the word "toolchain" on the alp-sdk#855
+/// fresh-host run, and the two-name confusion between this check and
+/// `zephyrSdkAvailableForHost` is exactly what let a `[+]` sit beside a problem
+/// that cost 73 of that run's ~80 minutes.
+///
+/// **`Fail`, not `Warn`** (#159), and the ONE Zephyr check with no host
+/// exemption. The argument that keeps `dtc`/`gperf` at `Warn` is that the
+/// Zephyr SDK's native-Windows hosttools bundle ships neither (alp-sdk#967) —
+/// i.e. the SDK is what supplies them. So an ABSENT SDK is not the same class
+/// of finding at all: there is no host, Windows included, on which a Zephyr
+/// build succeeds without a toolchain.
+///
+/// Measured on the fresh-host run in alp-sdk#855: this reported `[!]`, the
+/// report said `10 passed · 7 warnings · 0 failed`, `tan doctor --build`
+/// exited 0, and the very next command died with `Could not find a package
+/// configuration file provided by "Zephyr-sdk"`. A readiness command that
+/// cannot fail hands a green light into a guaranteed failure.
+///
+/// The `fix` names the EXACT command the alp-sdk#855 reporter used to get
+/// past this (`west sdk install --version 1.0.1 -t arm-zephyr-eabi`, the same
+/// one this repo's own "Live state" notes record as e2e-verified), not merely
+/// a docs URL — tan does not run it itself (`west sdk install` is a real
+/// download+extract, `west`'s job once a workspace exists, not a doctor-time
+/// side effect), only names it precisely enough to act on.
+pub fn zephyr_sdk_toolchain_check(detected: bool) -> DoctorCheck {
+    DoctorCheck {
+        name: "zephyrSdk".to_string(),
+        status: if detected {
+            DoctorStatus::Pass
+        } else {
+            DoctorStatus::Fail
+        },
+        detail: if detected {
+            "Zephyr SDK toolchain detected.".to_string()
+        } else {
+            "Zephyr SDK toolchain not detected (ZEPHYR_SDK_INSTALL_DIR unset).".to_string()
+        },
+        fix: if detected {
+            None
+        } else {
+            Some(format!(
+                "Install the Zephyr SDK toolchain (arm-zephyr-eabi, version {}): from an \
+                 initialised west workspace, run `west sdk install --version {} -t \
+                 arm-zephyr-eabi`. Details: \
+                 https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
+                crate::ZEPHYR_SDK_INSTALL_VERSION,
+                crate::ZEPHYR_SDK_INSTALL_VERSION,
+            ))
+        },
+    }
+}
+
 /// A build backend a `board.yaml` can target. Serializes lowercase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -380,42 +437,10 @@ pub fn build_readiness_report(
             "Zephyr",
             "Install gperf.",
         );
-        // Zephyr SDK is detected (env / install dir), not a PATH binary.
-        //
-        // FAIL, not warn (#159), and it is the ONE Zephyr check with no host
-        // exemption. The argument that keeps `dtc`/`gperf` at Warn is that the
-        // Zephyr SDK's native-Windows hosttools bundle ships neither
-        // (alp-sdk#967) -- i.e. the SDK is what supplies them. So an ABSENT SDK
-        // is not the same class of finding at all: there is no host, Windows
-        // included, on which a Zephyr build succeeds without a toolchain.
-        //
-        // Measured on the fresh-host run in alp-sdk#855: this reported `[!]`,
-        // the report said `10 passed · 7 warnings · 0 failed`, `tan doctor
-        // --build` exited 0, and the very next command died with
-        // `Could not find a package configuration file provided by
-        // "Zephyr-sdk"`. A readiness command that cannot fail hands a green
-        // light into a guaranteed failure.
-        checks.push(DoctorCheck {
-            name: "zephyrSdk".to_string(),
-            status: if probe.zephyr_sdk {
-                DoctorStatus::Pass
-            } else {
-                DoctorStatus::Fail
-            },
-            detail: if probe.zephyr_sdk {
-                "Zephyr SDK toolchain detected.".to_string()
-            } else {
-                "Zephyr SDK toolchain not detected (ZEPHYR_SDK_INSTALL_DIR unset).".to_string()
-            },
-            fix: if probe.zephyr_sdk {
-                None
-            } else {
-                Some(
-                    "Install the Zephyr SDK: https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html"
-                        .to_string(),
-                )
-            },
-        });
+        // Zephyr SDK is detected (env / install dir), not a PATH binary. See
+        // [`zephyr_sdk_toolchain_check`] for the FAIL-not-warn argument and the
+        // alp-sdk#855 measurement behind it.
+        checks.push(zephyr_sdk_toolchain_check(probe.zephyr_sdk));
     }
 
     if os_set.contains(&BuildOs::Yocto) {
@@ -989,6 +1014,32 @@ mod tests {
     }
 
     #[test]
+    fn zephyr_sdk_toolchain_check_names_the_exact_pinned_install_command() {
+        // tan-cli#160(b): the reporter got past this with `west sdk install
+        // --version 1.0.1 -t arm-zephyr-eabi` -- "knowledge tan never
+        // provided". The fix string must now provide it verbatim, not merely
+        // a docs URL a fresh-host customer has to translate into a command
+        // themselves.
+        let absent = zephyr_sdk_toolchain_check(false);
+        assert_eq!(absent.status, DoctorStatus::Fail);
+        let fix = absent.fix.expect("absent zephyrSdk must carry a fix");
+        assert!(
+            fix.contains("west sdk install --version 1.0.1 -t arm-zephyr-eabi"),
+            "{fix}"
+        );
+        // The docs URL is additional context, not a REPLACEMENT for the
+        // command -- both must be present.
+        assert!(fix.contains("zephyr_sdk.html"), "{fix}");
+    }
+
+    #[test]
+    fn zephyr_sdk_toolchain_check_passes_clean_with_no_fix_when_detected() {
+        let present = zephyr_sdk_toolchain_check(true);
+        assert_eq!(present.status, DoctorStatus::Pass);
+        assert!(present.fix.is_none());
+    }
+
+    #[test]
     fn the_fix_prose_carries_the_manifest_command_when_there_is_one() {
         // The other half of #103. `missingPrerequisites[].command` has been
         // manifest-sourced since #95, but text mode renders only `checks` and
@@ -1244,9 +1295,10 @@ mod tests {
     fn missing_prerequisites_covers_only_path_tools_and_respects_the_os_gate() {
         // Two rules in one: a Zephyr-only project must never be told to install
         // `bitbake` (the check is not even emitted), and the non-PATH checks --
-        // `zephyrSdk` (env-var detection, docs-URL fix), `bmaptool` (two tools,
-        // one advisory, `dd` fallback), `vendorToolchain` (no tool name at all)
-        // -- must stay out, since no `{tool, command}` pair can carry them.
+        // `zephyrSdk` (env-var detection; `fix` is a runnable `west sdk install`
+        // one-liner, not a `{tool, command}` pair), `bmaptool` (two tools, one
+        // advisory, `dd` fallback), `vendorToolchain` (no tool name at all) --
+        // must stay out, since no `{tool, command}` pair can carry them.
         let zephyr_only = build_readiness_report(
             "t".to_string(),
             vec![BuildOs::Zephyr],

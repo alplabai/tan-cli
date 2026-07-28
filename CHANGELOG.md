@@ -98,6 +98,59 @@
   the default/`--all` set, none of which the SDK ever reads `--core` for).
 
 ### Fixed
+- **The four first-blink blockers a customer actually hits on a fresh host
+  (alp-sdk#855's deliberate fresh-host run), closing #159 (PR #166)'s
+  companion set:**
+  - **#160 — nothing installed or named the Zephyr SDK toolchain, and
+    `zephyrSdkHost` read as "installed" when it meant only "a host build
+    exists for this platform".** Renamed to `zephyrSdkAvailableForHost` so a
+    `[+]` cannot be misread as "the toolchain is present" — the check that
+    means that, `zephyrSdk`, is a hard `Fail` when absent since #159/#166, and
+    the two sitting under confusable names on the same report was worse than
+    either alone. `zephyrSdk` now also appears in PLAIN `tan doctor`, not only
+    `--build`, both driven by the identical `crate::toolchain::zephyr_sdk_detected()`
+    probe so the two run modes can never disagree. Its `fix` now names the
+    EXACT command that got the alp-sdk#855 reporter past this — `west sdk
+    install --version 1.0.1 -t arm-zephyr-eabi` — instead of a bare docs URL;
+    tan does not run it itself (a real download+extract belongs to `west`
+    once a workspace exists, not a `doctor`-time side effect).
+  - **#161 — a partially-failed bootstrap left a broken `.venv` that every
+    retry silently reused, repeating the identical failure with no new
+    information.** Reproduced on a real Debian/Ubuntu host missing
+    `python3-venv`: `python3 -m venv` fails with `ensurepip is not
+    available`, but the interpreter file it leaves behind IS real, so
+    `tan bootstrap`'s presence check accepted it and died again at `No module
+    named pip`. `ensure_venv` now probes an existing venv's own `python -m
+    pip --version` before reusing it; an unusable one is removed and
+    recreated rather than adopted. Additionally, `tan doctor`/`tan bootstrap`
+    now probe venv CAPABILITY (`import ensurepip`) rather than merely
+    `python3`'s presence, so this fails loudly at `doctor` time, before
+    `bootstrap` ever runs — `python3-venv` itself could not be added to the
+    prerequisite list here, since that list is pinned byte-equal to alp-sdk's
+    `metadata/bootstrap.json` (a manifest fact this repo does not own; filed
+    upstream as alp-sdk#1011).
+  - **#162 — `tan sdk install` left nothing selected, and `tan sdk current`
+    sent the user back to `install` with no exit.** `tan sdk install` now
+    auto-selects the version it just installed whenever nothing is currently
+    active (never overriding an existing selection), reusing the exact
+    `tan sdk switch` repair alp-sdk-vscode#388 already shells rather than a
+    second copy of it. `tan sdk current`'s "nothing selected" message now
+    recommends `switch` (naming what's already cached) instead of `install`
+    again whenever the cache is populated. Also fixed: `sdk install`/
+    `current`/`switch` reported `version (unknown)` for every git-clone
+    install because no released alp-sdk ships a top-level `VERSION` file;
+    `check_sdk_readiness` now falls back to `metadata/sdk_version.yaml`, the
+    same file `tan doctor`'s `sdkProvenance` check already read successfully.
+    Deliberately NOT done: an automatic "pick the newest `~/.alp/sdk-cache`
+    entry" global fallback for the directory-scoped-selection gap — this
+    codebase already refuses to guess among ambiguous Zephyr SDK installs for
+    the same reason ("newest" is not even a well-defined ordering), and the
+    two fixes above close the loop for the common case without it.
+  - **#164 — `tan examples` printed only a count, never the list
+    `--from-example` needs a source dir from.** Text mode now renders
+    `id`/`title` per line (`--verbose` adding the description), plus a new
+    `--filter <substring>` (matched case-insensitively against `id`/`title`)
+    for narrowing the 97-entry catalog.
 - **`tan_core::GENERATION_TARGET_CATALOG` (what `tan explain`/`tan trace`
   read) listed only 4 of the 10 real `tan generate --target` values (#165),
   omitting `hw-info-h`, `west-libraries`, `zephyr-board`, `carrier-netlist`,

@@ -602,7 +602,7 @@ mod tests {
             &runtime(),
         );
         let names: Vec<&str> = doctor.checks.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"zephyrSdkHost"), "{names:?}");
+        assert!(names.contains(&"zephyrSdkAvailableForHost"), "{names:?}");
         assert!(names.contains(&"homePath"), "{names:?}");
         assert_eq!(
             names.contains(&"longPaths"),
