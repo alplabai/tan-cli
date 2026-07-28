@@ -25,6 +25,21 @@ name: parity
 
 on:
   pull_request:
+  # ADR-0020's cross-repo trigger. alp-sdk fires this on every push that touches
+  # its contract surface, and the payload carries the SHA to test against --
+  # which is the whole point: a `pull_request` run checks tan against a PINNED
+  # alp-sdk, so it cannot see an alp-sdk change that breaks tan until someone
+  # bumps the pin by hand. alp-sdk's own `parity-seam1.yml` cannot see it either:
+  # that job diffs alp-sdk's emit against alp-sdk's own frozen oracle and never
+  # runs tan at all.
+  #
+  # THIS BLOCK MUST EXIST ON THE DEFAULT BRANCH (#194). GitHub triggers
+  # `repository_dispatch` from the DEFAULT branch's copy of a workflow and
+  # nowhere else, so while this lived only on `dev`, alp-sdk dispatched
+  # successfully and nothing ever ran -- lifetime run count 0, with a 204 and no
+  # body on every send. Do not "tidy" it onto a feature branch only.
+  repository_dispatch:
+    types: [alp-sdk-planner-change]
 
 env:
   # Fallback alp-sdk ref for a plain `pull_request` run (no dispatch payload).
@@ -65,8 +80,16 @@ jobs:
         id: sdk_ref
         shell: bash
         run: |
-          echo "ref=${{ env.PINNED_SDK_TAG }}" >> "$GITHUB_OUTPUT"
-          echo "::notice::comparing against alp-sdk ref: ${{ env.PINNED_SDK_TAG }}"
+          # A dispatch carries the alp-sdk SHA that just landed; a plain PR run
+          # has no payload and falls back to the pin. Written as one expression
+          # so the two paths cannot drift apart.
+          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ github.event.client_payload.sdk_ref }}" ]; then
+            echo "::notice::DISPATCHED by alp-sdk -- comparing against the ref that just landed: ${ref}"
+          else
+            echo "::notice::comparing against the pinned alp-sdk ref: ${ref}"
+          fi
 
       - name: clone alp-sdk
         uses: actions/checkout@v4
@@ -143,8 +166,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "ref=${{ env.PINNED_SDK_TAG }}" >> "$GITHUB_OUTPUT"
-          echo "::notice::seam2 building against alp-sdk ref: ${{ env.PINNED_SDK_TAG }}"
+          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          if [ -n "${{ github.event.client_payload.sdk_ref }}" ]; then
+            echo "::notice::seam2 DISPATCHED by alp-sdk -- building against the ref that just landed: ${ref}"
+          else
+            echo "::notice::seam2 building against the pinned alp-sdk ref: ${ref}"
+          fi
 
       - name: clone alp-sdk
         uses: actions/checkout@v4
