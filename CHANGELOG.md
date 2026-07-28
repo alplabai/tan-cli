@@ -5,7 +5,7 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.4.0-rc1] — 2026-07-28
+## [0.4.0] — 2026-07-28
 
 ### Added
 - **The JSON envelope vocabulary alp-sdk-vscode gates on is now a frozen,

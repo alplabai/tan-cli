@@ -256,8 +256,8 @@ jobs:
           ## Release assets
 
           - `-gnu` Linux binaries are cross-built with a pinned **glibc 2.31**
-            floor (runs on distros as old as Debian bookworm); `-musl` Linux
-            binaries are fully static and run on any distro/libc.
+            floor -- they run on Debian 11 (bullseye) / Ubuntu 20.04 and newer.
+            `-musl` Linux binaries are fully static and run on any distro/libc.
           - Every binary + `checksums.txt` carries a GitHub build-provenance
             attestation. Verify with:
             `gh attestation verify <downloaded-file> --repo alplabai/tan-cli`
