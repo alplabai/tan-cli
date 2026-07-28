@@ -50,7 +50,7 @@ pub fn create_launch_draft(
 
     let draft = match target {
         DebugTargetKind::ZephyrMcu => {
-            let name = format!("ALP: Zephyr Debug ({})", server_label(server));
+            let name = format!("Alp: Zephyr Debug ({})", server_label(server));
             match server {
                 DebugServerKind::Openocd => json!({
                     "name": name,
@@ -95,7 +95,7 @@ pub fn create_launch_draft(
             }
         }
         DebugTargetKind::BaremetalMcu => json!({
-            "name": format!("ALP: Baremetal Debug ({})", server_label(server)),
+            "name": format!("Alp: Baremetal Debug ({})", server_label(server)),
             "type": "cortex-debug",
             "request": "launch",
             "servertype": server.as_str(),
@@ -108,7 +108,7 @@ pub fn create_launch_draft(
             "svdPath": "<resolved-svd>",
         }),
         DebugTargetKind::YoctoUserspace => json!({
-            "name": "ALP: Yocto Remote Debug",
+            "name": "Alp: Yocto Remote Debug",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/yocto/app",
@@ -120,7 +120,7 @@ pub fn create_launch_draft(
             "preLaunchTask": pre_launch_task,
         }),
         DebugTargetKind::NativeHost => json!({
-            "name": "ALP: Native Sim Debug",
+            "name": "Alp: Native Sim Debug",
             // `lldb`, not `codelldb`, because CodeLLDB's own manifest says so:
             // `vadimcn.vscode-lldb` v1.12.2 declares
             // `contributes.debuggers[0].type = "lldb"`. `codelldb` is the
@@ -693,7 +693,7 @@ mod tests {
         let json = serde_json::to_string(&draft).unwrap();
         // Keys must stay in insertion order (preserve_order), not sorted.
         assert!(json.starts_with(
-            "{\"name\":\"ALP: Zephyr Debug (J-Link)\",\"type\":\"cortex-debug\",\"request\":\"launch\""
+            "{\"name\":\"Alp: Zephyr Debug (J-Link)\",\"type\":\"cortex-debug\",\"request\":\"launch\""
         ));
         assert!(json.ends_with(
             "\"servertype\":\"jlink\",\"device\":\"<resolved-device>\",\"interface\":\"swd\"}"
@@ -876,6 +876,42 @@ mod tests {
         assert_eq!(doc["configurations"].as_array().unwrap().len(), 1);
     }
 
+    /// #133: tan used to spell every launch-configuration `name` `"ALP: …"`
+    /// while `alp-sdk-vscode` spells the same four `"Alp: …"`. Both sides merge
+    /// by exact `name`, so the two spellings never matched and a workspace that
+    /// had seen both tools ended up with two of every debug configuration. This
+    /// simulates a `launch.json` the extension already wrote (its own draft,
+    /// `Alp:`-spelled, never anything tan produced) and asserts tan's own write
+    /// merges into it rather than appending a duplicate. Pre-fix, when
+    /// `create_launch_draft` still emitted `"ALP: Native Sim Debug"`, this name
+    /// mismatch would have made `plan.replaced` false and left two entries.
+    #[test]
+    fn an_existing_extension_written_configuration_is_merged_not_duplicated() {
+        let existing = existing_with(json!({
+            "name": "Alp: Native Sim Debug",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
+            "cwd": "${workspaceFolder}",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        assert_eq!(draft["name"], "Alp: Native Sim Debug");
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(
+            plan.replaced,
+            "an existing Alp:-named configuration must be merged, not duplicated"
+        );
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        assert_eq!(
+            doc["configurations"].as_array().unwrap().len(),
+            1,
+            "duplicated instead of merging: {}",
+            plan.content
+        );
+    }
+
     /// Serialize `{version, configurations:[config]}` as an existing file.
     fn existing_with(config: Value) -> String {
         serde_json::to_string_pretty(&json!({
@@ -898,7 +934,7 @@ mod tests {
         // The #105 report: the customer is told to fill in `device`, does, and
         // the next F5 writes `<resolved-device>` back over it.
         let existing = existing_with(json!({
-            "name": "ALP: Zephyr Debug (J-Link)",
+            "name": "Alp: Zephyr Debug (J-Link)",
             "type": "cortex-debug",
             "request": "launch",
             "cwd": "${workspaceFolder}",
@@ -938,7 +974,7 @@ mod tests {
         // `codelldb` → `lldb` repair (#104) has to land on an entry that
         // already exists, which is every entry after the first write.
         let existing = existing_with(json!({
-            "name": "ALP: Native Sim Debug",
+            "name": "Alp: Native Sim Debug",
             "type": "codelldb",
             "request": "launch",
             "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
@@ -969,7 +1005,7 @@ mod tests {
         // extension found. A prefix-only predicate calls it a real address and
         // overwrites the one the customer typed.
         let existing = existing_with(json!({
-            "name": "ALP: Yocto Remote Debug",
+            "name": "Alp: Yocto Remote Debug",
             "type": "cppdbg",
             "miDebuggerServerAddress": "192.168.10.42:3333",
             "miDebuggerPath": "/opt/gdb/bin/aarch64-poky-linux-gdb",
@@ -996,7 +1032,7 @@ mod tests {
         // A per-index merge against the one-element draft would drop the
         // customer's hand-added second `.cfg` entirely.
         let existing = existing_with(json!({
-            "name": "ALP: Zephyr Debug (OpenOCD)",
+            "name": "Alp: Zephyr Debug (OpenOCD)",
             "type": "cortex-debug",
             "servertype": "openocd",
             "configFiles": ["/boards/alp/board.cfg", "/boards/alp/extra.cfg"],
@@ -1033,7 +1069,7 @@ mod tests {
     #[test]
     fn keys_the_customer_added_that_tan_never_writes_are_untouched() {
         let existing = existing_with(json!({
-            "name": "ALP: Native Sim Debug",
+            "name": "Alp: Native Sim Debug",
             "type": "lldb",
             "preLaunchTask": "my own build task",
             "initCommands": ["settings set target.x86-disassembly-flavor intel"],

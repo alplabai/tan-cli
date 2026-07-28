@@ -173,7 +173,7 @@ pub fn check_sdk_readiness(
     let loader_script_present = path_exists(&join(LOADER_SCRIPT_RELATIVE));
     if !loader_script_present {
         issues.push(format!(
-            "scripts/alp_project.py not found — \"{sdk_path}\" is not a valid ALP SDK root."
+            "scripts/alp_project.py not found — \"{sdk_path}\" is not a valid Alp SDK root."
         ));
     }
 

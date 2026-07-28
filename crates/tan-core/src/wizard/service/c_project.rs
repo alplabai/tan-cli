@@ -204,7 +204,7 @@ fn gen_board_yaml(
 fn gen_readme(def: &WizardTemplateDefinition, som_sku: Option<&str>) -> String {
     let sku = som_sku.unwrap_or(crate::DEFAULT_SOM_SKU);
     let mut s = String::new();
-    s.push_str("# ALP Starter Project\n\n");
+    s.push_str("# Alp Starter Project\n\n");
     s.push_str(&format!("Template: {}\n", def.id.as_str()));
     s.push_str(&format!("SoM: {sku}\n"));
     s.push_str(&format!("App core: {} (Zephyr)\n\n", app_core_for_sku(sku)));
