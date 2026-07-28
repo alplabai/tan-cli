@@ -17,6 +17,12 @@ tests/fixtures/kconfig-contract/** text eol=lf
 # it and fail that byte-diff against the LF original.
 contract/fixtures/bootstrap/** text eol=lf
 
+# Vendored copy of alp-sdk's `metadata/toolchains.json` (tan-cli#172), byte-
+# diffed against the live checkout by tests/parity/toolchain_lock_parity.py.
+# Same reason again: a Windows checkout with autocrlf=true would CRLF-convert
+# it and fail that byte-diff against the LF original.
+contract/fixtures/toolchains/** text eol=lf
+
 # The shipped shell completion scripts, baked in via include_str!. Two
 # independent reasons, either one sufficient: a CRLF bash/zsh script is
 # broken ON the target shell (a trailing `\r` rides into every command), and
