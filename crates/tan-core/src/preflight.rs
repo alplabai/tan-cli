@@ -120,7 +120,20 @@ pub fn build_preflight_checks(input: &PreflightInput) -> Vec<DoctorCheck> {
             checks.push(if ws == pin {
                 pass("zephyrVersion", format!("Zephyr v{ws} matches the SDK pin"))
             } else {
-                warn(
+                // FAIL, not warn (#159). A workspace Zephyr that differs from
+                // the SDK pin does not "maybe" break the build -- it compiles
+                // against a different Zephyr than the plan was emitted for, and
+                // the fresh-host run in alp-sdk#855 caught exactly that: a
+                // v4.4.1 tree on a v4.4.0 pin reported `11 passed · 6 warnings ·
+                // 0 failed`, rc=0, and the next command failed. A readiness
+                // check that cannot fail is indistinguishable from one that
+                // always passes.
+                //
+                // `commands::build::preflight` reads this check to decide
+                // whether to auto-bootstrap a stale workspace; it matches on
+                // "not pass" rather than on Warn specifically, so this severity
+                // change does not silently disarm that.
+                fail(
                     "zephyrVersion",
                     &format!(
                         "reused Zephyr v{ws} != SDK pin v{pin} — run `tan bootstrap` to refresh the workspace"
@@ -308,17 +321,20 @@ mod tests {
     }
 
     #[test]
-    fn stale_reused_zephyr_warns_but_does_not_block() {
+    fn stale_reused_zephyr_blocks_the_build() {
         let input = PreflightInput {
             workspace_zephyr_version: Some("3.7.0".to_string()),
             sdk_zephyr_pin: Some("4.4.1".to_string()),
             ..ready()
         };
         let checks = build_preflight_checks(&input);
-        // A mismatch is advisory, not blocking — the workspace may still build.
-        assert!(!preflight_blocked(&checks));
+        // #159: a mismatch BLOCKS. The workspace does not "maybe" build -- it
+        // compiles against a different Zephyr than the plan was emitted for.
+        // On a real upgrade host (alp-sdk#855) this reported `11 passed · 6
+        // warnings · 0 failed`, rc=0, and the build then failed.
+        assert!(preflight_blocked(&checks));
         let zv = checks.iter().find(|c| c.name == "zephyrVersion").unwrap();
-        assert_eq!(zv.status, DoctorStatus::Warn);
+        assert_eq!(zv.status, DoctorStatus::Fail);
         assert!(zv.detail.contains("3.7.0"));
         assert!(zv.detail.contains("4.4.1"));
         assert!(
@@ -332,7 +348,8 @@ mod tests {
     fn a_patch_level_pin_bump_is_stale_too() {
         // #98: `v4.4.0` and `v4.4.1` both truncate to "4.4", so this check used
         // to Pass — and `build`'s auto-bootstrap, which fires on this exact
-        // Warn, never ran. The build was then green against the Zephyr (and
+        // check being unsatisfied, never ran. (#159 moved it Warn -> Fail; the
+        // auto-bootstrap predicate matches "not pass", so it still fires.) The build was then green against the Zephyr (and
         // hal_alif) the PREVIOUS SDK pinned.
         //
         // Both sides go through the REAL parsers, not literal strings: the
@@ -353,7 +370,7 @@ mod tests {
         assert_eq!(input.sdk_zephyr_pin.as_deref(), Some("4.4.1"));
         let checks = build_preflight_checks(&input);
         let zv = checks.iter().find(|c| c.name == "zephyrVersion").unwrap();
-        assert_eq!(zv.status, DoctorStatus::Warn, "{}", zv.detail);
+        assert_eq!(zv.status, DoctorStatus::Fail, "{}", zv.detail);
     }
 
     #[test]
