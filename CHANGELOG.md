@@ -5,7 +5,7 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-07-28
 
 ### Added
 - **The JSON envelope vocabulary alp-sdk-vscode gates on is now a frozen,
@@ -356,6 +356,15 @@ All notable changes to `tan` are documented here. Format follows
   reported as `build.sdk-switch-pristine` naming both SDK roots. The wipe
   skips any slice with an explicit `-d`/`--build-dir` and only fires under
   the project's own `build` root. (#52)
+- **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
+  project in the headless smoke. A manifest with more than one Zephyr slice (an
+  E1M-AEN801's `m55_hp` + `m55_he`) was refused outright with "the Renode smoke
+  boots a single-Zephyr-slice system", leaving no way to smoke-test such a
+  project at all. `--core` narrows the zephyr set before the runnable filter, so
+  an explicitly named blocked/skipped slice still boots exactly like a lone one
+  does (the smoke touches no hardware). A name matching no zephyr slice fails
+  with `UnknownCore`, listing the manifest's zephyr cores. The refusal message
+  now names the flag. Unchanged for a single-slice project.
 
 ### Changed
 - **`tan sdk switch <version>` resolves the bare version against more than one
@@ -1121,18 +1130,6 @@ All notable changes to `tan` are documented here. Format follows
   Arm-toolchain scoping. The single degraded case is an alp-sdk `dev` checkout
   between #917 and #961, where the manifest exists but still has the
   one-sentence note; it is dev-only and customer-unreachable. (#82)
-
-### Added
-- **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
-  project in the headless smoke. A manifest with more than one Zephyr slice (an
-  E1M-AEN801's `m55_hp` + `m55_he`) was refused outright with "the Renode smoke
-  boots a single-Zephyr-slice system", leaving no way to smoke-test such a
-  project at all. `--core` narrows the zephyr set before the runnable filter, so
-  an explicitly named blocked/skipped slice still boots exactly like a lone one
-  does (the smoke touches no hardware). A name matching no zephyr slice fails
-  with `UnknownCore`, listing the manifest's zephyr cores. The refusal message
-  now names the flag. Unchanged for a single-slice project.
-
 ## [0.3.1] — 2026-07-25
 
 ### Added
