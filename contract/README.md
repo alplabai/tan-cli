@@ -64,6 +64,7 @@ these is a **breaking wire change** — bump the CLI MAJOR/MINOR, record it in
 | `bootstrap.yocto-host` (severity `error`) | A Yocto-only project is sent into a bootstrap that cannot work on this host. The mixed-board case reuses the suffix at severity `warning` and must stay a warning. |
 | `bootstrap.prerequisites-missing` (severity `error`) | tan's own refusal is not recognised, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost. |
 | `presets.sdk-root-unresolved` (severity `warning`) | The New Project wizard silently falls back to its static catalogue, which carries no `cores`, so a **heterogeneous SoM scaffolds single-core with no IPC**. The reference part E1M-AEN801 is multi-core, so that is the default path. |
+| `debug-config.legacy-entry-migrated` (severity `info`) | No consumer yet — reserved. A stale pre-#155 `"ALP: ..."` launch-configuration entry was folded into the maintained `"Alp: ..."` one, carrying across any hand-resolved fields (tan-cli#133). |
 
 `bootstrap.python-not-runnable` and `bootstrap.python-too-old` are separate
 codes carrying no missing TOOL; a consumer that wants those two must match

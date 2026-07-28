@@ -293,6 +293,27 @@ pub struct LaunchJsonWritePlan {
     pub content: String,
     /// `true` if an existing same-named configuration was replaced; `false` if appended.
     pub replaced: bool,
+    /// The legacy `"ALP: ..."` name of an entry that was adopted onto the
+    /// current `"Alp: ..."` name this run (see [`legacy_name`]). `None` on
+    /// every other path, including when a current-named entry already existed
+    /// (that case never looks for a legacy counterpart at all — see
+    /// [`create_launch_json_write_plan`]).
+    pub migrated_from: Option<String>,
+}
+
+/// The pre-#155 spelling of a current launch-configuration name, or `None` if
+/// `next_name` does not use the current `"Alp: "` prefix (defensive: every
+/// name [`create_launch_draft`] emits does).
+///
+/// Deliberately narrow: this computes the ONE legacy string that corresponds
+/// to `next_name` — one of the four names this crate ever emits — rather than
+/// matching any configuration whose name happens to start with `"ALP: "`. A
+/// customer's own unrelated entry that happens to start with those letters
+/// (`"ALP: My Custom Config"`) is not one of the four and is never touched.
+fn legacy_name(next_name: &str) -> Option<String> {
+    next_name
+        .strip_prefix("Alp: ")
+        .map(|rest| format!("ALP: {rest}"))
 }
 
 /// Whether a string is one of OUR "nobody filled this in yet" markers.
@@ -396,6 +417,29 @@ fn merge_configuration(existing: &Value, next: &Value) -> Value {
 /// Merge `draft` into an existing `launch.json` (or a fresh document), merging
 /// key-by-key over any configuration with the same `name`. Mirrors TS
 /// `createLaunchJsonWritePlan`.
+///
+/// #133 (reopened): the #155 rename to `"Alp: ..."` left any entry still
+/// spelled `"ALP: ..."` orphaned — nothing matched it by exact name any more,
+/// so it silently stopped receiving merges. That is not cosmetic: the
+/// orphaned entry is exactly where a customer's own hand-resolved fields
+/// (`device`, …) already lived, and the maintained entry kept its
+/// placeholder. So a MISS on the current name now falls through to a search
+/// for that one legacy counterpart ([`legacy_name`]) before giving up and
+/// appending fresh, and a hit there is folded in via the SAME
+/// [`merge_configuration`] a same-named update already uses — the customer's
+/// hand-filled values survive onto the correctly-named entry exactly the way
+/// they survive a normal re-run, and the entry is renamed in place rather than
+/// duplicated.
+///
+/// This only ever fires on a MISS against the current name. When a
+/// current-named entry already exists — whether or not a legacy one *also*
+/// still sits in the file (a workspace that ran a pre-#155 `tan` and then a
+/// post-#155 one) — this function takes the ordinary same-name-replace path
+/// and never looks for a legacy counterpart at all. The legacy entry is left
+/// exactly as it is: nothing decides which of two possibly-hand-edited
+/// entries is authoritative, so nothing is merged or deleted on this run's
+/// say-so. That is not an oversight; see `crates/tan-core/src/debug_launch.rs`
+/// test `both_a_current_and_a_legacy_entry_leaves_the_legacy_one_untouched`.
 pub fn create_launch_json_write_plan(
     existing_content: Option<&str>,
     draft: &Value,
@@ -412,14 +456,31 @@ pub fn create_launch_json_write_plan(
         .iter()
         .position(|c| c.get("name").and_then(Value::as_str) == Some(next_name));
 
-    let replaced = match existing_index {
+    let (replaced, migrated_from) = match existing_index {
         Some(index) => {
             configs[index] = merge_configuration(&configs[index], draft);
-            true
+            (true, None)
         }
         None => {
-            configs.push(draft.clone());
-            false
+            let legacy_index = legacy_name(next_name).and_then(|legacy| {
+                configs
+                    .iter()
+                    .position(|c| c.get("name").and_then(Value::as_str) == Some(legacy.as_str()))
+            });
+            match legacy_index {
+                Some(index) => {
+                    let from = configs[index]
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    configs[index] = merge_configuration(&configs[index], draft);
+                    (true, from)
+                }
+                None => {
+                    configs.push(draft.clone());
+                    (false, None)
+                }
+            }
         }
     };
 
@@ -427,7 +488,11 @@ pub fn create_launch_json_write_plan(
         "{}\n",
         serde_json::to_string_pretty(&document).expect("launch document is serializable")
     );
-    Ok(LaunchJsonWritePlan { content, replaced })
+    Ok(LaunchJsonWritePlan {
+        content,
+        replaced,
+        migrated_from,
+    })
 }
 
 /// Strip a leading UTF-8 BOM plus `//` / `/* */` comments from JSONC text,
@@ -910,6 +975,188 @@ mod tests {
             "duplicated instead of merging: {}",
             plan.content
         );
+    }
+
+    /// #133 reopened: the vscode drive that reopened this issue, reproduced.
+    /// Only the legacy `"ALP: Zephyr Debug (J-Link)"` entry exists, carrying
+    /// the customer's own hand-filled `"device": "AE822F4M55_HP"`. A test that
+    /// only checked the name changed would pass while still stranding that
+    /// value — so this asserts BOTH: the file ends with one, correctly-named
+    /// entry, AND the hand-filled device is the one that survives onto it
+    /// (not the fresh `"<resolved-device>"` placeholder the draft carries).
+    #[test]
+    fn only_a_legacy_alp_entry_migrates_and_keeps_the_hand_filled_device() {
+        let existing = existing_with(json!({
+            "name": "ALP: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+            "servertype": "jlink",
+            "device": "AE822F4M55_HP",
+            "interface": "swd",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        assert_eq!(draft["name"], "Alp: Zephyr Debug (J-Link)");
+        assert_eq!(draft["device"], "<resolved-device>");
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(
+            plan.migrated_from.as_deref(),
+            Some("ALP: Zephyr Debug (J-Link)")
+        );
+        assert!(plan.replaced);
+
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(
+            configs.len(),
+            1,
+            "the legacy entry must be adopted in place, not left behind \
+             alongside a new one: {}",
+            plan.content
+        );
+        assert_eq!(configs[0]["name"], "Alp: Zephyr Debug (J-Link)");
+        assert_eq!(
+            configs[0]["device"], "AE822F4M55_HP",
+            "the customer's hand-filled device must survive the migration, \
+             not be reset to the fresh placeholder: {}",
+            plan.content
+        );
+    }
+
+    /// #133 reopened, "the dangerous branch": both a maintained `"Alp: ..."`
+    /// entry (placeholder device, per the reported transcript) AND the legacy
+    /// `"ALP: ..."` entry (the customer's real hand-filled device) exist at
+    /// once — a workspace that ran a pre-#155 `tan` and then a post-#155 one.
+    /// The decision here is to touch neither entry beyond the ordinary
+    /// same-name merge of the maintained one: nothing decides which of two
+    /// possibly-hand-edited entries is authoritative, so migrating or deleting
+    /// either would risk destroying user data on a guess. This asserts BOTH
+    /// entries still exist afterwards and the legacy one is BYTE-IDENTICAL to
+    /// what the customer had — proving it truly was not touched, not merely
+    /// that its `device` field looks unchanged.
+    #[test]
+    fn both_a_current_and_a_legacy_entry_leaves_the_legacy_one_untouched() {
+        let legacy = json!({
+            "name": "ALP: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "device": "AE822F4M55_HP",
+            "servertype": "jlink",
+        });
+        let existing = serde_json::to_string_pretty(&json!({
+            "version": "0.2.0",
+            "configurations": [
+                json!({
+                    "name": "Alp: Zephyr Debug (J-Link)",
+                    "type": "cortex-debug",
+                    "request": "launch",
+                    "cwd": "${workspaceFolder}",
+                    "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+                    "servertype": "jlink",
+                    "device": "<resolved-device>",
+                    "interface": "swd",
+                }),
+                legacy.clone(),
+            ],
+        }))
+        .unwrap();
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(
+            plan.replaced,
+            "the exact-name match on the maintained entry must still fire"
+        );
+        assert_eq!(
+            plan.migrated_from, None,
+            "a current-named entry already existed, so no legacy search must \
+             have run at all"
+        );
+
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(
+            configs.len(),
+            2,
+            "both entries must still exist -- deleting either is a data-loss \
+             decision this run must not make on a guess: {}",
+            plan.content
+        );
+        let found_legacy = configs
+            .iter()
+            .find(|c| c["name"] == "ALP: Zephyr Debug (J-Link)")
+            .expect("the legacy entry must still be present");
+        assert_eq!(
+            found_legacy, &legacy,
+            "the legacy entry must be byte-identical to what the customer had \
+             -- not merely 'device unchanged' -- proving it was not touched: {}",
+            plan.content
+        );
+    }
+
+    /// A legacy entry for a DIFFERENT target/server than the one being
+    /// written this run must not be mistaken for this draft's counterpart:
+    /// `"ALP: Zephyr Debug (J-Link)"` sits in the file while this run writes
+    /// `"Alp: Native Sim Debug"`. Per-draft scoping means the legacy entry is
+    /// left alone and the new draft is appended fresh, same as if the legacy
+    /// entry were not there at all.
+    #[test]
+    fn a_legacy_entry_for_a_different_target_is_left_alone() {
+        let existing = existing_with(json!({
+            "name": "ALP: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "device": "AE822F4M55_HP",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        assert_eq!(draft["name"], "Alp: Native Sim Debug");
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(plan.migrated_from, None);
+        assert!(!plan.replaced);
+
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 2, "{}", plan.content);
+        let untouched = configs
+            .iter()
+            .find(|c| c["name"] == "ALP: Zephyr Debug (J-Link)")
+            .expect("the unrelated legacy entry must still be present");
+        assert_eq!(untouched["device"], "AE822F4M55_HP");
+    }
+
+    /// The narrow-match-rule guard: a customer's OWN config that happens to
+    /// start with `"ALP: "` but is not one of the four names this crate ever
+    /// emitted (`"ALP: My Custom Config"`) must never be mistaken for a legacy
+    /// counterpart of anything tan writes, even though a naive `starts_with("ALP:
+    /// ")` scan would match it. Proves the rule is "the one legacy spelling of
+    /// THIS draft's name", not "anything ALP-prefixed".
+    #[test]
+    fn an_unrelated_alp_prefixed_user_config_is_never_mistaken_for_the_legacy_name() {
+        let existing = existing_with(json!({
+            "name": "ALP: My Custom Config",
+            "type": "cortex-debug",
+            "device": "hand-picked-value",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(plan.migrated_from, None);
+        assert!(!plan.replaced);
+
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 2, "{}", plan.content);
+        let untouched = configs
+            .iter()
+            .find(|c| c["name"] == "ALP: My Custom Config")
+            .expect("the unrelated user config must still be present");
+        assert_eq!(untouched["device"], "hand-picked-value");
     }
 
     /// Serialize `{version, configurations:[config]}` as an existing file.

@@ -346,13 +346,25 @@
   generated with both tools ended up duplicated. `tan` now emits `Alp:` --
   byte-for-byte identical to the extension's four names.
 
-  **One-time migration note:** an `ALP: ...` entry a previous `tan` already
-  wrote into `.vscode/launch.json` is left in place, not rewritten or removed
-  -- the next `tan debug-config` (or the extension's own regenerate) now
-  matches and merges into the correctly-spelled `Alp: ...` entry going
-  forward, but the stale `ALP:` duplicate has to be deleted by hand once.
-  Anyone who ran `tan debug-config` before this release should remove the
-  `ALP: ...` entries from `.vscode/launch.json`.
+  **Migration, corrected (#133 reopened):** this note originally said an
+  existing `ALP: ...` entry is left in place and has to be deleted by hand.
+  That was wrong, and not merely cosmetic: the orphaned `ALP:` entry is
+  exactly where a customer's own hand-resolved fields (a hand-filled
+  `device`, for instance) already lived, while the maintained `Alp:` entry
+  kept the unresolved placeholder -- so the advice to delete it would have
+  thrown away the working value. `tan debug-config` now adopts a legacy
+  `ALP: ...` entry onto its `Alp: ...` counterpart the first time it runs
+  after this fix, carrying across any hand-filled fields via the same merge
+  an ordinary re-run already uses, and reports the migration as a
+  `debug-config.legacy-entry-migrated` issue (severity `info`) so an
+  automated consumer or a `--format json` reader can tell why the file
+  changed. No manual deletion is needed, and none should be done. The one
+  case left alone on purpose: a workspace that already has BOTH a maintained
+  `Alp: ...` entry and a legacy `ALP: ...` one (from running `tan
+  debug-config` both before and after this fix) keeps the legacy entry
+  exactly as it is -- nothing here decides which of two possibly-hand-edited
+  entries is authoritative, so that specific case is the only one where a
+  customer may still want to look at the file by hand.
 
   The company is "Alp Lab" (never "ALP Lab"), and the same misspelling had
   spread to other user-facing strings: the `tan sdk list` spinner and table
