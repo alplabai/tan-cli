@@ -49,6 +49,7 @@ complete -c tan -n '__fish_seen_subcommand_from sdk' -l global -d 'Pin the machi
 complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l no-pip -d 'Skip pip install'
 complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l no-west -d 'Skip west init/update'
 complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l print-env -d 'Print environment lines only'
+complete -c tan -n '__fish_seen_subcommand_from bootstrap' -l workspace -d 'Build the workspace at this path'
 complete -c tan -n '__fish_seen_subcommand_from build' -l plan -d 'Show the build plan'
 complete -c tan -n '__fish_seen_subcommand_from build' -l plan-from -d 'Read build plan from file'
 complete -c tan -n '__fish_seen_subcommand_from build' -l materialise -d 'Materialise plan files'

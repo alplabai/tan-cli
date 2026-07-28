@@ -84,6 +84,46 @@
       "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
       "literal": "\"debug-config.comments-dropped\"",
       "note": "Set from `LaunchJsonWritePlan::comments_dropped` (`tan_core::debug_launch::write_content`): for a splice, whether `strip_jsonc` changes the replaced entry's own original byte span; for the whole-document fallback, whether it changes the original file at all. Never fires on the no-op short-circuit path (an unchanged merge returns `original` verbatim) or on an append (nothing existing is ever rewritten)."
+    },
+    {
+      "code": "bootstrap.workspace-guard",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to distinguish the tan-cli#185 workspace-parent-guard refusal (the checkout's parent holds unrelated content and neither --workspace nor an interactive accept resolved it) from every other bootstrap refusal, so a future UI could offer its own relocation picker instead of just showing the message.",
+      "emittedBy": "crates/tan-cli/src/commands/bootstrap/relocate.rs",
+      "literal": "code: \"workspace-guard\"",
+      "note": "The `bootstrap.` prefix is applied by `failure()` in crates/tan-cli/src/commands/bootstrap/mod.rs, same as `prerequisites-missing` above. Fires on BOTH a --non-interactive/--ci/--format json refusal and an interactive decline/cancel -- the two share this one code, distinguished only by `exitCode` (2 vs 1) and by `issues[].message`, which is what a consumer without a code-level split reads instead."
+    },
+    {
+      "code": "bootstrap.workspace-relocated",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to notice that `tan bootstrap` physically moved the customer's alp-sdk checkout (an accepted tan-cli#185 relocation prompt, or an explicit --workspace naming somewhere new) -- `data.sdkRoot`/`data.workspaceDir` already carry the new location on the wire; this is the narrative flag that it MOVED rather than simply having always been there.",
+      "emittedBy": "crates/tan-cli/src/commands/bootstrap/mod.rs",
+      "literal": "\"workspace-relocated\"",
+      "note": "Recorded via `Log::warn` (steps.rs), which applies the same `bootstrap.` prefix on drain as every other bootstrap warning; the literal here is the bare suffix passed in, matching how `yocto-host`'s WARNING sibling (`yocto_mixed_warning`) is emitted the same way."
+    },
+    {
+      "code": "bootstrap.workspace-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to distinguish an unusable `--workspace <path>` value (empty/whitespace-only, or a Windows drive-relative root like `/e/foo/ws` that would otherwise resolve against whichever drive the process happens to run from) from the workspace-parent-guard refusal above -- this fires BEFORE any directory listing or IO, on the value itself (tan-cli#185 review finding 3).",
+      "emittedBy": "crates/tan-cli/src/commands/bootstrap/mod.rs",
+      "literal": "\"workspace-invalid\"",
+      "note": "The `bootstrap.` prefix is applied by `failure()`, same as `workspace-guard` above. Emitted by `tan_core::path_guard::resolve_workspace_target`'s `Err` case; that function does no IO of its own, so this refusal never leaves anything on disk."
+    },
+    {
+      "code": "bootstrap.print-env-workspace-conflict",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to distinguish `--print-env --workspace <path>` (a combination `tan bootstrap` refuses outright rather than rendering env lines for a directory nothing was ever moved into) from every other bootstrap refusal (tan-cli#185 review finding 7).",
+      "emittedBy": "crates/tan-cli/src/commands/bootstrap/mod.rs",
+      "literal": "\"print-env-workspace-conflict\"",
+      "note": "The `bootstrap.` prefix is applied by `failure()`, same as `workspace-guard` above. Fires before the `--print-env` short-circuit and before the workspace-parent guard itself -- `--print-env`'s whole contract is printing what an already-resolved workspace exports, and `--workspace` names where a NEW one goes; the two claims conflict regardless of what the checkout's parent holds."
     }
   ]
 }

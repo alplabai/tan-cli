@@ -439,6 +439,12 @@ pub struct BootstrapArgs {
     /// Only print the environment-variable lines and exit.
     #[arg(long = "print-env")]
     pub print_env: bool,
+    /// Build the west workspace under this directory instead of the
+    /// checkout's parent, moving the checkout there first if it isn't
+    /// already (tan-cli#185). Answers the workspace-parent guard outright —
+    /// no prompt, no refusal, whatever the parent otherwise holds.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<String>,
 }
 
 /// Args for `sdk`: a free-form subcommand verb plus its positional argument and cache destination.

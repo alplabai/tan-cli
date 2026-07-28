@@ -123,6 +123,7 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
                 no_pip: false,
                 no_west: false,
                 print_env: false,
+                workspace: None,
             },
         );
         bootstrap_fix_check = Some(bootstrap_fix_doctor_check(&bootstrap_run));
