@@ -123,9 +123,17 @@ jobs:
       # alp_orchestrate's emit path hard-requires PyYAML and jsonschema (it
       # aborts with "<pkg> is required" otherwise). setup-python ships a bare
       # interpreter, so install them explicitly — without this, seam1 fails
-      # every example with an emit error, not a real plan-shape diff.
-      - name: install SDK emit deps
-        run: python3 -m pip install --upgrade pip pyyaml jsonschema
+      # every example with an emit error, not a real plan-shape diff. `pytest`
+      # runs the comparator's own unit tests, below.
+      - name: install SDK emit + test deps
+        run: python3 -m pip install --upgrade pip pyyaml jsonschema pytest
+
+      # The comparator judges every live alp-sdk emit against the frozen
+      # oracle -- a broken comparator (e.g. a tolerance that silently waves
+      # through a dropped command) must be caught here, before it is trusted
+      # to judge alp-sdk below.
+      - name: seam1 comparator self-test (test_seam1_field_diff.py)
+        run: python3 -m pytest tests/parity/test_seam1_field_diff.py -q
 
       - name: seam1 field diff (live emit vs. frozen oracle)
         run: >

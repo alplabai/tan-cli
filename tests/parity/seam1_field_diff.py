@@ -99,27 +99,10 @@ _PYTHON_TOKEN = "__PYTHON__"
 # `;`-joined multi-value arg keeps its other segments.
 _PYTHON_EXE_RE = re.compile(r"-DPython3_EXECUTABLE=[^;]*")
 
-# The deltas hand-reviewed and allowed through the gate.
-#
-# 1. debug.probe "openocd" (oracle, 97ad481b) -> null (df312cec+, #848).
+# The one delta hand-reviewed and allowed through the gate: debug.probe
+# "openocd" (oracle, 97ad481b) -> null (df312cec+, #848).
 _ALLOWED_OLD_PROBE = "openocd"
 _ALLOWED_NEW_PROBE = None
-
-# 2. A Zephyr slice whose board has NO tree in `zephyr/boards/alp/` now emits
-#    `command: null` plus a warning, instead of a `west build -b <board>` that
-#    could never have succeeded (alp-sdk#999, merged ff39401d). Surfaced here
-#    the moment PINNED_SDK_TAG moved 0ed078a6 -> 3ffd8774: the oracle predates
-#    the guard and still carries the doomed command for
-#    `multicore_rpmsg-imx93`'s m33 slice, whose board `alp_e1m_nx9101_m33` has
-#    no tree.
-#
-#    Narrow on purpose. Only oracle-command -> live-null passes, and only for a
-#    `slices[*].command`; a command CHANGING is still a failure, and a slice
-#    losing its command for any other reason is still a failure. The paired
-#    `warnings[len]` 0 -> 1 is allowed for the same reason -- the guard's whole
-#    point is to say why -- but only upward, since warnings disappearing is the
-#    direction that hides a problem.
-_ALLOWED_COMMAND_TO_NULL = True
 
 
 class ComparatorError(RuntimeError):
@@ -324,29 +307,7 @@ def diff_plans(oracle: dict, live: dict) -> tuple[list[tuple[str, Any, Any]], li
     failing: list[tuple[str, Any, Any]] = []
     for path, old, new in _walk_diff("", oracle, live):
         is_probe_field = path.endswith(".debug.probe")
-        # alp-sdk#999: a slice whose Zephyr board has no tree drops its command
-        # and gains a warning. Deliberately narrow -- a command that CHANGES,
-        # or a null appearing anywhere but `slices[*].command`, still fails.
-        is_command_dropped = (
-            _ALLOWED_COMMAND_TO_NULL
-            and path.endswith("].command")
-            and path.startswith("slices[")
-            and isinstance(old, dict)
-            and new is None
-        )
-        # ...and the warning it emits to say why. Upward only: warnings
-        # DISAPPEARING is the direction that hides a problem.
-        is_warning_added = (
-            path == "warnings[len]"
-            and isinstance(old, int)
-            and isinstance(new, int)
-            and new > old
-        )
-        if (
-            (is_probe_field and old == _ALLOWED_OLD_PROBE and new == _ALLOWED_NEW_PROBE)
-            or is_command_dropped
-            or is_warning_added
-        ):
+        if is_probe_field and old == _ALLOWED_OLD_PROBE and new == _ALLOWED_NEW_PROBE:
             allowed.append((path, old, new))
         else:
             failing.append((path, old, new))

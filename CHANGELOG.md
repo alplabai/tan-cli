@@ -40,6 +40,25 @@
   binaries + npm shim still ship". The npm shim did NOT ship, for the same
   reason, and that job had no way to know.
 
+- **Seam 1's oracle carried a stale `multicore_rpmsg-imx93` fixture, papered
+  over with a tolerance that could pass a silently dropped command
+  (#855).** The vendored oracle predated alp-sdk#999 (merged `ff39401d`),
+  which teaches the planner to refuse a `west build -b <board>` command for a
+  Zephyr slice whose board has no tree, emitting `command: null` plus a
+  `board-tree-missing` warning instead. Rather than re-vendor the one stale
+  fixture, a prior pass added a `command -> null` tolerance to
+  `tests/parity/seam1_field_diff.py` -- a comparator-local workaround alp-sdk's
+  own copy of this comparator carries no equivalent of, and one that was
+  uncoupled from the warning it claimed to require: it accepted a command
+  vanishing with **no** accompanying warning at all, so seam 1 could go green
+  on a silently dropped command. Fixed by re-vendoring
+  `tests/parity/oracle/multicore_rpmsg-imx93.build-plan.json` byte-for-byte
+  from alp-sdk at `PINNED_SDK_TAG`, rather than hand-editing it here, and
+  deleting the tolerance outright -- `slices[*].debug.probe` is once again the
+  *only* delta `seam1_field_diff.py` allows through the gate. The comparator's
+  own negative-matrix suite (`tests/parity/test_seam1_field_diff.py`) now also
+  runs in CI, ahead of the live comparator, so a future comparator regression
+  fails before it is trusted to judge alp-sdk.
 - **`tan debug-config` wrote `"ALP: ..."` launch-configuration names while the
   `alp-sdk-vscode` extension writes the same four configurations `"Alp: ..."`
   (#133).** Both sides merge into `.vscode/launch.json` by exact `name` match,
