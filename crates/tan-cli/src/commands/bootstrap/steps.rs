@@ -264,6 +264,7 @@ pub(super) struct Workspace<'a> {
 
 /// The venv executables, resolved against the bin directory that actually
 /// exists on disk.
+#[derive(Debug)]
 pub(super) struct VenvBin {
     /// The venv's interpreter.
     pub python: PathBuf,

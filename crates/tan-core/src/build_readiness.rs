@@ -68,7 +68,21 @@ pub fn zephyr_sdk_toolchain_check(detected: bool) -> DoctorCheck {
         detail: if detected {
             "Zephyr SDK toolchain detected.".to_string()
         } else {
-            "Zephyr SDK toolchain not detected (ZEPHYR_SDK_INSTALL_DIR unset).".to_string()
+            // The pinned command belongs here too, not only in `fix` — `fix`
+            // renders only under `--verbose` (`style.rs`'s "Next steps"
+            // block), so plain `tan doctor` used to show this Fail with no
+            // remedy at all, exactly the gap alp-sdk#855's fresh-host
+            // reporter hit. Every sibling doctor check (`sdk`/`workspace` in
+            // `preflight.rs`, `hostPrerequisites` in `bootstrap/
+            // prerequisites.rs`) already inlines its one-liner in `detail`;
+            // this one is the check the issue was filed about, so it cannot
+            // be the exception.
+            format!(
+                "Zephyr SDK toolchain not detected (ZEPHYR_SDK_INSTALL_DIR unset) — from an \
+                 initialised west workspace, run `west sdk install --version {} -t \
+                 arm-zephyr-eabi`.",
+                crate::ZEPHYR_SDK_INSTALL_VERSION,
+            )
         },
         fix: if detected {
             None
@@ -1030,6 +1044,17 @@ mod tests {
         // The docs URL is additional context, not a REPLACEMENT for the
         // command -- both must be present.
         assert!(fix.contains("zephyr_sdk.html"), "{fix}");
+        // #160(b) review: `fix` alone is invisible on the default (non
+        // `--verbose`) text path, so plain `tan doctor` left this Fail with
+        // no remedy. The command must ALSO be in `detail`, which every text
+        // mode renders unconditionally.
+        assert!(
+            absent
+                .detail
+                .contains("west sdk install --version 1.0.1 -t arm-zephyr-eabi"),
+            "{}",
+            absent.detail
+        );
     }
 
     #[test]

@@ -119,19 +119,51 @@ fn render_examples_text(
         examples.len()
     )];
     for e in examples {
-        let mut line = format!("  {:id_width$}  {}", e.id, e.title);
-        if verbose && !e.description.is_empty() {
-            line.push_str("   -- ");
-            line.push_str(&e.description);
+        let title = strip_markdown_noise(&e.title);
+        let mut line = format!("  {:id_width$}  {}", e.id, title);
+        if verbose {
+            let description = strip_markdown_noise(&e.description);
+            if !description.is_empty() {
+                line.push_str("   -- ");
+                line.push_str(&description);
+            }
         }
         lines.push(line);
     }
     lines
 }
 
+/// Strip GitHub-flavoured markdown noise that reads fine as README prose but
+/// not as a plain-text catalog line: `![alt](url)` image/badge spans (e.g. a
+/// `shields.io` status badge appended to a README's title heading) and `**`
+/// emphasis markers. Text mode only -- `ExampleEntry`'s JSON fields keep the
+/// raw README-derived value, so `data.examples[]` is unaffected.
+fn strip_markdown_noise(s: &str) -> String {
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("![") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find(')') {
+            Some(end) => rest = &rest[start + end + 1..],
+            // No closing `)` -- an incomplete/non-markdown `![`; keep it
+            // rather than eating the rest of the line.
+            None => {
+                out.push_str(&rest[start..]);
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.replace("**", "").trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ExampleEntry, ExamplesData, example_matches_filter, render_examples_text};
+    use super::{
+        ExampleEntry, ExamplesData, example_matches_filter, render_examples_text,
+        strip_markdown_noise,
+    };
 
     /// Pins the byte-fixed populated-catalog shape (camelCase `sourceDir`, field
     /// order) that the empty-catalog contract fixture cannot exercise and that the
@@ -212,5 +244,41 @@ mod tests {
         let lines = render_examples_text(&[], Some("no-such-thing"), false);
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("no-such-thing"), "{lines:?}");
+    }
+
+    #[test]
+    fn strip_markdown_noise_drops_badge_spans_and_bold_markers() {
+        // Real title from alp-sdk's audio/audio-noise-suppression README.
+        assert_eq!(
+            strip_markdown_noise(
+                "audio-noise-suppression  ![UNTESTED](https://img.shields.io/badge/status-UNTESTED-yellow)"
+            ),
+            "audio-noise-suppression"
+        );
+        assert_eq!(
+            strip_markdown_noise("On-silicon analog validation for the **E1M-AEN801** board"),
+            "On-silicon analog validation for the E1M-AEN801 board"
+        );
+        // Plain text is untouched.
+        assert_eq!(strip_markdown_noise("Plays a tone."), "Plays a tone.");
+        // A `![` with no closing `)` is not markdown -- kept verbatim rather
+        // than silently eaten.
+        assert_eq!(strip_markdown_noise("weird ![ prefix"), "weird ![ prefix");
+    }
+
+    #[test]
+    fn render_examples_text_strips_markdown_noise_from_title_and_description() {
+        let examples = vec![entry(
+            "audio/audio-noise-suppression",
+            "audio-noise-suppression  ![UNTESTED](https://img.shields.io/badge/status-UNTESTED-yellow)",
+            "Real-time **noise suppression** demo.",
+        )];
+        let lines = render_examples_text(&examples, None, true);
+        assert!(!lines[1].contains("!["), "{lines:?}");
+        assert!(!lines[1].contains("**"), "{lines:?}");
+        assert!(
+            lines[1].contains("audio-noise-suppression") && lines[1].contains("noise suppression"),
+            "{lines:?}"
+        );
     }
 }

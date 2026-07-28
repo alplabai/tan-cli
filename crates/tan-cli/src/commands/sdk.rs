@@ -372,6 +372,21 @@ fn fold_auto_select(
         Ok(switched) => {
             text.push(String::new());
             text.extend(switched.text);
+            // tan-cli#160/#161/#162 review: the auto-select always writes the
+            // PROJECT (cwd-scoped) pointer, never `--global` -- so a
+            // first-time user who runs `install` from a scratch directory
+            // before any project exists gets a selection that later commands
+            // run from a different directory will not see (`tan sdk current`
+            // there reports "nothing selected" again). `switch`'s own text
+            // ("Switched project SDK to ...") does not say that scoping is
+            // directory-bound; state it here so this is not a silent trap.
+            if switched.data.scope == "project" {
+                text.push(
+                    "  note    scoped to this directory -- run future commands from here, \
+                     or `tan sdk switch --global` to select machine-wide."
+                        .to_string(),
+                );
+            }
             issues.extend(switched.issues);
             true
         }
@@ -1815,10 +1830,36 @@ mod tests {
                 "SDK v0.13.0 installed".to_string(),
                 String::new(),
                 "Switched project SDK to 0.13.0.".to_string(),
+                "  note    scoped to this directory -- run future commands from here, or \
+                 `tan sdk switch --global` to select machine-wide."
+                    .to_string(),
             ]
         );
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].code, "sdk.bootstrap-recommended");
+    }
+
+    #[test]
+    fn fold_auto_select_omits_the_directory_note_for_a_global_switch() {
+        // A `--global` auto-select pins a machine-wide pointer, so the
+        // directory-scoping caveat above does not apply to it.
+        let mut text = vec!["SDK v0.13.0 installed".to_string()];
+        let mut issues: Vec<Issue> = Vec::new();
+        let outcome = Ok(SwitchOutcome {
+            data: SwitchData {
+                subcommand: "switch",
+                sdk_path: "/cache/v0.13.0".to_string(),
+                version: Some("0.13.0".to_string()),
+                scope: "global",
+            },
+            text: vec!["Switched global SDK to 0.13.0.".to_string()],
+            issues: vec![],
+        });
+        fold_auto_select(&mut text, &mut issues, outcome);
+        assert!(
+            !text.iter().any(|l| l.contains("scoped to this directory")),
+            "{text:?}"
+        );
     }
 
     #[test]
