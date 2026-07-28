@@ -221,17 +221,21 @@ pub(super) fn build_dir_overridden(cmd_args: &[String]) -> bool {
         .any(|a| a == "-d" || a == "--build-dir" || a.starts_with("--build-dir="))
 }
 
-/// Path of the tan-owned SDK-root stamp (issue #52): lives INSIDE west's own
-/// nested build dir (`<cwd>/build`, not `<cwd>` itself), so wiping that dir on
-/// a mismatch retires the stamp atomically — it can never outlive or
+/// Path of the tan-owned SDK-identity stamp (issue #52): lives INSIDE west's
+/// own nested build dir (`<cwd>/build`, not `<cwd>` itself), so wiping that
+/// dir on a mismatch retires the stamp atomically — it can never outlive or
 /// misdescribe a build dir that no longer exists.
 pub(super) fn sdk_stamp_path(slice_cwd: &Path) -> std::path::PathBuf {
     slice_cwd.join("build").join(".tan-sdk-root")
 }
 
-/// The SDK root recorded in the stamp file, if any (`None` covers both "never
-/// stamped" and "unreadable" — both read as "no signal", which
+/// The SDK identity key recorded in the stamp file, if any (`None` covers
+/// both "never stamped" and "unreadable" — both read as "no signal", which
 /// `sdk_stamp_action` treats as a mismatch on an already-configured dir).
+/// The value is whatever the executor wrote via [`write_sdk_stamp`] — the
+/// bare `--sdk-root` path on an older stamp, or `tan_core::plan_exec::
+/// sdk_stamp_key`'s `<root>@<sdkCommit>` form once the plan carries a commit
+/// — this function does not itself parse or care which.
 pub(super) fn read_sdk_stamp(slice_cwd: &Path) -> Option<String> {
     std::fs::read_to_string(sdk_stamp_path(slice_cwd))
         .ok()
@@ -240,16 +244,18 @@ pub(super) fn read_sdk_stamp(slice_cwd: &Path) -> Option<String> {
 
 /// Write the stamp BEFORE the tool is spawned (see the executor call site):
 /// a mid-configure failure still stamped correctly, since the dir really was
-/// configured against `sdk_root` regardless of whether the build finishes.
-/// Best-effort — a write failure here is not fatal to the build; it just
-/// means the next run may treat this dir as unstamped (fails toward a
-/// spurious rebuild, not toward trusting a stale one).
-pub(super) fn write_sdk_stamp(slice_cwd: &Path, sdk_root: &str) -> std::io::Result<()> {
+/// configured against `key` regardless of whether the build finishes.
+/// `key` is `tan_core::plan_exec::sdk_stamp_key`'s output — the resolved SDK
+/// root, plus `@<sdkCommit>` when the plan carries one — not necessarily a
+/// bare path. Best-effort — a write failure here is not fatal to the build;
+/// it just means the next run may treat this dir as unstamped (fails toward
+/// a spurious rebuild, not toward trusting a stale one).
+pub(super) fn write_sdk_stamp(slice_cwd: &Path, key: &str) -> std::io::Result<()> {
     let path = sdk_stamp_path(slice_cwd);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, sdk_root)
+    std::fs::write(path, key)
 }
 
 /// Whether west has ever configured this slice's build dir (`<cwd>/build/

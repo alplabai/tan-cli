@@ -165,6 +165,34 @@ pub fn sdk_stamp_action(
     }
 }
 
+/// The identity [`sdk_stamp_action`] actually compares, and the executor
+/// writes to `.tan-sdk-root`: the resolved `--sdk-root` PATH alone is not
+/// enough, because a standalone checkout that changes CONTENT at the SAME
+/// path — a `git pull`/`git checkout <tag>` in a `--sdk-root ../alp-sdk`
+/// checkout, or `tan sdk switch <path>` re-pointing at a literal path that
+/// hasn't moved (`sdk.rs`'s switch resolves a non-plain-relative argument to
+/// the literal path, unchanged) — leaves the path-only stamp matching while
+/// the build dir is actually stale (tan-cli#163 review follow-up: the
+/// path-only stamp caught a relocated/switched checkout, but not this one).
+/// Folding the plan's own `sdkCommit` in closes it: a freshly emitted plan
+/// (the normal, non-`--plan-from` path) always reflects the SDK checkout's
+/// CURRENT git HEAD, so a content change at the same root changes the key.
+///
+/// `sdk_commit` blank or absent (an older plan, or an SDK checkout with no
+/// resolvable git HEAD) degrades the key to the root alone — the historical,
+/// path-only stamp. An existing on-disk stamp written under that historical
+/// (root-only) scheme mismatches the new commit-aware key exactly once, the
+/// first build after upgrading to a `tan` that computes it — a one-time
+/// forced pristine, the same "fails toward a spurious rebuild, never toward
+/// trusting a stale one" trade-off `sdk_stamp_action` already documents.
+pub fn sdk_stamp_key(sdk_root: Option<&str>, sdk_commit: Option<&str>) -> Option<String> {
+    let root = sdk_root?;
+    match sdk_commit.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(commit) => Some(format!("{root}@{commit}")),
+        None => Some(root.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,5 +387,44 @@ mod tests {
             sdk_stamp_action(Some("/sdk/v0.11.0"), None, true, false, true),
             SdkStampAction::Keep
         );
+    }
+
+    #[test]
+    fn sdk_stamp_key_combines_root_and_commit_when_both_present() {
+        assert_eq!(
+            sdk_stamp_key(Some("/sdk"), Some("3ffd8774")),
+            Some("/sdk@3ffd8774".to_string())
+        );
+    }
+
+    #[test]
+    fn sdk_stamp_key_degrades_to_the_root_alone_when_commit_is_absent_or_blank() {
+        // Older plan (no sdkCommit at all): matches the historical, root-only
+        // stamp exactly.
+        assert_eq!(sdk_stamp_key(Some("/sdk"), None), Some("/sdk".to_string()));
+        // A resolvable-but-blank commit (no git HEAD detectable) degrades the
+        // same way — never stamps a bare "@" with nothing after it.
+        assert_eq!(
+            sdk_stamp_key(Some("/sdk"), Some("   ")),
+            Some("/sdk".to_string())
+        );
+    }
+
+    #[test]
+    fn sdk_stamp_key_is_none_when_the_root_is_unresolved() {
+        // Nothing to key on at all — mirrors sdk_stamp_action's own "never
+        // wipe on an unresolved current root" refusal.
+        assert_eq!(sdk_stamp_key(None, Some("3ffd8774")), None);
+    }
+
+    #[test]
+    fn sdk_stamp_key_changes_when_only_the_commit_changes_at_the_same_root() {
+        // The MAJOR #163-review gap this key exists to close: a same-path SDK
+        // checkout whose content changed (git checkout <tag> in place) must
+        // produce a DIFFERENT key so sdk_stamp_action treats it as a switch,
+        // even though the root string alone is unchanged.
+        let a = sdk_stamp_key(Some("/sdk"), Some("deadbee"));
+        let b = sdk_stamp_key(Some("/sdk"), Some("3ffd8774"));
+        assert_ne!(a, b);
     }
 }

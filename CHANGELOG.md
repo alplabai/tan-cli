@@ -107,6 +107,39 @@
   the default/`--all` set, none of which the SDK ever reads `--core` for).
 
 ### Fixed
+- **The sdk-switch-pristine stamp recorded only the resolved `--sdk-root`
+  PATH, so an SDK checkout that changes CONTENT at the SAME path was silently
+  reused — the #163 symptom, still live after the `--pristine`/no-stamp fix
+  above closed only the path-changing case (review follow-up on #163).**
+  Reproduced end-to-end and with a unit test: seed a build dir under one SDK
+  commit, `git checkout` a different tag in the SAME `--sdk-root` checkout (or
+  `tan sdk switch <path>` back to a literal path that never moved — `sdk.rs`
+  resolves that to an unchanged pointer), and a plain re-run of `tan build`
+  never noticed — no `build.sdk-switch-pristine` issue, stale build state
+  intact. The plan already carries the fix's own input: a freshly emitted
+  plan's `sdkCommit` reflects the checkout's CURRENT git HEAD. A new
+  `tan_core::plan_exec::sdk_stamp_key` folds it into the identity
+  `sdk_stamp_action` compares and the executor writes to `.tan-sdk-root`
+  (`<root>@<sdkCommit>`, degrading to the root alone on an older/commit-less
+  plan — matching, and staying compatible with, the historical stamp). An
+  existing root-only stamp mismatches the new key exactly once, the first
+  build after upgrading — the same "fail toward a spurious rebuild, never
+  toward trusting a stale one" trade-off the original mechanism already makes.
+- **`tan build --pristine` misreported a harmless no-op as a wipe for a slice
+  whose build tool never used `<cwd>/build` at all (review follow-up on
+  #163).** The `--pristine` guard checked bare `cwd.join("build").exists()` —
+  but `write_sdk_stamp` itself `create_dir_all`s that exact directory to write
+  `.tan-sdk-root`, so after ANY prior successful build (a yocto/bitbake slice
+  included, whose own state lands elsewhere — bitbake's TMPDIR defaults to
+  `<TOPDIR>/tmp`, not `<cwd>/build`) the directory `.exists()` with nothing in
+  it but tan's own stamp. Reproduced end-to-end against a real E1M-V2N101
+  plan: `tan build --native --pristine` reported `build.sdk-switch-pristine —
+  a55_cluster: --pristine passed; wiping build dir before dispatch` for the
+  bitbake slice's build dir, which held only `.tan-sdk-root`. Not destructive
+  (nothing bitbake wrote was there to lose), but exactly the "misreport a
+  harmless no-op as a wipe" the `.exists()` guard was added to prevent. Now
+  gated on `cmake_cache_configured` — the SAME "was this dir ever really
+  configured" signal the automatic (non-forced) branch already uses.
 - **`kconfig_fixture_parity.py` and `scaffold_byte_parity.py` still treated an
   explicit `--sdk` as a hint inside the required `seam1 -- plan-shape parity`
   job (#175).** #173 fixed this for `toolchain_lock_parity.py` and

@@ -14,7 +14,9 @@ use serde::Serialize;
 use tan_core::ProjectContext;
 use tan_core::build_plan::{BuildPlan, CONSUMER_BUILD_ROOT, PolicyAction};
 use tan_core::debug::{DoctorCheck, DoctorStatus};
-use tan_core::plan_exec::{SdkStampAction, assemble_slice_env, resolve_action, sdk_stamp_action};
+use tan_core::plan_exec::{
+    SdkStampAction, assemble_slice_env, resolve_action, sdk_stamp_action, sdk_stamp_key,
+};
 use tan_core::preflight::preflight_summary;
 
 use super::CommandRun;
@@ -209,6 +211,15 @@ pub(crate) fn execute_slices_outcome(
     // switch` already pinned for the SAME checkout — thrashing `Pristine` (a
     // full wipe) on every alternating invocation between the two forms.
     let sdk_root_str = normalized_sdk_root_str(sdk_root.as_deref(), &workspace_root);
+    // The identity `sdk_stamp_action` actually compares (MAJOR review finding
+    // on tan-cli#163): the root PATH alone misses a standalone checkout that
+    // changes CONTENT at the SAME path (`git checkout <tag>`/`git pull` in a
+    // `--sdk-root ../alp-sdk` checkout, or `tan sdk switch` re-pointing at a
+    // literal path that hasn't moved) — the plan's own `sdkCommit` (this
+    // run's freshly emitted plan reflects the checkout's CURRENT HEAD) closes
+    // it. See `tan_core::plan_exec::sdk_stamp_key`'s doc for the degrade-to-
+    // root-alone behavior on an older/commit-less plan.
+    let sdk_stamp_key_str = sdk_stamp_key(sdk_root_str.as_deref(), plan.sdk_commit.as_deref());
     // Auto-manage the build env so `tan build` needs no manual
     // `source .venv/activate` / `export ZEPHYR_BASE`: derive ZEPHYR_BASE from the
     // resolved workspace and pass the alp-sdk checkout as an extra Zephyr module,
@@ -529,25 +540,32 @@ pub(crate) fn execute_slices_outcome(
             // `--pristine` (tan-cli#163) forces the SAME decision the
             // automatic stamp comparison makes, rather than a second wipe
             // path — still inside the two guards above, so it never touches
-            // a build dir tan cannot vouch for. Only when the nested build
-            // dir actually exists: forcing a wipe of nothing would otherwise
-            // hit remove_dir_all's NotFound and misreport a harmless
-            // first-ever configure as a failed pristine.
-            let action = if force_pristine && cwd.join("build").exists() {
+            // a build dir tan cannot vouch for. Gated on `cmake_cache_configured`
+            // (the SAME "was this dir ever really configured" signal the
+            // automatic branch below uses), NOT a bare `cwd.join("build").exists()`
+            // (MINOR review finding on tan-cli#163): `write_sdk_stamp` below
+            // itself `create_dir_all`s `<cwd>/build` to write `.tan-sdk-root`,
+            // so after ANY prior successful slice — including a yocto/bitbake
+            // one whose own build state never lands under `<cwd>/build` at all
+            // — that directory `.exists()` with nothing in it but tan's own
+            // stamp. The bare `.exists()` check then reported wiping it as a
+            // real pristine on every subsequent `--pristine` run, for a slice
+            // that was never actually configured there.
+            let action = if force_pristine && manifest::cmake_cache_configured(&cwd) {
                 SdkStampAction::Pristine
             } else if force_pristine {
                 SdkStampAction::Keep
             } else {
                 sdk_stamp_action(
                     cached_sdk_root.as_deref(),
-                    sdk_root_str.as_deref(),
+                    sdk_stamp_key_str.as_deref(),
                     manifest::cmake_cache_configured(&cwd),
                     build_dir_overridden,
                     cwd_under_build_root,
                 )
             };
             if action == SdkStampAction::Pristine {
-                let new_root = sdk_root_str.as_deref().unwrap_or("?");
+                let new_root = sdk_stamp_key_str.as_deref().unwrap_or("?");
                 let message = if force_pristine {
                     format!(
                         "{}: --pristine passed; wiping build dir before dispatch",
@@ -605,14 +623,14 @@ pub(crate) fn execute_slices_outcome(
             }
             // Re-stamp BEFORE the tool runs (not after success): a
             // mid-configure failure still stamped correctly, because the dir
-            // really was configured against `sdk_root` regardless of whether
-            // the build finishes — and a compile-error iteration loop keeps
-            // its incremental state instead of re-pristine-ing on every
+            // really was configured against `sdk_stamp_key_str` regardless of
+            // whether the build finishes — and a compile-error iteration loop
+            // keeps its incremental state instead of re-pristine-ing on every
             // retry. Best-effort: a write failure here just leaves the dir
             // unstamped, which fails toward a spurious future rebuild, never
             // toward trusting a stale one.
-            if let Some(root) = sdk_root_str.as_deref() {
-                let _ = manifest::write_sdk_stamp(&cwd, root);
+            if let Some(key) = sdk_stamp_key_str.as_deref() {
+                let _ = manifest::write_sdk_stamp(&cwd, key);
             }
         }
 
@@ -1753,6 +1771,30 @@ mod tests {
         parse_build_plan(&json).unwrap()
     }
 
+    /// [`one_slice_plan_at`], plus a plan-level `sdkCommit` — the field a
+    /// freshly emitted plan carries (the reviewer's live evidence:
+    /// `"sdkVersion":"0.13.0","sdkCommit":"3ffd8774"`) reflecting the SDK
+    /// checkout's CURRENT git HEAD at emit time.
+    fn one_slice_plan_at_with_sdk_commit(cwd: &str, sdk_commit: &str) -> BuildPlan {
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "sdkCommit": "{sdk_commit}",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "{cwd}",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "{cwd}" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        parse_build_plan(&json).unwrap()
+    }
+
     fn sdk_switch_issue_codes(json: &str) -> Vec<String> {
         let env: serde_json::Value = serde_json::from_str(json).unwrap();
         env["issues"]
@@ -1848,6 +1890,110 @@ mod tests {
         assert!(
             nested.join("incremental-state.marker").exists(),
             "a matching stamp must not be wiped"
+        );
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+    }
+
+    #[test]
+    fn execute_slices_wipes_a_build_dir_whose_sdk_content_changed_at_the_same_root() {
+        // MAJOR finding of the #163 review: the stamp used to record ONLY the
+        // resolved `--sdk-root` PATH, so an SDK checkout that changes CONTENT
+        // at the SAME path (a `git checkout <tag>`/`git pull` in a standalone
+        // `--sdk-root ../alp-sdk` checkout, or `tan sdk switch <path>`
+        // re-pointing at a literal path that hasn't moved) left the path-only
+        // stamp matching while the build dir was actually stale — the
+        // verbatim #163 symptom, reachable even with the path-changing case
+        // above fixed. The on-disk stamp is the PLAIN root, exactly what the
+        // reviewer's repro shows (and all `sdk_root_str`-era stamps are, since
+        // that code path never recorded a commit at all, regardless of
+        // whether the plan carried one) -- proving this specific gap needs a
+        // root-only fixture, not one already `@commit`-suffixed: a stamp that
+        // already differs from the current key structurally (has vs. lacks an
+        // `@commit` suffix) would mismatch under the OLD comparison too, and
+        // not actually exercise the bug.
+        let sdk_a = fake_sdk_root("sdkswitch-commit-change");
+        let base = unique_temp_dir("exec-sdkswitch-commit-change");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("stale-state.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_a);
+        let plan = one_slice_plan_at_with_sdk_commit("build/c1", "3ffd8774");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            !nested.join("stale-state.marker").exists(),
+            "a content change at the SAME --sdk-root path must still wipe the stale build dir"
+        );
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+    }
+
+    #[test]
+    fn execute_slices_keeps_a_build_dir_when_the_plan_carries_no_sdk_commit_and_root_matches() {
+        // Backward compatibility: an older plan (no `sdkCommit` field) must
+        // keep comparing on the root alone, same as before this fix — a
+        // matching root-only stamp is still an ordinary incremental rebuild.
+        let sdk_a = fake_sdk_root("sdkswitch-no-commit-match");
+        let base = unique_temp_dir("exec-sdkswitch-no-commit-match");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("incremental-state.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_a);
+        let plan = one_slice_plan_at("build/c1"); // no sdkCommit
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            nested.join("incremental-state.marker").exists(),
+            "a matching root-only stamp against a commit-less plan must not be wiped"
         );
         let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
         assert!(
@@ -2018,6 +2164,51 @@ mod tests {
         assert!(
             !codes.contains(&"build.sdk-switch-pristine-failed".to_string()),
             "a never-configured dir must not report a failed wipe: {codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn execute_slices_outcome_force_pristine_does_not_misreport_a_stamp_only_dir_as_wiped() {
+        // MINOR finding of the #163 review: `write_sdk_stamp` itself
+        // `create_dir_all`s `<cwd>/build` to write `.tan-sdk-root`, so after
+        // ANY prior successful slice -- including a yocto/bitbake one whose
+        // own build state never lands under `<cwd>/build` at all (bitbake's
+        // TMPDIR defaults to <TOPDIR>/tmp) -- that directory `.exists()` with
+        // nothing in it but tan's own stamp. A bare `.exists()` guard
+        // (instead of `cmake_cache_configured`, the SAME "was this dir ever
+        // really configured" signal the automatic branch uses) then reports
+        // wiping it as a real pristine on every subsequent `--pristine` run,
+        // for a slice that was never actually configured there.
+        let base = unique_temp_dir("exec-force-pristine-stamp-only");
+        let _ = std::fs::remove_dir_all(&base);
+        let stamp_only = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&stamp_only).unwrap();
+        std::fs::write(stamp_only.join(".tan-sdk-root"), "/some/sdk").unwrap();
+        // Deliberately NO CMakeCache.txt: this dir was never really configured.
+
+        let g = global_with_sdk_root(&fake_sdk_root("sdkswitch-force-stamp-only"));
+        let plan = one_slice_plan_at("build/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let outcome = execute_slices_outcome(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+            &[],
+            true, // force_pristine
+        );
+
+        let codes = sdk_switch_issue_codes(outcome.run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "a dir holding only tan's own stamp was never really configured -- \
+             must not be reported as wiped: {codes:?}"
         );
 
         std::fs::remove_dir_all(&base).ok();
