@@ -31,6 +31,11 @@
   same workflow. That line is why nobody noticed, and it is now a table naming
   each secret and what breaks without it.
 
+  The README advertised both commands with no caveat, so a customer following
+  it today hits a failure. It now carries a warning naming #151 and pointing at
+  the release binaries, while keeping the command names documented so they do
+  not change under anyone once the tokens land.
+
   Also corrected: the crates.io skip message asserted "The GitHub release
   binaries + npm shim still ship". The npm shim did NOT ship, for the same
   reason, and that job had no way to know.
