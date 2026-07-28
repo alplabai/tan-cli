@@ -13,12 +13,16 @@ use crate::exit::ExitCode;
 //
 // tan-cli#165: this used to be a SECOND, hand-maintained copy of the target
 // list, independent of `tan_core::loader::GENERATION_TARGET_CATALOG` (the
-// list `explain`/`trace`/`support-bundle` read) -- exactly how the two
-// drifted apart, silently, with nothing to catch it (the catalog carried
-// only 4 of these 8). Fixed by deleting this copy: `generate` now reads
-// `tan_core::ALL_EMIT_MODES` directly, the same single source `explain`
-// (`generation_target_support`/`list_generation_target_support`) and
-// `trace`/`support-bundle` (`ALL_EMIT_MODES` itself) already read.
+// list `explain` reads) -- exactly how the two drifted apart, silently, with
+// nothing to catch it (the catalog carried only 4 of these 8). Fixed by
+// deleting this copy: `generate` now reads `tan_core::ALL_EMIT_MODES`
+// directly, the same single source `explain`
+// (`generation_target_support`/`list_generation_target_support`) reads from
+// the wider catalog. `trace`/`support-bundle` deliberately do NOT share this
+// constant: they enumerate the narrower `tan_core::BUILD_CONFIG_EMIT_MODES`
+// instead (tan-cli#165 review finding 1) -- pointing them at the full
+// `generate` surface would silently claim a build runs project-level exports
+// (`carrier-netlist`, `os-topology`, ...) it never runs.
 //
 // `os-topology` (tan-cli#115) is the ninth entry: `--emit os-topology
 // --output <path>` was measured live against the pinned SDK tag and writes
@@ -441,7 +445,17 @@ fn output_path_for_emit(
     let relative = tan_core::generation_target_support(emit)
         .map(|target| target.output_relative_path)
         .unwrap_or("build/generated/alp.out");
-    workspace_root.join(relative)
+    // tan-cli#165 review finding 4: the catalog's `output_relative_path`
+    // literals are always `/`-separated (they are shared with `explain`'s
+    // display text and with `create_loader_plan`, not host-path strings), so
+    // joining the whole literal in one `Path::join` call left its internal
+    // `/`s untranslated on Windows -- e.g. `build/generated/alp.conf` next to
+    // `zephyr-board`'s component-wise `build\boards\<dir>` in the SAME
+    // envelope's `data.written[]`. Splitting and folding each component keeps
+    // every target's path native and internally consistent.
+    relative
+        .split('/')
+        .fold(workspace_root.to_path_buf(), |path, part| path.join(part))
 }
 
 /// True when a bare `tan generate` (or `--target native-sim-overlay`) would
@@ -566,6 +580,32 @@ mod tests {
     fn carrier_netlist_writes_a_json_artefact() {
         let path = output_path_for_emit(Path::new("/ws"), "carrier-netlist", None);
         assert!(path.ends_with("build/generated/carrier-netlist.json"));
+    }
+
+    /// tan-cli#165 review finding 4: joining the catalog's `/`-separated
+    /// `output_relative_path` literal in one `Path::join` call left its
+    /// internal `/`s untranslated on Windows, so a single `tan generate`
+    /// envelope's `data.written[]` mixed `build/generated/alp.conf` (raw
+    /// literal, one `Path::join` call) next to `zephyr-board`'s
+    /// component-wise `build\boards\<dir>` -- the FAILING case this guards.
+    /// `Path::ends_with` (the assertion every other test here uses) can't
+    /// catch it: Windows path-component parsing treats `/` as a separator
+    /// for iteration regardless of the raw string's actual separator, so a
+    /// mixed-separator path still satisfies an `ends_with("a/b/c")` check.
+    /// This asserts the RENDERED string instead.
+    #[test]
+    fn output_path_for_emit_uses_the_native_separator_throughout() {
+        if std::path::MAIN_SEPARATOR == '/' {
+            return; // nothing to prove on a platform where '/' is already native.
+        }
+        for emit in tan_core::ALL_EMIT_MODES {
+            let path = output_path_for_emit(Path::new("."), emit, None);
+            let rendered = path.to_string_lossy();
+            assert!(
+                !rendered.contains('/'),
+                "target={emit} path={rendered:?} still carries a non-native '/'"
+            );
+        }
     }
 
     #[test]

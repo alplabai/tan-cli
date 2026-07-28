@@ -119,9 +119,33 @@
   a new `catalog_matches_all_emit_modes_plus_zephyr_board` test fails if the
   catalog's target set ever again differs from `ALL_EMIT_MODES` plus
   `zephyr-board`. The stale "the four emit targets" module doc comment is
-  also corrected. `tan explain --target <mode>` and `tan trace` now cover
-  all ten `generate` targets, including the `os-topology` target added
-  above (#115).
+  also corrected. `tan explain --target <mode>` now covers all ten
+  `generate` targets, including the `os-topology` target added above
+  (#115). `tan trace`/`tan support-bundle` deliberately do NOT: they
+  enumerate a separate, narrower `tan_core::BUILD_CONFIG_EMIT_MODES` (the
+  four per-core build-config targets a `tan build` slice actually
+  materialises — `zephyr-conf`/`dts-overlay`/`cmake-args`/`yocto-conf`,
+  unchanged from before this PR), since their own module docs describe
+  reporting "the generation decisions a build would make" — pointing them
+  at the full nine-target set instead (an earlier revision of this fix did)
+  would have them claim project-level exports like `carrier-netlist`/
+  `os-topology` that no build ever runs (review finding 1).
+
+  Two more defects surfaced measuring this against the real generated
+  output. The catalog's own `zephyr-board` entry named its documentary
+  output path `build/boards/<sku-slug>_<core>/`, missing the `alp_e1m_`
+  prefix `zephyr_board_dir_name` actually writes, so `tan explain --target
+  zephyr-board` pointed at a directory that does not exist (review finding
+  3) — fixed to `build/boards/alp_e1m_<sku-slug>_<core>/`. And
+  `generate.rs`'s `output_path_for_emit` joined the catalog's
+  `/`-separated literal in one `Path::join` call, leaving its internal
+  `/`s untranslated on Windows while `zephyr-board`'s own component-wise
+  join used the native separator — so a single `tan generate` envelope's
+  `data.written[]` mixed `build/generated/alp.conf` next to
+  `build\boards\alp_e1m_aen801_m55_hp` (review finding 4) — fixed by
+  splitting the relative literal on `/` and folding each component onto
+  the workspace root, so every target's path is native and internally
+  consistent.
 - **`tan generate`'s argument-shape errors (`--core` paired with a target it
   doesn't scope; `--target zephyr-board` with no `--core`) now exit
   `ValidationFailure` (2) with issue code `generate.invalid-target`, not

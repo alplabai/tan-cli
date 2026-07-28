@@ -93,8 +93,9 @@ pub use kconfig::{
     resolve_default_kconfig_core,
 };
 pub use loader::{
-    ALL_EMIT_MODES, GenerationTargetSupport, LoaderPlan, create_loader_plan,
-    generation_target_support, list_generation_target_support, zephyr_board_dir_name,
+    ALL_EMIT_MODES, BUILD_CONFIG_EMIT_MODES, GenerationTargetSupport, LoaderPlan,
+    create_loader_plan, generation_target_support, list_generation_target_support,
+    zephyr_board_dir_name,
 };
 pub use model::{BoardModel, normalize_board_model};
 pub use path_guard::{is_plain_relative, is_unsafe_removal_target, normalize as normalize_path};

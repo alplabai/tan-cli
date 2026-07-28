@@ -2,23 +2,42 @@
 //! Generation-target catalog — a port of the TS loader
 //! `GENERATION_TARGET_CATALOG` / `listGenerationTargetSupport`. Static metadata
 //! describing every `tan generate --target` output (used by `explain`, and by
-//! `trace`/`support-bundle` via [`ALL_EMIT_MODES`] + [`create_loader_plan`]).
+//! `trace`/`support-bundle` via [`BUILD_CONFIG_EMIT_MODES`] +
+//! [`create_loader_plan`]).
 //!
 //! tan-cli#165: this used to list only four of the (then) nine `generate`
-//! targets, so `tan explain`/`tan trace` silently omitted five real targets
-//! -- including two shipped in the immediately preceding PR. `generate.rs`
-//! (`crates/tan-cli/src/commands/generate.rs`) used to keep its OWN, second
-//! `ALL_EMIT_MODES`/output-path table, which is exactly how the two drifted
-//! apart with nothing to catch it. Fixed by unifying the direction of
-//! derivation the OTHER way round from what a naive merge would do: this
-//! catalog (plus [`ALL_EMIT_MODES`], now the sole copy) is the single source
-//! of every target's `emit` key + output path; `generate.rs`'s
-//! `output_path_for_emit` reads [`generation_target_support`] instead of
-//! hand-duplicating the file-name table. What does NOT unify: `generate.rs`
-//! alone owns `CORE_SCOPABLE_TARGETS` (which targets forward `--core` to
-//! `alp_project.py`) and the `zephyr-board` output-directory-naming dance --
-//! both are argv-composition concerns specific to spawning the loader, not
-//! "what is this target" facts `explain`/`trace` need.
+//! targets, so `tan explain --target <mode>` silently failed to describe five
+//! real targets -- including two shipped in the immediately preceding PR.
+//! `generate.rs` (`crates/tan-cli/src/commands/generate.rs`) used to keep its
+//! OWN, second `ALL_EMIT_MODES`/output-path table, which is exactly how the
+//! two drifted apart with nothing to catch it. Fixed by unifying the
+//! direction of derivation the OTHER way round from what a naive merge would
+//! do: this catalog (plus [`ALL_EMIT_MODES`], now the sole copy `generate.rs`
+//! reads) is the single source of every target's `emit` key + output path;
+//! `generate.rs`'s `output_path_for_emit` reads [`generation_target_support`]
+//! instead of hand-duplicating the file-name table. What does NOT unify:
+//! `generate.rs` alone owns `CORE_SCOPABLE_TARGETS` (which targets forward
+//! `--core` to `alp_project.py`) and the `zephyr-board`
+//! output-directory-naming dance -- both are argv-composition concerns
+//! specific to spawning the loader, not "what is this target" facts
+//! `explain`/`trace` need.
+//!
+//! tan-cli#165 review finding 1: an earlier revision of this fix pointed
+//! `trace`/`support-bundle` at [`ALL_EMIT_MODES`] too, on the theory that "the
+//! set explain/trace/generate read" was one thing. It is not: `trace.rs`/
+//! `cli.rs`'s own (untouched) docs describe `tan trace` as reporting "the
+//! generation decisions a build would make", and `tan build` only ever
+//! materialises the four per-core build-config artefacts
+//! (`build_plan.rs`'s `configArtefacts`) -- never the project-level exports
+//! (`carrier-netlist`, `west-libraries`, `hw-info-h`, `os-topology`,
+//! `native-sim-overlay`) that make up the other five of
+//! [`ALL_EMIT_MODES`]'s nine. Pointing trace's default/validation set at all
+//! nine silently rescoped it to claim a build runs exports it never runs.
+//! [`BUILD_CONFIG_EMIT_MODES`] restores the narrower set `generate.rs`
+//! carried before #165 (its deleted comment: "none is in
+//! `tan_core::ALL_EMIT_MODES` ... because those model the *build* generation
+//! a slice runs") as trace/support-bundle's own constant, independent of
+//! `generate`'s full discovery surface.
 //!
 //! `zephyr-board` (tan-cli#116) is the one target that does not fit a single
 //! `output_relative_path` string at all: it writes a DIRECTORY of files,
@@ -26,10 +45,10 @@
 //! conventional path. It is still listed here (`explain --target
 //! zephyr-board` must describe it), but `is_directory: true` marks its
 //! `output_relative_path` as a documentary template, never a literal path to
-//! join -- and it is deliberately excluded from [`ALL_EMIT_MODES`] (mirroring
-//! `generate.rs`'s own default/`--all` exclusion), so `trace`/`support-bundle`
-//! never try to plan a per-SKU/core path they cannot resolve without a real
-//! `board.yaml` + `--core`.
+//! join -- and it is deliberately excluded from both [`ALL_EMIT_MODES`] and
+//! [`BUILD_CONFIG_EMIT_MODES`] (mirroring `generate.rs`'s own default/`--all`
+//! exclusion), so `trace`/`support-bundle` never try to plan a per-SKU/core
+//! path they cannot resolve without a real `board.yaml` + `--core`.
 
 /// Static metadata for one generation/emit target (Zephyr conf, DTS overlay, etc.).
 pub struct GenerationTargetSupport {
@@ -134,7 +153,7 @@ static GENERATION_TARGET_CATALOG: &[GenerationTargetSupport] = &[
         // `zephyr_board_dir_name`. Never join this literally onto a
         // workspace root; `generate.rs`'s `output_path_for_emit` special-cases
         // this target rather than reading this field.
-        output_relative_path: "build/boards/<sku-slug>_<core>/",
+        output_relative_path: "build/boards/alp_e1m_<sku-slug>_<core>/",
         is_directory: true,
         preview_label: "Zephyr board tree preview",
         preview_language_id: "plaintext",
@@ -167,14 +186,17 @@ pub fn generation_target_support(emit: &str) -> Option<&'static GenerationTarget
     GENERATION_TARGET_CATALOG.iter().find(|t| t.emit == emit)
 }
 
-/// Every `generate` target defaultable by a bare `tan generate` / `--all`
-/// (also the set `tan trace`/`tan support-bundle` iterate with no
-/// `--target`). This is the SOLE copy `generate.rs` reads (tan-cli#165) --
-/// `zephyr-board` is deliberately excluded, since it hard-requires `--core`
-/// and writes a per-SKU/core directory rather than one fixed file (see
+/// Every `generate` target defaultable by a bare `tan generate` / `--all`.
+/// This is the SOLE copy `generate.rs` reads (tan-cli#165) -- `zephyr-board`
+/// is deliberately excluded, since it hard-requires `--core` and writes a
+/// per-SKU/core directory rather than one fixed file (see
 /// `GenerationTargetSupport::is_directory`), so it cannot be defaulted the
 /// way these nine can; it stays reachable only via an explicit `--target
 /// zephyr-board --core <id>`.
+///
+/// NOT the set `tan trace`/`tan support-bundle` iterate -- see
+/// [`BUILD_CONFIG_EMIT_MODES`] for that narrower, deliberately different set
+/// (tan-cli#165 review finding 1).
 pub const ALL_EMIT_MODES: [&str; 9] = [
     "zephyr-conf",
     "dts-overlay",
@@ -186,6 +208,23 @@ pub const ALL_EMIT_MODES: [&str; 9] = [
     "hw-info-h",
     "os-topology",
 ];
+
+/// The four per-core build-config targets a `tan build` slice actually
+/// materialises (`build_plan.rs`'s `configArtefacts`, applied by
+/// `commands/build/materialise.rs`) -- the set `tan trace` and `tan
+/// support-bundle` enumerate by default, and validate an explicit `--target`
+/// against (tan-cli#165 review finding 1). Deliberately narrower than
+/// [`ALL_EMIT_MODES`]: `trace`/`support-bundle` model "the generation
+/// decisions a build would make" (their own module docs, unchanged by
+/// #165), not the wider `tan generate --target` discovery surface --
+/// `carrier-netlist`/`native-sim-overlay`/`west-libraries`/`hw-info-h`/
+/// `os-topology` are real `generate` targets `tan build` never runs.
+/// Restores the distinction `generate.rs` carried before #165 (its deleted
+/// comment: "none is in `tan_core::ALL_EMIT_MODES` ... because those model
+/// the *build* generation a slice runs"), which pointing trace/support-bundle
+/// at [`ALL_EMIT_MODES`] instead would silently collapse.
+pub const BUILD_CONFIG_EMIT_MODES: [&str; 4] =
+    ["zephyr-conf", "dts-overlay", "cmake-args", "yocto-conf"];
 
 /// The output path + command line a loader run would use (mirror of TS
 /// `createLoaderPlan`, limited to the fields `trace`/`support-bundle` surface).
@@ -286,6 +325,49 @@ mod tests {
         expected.sort_unstable();
 
         assert_eq!(catalog_emits, expected);
+    }
+
+    /// tan-cli#165 review finding 1: `trace`/`support-bundle`'s narrower set
+    /// must never silently diverge from -- or grow past -- the wider
+    /// `generate` set it is drawn from, and must stay exactly the original
+    /// four build-config targets (the FAILING case this guards: a future
+    /// edit that widens `BUILD_CONFIG_EMIT_MODES` to match `ALL_EMIT_MODES`
+    /// again, silently re-rescoping `tan trace` beyond what a build runs).
+    #[test]
+    fn build_config_emit_modes_is_the_original_four_and_a_subset_of_all_emit_modes() {
+        assert_eq!(
+            BUILD_CONFIG_EMIT_MODES,
+            ["zephyr-conf", "dts-overlay", "cmake-args", "yocto-conf"]
+        );
+        for mode in BUILD_CONFIG_EMIT_MODES {
+            assert!(
+                ALL_EMIT_MODES.contains(&mode),
+                "BUILD_CONFIG_EMIT_MODES entry {mode} missing from ALL_EMIT_MODES"
+            );
+        }
+    }
+
+    /// tan-cli#165 review finding 3: `zephyr-board`'s documentary
+    /// `output_relative_path` must name the real `alp_e1m_` prefix
+    /// [`zephyr_board_dir_name`] writes, not a bare `<sku-slug>` -- the
+    /// FAILING case this guards is exactly what shipped: `tan explain
+    /// --target zephyr-board` pointing at a directory
+    /// (`build/boards/<sku-slug>_<core>/`) that never gets created, because
+    /// the real one is `build/boards/alp_e1m_<sku-slug>_<core>/`.
+    #[test]
+    fn zephyr_board_catalog_path_carries_the_real_alp_e1m_prefix() {
+        let entry = generation_target_support("zephyr-board").expect("zephyr-board is catalogued");
+        assert_eq!(
+            entry.output_relative_path,
+            "build/boards/alp_e1m_<sku-slug>_<core>/"
+        );
+        // Cross-check against the function that actually names the
+        // directory, so the two can never silently re-diverge.
+        let real = zephyr_board_dir_name("E1M-AEN801", "m55_hp").unwrap();
+        assert!(
+            entry.output_relative_path.contains("alp_e1m_"),
+            "catalog template lost the alp_e1m_ prefix real names like {real:?} carry"
+        );
     }
 
     #[test]
