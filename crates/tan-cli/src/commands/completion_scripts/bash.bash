@@ -30,7 +30,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags --offline" -- "$cur") )
       ;;
     generate)
-      COMPREPLY=( $(compgen -W "$global_flags --force" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --force --core" -- "$cur") )
       ;;
     explain)
       COMPREPLY=( $(compgen -W "$global_flags --template" -- "$cur") )

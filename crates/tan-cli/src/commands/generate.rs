@@ -16,16 +16,26 @@ use crate::exit::ExitCode;
 /// netlist + BOM handoff Alp Studio consumes (alp-sdk#419) — not a per-core
 /// build config. `native-sim-overlay` is a Zephyr board overlay (the canonical
 /// `alp,pin-array` on `zephyr,gpio-emul`) that makes a GPIO app resolve under
-/// `native_sim`. Both are intentionally `generate` targets only: neither is in
-/// `tan_core::ALL_EMIT_MODES` (the set `trace` / `support-bundle` enumerate),
-/// because those model the *build* generation a slice runs.
-const ALL_EMIT_MODES: [&str; 6] = [
+/// `native_sim`. `west-libraries` (tan-cli#114) is the `west.yml` library
+/// auto-pin fragment, a single-file board-derived emit exactly like the
+/// other four `build/generated/` targets. All three are intentionally
+/// `generate` targets only: none is in `tan_core::ALL_EMIT_MODES` (the set
+/// `trace` / `support-bundle` enumerate), because those model the *build*
+/// generation a slice runs.
+///
+/// `zephyr-board` (tan-cli#116) is deliberately NOT here: unlike every mode
+/// above, it hard-requires `--core <id>` and writes a DIRECTORY of files, not
+/// one fixed conventional file, so it cannot be defaulted by a bare
+/// `tan generate` / `--all` the way these seven can. It is reachable only via
+/// explicit `--target zephyr-board --core <id>` — see `resolve_generate_targets`.
+const ALL_EMIT_MODES: [&str; 7] = [
     "zephyr-conf",
     "dts-overlay",
     "native-sim-overlay",
     "cmake-args",
     "yocto-conf",
     "carrier-netlist",
+    "west-libraries",
 ];
 
 /// JSON `data` payload for the `generate` envelope.
@@ -84,7 +94,7 @@ pub fn run(g: &GlobalArgs, args: &GenerateArgs) -> CommandRun {
         );
     };
 
-    let targets = match resolve_generate_targets(g.target.as_deref(), g.all) {
+    let targets = match resolve_generate_targets(g.target.as_deref(), g.all, args.core.as_deref()) {
         Ok(t) => t,
         Err(message) => {
             let copy = message.clone();
@@ -143,17 +153,26 @@ pub fn run(g: &GlobalArgs, args: &GenerateArgs) -> CommandRun {
     let mut issues = Vec::<Issue>::new();
 
     for emit in &targets {
-        let output_path = output_path_for_emit(&workspace_root, emit);
+        let output_path = output_path_for_emit(&workspace_root, emit, args.core.as_deref());
         let output_str = output_path.to_string_lossy().to_string();
-        let status = Command::new(python)
+        let mut command = Command::new(python);
+        command
             .arg(&script_path)
             .arg("--input")
             .arg(&board_path)
             .arg("--emit")
             .arg(emit)
             .arg("--output")
-            .arg(&output_str)
-            .output();
+            .arg(&output_str);
+        // zephyr-board is the one target `alp_project.py` requires --core for
+        // (resolve_generate_targets already refused this target with no
+        // --core, so this is always Some here).
+        if *emit == "zephyr-board" {
+            if let Some(core) = &args.core {
+                command.arg("--core").arg(core);
+            }
+        }
+        let status = command.output();
 
         match status {
             Ok(out) if out.status.success() => {
@@ -223,12 +242,39 @@ fn resolve_board_path(g: &GlobalArgs, workspace_root: &Path) -> PathBuf {
 
 /// Resolve which emit modes to run: all modes when `all` is set or no `--target`
 /// is given, otherwise the single matching mode, or an error for an unknown target.
-fn resolve_generate_targets(target: Option<&str>, all: bool) -> Result<Vec<&'static str>, String> {
+///
+/// `--core` (tan-cli#116) is meaningful for exactly one target, `zephyr-board`
+/// -- it picks which core's Zephyr board tree `alp_project.py --emit
+/// zephyr-board` generates, and the emit REQUIRES it (there is no
+/// sum-across-cores fallback the way there is for e.g. `west-libraries`).
+/// Passing `--core` with any other target (or with none/`--all`, which never
+/// resolves to `zephyr-board` alone) is refused rather than silently ignored --
+/// silently ignoring it would let a user believe `--core` scoped a target it
+/// does nothing for.
+fn resolve_generate_targets(
+    target: Option<&str>,
+    all: bool,
+    core: Option<&str>,
+) -> Result<Vec<&'static str>, String> {
+    if target != Some("zephyr-board") && core.is_some() {
+        return Err("`--core` is only valid with `--target zephyr-board`.".to_string());
+    }
+
     if all || target.is_none() {
         return Ok(ALL_EMIT_MODES.to_vec());
     }
 
     let target = target.unwrap_or_default();
+    if target == "zephyr-board" {
+        return match core {
+            Some(_) => Ok(vec!["zephyr-board"]),
+            None => Err(
+                "`--target zephyr-board` requires `--core <id>` (it generates one \
+                 core's Zephyr board tree)."
+                    .to_string(),
+            ),
+        };
+    }
     if let Some(mode) = ALL_EMIT_MODES.iter().copied().find(|mode| *mode == target) {
         return Ok(vec![mode]);
     }
@@ -240,12 +286,25 @@ fn resolve_generate_targets(target: Option<&str>, all: bool) -> Result<Vec<&'sta
 /// `<workspace_root>/build/generated/` (ephemeral build artifacts), but the
 /// `native_sim` overlay is a Zephyr board overlay: it must live at
 /// `boards/native_sim_native_64.overlay` in the app source tree so
-/// `west build -b native_sim/native/64` auto-discovers it.
-fn output_path_for_emit(workspace_root: &Path, emit: &str) -> PathBuf {
+/// `west build -b native_sim/native/64` auto-discovers it. `zephyr-board`
+/// writes a DIRECTORY of files (tan-cli#116), not one file: one subdirectory
+/// per `--core`, under `build/boards/`, so `west build --board-root
+/// build/boards` (docs/porting-new-som.md Step 7) finds every generated core's
+/// tree without them colliding. `core` is `None` for every other target.
+fn output_path_for_emit(workspace_root: &Path, emit: &str, core: Option<&str>) -> PathBuf {
     if emit == "native-sim-overlay" {
         return workspace_root
             .join("boards")
             .join("native_sim_native_64.overlay");
+    }
+    if emit == "zephyr-board" {
+        // `resolve_generate_targets` refuses this target without `--core`, so
+        // by the time this runs `core` is always Some; the fallback name is
+        // only reached from a direct unit-test call.
+        return workspace_root
+            .join("build")
+            .join("boards")
+            .join(core.unwrap_or("board"));
     }
 
     let file_name = match emit {
@@ -254,6 +313,7 @@ fn output_path_for_emit(workspace_root: &Path, emit: &str) -> PathBuf {
         "cmake-args" => "alp-cmake-args.txt",
         "yocto-conf" => "alp-yocto.conf",
         "carrier-netlist" => "carrier-netlist.json",
+        "west-libraries" => "alp-west-libs.yml",
         _ => "alp.out",
     };
 
@@ -268,7 +328,7 @@ fn output_path_for_emit(workspace_root: &Path, emit: &str) -> PathBuf {
 fn overlay_would_overwrite(workspace_root: &Path, targets: &[&str], force: bool) -> bool {
     !force
         && targets.contains(&"native-sim-overlay")
-        && output_path_for_emit(workspace_root, "native-sim-overlay").exists()
+        && output_path_for_emit(workspace_root, "native-sim-overlay", None).exists()
 }
 
 /// Render `output_path` relative to `workspace_root`, falling back to the full
@@ -356,19 +416,19 @@ mod tests {
 
     #[test]
     fn target_resolution_defaults_to_all() {
-        let resolved = resolve_generate_targets(None, false).unwrap();
+        let resolved = resolve_generate_targets(None, false, None).unwrap();
         assert_eq!(resolved, ALL_EMIT_MODES.to_vec());
     }
 
     #[test]
     fn target_resolution_accepts_single_target() {
-        let resolved = resolve_generate_targets(Some("cmake-args"), false).unwrap();
+        let resolved = resolve_generate_targets(Some("cmake-args"), false, None).unwrap();
         assert_eq!(resolved, vec!["cmake-args"]);
     }
 
     #[test]
     fn target_resolution_rejects_unknown_target() {
-        let err = resolve_generate_targets(Some("unknown"), false).unwrap_err();
+        let err = resolve_generate_targets(Some("unknown"), false, None).unwrap_err();
         assert!(err.contains("Unsupported generate target"));
     }
 
@@ -376,20 +436,20 @@ mod tests {
     fn target_resolution_accepts_carrier_netlist() {
         // The Studio netlist handoff (alp-sdk#419) must reach the SDK spawn,
         // not be rejected at the allowlist. See ALL_EMIT_MODES.
-        let resolved = resolve_generate_targets(Some("carrier-netlist"), false).unwrap();
+        let resolved = resolve_generate_targets(Some("carrier-netlist"), false, None).unwrap();
         assert_eq!(resolved, vec!["carrier-netlist"]);
     }
 
     #[test]
     fn carrier_netlist_writes_a_json_artefact() {
-        let path = output_path_for_emit(Path::new("/ws"), "carrier-netlist");
+        let path = output_path_for_emit(Path::new("/ws"), "carrier-netlist", None);
         assert!(path.ends_with("build/generated/carrier-netlist.json"));
     }
 
     #[test]
     fn target_resolution_accepts_native_sim_overlay() {
         // The native_sim overlay emit (alp-sdk#438) must reach the SDK spawn.
-        let resolved = resolve_generate_targets(Some("native-sim-overlay"), false).unwrap();
+        let resolved = resolve_generate_targets(Some("native-sim-overlay"), false, None).unwrap();
         assert_eq!(resolved, vec!["native-sim-overlay"]);
     }
 
@@ -398,8 +458,61 @@ mod tests {
         // Zephyr auto-discovers boards/<board>.overlay in the app source tree,
         // NOT build/generated -- so `west build -b native_sim/native/64` picks
         // it up and native_sim GPIO resolves.
-        let path = output_path_for_emit(Path::new("/ws"), "native-sim-overlay");
+        let path = output_path_for_emit(Path::new("/ws"), "native-sim-overlay", None);
         assert!(path.ends_with("boards/native_sim_native_64.overlay"));
+    }
+
+    #[test]
+    fn target_resolution_accepts_west_libraries() {
+        // tan-cli#114: the west.yml library auto-pin fragment must reach the
+        // SDK spawn as a normal default-set target -- no --core required.
+        let resolved = resolve_generate_targets(Some("west-libraries"), false, None).unwrap();
+        assert_eq!(resolved, vec!["west-libraries"]);
+        assert!(ALL_EMIT_MODES.contains(&"west-libraries"));
+    }
+
+    #[test]
+    fn west_libraries_writes_the_documented_conventional_path() {
+        // Matches alp-sdk docs/board-config-emit.md's own example verbatim.
+        let path = output_path_for_emit(Path::new("/ws"), "west-libraries", None);
+        assert!(
+            path.ends_with("build/generated/alp-west-libs.yml"),
+            "{path:?}"
+        );
+    }
+
+    #[test]
+    fn target_resolution_zephyr_board_requires_core() {
+        // tan-cli#116: the FAILING case -- no --core must be refused, not
+        // silently defaulted, since alp_project.py itself hard-requires it.
+        let err = resolve_generate_targets(Some("zephyr-board"), false, None).unwrap_err();
+        assert!(err.contains("--core"), "{err}");
+
+        // With --core, it resolves to itself alone -- never folded into --all.
+        let resolved =
+            resolve_generate_targets(Some("zephyr-board"), false, Some("m55_hp")).unwrap();
+        assert_eq!(resolved, vec!["zephyr-board"]);
+        assert!(!ALL_EMIT_MODES.contains(&"zephyr-board"));
+    }
+
+    #[test]
+    fn target_resolution_rejects_core_on_other_targets() {
+        // The footgun this guards: --core silently doing nothing for a target
+        // that doesn't consume it.
+        let err = resolve_generate_targets(Some("cmake-args"), false, Some("m55_hp")).unwrap_err();
+        assert!(err.contains("--core"), "{err}");
+        let err = resolve_generate_targets(None, false, Some("m55_hp")).unwrap_err();
+        assert!(err.contains("--core"), "{err}");
+    }
+
+    #[test]
+    fn zephyr_board_writes_a_per_core_directory_under_build_boards() {
+        let path = output_path_for_emit(Path::new("/ws"), "zephyr-board", Some("m55_hp"));
+        assert!(path.ends_with("build/boards/m55_hp"), "{path:?}");
+        // A different core must land in a different directory -- concurrent
+        // `--target zephyr-board` runs for two cores must never collide.
+        let other = output_path_for_emit(Path::new("/ws"), "zephyr-board", Some("a55_cluster"));
+        assert_ne!(path, other);
     }
 
     fn unique_temp_dir(tag: &str) -> std::path::PathBuf {

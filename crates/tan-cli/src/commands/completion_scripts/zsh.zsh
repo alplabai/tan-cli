@@ -78,7 +78,7 @@ _tan() {
           _arguments '--shell[Shell type]:shell:(bash zsh fish)' "${global_args[@]}"
           ;;
         generate)
-          _arguments '--force[Overwrite existing files]' "${global_args[@]}"
+          _arguments '--force[Overwrite existing files]' '--core[Core id (zephyr-board target)]' "${global_args[@]}"
           ;;
         explain)
           _arguments '--template[Template id]' "${global_args[@]}"

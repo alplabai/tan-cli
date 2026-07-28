@@ -451,6 +451,27 @@ pub struct DoctorArgs {
     #[arg(long, value_name = "SERVER")]
     pub server: Option<String>,
     /// Run the build-readiness preflight instead of the debug-readiness checks.
+    ///
+    /// KEPT DELIBERATELY (tan-cli#112), not merely tolerated: since #100
+    /// folded build-readiness into PLAIN `tan doctor` too, this flag reads as
+    /// redundant, and the natural cleanup would be to retire it. It must not
+    /// be retired, or turned into a usage error, because both
+    /// `alp-sdk-vscode` call sites pinned to `SUPPORTED_CLI_VERSION "0.4.0"`
+    /// hardcode it as a literal argv entry with no fallback --
+    /// `["doctor", "--build"]` (the Toolchain Doctor panel) and
+    /// `["doctor", "--build", "--fix"]` (its "Bootstrap now" remedy, the
+    /// primary recovery path from a failed check). Either change breaks both
+    /// at the same moment.
+    ///
+    /// This is NOT a deprecation-window shim scheduled to collapse into plain
+    /// `doctor` on a timer: `--build` and plain `doctor` stay two distinct,
+    /// permanent modes (own OS-set resolution, own check vocabulary -- see
+    /// `run_build_readiness`'s doc comment in `commands/doctor.rs`), and there
+    /// is no planned removal date. What WOULD have to be true before dropping
+    /// it: `alp-sdk-vscode` stops calling it at both sites, in the same PR
+    /// that bumps its `SUPPORTED_CLI_VERSION` pin past `"0.4.0"` -- and even
+    /// then, retiring the flag here is its own deliberate decision, not
+    /// something that falls out of that bump automatically.
     #[arg(long)]
     pub build: bool,
     /// With `--build`: auto-repair a fixable blocker — run `tan bootstrap` when no
@@ -552,12 +573,19 @@ pub struct CompletionArgs {
 }
 
 /// Args for `generate`: overwrite toggle for the one target (`native-sim-overlay`)
-/// that writes into the hand-editable app source tree instead of `build/generated/`.
+/// that writes into the hand-editable app source tree instead of `build/generated/`,
+/// plus the core selector `--target zephyr-board` requires.
 #[derive(Debug, Args)]
 pub struct GenerateArgs {
     /// Allow overwriting existing files.
     #[arg(long)]
     pub force: bool,
+    /// Core id to generate a Zephyr board tree for. Required by (and only
+    /// meaningful for) `--target zephyr-board` (alp-sdk#523, tan-cli#116): it
+    /// picks which core's board tree gets generated, matching `--core` on
+    /// `tan kconfig`.
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
 }
 
 /// Args for `init`: template, naming, destination, SoM/cores selection, and preview/force toggles.
