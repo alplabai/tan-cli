@@ -21,6 +21,7 @@
 //! captures it and emits exactly one envelope, folding a failing step's output
 //! tail into the issue message and every non-fatal warning into an issue.
 
+mod relocate;
 mod steps;
 mod west_config;
 
@@ -73,11 +74,16 @@ struct BootstrapData {
     /// Payload schema version (`"2"`); serialized as `schemaVersion`.
     #[serde(rename = "schemaVersion")]
     schema_version: String,
-    /// Resolved alp-sdk root; empty on failure paths.
+    /// Resolved alp-sdk root; empty on failure paths. Reflects a
+    /// workspace-parent-guard relocation (tan-cli#185) when one happened —
+    /// this is the checkout's CURRENT location, not necessarily where the
+    /// project was originally cloned.
     #[serde(rename = "sdkRoot")]
     sdk_root: String,
-    /// The west topdir the run targeted (`<sdkRoot>/..`, or a reused
-    /// `$ZEPHYR_BASE` workspace); empty when unresolved.
+    /// The west topdir the run targeted (`<sdkRoot>/..`, a reused
+    /// `$ZEPHYR_BASE` workspace, or the workspace-parent-guard's relocation
+    /// target — tan-cli#185, `--workspace <path>` or an accepted prompt);
+    /// empty when unresolved.
     #[serde(rename = "workspaceDir")]
     workspace_dir: String,
     /// `<workspaceDir>/<venv.dirName>` — the hermetic west + Python deps venv.
@@ -131,9 +137,13 @@ struct BootstrapData {
 
 /// Mutable run state the envelope reports, threaded through the phases.
 struct RunPaths {
-    /// `REPO_ROOT` — the alp-sdk checkout.
+    /// `REPO_ROOT` — the alp-sdk checkout. Repointed when the
+    /// workspace-parent guard relocates it (tan-cli#185).
     repo_root: PathBuf,
-    /// `WORKSPACE_DIR` — repointed when a `$ZEPHYR_BASE` workspace is adopted.
+    /// `WORKSPACE_DIR` — repointed when a `$ZEPHYR_BASE` workspace is adopted,
+    /// or when the workspace-parent guard relocates the checkout
+    /// (tan-cli#185; that repoint happens FIRST, before `select_workspace`
+    /// ever runs).
     workspace_dir: PathBuf,
     /// `<WORKSPACE_DIR>/<venv.dirName>` — follows `workspace_dir`.
     venv_dir: PathBuf,
@@ -152,9 +162,11 @@ impl RunPaths {
 }
 
 /// Runs `tan bootstrap`. Resolves the SDK root and the west topdir beside it,
-/// loads the workspace facts, short-circuits on `--print-env`, gates a
-/// Yocto-only project on a non-Linux host, then walks the venv → west → pip
-/// phases in the scripts' order.
+/// loads the workspace facts, short-circuits on `--print-env`, applies the
+/// workspace-parent guard (relocating the checkout if the parent is dirty and
+/// the customer agrees — tan-cli#185), gates a Yocto-only project on a
+/// non-Linux host, then walks the venv → west → pip phases in the scripts'
+/// order.
 pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     let is_windows = cfg!(windows);
     let host = HostOs::detect(std::env::consts::OS);
@@ -165,7 +177,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         root: context.workspace_root.clone(),
         board_yaml: context.board_yaml_path.clone(),
     };
-    let Some(sdk_root) = context.sdk_root.clone() else {
+    let Some(mut sdk_root) = context.sdk_root.clone() else {
         return failure(
             g,
             ExitCode::ValidationFailure,
@@ -242,6 +254,51 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         let text = print_env_block(&facts, tokens, facts.venv_bin_dir(is_windows), is_windows);
         let data = data_for(args, &sdk_root, &paths, &facts, &pin);
         return finish(g, ExitCode::Success, project, data, Vec::new(), text);
+    }
+
+    // Workspace-parent guard (tan-cli#185): `west init -l` forces the topdir
+    // to be the checkout's own PARENT (#769, above), so a customer who clones
+    // into e.g. ~/Downloads gets zephyr/modules/.west/venv sprayed there,
+    // unannounced, outside the checkout where no .gitignore can reach it.
+    // `--workspace <path>` answers the question outright (no guard at all,
+    // whatever the parent holds); otherwise the guard fires only when the
+    // parent holds content this checkout does not account for and is not
+    // itself already a west workspace (`tan_core::bootstrap::
+    // parent_needs_workspace_guard`). Placed before ANY write below — the
+    // venv, west and pip phases all come later — so a refusal (interactive
+    // decline or `--non-interactive`) leaves nothing on disk.
+    let is_interactive = !g.non_interactive && !g.ci && !g.is_json();
+    match relocate::resolve_workspace(
+        &paths.repo_root,
+        &paths.workspace_dir,
+        args.workspace.as_deref(),
+        is_interactive,
+    ) {
+        relocate::Resolution::Unchanged => {}
+        relocate::Resolution::Relocated {
+            repo_root,
+            workspace_dir,
+            notice,
+        } => {
+            paths.repo_root = repo_root;
+            paths.workspace_dir = workspace_dir;
+            paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
+            sdk_root = paths.repo_root.to_string_lossy().into_owned();
+            log.warn("workspace-relocated", &notice);
+        }
+        relocate::Resolution::Refuse {
+            exit,
+            code,
+            message,
+        } => {
+            let data = data_for(args, &sdk_root, &paths, &facts, &pin);
+            return failure(g, exit, code, vec![message], data, project);
+        }
+        relocate::Resolution::MoveFailed(message) => {
+            let issues = log.take_issues();
+            let data = data_for(args, &sdk_root, &paths, &facts, &pin);
+            return fatal(g, project, data, issues, message);
+        }
     }
 
     // Host gate: refuse ONLY a project whose every in-play core is Yocto, on a
@@ -933,6 +990,7 @@ mod tests {
             no_pip: false,
             no_west: false,
             print_env: false,
+            workspace: None,
         }
     }
 

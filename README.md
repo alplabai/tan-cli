@@ -153,6 +153,18 @@ Zephyr and baremetal cores build on every host. Only a project whose cores are
 *all* Yocto is refused off Linux — a mixed board still bootstraps, with a
 warning that the Yocto core itself needs WSL2 or a Linux host.
 
+`west init -l` puts the workspace (`zephyr/`, `modules/`, `.west/`, the venv)
+beside the alp-sdk checkout — its PARENT directory. If that parent holds
+anything besides the checkout itself (a real risk cloning into `~/Downloads`
+or `$HOME`), `bootstrap` guards it instead of spraying multiple gigabytes
+there unannounced: interactively it offers to move the checkout into a
+dedicated `alp-workspace/` sibling; under `--non-interactive`/`--ci`/
+`--format json` it refuses outright, naming the fix. `--workspace <path>`
+answers the question up front — no guard, no prompt, workspace built there. A
+parent already holding `.west` (an existing workspace) is never guarded.
+
+
+
 ## Commands
 
 | Area | Commands |

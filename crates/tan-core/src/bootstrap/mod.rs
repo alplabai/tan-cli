@@ -22,6 +22,7 @@ mod blocks;
 pub mod manifest;
 mod prerequisites;
 mod runtime;
+mod workspace_guard;
 
 pub use blocks::{next_steps_block, optional_libs_block, print_env_block, render_env_lines};
 pub use manifest::{
@@ -38,6 +39,7 @@ pub use runtime::{
     HostOs, OS_OFF, YoctoGate, in_play_runtimes, runtime_for_topology_core, yocto_gate,
     yocto_mixed_warning, yocto_only_refusal,
 };
+pub use workspace_guard::{DEFAULT_WORKSPACE_DIR_NAME, parent_needs_workspace_guard};
 
 /// FALLBACK Zephyr pin, used only when the SDK has no
 /// `metadata/bootstrap.json` — which is EVERY released SDK: that file has never

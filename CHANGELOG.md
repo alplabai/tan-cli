@@ -3,6 +3,50 @@
 
 ## [Unreleased]
 
+### Changed
+- **BEHAVIOUR CHANGE: `tan bootstrap` no longer sprays `zephyr/`, `modules/`,
+  `.west/` and its venv into whatever directory the alp-sdk checkout happens
+  to sit in — it now guards that parent, and refuses (or, interactively,
+  offers to relocate) when it holds anything else** (#185). `west init -l
+  <alp-sdk>` forces the west topdir to be the checkout's own PARENT (#769) —
+  a customer who clones into `~/Downloads` used to get multi-gigabyte
+  `~/Downloads/zephyr`, `~/Downloads/modules`, `~/Downloads/.west` and
+  `~/Downloads/.venv`, unannounced, and OUTSIDE the checkout so no
+  `.gitignore` could ever reach them.
+  The trigger is a predicate, not a directory-name list (`Downloads`/
+  `Desktop`/… would be locale-dependent and incomplete by construction):
+  **proceed silently when the checkout's parent holds nothing but the
+  checkout itself and/or an existing west workspace (a `.west` entry already
+  there); otherwise guard.** `mkdir alp && cd alp && git clone …` — the
+  documented flow — never prompts; a parent already holding `.west` is
+  already a workspace and is never guarded either. `$HOME` and
+  `~/Downloads` always hold other entries, so they always guard.
+  Interactively, an accepted guard relocates the checkout (its ENTIRE tree —
+  `.git`, uncommitted changes, untracked files — via one atomic directory
+  rename, never a copy that could half-complete) to `<parent>/alp-workspace/
+  <checkout-name>` and builds the workspace there instead. Under
+  `--non-interactive`/`--ci`/`--format json` a prompt is banned, so the guard
+  instead **fails outright** (exit 2), naming the remedy: pass the new
+  `--workspace <path>` (which relocates with NO guard at all — the customer
+  has answered the question) or clone alp-sdk into a dedicated directory. A
+  failed relocation attempt (destination collision, cross-device move,
+  permissions) always leaves the checkout exactly where it was — the atomic
+  rename cannot leave a customer with neither the original nor a working
+  workspace.
+  **Migration note:** a CI pipeline that clones alp-sdk into a directory it
+  shares with other content and then runs `tan bootstrap` there will newly
+  fail instead of bootstrapping. This repo's own CI is unaffected, but not
+  for the reason it might look like at a glance: no `.github/workflows/**`
+  job actually invokes `tan bootstrap` today (`parity.yml`'s `seam2` runs
+  `west init -l` directly), so the guard has nothing to intercept yet — the
+  moment a workflow adds a `tan bootstrap` call, it will need `--workspace`
+  or a dedicated clone directory like every other pipeline, since `seam2`'s
+  own checkout parent (`$GITHUB_WORKSPACE`, shared with the tan-cli checkout
+  itself) would otherwise trip the guard.
+  Registers two new `reserved` issue codes (`bootstrap.workspace-guard`,
+  `bootstrap.workspace-relocated`) in `contract/issue-codes.json` — no
+  consumer binds to either yet.
+
 ### Security
 - **`install.sh` and `install.ps1` now verify the downloaded binary against the
   release's `checksums.txt` and refuse to install on any failure** (#176).
