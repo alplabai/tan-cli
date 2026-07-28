@@ -1,6 +1,40 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **A release can no longer report a registry publish it did not perform
+  (#151).** `publish · crates.io` and `publish · npm shim` each emitted a
+  `::warning::` and exited **0** when their token was unset, so the v0.4.0 run
+  summary read `success` for both while the registries answered
+  `crate 'alp-tan-cli' does not exist` and `dist-tags: None`. `cargo install
+  alp-tan-cli` and `npm i -g @alplabai/tan` were documented install paths that
+  had never worked, and every signal the workflow produced said otherwise.
+
+  Both jobs already run on FINAL tags only (`!contains(github.ref_name, '-')`),
+  so the graceful skip only ever applied where it is least defensible: a
+  finished release advertising two install channels. A missing token now FAILS
+  that job and writes the outcome to `$GITHUB_STEP_SUMMARY` rather than an
+  annotation -- #151 is the proof an annotation is too weak, since the warning
+  was emitted correctly and still read as a publish. A successful publish
+  writes its own summary line too, so the run states what shipped either way.
+
+  The GitHub release is untouched: both jobs are `needs: release`, so the
+  binaries, `checksums.txt`, `envelope-contract.json` and the attestation are
+  already published before either can fail. The run going red reports the truth
+  about two registry channels; it does not withhold the release. Pre-release
+  tags never reach either job, so rc behaviour is unchanged.
+
+  `docs/release-contract.md` claimed "**No secrets.** Same-repo release uses the
+  default `GITHUB_TOKEN` only" -- flatly, with two secret-dependent jobs in the
+  same workflow. That line is why nobody noticed, and it is now a table naming
+  each secret and what breaks without it.
+
+  Also corrected: the crates.io skip message asserted "The GitHub release
+  binaries + npm shim still ship". The npm shim did NOT ship, for the same
+  reason, and that job had no way to know.
+
 All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
