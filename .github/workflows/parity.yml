@@ -75,6 +75,47 @@ jobs:
           ref: ${{ steps.sdk_ref.outputs.ref }}
           path: alp-sdk
 
+      # ADR-0020 mandates a `repository_dispatch` alp-sdk -> tan on every planner
+      # change. That needs a PAT/App secret this repo does not have, so the pin
+      # is bumped by hand -- and a hand-bumped pin ROTS SILENTLY. The gate stays
+      # green against a months-old alp-sdk while `dev` moves underneath it, which
+      # is the exact "green means nothing" failure the two-seam gate exists to
+      # prevent.
+      #
+      # This is the token-free half: no dispatch, but the pin cannot drift
+      # unnoticed. alp-sdk is public, so the default GITHUB_TOKEN reads it.
+      #
+      # WARN, never fail. A pin legitimately lags -- an alp-sdk change the
+      # planner did not touch should not red every tan PR, and a gate that
+      # reddens for something the author cannot fix in their own PR is a gate
+      # people learn to ignore. What it must never do is stay quiet.
+      - name: pin freshness (warn only)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          pinned='${{ env.PINNED_SDK_TAG }}'
+          head="$(gh api repos/alplabai/alp-sdk/commits/dev -q .sha 2>/dev/null || true)"
+          if [ -z "${head}" ]; then
+            echo "::warning::could not read alp-sdk dev to check pin freshness -- skipping this check only"
+            exit 0
+          fi
+          if [ "${head}" = "${pinned}" ]; then
+            echo "pin is alp-sdk dev tip (${pinned}) -- fresh."
+            exit 0
+          fi
+          # Count only commits touching the CONTRACT surface. Total commit count
+          # would flag a docs-only week and train everyone to ignore the warning.
+          cd alp-sdk
+          git fetch -q --depth=200 origin dev || true
+          behind="$(git rev-list --count "${pinned}..origin/dev" --                       scripts/alp_orchestrate metadata tests/parity 2>/dev/null || echo '?')"
+          if [ "${behind}" = "0" ]; then
+            echo "pin is behind alp-sdk dev, but by NOTHING on the contract surface. Fine."
+            exit 0
+          fi
+          echo "::warning::PINNED_SDK_TAG is ${behind} contract-surface commit(s) behind alp-sdk dev (${head}). Both seams are green against a pin that no longer reflects the planner. Re-bump PINNED_SDK_TAG in .github/workflows/parity.yml."
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.x"
