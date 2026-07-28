@@ -861,22 +861,21 @@ pub(crate) fn project_selected(g: &GlobalArgs) -> bool {
 
 /// The `DebuggerExtensionsState` for the standalone `tan` binary.
 ///
-/// The five flags are NOT MEANINGFUL here and nothing may read them as facts:
+/// The three flags are NOT MEANINGFUL here and nothing may read them as facts:
 /// only a VS Code extension host can enumerate its own marketplace extensions,
 /// so these are an inherited assumption from the TS `resolveCliDebugContext`
 /// (where `true` is correct, because that code CAN introspect its host). They
-/// are kept so the port stays faithful, and `observable: false` is what stops
-/// them being reported — every derived check renders `unknown` instead of
-/// printing "vadimcn.vscode-lldb is installed." on a headless container and
-/// counting itself among the passes (#102).
+/// are kept so the port stays faithful to `createExtensionCheck`'s three real
+/// TS counterparts, and `observable: false` is what stops them being reported
+/// — every derived check renders `unknown` instead of printing "vadimcn.
+/// vscode-lldb is installed." on a headless container and counting itself
+/// among the passes (#102).
 ///
 /// `pub(crate)`: `inspect` and `support-bundle` build the same context and must
 /// carry the same disclaimer, not a third copy of the literal.
 pub(crate) fn standalone_debugger_extensions() -> DebuggerExtensionsState {
     DebuggerExtensionsState {
         cortex_debug: true,
-        peripheral_viewer: true,
-        memory_view: true,
         cpp_tools: true,
         code_lldb: true,
         observable: false,

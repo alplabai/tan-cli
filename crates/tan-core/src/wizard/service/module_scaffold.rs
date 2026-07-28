@@ -57,7 +57,7 @@ fn gen_module_c(prefix: &str, nm: &str) -> String {
 
 fn gen_module_readme(def: &ModuleTemplateDefinition, nm: &str) -> String {
     let mut s = String::new();
-    s.push_str("# ALP Module Scaffold\n\n");
+    s.push_str("# Alp Module Scaffold\n\n");
     s.push_str(&format!("Template: {}\n", def.id.as_str()));
     s.push_str(&format!("Module: {nm}\n\n"));
     s.push_str("## Notes\n\n");

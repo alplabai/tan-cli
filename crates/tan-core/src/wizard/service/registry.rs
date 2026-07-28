@@ -23,7 +23,7 @@ pub(super) static TEMPLATE_DEFINITIONS: &[WizardTemplateDefinition] = &[
             unit_name: "app_bootstrap",
             todo_line: "TODO: register app services and initialize runtime modules.",
         }],
-        body_line1: "ALP minimal starter boot",
+        body_line1: "Alp minimal starter boot",
         body_line2: "TODO: add your application logic",
         explanation: &[
             "Minimal template keeps generated code intentionally small and neutral.",

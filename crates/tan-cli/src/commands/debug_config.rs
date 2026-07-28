@@ -413,7 +413,7 @@ fn manifest_os_for_target(target: DebugTargetKind) -> Option<&'static str> {
 /// uses to pick the host binary — not by `os`. A board that also builds a
 /// real Zephyr MCU slice still has one or more slices with `os: zephyr`; the
 /// old `os`-keyed match took the first of those, which on such a board is
-/// often the MCU slice, pointing `ALP: Native Sim Debug` at a Cortex-M ELF
+/// often the MCU slice, pointing `Alp: Native Sim Debug` at a Cortex-M ELF
 /// that CodeLLDB then can't launch on the host. `--core` is intentionally
 /// unused on this arm: a `native_sim` slice's `core_id` is not a hardware
 /// core selector.
@@ -493,7 +493,7 @@ fn resolve_from_build(
         // So a host target needs the sibling swap, via the same tan-core
         // helper `tan run` uses; every other target kind genuinely wants the
         // artefact verbatim. #83 took it verbatim here too, which pointed
-        // `ALP: Native Sim Debug` at a `zephyr.elf` CodeLLDB cannot launch.
+        // `Alp: Native Sim Debug` at a `zephyr.elf` CodeLLDB cannot launch.
         let artefact = match target {
             DebugTargetKind::NativeHost => native_sim_exe_beside(artefact),
             _ => artefact.to_string(),
@@ -714,7 +714,7 @@ mod tests {
     // `native_sim` slice second, `native-host` resolution must take the
     // native_sim artefact, never fall through to the MCU one — the old
     // `os`-keyed match took the first `os: zephyr` slice regardless of which
-    // one it was, pointing `ALP: Native Sim Debug` at a Cortex-M ELF.
+    // one it was, pointing `Alp: Native Sim Debug` at a Cortex-M ELF.
     //
     // And it must resolve the RUNNABLE: the slice records `zephyr.elf` (all
     // tan ever writes), so `program` has to be the sibling `zephyr.exe`.
