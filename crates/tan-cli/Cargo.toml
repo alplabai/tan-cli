@@ -46,3 +46,10 @@ sha2.workspace = true
 # anyway, and it is target-gated so no POSIX build sees it.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Registry", "Win32_System_Threading"] }
+
+[dev-dependencies]
+# tests/live_run_generate.rs parses a real `alp_project.py --emit west-libraries`
+# output as YAML (not merely non-empty) -- production code never needs a
+# generic YAML parser (tan-core's serde_yaml usage is board.yaml-schema-
+# shaped), so this stays dev-only.
+serde_yaml.workspace = true

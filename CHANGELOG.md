@@ -11,8 +11,33 @@
   single-file target shape exactly like the other five, writing to
   `build/generated/alp-west-libs.yml` (alp-sdk's own documented convention,
   `docs/board-config-emit.md`) and included in the default (`tan generate` /
-  `--all`) target set. Companion gap #113 (`hw-info-h`) is the same shape but
-  is NOT addressed by this change.
+  `--all`) target set. Companion gap #113 (`hw-info-h`) is addressed below.
+- **`tan generate --target hw-info-h`** (#113) — the build-time
+  `ALP_HW_BUILD_*` identifier header companion to `<alp/hw_info.h>` that
+  `scripts/alp_project.py --emit hw-info-h` produces (delegated to
+  `scripts/alp_project_emit/hw_info.py`), baking `board.yaml`'s SoM SKU/
+  family/hw_rev and (when declared) board name/hw_rev into string macros an
+  app cross-checks against the runtime EEPROM read via
+  `alp_hw_info_assert_matches_build()`. Previously reachable only via a raw
+  `python -m alp_cli emit hw-info-h --output <path>` that bypassed `tan`
+  entirely. Same single-file, project-wide shape as `west-libraries`: writes
+  to `build/generated/alp_hw_info_build.h` (alp-sdk's own documented
+  convention, `docs/board-config-emit.md`), is in the default (`tan
+  generate`/`--all`) target set, and `--core` is optional -- forwarded
+  through to `alp_project.py`, where it picks which core's OS lands in the
+  generated `ALP_HW_BUILD_OS`/`ALP_HW_BUILD_PRIMARY_CORE` macros.
+- **`tan generate` live-run e2e** (`crates/tan-cli/tests/live_run_generate.rs`)
+  — spawns a REAL `alp_project.py` from a real alp-sdk checkout and asserts
+  what actually lands on disk, closing the gap unit tests against a stub
+  loader script cannot: that alp-sdk accepts the argv `tan` composes, and
+  that files land where `tan` claims. Covers `zephyr-board` (including the
+  SoM-swap non-collision case PR #157 fixed: two SoMs sharing a core id must
+  never write into the same directory), `west-libraries` (output parses as
+  real YAML), `hw-info-h`, `--core` forwarded vs. refused, and the
+  `ValidationFailure`(2)-not-`InternalFailure`(5) exit-code mapping. Wired
+  into CI's `seam2` job against the same `PINNED_SDK_TAG` checkout the
+  materialise/build steps already use; hard-fails (not skips) if
+  `TAN_LIVE_RUN_SDK_ROOT` is unset under `CI=true`, self-skips locally.
 - **`tan generate --target zephyr-board --core <id>`** (#116) — the tan front
   door for the per-core Zephyr board tree generator
   (`scripts/gen_zephyr_board.py` via `--emit zephyr-board`), the step
@@ -32,10 +57,10 @@
   directories instead of colliding in one. `--core` is required for this
   target, optionally accepted -- forwarded straight through to
   `alp_project.py` -- on `zephyr-conf`/`yocto-conf`/`cmake-args`/
-  `dts-overlay`/`west-libraries` (`alp_project.py`'s own `--core` help
-  documents it as meaningful there too, at the pinned SDK tag), and refused
-  on every other target (`carrier-netlist`, `native-sim-overlay`, and the
-  default/`--all` set, none of which the SDK ever reads `--core` for).
+  `dts-overlay`/`west-libraries`/`hw-info-h` (`alp_project.py`'s own `--core`
+  help documents it as meaningful there too, at the pinned SDK tag), and
+  refused on every other target (`carrier-netlist`, `native-sim-overlay`, and
+  the default/`--all` set, none of which the SDK ever reads `--core` for).
 
 ### Fixed
 - **`tan generate`'s argument-shape errors (`--core` paired with a target it

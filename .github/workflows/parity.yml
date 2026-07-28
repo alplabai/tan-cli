@@ -281,6 +281,29 @@ jobs:
       - name: build tan
         run: cargo build --locked --bin tan
 
+      # `tan generate` live-run e2e (tan-cli#113 + the SoM-swap regression
+      # test for PR #157's output-directory bug): spawns the REAL
+      # `alp_project.py` from the checkout above (already pinned to
+      # PINNED_SDK_TAG by the `clone alp-sdk` step) and asserts what actually
+      # lands on disk -- `zephyr-board`/`west-libraries`/`hw-info-h`, the
+      # SoM-swap non-collision case, `--core` forwarded vs. refused, and the
+      # ValidationFailure(2)-not-InternalFailure(5) exit-code mapping. Needs
+      # only python + the SDK checkout (no Zephyr SDK/west/Renode), so it runs
+      # before those install -- but placed here, after `alp-sdk`'s own
+      # `west`/pyyaml/jsonschema deps are already installed above, since
+      # `alp_project.py` needs them. `TAN_LIVE_RUN_SDK_ROOT` pointed at THIS
+      # job's own pinned `alp-sdk/` checkout is what lets the suite inherit
+      # the pin by construction rather than a second hardcoded SHA -- see
+      # `crates/tan-cli/tests/live_run_generate.rs`'s module docs. This is
+      # deliberately NOT allowed to self-skip here: with `CI=true` (every
+      # GitHub Actions runner) and no reachable checkout the suite panics
+      # instead of quietly passing -- so a step that silently stopped setting
+      # this env var would fail loudly, not disappear.
+      - name: generate live-run e2e (tan generate vs pinned alp-sdk)
+        env:
+          TAN_LIVE_RUN_SDK_ROOT: ${{ github.workspace }}/alp-sdk
+        run: cargo test --locked -p alp-tan-cli --test live_run_generate
+
       # ---- the seam itself -------------------------------------------------
 
       # 1. MATERIALISE. tan reads alp-sdk's `--emit build-plan` and writes the
