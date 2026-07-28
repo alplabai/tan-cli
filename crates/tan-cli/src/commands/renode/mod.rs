@@ -6,9 +6,19 @@
 //! (`scripts/west_commands/alp_renode.py`); under ADR-0020 Phase 4 `tan` owns
 //! this and the Python is retired.
 //!
-//! SCOPE: the PLAIN (non-sim) headless smoke only. `--sim-mode` (the studio sim
-//! gateway, issue #674) is DEFERRED — the flag is wired for surface stability
-//! but errors "not yet ported".
+//! SCOPE: this file is the PLAIN (non-sim) headless smoke. `--sim-mode` (the
+//! studio sim gateway) lives in [`sim`], with its monitor bridge in [`monitor`]
+//! — the SOCKET half of `tan-cli#77` is implemented there (two ephemeral
+//! listeners, `sim-descriptor.json`, the readiness marker, the three-verb
+//! control protocol); the `ram_console_buf` → UART-socket streamer, the
+//! wired-UART console path, and the per-SKU sim profiles behind the
+//! descriptor's `framebuffers`/`peripherals` stay DEFERRED on that same issue.
+//! The contract was ported from the retired Python, not from issue prose. The
+//! historical contract is `alp-sdk#674` (CLOSED; the Python that closed it is
+//! deleted, so it is reachable only through git history). Never cite a bare
+//! `#674` here: read from this repo it means `tan-cli#674`, which has never
+//! existed and 404s — that exact ambiguity is what let three alp-sdk workflows
+//! drift into citing it. Always carry the owning repo.
 //!
 //! Divergences from the Python source, all deliberate:
 //!   - user-facing prose names `tan renode` / `tan build`, never
@@ -19,6 +29,9 @@
 //!     fixing the Python latent hang where a wedged-but-alive Renode blocked the
 //!     `for line in proc.stdout` read until EOF.
 
+mod monitor;
+mod sim;
+
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -28,8 +41,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tan_core::renode::{
-    build_renode_argv, platform_files_for_sku, platform_stem_for_sku, select_sku,
-    zephyr_elf_from_manifest,
+    build_renode_argv, elf_vector_table_base, platform_files_for_sku, platform_stem_for_sku,
+    renode_cpu_halted, renode_rejected_argv, select_sku, zephyr_elf_from_manifest,
 };
 use tan_core::system_manifest::{SystemManifestError, parse_system_manifest};
 
@@ -49,7 +62,9 @@ struct RenodeReport {
     platform_stem: String,
     /// Resolved `.repl` descriptor path.
     repl: String,
-    /// Resolved `.resc` descriptor path.
+    /// Resolved `.resc` descriptor path — the SDK's for the plain smoke, or the
+    /// GENERATED `<bundle>/.sim-boot.resc` under `--sim-mode`, which writes its
+    /// own boot script instead of including the SDK's.
     resc: String,
     /// Resolved Zephyr ELF path.
     elf: String,
@@ -63,6 +78,18 @@ struct RenodeReport {
     expect_found: bool,
     /// The exact headless Renode argv that ran (empty on a pre-flight failure).
     renode_argv: Vec<String>,
+    /// `--sim-mode` only: the `sim-descriptor.json` written for the studio
+    /// gateway. Empty on the plain smoke, and on a sim failure before it was
+    /// written. A JSON consumer reads it from here rather than assuming
+    /// `<bundle>/sim-descriptor.json`.
+    descriptor: String,
+    /// `--sim-mode` only: the bound control-socket port. 0 on the plain smoke and
+    /// before the listeners are bound. The matching `tcp://127.0.0.1:<port>` URI
+    /// is in the descriptor.
+    control_port: u16,
+    /// `--sim-mode` only: the bound UART-socket port, same conventions as
+    /// [`Self::control_port`].
+    uart_port: u16,
 }
 
 /// `tan renode` entry.
@@ -107,17 +134,10 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
         ..Default::default()
     };
 
-    // --sim-mode: DEFERRED. Wired for surface stability; errors until studio is
-    // repointed to `tan renode --sim-mode` (issue #674).
+    // --sim-mode branches FIRST: it resolves everything from `--image-bundle`,
+    // not from the build root, so none of the manifest work below applies.
     if args.sim_mode {
-        return fail(
-            g,
-            project,
-            report,
-            "renode.sim-mode-unported",
-            "renode --sim-mode is not yet ported (studio sim gateway, issue #674); \
-             use the plain headless smoke",
-        );
+        return sim::run(g, args, project, report);
     }
 
     // SDK-root guard — faithful to `find_sdk_root` None → die.
@@ -178,7 +198,7 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
     };
     report.sku = sku.clone();
 
-    let elf = match zephyr_elf_from_manifest(&manifest, &build_root) {
+    let elf = match zephyr_elf_from_manifest(&manifest, &build_root, args.core.as_deref()) {
         Ok(p) => p,
         Err(e) => return fail(g, project, report, "renode.slice", &e.to_string()),
     };
@@ -239,7 +259,15 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
         }
     }
 
-    let argv = build_renode_argv(&renode_bin, &repl, &resc, &elf);
+    // Read the ELF purely to learn where its vector table really is, so the
+    // descriptor can point the CPU at it instead of letting Renode guess from
+    // the lowest vaddr — which halts an MRAM-linked image before it executes a
+    // single instruction (alp-sdk#947). Best-effort by design: an unreadable or
+    // unexpected ELF injects nothing and leaves Renode exactly as it was.
+    let vtor = std::fs::read(&elf)
+        .ok()
+        .and_then(|bytes| elf_vector_table_base(&bytes));
+    let argv = build_renode_argv(&renode_bin, &repl, &resc, &elf, vtor);
     report.renode_argv = argv.clone();
 
     if !g.is_json() {
@@ -254,7 +282,7 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
     }
 
     // Run — enforce the wall-clock timeout even on a silent child.
-    let (found, natural_exit) = match run_renode(
+    let (found, natural_exit, argv_rejected, cpu_halted) = match run_renode(
         &argv,
         &log_path,
         args.timeout,
@@ -275,7 +303,41 @@ pub fn run(g: &GlobalArgs, args: &RenodeArgs) -> CommandRun {
     report.expect_found = found;
 
     let mut exit = ExitCode::Success;
-    if let Some(expect) = args.expect.as_deref() {
+    // Checked FIRST, and independently of the exit status: Renode answers an
+    // argv it doesn't accept by printing its usage page and exiting **0**, so
+    // this outcome is byte-identical to a clean smoke everywhere else in this
+    // function — `natural_exit` says success, and with no `--expect` nothing
+    // else looks. That is how the `--hide-monitor`/`--console` incompatibility
+    // in Renode 1.16.1 passed as green while nothing was ever simulated.
+    if argv_rejected {
+        exit = ExitCode::RuntimeFailure;
+        let msg = format!(
+            "renode: rejected the command line and printed its usage instead of booting — \
+             nothing was simulated (see {}).",
+            log_path.display()
+        );
+        issues.push(issue("renode.argv-rejected", "error", &msg));
+        if !g.is_json() {
+            text.push(msg);
+        }
+    } else if cpu_halted {
+        // Checked next, and just as independently of --expect/natural_exit as
+        // argv_rejected above: a Renode that boots, halts the CPU on its
+        // first instruction fetch, and then shuts down cleanly exits 0 —
+        // indistinguishable from a healthy smoke to either of those signals
+        // (issue #64). Without this, `tan renode` reported `ok: true` on a
+        // run where the firmware never executed a single instruction.
+        exit = ExitCode::RuntimeFailure;
+        let msg = format!(
+            "renode: the CPU halted on its first instruction fetch — no firmware code \
+             ever ran, even though the process exited cleanly (see {}).",
+            log_path.display()
+        );
+        issues.push(issue("renode.cpu-halted", "error", &msg));
+        if !g.is_json() {
+            text.push(msg);
+        }
+    } else if let Some(expect) = args.expect.as_deref() {
         if !found {
             exit = ExitCode::RuntimeFailure;
             let msg = format!(
@@ -334,21 +396,26 @@ fn resolve_renode_binary() -> Option<String> {
 /// the `expect` marker appearing, the child exiting (EOF), or `timeout_s`
 /// elapsing — the deadline fires even on a silent child via a reader thread +
 /// `recv_timeout` (the Python `for line in proc.stdout` blocked until EOF).
-/// Returns `(expect_found, natural_exit)`: `expect_found` is whether the
-/// `expect` marker was seen (always false when `expect` is `None`);
-/// `natural_exit` is `Some(status)` only when the child terminated ON ITS OWN
-/// (both pipes hit EOF) before the deadline/kill — i.e. a status worth
-/// trusting. A child we had to force-kill for the timeout always reports
-/// `None` here, so a forced-kill exit code is never mistaken for the child's
-/// own failure. `echo_stdout` tees each line to the CLI's own stdout (text
-/// mode only — in JSON mode it would corrupt the single-line Envelope).
+/// Returns `(expect_found, natural_exit, argv_rejected, cpu_halted)`:
+/// `expect_found` is whether the `expect` marker was seen (always false when
+/// `expect` is `None`); `natural_exit` is `Some(status)` only when the child
+/// terminated ON ITS OWN (both pipes hit EOF) before the deadline/kill — i.e.
+/// a status worth trusting. A child we had to force-kill for the timeout
+/// always reports `None` here, so a forced-kill exit code is never mistaken
+/// for the child's own failure. `argv_rejected` and `cpu_halted` are both
+/// latched from the console text rather than the exit status, because Renode
+/// exits **0** in both failure shapes: an argv it refuses (usage page) and a
+/// CPU that halts on its first instruction fetch (issue #64) are otherwise
+/// indistinguishable from a clean smoke. `echo_stdout` tees each line to the
+/// CLI's own stdout (text mode only — in JSON mode it would corrupt the
+/// single-line Envelope).
 fn run_renode(
     argv: &[String],
     log_path: &Path,
     timeout_s: u64,
     expect: Option<&str>,
     echo_stdout: bool,
-) -> std::io::Result<(bool, Option<ExitStatus>)> {
+) -> std::io::Result<(bool, Option<ExitStatus>, bool, bool)> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -372,6 +439,14 @@ fn run_renode(
     // Read loop in a closure so teardown (kill + reap + join) ALWAYS runs — even
     // if a log write fails mid-run, we must not leak the Renode child + threads.
     let mut natural_exit: Option<ExitStatus> = None;
+    // Set when Renode answers with its usage page instead of booting. Latched
+    // from the console because the exit code carries no signal for it (0).
+    let mut argv_rejected = false;
+    // Set when Renode reports the CPU halted before executing anything
+    // (issue #64). Latched from the console for the same reason as
+    // `argv_rejected`: a Renode that boots, halts the CPU, and shuts down
+    // cleanly also exits 0.
+    let mut cpu_halted = false;
     let read_result = (|| -> std::io::Result<bool> {
         let deadline = Instant::now() + Duration::from_secs(timeout_s);
         let mut found = false;
@@ -386,6 +461,12 @@ fn run_renode(
                     logf.flush()?;
                     if echo_stdout {
                         println!("{line}");
+                    }
+                    if renode_rejected_argv(&line) {
+                        argv_rejected = true;
+                    }
+                    if renode_cpu_halted(&line) {
+                        cpu_halted = true;
                     }
                     if let Some(exp) = expect {
                         if line.contains(exp) {
@@ -420,7 +501,7 @@ fn run_renode(
     let _ = h_out.join();
     let _ = h_err.join();
 
-    read_result.map(|found| (found, natural_exit))
+    read_result.map(|found| (found, natural_exit, argv_rejected, cpu_halted))
 }
 
 /// Pump `\n`-delimited lines from `reader` into `tx`, lossily replacing invalid
@@ -556,7 +637,8 @@ mod tests {
     fn expect_marker_present_returns_found_and_writes_log() {
         let log = tmp_log("hit");
         let argv = echo_argv(&["boot", "[hello] done", "tail"]);
-        let (found, _status) = run_renode(&argv, &log, 30, Some("[hello] done"), true).unwrap();
+        let (found, _status, _rejected, _cpu_halted) =
+            run_renode(&argv, &log, 30, Some("[hello] done"), true).unwrap();
         assert!(found);
         let contents = std::fs::read_to_string(&log).unwrap();
         assert!(contents.contains("[hello] done"), "{contents}");
@@ -567,7 +649,8 @@ mod tests {
     fn expect_marker_absent_returns_not_found() {
         let log = tmp_log("miss");
         let argv = echo_argv(&["boot", "running", "tail"]);
-        let (found, _status) = run_renode(&argv, &log, 30, Some("[hello] done"), false).unwrap();
+        let (found, _status, _rejected, _cpu_halted) =
+            run_renode(&argv, &log, 30, Some("[hello] done"), false).unwrap();
         assert!(!found);
         let _ = std::fs::remove_dir_all(log.parent().unwrap());
     }
@@ -576,7 +659,8 @@ mod tests {
     fn no_expect_always_returns_false_and_still_tees() {
         let log = tmp_log("noexpect");
         let argv = echo_argv(&["one", "two"]);
-        let (found, _status) = run_renode(&argv, &log, 30, None, false).unwrap();
+        let (found, _status, _rejected, _cpu_halted) =
+            run_renode(&argv, &log, 30, None, false).unwrap();
         assert!(!found);
         let contents = std::fs::read_to_string(&log).unwrap();
         assert!(contents.contains("one"), "{contents}");
@@ -597,10 +681,36 @@ mod tests {
         } else {
             vec!["sh".to_string(), "-c".to_string(), "exit 3".to_string()]
         };
-        let (found, status) = run_renode(&argv, &log, 30, None, false).unwrap();
+        let (found, status, _rejected, _cpu_halted) =
+            run_renode(&argv, &log, 30, None, false).unwrap();
         assert!(!found);
         let status = status.expect("child exited on its own before the deadline");
         assert!(!status.success());
+        let _ = std::fs::remove_dir_all(log.parent().unwrap());
+    }
+
+    /// Issue #64: a Renode that boots, halts the CPU on the first instruction
+    /// fetch, and then shuts down cleanly exits 0 — the child's own status
+    /// says success, so this latch is the ONLY signal available without
+    /// `--expect`. Echoes the real captured console (issue description).
+    #[test]
+    fn cpu_halt_is_latched_even_though_the_child_exits_cleanly() {
+        let log = tmp_log("halted");
+        let argv = echo_argv(&[
+            "cpu: Guessing VectorTableOffset value to be 0x20000000.",
+            "cpu: PC does not lay in memory or PC and SP are equal to zero. CPU was halted.",
+            "aen801: Machine started.",
+        ]);
+        let (found, status, rejected, cpu_halted) =
+            run_renode(&argv, &log, 30, None, false).unwrap();
+        assert!(!found);
+        assert!(!rejected);
+        assert!(cpu_halted);
+        let status = status.expect("child exited on its own before the deadline");
+        assert!(
+            status.success(),
+            "the child's own exit status says success — that's the whole bug this latch fixes"
+        );
         let _ = std::fs::remove_dir_all(log.parent().unwrap());
     }
 
@@ -619,7 +729,8 @@ mod tests {
         } else {
             vec!["sh".to_string(), "-c".to_string(), "sleep 30".to_string()]
         };
-        let (found, status) = run_renode(&argv, &log, 1, None, false).unwrap();
+        let (found, status, _rejected, _cpu_halted) =
+            run_renode(&argv, &log, 1, None, false).unwrap();
         assert!(!found);
         assert!(
             status.is_none(),

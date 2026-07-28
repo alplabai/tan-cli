@@ -16,7 +16,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use tan_core::bootstrap::{BootstrapFacts, Tokens, venv_exe_names};
+use tan_core::bootstrap::{
+    BootstrapFacts, HostOs, PrereqFailure, Tokens, posix_python_not_runnable, posix_refusal,
+    python_too_old, venv_exe_names, windows_python_not_runnable, windows_refusal,
+};
 
 use super::capture_tail;
 use crate::envelope::Issue;
@@ -147,21 +150,6 @@ pub(super) fn native(path: &Path) -> String {
     }
 }
 
-/// The `winget install` one-liner printed for a missing Windows prerequisite
-/// (`bootstrap.ps1`'s `$Prereqs`). The TOOL LIST is a manifest fact
-/// (`prerequisites.windows`); these hints are not in the manifest, so they stay
-/// keyed by tool name here. An unlisted tool gets a generic line rather than
-/// being dropped from the report.
-fn winget_hint(tool: &str) -> String {
-    match tool {
-        "git" => "winget install -e --id Git.Git".to_string(),
-        "cmake" => "winget install -e --id Kitware.CMake".to_string(),
-        "python" => "winget install -e --id Python.Python.3.12".to_string(),
-        "ninja" => "winget install -e --id Ninja-build.Ninja".to_string(),
-        other => format!("install `{other}` and put it on PATH"),
-    }
-}
-
 /// `Get-Command <name>` / `command -v <name>` equivalent, with one deliberate
 /// widening on Windows: `python` counts as present when the `py` launcher is
 /// installed, because `tan_core::bootstrap::python_candidates` leads with
@@ -174,7 +162,19 @@ fn prereq_present(tool: &str, is_windows: bool) -> bool {
 
 /// Prerequisite gate, over the manifest's per-OS `prerequisites` list. Returns
 /// the host interpreter the workspace venv will be created with; `Err` carries
-/// the fatal message lines verbatim.
+/// the fatal message lines verbatim PLUS the structured per-tool form of them
+/// (see [`PrereqFailure`]).
+///
+/// `pub(crate)` rather than `pub(super)`: `commands::doctor` runs this SAME
+/// gate so plain `tan doctor` reports a missing `ninja` without anyone having
+/// to run bootstrap first (alp-sdk ADR 0021 P0a). One probe, not two that could
+/// disagree about what the host is missing.
+///
+/// This is the PROBING half only — `prereq_present` walks PATH and
+/// `probe_host_python` spawns interpreters, so it has to live here. Every
+/// message and every struct it returns is built by
+/// `tan_core::bootstrap::prerequisites`, which is pure and therefore testable
+/// on both platforms from either host; nothing below renders a string itself.
 ///
 /// The POSIX and Windows lists genuinely differ (Windows adds `ninja`) and only
 /// Windows enforces `pythonMinVersion` — `bootstrap.sh` has no version check at
@@ -182,69 +182,56 @@ fn prereq_present(tool: &str, is_windows: bool) -> bool {
 /// not silently unified") and so does this: the floor below is applied on the
 /// Windows branch only. Every path that actually RUNS an SDK script still
 /// applies `crate::util::python_too_old` on both platforms.
-pub(super) fn check_prerequisites(
+pub(crate) fn check_prerequisites(
     facts: &BootstrapFacts,
-    is_windows: bool,
-) -> Result<HostPython, Vec<String>> {
-    let missing: Vec<&String> = facts
+    host: HostOs,
+) -> Result<HostPython, PrereqFailure> {
+    // The HOST, not just `is_windows`: the manifest keys its install commands
+    // `linux`/`macos`/`windows` while keying the tool LISTS `posix`/`windows`, so
+    // the refusals below need the finer fact to hand a macOS user `brew install`
+    // instead of Linux's `apt-get` line. Resolved ONCE here and passed down, so
+    // no branch can look a tool up in the wrong OS's table.
+    let is_windows = host == HostOs::Windows;
+    let install = facts.install.for_host(host);
+    let missing: Vec<&str> = facts
         .prerequisites(is_windows)
         .iter()
         .filter(|tool| !prereq_present(tool, is_windows))
+        .map(String::as_str)
         .collect();
 
     if is_windows {
         if !missing.is_empty() {
-            let mut lines = vec!["Missing required tools:".to_string()];
-            lines.extend(
-                missing
-                    .iter()
-                    .map(|tool| format!("  {tool}  ->  {}", winget_hint(tool))),
-            );
-            lines.push("Install the tools above (then reopen PowerShell) and re-run.".to_string());
-            return Err(lines);
+            return Err(windows_refusal(&missing, install));
         }
         // Python >= pythonMinVersion (dataclass slots, `X | None` unions).
-        let (min_major, min_minor) = facts.python_min_version;
         // Probe against the MANIFEST's floor, not tan's compiled-in one: the
         // check just below enforces the manifest's, and probing to a lower bar
         // would stop at the first candidate that clears 3.10 (`py -3`, often
         // the launcher's older default) and then fail the host for it, while a
         // newer `python` sat one candidate down the list.
         let Some(python) = probe_host_python(facts.python_min_version) else {
-            return Err(vec![
-                "python did not run (Windows Store alias?).  Install real Python: winget install \
-                 -e --id Python.Python.3.12, reopen PowerShell, re-run."
-                    .to_string(),
-            ]);
+            return Err(windows_python_not_runnable(install));
         };
-        if python.version < (min_major, min_minor) {
-            return Err(vec![format!(
-                "Python {}.{} found; the SDK tooling needs >= {min_major}.{min_minor} (winget \
-                 install -e --id Python.Python.3.12).",
-                python.version.0, python.version.1
-            )]);
+        if python.version < facts.python_min_version {
+            return Err(python_too_old(
+                python.version,
+                facts.python_min_version,
+                install,
+            ));
         }
         return Ok(python);
     }
 
     if !missing.is_empty() {
-        let names: Vec<&str> = missing.iter().map(|t| t.as_str()).collect();
-        return Err(vec![format!(
-            "Missing required tools: {}.  Install them and re-run.",
-            names.join(" ")
-        )]);
+        return Err(posix_refusal(&missing, install));
     }
     // No version check here — see the doc comment. The manifest floor is still
     // what the probe PREFERS (it only picks between candidates that ran; it
     // never refuses), so this branch cannot fail on version. The only extra
     // failure this adds over bootstrap.sh is an interpreter on PATH that cannot
     // run, which the script would have hit one step later at `python3 -m venv`.
-    probe_host_python(facts.python_min_version).ok_or_else(|| {
-        vec![
-            "python3 is on PATH but did not run.  Install a working Python 3 and re-run."
-                .to_string(),
-        ]
-    })
+    probe_host_python(facts.python_min_version).ok_or_else(posix_python_not_runnable)
 }
 
 /// The resolved workspace paths every step works against.
@@ -323,10 +310,7 @@ impl Workspace<'_> {
     fn west(&self, venv: &VenvBin) -> Command {
         let mut cmd = Command::new(&venv.west);
         cmd.current_dir(self.workspace_dir);
-        crate::commands::build::workspace::with_venv_on_path(
-            &mut cmd,
-            &venv.west.to_string_lossy(),
-        );
+        crate::venv::with_venv_on_path(&mut cmd, &venv.west.to_string_lossy());
         cmd
     }
 }
@@ -651,21 +635,49 @@ mod tests {
 
     #[test]
     fn prerequisites_come_from_the_manifest_list() {
-        // A manifest that adds a tool must be enforced without a tan release.
+        // What only THIS side can prove: the PATH probe reads the manifest's
+        // list (a manifest that adds a tool is enforced without a tan release)
+        // and hands the right per-platform refusal back. The refusals' own
+        // wording, and the structured entries they carry, are pinned where they
+        // are built -- `tan_core::bootstrap::prerequisites`, PATH-free and so
+        // testable for `ninja` too, which this test could never assume absent.
         let mut facts = fallback_facts((3, 10));
         facts.prerequisites_posix = vec!["tan-no-such-tool-xyz".to_string()];
         facts.prerequisites_windows = vec!["tan-no-such-tool-xyz".to_string()];
-        let err = check_prerequisites(&facts, cfg!(windows)).unwrap_err();
-        assert!(
-            err.iter().any(|l| l.contains("tan-no-such-tool-xyz")),
-            "{err:?}"
+
+        let win = check_prerequisites(&facts, HostOs::Windows).unwrap_err();
+        assert_eq!(
+            win,
+            windows_refusal(
+                &["tan-no-such-tool-xyz"],
+                facts.install.for_host(HostOs::Windows)
+            )
         );
-        // The Windows branch renders a per-tool hint line.
-        let win = check_prerequisites(&facts, true).unwrap_err();
-        assert_eq!(win[0], "Missing required tools:");
-        assert!(
-            win[1].contains("  ->  install `tan-no-such-tool-xyz`"),
-            "{win:?}"
+        // Both POSIX hosts, because `check_prerequisites` is now what resolves
+        // WHICH install map a refusal carries: hard-coding either one (or
+        // collapsing the two back into an `is_windows` bool) would hand a macOS
+        // user Linux's `apt-get` lines, and only comparing against the other
+        // host's own map catches it.
+        for host in [HostOs::Linux, HostOs::MacOs, HostOs::Other] {
+            let posix = check_prerequisites(&facts, host).unwrap_err();
+            assert_eq!(
+                posix,
+                posix_refusal(&["tan-no-such-tool-xyz"], facts.install.for_host(host)),
+                "{host:?}"
+            );
+        }
+
+        // A tool that IS present must not be reported -- `cargo` runs this
+        // test, so it is on PATH by construction.
+        facts.prerequisites_posix = vec!["cargo".to_string()];
+        facts.prerequisites_windows = vec!["cargo".to_string()];
+        let refused = check_prerequisites(&facts, HostOs::detect(std::env::consts::OS))
+            .err()
+            .map(|f| f.code);
+        assert_ne!(
+            refused,
+            Some("prerequisites-missing"),
+            "a tool on PATH must not be reported missing"
         );
     }
 }

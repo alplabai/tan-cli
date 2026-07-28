@@ -6,11 +6,15 @@
 #
 #   seam1-plan-shape : live `--emit build-plan` vs. the frozen oracle,
 #                       toolchain-free. Implemented.
-#   seam2            : materialise byte-check + real build + Renode smoke.
-#                       Documented placeholder -- needs a Linux toolchain
-#                       runner (west / Zephyr SDK / Renode). Does not run a
-#                       fake check; does not report success for unverified
-#                       work.
+#   seam2            : materialise + real build + Renode smoke. Implemented.
+#                       alp-sdk plans it, TAN executes it, the artefact boots.
+#                       The toolchain (west / Zephyr SDK / Renode) installs
+#                       in-job on stock ubuntu-latest -- alp-sdk#976 proved
+#                       that, retiring this job's old "needs a self-hosted
+#                       runner" blocker.
+#                       Deliberately builds through `tan build`, NOT plain
+#                       `west`: routing around the executor would test Zephyr
+#                       and assert nothing about the seam.
 #
 # Runs on every tan PR as a self-check of this repo's vendored oracle +
 # comparator against a pinned alp-sdk ref. (Plan-shape drift on the alp-sdk
@@ -27,17 +31,27 @@ env:
   # It MUST be a ref at or after the oracle SHA (97ad481b) -- an OLDER ref
   # (e.g. the last release v0.11.1, which predates the Phase-1 fields) lacks
   # envAppendPath/executionPolicy and would fail seam1 on missing-field diffs,
-  # not real drift. Pinned to the v0.13.0 release tag (93ef5726): carries the
-  # Phase-1 fields, the one allowed delta (debug.probe openocd->null), the
-  # tokened-plan reconciliation branch `normalize_plan` exercises, AND
-  # alp-sdk#893/#894/#897 (the `--emit kconfig` feature + its canonical
-  # fixture) -- `kconfig_fixture_parity.py` below now byte-diffs the vendored
-  # `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` for real
-  # instead of soft-NOTICE-skipping (that self-skip only fired for a pin
-  # predating #897; verified locally against a v0.13.0 checkout, PASS, 814
-  # bytes). Re-bump on every alp-sdk release this repo's parity gate should
-  # track.
-  PINNED_SDK_TAG: v0.13.0
+  # not real drift. Pinned to an exact alp-sdk `dev` commit SHA rather than a
+  # tag: `actions/checkout`'s `ref:` takes any git ref, and a full SHA is
+  # exactly as immutable as a tag without waiting on alp-sdk to cut one.
+  # Carries the Phase-1 fields, the one allowed delta (debug.probe
+  # openocd->null), the tokened-plan reconciliation branch `normalize_plan`
+  # exercises, alp-sdk#893/#894/#897 (the `--emit kconfig` fixture), and
+  # alp-sdk#917/#928 (the `metadata/bootstrap.json` manifest + its
+  # `manualInstallHints` split). Bumped past #917 to alp-sdk#961 (Arm-toolchain
+  # scoping, merged a27757b8f654b2d8d32a1a2a3f3ce640e9bade0c) and #967
+  # (dtc/gperf settled, merged at this very SHA), which together rewrote
+  # `manualInstallHints.windows.note` from one sentence to five elements and
+  # bumped `zephyr.version` to v4.4.1 -- the re-vendor that let tan-cli#82
+  # delete `optional_libs_block`'s duplicate hardcoded Arm/Zephyr-SDK block.
+  # Bootstrap manifest is 5473 bytes at this SHA (was 3180) and its byte-parity
+  # step is verified PASS locally against it; the kconfig / scaffold / seam1
+  # steps were verified at the previous SHA and are NOT re-verified at this one
+  # (they need an emit-capable Linux runner), so this bump is the first CI run
+  # that proves them here. Re-bump (to a released tag once alp-sdk cuts one at
+  # or after this SHA, or straight to a later SHA) on every alp-sdk change this
+  # repo's parity gate should track.
+  PINNED_SDK_TAG: 3ffd87743d7648b317e6b3e34fc2fbb57745e7d2
 
 jobs:
   seam1-plan-shape:
@@ -85,9 +99,9 @@ jobs:
       # and falls back to hand-ported constants for an SDK without one.
       # alp-sdk's own check_bootstrap_manifest.py polices its two shell
       # scripts against that manifest but cannot see this checkout, so this
-      # is the tan-side half of that gate. NOTE: PINNED_SDK_TAG (v0.13.0)
-      # predates #917, so this step NOTICEs and passes until the pin is
-      # bumped — same lag the kconfig step had before #897.
+      # is the tan-side half of that gate. PINNED_SDK_TAG is now past #917
+      # (and #928), so this step byte-diffs for real -- same milestone the
+      # kconfig step passed once its pin moved past #897.
       - name: bootstrap manifest byte-parity (vendored vs. pinned alp-sdk)
         run: python3 tests/parity/bootstrap_manifest_parity.py --sdk alp-sdk
 
@@ -100,16 +114,268 @@ jobs:
       - name: scaffold byte-parity (vendored tree vs. pinned alp-sdk --emit scaffold)
         run: python3 tests/parity/scaffold_byte_parity.py --sdk alp-sdk
 
+  # seam2 -- the half of ADR-0020's parity contract seam1 cannot reach.
+  #
+  # seam1 proves the PLAN's SHAPE is stable. It never runs tan and never
+  # compiles anything, so it cannot catch an executor that reads a correct plan
+  # and does the wrong thing with it. seam2 closes that: alp-sdk plans it, TAN
+  # executes it, and the artefact is booted.
+  #
+  # Note the deliberate difference from alp-sdk's own pr-renode-aen-smoke.yml,
+  # which this borrows its toolchain recipe from: that job builds with plain
+  # `west`, because it is testing alp-sdk's board files. Here the build MUST go
+  # through `tan build` -- routing around tan would test Zephyr and assert
+  # nothing about the seam.
+  #
+  # This was a documented no-op placeholder until now, on the stated grounds
+  # that it "needs a Linux runner with the toolchain installed". alp-sdk#976
+  # disproved that: the Zephyr SDK and Renode both install on a stock
+  # ubuntu-latest runner in-job. The blocker had expired.
   seam2:
-    name: "seam2 -- materialise + real build + Renode smoke (TODO)"
+    name: "seam2 -- materialise + real build + Renode smoke"
     runs-on: ubuntu-latest
     steps:
-      - name: not yet implemented
+      - name: checkout tan-cli
+        uses: actions/checkout@v4
+
+      - name: resolve alp-sdk ref
+        id: sdk_ref
+        shell: bash
         run: |
-          echo "::warning::seam2 is a documented placeholder, not a real check."
-          echo "It needs a Linux runner with the toolchain installed (west, the"
-          echo "Zephyr SDK, the AEN/E1M-X modules, Renode) to materialise each"
-          echo "slice, run a real build, and Renode-smoke the result. See"
-          echo "tests/parity/README.md and alp-sdk ADR-0020 (alp-sdk#855) for"
-          echo "the full seam definition. This job intentionally does no"
-          echo "verification and must not be read as one."
+          set -euo pipefail
+          echo "ref=${{ env.PINNED_SDK_TAG }}" >> "$GITHUB_OUTPUT"
+          echo "::notice::seam2 building against alp-sdk ref: ${{ env.PINNED_SDK_TAG }}"
+
+      - name: clone alp-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.sdk_ref.outputs.ref }}
+          path: alp-sdk
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: host deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              ninja-build device-tree-compiler gperf ca-certificates curl gnupg xz-utils
+
+      - name: west + SDK python deps
+        run: python3 -m pip install --upgrade pip west pyyaml jsonschema pyelftools
+
+      # Zephyr itself. `west init -l` against alp-sdk's own manifest is what a
+      # customer's `tan bootstrap` does, so the tree under test is the pinned
+      # one rather than whatever Zephyr happens to be newest.
+      - name: west workspace (alp-sdk manifest)
+        run: |
+          set -euo pipefail
+          west init -l alp-sdk
+          west update --narrow -o=--depth=1
+          west zephyr-export
+
+      # Single source for the SDK pin, same read alp-sdk's own renode job does
+      # (metadata/toolchains.json, gated by check_toolchain_lock.py).
+      - name: read Zephyr SDK pin
+        run: |
+          set -euo pipefail
+          # Bind to plain locals before formatting. Inlining the subscripts as
+          # f"...{sdk[\"version\"]}..." needs backslash escapes inside the
+          # f-string expression, which is a SyntaxError -- and it is what broke
+          # this step on its first run. alp-sdk's pr-renode-aen-smoke.yml has
+          # this exact shape for this exact reason; do not re-compress it.
+          python3 -c '
+          import json
+          d = json.load(open("alp-sdk/metadata/toolchains.json"))
+          sdk = d["zephyrSdk"]
+          art = next(a for a in sdk["artifacts"]
+                     if a["host"] == "linux-x86_64" and a["component"] == "minimal-sdk")
+          version = sdk["version"]
+          url = sdk["baseUrl"] + art["filename"]
+          sha256 = art["sha256"]
+          print(f"ZEPHYR_SDK_VERSION={version}")
+          print(f"ZEPHYR_SDK_URL={url}")
+          print(f"ZEPHYR_SDK_SHA256={sha256}")
+          ' >> "$GITHUB_ENV"
+
+      - name: install Zephyr SDK (arm-zephyr-eabi)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zephyr-sdk.tar.xz "${ZEPHYR_SDK_URL}"
+          ACTUAL="$(sha256sum /tmp/zephyr-sdk.tar.xz | awk '{print $1}')"
+          if [ "${ACTUAL}" != "${ZEPHYR_SDK_SHA256}" ]; then
+            echo "::error::Zephyr SDK sha256 mismatch: expected ${ZEPHYR_SDK_SHA256}, got ${ACTUAL}"
+            exit 1
+          fi
+          mkdir -p "$HOME/zephyr-sdk"
+          tar -xJf /tmp/zephyr-sdk.tar.xz -C "$HOME/zephyr-sdk" --strip-components=1
+          "$HOME/zephyr-sdk/setup.sh" -t arm-zephyr-eabi -c
+          echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk" >> "$GITHUB_ENV"
+
+      # v1.16.1 portable-dotnet: self-contained .NET, no Mono/GTK# system deps.
+      # The .deb needs gtk-sharp2/*-cil-dev packages ubuntu-24.04 dropped.
+      - name: install Renode
+        run: |
+          set -euo pipefail
+          curl -fsSL https://github.com/renode/renode/releases/download/v1.16.1/renode-1.16.1.linux-portable-dotnet.tar.gz \
+              -o /tmp/renode.tar.gz
+          mkdir -p "$HOME/renode"
+          tar -xzf /tmp/renode.tar.gz -C "$HOME/renode" --strip-components=1
+          echo "$HOME/renode" >> "$GITHUB_PATH"
+          "$HOME/renode/renode" --version
+
+      - name: build tan
+        run: cargo build --locked --bin tan
+
+      # ---- the seam itself -------------------------------------------------
+
+      # 1. MATERIALISE. tan reads alp-sdk's `--emit build-plan` and writes the
+      #    per-slice artefacts. Failing here means the plan and the executor
+      #    disagree about the plan's own contents -- the drift seam1 is blind to.
+      # `build --materialise` is the primitive seam2's own definition names:
+      # "consume the plan, write its generated files (shared artefacts +
+      # per-slice config) to disk". Not `generate`, which emits a single target
+      # rather than the plan's whole artefact set.
+      #
+      # Verified locally against alp-sdk 3ffd8774 before this landed -- it needs
+      # no toolchain, so it is the one seam2 stage reproducible off-runner:
+      #   ok=true, data.written = [build/generated/alp/system_ipc.h,
+      #   build/generated/dts-reservations.dtsi, build/generated/dts-partitions.dtsi,
+      #   build/a32_cluster-yocto/local.conf, build/m55_he-zephyr/alp.conf,
+      #   build/m55_hp-zephyr/alp.conf]
+      - name: materialise (tan build --materialise)
+        working-directory: alp-sdk/examples/peripheral-io/hello-world
+        env:
+          ZEPHYR_BASE: ${{ github.workspace }}/zephyr
+        run: |
+          set -euo pipefail
+          "${GITHUB_WORKSPACE}/target/debug/tan" \
+              --sdk-root "${GITHUB_WORKSPACE}/alp-sdk" \
+              --format json build --materialise > /tmp/seam2-materialise.json
+          python3 -c '
+          import json, sys
+          e = json.load(open("/tmp/seam2-materialise.json"))
+          if not e.get("ok"):
+              print("::error::seam2 materialise: tan reported not-ok:",
+                    json.dumps(e.get("issues"), indent=2))
+              sys.exit(1)
+          written = (e.get("data") or {}).get("written") or []
+          if not written:
+              print("::error::seam2 materialise: `data.written` is empty -- tan "
+                    "reported success having produced no artefacts. An empty "
+                    "write list is exactly the silent-pass shape this seam exists "
+                    "to catch, so it is a failure here, not a pass.")
+              sys.exit(1)
+          print("materialised", len(written), "artefacts:")
+          for w in written: print("   ", w)
+          '
+
+      # 2. REAL BUILD, through tan. Not `west` -- routing around the executor
+      #    would test Zephyr and assert nothing about the seam.
+      - name: real build (tan build)
+        working-directory: alp-sdk/examples/peripheral-io/hello-world
+        env:
+          ZEPHYR_BASE: ${{ github.workspace }}/zephyr
+        run: |
+          set -euo pipefail
+          "${GITHUB_WORKSPACE}/target/debug/tan" \
+              --sdk-root "${GITHUB_WORKSPACE}/alp-sdk" \
+              build --native 2>&1 | tee /tmp/seam2-build.log
+          # `tee` would mask a non-zero tan exit without this; the whole point
+          # of the job is that a failed build fails the gate.
+          rc="${PIPESTATUS[0]}"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::seam2 real build: tan build exited ${rc}."
+            exit "$rc"
+          fi
+
+      # 3. The artefact must EXIST. `tan build` reporting ok while producing no
+      #    ELF is exactly the #97 defect class, one layer up.
+      # Pick the M55-HP slice EXPLICITLY. `-print -quit` takes whichever slice
+      # `find` reaches first, which on the first run was m55_he -- then booted
+      # against a descriptor written for the HP core. The descriptor decides
+      # which artefact is meaningful here, so the selection cannot be
+      # whichever-comes-first.
+      - name: locate the built ELF (m55_hp slice)
+        run: |
+          set -euo pipefail
+          BUILD="${GITHUB_WORKSPACE}/alp-sdk/examples/peripheral-io/hello-world/build"
+          ELF="${BUILD}/m55_hp-zephyr/build/zephyr/zephyr.elf"
+          if [ ! -f "${ELF}" ]; then
+            echo "::error::seam2: tan build reported success but produced no ${ELF}. Tree:"
+            find "${BUILD}" -maxdepth 3 -type d || true
+            find "${BUILD}" -name 'zephyr.elf' || true
+            exit 1
+          fi
+          file "${ELF}"
+          # A host x86-64 binary here is the #97 defect reaching the artefact.
+          if ! file "${ELF}" | grep -q "ARM"; then
+            echo "::error::seam2: ${ELF} is not an ARM image -- a zephyr slice produced a host binary."
+            exit 1
+          fi
+          echo "SEAM2_ELF=${ELF}" >> "$GITHUB_ENV"
+
+      # 4. RENODE SMOKE. Same three assertions alp-sdk#974/#976 established, on
+      #    the artefact TAN produced rather than one west produced.
+      - name: Renode boot smoke
+        run: |
+          set -euo pipefail
+          LOG=/tmp/seam2-renode.log
+          # `$repl` MUST be passed. The .resc defaults it to the RELATIVE path
+          # `metadata/renode/alif_ensemble_e8.repl`, which only resolves when
+          # renode's cwd is the alp-sdk root. Omitting it on the first run gave
+          #   Could not find file 'metadata/renode/alif_ensemble_e8.repl'
+          # and then the absent-PC assertion fired -- a real failure, but for a
+          # harness reason rather than the boot reason it is meant to report.
+          set +e
+          "$HOME/renode/renode" --console --disable-xwt --plain \
+              -e "\$repl=@${GITHUB_WORKSPACE}/alp-sdk/metadata/renode/alif_ensemble_e8.repl" \
+              -e "\$elf=@${SEAM2_ELF}" \
+              -e "i @${GITHUB_WORKSPACE}/alp-sdk/metadata/renode/alif_ensemble_e8.resc" \
+              -e "quit" > "${LOG}" 2>&1
+          RC=$?
+          set -e
+          echo "----- renode log -----"; cat "${LOG}"
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::seam2 Renode smoke: renode exited ${RC}."
+            exit 1
+          fi
+          # Renode exits 0 even when a monitor command fails -- the first run
+          # here failed to load the .repl and still returned 0, so the exit code
+          # alone is not a verdict. Catch the harness failure by name, before
+          # the boot assertions, or a broken setup reports itself as a boot
+          # failure and sends the next reader after the wrong thing.
+          if grep -qE "There was an error executing command|Could not find file" "${LOG}"; then
+            echo "::error::seam2 Renode smoke: a monitor command failed (renode still exited 0) -- this is a HARNESS failure, not a boot failure. First offending line:"
+            grep -m1 -E "There was an error executing command|Could not find file" "${LOG}"
+            exit 1
+          fi
+          if ! grep -q "Setting initial values: PC = 0x" "${LOG}"; then
+            echo "::error::seam2 Renode smoke: 'Setting initial values: PC = 0x' absent -- the vector table was never seeded."
+            exit 1
+          fi
+          if grep -q "CPU was halted" "${LOG}"; then
+            echo "::error::seam2 Renode smoke: 'CPU was halted' -- the PC/SP seed was unusable."
+            exit 1
+          fi
+          if grep -q "Guessing VectorTableOffset value to be 0x" "${LOG}"; then
+            echo "::error::seam2 Renode smoke: Renode fell back to inferring VectorTableOffset (the condition alp-sdk#947 exists to eliminate)."
+            exit 1
+          fi
+          echo "seam2: materialise -> tan build -> ARM ELF -> Renode boot, all asserted."
+
+      - name: upload seam2 logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seam2-logs
+          path: |
+            /tmp/seam2-materialise.json
+            /tmp/seam2-build.log
+            /tmp/seam2-renode.log
+          if-no-files-found: warn

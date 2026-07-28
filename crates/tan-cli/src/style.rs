@@ -70,12 +70,16 @@ impl Theme {
                 DoctorStatus::Pass => "[+]".to_string(),
                 DoctorStatus::Warn => "[!]".to_string(),
                 DoctorStatus::Fail => "[x]".to_string(),
+                DoctorStatus::Unknown => "[?]".to_string(),
             };
         }
         match status {
             DoctorStatus::Pass => "✓".green().bold().to_string(),
             DoctorStatus::Warn => "!".yellow().bold().to_string(),
             DoctorStatus::Fail => "✗".red().bold().to_string(),
+            // Dim, never colored: an unobservable check is not a warning about
+            // anything, and a yellow row would read as one.
+            DoctorStatus::Unknown => self.dim("?"),
         }
     }
 
@@ -173,7 +177,7 @@ pub fn render_report(
             // count the ANSI escapes and misalign the column.
             let name = format!("{:<width$}", check.name, width = width);
             let name = theme.bold(&name);
-            let detail = if check.status == DoctorStatus::Pass {
+            let detail = if matches!(check.status, DoctorStatus::Pass | DoctorStatus::Unknown) {
                 theme.dim(&check.detail)
             } else {
                 check.detail.clone()
@@ -186,7 +190,28 @@ pub fn render_report(
         lines.push(String::new());
     }
 
-    lines.push(format!("  {}", theme.summary_line(summary)));
+    // `DoctorStatus::Unknown` is in none of the summary's three buckets (see the
+    // variant's note — a fourth count would change the `tan doctor --build`
+    // envelope's key set, which alp-sdk-vscode parses). That is right for the
+    // JSON payload and wrong for a rendered report, where it would leave more
+    // rows on screen than the summary accounts for. Counted from the checks
+    // here, text-only, and appended only when non-zero so every report that has
+    // no unknown row renders exactly as before.
+    let unknown = checks
+        .iter()
+        .filter(|c| c.status == DoctorStatus::Unknown)
+        .count();
+    let summary_line = if unknown == 0 {
+        theme.summary_line(summary)
+    } else {
+        format!(
+            "{} {} {}",
+            theme.summary_line(summary),
+            theme.dim("·"),
+            theme.dim(&format!("{unknown} unknown"))
+        )
+    };
+    lines.push(format!("  {summary_line}"));
 
     if verbose && !next_steps.is_empty() {
         lines.push(String::new());
@@ -308,6 +333,42 @@ mod tests {
         let lines = render_report(&args(true, false), "t", "sub", &checks, &summary, &[]);
         assert!(lines.iter().all(|l| !l.contains("west")));
         assert!(lines.iter().any(|l| l.contains("1 passed")));
+    }
+
+    #[test]
+    fn an_unknown_row_gets_its_own_marker_and_a_summary_tail() {
+        // `Unknown` is in none of the summary's three buckets (#102), so a
+        // rendered report would otherwise show more rows than it accounts for.
+        let checks = vec![
+            check("west", DoctorStatus::Pass, "ok"),
+            check("codeLLDBExtension", DoctorStatus::Unknown, "unknown"),
+        ];
+        let summary = DoctorSummary {
+            pass: 1,
+            warn: 0,
+            fail: 0,
+        };
+        let lines = render_report(&args(false, false), "t", "sub", &checks, &summary, &[]);
+        let row = lines
+            .iter()
+            .find(|l| l.contains("codeLLDBExtension"))
+            .unwrap();
+        assert!(row.contains("[?]"), "{row}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("1 passed · 0 warnings · 0 failed · 1 unknown")),
+            "{lines:?}"
+        );
+
+        // A report with no unknown row renders exactly as it did before.
+        let lines = render_report(&args(false, false), "t", "sub", &checks[..1], &summary, &[]);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.trim() == "1 passed · 0 warnings · 0 failed"),
+            "{lines:?}"
+        );
     }
 
     #[test]

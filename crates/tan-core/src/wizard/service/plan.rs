@@ -2,12 +2,10 @@
 //! Module-name normalization and wizard/module-scaffold planning entry points.
 
 use super::c_project::gen_c_project_files;
-use super::host_tooling::gen_host_tooling_files;
 use super::module_scaffold::gen_module_files;
 use super::registry::{MODULE_TEMPLATE_DEFINITIONS, TEMPLATE_DEFINITIONS};
 use crate::wizard::models::{
     ModuleScaffoldInput, ModuleScaffoldPlan, WizardPlan, WizardPlanInput, WizardPlannedFile,
-    WizardTemplateId,
 };
 
 /// Lowercase `name` and collapse runs of non-`[a-z0-9]` chars into single `_`
@@ -55,11 +53,7 @@ pub fn create_wizard_plan_with_cores(
         .find(|d| d.id == input.template_id)
         .expect("template id must exist in registry");
 
-    let files = if def.id == WizardTemplateId::HostToolingStarter {
-        gen_host_tooling_files()
-    } else {
-        gen_c_project_files(def, input.som_sku.as_deref(), cores)
-    };
+    let files = gen_c_project_files(def, input.som_sku.as_deref(), cores);
 
     WizardPlan {
         template_id: input.template_id,

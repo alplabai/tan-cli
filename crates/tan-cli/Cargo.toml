@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
-name = "tan"
+# crates.io identity only — the built binary is still named `tan` (see [[bin]]
+# below); `cargo install alp-tan-cli` puts a `tan` command on PATH. Named
+# `alp-tan-cli`, not `tan-cli`: both `tan` and `tan-cli`/`tan_cli` are already
+# registered on crates.io by an unrelated project (github.com/tan-language/tan),
+# so the literal name alp-sdk#855/tan-cli#11 asked for is unavailable.
+name = "alp-tan-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,21 +13,36 @@ repository = "https://github.com/alplabai/tan-cli"
 rust-version.workspace = true
 readme = "README.md"
 description = "The native `tan` CLI for Alp Lab embedded projects: board.yaml validate/generate, toolchain bootstrap, and plan-driven build/flash with a stable JSON envelope."
+keywords = ["cli", "embedded", "firmware", "zephyr", "build"]
+categories = ["command-line-utilities", "embedded", "development-tools::build-utils"]
 
 [[bin]]
 name = "tan"
 path = "src/main.rs"
 
 [dependencies]
-tan-core = { path = "../tan-core", version = "0.3.1" }
+tan-core = { path = "../tan-core", version = "0.4.0" }
 clap.workspace = true
 inquire.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+webpki-roots.workspace = true
 anyhow.workspace = true
 owo-colors.workspace = true
 indicatif.workspace = true
 tar.workspace = true
 flate2.workspace = true
 sha2.workspace = true
+
+# `tan doctor`'s `longPaths` check reads
+# HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled through the
+# registry API rather than shelling `reg query` — which would cost a process,
+# depend on the PATH of a host that is by definition suspect, and turn a typed
+# DWORD back into text to re-parse. Already resolved in the lock tree (via the
+# rustls/ureq side), so this is a direct edge onto a crate that was being built
+# anyway, and it is target-gated so no POSIX build sees it.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Registry", "Win32_System_Threading"] }

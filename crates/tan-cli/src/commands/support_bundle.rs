@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tan_core::{
     ALL_EMIT_MODES, DebugGenerationTraceDecision, DebugServerKind, DebugTargetKind,
-    DebugTraceOutcome, DebugWorkspaceContext, DebuggerExtensionsState, DoctorCheck, DoctorReport,
-    DoctorStatus, ProjectContext, build_doctor_report, collect_resolved_values,
+    DebugTraceOutcome, DebugWorkspaceContext, DoctorCheck, DoctorReport, DoctorStatus,
+    ProjectContext, build_doctor_report, collect_resolved_values,
     collect_runtime_capabilities_from_commands, create_debug_workspace_context, create_loader_plan,
     generation_target_support, is_server_supported_for_target, parse_server_kind,
     parse_target_kind,
@@ -113,13 +113,9 @@ pub fn run(g: &GlobalArgs, args: &SupportBundleArgs) -> CommandRun {
         &project,
         generated_at.clone(),
         |path| Path::new(path).exists(),
-        DebuggerExtensionsState {
-            cortex_debug: true,
-            peripheral_viewer: true,
-            memory_view: true,
-            cpp_tools: true,
-            code_lldb: true,
-        },
+        crate::commands::doctor::project_selected(g),
+        // Not meaningful in the standalone binary — see the constructor.
+        crate::commands::doctor::standalone_debugger_extensions(),
     );
 
     let target = match parse_target_kind(args.target_kind.as_deref()) {
@@ -135,14 +131,14 @@ pub fn run(g: &GlobalArgs, args: &SupportBundleArgs) -> CommandRun {
         return server_incompatible(g, &generated_at, target, server);
     }
 
-    let runtime = collect_runtime_capabilities_from_commands(&project, command_on_path);
+    let runtime = collect_runtime_capabilities_from_commands(command_on_path);
 
     let decisions =
         match create_bundle_trace_decisions(&project, g.target.as_deref(), args.path.as_deref()) {
             Ok(d) => d,
             Err(message) => return internal_failure(g, &generated_at, message),
         };
-    let doctor = build_doctor_report(&context, target, server, &runtime);
+    let doctor = bundle_doctor_report(&context, target, server, &runtime);
 
     // Assemble + serialize the bundle file (side effect; not in the envelope).
     let notes = vec![
@@ -212,6 +208,37 @@ pub fn run(g: &GlobalArgs, args: &SupportBundleArgs) -> CommandRun {
         .then(|| Envelope::new("support-bundle", project_env, data, issues, exit.code()).to_json());
 
     CommandRun { exit, text, json }
+}
+
+/// The bundle's doctor section: the pure report PLUS the host-prerequisite
+/// gate.
+///
+/// The gate runs here too, not just in `tan doctor`. A support bundle is what a
+/// user attaches *precisely when bootstrap failed*, and
+/// `DoctorReport::missing_prerequisites` defines `null` as "checked, nothing
+/// missing" — so a bundle built without it would hide the missing `ninja` that
+/// caused it AND positively assert the host is fine. A missing prerequisite
+/// therefore also makes `tan support-bundle` exit 4 with a
+/// `support-bundle.hostPrerequisites` error issue (the bundle file is still
+/// written).
+///
+/// Its own function rather than four inline lines in `run` so the gate call is
+/// reachable from a test: `run` writes files and resolves a real project, so a
+/// no-op'd call inline there was invisible to the suite.
+fn bundle_doctor_report(
+    context: &DebugWorkspaceContext,
+    target: DebugTargetKind,
+    server: DebugServerKind,
+    runtime: &tan_core::DebugRuntimeCapabilities,
+) -> DoctorReport {
+    let mut doctor = build_doctor_report(context, target, server, runtime);
+    crate::commands::doctor::append_host_prerequisites(&mut doctor, context.sdk_root.as_deref());
+    // Same reasoning as the line above: a bundle is attached precisely when
+    // something failed, and "this host has no Zephyr SDK build at all" /
+    // "long paths are off" are facts the maintainer would otherwise reconstruct
+    // from a build log.
+    crate::commands::doctor::append_host_environment(&mut doctor);
+    doctor
 }
 
 /// Builds the generation-trace decisions: one `Planned` entry per emit target
@@ -318,12 +345,13 @@ fn timestamp_for_file(iso_timestamp: &str) -> String {
         .collect()
 }
 
-/// Maps non-`Pass` doctor checks to envelope `Issue`s, coding each as
+/// Maps `Fail`/`Warn` doctor checks to envelope `Issue`s, coding each as
 /// `support-bundle.<name>` and severity `error` for `Fail`, `warning` otherwise.
+/// `Unknown` raises nothing — the CLI observed nothing to report.
 fn doctor_checks_to_issues(checks: &[DoctorCheck]) -> Vec<Issue> {
     checks
         .iter()
-        .filter(|c| c.status != DoctorStatus::Pass)
+        .filter(|c| matches!(c.status, DoctorStatus::Warn | DoctorStatus::Fail))
         .map(|c| Issue {
             code: format!("support-bundle.{}", c.name),
             severity: if c.status == DoctorStatus::Fail {
@@ -445,5 +473,184 @@ fn null_project() -> Project {
     Project {
         root: None,
         board_yaml: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::doctor::tests::TempTree;
+
+    fn context() -> DebugWorkspaceContext {
+        DebugWorkspaceContext {
+            generated_at: "1970-01-01T00:00:00.000Z".to_string(),
+            workspace_root: Some("/work/proj".to_string()),
+            // No SDK root -> the prerequisite gate falls back to tan's built-in
+            // tool list, which is still a real probe of this host.
+            sdk_root: None,
+            board_yaml_path: Some("/work/proj/board.yaml".to_string()),
+            west_cwd: Some("/work/proj".to_string()),
+            python_binary: "python3".to_string(),
+            board_yaml_exists: true,
+            project_selected: true,
+            debugger_extensions: crate::commands::doctor::standalone_debugger_extensions(),
+        }
+    }
+
+    /// Every check landed in exactly one summary bucket, except the
+    /// deliberately uncounted [`DoctorStatus::Unknown`] rows (the VS Code
+    /// extension-presence set — see `tan_core::debug::DoctorStatus`). The exit
+    /// code is `summary.fail > 0`, so an APPENDED check that skipped the tally
+    /// silently changes it.
+    fn every_check_is_accounted_for(report: &DoctorReport) {
+        let counted = report.summary.pass + report.summary.warn + report.summary.fail;
+        let unknown = report
+            .checks
+            .iter()
+            .filter(|c| c.status == DoctorStatus::Unknown)
+            .count();
+        assert_eq!(counted as usize + unknown, report.checks.len());
+    }
+
+    fn runtime() -> tan_core::DebugRuntimeCapabilities {
+        tan_core::DebugRuntimeCapabilities {
+            jlink_executable: None,
+            open_ocd_executable: None,
+            pyocd_executable: None,
+            gdb_executable: None,
+            lldb_executable: Some("lldb".to_string()),
+        }
+    }
+
+    #[test]
+    fn the_bundles_doctor_section_runs_the_host_prerequisite_gate() {
+        // `build_doctor_report` alone never probes prerequisites, so it
+        // serializes `"missingPrerequisites": null` -- which that field defines
+        // as "checked, nothing missing" -- for a host nobody checked. Dropping
+        // the `append_host_prerequisites` call has to fail HERE; the assertion
+        // is on the CHECK's presence, not its status, because the status is
+        // whatever this host's PATH produces.
+        let doctor = bundle_doctor_report(
+            &context(),
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime(),
+        );
+        let check = doctor
+            .checks
+            .iter()
+            .find(|c| c.name == "hostPrerequisites")
+            .expect("the bundle's doctor section must carry the prerequisite verdict");
+        assert!(
+            check
+                .detail
+                .contains("facts from tan's built-in fallback list"),
+            "{}",
+            check.detail
+        );
+        // Counted, not just appended -- the exit code is `summary.fail > 0`.
+        every_check_is_accounted_for(&doctor);
+    }
+
+    #[test]
+    fn the_bundles_doctor_section_carries_the_host_environment_checks() {
+        // Same hole, one line down: deleting `append_host_environment` leaves a
+        // bundle from a windows-arm64 or Intel-Mac host that never says the
+        // pinned toolchain has no build for it -- the single most useful fact
+        // in the file, and the one a maintainer would otherwise spend a build
+        // log looking for. Names only; the statuses are whatever THIS host is.
+        let doctor = bundle_doctor_report(
+            &context(),
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime(),
+        );
+        let names: Vec<&str> = doctor.checks.iter().map(|c| c.name.as_str()).collect();
+        assert!(names.contains(&"zephyrSdkHost"), "{names:?}");
+        assert!(names.contains(&"homePath"), "{names:?}");
+        assert_eq!(
+            names.contains(&"longPaths"),
+            cfg!(windows),
+            "longPaths is Windows-only: {names:?}"
+        );
+        every_check_is_accounted_for(&doctor);
+    }
+
+    #[test]
+    fn the_written_bundle_file_carries_the_prerequisite_verdict() {
+        // The wiring seam: `run` -> `bundle_doctor_report`. Swapping that one
+        // call for the bare `build_doctor_report` writes a bundle whose doctor
+        // section has no `hostPrerequisites` check and `"missingPrerequisites":
+        // null` -- which that field DEFINES as "checked, nothing missing" --
+        // for a host nobody probed, and the test above still passes because it
+        // calls the helper directly. A bundle is attached PRECISELY when
+        // bootstrap failed, so it is the last artifact that may assert a host
+        // is clean without looking; assert on the file the command actually
+        // wrote.
+        let tree = TempTree::new("bundle-run");
+        let g = GlobalArgs {
+            project: Some(tree.path().to_string_lossy().into_owned()),
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: crate::cli::Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: false,
+            non_interactive: false,
+            ci: false,
+        };
+        let run = run(
+            &g,
+            &SupportBundleArgs {
+                target_kind: None,
+                server: None,
+                path: None,
+                destination: Some(tree.path().to_string_lossy().into_owned()),
+            },
+        );
+        let json = run.json.expect("json envelope");
+        let envelope: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+        let output_path = envelope["data"]["outputPath"]
+            .as_str()
+            .expect("the bundle path is reported");
+        let bundle: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(output_path).expect("bundle written"))
+                .expect("bundle is JSON");
+        let names: Vec<&str> = bundle["doctor"]["checks"]
+            .as_array()
+            .expect("doctor.checks is an array")
+            .iter()
+            .map(|c| c["name"].as_str().unwrap_or_default())
+            .collect();
+        assert!(names.contains(&"hostPrerequisites"), "{names:?}");
+    }
+
+    #[test]
+    fn a_failing_prerequisite_check_becomes_a_support_bundle_error_issue() {
+        // The `support-bundle.` prefix, not `doctor.` and not
+        // `bootstrap.prerequisites-missing`: in this CLI an issue code's prefix
+        // is the command that emitted the envelope, without exception.
+        let issues = doctor_checks_to_issues(&[
+            DoctorCheck {
+                name: "boardYaml".to_string(),
+                status: DoctorStatus::Pass,
+                detail: "fine".to_string(),
+                fix: None,
+            },
+            DoctorCheck {
+                name: "hostPrerequisites".to_string(),
+                status: DoctorStatus::Fail,
+                detail: "Missing required tools: ninja.".to_string(),
+                fix: Some(
+                    "Install the missing prerequisites, then run `tan bootstrap`.".to_string(),
+                ),
+            },
+        ]);
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "support-bundle.hostPrerequisites");
+        assert_eq!(issues[0].severity, "error");
+        assert_eq!(issues[0].message, "Missing required tools: ninja.");
     }
 }

@@ -28,6 +28,63 @@ pub struct SdkRelease {
     pub release_notes_summary: String,
     /// Full release body (Markdown), for an expandable changelog.
     pub release_notes: String,
+    /// Whether GitHub has this release marked as a draft (unpublished).
+    /// Defaults to `false` when the field is absent or not a boolean —
+    /// absent means "not flagged", never a reason to drop the release.
+    pub draft: bool,
+    /// Whether GitHub has this release marked as a pre-release. Same
+    /// missing/non-boolean default as `draft`.
+    pub prerelease: bool,
+}
+
+/// Append the likely environmental cause to a raw network error.
+///
+/// rustls reports a middlebox-signed certificate as a bare "tls connection init
+/// failed: invalid peer certificate: UnknownIssuer", and ureq reports an
+/// unreachable proxy as a bare connect error. Both read to a user as "the
+/// network is down", so they go hunting in the wrong place — the actual answer
+/// is almost always "your corporate CA is not in this machine's trust store" or
+/// "your proxy env vars are wrong". alp-sdk ADR 0021 makes this explicit for the
+/// download path: a failure behind a TLS-intercepting middlebox must say
+/// *proxy/CA interference*, never blame the payload. One sentence appended to
+/// the error we already surface — deliberately not a diagnostic-code scheme.
+///
+/// `proxy_configured` is the one bit the error string cannot carry: an
+/// unreachable, refused or firewalled proxy fails as a plain `ConnectionFailed`
+/// that never contains the word "proxy" (ureq only says it for the CONNECT
+/// stage), and that is the single most common misconfiguration. The caller reads
+/// the environment (IO) and tells us; `tan-cli`'s `http::proxy_configured` is it.
+pub fn describe_network_error(error: &str, proxy_configured: bool) -> String {
+    let lower = error.to_ascii_lowercase();
+    // Names only the variables that actually steer these requests. Both paths
+    // that reach here are `https://` — the in-process API GET and `sdk install`'s
+    // `git clone` — and neither `tan` nor git applies `HTTP_PROXY` to an https
+    // URL, so naming it sent the user to edit a variable that changes nothing.
+    // `NO_PROXY` is named instead because it is the knob that *fixes* this exact
+    // failure when the host is reachable directly.
+    let proxy_hint = "Check ALL_PROXY/HTTPS_PROXY/NO_PROXY — the configured proxy refused or could not complete the connection.";
+    // Named-proxy first: a proxy CONNECT/auth failure that also mentions TLS is
+    // still a proxy problem to look at first, so it must beat the certificate
+    // arm. A certificate/TLS failure comes next even when a proxy IS set — the
+    // middlebox is reachable, it is its CA that is untrusted, and pointing at
+    // the proxy env vars there would send the user to the wrong knob. Only then
+    // do we treat a bare connect failure as the proxy's fault, and only when
+    // there is a proxy to blame.
+    let hint = if lower.contains("proxy") {
+        Some(proxy_hint)
+    } else if lower.contains("certificate") || lower.contains("tls") {
+        Some(
+            "This is usually a TLS-intercepting proxy or a corporate CA that this machine does not trust, not a broken connection.",
+        )
+    } else if proxy_configured && lower.contains("connect") {
+        Some(proxy_hint)
+    } else {
+        None
+    };
+    match hint {
+        Some(hint) => format!("{error} {hint}"),
+        None => error.to_string(),
+    }
 }
 
 /// Parse the GitHub Releases API payload into typed releases (mirror of
@@ -48,12 +105,15 @@ pub fn parse_remote_sdk_releases(raw: &Value) -> Result<Vec<SdkRelease>, String>
                     .to_string()
             };
             let body = item.get("body").and_then(Value::as_str).unwrap_or("");
+            let bool_field = |key: &str| item.get(key).and_then(Value::as_bool).unwrap_or(false);
             SdkRelease {
                 tag: str_field("tag_name"),
                 published_at: str_field("published_at"),
                 tarball_url: str_field("tarball_url"),
                 release_notes_summary: extract_first_paragraph(body),
                 release_notes: body.trim().to_string(),
+                draft: bool_field("draft"),
+                prerelease: bool_field("prerelease"),
             }
         })
         .collect())
@@ -196,6 +256,42 @@ pub fn resolve_global_default_sdk(
         .map(str::to_string)
 }
 
+/// Resolve a BARE version argument (`tan sdk switch v0.13.0`) to an on-disk
+/// path by trying each candidate cache root in order and taking the first that
+/// actually holds an SDK checkout for that version.
+///
+/// One root — `~/.alp/sdk-cache`, tan's own install target — used to be the
+/// only one consulted, which is why #62's fix could never fire for the layout
+/// that reported it: those SDKs live under `~/.alp/sdk` (the VS Code
+/// extension's install root), so `tan sdk switch v0.13.0` resolved
+/// `~/.alp/sdk-cache/v0.13.0`, found nothing, and failed with `path-not-found`
+/// before any reconciliation was reachable. Nothing on this machine DECLARES a
+/// cache root; the authoritative record of where its SDKs actually live is the
+/// active-SDK pointer's own parent directory, which the caller passes as a
+/// lower-precedence root.
+///
+/// Deterministic by construction: roots are tried in the given order and the
+/// FIRST that holds a real checkout wins, so the same command on the same disk
+/// always resolves the same path. `is_sdk` (not mere existence) is the test, so
+/// a leftover empty directory in an earlier root cannot shadow a real checkout
+/// in a later one. When no root holds it, `roots[0]` is returned so the
+/// `path-not-found` message names the canonical location rather than the last
+/// long-shot guess.
+pub fn resolve_sdk_version_root(
+    version: &str,
+    roots: &[String],
+    is_sdk: impl Fn(&str) -> bool,
+) -> String {
+    let Some(first) = roots.first() else {
+        return version.to_string();
+    };
+    roots
+        .iter()
+        .map(|root| join_path(root, version))
+        .find(|candidate| is_sdk(candidate))
+        .unwrap_or_else(|| join_path(first, version))
+}
+
 /// Which precedence tier produced the active SDK path — `tan sdk current
 /// --json`'s `sourceTier`, and the precedence `tan init` pins the new project
 /// against.
@@ -267,6 +363,112 @@ mod tests {
         assert_eq!(releases[0].tag, "v1.5.0");
         assert_eq!(releases[0].release_notes_summary, "First line.");
         assert_eq!(releases[0].release_notes, "First line.\n\nrest");
+        // #122: absent draft/prerelease keys must default to false, never drop
+        // the release or panic.
+        assert!(!releases[0].draft);
+        assert!(!releases[0].prerelease);
+    }
+
+    #[test]
+    fn parses_draft_and_prerelease_flags() {
+        // #122: GitHub's `draft`/`prerelease` booleans must survive the parse
+        // so a consumer can tell a release candidate or an unpublished draft
+        // apart from a real latest release, instead of tan silently dropping
+        // the fact.
+        let raw = json!([
+            {"tag_name": "v2.0.0-rc1", "published_at": "t", "tarball_url": "u", "body": "b",
+             "draft": true, "prerelease": true},
+        ]);
+        let releases = parse_remote_sdk_releases(&raw).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert!(releases[0].draft);
+        assert!(releases[0].prerelease);
+    }
+
+    #[test]
+    fn draft_and_prerelease_default_false_when_absent_or_non_boolean() {
+        let raw = json!([
+            {"tag_name": "v1.0.0", "published_at": "t", "tarball_url": "u", "body": "b"},
+            {"tag_name": "v1.0.1", "published_at": "t", "tarball_url": "u", "body": "b",
+             "draft": "yes", "prerelease": 1},
+        ]);
+        let releases = parse_remote_sdk_releases(&raw).unwrap();
+        // Neither a missing key nor a non-boolean value drops the release.
+        assert_eq!(releases.len(), 2);
+        assert!(!releases[0].draft);
+        assert!(!releases[0].prerelease);
+        assert!(!releases[1].draft);
+        assert!(!releases[1].prerelease);
+    }
+
+    #[test]
+    fn sdk_release_json_keys_are_exactly_the_seven_fields() {
+        // The membership test #122 asks for: pins the emitted per-release key
+        // set so a later silent rename or drop (the #106 failure class) is
+        // caught here, since no golden covers `sdk list` at all.
+        let release = SdkRelease {
+            tag: "v1.5.0".to_string(),
+            published_at: "2024-01-02T00:00:00Z".to_string(),
+            tarball_url: "u".to_string(),
+            release_notes_summary: "s".to_string(),
+            release_notes: "s".to_string(),
+            draft: false,
+            prerelease: true,
+        };
+        let value = serde_json::to_value(&release).unwrap();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "tag",
+                "publishedAt",
+                "tarballUrl",
+                "releaseNotesSummary",
+                "releaseNotes",
+                "draft",
+                "prerelease",
+            ])
+        );
+    }
+
+    #[test]
+    fn network_error_names_the_likely_cause() {
+        // The real rustls string a TLS-intercepting middlebox produces. Still the
+        // CA answer WITH a proxy configured: the proxy answered, its CA is the
+        // problem.
+        for proxy_set in [false, true] {
+            let tls = describe_network_error(
+                "https://api.github.com/…: tls connection init failed: invalid peer certificate: UnknownIssuer",
+                proxy_set,
+            );
+            assert!(tls.contains("corporate CA"), "{tls}");
+        }
+        // Proxy wins over the certificate arm — a proxy CONNECT failure that also
+        // mentions TLS is still a proxy problem to go look at first.
+        let proxy = describe_network_error("proxy: tls connection failed", false);
+        assert!(proxy.contains("HTTPS_PROXY"), "{proxy}");
+        assert!(!proxy.contains("corporate CA"), "{proxy}");
+        // The most common misconfiguration of all: a proxy that is set but
+        // unreachable/refused. ureq raises that as a plain ConnectionFailed with
+        // no mention of a proxy anywhere — verbatim from `HTTPS_PROXY=http://127.0.0.1:9`.
+        let refused = "https://api.github.com/repos/alplabai/alp-sdk/releases: Connection Failed: Connect error: No connection could be made because the target machine actively refused it. (os error 10061)";
+        assert!(
+            describe_network_error(refused, true).contains("HTTPS_PROXY"),
+            "a refused proxy must be named"
+        );
+        // …and the identical string is left alone with no proxy configured: then
+        // it really is just an unreachable host.
+        assert_eq!(describe_network_error(refused, false), refused);
+        // Anything else is passed through untouched — no invented diagnosis.
+        assert_eq!(
+            describe_network_error("dns: failed to lookup address", true),
+            "dns: failed to lookup address"
+        );
     }
 
     #[test]
@@ -359,5 +561,41 @@ mod tests {
         let (path, tier) = resolve_sdk_source_tier(None, None, None, None);
         assert_eq!(path, None);
         assert_eq!(tier, SdkSourceTier::None);
+    }
+
+    /// Both roots of the layout that reported #62: tan's own install cache and
+    /// the extension's install root, where the SDKs actually were.
+    fn roots() -> Vec<String> {
+        vec![
+            "/home/u/.alp/sdk-cache".to_string(),
+            "/home/u/.alp/sdk".to_string(),
+        ]
+    }
+
+    #[test]
+    fn version_root_falls_through_to_the_root_that_actually_holds_the_version() {
+        // #62's layout: `~/.alp/sdk-cache` is empty, the SDKs live in
+        // `~/.alp/sdk`. Resolving against the first root ONLY is what put the
+        // bare-version form out of reach of the whole reconciliation.
+        let real = join_path("/home/u/.alp/sdk", "v0.13.0");
+        let got = resolve_sdk_version_root("v0.13.0", &roots(), |candidate| candidate == real);
+        assert_eq!(got, real);
+    }
+
+    #[test]
+    fn version_root_prefers_the_first_root_holding_the_version() {
+        // Both roots hold it -> the earlier one wins, deterministically:
+        // `tan sdk install v0.13.0 && tan sdk switch v0.13.0` must select the
+        // checkout the install just wrote.
+        let got = resolve_sdk_version_root("v0.13.0", &roots(), |_| true);
+        assert_eq!(got, join_path("/home/u/.alp/sdk-cache", "v0.13.0"));
+    }
+
+    #[test]
+    fn version_root_falls_back_to_the_canonical_root_when_nothing_holds_it() {
+        // Nothing found anywhere -> the `path-not-found` message names the
+        // canonical install location, not the last root tried.
+        let got = resolve_sdk_version_root("v9.9.9", &roots(), |_| false);
+        assert_eq!(got, join_path("/home/u/.alp/sdk-cache", "v9.9.9"));
     }
 }

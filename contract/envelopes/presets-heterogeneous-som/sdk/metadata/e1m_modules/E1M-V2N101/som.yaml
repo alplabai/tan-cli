@@ -1,0 +1,15 @@
+# SPDX-License-Identifier: Apache-2.0
+# A HETEROGENEOUS SoM on purpose (issue #106's worked example): an `a55` core
+# with a `machine:` resolves to yocto and an `m33` core with a `board:` to
+# zephyr, so this fixture is the one that makes `data.soms[].cores[].os` carry
+# two different values. The New Project wizard scaffolds IPC off exactly this.
+schema_version: 1
+sku: E1M-V2N101
+display_name: E1M V2N101
+family: v2n
+silicon: renesas-rzv2n
+topology:
+  a55:
+    machine: e1m-v2n101-a55
+  m33:
+    board: e1m_v2n101_m33

@@ -21,6 +21,34 @@ use crate::cli::GlobalArgs;
 
 use super::workspace::resolved_planner_python;
 
+/// A slice demoted by `tan_core::plan_tokens::substitute_plan_tokens` (tan-cli
+/// #89): its fields still name a literal `${TOOLCHAIN_ROOT}` because this host
+/// has none resolved, but the demotion has an owning slice AND an owning
+/// dispatch seam (`executionPolicy.missingTool`) to route to, so it did not
+/// fail the whole plan. `reason` is built HERE, not in `tan-core`, because
+/// only this file has the resolved [`crate::toolchain::ToolchainRoot`] value
+/// needed to phrase host-specific advice ("install one" vs "choose between
+/// several") — `tan-core::plan_tokens` knows only that the token is unresolved,
+/// not why.
+#[derive(Debug)]
+pub(super) struct SliceDemotion {
+    /// Index into `plan.slices` — mirrors `tan_core::plan_tokens::DemotedSlice`
+    /// so the executor's dispatch loop (index-keyed) can attribute this back
+    /// to the right slice.
+    pub(super) slice_index: usize,
+    /// Carried alongside the index so the executor can key its lookup on
+    /// BOTH — see `DemotedSlice`'s own doc for why an index-only signal is
+    /// fragile if `plan.slices` is ever reordered/filtered between here and
+    /// dispatch.
+    pub(super) core_id: String,
+    /// The full host-specific sentence the executor/materialise surface
+    /// verbatim: which field, which token, and why it's unresolved on THIS
+    /// host — the same advice text `build.toolchain-root-unresolved`'s
+    /// plan-fatal sibling error already gives, just attached to a skip/fail
+    /// instead of a hard refusal.
+    pub(super) reason: String,
+}
+
 /// Apply the build-plan token-substitution pass to `plan` before materialise
 /// writes anything or a slice command runs — called from EVERY route that
 /// materialises or executes a plan (`native::native_build_outcome` and
@@ -32,14 +60,26 @@ use super::workspace::resolved_planner_python;
 /// `exec_base` is the executor's actual base dir (`native::base_dir` —
 /// `west_cwd || workspace_root`); the caller resolves it once and passes it
 /// in so this never re-derives a second, possibly different, value.
+///
+/// `toolchain` is likewise resolved ONCE by the caller (`native_build_outcome`
+/// / `plan_command`, both via `crate::toolchain::resolve_toolchain_root()`)
+/// and handed in, rather than this function calling the resolver itself: a
+/// previous version called `resolve_toolchain_root()` internally, which made
+/// this function's OWN unit tests silently host-dependent — they assumed
+/// `NotFound` but actually got whatever `ZEPHYR_SDK_INSTALL_DIR`/`/opt`/`$HOME`
+/// happen to resolve to on the machine running `cargo test`, passing on a
+/// clean CI box and failing on any developer machine with a real Zephyr SDK
+/// installed. Threading it as a parameter lets a test inject a fixed
+/// `ToolchainRoot` and stay deterministic regardless of ambient host state.
 pub(super) fn apply_plan_token_substitution(
     g: &GlobalArgs,
     context: &ProjectContext,
     exec_base: &str,
     plan: &BuildPlan,
-) -> Result<BuildPlan, (&'static str, String)> {
+    toolchain: &crate::toolchain::ToolchainRoot,
+) -> Result<(BuildPlan, Vec<SliceDemotion>), (&'static str, String)> {
     match plan.plan_path_mode.as_deref() {
-        None => return Ok(plan.clone()),
+        None => return Ok((plan.clone(), Vec::new())),
         Some(PLAN_PATH_MODE_TOKENED) => {}
         Some(other) => {
             return Err((
@@ -120,27 +160,101 @@ pub(super) fn apply_plan_token_substitution(
         }
     }
 
+    // ${TOOLCHAIN_ROOT} (ADR 0021): resolved LAZILY by the caller — an
+    // unresolvable toolchain root arrives here as `ToolchainRoot::NotFound`/
+    // `Ambiguous`, not refused, so the plans the SDK emits today (which name
+    // no `${TOOLCHAIN_ROOT}`) keep building on a host with no detectable
+    // toolchain install. The refusal fires inside the pass, only when a plan
+    // actually uses the token.
+    let toolchain_root = toolchain.path().map(|p| p.to_string_lossy().into_owned());
+
     let python = resolved_planner_python(context);
     let values = TokenValues {
         sdk_root: &sdk_root_str,
         project_root: &project_root,
         python: &python,
+        toolchain_root: toolchain_root.as_deref(),
     };
-    substitute_plan_tokens(plan, &values).map_err(|e| match e {
+    let (plan, demoted) = substitute_plan_tokens(plan, &values).map_err(|e| match e {
         PlanTokenError::LeftoverToken { field, token } => (
             "build.plan-token-unresolved",
             format!(
                 "plan is `planPathMode: tokened` but field `{field}` still names the literal \
                  token `{token}` after substitution — an SDK-side token this CLI does not \
-                 resolve (only ${{SDK_ROOT}}, ${{PROJECT_ROOT}}, ${{PYTHON}} are known). Upgrade \
-                 tan, or check the plan for a bug."
+                 resolve (only ${{SDK_ROOT}}, ${{PROJECT_ROOT}}, ${{PYTHON}}, \
+                 ${{TOOLCHAIN_ROOT}} are known). Upgrade tan, or check the plan for a bug."
+            ),
+        ),
+        // Distinct from the above on purpose: tan KNOWS this token, so
+        // "upgrade tan" is the wrong advice — the host is missing (or has
+        // several of) the thing it names. Only reachable for a PLAN-LEVEL
+        // field now (boardYaml / sharedArtefacts[]) — a slice-confined
+        // occurrence is reported as a `DemotedSlice` instead (tan-cli #89),
+        // mapped to `SliceDemotion` below rather than erroring here.
+        PlanTokenError::UnresolvedToolchainRoot { field } => (
+            "build.toolchain-root-unresolved",
+            format!(
+                "plan field `{field}` names ${{TOOLCHAIN_ROOT}}, but {}. tan refuses rather than \
+                 substituting an empty path, which would silently build against the host root.",
+                describe_unresolved(toolchain)
             ),
         ),
         PlanTokenError::UnknownPlanPathMode(mode) => (
             "build.plan-invalid",
             format!("unknown planPathMode `{mode}` (only \"tokened\" is defined)"),
         ),
-    })
+    })?;
+
+    // `toolchain` is the caller's ONE resolved value for this whole pass
+    // (see the function doc) — reused here for the demotion's advice text
+    // instead of a second resolution, so a demoted slice's message and a
+    // plan-fatal `UnresolvedToolchainRoot`'s message (above) never disagree
+    // about why.
+    let demoted = demoted
+        .into_iter()
+        .map(|d| {
+            let reason = format!(
+                "plan field `{}` names ${{TOOLCHAIN_ROOT}}, but {}",
+                d.field,
+                describe_unresolved(toolchain)
+            );
+            SliceDemotion {
+                slice_index: d.slice_index,
+                core_id: d.core_id,
+                reason,
+            }
+        })
+        .collect();
+    Ok((plan, demoted))
+}
+
+/// Why [`crate::toolchain::resolve_toolchain_root`] produced no single path,
+/// phrased to complete the sentence "…names ${TOOLCHAIN_ROOT}, but {this}."
+/// The two causes need opposite fixes — install one vs. choose between the
+/// ones already installed — so they must not share a message.
+fn describe_unresolved(toolchain: &crate::toolchain::ToolchainRoot) -> String {
+    match toolchain {
+        crate::toolchain::ToolchainRoot::Ambiguous(candidates) => {
+            let list = candidates
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "this host has several toolchain installs and no `ZEPHYR_SDK_INSTALL_DIR` to \
+                 choose between them ({list}) — set `ZEPHYR_SDK_INSTALL_DIR` to the one this \
+                 build should use"
+            )
+        }
+        // `Resolved` cannot reach here (a resolved root is substituted), but
+        // it shares the "nothing usable" advice rather than being unreachable!().
+        crate::toolchain::ToolchainRoot::NotFound
+        | crate::toolchain::ToolchainRoot::Resolved(_) => {
+            "no toolchain install is detectable on this host — install the Zephyr SDK (`west sdk \
+             install`) or set `ZEPHYR_SDK_INSTALL_DIR` to an existing install"
+                .to_string()
+        }
+    }
 }
 
 /// Parent directory of `board_yaml_path`, forward-slash (matches
@@ -215,6 +329,18 @@ mod tests {
         .global
     }
 
+    /// A fixed, host-independent `ToolchainRoot` for every test below that
+    /// doesn't itself exercise toolchain resolution: `apply_plan_token_
+    /// substitution` used to call `crate::toolchain::resolve_toolchain_root()`
+    /// internally, which made these tests depend on whether THIS machine
+    /// happens to have a Zephyr SDK install (passing on a clean CI box,
+    /// failing on any developer machine with `ZEPHYR_SDK_INSTALL_DIR` set or
+    /// a `zephyr-sdk-*` under `$HOME`/`/opt`). Threading the value in as a
+    /// parameter (this helper) is what makes these tests deterministic.
+    fn no_toolchain() -> crate::toolchain::ToolchainRoot {
+        crate::toolchain::ToolchainRoot::NotFound
+    }
+
     const LEGACY_PLAN: &str = r#"{
       "schemaVersion": 1, "boardYaml": "/work/proj/board.yaml", "sku": "S", "buildRoot": "build",
       "slices": [], "sharedArtefacts": []
@@ -224,9 +350,11 @@ mod tests {
     fn legacy_plan_is_untouched_no_op() {
         let plan = parse_build_plan(LEGACY_PLAN).unwrap();
         let ctx = context("/work/proj/board.yaml", "/opt/alp-sdk");
-        let out = apply_plan_token_substitution(&global(), &ctx, "/work/proj", &plan)
-            .expect("legacy plan must not error");
+        let (out, demoted) =
+            apply_plan_token_substitution(&global(), &ctx, "/work/proj", &plan, &no_toolchain())
+                .expect("legacy plan must not error");
         assert_eq!(out, plan);
+        assert!(demoted.is_empty());
     }
 
     #[test]
@@ -242,8 +370,9 @@ mod tests {
         }"#;
         let plan = parse_build_plan(json).unwrap();
         let ctx = context("/work/proj/examples/foo/board.yaml", "/opt/alp-sdk");
-        let err = apply_plan_token_substitution(&global(), &ctx, "/work/proj", &plan)
-            .expect_err("unknown mode must be refused");
+        let err =
+            apply_plan_token_substitution(&global(), &ctx, "/work/proj", &plan, &no_toolchain())
+                .expect_err("unknown mode must be refused");
         assert_eq!(err.0, "build.plan-invalid");
         assert!(err.1.contains("tokened-v2"), "got: {}", err.1);
     }
@@ -259,8 +388,9 @@ mod tests {
         // board.yaml lives nested under the workspace root, but the exec base
         // stays the workspace root itself — a real PROJECT_ROOT/exec-base split.
         let ctx = context("/work/proj/examples/foo/board.yaml", "/opt/alp-sdk");
-        let err = apply_plan_token_substitution(&global(), &ctx, "/work/proj", &plan)
-            .expect_err("divergence must be refused");
+        let err =
+            apply_plan_token_substitution(&global(), &ctx, "/work/proj", &plan, &no_toolchain())
+                .expect_err("divergence must be refused");
         assert_eq!(err.0, "build.project-root-mismatch");
         assert!(err.1.contains("examples/foo"), "got: {}", err.1);
     }
@@ -284,8 +414,9 @@ mod tests {
         let plan = parse_build_plan(json).unwrap();
         let ctx = context("/work/proj/board.yaml", "/opt/alp-sdk");
         // No `--sdk-root` and a cwd that isn't an SDK checkout -> unresolved.
-        let err = apply_plan_token_substitution(&global(), &ctx, "/work/proj", &plan)
-            .expect_err("unresolved sdk_root must be refused");
+        let err =
+            apply_plan_token_substitution(&global(), &ctx, "/work/proj", &plan, &no_toolchain())
+                .expect_err("unresolved sdk_root must be refused");
         assert_eq!(err.0, "build.sdk-root-unresolved");
     }
 
@@ -304,11 +435,12 @@ mod tests {
         let plan = parse_build_plan(json).unwrap();
         let sdk_root = sdk_root_dir("substitutes");
         let ctx = context("/work/proj/board.yaml", &sdk_root.to_string_lossy());
-        let out = apply_plan_token_substitution(
+        let (out, demoted) = apply_plan_token_substitution(
             &global_with_sdk_root(&sdk_root),
             &ctx,
             "/work/proj",
             &plan,
+            &no_toolchain(),
         )
         .expect("matching project root must substitute");
         assert_eq!(out.board_yaml, "/work/proj/board.yaml");
@@ -316,8 +448,91 @@ mod tests {
             out.slices[0].env.get("ALP_SDK_ROOT").map(String::as_str),
             Some(sdk_root.to_string_lossy().into_owned().as_str())
         );
+        assert!(demoted.is_empty());
 
         std::fs::remove_dir_all(&sdk_root).ok();
+    }
+
+    #[test]
+    fn slice_confined_toolchain_root_is_demoted_not_a_hard_error() {
+        // tan-cli #89: an unresolved ${TOOLCHAIN_ROOT} confined to one
+        // slice's own field must not fail the whole substitution pass — it
+        // comes back as a `SliceDemotion`, carrying the same host-specific
+        // advice `describe_unresolved` gives the plan-fatal sibling error,
+        // for the executor to route through `executionPolicy.missingTool` at
+        // dispatch instead of erroring here.
+        let json = r#"{
+          "schemaVersion": 1, "planPathMode": "tokened",
+          "boardYaml": "${PROJECT_ROOT}/board.yaml", "sku": "S", "buildRoot": "build",
+          "slices": [
+            { "coreId": "m33_sm", "backend": "zephyr", "buildDir": "build/c1",
+              "command": { "tool": "west", "args": ["build"], "cwd": "build/c1" },
+              "env": { "ZEPHYR_SDK_INSTALL_DIR": "${TOOLCHAIN_ROOT}" } }
+          ],
+          "sharedArtefacts": []
+        }"#;
+        let plan = parse_build_plan(json).unwrap();
+        let sdk_root = sdk_root_dir("slice-demotion");
+        let ctx = context("/work/proj/board.yaml", &sdk_root.to_string_lossy());
+        // Inject `NotFound` explicitly (see `no_toolchain`'s doc) instead of
+        // relying on this machine having no real Zephyr SDK install.
+        let (out, demoted) = apply_plan_token_substitution(
+            &global_with_sdk_root(&sdk_root),
+            &ctx,
+            "/work/proj",
+            &plan,
+            &no_toolchain(),
+        )
+        .expect("a slice-confined unresolved toolchain root must not fail the plan");
+
+        assert_eq!(demoted.len(), 1, "expected exactly one demotion");
+        let d = &demoted[0];
+        assert_eq!(d.slice_index, 0);
+        assert_eq!(d.core_id, "m33_sm");
+        // `field` was folded into `reason` (and the standalone field dropped
+        // — it was read only by this assertion, per MINOR 5 of the #89
+        // review): assert on `reason` instead.
+        assert!(
+            d.reason.contains("slices[0].env.ZEPHYR_SDK_INSTALL_DIR"),
+            "got: {}",
+            d.reason
+        );
+        assert!(
+            d.reason.contains("west sdk install") || d.reason.contains("ZEPHYR_SDK_INSTALL_DIR"),
+            "got: {}",
+            d.reason
+        );
+        // The literal token survives in the (never-dispatched) output plan —
+        // fenced by the executor's index check, not substituted blank.
+        assert_eq!(
+            out.slices[0]
+                .env
+                .get("ZEPHYR_SDK_INSTALL_DIR")
+                .map(String::as_str),
+            Some("${TOOLCHAIN_ROOT}")
+        );
+
+        std::fs::remove_dir_all(&sdk_root).ok();
+    }
+
+    #[test]
+    fn unresolved_toolchain_root_advice_differs_by_cause() {
+        use crate::toolchain::ToolchainRoot;
+
+        // Nothing installed: tell them to install one.
+        let none = describe_unresolved(&ToolchainRoot::NotFound);
+        assert!(none.contains("west sdk install"), "got: {none}");
+
+        // Several installed: tell them to choose, and name the candidates —
+        // "install the Zephyr SDK" would be actively wrong advice here.
+        let many = describe_unresolved(&ToolchainRoot::Ambiguous(vec![
+            std::path::PathBuf::from("/opt/zephyr-sdk-0.16.5"),
+            std::path::PathBuf::from("/opt/zephyr-sdk-1.0.1"),
+        ]));
+        assert!(many.contains("ZEPHYR_SDK_INSTALL_DIR"), "got: {many}");
+        assert!(many.contains("/opt/zephyr-sdk-0.16.5"), "got: {many}");
+        assert!(many.contains("/opt/zephyr-sdk-1.0.1"), "got: {many}");
+        assert!(!many.contains("west sdk install"), "got: {many}");
     }
 
     #[test]
@@ -335,6 +550,7 @@ mod tests {
             &ctx,
             "/work/proj",
             &plan,
+            &no_toolchain(),
         )
         .expect_err("leftover token must be refused");
         assert_eq!(err.0, "build.plan-token-unresolved");
@@ -363,6 +579,7 @@ mod tests {
             &ctx,
             "/work/proj",
             &plan,
+            &no_toolchain(),
         );
         assert!(result.is_ok(), "got: {result:?}");
 
@@ -420,6 +637,7 @@ mod tests {
             &ctx,
             "/work/proj",
             &plan,
+            &no_toolchain(),
         )
         .expect_err("sdkCommit mismatch must be refused regardless of plan_from");
         assert_eq!(err.0, "build.sdk-commit-mismatch");

@@ -17,8 +17,10 @@ use crate::cli::{BootstrapArgs, GlobalArgs};
 use crate::exit::ExitCode;
 use crate::util::resolve_cli_project_context;
 
+use crate::venv::west_program;
+
 use super::native::base_dir;
-use super::workspace::{west_program, west_workspace_dir};
+use super::workspace::west_workspace_dir;
 
 /// Probe the build prerequisites (SDK / board.yaml / workspace / west) into the
 /// pure `tan_core::preflight` checks. Shared by `tan build`'s pre-flight gate and
@@ -44,21 +46,24 @@ pub(crate) fn probe_build_preflight(g: &GlobalArgs, context: &ProjectContext) ->
         west_available,
         workspace_zephyr_version: read_workspace_zephyr_version(workspace.as_deref()),
         sdk_zephyr_pin: read_sdk_zephyr_pin(sdk_root.as_deref()),
+        project_scope: g.project.clone(),
     };
     build_preflight_checks(&input)
 }
 
-/// Read the reused workspace's Zephyr `MAJOR.MINOR` from `<workspace>/zephyr/VERSION`.
-/// `None` when there is no workspace or the file is absent/unparseable — the
-/// preflight then simply skips the version-compatibility check.
+/// Read the reused workspace's Zephyr `MAJOR.MINOR.PATCH` from
+/// `<workspace>/zephyr/VERSION`. `None` when there is no workspace or the file
+/// is absent/unparseable — the preflight then simply skips the
+/// version-compatibility check.
 fn read_workspace_zephyr_version(workspace_dir: Option<&Path>) -> Option<String> {
     let version_file = workspace_dir?.join("zephyr").join("VERSION");
     let body = std::fs::read_to_string(version_file).ok()?;
     tan_core::preflight::parse_zephyr_version_file(&body)
 }
 
-/// Read the active SDK's pinned Zephyr `MAJOR.MINOR` from `<sdk>/west.yml`.
-/// `None` when unresolved, unreadable, or the pin is a branch/SHA.
+/// Read the active SDK's pinned Zephyr `MAJOR.MINOR.PATCH` from
+/// `<sdk>/west.yml`. `None` when unresolved, unreadable, or the pin is a
+/// branch/SHA.
 fn read_sdk_zephyr_pin(sdk_root: Option<&Path>) -> Option<String> {
     let west_yml = sdk_root?.join("west.yml");
     let body = std::fs::read_to_string(west_yml).ok()?;
@@ -111,8 +116,14 @@ pub(super) fn maybe_auto_bootstrap(
     };
     // Bootstrap when there is no workspace at all, OR when the reused workspace's
     // Zephyr diverges from the SDK pin (stale reuse — `tan bootstrap` refreshes
-    // it to the pinned MAJOR.MINOR). Still gated on the SDK + board.yaml being
+    // it to the pinned version). Still gated on the SDK + board.yaml being
     // present, since bootstrap needs the SDK.
+    //
+    // `zephyrVersion` compares the full MAJOR.MINOR.PATCH since #98, so a
+    // patch-level pin bump now reaches this branch too. That closes the second
+    // half of the same blind spot: `--no-auto-bootstrap`'s own `--help` promises
+    // the default bootstraps a "stale" workspace, and against a `v4.4.0` tree on
+    // a `v4.4.1` pin it previously did not.
     let missing_workspace = is_fail("workspace");
     let stale_zephyr = is_warn("zephyrVersion");
     if (!missing_workspace && !stale_zephyr) || is_fail("sdk") || is_fail("boardYaml") {

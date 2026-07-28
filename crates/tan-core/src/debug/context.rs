@@ -21,13 +21,35 @@ pub struct DebuggerExtensionsState {
     /// `vadimcn.vscode-lldb` is installed.
     #[serde(rename = "codeLLDB")]
     pub code_lldb: bool,
+    /// Whether the five flags above were OBSERVED at all.
+    ///
+    /// `false` in the standalone `tan` binary, where they are not meaningful:
+    /// only an extension host can enumerate its own marketplace extensions, so
+    /// the CLI's values are an inherited assumption, never a probe. Everything
+    /// derived from them is reported as `unknown` in that state rather than as
+    /// a pass claiming "is installed." on a machine with no VS Code (#102).
+    ///
+    /// The flags keep their pass-through `true` defaults instead of becoming
+    /// `Option<bool>`: one binary either can see VS Code or cannot, and the
+    /// per-field distinction only exists for a caller that can actually probe.
+    pub observable: bool,
 }
 
-/// Probed availability of debug tooling on the host (PATH lookups + interpreter).
+impl DebuggerExtensionsState {
+    /// One extension flag as an observation: `None` when nothing was observed.
+    pub fn observed(&self, installed: bool) -> Option<bool> {
+        self.observable.then_some(installed)
+    }
+}
+
+/// Probed availability of debug tooling on the host (PATH lookups).
+///
+/// No `python_available`: the retired `python` check was its only reader, and
+/// `hostPrerequisites` now probes the interpreter off the manifest's
+/// prerequisite list (with a `pythonMinVersion` floor the bare PATH lookup
+/// never had).
 #[derive(Debug, Clone)]
 pub struct DebugRuntimeCapabilities {
-    /// The configured Python interpreter is on PATH.
-    pub python_available: bool,
     /// Resolved J-Link GDB-server executable name, if found.
     pub jlink_executable: Option<String>,
     /// Resolved OpenOCD executable name, if found.
@@ -60,6 +82,12 @@ pub struct DebugWorkspaceContext {
     pub python_binary: String,
     /// Whether `board.yaml` exists at the resolved path (probed).
     pub board_yaml_exists: bool,
+    /// Whether the caller actually NAMED a project (`--project` /
+    /// `--board-yaml`), as opposed to `board_yaml_path` being a default guess
+    /// at the working directory. Decides whether a missing `board.yaml` is a
+    /// hard failure or merely "no project selected yet" — see
+    /// [`board_yaml_check`](crate::debug::doctor).
+    pub project_selected: bool,
     /// Installed-extension state for the host.
     pub debugger_extensions: DebuggerExtensionsState,
 }
@@ -70,6 +98,7 @@ pub fn create_debug_workspace_context(
     project: &ProjectContext,
     generated_at: String,
     board_yaml_exists: impl Fn(&str) -> bool,
+    project_selected: bool,
     debugger_extensions: DebuggerExtensionsState,
 ) -> DebugWorkspaceContext {
     let exists = match &project.board_yaml_path {
@@ -84,13 +113,17 @@ pub fn create_debug_workspace_context(
         west_cwd: project.west_cwd.clone(),
         python_binary: project.python_binary.clone(),
         board_yaml_exists: exists,
+        project_selected,
         debugger_extensions,
     }
 }
 
 /// Mirror of TS `collectRuntimeCapabilitiesFromCommands`.
+///
+/// Takes no `ProjectContext` any more: the only field it ever read was
+/// `python_binary`, for the `python_available` flag the retired `python` check
+/// consumed.
 pub fn collect_runtime_capabilities_from_commands(
-    project: &ProjectContext,
     command_on_path: impl Fn(&str) -> bool,
 ) -> DebugRuntimeCapabilities {
     let first_available = |commands: &[&str]| -> Option<String> {
@@ -101,7 +134,6 @@ pub fn collect_runtime_capabilities_from_commands(
     };
 
     DebugRuntimeCapabilities {
-        python_available: command_on_path(&project.python_binary),
         jlink_executable: first_available(&["JLinkGDBServerCL", "JLinkGDBServer"]),
         open_ocd_executable: first_available(&["openocd"]),
         pyocd_executable: first_available(&["pyocd"]),

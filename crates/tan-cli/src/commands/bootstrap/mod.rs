@@ -8,9 +8,11 @@
 //! No `bash` anywhere — native Windows is a first-class host (#49), so the two
 //! scripts are the parity oracle for CONTROL FLOW and message strings, not a
 //! runtime dependency. The FACTS come from `<sdkRoot>/metadata/bootstrap.json`
-//! (alp-sdk#917), which names tan a required consumer. The compiler toolchains
-//! (Zephyr SDK, vendor SDKs) stay out of scope; `doctor` detects + points to
-//! those.
+//! (alp-sdk#917) — its own `_comment` names tan a real reader of those facts
+//! since tan-cli PR #55, and `tan_core::bootstrap`'s
+//! `parse_bootstrap_manifest` is that reader. The compiler
+//! toolchains (Zephyr SDK, vendor SDKs) stay out of scope; `doctor` detects +
+//! points to those.
 //!
 //! Decision logic lives in `tan_core::bootstrap`; the spawning steps live in
 //! [`steps`]; this file is orchestration + the envelope.
@@ -26,11 +28,12 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use tan_core::ManifestReconcile;
 use tan_core::bootstrap::{
-    BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, ExistingWorkspace, HostOs, Tokens,
-    WorkspaceChoice, YoctoGate, decide_workspace_reuse, fallback_facts, in_play_runtimes,
+    BOOTSTRAP_MANIFEST_REL_PATH, BootstrapFacts, ExistingWorkspace, HostOs, MissingPrerequisite,
+    Tokens, WorkspaceChoice, YoctoGate, decide_workspace_reuse, fallback_facts, in_play_runtimes,
     next_steps_block, optional_libs_block, parse_bootstrap_manifest, print_env_block,
-    resolve_pin_major_minor, yocto_gate, yocto_mixed_warning, yocto_only_refusal,
+    reported_missing, resolve_zephyr_pin, yocto_gate, yocto_mixed_warning, yocto_only_refusal,
 };
 use tan_core::sdk_catalogue::TopologyCore;
 
@@ -40,10 +43,23 @@ use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 use crate::util::{MIN_PYTHON, resolve_cli_project_context};
 
-use steps::{
-    Log, Runner, Workspace, check_prerequisites, ensure_venv, native, pip_phase, west_phase,
+use steps::{Log, Runner, Workspace, ensure_venv, native, pip_phase, west_phase};
+use west_config::same_directory;
+// The prerequisite gate, shared with `commands::doctor` so plain `tan doctor`
+// reports a missing `ninja` without anyone having to run bootstrap first
+// (alp-sdk ADR 0021 P0a). `steps` itself stays a private submodule.
+pub(crate) use steps::check_prerequisites;
+// Re-exported at crate visibility (rather than the module's own `pub(super)`)
+// so `commands::sdk`'s `run_switch` can chain the SAME reconciliation (#62) —
+// `west_config` itself stays a private submodule; only these names need a
+// wider audience than `bootstrap` alone. `run_switch` uses the guarded
+// `_for_switch` variant, never the unconditional one directly — that stays
+// `bootstrap`-only since only bootstrap's job IS the workspace under its
+// topdir. `workspace_synced_to` is the read half of the sync record bootstrap
+// writes below; the OUTCOME type itself is `tan_core::ManifestReconcile`.
+pub(crate) use west_config::{
+    reconcile_west_manifest_path_for_switch, record_workspace_sdk, workspace_synced_to,
 };
-use west_config::{reconcile_west_manifest_path, same_directory};
 
 /// `data` payload for the `bootstrap` envelope: the resolved SDK root, the
 /// three paths the run produced, where its facts came from, and the flags.
@@ -76,7 +92,9 @@ struct BootstrapData {
     /// needs to know which side it read.
     #[serde(rename = "factsFromManifest")]
     facts_from_manifest: bool,
-    /// The Zephyr `MAJOR.MINOR` the workspace-reuse test compared against.
+    /// The Zephyr version the workspace-reuse test compared against. Full
+    /// `MAJOR.MINOR.PATCH` since #98 — it read `"4.4"` before, which is exactly
+    /// the truncation that let a `v4.4.1` pin adopt a `v4.4.0` tree.
     #[serde(rename = "zephyrPin")]
     zephyr_pin: String,
     /// `--no-pip` (skip the Python dependency installs).
@@ -88,6 +106,27 @@ struct BootstrapData {
     /// `--print-env` (print the env-var lines and exit, installing nothing).
     #[serde(rename = "printEnv")]
     print_env: bool,
+    /// Per-tool form of a `prerequisites-missing` refusal, so a consumer never
+    /// has to parse `issues[].message` back apart (the message is
+    /// `lines.join(" ")`, and a command contains the same spaces the join used
+    /// — the split is not recoverable; alp-sdk-vscode#347 proved that parse
+    /// dead and deleted it).
+    ///
+    /// `null` on every run that has no missing tool to name: a success, a
+    /// refusal that fired BEFORE the gate, AND the two Python-floor refusals,
+    /// which have no missing tool at all. NEVER `[]` — a run that checked the
+    /// tool list and found it clean is exactly a successful run, which reports
+    /// `null`, so `[]` would be a second spelling of the same fact and the
+    /// distinction would carry no information a consumer could act on.
+    ///
+    /// No `skip_serializing_if`: an explicit `null` matches
+    /// [`crate::envelope::Project`]'s two fields and makes a captured envelope
+    /// self-documenting — the key is in every sample, so a consumer can see the
+    /// field exists without reaching for a schema. A deliberate divergence from
+    /// the sibling `data` payloads (`build`, `flash`, `pinmux`), which omit
+    /// their optional keys instead.
+    #[serde(rename = "missingPrerequisites")]
+    missing_prerequisites: Option<Vec<MissingPrerequisite>>,
 }
 
 /// Mutable run state the envelope reports, threaded through the phases.
@@ -179,7 +218,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     // `venv.dirName` is a manifest fact, so the venv path is only final now.
     paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
     // ONE pin authority, shared with `preflight`'s zephyrVersion check.
-    let pin = resolve_pin_major_minor(
+    let pin = resolve_zephyr_pin(
         std::fs::read_to_string(paths.repo_root.join("west.yml"))
             .ok()
             .as_deref(),
@@ -228,18 +267,22 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         YoctoGate::Clear => {}
     }
 
-    let host_python = match check_prerequisites(&facts, is_windows) {
+    let host_python = match check_prerequisites(&facts, host) {
         Ok(python) => python,
-        Err(lines) => {
-            let data = data_for(args, &sdk_root, &paths, &facts, &pin);
-            return failure(
-                g,
-                ExitCode::RuntimeFailure,
-                "prerequisites-missing",
-                lines,
-                data,
-                project,
-            );
+        Err(f) => {
+            // The ONLY path that fills `missingPrerequisites` — `data_for`'s
+            // other six call sites have nothing to say about prerequisites, so
+            // the field stays out of its signature and is set here instead.
+            // The code comes from the refusal (`prerequisites-missing`, or one
+            // of the two Python-floor codes that carry no tool at all).
+            //
+            // Empty stays `null`, never `[]`: the Python-floor refusals name no
+            // tool, and a run that checked the list and found it clean IS a
+            // successful run, which reports `null`. Two spellings of one fact
+            // would only give a consumer something extra to get wrong.
+            let mut data = data_for(args, &sdk_root, &paths, &facts, &pin);
+            data.missing_prerequisites = reported_missing(f.missing);
+            return failure(g, ExitCode::RuntimeFailure, f.code, f.lines, data, project);
         }
     };
 
@@ -260,9 +303,20 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         ));
         log.line(&format!("Detected OS:     {}", os_label(host)));
     }
+    // #99: `factsFromManifest` lived only in the `--format json` envelope, so a
+    // customer on the default text UI had no way to tell a run against a real
+    // legacy SDK — where every pin, tool list and env line came from tan's
+    // hand-ported constants — from one driven by the SDK's own declared facts.
+    // A `line`, not a `warn`: on a released SDK this is the correct, expected
+    // path, not a defect.
+    if !facts.from_manifest {
+        log.line(&format!(
+            "Facts:           tan's built-in fallbacks ({BOOTSTRAP_MANIFEST_REL_PATH} absent -- \
+             this SDK predates alp-sdk#917)"
+        ));
+    }
 
-    let (reuse, clear_zephyr_base) =
-        select_workspace(&mut log, is_windows, &pin, &facts, &mut paths);
+    let plan = select_workspace(&mut log, is_windows, &pin, &facts, &mut paths);
 
     let workspace = Workspace {
         is_windows,
@@ -273,7 +327,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     };
     let runner = Runner {
         json: g.is_json(),
-        clear_zephyr_base,
+        clear_zephyr_base: plan.clear_zephyr_base,
     };
 
     // The venv backs BOTH later phases, so it is created when either will run.
@@ -300,23 +354,73 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         // checkout under the same topdir would silently pull the WRONG SDK's
         // west.yml. Pointless (and a stray write) when an existing workspace is
         // reused, since that path touches neither west nor this topdir.
-        if !reuse {
-            if let Some((config_path, old_rel, new_rel)) = reconcile_west_manifest_path(&sdk_root) {
-                log.warn(
-                    "west-config-reconciled",
-                    &format!(
-                        "reconciled {} manifest.path {old_rel} -> {new_rel} (it named a different \
-                         SDK checkout under this topdir, #31)",
-                        config_path.display()
-                    ),
-                );
-            }
+        //
+        // The outcome outlives this block: it is also what decides whether the
+        // sync record below may be written at all.
+        //
+        // Gated on ADOPTION, not on reuse: `reconcile` derives its topdir as
+        // `<sdkRoot>/..`, which on an adopted `$ZEPHYR_BASE` is not the topdir
+        // `west update` is about to run in — and the adopted one needs no
+        // reconciling anyway, since `manifest_is_sdk` (a precondition of both
+        // Reuse and Stale) already proved its `manifest.path` resolves here.
+        let reconciled =
+            (!plan.adopted).then(|| west_config::reconcile_west_manifest_path(&sdk_root));
+        match &reconciled {
+            Some(ManifestReconcile::Rewrote {
+                config_path,
+                old_rel,
+                new_rel,
+            }) => log.warn(
+                "west-config-reconciled",
+                &format!(
+                    "reconciled {} manifest.path {old_rel} -> {new_rel} (it named a different SDK \
+                     checkout under this topdir, #31)",
+                    config_path.display()
+                ),
+            ),
+            // Silent here would be the worst of the three callers: `west
+            // update` is about to run against whatever manifest that
+            // unrewritten pointer names -- i.e. the WRONG SDK's west.yml,
+            // the exact #31 failure this call exists to prevent.
+            Some(ManifestReconcile::Failed {
+                config_path,
+                old_rel,
+                reason,
+            }) => log.warn(
+                "west-config-reconcile-failed",
+                &format!(
+                    "{}; `west update` will resolve the manifest from whatever that pointer still \
+                     names",
+                    tan_core::describe_reconcile_failure(config_path, old_rel.as_deref(), reason)
+                ),
+            ),
+            _ => {}
         }
-        if let Err(message) = west_phase(&workspace, venv, &mut log, &runner, reuse) {
+        if let Err(message) = west_phase(&workspace, venv, &mut log, &runner, plan.reuse) {
             let mut issues = issues;
             issues.extend(log.take_issues());
             let data = data_for(args, &sdk_root, &paths, &facts, &pin);
             return fatal(g, project, data, issues, message);
+        }
+        // `west update` just materialised this topdir's trees from THIS SDK's
+        // manifest -- the one fact nothing else on disk records, and the one
+        // `tan sdk switch` needs to stop recommending a bootstrap that already
+        // happened. Only on the `!reuse` path: a reused workspace was left
+        // untouched. A STALE adoption (#98) DID run `west update`, over
+        // `paths.workspace_dir`, which `select_workspace` already repointed at
+        // the adopted topdir -- so the record lands on the tree it describes.
+        //
+        // NOT after a Failed reconcile, which is the subtle one: the update
+        // above resolved its manifest from the STALE pointer, and a stale
+        // pointer naming a sibling alp-sdk checkout still satisfies west's own
+        // guard, so `west_phase` returns Ok over trees belonging to the other
+        // SDK. Recording a sync here would assert the very thing that did not
+        // happen -- and the next `tan sdk switch`, seeing a by-then-rewritable
+        // pointer plus `synced = true`, would suppress the bootstrap advice
+        // over those trees. That is the gap this branch exists to close,
+        // re-entered through the failure path.
+        if !matches!(reconciled, Some(ManifestReconcile::Failed { .. })) && !plan.reuse {
+            record_workspace_sdk(&paths.workspace_dir, &sdk_root);
         }
     }
 
@@ -339,7 +443,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         sdk_root: &sdk,
         workspace_dir: &ws,
     };
-    let mut text = optional_libs_block(&facts, host, &native(&paths.workspace_dir));
+    let mut text = optional_libs_block(&facts, host);
     text.push(String::new());
     // Deliberately NOT the oracles' "Bootstrap complete." — `doctor`'s
     // `bootstrap_fix_doctor_check` folds this exact line into its `bootstrapFix`
@@ -362,47 +466,91 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
 /// constants when the SDK predates alp-sdk#917.
 ///
 /// Version-skew guard, matching `parse_build_plan`: an ABSENT manifest is the
-/// legacy path and falls back; a manifest present with an unsupported
-/// `schemaVersion` (or one that cannot be parsed) is a hard `Err` naming why.
-/// Falling back THERE would silently re-introduce hand-ported behaviour against
-/// an SDK that explicitly declared something else — the RFC #843 drift.
-fn load_facts(sdk_root: &str) -> Result<BootstrapFacts, String> {
+/// legacy path and falls back; a manifest present but unusable — unreadable, or
+/// carrying an unsupported `schemaVersion`, or unparseable — is a hard `Err`
+/// naming why. Falling back THERE would silently re-introduce hand-ported
+/// behaviour against an SDK that explicitly declared something else — the RFC
+/// #843 drift.
+///
+/// `NotFound` is the ONLY kind that falls back (#99). This used to be a blanket
+/// `Err(_)`, on the stated premise that "every released alp-sdk today has no
+/// manifest at all" — true when it was written, expired now that `dev` ships
+/// `metadata/bootstrap.json`. A `chmod 000` manifest on a dev tree produced an
+/// envelope identical in every verdict-bearing field (`ok:true`, `exitCode:0`,
+/// `factsFromManifest:false`, `issues:[]`) to a genuine legacy SDK's.
+///
+/// `pub(crate)`: `commands::doctor` reads the same facts for the same gate, and
+/// a second reader with its own skew rule is exactly the drift this guard
+/// exists to catch.
+pub(crate) fn load_facts(sdk_root: &str) -> Result<BootstrapFacts, String> {
     let path = Path::new(sdk_root).join(BOOTSTRAP_MANIFEST_REL_PATH);
     match std::fs::read_to_string(&path) {
         Ok(text) => parse_bootstrap_manifest(&text).map_err(|e| e.to_string()),
-        // Any read failure (absent, unreadable) is treated as "legacy SDK":
-        // every released alp-sdk today has no manifest at all.
-        Err(_) => Ok(fallback_facts(MIN_PYTHON)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(fallback_facts(MIN_PYTHON)),
+        // Same shape as the parse-failure message `parse_bootstrap_manifest`
+        // produces, so a consumer sees one wording for "this manifest is here
+        // and I cannot use it", whichever way it is unusable.
+        Err(e) => Err(format!(
+            "{BOOTSTRAP_MANIFEST_REL_PATH} could not be read: {e}"
+        )),
     }
 }
 
-/// Workspace selection: reuse the `$ZEPHYR_BASE` tree only when it is a
-/// `<pin>.x` west workspace whose manifest IS this alp-sdk checkout. Returns
-/// `(reuse, clear_zephyr_base)` and, on reuse, repoints `paths.workspace_dir` /
-/// `paths.venv_dir` at the adopted tree. The rejected cases clear
-/// `$ZEPHYR_BASE` from every child so a stale tree cannot hijack `west init`.
+/// What [`select_workspace`] decided about `$ZEPHYR_BASE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct WorkspacePlan {
+    /// Skip `west init` / `west update` entirely — the adopted tree is already
+    /// on the pinned Zephyr, so bootstrap leaves it untouched.
+    reuse: bool,
+    /// A `$ZEPHYR_BASE` topdir was taken over (reused untouched OR refreshed in
+    /// place), so `paths` now name it rather than `<sdkRoot>/..`.
+    adopted: bool,
+    /// Drop `$ZEPHYR_BASE` from every child — set only when the ambient value
+    /// was REFUSED, so a foreign tree cannot hijack `west init`.
+    clear_zephyr_base: bool,
+}
+
+impl WorkspacePlan {
+    /// No `$ZEPHYR_BASE` in play at all: bootstrap `<sdkRoot>/..` normally.
+    const FRESH: Self = WorkspacePlan {
+        reuse: false,
+        adopted: false,
+        clear_zephyr_base: false,
+    };
+}
+
+/// Workspace selection over the `$ZEPHYR_BASE` tree, and, when it is adopted,
+/// repoints `paths.workspace_dir` / `paths.venv_dir` at it. The refused cases
+/// clear `$ZEPHYR_BASE` from every child so a foreign tree cannot hijack
+/// `west init`.
 ///
-/// Both rejection outcomes are recorded as warnings, not just printed: a JSON
-/// consumer otherwise could not tell that its `$ZEPHYR_BASE` was refused and a
-/// second workspace built somewhere else entirely.
+/// Three outcomes for a tree whose manifest IS this alp-sdk checkout: on the
+/// pinned Zephyr it is reused untouched; on a DIFFERENT one it is adopted and
+/// refreshed by the ordinary `west update` (#98) rather than reused-and-skipped
+/// or abandoned for a second clone elsewhere; and a foreign-manifest tree is
+/// refused as before (#769).
+///
+/// Every non-reuse outcome is recorded as a warning, not just printed: a JSON
+/// consumer otherwise could not tell that its `$ZEPHYR_BASE` was refreshed, or
+/// refused and a second workspace built somewhere else entirely.
 fn select_workspace(
     log: &mut Log,
     is_windows: bool,
     pin: &str,
     facts: &BootstrapFacts,
     paths: &mut RunPaths,
-) -> (bool, bool) {
+) -> WorkspacePlan {
     // Read the ENVIRONMENT VARIABLE only -- never a shell rc file -- so this
     // behaves identically under bash / zsh / fish / PowerShell / WSL.
     let Some(zephyr_base) = std::env::var("ZEPHYR_BASE")
         .ok()
         .filter(|v| !v.trim().is_empty())
     else {
-        return (false, false);
+        return WorkspacePlan::FRESH;
     };
     let zephyr_base_path = PathBuf::from(&zephyr_base);
     let Ok(version_file) = std::fs::read_to_string(zephyr_base_path.join("VERSION")) else {
-        return (false, false);
+        return WorkspacePlan::FRESH;
     };
     let top = zephyr_base_path.parent().map(Path::to_path_buf);
     let var = if is_windows {
@@ -418,29 +566,67 @@ fn select_workspace(
             .is_some_and(|t| manifest_points_at(t, &paths.repo_root)),
     };
     match decide_workspace_reuse(&existing, pin) {
-        WorkspaceChoice::Reuse { major_minor } => {
+        WorkspaceChoice::Reuse { version } => {
             // Never modify the user's tree: adopt it and skip init/update.
             paths.workspace_dir = top.unwrap_or_else(|| paths.workspace_dir.clone());
             paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
             log.line(&format!(
-                "Reusing compatible alp-sdk workspace from {var}: {} (Zephyr {major_minor}.x)",
+                "Reusing compatible alp-sdk workspace from {var}: {} (Zephyr {version})",
                 native(&paths.workspace_dir)
             ));
-            (true, false)
+            WorkspacePlan {
+                reuse: true,
+                adopted: true,
+                clear_zephyr_base: false,
+            }
+        }
+        WorkspaceChoice::Stale { version } => {
+            // This IS bootstrap's own workspace (its .west/config manifest.path
+            // resolves to this checkout), just left behind by an SDK pin bump.
+            // Adopt it and let the ordinary west phase run `west init -l` (a
+            // no-op here) + `west update`, which is what moves zephyr AND every
+            // other project to what this SDK's west.yml now pins.
+            //
+            // `west update` over a diagnostic: a warning alone leaves the next
+            // build green against the wrong Zephyr, which IS the #98 defect. It
+            // is not the aggressive option either -- it is byte-for-byte the
+            // command a bootstrap with no $ZEPHYR_BASE set would run over this
+            // same topdir, and it is gated on a manifest that already proved
+            // the tree belongs to this SDK.
+            paths.workspace_dir = top.unwrap_or_else(|| paths.workspace_dir.clone());
+            paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
+            log.warn(
+                "zephyr-base-stale",
+                &format!(
+                    "{var} workspace ({}) is on Zephyr {version} but this alp-sdk pins {pin} -- \
+                     refreshing it with 'west update' (this also moves the other west.yml projects \
+                     to their pins)",
+                    native(&paths.workspace_dir)
+                ),
+            );
+            WorkspacePlan {
+                reuse: false,
+                adopted: true,
+                clear_zephyr_base: false,
+            }
         }
         WorkspaceChoice::ManifestMismatch => {
             let existing = native(top.as_deref().unwrap_or(&zephyr_base_path));
             log.warn(
                 "zephyr-base-manifest-mismatch",
                 &format!(
-                    "{var} workspace ({existing}) is a {pin}.x tree but its manifest is not \
+                    "{var} workspace ({existing}) is a Zephyr {pin} tree but its manifest is not \
                      alp-sdk's west.yml -- not reusing it (would leave 'west {}' unknown, #769); \
                      building an alp-sdk workspace at {}",
                     facts.west_extension_guard,
                     native(&paths.workspace_dir)
                 ),
             );
-            (false, true)
+            WorkspacePlan {
+                reuse: false,
+                adopted: false,
+                clear_zephyr_base: true,
+            }
         }
         WorkspaceChoice::Incompatible => {
             // bootstrap.sh's message carries a tail bootstrap.ps1's does not.
@@ -452,10 +638,15 @@ fn select_workspace(
             log.warn(
                 "zephyr-base-incompatible",
                 &format!(
-                    "{var} ({zephyr_base}) is not a {pin}.x west workspace -- ignoring it{tail}"
+                    "{var} ({zephyr_base}) is not an alp-sdk Zephyr {pin} west workspace -- \
+                     ignoring it{tail}"
                 ),
             );
-            (false, true)
+            WorkspacePlan {
+                reuse: false,
+                adopted: false,
+                clear_zephyr_base: true,
+            }
         }
     }
 }
@@ -463,7 +654,12 @@ fn select_workspace(
 /// Whether `<topdir>/.west/config`'s `[manifest] path` resolves to `repo_root`.
 /// west/the venv aren't set up yet at this point, so read the config directly
 /// rather than shelling `west config manifest.path`.
-fn manifest_points_at(topdir: &Path, repo_root: &Path) -> bool {
+///
+/// `pub(crate)`, not private: `build::workspace::west_workspace_dir` reuses this
+/// SAME check (#61) to refuse a `$ZEPHYR_BASE` workspace whose manifest isn't
+/// alp-sdk's, exactly like `select_workspace` above refuses one for `tan
+/// bootstrap` -- one manifest-match test, not two copies that could drift.
+pub(crate) fn manifest_points_at(topdir: &Path, repo_root: &Path) -> bool {
     let Ok(config) = std::fs::read_to_string(topdir.join(".west").join("config")) else {
         return false;
     };
@@ -627,6 +823,9 @@ fn data_for(
         no_pip: args.no_pip,
         no_west: args.no_west,
         print_env: args.print_env,
+        // Only the prerequisite refusal has a verdict to report; every other
+        // caller of this leaves it `null` ("not reported"), never `[]`.
+        missing_prerequisites: None,
     }
 }
 
@@ -644,6 +843,8 @@ fn empty_data(args: &BootstrapArgs) -> BootstrapData {
         no_pip: args.no_pip,
         no_west: args.no_west,
         print_env: args.print_env,
+        // `sdk-root-unresolved` refuses before the gate ever runs.
+        missing_prerequisites: None,
     }
 }
 
@@ -672,6 +873,18 @@ pub(super) fn capture_tail(stdout: &[u8], stderr: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    /// The Windows install commands as `metadata/bootstrap.json` carries them,
+    /// via the fallback constants that `tan_core::bootstrap::manifest`'s
+    /// `the_fallback_matches_the_real_manifest_field_for_field` pins byte-equal to
+    /// the vendored fixture. So the `winget` lines asserted below are the
+    /// producer's own strings — this file no longer holds a copy of them.
+    fn windows_install_commands() -> std::collections::BTreeMap<String, String> {
+        fallback_facts(MIN_PYTHON)
+            .install
+            .for_host(HostOs::Windows)
+            .clone()
+    }
+
     #[test]
     fn capture_tail_prefers_stderr_and_keeps_last_lines_in_order() {
         // Regression: JSON-mode bootstrap used to discard the captured
@@ -697,6 +910,111 @@ mod tests {
         assert_eq!(capture_tail(b"", b""), "");
     }
 
+    /// `--format json`, everything else default.
+    fn json_args() -> GlobalArgs {
+        GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format: crate::cli::Format::Json,
+            verbose: false,
+            quiet: false,
+            no_color: true,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    /// No flags set.
+    fn bootstrap_args() -> BootstrapArgs {
+        BootstrapArgs {
+            no_pip: false,
+            no_west: false,
+            print_env: false,
+        }
+    }
+
+    #[test]
+    fn missing_prerequisites_is_null_unless_a_tool_is_actually_named() {
+        let args = bootstrap_args();
+        // Never reported: an explicit `null`, NOT an omitted key.
+        let json = serde_json::to_value(empty_data(&args)).unwrap();
+        assert_eq!(json["missingPrerequisites"], serde_json::Value::Null);
+
+        // The blocker this guards: the two Python-floor refusals reach the
+        // assignment with an EMPTY vec, and `[]` on the wire would spell
+        // "checked, nothing missing" -- which is what a successful run reports
+        // as `null`. Both must be `null`.
+        let install = windows_install_commands();
+        assert_eq!(
+            reported_missing(tan_core::bootstrap::windows_python_not_runnable(&install).missing),
+            None
+        );
+        assert_eq!(
+            reported_missing(
+                tan_core::bootstrap::python_too_old((3, 9), (3, 10), &install).missing
+            ),
+            None
+        );
+        assert!(
+            reported_missing(tan_core::bootstrap::windows_refusal(&["ninja"], &install).missing)
+                .is_some()
+        );
+
+        // Reported: one object per tool, `command` null for a tool tan knows no
+        // install command for (a consumer renders that field as something it
+        // RUNS, so advice must never appear there).
+        let mut data = empty_data(&args);
+        data.missing_prerequisites = reported_missing(
+            tan_core::bootstrap::windows_refusal(&["ninja", "no-such-tool"], &install).missing,
+        );
+        let json = serde_json::to_value(data).unwrap();
+        assert_eq!(
+            json["missingPrerequisites"],
+            serde_json::json!([
+                {"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"},
+                {"tool": "no-such-tool", "command": null},
+            ])
+        );
+    }
+
+    #[test]
+    fn failure_joins_its_lines_with_a_single_space_into_one_issue_message() {
+        // The PREMISE of `missingPrerequisites`: this join is why a consumer
+        // cannot recover `<tool>`/`<command>` from the message (a command
+        // contains the same spaces the join used). Nothing else pins it, and
+        // there is no bootstrap golden under `contract/envelopes/` -- bootstrap
+        // probes the host PATH, which that suite deliberately excludes -- so a
+        // refactor to `join("\n")` would silently change every bootstrap issue
+        // message on the wire.
+        let refusal = tan_core::bootstrap::windows_refusal(&["ninja"], &windows_install_commands());
+        let run = failure(
+            &json_args(),
+            ExitCode::RuntimeFailure,
+            refusal.code,
+            refusal.lines,
+            empty_data(&bootstrap_args()),
+            Project {
+                root: None,
+                board_yaml: None,
+            },
+        );
+        let envelope: serde_json::Value =
+            serde_json::from_str(&run.json.expect("json mode emits an envelope")).unwrap();
+        assert_eq!(
+            envelope["issues"][0]["code"],
+            "bootstrap.prerequisites-missing"
+        );
+        assert_eq!(envelope["issues"][0]["severity"], "error");
+        assert_eq!(
+            envelope["issues"][0]["message"],
+            "Missing required tools:   ninja  ->  winget install -e --id Ninja-build.Ninja \
+             Install the tools above (then reopen PowerShell) and re-run."
+        );
+    }
+
     /// Fresh temp dir for one test, tagged and pid-scoped like the other
     /// command test suites in this crate.
     fn tmp(tag: &str) -> PathBuf {
@@ -713,7 +1031,7 @@ mod tests {
         // No metadata/bootstrap.json at all -> legacy SDK -> fallback constants.
         let legacy = load_facts(&sdk.to_string_lossy()).expect("absent manifest must fall back");
         assert!(!legacy.from_manifest);
-        assert_eq!(legacy.zephyr_version, "v4.4.0");
+        assert_eq!(legacy.zephyr_version, "v4.4.1");
 
         // Present and supported -> its values win.
         let metadata = sdk.join("metadata");
@@ -732,6 +1050,29 @@ mod tests {
         .unwrap();
         let err = load_facts(&sdk.to_string_lossy()).expect_err("skew must not fall back");
         assert!(err.contains("schemaVersion 99"), "{err}");
+        let _ = std::fs::remove_dir_all(&sdk);
+    }
+
+    #[test]
+    fn a_manifest_that_is_present_but_unreadable_is_not_an_absent_one() {
+        // #99: every read error used to reach the fallback arm, so a manifest
+        // that exists and cannot be read produced an envelope identical in
+        // every verdict-bearing field (ok/exitCode/factsFromManifest/issues) to
+        // a genuine legacy SDK's. Only NotFound is the legacy path now.
+        //
+        // A DIRECTORY at the manifest's path is the portable stand-in for the
+        // reported `chmod 000`: it is present, `read_to_string` fails, and the
+        // kind is never NotFound — on Windows, where a mode-000 file is not
+        // reproducible and the real world's equivalent is a sharing violation
+        // or an ACL denial, this is the only shape a unit test can force.
+        let sdk = tmp("unreadable");
+        std::fs::create_dir_all(sdk.join(BOOTSTRAP_MANIFEST_REL_PATH)).unwrap();
+
+        let err = load_facts(&sdk.to_string_lossy())
+            .expect_err("a present-but-unreadable manifest must not fall back");
+        // Names the file, in the same shape as the parse-failure message.
+        assert!(err.starts_with(BOOTSTRAP_MANIFEST_REL_PATH), "{err}");
+        assert!(err.contains("could not be read"), "{err}");
         let _ = std::fs::remove_dir_all(&sdk);
     }
 

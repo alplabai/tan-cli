@@ -75,11 +75,33 @@ git clone https://github.com/alplabai/tan-cli && cd tan-cli
 cargo install --path crates/tan-cli --locked
 ```
 
+### Package managers
+
+**crates.io** (Rust **1.86+**, edition 2024) — the published crate is named
+`alp-tan-cli` (`tan`/`tan-cli` were already taken on crates.io by an unrelated
+project); the installed binary is still `tan`:
+
+```sh
+cargo install alp-tan-cli --locked
+tan --version
+```
+
+**npm** — a shim that downloads the matching platform binary on install (see
+[`npm-shim/`](npm-shim/)); no Rust toolchain needed:
+
+```sh
+npm install -g @alplabai/tan
+# or run without installing:
+npx @alplabai/tan --version
+```
+
 `tan` needs an **alp-sdk checkout** to plan against. It is found, in order, from
 `--sdk-root <path>`, the `.alp/sdk-path` pointer `tan sdk switch` writes, or an
 `alp-sdk/` directory beside the project. `tan sdk install <version>` only
 downloads into `~/.alp/sdk-cache` — follow it with `tan sdk switch <version>` to
-select it. No VS Code required.
+select it (which also reconciles a stale `.west/config` manifest pointer left
+over from a prior SDK version under the same workspace topdir). No VS Code
+required.
 
 ## Quickstart
 
@@ -88,7 +110,8 @@ select it. No VS Code required.
 # `tan sdk install <version> && tan sdk switch <version>`.
 tan bootstrap --sdk-root ./alp-sdk    # west + Zephyr workspace + Python deps
                                       # (Linux, macOS and native Windows alike)
-tan init --template minimal-app --som E1M-AEN701 --name my-app
+tan init --name my-app                # defaults to --template zephyr-app
+                                      # --som E1M-AEN801
 cd my-app                             # sibling ../alp-sdk resolves automatically
 
 tan validate                          # schema + semantic checks on board.yaml
@@ -97,16 +120,28 @@ tan size                              # footprint vs the SoM memory budget
 tan run --flash                       # build, then run (host) or program (hardware)
 ```
 
-`tan doctor --build --fix` diagnoses (and repairs what it can) a build
-environment that is not ready. `tan completion --shell zsh` emits a completion
+`tan doctor` sanity-checks the host: build readiness (SDK, Zephyr workspace,
+west) alongside debug readiness for the selected target/server. `tan doctor
+--build --fix` goes further, resolving the OS set from `board.yaml` and
+diagnosing (and repairing what it can) a build environment that is not ready;
+`--fix` requires `--build`. `tan completion --shell zsh` emits a completion
 script.
 
-`bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; on
-Windows it prints the `winget install` line for any missing `git`/`cmake`/
-`python`/`ninja` rather than installing system packages itself. Zephyr and
-baremetal cores build on every host. Only a project whose cores are *all* Yocto
-is refused off Linux — a mixed board still bootstraps, with a warning that the
-Yocto core itself needs WSL2 or a Linux host.
+`bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; it
+names the missing prerequisites rather than installing system packages itself.
+The install commands come from the SDK's own `metadata/bootstrap.json`
+(`prerequisites.install`, keyed per OS), not from a table `tan` carries — so
+Windows prints the `winget install` line for a missing `git`/`cmake`/`python`/
+`ninja`, and the JSON envelope's `missingPrerequisites[].command` now carries
+real `apt-get`/`brew` commands on Linux and macOS where it used to be `null` on
+every POSIX host. The *printed* POSIX refusal line is deliberately unchanged —
+it stays `bootstrap.sh`'s verbatim, naming the tools and nothing else. An SDK
+too old to carry `prerequisites.install` falls back to the same commands, so no
+host loses one.
+
+Zephyr and baremetal cores build on every host. Only a project whose cores are
+*all* Yocto is refused off Linux — a mixed board still bootstraps, with a
+warning that the Yocto core itself needs WSL2 or a Linux host.
 
 ## Commands
 
@@ -130,9 +165,10 @@ Yocto core itself needs WSL2 or a Linux host.
 | `--quiet` / `--verbose` / `--no-color` | Output volume and styling. |
 
 `--format json` emits the stable envelope
-`{command, ok, exitCode, project, data, issues}` — the contract the
-alp-sdk-vscode extension consumes. Text output is for humans and may change;
-the envelope is the API.
+`{command, ok, exitCode, project, sdk, data, issues}` — the contract the
+alp-sdk-vscode extension consumes (`sdk` is optional: present only when the
+command actually resolved an alp-sdk root). Text output is for humans and may
+change; the envelope is the API.
 
 ## Where it sits (three repos, one executor)
 

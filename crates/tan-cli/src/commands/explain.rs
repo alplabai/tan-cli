@@ -6,7 +6,7 @@
 //! prints an overview. Supplying both is an error (exit 1), as is an unknown id.
 
 use tan_core::wizard::{ModuleTemplateDefinition, WizardFeatureFlags, WizardTemplateDefinition};
-use tan_core::wizard::{list_module_templates, list_wizard_templates};
+use tan_core::wizard::{list_module_templates, list_wizard_templates, vendored_library_names_for};
 use tan_core::{GenerationTargetSupport, list_generation_target_support};
 
 use super::CommandRun;
@@ -226,17 +226,45 @@ pub fn run(g: &GlobalArgs, args: &ExplainArgs) -> CommandRun {
 fn project_template_details(pt: &WizardTemplateDefinition) -> Vec<String> {
     let mut details = vec![pt.description.to_string()];
     details.extend(pt.explanation.iter().map(|s| (*s).to_string()));
-    let libraries = if pt.libs.is_empty() {
-        "(none)".to_string()
-    } else {
-        pt.libs.join(", ")
-    };
-    details.push(format!("Default libraries: {libraries}"));
+    details.push(format!(
+        "Default libraries: {}",
+        format_library_names(&template_library_names(pt))
+    ));
     details.push(format!(
         "Default features: {}",
         format_feature_flags(pt.features.as_ref())
     ));
     details
+}
+
+/// The library names to report for `pt`: the vendored `board.yaml`'s
+/// `libraries:` block for a template that has a vendored SDK scaffold
+/// (`vendored_library_names_for` returns `Some(..)`, even an empty vec, for
+/// every mapped template — that empty answer IS what the scaffold ships,
+/// e.g. `zephyr-app`/`sensor-starter`/`board-diagnostics`), or the
+/// registry's own `libs` field for the one template still hand-generated
+/// (`minimal-app`, `vendored_library_names_for` returns `None` for it).
+///
+/// Fixes tan-cli#124: this used to read `pt.libs` unconditionally, which is
+/// deliberately blanked in the registry for a vendored template (the SDK
+/// scaffold's real bytes are the source of truth for what `tan init`
+/// writes, not that field) — `edge-ai-starter` reported "Default libraries:
+/// (none)" while its vendored board.yaml declares `tflite-micro`.
+fn template_library_names(pt: &WizardTemplateDefinition) -> Vec<String> {
+    match vendored_library_names_for(pt.id) {
+        Some(names) => names,
+        None => pt.libs.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+/// Formats a resolved library-name list as a comma-joined string, or
+/// `(none)` when empty.
+fn format_library_names(names: &[String]) -> String {
+    if names.is_empty() {
+        "(none)".to_string()
+    } else {
+        names.join(", ")
+    }
 }
 
 /// Builds the detail lines for a module (`tan scaffold`) template: description,
@@ -368,4 +396,115 @@ fn explain_text(summary: &str, details: &[String], g: &GlobalArgs) -> Vec<String
         }
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::Format;
+
+    fn globals(format: Format) -> GlobalArgs {
+        GlobalArgs {
+            project: None,
+            board_yaml: None,
+            sdk_root: None,
+            target: None,
+            all: false,
+            format,
+            verbose: false,
+            quiet: false,
+            no_color: true,
+            non_interactive: false,
+            ci: false,
+        }
+    }
+
+    #[test]
+    fn edge_ai_starter_reports_its_vendored_library() {
+        // Regression guard for tan-cli#124: the registry's `libs` field is
+        // blanked (`&[]`) for this vendored template, but its real vendored
+        // board.yaml declares `libraries: [tflite-micro]` -- `explain` must
+        // report that, not "(none)".
+        let args = ExplainArgs {
+            template: Some("edge-ai-starter".to_string()),
+        };
+        let run = run(&globals(Format::Text), &args);
+        assert_eq!(run.exit, ExitCode::Success);
+        let text = run.text.join("\n");
+        assert!(
+            text.contains("- Default libraries: tflite-micro"),
+            "got:\n{text}"
+        );
+        assert!(!text.contains("Default libraries: (none)"), "got:\n{text}");
+    }
+
+    #[test]
+    fn edge_ai_starter_json_envelope_reports_its_vendored_library() {
+        // Same fact, through the JSON envelope's `data.details` array (what
+        // the vscode extension actually parses).
+        let args = ExplainArgs {
+            template: Some("edge-ai-starter".to_string()),
+        };
+        let run = run(&globals(Format::Json), &args);
+        let json = run.json.expect("json envelope must be present");
+        assert!(
+            json.contains("Default libraries: tflite-micro"),
+            "got:\n{json}"
+        );
+    }
+
+    #[test]
+    fn iot_starter_still_reports_mbedtls_and_its_feature_flags() {
+        // iot-starter was already hand-synced correctly ahead of this fix
+        // (tan-cli#128) -- pins that switching the "Default libraries" line
+        // to derive from the vendored board.yaml (tan-cli#124) didn't
+        // regress it, and that "Default features" (still registry-sourced)
+        // is untouched.
+        let args = ExplainArgs {
+            template: Some("iot-starter".to_string()),
+        };
+        let run = run(&globals(Format::Text), &args);
+        let text = run.text.join("\n");
+        assert!(
+            text.contains("- Default libraries: mbedtls"),
+            "got:\n{text}"
+        );
+        assert!(
+            text.contains("- Default features: wifi=true mqtt=true ble=false tls=true"),
+            "got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn zephyr_app_and_board_diagnostics_genuinely_report_no_libraries() {
+        // Both are vendored templates whose real board.yaml has no
+        // `libraries:` block at all -- "(none)" is the correct, SOURCED
+        // answer for them (`Some(vec![])` from `vendored_library_names_for`),
+        // not an unread hand-generator default.
+        for id in ["zephyr-app", "board-diagnostics"] {
+            let args = ExplainArgs {
+                template: Some(id.to_string()),
+            };
+            let run = run(&globals(Format::Text), &args);
+            let text = run.text.join("\n");
+            assert!(
+                text.contains("- Default libraries: (none)"),
+                "{id} got:\n{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn minimal_app_falls_back_to_the_registry_libs_field() {
+        // minimal-app has no vendored tree -- `vendored_library_names_for`
+        // returns `None` for it, so `explain` must keep reading the
+        // registry's own (empty) `libs` field for this one template.
+        let args = ExplainArgs {
+            template: Some("minimal-app".to_string()),
+        };
+        let run = run(&globals(Format::Text), &args);
+        assert_eq!(run.exit, ExitCode::Success);
+        let text = run.text.join("\n");
+        assert!(text.contains("- Default libraries: (none)"), "got:\n{text}");
+    }
 }

@@ -48,7 +48,11 @@ pub use workspace::run;
 // `alp_orchestrate --emit kconfig --core <id>` through the SAME mechanism
 // `tan build` already uses instead of re-deriving any of them.
 pub(crate) use native::base_dir;
-pub(crate) use workspace::{invoke_sdk_emit, resolve_zephyr_base};
+// `west_workspace_dir` is also shared with `commands::flash` (#61): `west
+// flash`'s runner registration resolves only from the west workspace
+// manifest, so the flash child's cwd must agree with this SAME resolver
+// rather than re-deriving its own copy.
+pub(crate) use workspace::{invoke_sdk_emit, resolve_zephyr_base, west_workspace_dir};
 
 /// Envelope `data` for the `west`-delegating path: the `alp-*` command run, its
 /// cwd, and the forwarded args.

@@ -3,6 +3,7 @@
 //! CLI's `CliEnvelope`. JSON mode writes exactly one of these to stdout.
 
 use serde::Serialize;
+use tan_core::SdkSourceTier;
 
 /// A single diagnostic carried in an envelope's `issues` list.
 #[derive(Debug, Clone, Serialize)]
@@ -25,6 +26,20 @@ pub struct Project {
     pub board_yaml: Option<String>,
 }
 
+/// The alp-sdk root a command actually resolved and used, plus which
+/// precedence tier produced it. Populated from [`crate::sdk_report`] — a
+/// value RECORDED at the moment the resolver that built `project` (or a
+/// sibling resolver the same command also called) actually resolved one,
+/// never from a fresh resolution (see that module for why).
+#[derive(Debug, Clone, Serialize)]
+pub struct SdkInfo {
+    /// Absolute path to the alp-sdk checkout the command resolved and used.
+    pub root: String,
+    /// Which precedence tier produced it.
+    #[serde(rename = "sourceTier")]
+    pub source_tier: SdkSourceTier,
+}
+
 /// Top-level result envelope serialized to stdout in JSON mode; `T` is the
 /// command-specific payload.
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +53,11 @@ pub struct Envelope<T: Serialize> {
     pub exit_code: i32,
     /// Resolved project context.
     pub project: Project,
+    /// The SDK root + tier the command actually resolved and used, when one
+    /// did. Absent entirely (not `null`) when nothing resolved — see
+    /// [`crate::sdk_report`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sdk: Option<SdkInfo>,
     /// Command-specific result payload.
     pub data: T,
     /// Diagnostics emitted by the command.
@@ -45,7 +65,9 @@ pub struct Envelope<T: Serialize> {
 }
 
 impl<T: Serialize> Envelope<T> {
-    /// Build an envelope; `ok` is derived from `exit_code == 0`.
+    /// Build an envelope; `ok` is derived from `exit_code == 0`. `sdk` is
+    /// populated from whatever [`crate::sdk_report`] recorded during this
+    /// command's own resolution — not a fresh lookup.
     pub fn new(
         command: &str,
         project: Project,
@@ -53,11 +75,14 @@ impl<T: Serialize> Envelope<T> {
         issues: Vec<Issue>,
         exit_code: i32,
     ) -> Self {
+        let sdk =
+            crate::sdk_report::take().map(|(root, source_tier)| SdkInfo { root, source_tier });
         Self {
             command: command.to_string(),
             ok: exit_code == 0,
             exit_code,
             project,
+            sdk,
             data,
             issues,
         }
@@ -81,6 +106,7 @@ impl<T: Serialize> Envelope<T> {
                 ok: false,
                 exit_code: crate::exit::ExitCode::InternalFailure.code(),
                 project: self.project.clone(),
+                sdk: self.sdk.clone(),
                 data: (),
                 issues: vec![Issue {
                     code: "envelope.serialize-failed".to_string(),
@@ -107,6 +133,7 @@ mod tests {
     /// `envelope.serialize-failed` issue.
     #[test]
     fn to_json_never_panics_on_unserializable_map_keys() {
+        crate::sdk_report::reset();
         let mut data: BTreeMap<Vec<i32>, i32> = BTreeMap::new();
         data.insert(vec![1, 2], 3);
         let project = Project {
@@ -126,6 +153,7 @@ mod tests {
 
     #[test]
     fn to_json_round_trips_a_normal_payload() {
+        crate::sdk_report::reset();
         let project = Project {
             root: Some("/p".to_string()),
             board_yaml: None,
@@ -135,5 +163,56 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed["ok"], true);
         assert_eq!(parsed["data"], 42);
+    }
+
+    /// Nothing recorded by `crate::sdk_report` before `Envelope::new` -> the
+    /// `sdk` key must be ABSENT from the emitted JSON entirely, not `null`
+    /// (that's what keeps the existing contract goldens byte-identical).
+    #[test]
+    fn sdk_key_is_absent_when_nothing_was_recorded() {
+        crate::sdk_report::reset();
+        let project = Project {
+            root: Some("/p".to_string()),
+            board_yaml: None,
+        };
+        let env = Envelope::new("test", project, 1, Vec::new(), 0);
+        let json = env.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            !parsed.as_object().unwrap().contains_key("sdk"),
+            "sdk key must be absent, not present as null: {json}"
+        );
+    }
+
+    /// Whatever `crate::sdk_report` has recorded at the moment `Envelope::new`
+    /// runs is exactly what ends up in the `sdk` key — this is the whole
+    /// contract the recorder exists to serve. Also pins the member set: no
+    /// contract golden exercises this (none of the 11 fixtures resolves an
+    /// SDK, so none ever emits the `sdk` key at all), so a member silently
+    /// added or renamed inside `sdk` would otherwise ship unnoticed.
+    #[test]
+    fn sdk_key_reflects_whatever_was_recorded() {
+        crate::sdk_report::reset();
+        crate::sdk_report::record("/resolved/sdk", SdkSourceTier::Discovery);
+        let project = Project {
+            root: Some("/p".to_string()),
+            board_yaml: None,
+        };
+        let env = Envelope::new("test", project, 1, Vec::new(), 0);
+        let json = env.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed["sdk"]["root"], "/resolved/sdk");
+        assert_eq!(parsed["sdk"]["sourceTier"], "discovery");
+        let keys: std::collections::BTreeSet<&str> = parsed["sdk"]
+            .as_object()
+            .expect("sdk must be a JSON object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            ["root", "sourceTier"].into_iter().collect(),
+            "sdk member set must be exactly {{root, sourceTier}}: {json}"
+        );
     }
 }

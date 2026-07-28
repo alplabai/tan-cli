@@ -12,9 +12,9 @@ use std::process::Command;
 
 use serde::Serialize;
 use tan_core::ProjectContext;
-use tan_core::build_plan::{BuildPlan, PolicyAction};
+use tan_core::build_plan::{BuildPlan, CONSUMER_BUILD_ROOT, PolicyAction};
 use tan_core::debug::{DoctorCheck, DoctorStatus};
-use tan_core::plan_exec::{assemble_slice_env, resolve_action};
+use tan_core::plan_exec::{SdkStampAction, assemble_slice_env, resolve_action, sdk_stamp_action};
 use tan_core::preflight::preflight_summary;
 
 use super::CommandRun;
@@ -22,7 +22,10 @@ use crate::cli::GlobalArgs;
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 
-use super::workspace::{resolve_zephyr_base, west_program, with_venv_on_path};
+use crate::venv::{west_program, with_venv_on_path};
+
+use super::token_substitution::SliceDemotion;
+use super::workspace::resolve_zephyr_base;
 
 /// `SliceResult.reason` for a plan slice that carries no command. The recap
 /// keys its `(no command)` rendering off this exact string — keep producer and
@@ -110,7 +113,42 @@ pub(super) fn execute_slices(
     plan: &BuildPlan,
     base: &str,
 ) -> CommandRun {
-    execute_slices_outcome(g, context, project, plan, base).run
+    // No tokened plans in this module's own tests — nothing is ever demoted.
+    execute_slices_outcome(g, context, project, plan, base, &[]).run
+}
+
+/// Shared skip/fail shaping for the dispatch loop's early-exit branches
+/// (unknown backend / null command / demoted slice / missing tool) — tan-cli
+/// #89 review, MINOR 6: this exact shape (a colored text-mode status line,
+/// plus flipping `any_failed` when the resolved policy says Fail) used to be
+/// written out four times in the loop below. Each branch still builds its
+/// own `Issue` (different codes/severities) and `SliceResult` — those differ
+/// enough per site that folding them in too would just be a config struct
+/// for four call sites, so only the part that was byte-for-byte identical is
+/// factored out here.
+fn report_slice_outcome(
+    text_mode: bool,
+    theme: &crate::style::Theme,
+    core_id: &str,
+    backend: &str,
+    fail: bool,
+    detail: &str,
+    any_failed: &mut bool,
+) {
+    if text_mode {
+        let ds = if fail {
+            DoctorStatus::Fail
+        } else {
+            DoctorStatus::Warn
+        };
+        eprintln!(
+            "{}",
+            theme.slice_result(ds, &format!("{core_id} [{backend}] — {detail}"))
+        );
+    }
+    if fail {
+        *any_failed = true;
+    }
 }
 
 /// Run each slice's `ToolStep` sequentially under `base`. Text mode streams each
@@ -123,6 +161,7 @@ pub(crate) fn execute_slices_outcome(
     project: Project,
     plan: &BuildPlan,
     base: &str,
+    demoted: &[SliceDemotion],
 ) -> NativeBuildOutcome {
     let base_path = Path::new(base);
     let text_mode = !g.is_json();
@@ -135,7 +174,29 @@ pub(crate) fn execute_slices_outcome(
     // `build.slice-failed` issue — because the whole point of this policy is
     // to name WHICH backend string the plan sent that this CLI doesn't know.
     let mut backend_issues: Vec<Issue> = Vec::new();
-    let sdk_root = crate::util::resolve_sdk_root(g, &crate::util::cli_workspace_root(g));
+    // Also folded into the JSON envelope: a warning per slice this run wiped
+    // for a stale-SDK build dir (issue #52) — never silent, since the VS Code
+    // extension only ever sees the envelope, not this function's `eprintln!`s.
+    let mut sdk_switch_issues: Vec<Issue> = Vec::new();
+    // Per-slice `build.toolchain-root-unresolved` issues (tan-cli #89): a
+    // slice demoted by `apply_plan_token_substitution` because its OWN fields
+    // (not a plan-level site) still name an unresolved `${TOOLCHAIN_ROOT}`.
+    // Reuses the plan-fatal sibling error's code on purpose — the extension
+    // needs no new vocabulary — but at `warning` (skip) or `error` (fail)
+    // severity instead of always erroring the whole plan.
+    let mut toolchain_issues: Vec<Issue> = Vec::new();
+    let workspace_root = crate::util::cli_workspace_root(g);
+    let sdk_root = crate::util::resolve_sdk_root(g, &workspace_root);
+    // Normalized (absolute + `.`/`..`-collapsed) — NOT `sdk_root`'s raw
+    // `to_string_lossy()`. `resolve_sdk_root` returns an explicit `--sdk-root`
+    // verbatim (relative forms are a documented, supported shape), while `tan
+    // sdk switch` stores an absolute, `tan_core::normalize_path`-normalized
+    // pointer (the same `normalize_path(workspace_root.join(p))` idiom reused
+    // here, sdk.rs:414). Comparing the two raw byte-mismatches a relative
+    // `--sdk-root ../alp-sdk` against the identical absolute path `tan sdk
+    // switch` already pinned for the SAME checkout — thrashing `Pristine` (a
+    // full wipe) on every alternating invocation between the two forms.
+    let sdk_root_str = normalized_sdk_root_str(sdk_root.as_deref(), &workspace_root);
     // Auto-manage the build env so `tan build` needs no manual
     // `source .venv/activate` / `export ZEPHYR_BASE`: derive ZEPHYR_BASE from the
     // resolved workspace and pass the alp-sdk checkout as an extra Zephyr module,
@@ -143,7 +204,7 @@ pub(crate) fn execute_slices_outcome(
     // wiring `-DEXTRA_ZEPHYR_MODULES`. The plan's per-slice env still wins.
     let zephyr_base = resolve_zephyr_base(base, sdk_root.as_deref());
 
-    for slice in &plan.slices {
+    for (idx, slice) in plan.slices.iter().enumerate() {
         let backend = slice.backend.as_str().to_string();
 
         // `unknown_backend` policy: Fail (default) vs Skip. `Backend::Unknown`
@@ -152,9 +213,18 @@ pub(crate) fn execute_slices_outcome(
         // nothing enforced `executionPolicy.unknownBackend` after that
         // landed, so an unrecognised backend fell straight into dispatch
         // unchecked: a net regression versus the old closed-enum
-        // reject-the-plan behavior. Checked before the null-command/
-        // missing-tool branches below: an unrecognised backend is unusable
-        // regardless of whether the slice happens to carry a command.
+        // reject-the-plan behavior. Checked FIRST — before null-command,
+        // missing-tool, AND the demoted-slice check below (tan-cli #89
+        // review, MAJOR 2): an unrecognised backend is unusable regardless
+        // of whether the slice happens to carry a command OR is ALSO
+        // token-demoted, and `executionPolicy.unknownBackend` (default Fail,
+        // the SDK default) must not be silently downgraded to
+        // `missingTool`'s default-Skip just because the same slice ALSO
+        // names an unresolved `${TOOLCHAIN_ROOT}` — a version/bug fact
+        // outranks a host-provisioning fact, the same principle
+        // `sub_field_lenient` (tan-core) already applies within one field.
+        // Demoted used to be checked FIRST, ahead of this, which let that
+        // exact combination exit via `missingTool`'s skip-by-default instead.
         if slice.backend.is_unknown() {
             let fail = resolve_action(
                 plan.execution_policy.as_ref(),
@@ -162,21 +232,15 @@ pub(crate) fn execute_slices_outcome(
                 PolicyAction::Fail,
             ) == PolicyAction::Fail;
             let reason = format!("unrecognised backend `{backend}`");
-            if text_mode {
-                let ds = if fail {
-                    DoctorStatus::Fail
-                } else {
-                    DoctorStatus::Warn
-                };
-                eprintln!(
-                    "{}",
-                    theme
-                        .slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, reason))
-                );
-            }
-            if fail {
-                any_failed = true;
-            }
+            report_slice_outcome(
+                text_mode,
+                &theme,
+                &slice.core_id,
+                &backend,
+                fail,
+                &reason,
+                &mut any_failed,
+            );
             backend_issues.push(Issue {
                 code: "build.unknown-backend".to_string(),
                 severity: if fail { "error" } else { "warning" }.to_string(),
@@ -200,25 +264,28 @@ pub(crate) fn execute_slices_outcome(
 
         let Some(cmd) = &slice.command else {
             // `null_command` policy: Skip (default / older plan) vs Fail.
+            // Checked before the demoted-slice check below for the same
+            // reason as unknown-backend above: a null command is unusable
+            // regardless of a co-occurring token demotion.
             let fail = resolve_action(
                 plan.execution_policy.as_ref(),
                 |p| p.null_command,
                 PolicyAction::Skip,
             ) == PolicyAction::Fail;
-            if text_mode {
-                let (ds, tail) = if fail {
-                    (DoctorStatus::Fail, "no command")
-                } else {
-                    (DoctorStatus::Warn, "no command, skipped")
-                };
-                eprintln!(
-                    "{}",
-                    theme.slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, tail))
-                );
-            }
-            if fail {
-                any_failed = true;
-            }
+            let detail = if fail {
+                "no command"
+            } else {
+                "no command, skipped"
+            };
+            report_slice_outcome(
+                text_mode,
+                &theme,
+                &slice.core_id,
+                &backend,
+                fail,
+                detail,
+                &mut any_failed,
+            );
             results.push(SliceResult {
                 core_id: slice.core_id.clone(),
                 backend,
@@ -230,6 +297,86 @@ pub(crate) fn execute_slices_outcome(
             });
             continue;
         };
+
+        // Demoted-slice check (tan-cli #89) — AFTER unknown-backend and
+        // null-command above (MAJOR 2 of the #89 review: this used to sit
+        // FIRST, ahead of both — see their comments for the regression that
+        // reopened). Still BEFORE the unsafe-cwd guard/`create_dir_all`/the
+        // pristine wipe/dispatch below: a demoted slice's PLAN fields still
+        // carry the literal, unsubstituted `${TOOLCHAIN_ROOT}` —
+        // `apply_plan_token_substitution` reported it instead of erroring
+        // precisely because it has an owning slice/dispatch seam, but it did
+        // NOT make the token usable. So nothing below this point may touch
+        // those fields: not `create_dir_all` on a possibly token-bearing cwd,
+        // not the destructive sdk-switch-pristine wipe (which would delete
+        // the slice's last-good `zephyr.elf` for a build that never runs),
+        // not env assembly, not dispatch.
+        if let Some(d) = demoted
+            .iter()
+            .find(|d| d.slice_index == idx && d.core_id == slice.core_id)
+        {
+            // Keyed on BOTH `slice_index` AND `core_id`, not index alone,
+            // and not a `debug_assert_eq!` (MINOR 3 of the #89 review: a
+            // debug assertion compiles out of the shipped release binary, so
+            // it gave no protection in production). A mismatch here simply
+            // finds no demotion, so the slice falls through to normal
+            // dispatch below — where its still-literal `${TOOLCHAIN_ROOT}`
+            // fails loudly at the tool invocation — instead of silently
+            // applying a skip/fail policy to the WRONG slice.
+            //
+            // Reuses `missingTool` rather than a new policy key: this IS the
+            // condition that knob already names — "this host lacks the thing
+            // this slice builds with" — whether the missing thing is a PATH
+            // binary or a toolchain-root token. A new key would be the exact
+            // SDK-contract drift the module doc warns against.
+            let fail = resolve_action(
+                plan.execution_policy.as_ref(),
+                |p| p.missing_tool,
+                PolicyAction::Skip,
+            ) == PolicyAction::Fail;
+            let reason = d.reason.clone();
+            report_slice_outcome(
+                text_mode,
+                &theme,
+                &slice.core_id,
+                &backend,
+                fail,
+                &reason,
+                &mut any_failed,
+            );
+            toolchain_issues.push(Issue {
+                code: "build.toolchain-root-unresolved".to_string(),
+                severity: if fail { "error" } else { "warning" }.to_string(),
+                message: format!(
+                    "slice `{}` {}: {reason}",
+                    slice.core_id,
+                    if fail { "failed" } else { "skipped" }
+                ),
+            });
+            results.push(SliceResult {
+                core_id: slice.core_id.clone(),
+                backend,
+                status: if fail { "failed" } else { "skipped" }.to_string(),
+                rc: None,
+                reason: Some(reason),
+                // Explicitly cleared, NOT `None` (MINOR 4 of the #89 review):
+                // `overlay_run_results_raw` treats a `None` output_artefact as
+                // "preserve the plan-time/previous-run value" — a demoted
+                // slice never dispatches, so leaving this `None` let a
+                // Zephyr-only tokened plan on a toolchain-less host overwrite
+                // `status` to skipped/failed while `system-manifest.yaml`
+                // still named a PREVIOUS run's `zephyr.elf`. `tan flash`
+                // already refuses any non-`ok` status before trusting
+                // `output_artefact` (`plan_flash_targets`), but `tan size`/
+                // `tan debug-config` read it with no status check of their
+                // own — clearing it here (rather than requiring every reader
+                // to add one) closes that at the one place that knows the
+                // slice never built.
+                output_artefact: Some(String::new()),
+                build_dir: None,
+            });
+            continue;
+        }
 
         if text_mode {
             eprintln!(
@@ -287,6 +434,7 @@ pub(crate) fn execute_slices_outcome(
             });
             continue;
         }
+
         let tool = if cmd.tool == "west" {
             west_program(base, sdk_root.as_deref())
         } else {
@@ -310,21 +458,15 @@ pub(crate) fn execute_slices_outcome(
                 |p| p.missing_tool,
                 PolicyAction::Skip,
             ) == PolicyAction::Fail;
-            if text_mode {
-                let ds = if fail {
-                    DoctorStatus::Fail
-                } else {
-                    DoctorStatus::Warn
-                };
-                eprintln!(
-                    "{}",
-                    theme
-                        .slice_result(ds, &format!("{} [{}] — {}", slice.core_id, backend, reason))
-                );
-            }
-            if fail {
-                any_failed = true;
-            }
+            report_slice_outcome(
+                text_mode,
+                &theme,
+                &slice.core_id,
+                &backend,
+                fail,
+                &reason,
+                &mut any_failed,
+            );
             results.push(SliceResult {
                 core_id: slice.core_id.clone(),
                 backend,
@@ -335,6 +477,111 @@ pub(crate) fn execute_slices_outcome(
                 build_dir: None,
             });
             continue;
+        }
+
+        // Sdk-switch-pristine guard (issue #52): a build dir west configured
+        // against a PREVIOUS `--sdk-root` makes it FATAL ERROR on this one
+        // ("please clean it, use --pristine, or use --build-dir") — a real
+        // failure the user only sees as a bare "terminated with exit code: 1"
+        // in the terminal tab title, with the actual cause buried in
+        // scrollback. Detect it here and wipe west's own nested build dir
+        // before the tool runs, so the configure that follows is fresh
+        // instead of fatal.
+        //
+        // Deliberately AFTER the missing-tool skip above (not right after
+        // `create_dir_all`): the wipe is destructive and the tool-availability
+        // check is the only thing standing between "this slice is about to be
+        // rebuilt" and "this slice is about to be skipped". Running the wipe
+        // first meant a host missing `west` (or mid-switch to an SDK whose
+        // venv isn't resolvable yet) got its LAST GOOD `zephyr.elf` deleted
+        // for a rebuild that then never happened — the skip still reported
+        // exit 0, so nothing downstream (`tan flash`/`size`) ever learned the
+        // artefact it names is gone.
+        //
+        // Two guards (mirroring `resolve_zephyr_artefact`'s own refusal to
+        // trust a build dir it cannot resolve) gate the WHOLE block —
+        // detection, wipe, AND the stamp write below — so tan never touches a
+        // `<cwd>/build` it cannot vouch for: an explicit `-d`/`--build-dir`
+        // override (west wrote somewhere this can't know), and a cwd that
+        // doesn't normalize under `CONSUMER_BUILD_ROOT` (a plan cwd of `src/`
+        // would put the touch target at `<project>/src/build`, which may hold
+        // files the build never created — even a harmless stamp write there
+        // is an uninvited side effect outside the build tree).
+        let build_dir_overridden = manifest::build_dir_overridden(&cmd.args);
+        let cwd_under_build_root = Path::new(&cmd.cwd)
+            .components()
+            .next()
+            .is_some_and(|c| c.as_os_str() == CONSUMER_BUILD_ROOT);
+        if !build_dir_overridden && cwd_under_build_root {
+            let cached_sdk_root = manifest::read_sdk_stamp(&cwd);
+            let action = sdk_stamp_action(
+                cached_sdk_root.as_deref(),
+                sdk_root_str.as_deref(),
+                manifest::cmake_cache_configured(&cwd),
+                build_dir_overridden,
+                cwd_under_build_root,
+            );
+            if action == SdkStampAction::Pristine {
+                let new_root = sdk_root_str.as_deref().unwrap_or("?");
+                let message = match &cached_sdk_root {
+                    Some(old) => format!(
+                        "{}: build dir was configured against SDK root `{old}`; \
+                         active SDK is `{new_root}` — running pristine",
+                        slice.core_id
+                    ),
+                    None => format!(
+                        "{}: build dir predates the SDK-switch stamp (no recorded \
+                         SDK root); running pristine against the active SDK `{new_root}`",
+                        slice.core_id
+                    ),
+                };
+                if text_mode {
+                    eprintln!("note: {message}");
+                } else {
+                    sdk_switch_issues.push(Issue {
+                        code: "build.sdk-switch-pristine".to_string(),
+                        severity: "warning".to_string(),
+                        message,
+                    });
+                }
+                if let Err(e) = std::fs::remove_dir_all(cwd.join("build")) {
+                    // Best-effort: west's own FATAL ERROR below (if the wipe
+                    // didn't fully land) at least now ships with a note
+                    // explaining WHY, instead of reading as opaque.
+                    //
+                    // This MUST reach the envelope too, not just the terminal.
+                    // The extension only ever sees JSON, and the warning above
+                    // has already claimed pristine is "running" — leaving the
+                    // failure text-only means a locked `CMakeCache.txt` (the
+                    // reachable case on Windows) hands the user the exact
+                    // FATAL ERROR this feature exists to prevent, underneath a
+                    // warning saying it was handled.
+                    let failed = format!(
+                        "{}: could not fully wipe the stale build dir: {e}",
+                        slice.core_id
+                    );
+                    if text_mode {
+                        eprintln!("note: {failed}");
+                    } else {
+                        sdk_switch_issues.push(Issue {
+                            code: "build.sdk-switch-pristine-failed".to_string(),
+                            severity: "warning".to_string(),
+                            message: failed,
+                        });
+                    }
+                }
+            }
+            // Re-stamp BEFORE the tool runs (not after success): a
+            // mid-configure failure still stamped correctly, because the dir
+            // really was configured against `sdk_root` regardless of whether
+            // the build finishes — and a compile-error iteration loop keeps
+            // its incremental state instead of re-pristine-ing on every
+            // retry. Best-effort: a write failure here just leaves the dir
+            // unstamped, which fails toward a spurious future rebuild, never
+            // toward trusting a stale one.
+            if let Some(root) = sdk_root_str.as_deref() {
+                let _ = manifest::write_sdk_stamp(&cwd, root);
+            }
         }
 
         // Assemble the slice subprocess env (pure, in tan-core): slice env +
@@ -403,6 +650,39 @@ pub(crate) fn execute_slices_outcome(
                 }
             }
         };
+        // Zephyr-boilerplate guard (tan-cli #97). A `zephyr` slice whose
+        // CMake configure never loaded Zephyr's boilerplate is NOT a
+        // successful build, whatever the tool's exit code says: the app's
+        // CMakeLists.txt was treated as a plain host project, the board name
+        // was never validated (nothing loaded the code that validates it),
+        // and what linked is a host executable. The out-of-the-box scaffold
+        // hit exactly this and was reported `[+] ok` for an x86-64 binary.
+        // Refuse it here, at the one seam that knows both the declared
+        // backend and the build dir — a guard in the executor survives any
+        // change to the default template or SKU. Skipped when the slice
+        // redirects west's build dir (`-d`/`--build-dir`), where the evidence
+        // lives somewhere this cannot see.
+        let (status, reason) = if status == "ok"
+            && slice.backend == tan_core::build_plan::Backend::Zephyr
+            && !build_dir_overridden
+            && !manifest::zephyr_boilerplate_loaded(&cwd)
+        {
+            let detail = format!(
+                "core `{}` is declared `os: zephyr`, but the build in `{}` never loaded Zephyr \
+                 (no ZEPHYR_BASE in its CMakeCache.txt and no zephyr/ output) — its \
+                 CMakeLists.txt must call `find_package(Zephyr REQUIRED HINTS \
+                 $ENV{{ZEPHYR_BASE}})` before `project()`; without it CMake builds a plain host \
+                 binary, not firmware. Scaffold a working app with `tan init --template \
+                 zephyr-app`, or point the core's `app:` at one that does.",
+                slice.core_id, cmd.cwd
+            );
+            if text_mode {
+                eprintln!("{}", theme.slice_result(DoctorStatus::Fail, &detail));
+            }
+            ("failed", Some(detail))
+        } else {
+            (status, reason)
+        };
         if status == "failed" {
             any_failed = true;
         }
@@ -440,11 +720,15 @@ pub(crate) fn execute_slices_outcome(
     // `tan flash`/`size`/`image` read) reflecting this run's per-slice status.
     // Best-effort in that a failure here never flips the build's own exit code
     // (the slices already ran) — but it must not be SILENT: a failed rewrite
-    // leaves the PREVIOUS run's manifest on disk, and `tan flash` doesn't
-    // check `status` before programming whatever artefact it names. Print the
-    // reason in text mode (as before) AND fold it into the JSON envelope as a
-    // warning Issue — dropping the JSON half is exactly how a stale manifest
-    // used to look identical to `ok:true`.
+    // leaves the PREVIOUS run's manifest on disk, naming that run's artefacts
+    // with that run's statuses. `tan flash` is safe against this on its own
+    // (`tan_core::flash::plan_flash_targets` refuses any slice whose `status`
+    // isn't `ok` rather than programming a possibly-stale artefact); `tan
+    // size` is NOT — its fallback re-derives `<build_dir>/zephyr/zephyr.elf`
+    // when the manifest carries no artefact, and that path still holds the
+    // previous run's binary. Print the reason in text mode (as before) AND
+    // fold it into the JSON envelope as a warning Issue — dropping the JSON
+    // half is exactly how a stale manifest used to look identical to `ok:true`.
     let manifest_outcome = manifest::write_post_build_manifest(context, plan, base, &results);
     let manifest_warning = manifest_outcome.write_failed_reason.clone();
     if let Some(reason) = &manifest_warning {
@@ -470,6 +754,8 @@ pub(crate) fn execute_slices_outcome(
             Vec::new()
         };
         issues.extend(backend_issues);
+        issues.extend(sdk_switch_issues);
+        issues.extend(toolchain_issues);
         if let Some(reason) = manifest_warning {
             issues.push(Issue {
                 code: "build.manifest-write-failed".to_string(),
@@ -543,6 +829,21 @@ pub(crate) fn execute_slices_outcome(
     }
 }
 
+/// Absolute, `.`/`..`-collapsed form of `sdk_root`, anchored at `workspace_root`
+/// — what `sdk_stamp_action` actually compares. An absolute `sdk_root` (`tan
+/// sdk switch`'s own pointer, or an absolute `--sdk-root`) passes through
+/// unchanged (`Path::join` discards the base for an absolute pushed path); a
+/// relative one (a bare `--sdk-root ../alp-sdk`) is resolved against
+/// `workspace_root` first, so it compares equal to the absolute form of the
+/// SAME checkout instead of byte-mismatching it.
+fn normalized_sdk_root_str(sdk_root: Option<&Path>, workspace_root: &Path) -> Option<String> {
+    sdk_root.map(|p| {
+        tan_core::normalize_path(&workspace_root.join(p))
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
 /// The failure tail from an ALREADY-captured process `Output` (JSON mode) — a
 /// pure read, no second spawn. Returns the last 4 non-empty output lines
 /// joined by " | ", or an rc-only fallback when the captured streams were
@@ -593,6 +894,30 @@ mod tests {
         std::env::temp_dir().join(format!("{tag}-{}", std::process::id()))
     }
 
+    /// Plant the Zephyr-configure evidence the #97 guard looks for under a
+    /// slice's plan cwd, so a stand-in `exit 0` command reads as the real
+    /// Zephyr build these tests are pretending it is. Without it every fake
+    /// `backend: "zephyr"` slice below is (correctly) refused as a host build.
+    fn plant_zephyr_output(base: &Path, slice_cwd: &str) {
+        std::fs::create_dir_all(base.join(slice_cwd).join("build").join("zephyr")).unwrap();
+    }
+
+    #[test]
+    fn normalized_sdk_root_str_treats_a_relative_and_absolute_form_as_equal() {
+        // The reported thrash: `--sdk-root ../alp-sdk` (returned verbatim by
+        // `resolve_sdk_root`) must stamp/compare identically to the absolute,
+        // normalized pointer `tan sdk switch` already pins for the SAME
+        // checkout — otherwise alternating between the two forms across
+        // invocations pristines (a full wipe) every other build.
+        let workspace_root = unique_temp_dir("normalize-sdk-root-ws");
+        let sdk_abs = workspace_root.parent().unwrap().join("alp-sdk");
+
+        let via_absolute = normalized_sdk_root_str(Some(&sdk_abs), &workspace_root);
+        let via_relative = normalized_sdk_root_str(Some(Path::new("../alp-sdk")), &workspace_root);
+
+        assert_eq!(via_absolute, via_relative);
+    }
+
     #[test]
     fn native_execute_runs_commands_skips_commandless_and_reports() {
         use clap::Parser;
@@ -620,6 +945,7 @@ mod tests {
         let base = unique_temp_dir("alp-exec");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
 
         let project = Project {
             root: None,
@@ -798,6 +1124,164 @@ mod tests {
         assert!(
             reason.contains("not found in PATH; this is normal on non-"),
             "got: {reason}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn execute_slices_outcome_skips_a_demoted_slice_and_still_builds_the_other() {
+        // tan-cli #89: a slice demoted by `apply_plan_token_substitution`
+        // (its OWN fields still name an unresolved ${TOOLCHAIN_ROOT}) must
+        // not cost the rest of the plan anything — the other slice builds
+        // normally and the whole run stays exit 0 under the default (skip)
+        // policy, exactly like a slice whose tool is simply missing.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/c1" }} }},
+                {{ "coreId": "c2", "backend": "zephyr", "buildDir": "build/c2",
+                   "command": {{ "tool": "west", "args": ["build"], "cwd": "build/c2" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-toolchain-demoted-skip");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let demoted = vec![SliceDemotion {
+            slice_index: 1,
+            core_id: "c2".to_string(),
+            reason: "plan field `slices[1].env.ZEPHYR_SDK_INSTALL_DIR` names ${TOOLCHAIN_ROOT}, \
+                     but no toolchain install is detectable on this host — install the Zephyr \
+                     SDK (`west sdk install`) or set ZEPHYR_SDK_INSTALL_DIR to an existing install"
+                .to_string(),
+        }];
+        let outcome = execute_slices_outcome(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+            &demoted,
+        );
+        assert_eq!(outcome.run.exit.code(), 0);
+
+        let env: serde_json::Value =
+            serde_json::from_str(outcome.run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], true);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "ok");
+        assert_eq!(slices[1]["status"], "skipped");
+        let reason = slices[1]["reason"].as_str().unwrap();
+        assert!(reason.contains("west sdk install"), "got: {reason}");
+
+        let issues = env["issues"].as_array().unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i["code"] == "build.toolchain-root-unresolved"
+                    && i["severity"] == "warning"
+                    && i["message"].as_str().unwrap().contains("c2")),
+            "got: {issues:?}"
+        );
+        // A skip must never carry an error-severity issue (would flip `ok`).
+        assert!(
+            issues.iter().all(|i| i["severity"] != "error"),
+            "got: {issues:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn execute_slices_outcome_fails_a_demoted_slice_when_policy_says_fail() {
+        // executionPolicy.missingTool = "fail" flips the default skip for a
+        // demoted slice too — it reuses the SAME policy key a missing tool
+        // does, so this is the same routing test as
+        // `native_execute_fails_missing_tool_when_policy_says_fail`, just for
+        // the #89 seam. The OTHER slice must still build (does-not-abort-
+        // early is preserved) even though the whole run now exits non-zero.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/c1" }} }},
+                {{ "coreId": "c2", "backend": "zephyr", "buildDir": "build/c2",
+                   "command": {{ "tool": "west", "args": ["build"], "cwd": "build/c2" }} }}
+              ],
+              "executionPolicy": {{ "missingTool": "fail" }},
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-toolchain-demoted-fail");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let demoted = vec![SliceDemotion {
+            slice_index: 1,
+            core_id: "c2".to_string(),
+            reason: "plan field `slices[1].env.ZEPHYR_SDK_INSTALL_DIR` names ${TOOLCHAIN_ROOT}, \
+                     but no toolchain install is detectable on this host"
+                .to_string(),
+        }];
+        let outcome = execute_slices_outcome(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+            &demoted,
+        );
+        assert_eq!(outcome.run.exit.code(), 1);
+
+        let env: serde_json::Value =
+            serde_json::from_str(outcome.run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], false);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "ok");
+        assert_eq!(slices[1]["status"], "failed");
+
+        let issues = env["issues"].as_array().unwrap();
+        assert!(
+            issues
+                .iter()
+                .any(|i| i["code"] == "build.toolchain-root-unresolved"
+                    && i["severity"] == "error"
+                    && i["message"].as_str().unwrap().contains("c2")),
+            "got: {issues:?}"
         );
 
         std::fs::remove_dir_all(&base).ok();
@@ -1046,6 +1530,7 @@ mod tests {
         let base = unique_temp_dir("alp-exec-manifest-warn");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
 
         let project = Project {
             root: None,
@@ -1159,6 +1644,7 @@ mod tests {
         let base = unique_temp_dir("alp-exec-outcome-threading");
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
+        plant_zephyr_output(&base, "build/c1");
 
         let project = Project {
             root: None,
@@ -1170,10 +1656,526 @@ mod tests {
             project,
             &plan,
             base.to_str().unwrap(),
+            &[],
         );
         assert_eq!(outcome.run.exit.code(), 0);
         assert!(!outcome.manifest_written);
         assert_eq!(outcome.native_sim_target, None);
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A minimal fake SDK root: only what `resolve_sdk_root`'s
+    /// `has_loader_script` marker check needs.
+    fn fake_sdk_root(tag: &str) -> std::path::PathBuf {
+        let d = unique_temp_dir(tag);
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("scripts")).unwrap();
+        std::fs::write(d.join("scripts").join("alp_project.py"), "").unwrap();
+        d
+    }
+
+    /// `GlobalArgs` with an explicit `--sdk-root`, so `sdk_root_str` resolves
+    /// deterministically — unlike this module's other tests, which leave
+    /// `--sdk-root` unset and rely on nothing resolving in the sandbox.
+    fn global_with_sdk_root(sdk_root: &std::path::Path) -> GlobalArgs {
+        use clap::Parser;
+        crate::cli::Cli::parse_from([
+            "alp",
+            "--format",
+            "json",
+            "--sdk-root",
+            sdk_root.to_str().unwrap(),
+            "validate",
+        ])
+        .global
+    }
+
+    /// A one-slice plan whose command is a portable no-op (its exit status is
+    /// never asserted by these tests — they only check the guard's
+    /// filesystem/issue side effects). MUST actually be on PATH: the guard now
+    /// runs AFTER the missing-tool skip (so a slice whose tool isn't installed
+    /// is never wiped only to sit un-rebuilt), so a tool that doesn't resolve
+    /// would `continue` before these tests' side effects ever land — `"true"`
+    /// isn't a binary on Windows, hence the per-platform pick every other
+    /// tool-spawning test in this file already uses.
+    fn one_slice_plan_at(cwd: &str) -> BuildPlan {
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "{cwd}",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "{cwd}" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        parse_build_plan(&json).unwrap()
+    }
+
+    fn sdk_switch_issue_codes(json: &str) -> Vec<String> {
+        let env: serde_json::Value = serde_json::from_str(json).unwrap();
+        env["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["code"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn execute_slices_wipes_a_build_dir_stamped_for_a_different_sdk_root() {
+        // The reported regression (issue #52): switching --sdk-root from
+        // sdk_a to sdk_b must wipe m55_he's stale nested build dir (west's
+        // own output, at <cwd>/build) BEFORE dispatch, instead of letting
+        // west's FATAL ERROR abort the slice.
+        let sdk_a = fake_sdk_root("sdkswitch-a");
+        let sdk_b = fake_sdk_root("sdkswitch-b");
+        let base = unique_temp_dir("exec-sdkswitch-wipe");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("leftover-from-sdk-a.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_b);
+        let plan = one_slice_plan_at("build/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            !nested.join("leftover-from-sdk-a.marker").exists(),
+            "the stale build dir must be wiped"
+        );
+        let stamped = std::fs::read_to_string(nested.join(".tan-sdk-root")).unwrap();
+        assert_eq!(stamped, sdk_b.to_string_lossy());
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+        std::fs::remove_dir_all(&sdk_b).ok();
+    }
+
+    #[test]
+    fn execute_slices_keeps_a_build_dir_stamped_for_the_current_sdk_root() {
+        // A build dir whose stamp already matches this run's --sdk-root is an
+        // ordinary incremental rebuild, not a switch — must not be touched.
+        let sdk_a = fake_sdk_root("sdkswitch-match-a");
+        let base = unique_temp_dir("exec-sdkswitch-match");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("incremental-state.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_a);
+        let plan = one_slice_plan_at("build/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            nested.join("incremental-state.marker").exists(),
+            "a matching stamp must not be wiped"
+        );
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+    }
+
+    #[test]
+    fn execute_slices_skips_the_wipe_when_the_build_dir_is_overridden() {
+        // Guard 1: an explicit -d/--build-dir means west wrote somewhere this
+        // check cannot know — mirrors resolve_zephyr_artefact's own refusal.
+        let sdk_a = fake_sdk_root("sdkswitch-override-a");
+        let sdk_b = fake_sdk_root("sdkswitch-override-b");
+        let base = unique_temp_dir("exec-sdkswitch-override");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("leftover-from-sdk-a.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_b);
+        // Same portable-tool requirement as `one_slice_plan_at`: the `-d
+        // ../elsewhere` override marker must ride along with a tool that
+        // actually launches, or the missing-tool skip (which now runs first)
+        // would `continue` before `build_dir_overridden` ever gets checked.
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0", "-d", "../elsewhere"]"#)
+        } else {
+            ("true", r#"["-d", "../elsewhere"]"#)
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/c1" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            nested.join("leftover-from-sdk-a.marker").exists(),
+            "an overridden build dir must not be wiped"
+        );
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+        std::fs::remove_dir_all(&sdk_b).ok();
+    }
+
+    #[test]
+    fn execute_slices_skips_the_wipe_when_cwd_is_outside_the_build_root() {
+        // Guard 2: a plan cwd outside CONSUMER_BUILD_ROOT (here "src/c1")
+        // would put the wipe target at <project>/src/c1/build — files the
+        // build never created must never be touched.
+        let sdk_a = fake_sdk_root("sdkswitch-outside-a");
+        let sdk_b = fake_sdk_root("sdkswitch-outside-b");
+        let base = unique_temp_dir("exec-sdkswitch-outside");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("src").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("user-owned.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_b);
+        let plan = one_slice_plan_at("src/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            nested.join("user-owned.marker").exists(),
+            "a cwd outside the build root must not be wiped"
+        );
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+        std::fs::remove_dir_all(&sdk_b).ok();
+    }
+
+    #[test]
+    fn native_execute_refuses_a_zephyr_slice_whose_configure_never_loaded_zephyr() {
+        // The tan-cli #97 defect, end to end: a core declared `os: zephyr`
+        // whose CMakeLists.txt never calls `find_package(Zephyr ...)` still
+        // configures and links under `west build -b <board>` (CMake only
+        // warns about the missing `project()`), so the tool exits 0 and the
+        // executor used to report `[+] ok` for a host x86-64 binary with no
+        // `zephyr/` build output at all. Exit 0 from the tool is NOT enough:
+        // with no Zephyr evidence in the build dir the slice must fail.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "m55_hp", "backend": "zephyr", "buildDir": "build/m55_hp-zephyr",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/m55_hp-zephyr" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-zephyr-boilerplate-missing");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // Deliberately NO `plant_zephyr_output` — this is the host-build shape.
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 1, "a host binary must not pass as zephyr");
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["ok"], false);
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "failed");
+        // The message must name the customer-actionable cause, not just an rc.
+        let reason = slices[0]["reason"].as_str().unwrap();
+        assert!(reason.contains("os: zephyr"), "got: {reason}");
+        assert!(reason.contains("find_package(Zephyr"), "got: {reason}");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_accepts_a_zephyr_slice_evidenced_by_the_cmake_cache() {
+        // The other half of the #97 guard: it must not fail a REAL Zephyr
+        // build. `ZEPHYR_BASE:` in the build dir's own CMakeCache.txt is the
+        // primary signal (what `find_package(Zephyr)` caches), so pin it here
+        // WITHOUT the directory fallback present — a verified real Zephyr
+        // slice build dir carried `ZEPHYR_BASE:PATH=…` and had NO `zephyr/`
+        // directory, so this is the combination that actually occurs.
+        //
+        // `--sysbuild` is covered separately by
+        // `native_execute_accepts_a_sysbuild_slice_evidenced_one_level_down`:
+        // do NOT fold it in here by asserting the superbuild's top-level cache
+        // carries `ZEPHYR_BASE:`. That is unestablished — Zephyr's
+        // `share/sysbuild/CMakeLists.txt` calls `find_package(Sysbuild …)`,
+        // not `find_package(Zephyr)`.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "m55_hp", "backend": "zephyr", "buildDir": "build/m55_hp-zephyr",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/m55_hp-zephyr" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-zephyr-boilerplate-cached");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("m55_hp-zephyr").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("CMakeCache.txt"),
+            "CMAKE_PROJECT_NAME:STATIC=zephyr
+ZEPHYR_BASE:PATH=/work/zephyr
+",
+        )
+        .unwrap();
+        assert!(!nested.join("zephyr").exists(), "cache-only evidence");
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 0);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "ok");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_accepts_a_sysbuild_slice_evidenced_one_level_down() {
+        // `--sysbuild` is a LIVE path here — the V2N plan carries
+        // `-DSB_CONF_FILE=…/zephyr/sysbuild/v2n/sysbuild.conf`. Its superbuild
+        // project owns the top-level build dir and nests the real per-image
+        // Zephyr builds one directory deeper, so the top level has NEITHER a
+        // `zephyr/` directory NOR (as far as anything establishes) a
+        // `ZEPHYR_BASE:` cache entry: `share/sysbuild/CMakeLists.txt` declares
+        // `project(sysbuild_toplevel LANGUAGES)` and calls
+        // `find_package(Sysbuild …)`, not `find_package(Zephyr)`.
+        //
+        // Without the one-level-down look this guard FAILS A CORRECT V2N
+        // BUILD. That is the regression this test exists to prevent, so the
+        // fixture deliberately leaves the top level bare.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0"]"#)
+        } else {
+            ("true", "[]")
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "m33_sm", "backend": "zephyr", "buildDir": "build/m33_sm-zephyr",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/m33_sm-zephyr" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-zephyr-sysbuild-nested");
+        let _ = std::fs::remove_dir_all(&base);
+
+        // Superbuild layout: top level bare, the real Zephyr image one down.
+        let top = base.join("build/m33_sm-zephyr").join("build");
+        let image = top.join("alp_app");
+        std::fs::create_dir_all(image.join("zephyr")).unwrap();
+        assert!(
+            !top.join("zephyr").exists() && !top.join("CMakeCache.txt").exists(),
+            "the top level must stay bare or this test proves nothing"
+        );
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(
+            run.exit.code(),
+            0,
+            "a real sysbuild slice must not be failed by the #97 guard"
+        );
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        let slices = env["data"]["slices"].as_array().unwrap();
+        assert_eq!(slices[0]["status"], "ok");
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn native_execute_skips_the_zephyr_guard_when_the_build_dir_is_overridden() {
+        // Same refusal `resolve_zephyr_artefact` and the sdk-switch wipe both
+        // already make: with `-d`/`--build-dir` west wrote somewhere this
+        // cannot see, so there is no evidence to judge — the guard must stand
+        // down rather than fail a build it cannot inspect.
+        use clap::Parser;
+        let g = crate::cli::Cli::parse_from(["alp", "--format", "json", "validate"]).global;
+
+        let (tool, args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0", "-d", "../elsewhere"]"#)
+        } else {
+            ("true", r#"["-d", "../elsewhere"]"#)
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "m55_hp", "backend": "zephyr", "buildDir": "build/m55_hp-zephyr",
+                   "command": {{ "tool": "{tool}", "args": {args}, "cwd": "build/m55_hp-zephyr" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let base = unique_temp_dir("alp-exec-zephyr-guard-overridden");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+        assert_eq!(run.exit.code(), 0);
+
+        let env: serde_json::Value = serde_json::from_str(run.json.as_deref().unwrap()).unwrap();
+        assert_eq!(env["data"]["slices"][0]["status"], "ok");
 
         std::fs::remove_dir_all(&base).ok();
     }

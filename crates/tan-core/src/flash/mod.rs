@@ -28,9 +28,9 @@ mod builders;
 mod registry;
 mod storage;
 
+pub use args::flash_args_has_tbd;
 pub use builders::{
-    jlink_commander_script, plan_baremetal_cmake_flash, plan_cc3501e_usb_bootloader,
-    plan_swd_probe, plan_zephyr_west_flash,
+    jlink_commander_script, plan_baremetal_cmake_flash, plan_swd_probe, plan_zephyr_west_flash,
 };
 pub use registry::{
     BackendKind, FlashBackendMeta, FlashInputs, FlashPlan, backend_for, registry_keys,
@@ -71,6 +71,10 @@ pub struct FlashTarget {
     pub output_artefact: Option<String>,
     /// Helper firmware path (`firmware_path`).
     pub firmware_path: Option<String>,
+    /// Set instead of `flash_method` when a helper is a vendor-OTA-updated
+    /// coprocessor (e.g. AEN's `cc3501e_otp` via `alp_ota_spi_otp`) -- never
+    /// populated for a slice (the SDK schema doesn't carry it there).
+    pub update_channel: Option<String>,
 }
 
 /// Build the ordered flash target list + any `boot_order` warnings/refusals,
@@ -190,6 +194,7 @@ pub fn plan_flash_targets(
                         flash_args: s.flash_args.clone().unwrap_or(Value::Null),
                         output_artefact: s.output_artefact.clone(),
                         firmware_path: None,
+                        update_channel: None,
                     });
                 }
                 None => warnings.push(format!(
@@ -217,6 +222,7 @@ pub fn plan_flash_targets(
                 flash_args: h.flash_args.clone().unwrap_or(Value::Null),
                 output_artefact: None,
                 firmware_path: h.firmware_path.clone(),
+                update_channel: h.update_channel.clone(),
             });
         }
     }
@@ -390,6 +396,27 @@ boot_order: []
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].id, "gd32_bridge");
         assert_eq!(targets[0].kind, FlashKind::Helper);
+    }
+
+    #[test]
+    fn helper_update_channel_threads_into_the_flash_target() {
+        // alp-sdk#868: a helper with update_channel and no flash_method must
+        // still land in `targets` (tan-cli's flash_entry decides the skip,
+        // not this pure planner) -- but the field must survive so it can.
+        let yaml = MULTI.replace(
+            "- name: gd32_bridge\n  chip: gd32g553\n  firmware_path: firmware/gd32.bin\n  \
+             flash_method: swd_probe\n  flash_args: {}\n",
+            "- name: cc3501e_otp\n  chip: cc3501e\n  firmware_path: fw.bin\n  \
+             update_channel: alp_ota_spi_otp\n",
+        );
+        let m = manifest(&yaml);
+        let (targets, _, _) = plan_flash_targets(&m, None, Some("cc3501e_otp"));
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].flash_method.is_none());
+        assert_eq!(
+            targets[0].update_channel.as_deref(),
+            Some("alp_ota_spi_otp")
+        );
     }
 
     #[test]

@@ -96,7 +96,7 @@ pub enum Command {
     Scaffold(ScaffoldArgs),
     /// List the SDK's ready-made example projects (source for `tan init --from-example`).
     Examples,
-    /// Diagnose debug readiness for a target/server combination.
+    /// Diagnose host build readiness plus debug readiness for a target/server pair.
     Doctor(DoctorArgs),
     /// Emit a shell completion script (bash, zsh, or fish).
     Completion(CompletionArgs),
@@ -214,8 +214,11 @@ pub struct SizeArgs {
 /// Args for `renode`: boot the built system-manifest's single Zephyr slice in
 /// headless Renode. Native — mirrors the retired `west alp-renode` flags
 /// (positional `app_path`, `--build-root`, `--board`, `--image-bundle`, `--log`,
-/// `--timeout`, `--expect`, `--sim-mode`). `--sim-mode` is wired for surface
-/// stability but errors "not yet ported" (studio sim gateway, issue #674).
+/// `--timeout`, `--expect`, `--sim-mode`). `--sim-mode` serves the studio sim
+/// gateway's SOCKET contract (`tan-cli#77`, ported from the retired Python);
+/// the `ram_console_buf` UART streamer and the per-SKU sim profiles behind the
+/// descriptor's `framebuffers`/`peripherals` remain deferred on that issue.
+/// Historical contract `alp-sdk#674` (closed) — always with its owning repo.
 #[derive(Debug, Args)]
 pub struct RenodeArgs {
     /// Application source directory (default: `.`). Used to derive the default
@@ -230,6 +233,12 @@ pub struct RenodeArgs {
     /// (default: `hw_info.sku` from the manifest).
     #[arg(long, value_name = "SKU")]
     pub board: Option<String>,
+    /// Boot the Zephyr slice with this `core_id`. Needed on a manifest carrying
+    /// more than one Zephyr slice (an AEN801's `m55_hp` + `m55_he`), which the
+    /// single-slice smoke otherwise refuses outright; optional when the project
+    /// has exactly one.
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
     /// Directory of pre-built per-slice artefacts. Accepted for parity with the
     /// dual-OS flow; unused by the single-Zephyr-slice smoke.
     #[arg(long = "image-bundle", value_name = "DIR")]
@@ -245,8 +254,18 @@ pub struct RenodeArgs {
     /// line; exit 1 if the run ends without it.
     #[arg(long, value_name = "STR")]
     pub expect: Option<String>,
-    /// DEFERRED studio hardware-simulator mode (issue #674): wired for surface
-    /// stability but errors "not yet ported" until studio is repointed to `tan`.
+    /// Studio hardware-simulator mode: boot `--image-bundle`'s firmware
+    /// headless and serve the control + UART sockets named by the bundle's
+    /// `sim-descriptor.json`. Requires `--image-bundle`; `--expect` is ignored.
+    // NOT a doc comment: clap prints the lines above verbatim in `tan renode
+    // --help`, so repo-internal citation policy does not belong there. The
+    // socket half is implemented (`tan-cli#77`, ported from the retired Python
+    // `west alp-renode --sim-mode`); the ram_console → UART streamer, the
+    // wired-UART console path and the per-SKU sim profiles stay deferred on the
+    // same issue, which is why the UART socket is silent for now. The
+    // historical contract is `alp-sdk#674`. Both issue numbers carry their repo
+    // because a bare `#674` is what let three alp-sdk workflows drift into
+    // linking `tan-cli#674` — an issue that has never existed here and 404s.
     #[arg(long = "sim-mode")]
     pub sim_mode: bool,
 }
@@ -412,7 +431,8 @@ pub struct SdkArgs {
     /// Positional argument (version for install, version|path for switch).
     #[arg(value_name = "ARG")]
     pub arg: Option<String>,
-    /// Cache root for `install` (default: ~/.alp/sdk-cache).
+    /// Cache root to install into, and the first root `switch <version>` looks
+    /// in (default: ~/.alp/sdk-cache).
     #[arg(long)]
     pub destination: Option<String>,
     /// With `switch`: pin the machine-global default (`~/.alp/sdk-default`)
@@ -435,7 +455,13 @@ pub struct DoctorArgs {
     pub build: bool,
     /// With `--build`: auto-repair a fixable blocker — run `tan bootstrap` when no
     /// Zephyr workspace is resolved, then re-check.
-    #[arg(long)]
+    ///
+    /// `requires`: `run()` reads this flag only inside its `--build` branch, so
+    /// `tan doctor --fix` used to parse, be accepted, and produce output
+    /// line-for-line identical to a plain `tan doctor` — no "fixed N", no
+    /// "nothing to fix", no error (#100). A usage error is the honest answer;
+    /// `--build --fix` is unaffected.
+    #[arg(long, requires = "build")]
     pub fix: bool,
 }
 
@@ -473,6 +499,18 @@ pub struct DebugConfigArgs {
     /// Debug server backend (jlink, openocd, pyocd, gdbserver, none).
     #[arg(long, value_name = "SERVER")]
     pub server: Option<String>,
+    /// Resolve against the build slice with this `core_id`. Defaults to the
+    /// first slice matching the target class's OS, which is the whole project
+    /// on a single-core board; needed to pick a side on a multicore one.
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
+    /// Emit `preLaunchTask: <TASK>` on the generated configuration. Off by
+    /// default: nothing in this repo, in alp-sdk-vscode, or in a generated
+    /// project contributes a task, and VS Code aborts pre-launch (so the
+    /// session never starts) on a `preLaunchTask` it cannot resolve. Pass the
+    /// name your own `tasks.json` or `TaskProvider` registers.
+    #[arg(long = "pre-launch-task", value_name = "TASK")]
+    pub pre_launch_task: Option<String>,
     /// Print the launch configuration without writing launch.json.
     #[arg(long)]
     pub preview: bool,
@@ -525,7 +563,8 @@ pub struct GenerateArgs {
 /// Args for `init`: template, naming, destination, SoM/cores selection, and preview/force toggles.
 #[derive(Debug, Args)]
 pub struct InitArgs {
-    /// Project template id (e.g. minimal-app, sensor-starter).
+    /// Project template id (e.g. zephyr-app, sensor-starter); defaults to
+    /// zephyr-app when not given and there is no TTY to prompt on.
     #[arg(long)]
     pub template: Option<String>,
     /// Copy an existing SDK example project verbatim instead of expanding a
@@ -543,7 +582,8 @@ pub struct InitArgs {
     /// Destination directory (default: current directory or --project).
     #[arg(long)]
     pub destination: Option<String>,
-    /// Target SoM SKU written into the generated board.yaml (e.g. E1M-AEN701).
+    /// Target SoM SKU written into the generated board.yaml (e.g. E1M-AEN801,
+    /// the default).
     #[arg(long)]
     pub som: Option<String>,
     /// Comma-separated cores for a heterogeneous project, `id[:os]`
@@ -576,4 +616,44 @@ pub struct ScaffoldArgs {
     /// Allow overwriting existing files.
     #[arg(long)]
     pub force: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `clap`'s own consistency pass over the whole command tree — it panics on
+    /// a `requires`/`conflicts_with` naming an argument id that does not exist,
+    /// which is the one way the `--fix` relationship below could silently
+    /// become a no-op again.
+    #[test]
+    fn the_command_tree_is_internally_consistent() {
+        use clap::CommandFactory;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn doctor_fix_is_a_usage_error_without_build() {
+        // #100(a): `tan doctor --fix` used to parse, be accepted, and produce
+        // output line-for-line identical to a plain `tan doctor` — `run()`
+        // reads the flag only inside its `--build` branch. Dropping the
+        // `requires = "build"` attribute fails here.
+        let err = Cli::try_parse_from(["tan", "doctor", "--fix"])
+            .expect_err("`--fix` without `--build` must be rejected");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "{err}"
+        );
+        assert!(err.to_string().contains("--build"), "{err}");
+
+        // The supported spelling still parses, and plain `doctor` is untouched.
+        for argv in [
+            vec!["tan", "doctor", "--build", "--fix"],
+            vec!["tan", "doctor", "--build"],
+            vec!["tan", "doctor"],
+        ] {
+            Cli::try_parse_from(&argv).unwrap_or_else(|e| panic!("{argv:?}: {e}"));
+        }
+    }
 }

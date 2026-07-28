@@ -92,47 +92,98 @@ pub fn print_env_block(
 
 /// The trailing manual-install hint. POSIX prints the manifest's per-OS
 /// optional-native-libs note (plus its install command, when the OS has one);
-/// native Windows prints the script's literal Arm/Zephyr-SDK block followed by
-/// the manifest's Windows note.
-pub fn optional_libs_block(
-    facts: &BootstrapFacts,
-    host: HostOs,
-    workspace_dir: &str,
-) -> Vec<String> {
-    let hint = facts.native_lib_hint(host);
+/// native Windows prints the manifest's `manualInstallHints.windows.note`, one
+/// two-space-indented line per element under its own heading — the SDK-sourced
+/// fact, matching `bootstrap.ps1`'s own
+/// `foreach ($line in $ManualInstallNote)`.
+///
+/// Issue #82, now closed: the Windows arm used to PRECEDE that note with a
+/// hardcoded Arm-GNU-Toolchain / Zephyr-SDK block. alp-sdk#961 deleted
+/// `bootstrap.ps1`'s own copy by moving both facts INTO the manifest note, so
+/// the block survived here only while the vendored fixture predated #961. The
+/// fixture is now re-vendored at alp-sdk `0ed078a6` (past #961 and #967) and
+/// the note carries every fact the block did: the Arm installer URL and the
+/// "tick 'Add path to environment variable'" tip verbatim (note element 4), and
+/// the Zephyr-SDK `west sdk install` fact WITH its workspace locator as prose
+/// (element 1 — "Run it from your west workspace's top-level directory -- the
+/// alp-sdk checkout's parent directory -- after this script completes."). That
+/// prose locator is the `$WorkspaceDir`-survives-as-prose case #961's PR body
+/// flagged; it is why the deleted line's `{workspace_dir}` interpolation is not
+/// re-added anywhere, and why this function no longer takes a `workspace_dir`.
+/// Printing both duplicated the Arm URL and the PATH tip, which IS the bug #82
+/// reported.
+///
+/// TWO things go away with the block, both accepted. First, the RESOLVED
+/// workspace path (`from C:\ws`): #961 chose prose over a token upstream and
+/// `bootstrap.ps1` prints no path either, so tan follows the oracle it mirrors
+/// — and the resolved path is still printed in the same transcript anyway, by
+/// [`next_steps_block`] from `RunPaths::token_strings()`, so the reader is not
+/// left guessing. Second, a deliberate wording divergence: `bootstrap.ps1` said
+/// "after this script", the deleted line said "after this STEP" because tan is
+/// not a script. The manifest note ends "after this script completes." and tan
+/// prints note elements verbatim, so that misnaming is back — tolerable only
+/// because the same note already says "not auto-installed by bootstrap.ps1",
+/// which tan was already printing verbatim, so the transcript was never free of
+/// the SDK naming its own scripts.
+///
+/// Note element 3 likewise supersedes the deleted heading's "host tools like
+/// dtc", which was wrong on Windows: alp-sdk#967 verified the Zephyr SDK's
+/// native-Windows hosttools bundle ships neither `dtc` nor `gperf`.
+///
+/// One narrow window is degraded by the delete: an alp-sdk **`dev`** checkout
+/// between #917 and #961 has a manifest whose note is the single pre-#961
+/// sentence, so against it the Arm URL and PATH tip are now printed by nothing
+/// at all. Customer-unreachable — `metadata/bootstrap.json` has never existed on
+/// alp-sdk `origin/main` (absent from its entire history and from `v0.13.0`), so
+/// every RELEASED SDK takes the [`super::fallback_facts`] path, which carries the
+/// full five-element note and therefore GAINS the 7-Zip prerequisite, the
+/// dtc/gperf correction and the toolchain scoping. Nobody on a release is
+/// degraded; only a dev checkout in that commit range.
+///
+/// This must NOT read `nativeLibHints.windows.note` here: appending both used
+/// to print the Arm/Zephyr-SDK sentence twice — once hardcoded, once from a
+/// manifest note field that (pre alp-sdk#917 review) still carried the same
+/// sentence. That field (the "Under Git Bash / MSYS2..." hint
+/// `bootstrap.sh`'s `windows-bash)` arm prints) is parsed into
+/// `BootstrapFacts::hint_windows` for round-trip fidelity but rendered by
+/// NOTHING in this crate: `HostOs::detect` reads the compile-time
+/// `std::env::consts::OS`, so a Windows-built `tan.exe` always takes THIS
+/// branch, git-bash or not — the `else` branch below never runs on Windows.
+/// `bootstrap.ps1` itself has no heading for this hint either, so the gap
+/// matches the ps1 oracle tan mirrors on native Windows; there is no
+/// git-bash detection here to make the `bootstrap.sh` arm reachable.
+pub fn optional_libs_block(facts: &BootstrapFacts, host: HostOs) -> Vec<String> {
     if host == HostOs::Windows {
         let mut lines = vec![
             String::new(),
             "bootstrap: NOT auto-installed (manual, one-time):".to_string(),
-            String::new(),
-            "  # Arm GNU Toolchain (cross-compiles for real silicon) -- installer EXE:".to_string(),
-            "  #   https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads".to_string(),
-            "  #   (tick 'Add path to environment variable' during install)".to_string(),
-            String::new(),
-            "  # Zephyr SDK (alternative cross-toolchain + host tools like dtc):".to_string(),
-            // Deliberate divergence: `bootstrap.ps1` says "after this script."
-            // Tan is not a script, so the same sentence would misname what the
-            // reader just ran; "step" is the only word changed.
-            format!("  #   run 'west sdk install' from {workspace_dir} after this step."),
-            String::new(),
         ];
-        if let Some(hint) = hint {
-            // One line per `note` element, two-space indented, exactly like
-            // `bootstrap.ps1`'s `foreach ($line in $HintWindowsNote)`.
-            lines.extend(hint.note.iter().map(|line| format!("  {line}")));
-            // Deliberate divergence: `bootstrap.ps1` never prints a command on
-            // this branch. `nativeLibHints.windows.command` is null today, so
-            // this renders nothing -- but a manifest that grows one (a winget
-            // line, say) must reach the output without a tan release, same as
-            // POSIX, rather than vanishing silently.
-            if let Some(command) = hint.command.as_deref().filter(|c| !c.is_empty()) {
-                lines.push(String::new());
-                lines.push(format!("  {command}"));
-            }
-        }
+        // One line per `manualInstallHints.windows.note` element, two-space
+        // indented, exactly like `bootstrap.ps1`'s
+        // `foreach ($line in $ManualInstallNote)` — the manifest-sourced fact,
+        // not a hand-typed Rust copy that would desync silently. This is the
+        // WHOLE Windows block now; see the doc comment above for why the
+        // hardcoded Arm/Zephyr-SDK block that used to precede it is gone.
+        //
+        // NO blank line between the heading and the first note element: the
+        // oracle at the pin is `Write-Host ""` / `Write-Info "NOT
+        // auto-installed..."` / `foreach ($line in $ManualInstallNote)` with
+        // nothing in between (`0ed078a6:scripts/bootstrap.ps1`). The gap that
+        // used to sit here came from the deleted here-string's own leading
+        // newline, so it left with the block — the POSIX arm below still emits
+        // its blank because `bootstrap.sh` genuinely echoes one.
+        lines.extend(
+            facts
+                .manual_install_hints
+                .windows
+                .note
+                .iter()
+                .map(|line| format!("  {line}")),
+        );
         return lines;
     }
 
+    let hint = facts.native_lib_hint(host);
     let mut lines = vec![
         String::new(),
         "bootstrap: Optional native libraries unlock the Yocto-side backends:".to_string(),
@@ -345,43 +396,102 @@ bootstrap: Optional native libraries unlock the Yocto-side backends:
 
   sudo apt-get install -y libmosquitto-dev libasound2-dev libssl-dev pkg-config";
         assert_eq!(
-            optional_libs_block(&manifest_facts(), HostOs::Linux, "/ws").join("\n"),
+            optional_libs_block(&manifest_facts(), HostOs::Linux).join("\n"),
             expected
         );
         // The fallback constants must render the same bytes as the manifest.
         assert_eq!(
-            optional_libs_block(&fallback_facts((3, 10)), HostOs::Linux, "/ws").join("\n"),
+            optional_libs_block(&fallback_facts((3, 10)), HostOs::Linux).join("\n"),
             expected
         );
     }
 
-    /// Same, for `bootstrap.ps1`'s `foreach ($line in $HintWindowsNote)`: the
-    /// literal Arm/Zephyr-SDK here-string, then one indented line per element.
+    /// Byte-parity against `bootstrap.ps1`'s manual-install section as it reads
+    /// at the pin: a blank line, the heading, then IMMEDIATELY one
+    /// two-space-indented line per `manualInstallHints.windows.note` element and
+    /// NOTHING else. No blank between heading and first element —
+    /// `0ed078a6:scripts/bootstrap.ps1` is `Write-Host ""` / `Write-Info "NOT
+    /// auto-installed (manual, one-time):"` / `foreach ($line in
+    /// $ManualInstallNote) { Write-Host "  $line" }` back to back.
+    ///
+    /// Asserted as the oracle's ALGORITHM rather than as a transcription of the
+    /// note's five paragraphs: a hand-copied expected string here would BE the
+    /// hardcoded duplication issue #82 removed, one layer down, and would need
+    /// re-typing on every SDK wording change. The two facts the deleted block
+    /// carried are checked to appear exactly ONCE, which is what fails if that
+    /// block ever comes back. `nativeLibHints.windows.note` (the "Under Git
+    /// Bash / MSYS2..." line) must NOT appear here — that is a different fact
+    /// (bootstrap.ps1 has no heading for it at all); printing both was the
+    /// alp-sdk#917-review bug this renders around.
     #[test]
     fn optional_libs_windows_renders_one_line_per_note_element() {
-        let expected = "
-bootstrap: NOT auto-installed (manual, one-time):
+        for facts in [manifest_facts(), fallback_facts((3, 10))] {
+            let mut expected = vec![
+                String::new(),
+                "bootstrap: NOT auto-installed (manual, one-time):".to_string(),
+            ];
+            expected.extend(
+                facts
+                    .manual_install_hints
+                    .windows
+                    .note
+                    .iter()
+                    .map(|line| format!("  {line}")),
+            );
+            let rendered = optional_libs_block(&facts, HostOs::Windows);
+            assert_eq!(rendered, expected);
+            let joined = rendered.join("\n");
+            // Issue #82: the Arm URL and the PATH tip exactly ONCE each. The
+            // deleted hardcoded block carried both, so a count of 2 is that
+            // double-print regression returning. (`west sdk install` is NOT
+            // checked for uniqueness: note elements 1 and 2 both name it
+            // upstream, and legitimately so.)
+            for once in [
+                "https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads",
+                "(tick 'Add path to environment variable' during install)",
+            ] {
+                assert_eq!(joined.matches(once).count(), 1, "{once} in:\n{joined}");
+            }
+            assert!(!joined.contains("Git Bash"), "{joined}");
+        }
+    }
 
-  # Arm GNU Toolchain (cross-compiles for real silicon) -- installer EXE:
-  #   https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads
-  #   (tick 'Add path to environment variable' during install)
-
-  # Zephyr SDK (alternative cross-toolchain + host tools like dtc):
-  #   run 'west sdk install' from C:\\ws after this step.
-
-  Under Git Bash / MSYS2 the Yocto-side backends aren't intended to run -- the canonical use is \
-WSL2 + Ubuntu with the linux command above; skip this step on native Windows.
-  The Arm GNU Toolchain and the Zephyr SDK (`west sdk install`) are separate manual, one-time \
-installs on native Windows -- not auto-installed by bootstrap.ps1; native_sim / Yocto need WSL2 \
-(docs/cross-platform-setup.md section 5).";
-        // `command: null` -> note only, no trailing blank + command line.
-        assert_eq!(
-            optional_libs_block(&manifest_facts(), HostOs::Windows, "C:\\ws").join("\n"),
-            expected
+    /// The failure mode this whole fix guards against: a hand-typed Rust copy
+    /// of the manual-install sentence would render the SAME text regardless of
+    /// what the manifest says. Editing the manifest's
+    /// `manualInstallHints.windows.note` MUST change the rendered line — proof
+    /// the block reads the field rather than a literal that merely happens to
+    /// match it today.
+    ///
+    /// Mutates the PARSED value and re-serializes, rather than `.replace()`ing
+    /// the raw JSON text with a needle built from the parsed string: the note
+    /// text and its JSON encoding are not always the same bytes (a quote,
+    /// backslash or `\uXXXX` escape in a future note element would make a
+    /// text-level needle match nothing), and a `.replace()` that then finds
+    /// nothing leaves this test silently asserting nothing about the field it
+    /// exists to check — worse than no test, per issue #82. Going through
+    /// `serde_json::Value` sidesteps the whole escaping class: there is no
+    /// "needle not found" case to guard against.
+    #[test]
+    fn optional_libs_windows_note_comes_from_the_manifest_not_a_rust_literal() {
+        let mut doc: serde_json::Value = serde_json::from_str(REAL_MANIFEST).unwrap();
+        let note = doc
+            .pointer_mut("/manualInstallHints/windows/note/0")
+            .expect("fixture must carry at least one manualInstallHints.windows.note element");
+        let original_note = note.as_str().unwrap().to_string();
+        *note = serde_json::Value::String(
+            "EDITED sentence that only the manifest field carries.".to_string(),
         );
-        assert_eq!(
-            optional_libs_block(&fallback_facts((3, 10)), HostOs::Windows, "C:\\ws").join("\n"),
-            expected
+        let doc = serde_json::to_string(&doc).expect("re-serializing the edited fixture");
+        let facts = parse_bootstrap_manifest(&doc).expect("edited manifest must parse");
+        let rendered = optional_libs_block(&facts, HostOs::Windows).join("\n");
+        assert!(
+            rendered.contains("  EDITED sentence that only the manifest field carries."),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains(&original_note),
+            "the stale sentence must not survive the edit: {rendered}"
         );
     }
 
@@ -393,7 +503,7 @@ installs on native Windows -- not auto-installed by bootstrap.ps1; native_sim / 
         facts.hint_linux.note = vec!["one line only".to_string()];
         facts.hint_linux.command = None;
         assert_eq!(
-            optional_libs_block(&facts, HostOs::Linux, "/ws"),
+            optional_libs_block(&facts, HostOs::Linux),
             vec![
                 "".to_string(),
                 "bootstrap: Optional native libraries unlock the Yocto-side backends:".to_string(),
@@ -401,35 +511,34 @@ installs on native Windows -- not auto-installed by bootstrap.ps1; native_sim / 
                 "  one line only".to_string(),
             ]
         );
-        facts.hint_windows.note = vec!["one line only".to_string()];
-        let win = optional_libs_block(&facts, HostOs::Windows, "C:\\ws");
-        assert_eq!(win.last().unwrap(), "  one line only");
-        assert_eq!(win[win.len() - 2], "", "the here-string's trailing blank");
+        // The Windows arm is these THREE lines and nothing more — the
+        // exhaustive compare is what proves both that the hardcoded
+        // Arm/Zephyr-SDK block issue #82 removed has not crept back in ahead of
+        // the note, and that no blank line survives between the heading and the
+        // first element (the ps1 at the pin has none).
+        facts.manual_install_hints.windows.note = vec!["one line only".to_string()];
+        assert_eq!(
+            optional_libs_block(&facts, HostOs::Windows),
+            vec![
+                "".to_string(),
+                "bootstrap: NOT auto-installed (manual, one-time):".to_string(),
+                "  one line only".to_string(),
+            ]
+        );
     }
 
     #[test]
     fn optional_libs_renders_the_manifest_hint_per_host() {
         let facts = manifest_facts();
-        let mac = optional_libs_block(&facts, HostOs::MacOs, "/ws").join("\n");
+        let mac = optional_libs_block(&facts, HostOs::MacOs).join("\n");
         assert!(mac.contains("  Equivalents via Homebrew:"), "{mac}");
         assert!(
             mac.contains("  mosquitto  -> alp_mqtt_* (cleartext + TLS)"),
             "{mac}"
         );
         assert!(mac.contains("  brew install mosquitto pkg-config"), "{mac}");
-        // `nativeLibHints.windows.command` is null, but a manifest that GROWS
-        // one must render it, spaced like POSIX (a tan-only tail, see
-        // `optional_libs_block`).
-        let mut with_command = manifest_facts();
-        with_command.hint_windows.command = Some("winget install -e --id Foo.Bar".to_string());
-        let grown = optional_libs_block(&with_command, HostOs::Windows, "C:\\ws");
-        let at = grown
-            .iter()
-            .position(|l| l == "  winget install -e --id Foo.Bar")
-            .expect("windows hint command must be rendered");
-        assert_eq!(grown[at - 1], "", "command must be blank-line separated");
         // `*)` arm: no hint for an unrecognised OS.
-        let other = optional_libs_block(&facts, HostOs::Other, "/ws").join("\n");
+        let other = optional_libs_block(&facts, HostOs::Other).join("\n");
         assert!(
             other.contains("(OS not auto-detected; see docs/testing.md)"),
             "{other}"

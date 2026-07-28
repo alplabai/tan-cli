@@ -212,11 +212,120 @@ pub(super) fn resolve_zephyr_artefact(
 /// True when the slice's argv redirects west's build dir away from the
 /// default nested `<cwd>/build` (`-d <dir>`, `--build-dir <dir>`, or
 /// `--build-dir=<dir>`) — the one case `resolve_zephyr_artefact`'s default
-/// path can't follow.
-fn build_dir_overridden(cmd_args: &[String]) -> bool {
+/// path can't follow. `pub(super)` — also consulted by the executor's
+/// sdk-switch-pristine guard (see `sdk_stamp_path`), which refuses to touch a
+/// build dir west didn't put at the default nested path for the same reason.
+pub(super) fn build_dir_overridden(cmd_args: &[String]) -> bool {
     cmd_args
         .iter()
         .any(|a| a == "-d" || a == "--build-dir" || a.starts_with("--build-dir="))
+}
+
+/// Path of the tan-owned SDK-root stamp (issue #52): lives INSIDE west's own
+/// nested build dir (`<cwd>/build`, not `<cwd>` itself), so wiping that dir on
+/// a mismatch retires the stamp atomically — it can never outlive or
+/// misdescribe a build dir that no longer exists.
+pub(super) fn sdk_stamp_path(slice_cwd: &Path) -> std::path::PathBuf {
+    slice_cwd.join("build").join(".tan-sdk-root")
+}
+
+/// The SDK root recorded in the stamp file, if any (`None` covers both "never
+/// stamped" and "unreadable" — both read as "no signal", which
+/// `sdk_stamp_action` treats as a mismatch on an already-configured dir).
+pub(super) fn read_sdk_stamp(slice_cwd: &Path) -> Option<String> {
+    std::fs::read_to_string(sdk_stamp_path(slice_cwd))
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Write the stamp BEFORE the tool is spawned (see the executor call site):
+/// a mid-configure failure still stamped correctly, since the dir really was
+/// configured against `sdk_root` regardless of whether the build finishes.
+/// Best-effort — a write failure here is not fatal to the build; it just
+/// means the next run may treat this dir as unstamped (fails toward a
+/// spurious rebuild, not toward trusting a stale one).
+pub(super) fn write_sdk_stamp(slice_cwd: &Path, sdk_root: &str) -> std::io::Result<()> {
+    let path = sdk_stamp_path(slice_cwd);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, sdk_root)
+}
+
+/// Whether west has ever configured this slice's build dir (`<cwd>/build/
+/// CMakeCache.txt`) — the "was this dir ever configured" signal
+/// `sdk_stamp_action` needs before it treats a missing stamp as stale. Present
+/// at the top of the nested dir in both plain and `--sysbuild` builds (the
+/// sysbuild superbuild project has its own top-level cache; only per-image
+/// caches nest further), so this holds for every slice `tan` emits today.
+pub(super) fn cmake_cache_configured(slice_cwd: &Path) -> bool {
+    slice_cwd.join("build").join("CMakeCache.txt").is_file()
+}
+
+/// Whether this slice's build dir shows that Zephyr's CMake boilerplate was
+/// actually loaded — the signal behind the `os: zephyr` guard (tan-cli #97).
+///
+/// The reported defect: a project whose `CMakeLists.txt` never calls
+/// `find_package(Zephyr ...)` still configures and links fine under `west
+/// build -b <board>` (CMake only emits a *dev* warning about the missing
+/// `project()` call), so a core declared `os: zephyr` produced a host x86-64
+/// executable and the executor reported it `[+] ok`. The board name is never
+/// even validated, because nothing loaded the code that would validate it.
+///
+/// Two signals, either of which proves the boilerplate ran; both are
+/// generated build artefacts, NOT log text (a configure-log grep for
+/// `ZephyrConfig.cmake` breaks the moment CMake rewords a line, and
+/// log-scraping gates are a failure class this repo has been burned by):
+///
+/// 1. A `ZEPHYR_BASE:` entry in the build dir's own `CMakeCache.txt`. This is
+///    the primary signal and the closest thing to the fact being asserted —
+///    `find_package(Zephyr)` is what caches it, a plain host configure never
+///    does (verified against a real `<slice>/build/CMakeCache.txt`, which
+///    carries `ZEPHYR_BASE:PATH=…` on line 42, versus a baremetal one, whose
+///    complete 339-line cache has no `ZEPHYR_BASE` line at all).
+/// 2. A `zephyr/` subdirectory under the build dir — Zephyr's boilerplate
+///    binary dir. Kept as an OR fallback rather than the primary signal so
+///    the guard can only ever fail a build it is SURE about: a real Zephyr
+///    tree that somehow shipped no readable `CMakeCache.txt` still passes.
+///    Do NOT promote this to the primary signal: the verified real Zephyr
+///    slice dir above carried `ZEPHYR_BASE:` and had NO `zephyr/` directory,
+///    so signal 1 is the one doing the work.
+///
+/// Both signals are also checked one level down, because `--sysbuild` is a
+/// live path here (`-DSB_CONF_FILE=…/zephyr/sysbuild/v2n/sysbuild.conf` for
+/// V2N) and its superbuild nests the real per-image Zephyr builds one
+/// directory deeper. An earlier revision of this function asserted that a
+/// sysbuild top-level cache carries `ZEPHYR_BASE:` too; that is NOT
+/// established. Zephyr's `share/sysbuild/CMakeLists.txt` declares
+/// `project(sysbuild_toplevel LANGUAGES)` and calls
+/// `find_package(Sysbuild …)`, not `find_package(Zephyr)` — and the only
+/// `set(ZEPHYR_BASE … CACHE)` in the tree is in `cmake/modules/unittest.cmake`.
+/// Without the nested look, a legitimate V2N sysbuild slice would have no
+/// top-level `ZEPHYR_BASE:` and no top-level `zephyr/`, and this guard would
+/// fail a correct build. One level is enough (sysbuild nests per-image, not
+/// recursively) and keeps the cost bounded.
+///
+/// Callers must skip this check when `build_dir_overridden` — west then wrote
+/// somewhere this can't see, same refusal `resolve_zephyr_artefact` already
+/// makes.
+pub(super) fn zephyr_boilerplate_loaded(slice_cwd: &Path) -> bool {
+    let build = slice_cwd.join("build");
+    if dir_shows_zephyr(&build) {
+        return true;
+    }
+    // sysbuild superbuild: the real Zephyr builds are one level down.
+    std::fs::read_dir(&build).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_type().is_ok_and(|t| t.is_dir()) && dir_shows_zephyr(&e.path()))
+    })
+}
+
+/// The two per-directory signals behind [`zephyr_boilerplate_loaded`].
+fn dir_shows_zephyr(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("CMakeCache.txt"))
+        .is_ok_and(|c| c.lines().any(|l| l.starts_with("ZEPHYR_BASE:")))
+        || dir.join("zephyr").is_dir()
 }
 
 /// Absolute, lossy-string form of a path (no filesystem round-trip beyond
@@ -410,6 +519,57 @@ boot_order: []
     }
 
     #[test]
+    fn rewrite_manifest_yaml_clears_a_stale_output_artefact_when_the_executor_says_so() {
+        // MINOR 4 of the #89 review: `overlay_run_results_raw` treats a
+        // `None` `output_artefact` as "preserve the plan-time/previous-run
+        // value" — correct for a slice this run never touched, but WRONG for
+        // one the executor knows never dispatched this run (a demoted slice,
+        // tan-cli #89). Left as `None`, a Zephyr-only tokened plan on a
+        // toolchain-less host would write `status: skipped` next to the
+        // PREVIOUS run's `zephyr.elf` path — `tan size`/`tan debug-config`
+        // read `output_artefact` with no status check of their own. The
+        // executor's fix is to overlay `Some(String::new())` instead of
+        // `None`; this pins that an explicit empty string actually clears
+        // the stale value rather than being (mis)treated as "preserve".
+        let yaml = r#"
+schema_version: 1
+generated_by: scripts/alp_orchestrate.py
+hw_info:
+  sku: E1M-V2N101
+slices:
+- core_id: m33_sm
+  os: zephyr
+  output_artefact: build/m33_sm-zephyr/build/zephyr/zephyr.elf
+  status: ok
+ipc: []
+helper_mcus: []
+boot_order: []
+"#;
+        let overlay = vec![(
+            "m33_sm".to_string(),
+            "skipped".to_string(),
+            Some(String::new()),
+            None,
+            Some(
+                "plan field `slices[0].env.ZEPHYR_SDK_INSTALL_DIR` names ${TOOLCHAIN_ROOT}, \
+                  but no toolchain install is detectable on this host"
+                    .to_string(),
+            ),
+        )];
+
+        let out = rewrite_manifest_yaml(yaml, &overlay).expect("rewrite must succeed");
+
+        assert!(
+            out.contains("status: skipped"),
+            "overlay did not land: {out}"
+        );
+        assert!(
+            !out.contains("build/m33_sm-zephyr/build/zephyr/zephyr.elf"),
+            "the previous run's elf path must not survive a demoted slice's overlay: {out}"
+        );
+    }
+
+    #[test]
     fn resolve_zephyr_artefact_accepts_an_elf_left_by_a_no_op_incremental_rebuild() {
         // Regression: an earlier version gated on `mtime >= not_before`
         // (captured right before the command was spawned) to reject a stale
@@ -475,6 +635,84 @@ boot_order: []
         let (artefact, build_dir) = resolve_zephyr_artefact(&cwd, &[]);
         assert!(artefact.is_some());
         assert!(build_dir.is_some());
+
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    /// The producer half of a cross-module assumption. `resolve_zephyr_artefact`
+    /// is tan's ONLY writer of a slice's `output_artefact` (alp-sdk is
+    /// planner/emit-only and never writes it), and it names `zephyr.elf` for
+    /// EVERY zephyr slice — native_sim included, where the runnable is the
+    /// sibling `zephyr.exe`. `tan run` and `tan debug-config` both depend on
+    /// that: each resolves the host binary by swapping the filename
+    /// (`tan_core::run::native_sim_exe_beside`). #83 shipped a `program`
+    /// pointing at the ELF precisely because its test fixture asserted a
+    /// `.exe` manifest this function cannot produce, and nothing on this side
+    /// contradicted it. So pin it HERE, where the string is actually decided:
+    /// add a native_sim `.exe` branch above and this fails, instead of two
+    /// consumer fixtures quietly going stale.
+    #[test]
+    fn resolve_zephyr_artefact_names_the_elf_even_for_a_native_sim_slice() {
+        let cwd = unique_temp_dir("alp-resolve-native-sim");
+        let _ = std::fs::remove_dir_all(&cwd);
+        let out_dir = cwd.join("build").join("zephyr");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        // What a real native_sim build leaves behind: BOTH files, side by side.
+        std::fs::write(out_dir.join("zephyr.elf"), b"elf").unwrap();
+        std::fs::write(out_dir.join("zephyr.exe"), b"exe").unwrap();
+
+        let (artefact, _) = resolve_zephyr_artefact(&cwd, &[]);
+        let artefact = artefact.expect("a built slice resolves an artefact");
+        assert!(
+            artefact.ends_with("zephyr.elf"),
+            "the manifest must record the ELF even when a runnable .exe sits \
+             beside it — consumers resolve the host binary from it: {artefact}"
+        );
+
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    #[test]
+    fn sdk_stamp_round_trips_through_write_and_read() {
+        let cwd = unique_temp_dir("alp-sdk-stamp-roundtrip");
+        let _ = std::fs::remove_dir_all(&cwd);
+
+        assert_eq!(read_sdk_stamp(&cwd), None, "nothing written yet");
+        write_sdk_stamp(&cwd, "/sdk/v0.13.0").unwrap();
+        assert_eq!(read_sdk_stamp(&cwd), Some("/sdk/v0.13.0".to_string()));
+
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    #[test]
+    fn sdk_stamp_lives_inside_the_nested_build_dir_so_wiping_it_retires_the_stamp() {
+        // The load-bearing property: the stamp can never outlive or
+        // misdescribe a build dir that no longer exists, because it sits
+        // INSIDE the exact directory the mismatch wipe removes.
+        let cwd = unique_temp_dir("alp-sdk-stamp-retires-with-wipe");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write_sdk_stamp(&cwd, "/sdk/v0.11.0").unwrap();
+        assert!(sdk_stamp_path(&cwd).starts_with(cwd.join("build")));
+
+        std::fs::remove_dir_all(cwd.join("build")).unwrap();
+        assert_eq!(
+            read_sdk_stamp(&cwd),
+            None,
+            "stamp must not survive the wipe"
+        );
+
+        std::fs::remove_dir_all(&cwd).ok();
+    }
+
+    #[test]
+    fn cmake_cache_configured_reflects_whether_west_ever_configured_the_dir() {
+        let cwd = unique_temp_dir("alp-cmake-cache-configured");
+        let _ = std::fs::remove_dir_all(&cwd);
+        std::fs::create_dir_all(cwd.join("build")).unwrap();
+
+        assert!(!cmake_cache_configured(&cwd), "no CMakeCache.txt yet");
+        std::fs::write(cwd.join("build").join("CMakeCache.txt"), "").unwrap();
+        assert!(cmake_cache_configured(&cwd));
 
         std::fs::remove_dir_all(&cwd).ok();
     }

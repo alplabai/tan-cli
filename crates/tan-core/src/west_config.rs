@@ -13,6 +13,97 @@
 //! that divergence before shelling `bootstrap.sh`; the IO (read/canonicalize/
 //! write) lives there, this module only has the section-scoped text logic.
 
+use std::path::{Path, PathBuf};
+
+/// What an attempted `.west/config` manifest-path reconcile actually did.
+///
+/// The whole point is that "nothing to do" and "I could not do it" are
+/// DIFFERENT outcomes. This used to be an `Option`, whose `None` folded five
+/// states into one: no topdir, no `.west/config`, an unreadable one, no
+/// `[manifest] path` line, and a failed write. The first two are genuine
+/// no-ops; the last three mean the pointer the workspace actually resolves its
+/// manifest from is still stale — and the caller reported clean success for
+/// all five. A read-only or (on Windows, routinely) open-in-another-process
+/// `.west/config` is the common shape of that, not an exotic permissions edge.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ManifestReconcile {
+    /// No parent directory, no `.west/config` under the topdir, or a config
+    /// with no `[manifest] path` line at all — there is no workspace pointer
+    /// here to reconcile, and nothing was touched.
+    NotApplicable,
+    /// `[manifest] path` already names the target SDK — a true no-op.
+    AlreadyMatches,
+    /// The pointer diverged and was rewritten to `new_rel`.
+    Rewrote {
+        config_path: PathBuf,
+        old_rel: String,
+        new_rel: String,
+    },
+    /// The pointer diverged but names a real directory that is NOT an alp-sdk
+    /// checkout, so `tan sdk switch`'s guard deliberately left it alone.
+    Blocked {
+        config_path: PathBuf,
+        old_rel: String,
+    },
+    /// A rewrite was needed and could not be performed. `old_rel` is `None`
+    /// when the failure happened before the current value could be read.
+    Failed {
+        config_path: PathBuf,
+        old_rel: Option<String>,
+        reason: String,
+    },
+}
+
+/// The shared opening sentence for a [`ManifestReconcile::Failed`]: what could
+/// not be rewritten, what it still says, and why (the OS's own reason).
+///
+/// Both callers — `tan sdk switch` and `tan bootstrap` — say exactly this and
+/// then append their own consequence, so it lives here once rather than being
+/// hand-formatted twice. That also makes it checkable without a venv: the
+/// bootstrap call site itself can only be reached behind a real `west` run.
+pub fn describe_reconcile_failure(
+    config_path: &Path,
+    old_rel: Option<&str>,
+    reason: &str,
+) -> String {
+    format!(
+        "could not rewrite {}'s manifest.path{} ({reason})",
+        config_path.display(),
+        // No `old_rel` when the failure landed before the current value could
+        // be read — say nothing rather than invent a value.
+        old_rel.map_or(String::new(), |old| format!(" (still {old})")),
+    )
+}
+
+/// Whether `tan bootstrap` should be recommended after a `tan sdk switch`,
+/// derived from WORKSPACE STATE rather than from whether this particular
+/// invocation happened to rewrite a line.
+///
+/// The rewrite-latched version was silent on a second `sdk switch` (the config
+/// already matched by then) even though `topdir/zephyr` and `modules/` were
+/// still the previous SDK's trees — the advice disappeared exactly when the
+/// user had not yet acted on it. Two independent facts decide it instead:
+///
+/// - the manifest pointer (does `.west/config` resolve to THIS SDK's
+///   `west.yml`), carried by `outcome`; and
+/// - `synced_to_sdk` — whether the workspace's checked-out trees were last
+///   `west update`d against this SDK, which only a recorded fact can answer
+///   (`tan bootstrap` writes it; see `record_workspace_sdk` in the CLI).
+///
+/// `NotApplicable` is the one silent case: no `.west/` under this topdir means
+/// there is no workspace here to be stale — including the legitimate adopted
+/// `$ZEPHYR_BASE` workspace that lives somewhere else entirely.
+pub fn workspace_needs_bootstrap(outcome: &ManifestReconcile, synced_to_sdk: bool) -> bool {
+    match outcome {
+        ManifestReconcile::NotApplicable => false,
+        // The pointer does not name this SDK (and this run could not fix it):
+        // stale regardless of what any sync record claims.
+        ManifestReconcile::Blocked { .. } | ManifestReconcile::Failed { .. } => true,
+        // The pointer names this SDK — the trees decide.
+        ManifestReconcile::Rewrote { .. } | ManifestReconcile::AlreadyMatches => !synced_to_sdk,
+    }
+}
+
 /// Returns the `[manifest]` section's `path = ` value, or `None` when the
 /// config has no `[manifest]` section or no `path` key inside it.
 ///
@@ -117,6 +208,78 @@ mod tests {
     use super::*;
 
     const CONFIG: &str = "[manifest]\npath = alp-sdk\nfile = west.yml\n[zephyr]\nbase = zephyr\n";
+
+    #[test]
+    fn a_reconcile_failure_names_the_file_the_stale_value_and_the_reason() {
+        // The sentence both callers put in front of their own consequence.
+        // Covered here because bootstrap's copy of it sits behind a real `west`
+        // run and no unit test can reach that call site.
+        let message = describe_reconcile_failure(
+            Path::new("/top/.west/config"),
+            Some("v0.11.0"),
+            "Access is denied. (os error 5)",
+        );
+        assert!(message.contains("/top/.west/config"), "{message}");
+        assert!(message.contains("(still v0.11.0)"), "{message}");
+        assert!(
+            message.contains("Access is denied. (os error 5)"),
+            "{message}"
+        );
+
+        // Nothing was read -> no stale value is claimed.
+        let unread = describe_reconcile_failure(Path::new("/top/.west/config"), None, "EISDIR");
+        assert!(!unread.contains("still"), "{unread}");
+        assert!(unread.contains("EISDIR"), "{unread}");
+    }
+
+    #[test]
+    fn advice_is_silent_only_when_the_workspace_is_provably_synced() {
+        // The gap this closes: the advice used to be latched to a rewrite
+        // FIRING, so a second `sdk switch` (pointer already correct, trees
+        // still the old SDK's) said nothing. A matching pointer is now only
+        // half the answer -- the trees have to have been synced too.
+        let matches = ManifestReconcile::AlreadyMatches;
+        assert!(workspace_needs_bootstrap(&matches, false));
+        assert!(!workspace_needs_bootstrap(&matches, true));
+
+        let rewrote = ManifestReconcile::Rewrote {
+            config_path: PathBuf::from("/top/.west/config"),
+            old_rel: "v0.11.0".to_string(),
+            new_rel: "v0.13.0".to_string(),
+        };
+        assert!(workspace_needs_bootstrap(&rewrote, false));
+        // A pointer someone else had diverted, rewritten back to the SDK the
+        // trees were already synced against, genuinely needs nothing.
+        assert!(!workspace_needs_bootstrap(&rewrote, true));
+    }
+
+    #[test]
+    fn advice_ignores_a_sync_record_when_the_pointer_does_not_name_this_sdk() {
+        // Blocked/Failed mean `west` still resolves its manifest from somewhere
+        // else -- no sync record can make that state fine.
+        let blocked = ManifestReconcile::Blocked {
+            config_path: PathBuf::from("/top/.west/config"),
+            old_rel: "zephyr".to_string(),
+        };
+        assert!(workspace_needs_bootstrap(&blocked, true));
+        let failed = ManifestReconcile::Failed {
+            config_path: PathBuf::from("/top/.west/config"),
+            old_rel: Some("v0.11.0".to_string()),
+            reason: "permission denied".to_string(),
+        };
+        assert!(workspace_needs_bootstrap(&failed, true));
+    }
+
+    #[test]
+    fn advice_stays_silent_when_there_is_no_workspace_under_this_topdir() {
+        // No `.west/` here at all -- including the adopted `$ZEPHYR_BASE`
+        // workspace case, where the real workspace lives elsewhere entirely.
+        // Nothing under this topdir can be stale, so `sdk switch` says nothing.
+        assert!(!workspace_needs_bootstrap(
+            &ManifestReconcile::NotApplicable,
+            false
+        ));
+    }
 
     #[test]
     fn get_returns_the_manifest_path() {
