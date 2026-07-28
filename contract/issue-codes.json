@@ -74,6 +74,16 @@
       "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
       "literal": "\"debug-config.legacy-entry-migrated\"",
       "note": "Fires only on the one-time migration path in `tan_core::debug_launch::create_launch_json_write_plan`: an exact-name miss against the current `\"Alp: ...\"` name that then hits the ONE legacy spelling of that same name. It never fires when a current-named entry already exists (whether or not a legacy one also still sits in the file) -- that branch deliberately leaves any leftover legacy entry untouched rather than guessing which of two possibly-hand-edited entries is authoritative."
+    },
+    {
+      "code": "debug-config.comments-dropped",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to surface a one-time notice that a `tan debug-config` write discarded a comment (or trailing comma) sitting inside the byte span it rewrote -- the one launch-configuration entry a splice replaced, or, on the whole-document fallback, the customer's entire original file (tan-cli#182 review finding #2).",
+      "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
+      "literal": "\"debug-config.comments-dropped\"",
+      "note": "Set from `LaunchJsonWritePlan::comments_dropped` (`tan_core::debug_launch::write_content`): for a splice, whether `strip_jsonc` changes the replaced entry's own original byte span; for the whole-document fallback, whether it changes the original file at all. Never fires on the no-op short-circuit path (an unchanged merge returns `original` verbatim) or on an append (nothing existing is ever rewritten)."
     }
   ]
 }

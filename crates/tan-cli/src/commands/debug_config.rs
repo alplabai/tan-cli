@@ -176,13 +176,20 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
     // WHY the file changed under them (their old `"ALP: ..."` entry is gone,
     // folded into the correctly-named one) rather than discovering it only by
     // diffing the file themselves.
-    let issues = match &plan.migrated_from {
-        Some(from) => vec![legacy_entry_migrated_issue(
+    let mut issues = Vec::new();
+    if let Some(from) = &plan.migrated_from {
+        issues.push(legacy_entry_migrated_issue(
             from,
             draft["name"].as_str().unwrap_or_default(),
-        )],
-        None => Vec::new(),
-    };
+        ));
+    }
+    // #182 review finding #2: a splice or fallback write that dropped a
+    // comment (or trailing comma) the customer's file held must say so —
+    // #182 named unqualified success on a write that destroys user-authored
+    // content as the one thing that is never acceptable, not just "diffable".
+    if plan.comments_dropped {
+        issues.push(comments_dropped_issue());
+    }
 
     success(
         g,
@@ -216,6 +223,26 @@ fn legacy_entry_migrated_issue(from: &str, to: &str) -> Issue {
              carried across; every other field tan owns was refreshed to this run's \
              values, same as an ordinary re-run. The old entry is gone."
         ),
+    }
+}
+
+/// tan-cli#182 review finding #2: emitted whenever this write dropped a
+/// comment (or trailing comma) sitting inside a byte span it rewrote — the
+/// one maintained entry a splice replaced, or, on the whole-document
+/// fallback, the customer's entire original file. Severity `info`, same as
+/// [`legacy_entry_migrated_issue`]: nothing failed and there is no action to
+/// take, but a tool that discarded user-authored content must never report
+/// unqualified success (#182's own non-negotiable floor).
+fn comments_dropped_issue() -> Issue {
+    Issue {
+        code: "debug-config.comments-dropped".to_string(),
+        severity: "info".to_string(),
+        message: "This write dropped a comment (or trailing comma) that sat inside the \
+                   part of .vscode/launch.json it rewrote — either inside the one entry \
+                   being updated, or, if the file's shape couldn't be confidently \
+                   spliced, anywhere in the file. Everything outside that span is \
+                   untouched."
+            .to_string(),
     }
 }
 
@@ -428,6 +455,14 @@ fn debug_config_text(
         for issue in issues {
             if issue.code == "debug-config.legacy-entry-migrated" {
                 lines.push(format!("debug-config: {}", issue.message));
+            }
+        }
+        // Same treatment for a dropped comment/trailing comma (#182 review
+        // finding #2): a notice about content this run destroyed is never
+        // routine noise, so it survives --quiet too.
+        for issue in issues {
+            if issue.code == "debug-config.comments-dropped" {
+                lines.push(format!("note: {}", issue.message));
             }
         }
         if !g.quiet {
@@ -1074,6 +1109,83 @@ mod tests {
                 .any(|l| l.contains("Migrated the legacy launch-configuration entry")),
             "{:?}",
             run_result.text
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// tan-cli#182 review finding #2, at the command boundary: a write that
+    /// drops a comment inside the entry being updated must surface
+    /// `debug-config.comments-dropped` as an `issues[]` entry, severity
+    /// `info`, not just succeed silently — #182's own non-negotiable floor.
+    #[test]
+    fn run_reports_a_comments_dropped_issue_when_a_write_drops_one() {
+        let dir = tmp("comments-dropped-issue");
+        let vscode_dir = dir.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("launch.json"),
+            "{\n  \"version\": \"0.2.0\",\n  \"configurations\": [\n    {\n      \"name\": \"Alp: Zephyr Debug (J-Link)\",\n      \"type\": \"cortex-debug\",\n      \"request\": \"launch\",\n      // hand-picked after bring-up\n      \"cwd\": \"${workspaceFolder}\",\n      \"executable\": \"${workspaceFolder}/build/app/zephyr/zephyr.elf\",\n      \"servertype\": \"jlink\",\n      \"device\": \"OLD_DEVICE\",\n      \"interface\": \"swd\"\n    }\n  ]\n}\n",
+        )
+        .unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            preview: false,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        let issues = envelope["issues"].as_array().unwrap();
+        let found = issues
+            .iter()
+            .find(|i| i["code"] == "debug-config.comments-dropped")
+            .unwrap_or_else(|| panic!("no comments-dropped issue: {envelope}"));
+        assert_eq!(found["severity"], "info");
+
+        let after = std::fs::read_to_string(vscode_dir.join("launch.json")).unwrap();
+        assert!(
+            !after.contains("hand-picked after bring-up"),
+            "the fixture must actually have dropped the comment for this test \
+             to prove anything: {after}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The failing-case pairing: an ordinary re-run against a comment-free
+    /// file (the common case) must never report `comments-dropped`.
+    #[test]
+    fn run_emits_no_comments_dropped_issue_on_an_ordinary_write() {
+        let dir = tmp("no-comments-dropped");
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("native-host".to_string()),
+            server: None,
+            pre_launch_task: None,
+            preview: false,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert!(
+            envelope["issues"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|i| i["code"] != "debug-config.comments-dropped"),
+            "a fresh write with nothing to drop must not report dropping anything: {envelope}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

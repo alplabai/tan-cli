@@ -142,6 +142,73 @@
   the default/`--all` set, none of which the SDK ever reads `--core` for).
 
 ### Fixed
+- **`tan debug-config` silently deleted every JSONC comment (plus any BOM and
+  trailing comma) in the customer's `.vscode/launch.json` on every write, not
+  just the one entry actually being changed (#182).** Root cause:
+  `create_launch_json_write_plan` parsed the whole file into a `serde_json::Value`
+  (via the existing, still-correct `strip_jsonc` tolerant read) and then
+  re-serialized the WHOLE document with `serde_json::to_string_pretty` — so a
+  `// remote probe, do not commit` note or a hand-written `// swap to m55_he
+  for the HP build` was gone at exit 0, with no diff shown and no mention in
+  the run's own output, on a file the customer owns and hand-edits. Reproduced
+  end-to-end against the real binary: a 4-comment, BOM-carrying, trailing-comma
+  fixture went to 0 comments and lost its BOM on a single `tan debug-config`
+  run, including on an entry the run wasn't even asked to touch. Considered a
+  jsonc-preserving parser crate first and rejected it: the write plan only
+  ever changes ONE array element (or appends one), so a targeted byte-level
+  splice needs no parser at all, and — unlike a round-trip through even a
+  jsonc-aware library — guarantees every byte outside the edited span survives
+  by construction (there is no re-serialization pass over it to lose
+  anything), rather than merely "usually". New `tan_core::jsonc_splice` locates
+  the target entry's exact byte span in the ORIGINAL text (mirroring
+  `strip_jsonc`'s own string/comment tracking so the two never disagree about
+  what counts as structure) and the write copies everything outside that span
+  through unconditionally. Falls back to the old whole-document re-serialize
+  only when there is no original text to splice into (a brand-new file) or the
+  locator can't confidently place the array (no top-level `configurations` key
+  in the raw text) — never a malformed write. A comment sitting ABOVE the
+  edited entry survives (it's outside the entry's own `{...}` span); a comment
+  BETWEEN that one entry's own keys is the one unavoidable loss, exactly like
+  any tool that overwrites one JSON object's fields — every comment on every
+  OTHER entry, the BOM, and any trailing comma are untouched. A file tan
+  genuinely cannot parse still refuses to write rather than guessing, unchanged
+  from before — the bug was always "destroys and reports success", not "fails
+  to parse a good file". The four `debug-config-preview` envelope goldens are
+  unaffected: preview never reads the customer's file.
+- **A semantically no-op `debug-config` re-run still spliced (and reformatted)
+  the maintained entry, destroying a comment inside it even though nothing
+  about the entry had actually changed (review follow-up on #182).**
+  Reproduced end-to-end: generate the entry once, hand-add
+  `// DO NOT DELETE: probe serial 000123456789` between two of its keys with
+  nothing else touched, re-run the identical command — 444 → 394 bytes, the
+  comment gone, exit 0, `issues: []`. The extension shells `debug-config`
+  before every debug session, so the no-change re-run is the COMMON case, not
+  an edge case. `create_launch_json_write_plan` now compares the merged entry
+  against what was already on disk and, when they are identical, skips the
+  splice entirely and hands back `original`'s own bytes verbatim — an
+  unchanged entry means an unchanged document, since the splice never touches
+  anything else anyway. Also closes the silent half of #182 itself: a write
+  that DOES drop a comment (the one still-unavoidable case — a comment
+  sitting between two keys of the entry actually being replaced, or the
+  whole-document fallback) now reports it as an `issues[]` entry,
+  `debug-config.comments-dropped` (severity `info`, registered `reserved` in
+  `contract/issue-codes.json`, no consumer yet), plus a `note:` line in text
+  mode — #182 named "a tool that deletes user-authored content must not report
+  unqualified success" as the non-negotiable floor, and silence on that one
+  remaining loss path did not meet it. Also fixed: a document with two
+  top-level `"configurations"` keys (`serde_json` resolves the duplicate to
+  the LAST one; the byte-level locator used to stop at the FIRST) could splice
+  into the wrong array, destroying whichever entry sat in the one actually
+  rewritten and leaving the other stale — the locator now bails to the safe
+  whole-document fallback on a duplicate instead of guessing. Also fixed: a
+  splice into a CRLF-authored `launch.json` used to emit the new entry's own
+  newlines as bare LF, leaving a mixed-EOL file (Windows is tan's primary
+  platform); the splice now matches whichever line ending is already dominant
+  in the file. Also fixed: appending into an array collapsed onto one line
+  (`"configurations": []`, VS Code's own stock template) used to indent the
+  new entry at a flat 4 spaces regardless of the file's actual indent width
+  and leave the closing `]` stranded at column 0; it now derives the entry's
+  indent from its neighbours and keeps the closing bracket aligned.
 - **The sdk-switch-pristine stamp recorded only the resolved `--sdk-root`
   PATH, so an SDK checkout that changes CONTENT at the SAME path was silently
   reused — the #163 symptom, still live after the `--pristine`/no-stamp fix
