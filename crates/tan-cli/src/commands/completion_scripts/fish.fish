@@ -17,6 +17,7 @@ complete -c tan -n '__fish_seen_subcommand_from validate' -l offline -d 'Offline
 complete -c tan -n '__fish_seen_subcommand_from generate' -l force -d 'Overwrite existing files'
 complete -c tan -n '__fish_seen_subcommand_from generate' -l core -d 'Core id (zephyr-board target)'
 complete -c tan -n '__fish_seen_subcommand_from explain' -l template -d 'Template id'
+complete -c tan -n '__fish_seen_subcommand_from examples' -l filter -d 'Substring match on id/title'
 complete -c tan -n '__fish_seen_subcommand_from init scaffold' -l template -d 'Template id'
 complete -c tan -n '__fish_seen_subcommand_from init' -l from-example -d 'Example source dir'
 complete -c tan -n '__fish_seen_subcommand_from init scaffold' -l name -d 'Name value'

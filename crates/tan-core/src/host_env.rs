@@ -56,6 +56,23 @@ pub const ZEPHYR_SDK_HOSTS: [&str; 4] = [
     "windows-x86_64",
 ];
 
+/// The Zephyr SDK release `west sdk install --version` needs, for the SAME
+/// pin [`ZEPHYR_SDK_HOSTS`]'s doc comment verifies (`1.0.1`, current for both
+/// of alp-sdk's `main`/`dev` Zephyr pins). One constant so a fix string naming
+/// the version (tan-cli#160) and this doc's own claim about it cannot drift
+/// apart silently.
+///
+/// The full command this feeds — `west sdk install --version 1.0.1 -t
+/// arm-zephyr-eabi` — is what got the alp-sdk#855 fresh-host run past tan-cli#160
+/// (its own words: *"I got past it with `west sdk install --version 1.0.1 -t
+/// arm-zephyr-eabi` — knowledge tan never provided"*), and it is the same
+/// command this repo's own "Live state" notes already record as e2e-verified
+/// against a real west workspace. tan does not run it — `west sdk install`
+/// downloads and extracts a toolchain, which is squarely `west`'s job once a
+/// workspace exists, not a hidden side effect of a read-only `doctor` report —
+/// it only prints the exact, pinned command precisely enough to act on.
+pub const ZEPHYR_SDK_INSTALL_VERSION: &str = "1.0.1";
+
 /// The already-probed host facts the checks below decide on. One struct rather
 /// than four arguments, mirroring [`BuildToolProbe`](crate::BuildToolProbe):
 /// the caller does the IO, this module does the judging.
@@ -185,8 +202,17 @@ pub fn host_environment_checks(probe: &HostEnvProbe) -> Vec<DoctorCheck> {
     checks
 }
 
-/// `zephyrSdkHost` — does the pinned Zephyr SDK publish a host build for this
-/// machine?
+/// `zephyrSdkAvailableForHost` — does the pinned Zephyr SDK publish a host
+/// build for this machine at all?
+///
+/// Named (tan-cli#160; was `zephyrSdkHost` through v0.4.0) so a `[+]` here
+/// cannot be misread as "the toolchain is installed" — it answers a narrower
+/// question, "COULD one be provisioned on this machine". The check that means
+/// "IS one installed" is `--build`'s `zephyrSdk`, which is a hard `Fail` when
+/// absent (#159/#166); the two must never share a name, or a `[+]` beside a
+/// hard-failing `zephyrSdk` on the SAME report reads as a contradiction about
+/// the very thing that cost the fresh-host run in alp-sdk#855 73 of its ~80
+/// minutes.
 ///
 /// **`Fail`, not `Warn`**, on every unserved host. This is the one check in the
 /// group that means "the toolchain cannot run here", full stop: there is no
@@ -198,7 +224,7 @@ pub fn zephyr_sdk_host_check(os: &str, arch: &str) -> DoctorCheck {
     let tag = zephyr_sdk_host_tag(os, arch);
     if ZEPHYR_SDK_HOSTS.contains(&tag.as_str()) {
         return DoctorCheck {
-            name: "zephyrSdkHost".to_string(),
+            name: "zephyrSdkAvailableForHost".to_string(),
             status: DoctorStatus::Pass,
             detail: format!("The Zephyr SDK publishes a host build for {tag}."),
             fix: None,
@@ -245,7 +271,7 @@ pub fn zephyr_sdk_host_check(os: &str, arch: &str) -> DoctorCheck {
     };
 
     DoctorCheck {
-        name: "zephyrSdkHost".to_string(),
+        name: "zephyrSdkAvailableForHost".to_string(),
         status: DoctorStatus::Fail,
         detail,
         fix: Some(fix),
@@ -422,7 +448,7 @@ mod tests {
             let check = zephyr_sdk_host_check(os, arch);
             assert_eq!(check.status, DoctorStatus::Fail, "{os}-{arch}");
             assert!(check.fix.is_some(), "{os}-{arch}");
-            assert_eq!(check.name, "zephyrSdkHost");
+            assert_eq!(check.name, "zephyrSdkAvailableForHost");
         }
     }
 
@@ -555,7 +581,7 @@ mod tests {
             ..clean()
         };
         let names = check_names(&unserved);
-        assert_eq!(names, ["zephyrSdkHost", "homePath"]);
+        assert_eq!(names, ["zephyrSdkAvailableForHost", "homePath"]);
 
         // `longPaths` on Windows only: the registry value does not exist
         // elsewhere, so emitting it on Linux would be an invented verdict.
@@ -576,7 +602,7 @@ mod tests {
         };
         assert_eq!(
             check_names(&windows),
-            ["zephyrSdkHost", "longPaths", "homePath"]
+            ["zephyrSdkAvailableForHost", "longPaths", "homePath"]
         );
     }
 

@@ -95,7 +95,7 @@ pub enum Command {
     /// Scaffold a module into an existing project.
     Scaffold(ScaffoldArgs),
     /// List the SDK's ready-made example projects (source for `tan init --from-example`).
-    Examples,
+    Examples(ExamplesArgs),
     /// Diagnose host build readiness plus debug readiness for a target/server pair.
     Doctor(DoctorArgs),
     /// Emit a shell completion script (bash, zsh, or fish).
@@ -167,6 +167,16 @@ pub struct PinmuxArgs {
     /// Pinmux family stem directly (e.g. `aen`, `v2n`); overrides `--sku`.
     #[arg(long)]
     pub family: Option<String>,
+}
+
+/// Args for `examples`: a case-insensitive substring filter over the catalog's
+/// `id`/`title` (tan-cli#164 — 97 entries is too many to scan unfiltered).
+#[derive(Debug, Args)]
+pub struct ExamplesArgs {
+    /// Case-insensitive substring to match against `id` or `title`; unset lists
+    /// every example.
+    #[arg(long, value_name = "SUBSTRING")]
+    pub filter: Option<String>,
 }
 
 /// Args for `clean`: app-path + build-root override + dry-run. Native — mirrors

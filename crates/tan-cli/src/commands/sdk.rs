@@ -42,6 +42,13 @@ struct InstallData {
     #[serde(rename = "sdkPath")]
     sdk_path: String,
     readiness: SdkReadinessReport,
+    /// Whether this install was also selected as the active SDK (tan-cli#162 —
+    /// `install` used to leave nothing selected, and `sdk current` sent the
+    /// user back to `install` with no exit). `false` on every failure path and
+    /// whenever an SDK was ALREADY active (install never overrides a selection
+    /// the user or another tool made on purpose); additive field, no existing
+    /// consumer reads its absence.
+    selected: bool,
 }
 
 /// Envelope `data` payload for `sdk current`: the active SDK, if any, its
@@ -206,6 +213,7 @@ fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 version: String::new(),
                 sdk_path: String::new(),
                 readiness: empty_readiness(""),
+                selected: false,
             },
             ExitCode::RuntimeFailure,
             "missing-version",
@@ -232,6 +240,7 @@ fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                 version: version.clone(),
                 sdk_path: String::new(),
                 readiness: empty_readiness(""),
+                selected: false,
             },
             ExitCode::RuntimeFailure,
             "invalid-version",
@@ -259,6 +268,7 @@ fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
                     version: version.clone(),
                     sdk_path: dest_str.clone(),
                     readiness: empty_readiness(&dest_str),
+                    selected: false,
                 },
                 ExitCode::RuntimeFailure,
                 "install-failed",
@@ -274,13 +284,13 @@ fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     } else {
         ExitCode::Success
     };
-    let text = format_readiness_block(&format!("SDK {version} installed"), &readiness);
+    let mut text = format_readiness_block(&format!("SDK {version} installed"), &readiness);
     // A Missing readiness used to reach the envelope only as this text block,
     // which `--format json` throws away entirely — the JSON consumer (the
     // vscode extension) got exitCode 0/ok:true with an empty `issues` array
     // for an SDK clone that is not actually usable. Surface it as a real Issue
     // too, not just prose.
-    let issues = if readiness.state == SdkReadinessState::Missing {
+    let mut issues = if readiness.state == SdkReadinessState::Missing {
         vec![Issue {
             code: "sdk.install-not-ready".to_string(),
             severity: "error".to_string(),
@@ -296,6 +306,34 @@ fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     } else {
         Vec::new()
     };
+
+    // tan-cli#162: `install` used to leave the active-SDK pointer untouched, so
+    // `sdk current` (the very next command a new user runs) reported "no
+    // active SDK" and sent them back to `install` -- a loop with no exit.
+    // Auto-select ONLY when nothing is active yet: an install alongside an
+    // SDK the user (or another tool) already selected on purpose must not
+    // silently repoint them. Reuses `do_switch` -- the exact repair
+    // alp-sdk-vscode#388 now shells `tan sdk switch` for -- rather than a
+    // second, parallel copy of the pointer write + `.west/config`
+    // reconciliation; a caller that already has an active SDK (e.g. the
+    // extension, which switches explicitly after every install) sees no
+    // difference. Best-effort: a failed auto-select does not fail the
+    // install itself, which already succeeded.
+    let mut selected = false;
+    if exit == ExitCode::Success {
+        let workspace_root = crate::util::cli_workspace_root(g);
+        let (active, _) = crate::util::resolve_sdk_tiered(g, &workspace_root);
+        if active.is_none() {
+            let switch_args = SdkArgs {
+                subcommand: Some("switch".to_string()),
+                arg: Some(version.clone()),
+                destination: args.destination.clone(),
+                global: false,
+            };
+            selected = fold_auto_select(&mut text, &mut issues, do_switch(g, &switch_args));
+        }
+    }
+
     emit_success(
         g,
         InstallData {
@@ -303,11 +341,70 @@ fn run_install(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
             version,
             sdk_path: dest_str,
             readiness,
+            selected,
         },
         exit,
         issues,
         text,
     )
+}
+
+/// Fold an auto-select attempt's outcome into `install`'s own report — a
+/// trailing blank line, then either the switch's full text/issues or a
+/// best-effort warning naming why it did not select. `selected` (`install`'s
+/// own return) is this call's `bool` result.
+///
+/// PURE, and split out purely so tan-cli#162's actual new behavior is
+/// unit-testable directly: the GATE around this call (`resolve_sdk_tiered(..)
+/// .is_none()`) depends on this machine's real `~/.alp` (global-default and
+/// discovery both read it) the same way `resolve_sdk_tiered`'s own tests
+/// already avoid asserting on for exactly that reason — so testing the merge
+/// logic here, against a hand-built [`SwitchOutcome`]/[`SwitchFailure`], is
+/// what actually exercises tan-cli#162's new code without coupling a test's
+/// pass/fail to whatever SDK happens to be configured on the machine running
+/// it.
+fn fold_auto_select(
+    text: &mut Vec<String>,
+    issues: &mut Vec<Issue>,
+    outcome: Result<SwitchOutcome, Box<SwitchFailure>>,
+) -> bool {
+    match outcome {
+        Ok(switched) => {
+            text.push(String::new());
+            text.extend(switched.text);
+            // tan-cli#160/#161/#162 review: the auto-select always writes the
+            // PROJECT (cwd-scoped) pointer, never `--global` -- so a
+            // first-time user who runs `install` from a scratch directory
+            // before any project exists gets a selection that later commands
+            // run from a different directory will not see (`tan sdk current`
+            // there reports "nothing selected" again). `switch`'s own text
+            // ("Switched project SDK to ...") does not say that scoping is
+            // directory-bound; state it here so this is not a silent trap.
+            if switched.data.scope == "project" {
+                text.push(
+                    "  note    scoped to this directory -- run future commands from here, \
+                     or `tan sdk switch --global` to select machine-wide."
+                        .to_string(),
+                );
+            }
+            issues.extend(switched.issues);
+            true
+        }
+        Err(failure) => {
+            text.push(String::new());
+            text.push(format!(
+                "  warn    installed, but could not select it automatically: {}",
+                failure.message
+            ));
+            text.push("  next    run `tan sdk switch` yourself.".to_string());
+            issues.push(Issue {
+                code: format!("sdk.{}", failure.code),
+                severity: "warning".to_string(),
+                message: failure.message,
+            });
+            false
+        }
+    }
 }
 
 /// Shallow-clones `SDK_GIT_URL` at the `version` tag into `dest`; returns git's stderr on failure.
@@ -382,10 +479,16 @@ fn run_current(g: &GlobalArgs) -> CommandRun {
 
     let text = match (&sdk_path, &readiness) {
         (Some(_), Some(report)) => format_readiness_block("Active SDK", report),
-        _ => vec![
-            "No active SDK configured for this workspace.".to_string(),
-            "Run 'tan sdk install <version>' to get started.".to_string(),
-        ],
+        // tan-cli#162: this used to point EVERY "nothing selected" case back at
+        // `install` -- including the one `install` itself had just left the
+        // user in, a loop with no exit. `install` auto-selects when it can
+        // (above), but a cache populated by an OLDER tan, a different
+        // `--destination`, or a switch made in another directory (selection is
+        // directory-scoped -- a real, separate gap, not fixed here) still
+        // lands here with something installed and nothing said about it.
+        // `switch`, not `install` again, whenever the cache can already answer
+        // "installed" for at least one version.
+        _ => no_active_sdk_text(&cached_sdk_versions()),
     };
     emit_success(
         g,
@@ -407,26 +510,71 @@ fn run_current(g: &GlobalArgs) -> CommandRun {
 /// cache root, anything path-shaped resolves under the workspace root — absolute as-is),
 /// verifying the path exists and writing the pointer file.
 fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
+    match do_switch(g, args) {
+        Ok(outcome) => emit_success(
+            g,
+            outcome.data,
+            ExitCode::Success,
+            outcome.issues,
+            outcome.text,
+        ),
+        Err(failure) => emit_failure(
+            g,
+            failure.data,
+            ExitCode::RuntimeFailure,
+            failure.code,
+            failure.message,
+            failure.text,
+        ),
+    }
+}
+
+/// The facts + side effects of a `tan sdk switch <version|path>`, before either
+/// caller decides how to report it: the real `run_switch` (an envelope of its
+/// own), and `run_install`'s auto-select (tan-cli#162 — nothing was selecting
+/// a freshly installed SDK, and `tan sdk current` sent the user right back to
+/// `install`). One resolver, pointer write and `.west/config` reconciliation
+/// for both, so they cannot disagree about what "switched" means; also what
+/// keeps this COMPOSING with alp-sdk-vscode#388's own explicit
+/// `tan sdk switch` shell-out instead of growing a second copy of it.
+struct SwitchOutcome {
+    data: SwitchData,
+    /// Everything `run_switch` alone would have printed, header line included
+    /// (`"Switched {scope} SDK to {version}."` plus the `  path`/`  state`/
+    /// `  info`/`  warn`/`  next` detail lines) — a caller folding this into a
+    /// larger report appends it as-is rather than re-deriving the header.
+    text: Vec<String>,
+    issues: Vec<Issue>,
+}
+
+/// A refused switch, in the shape [`emit_failure`] (or a caller building its
+/// own envelope) needs.
+struct SwitchFailure {
+    data: SwitchData,
+    code: &'static str,
+    message: String,
+    text: Vec<String>,
+}
+
+fn do_switch(g: &GlobalArgs, args: &SdkArgs) -> Result<SwitchOutcome, Box<SwitchFailure>> {
     // Which pointer this switch targets — echoed in every `SwitchData` envelope
     // so a JSON consumer can tell a `--global` switch from a project one.
     let scope = if args.global { "global" } else { "project" };
     let Some(version_or_path) = args.arg.clone() else {
-        return emit_failure(
-            g,
-            SwitchData {
+        return Err(Box::new(SwitchFailure {
+            data: SwitchData {
                 subcommand: "switch",
                 sdk_path: String::new(),
                 version: None,
                 scope,
             },
-            ExitCode::RuntimeFailure,
-            "missing-version",
-            "Version or path argument is required.".to_string(),
-            vec![
+            code: "missing-version",
+            message: "Version or path argument is required.".to_string(),
+            text: vec![
                 "sdk switch: version or path argument is required.".to_string(),
                 "Usage: tan sdk switch <version|path>".to_string(),
             ],
-        );
+        }));
     };
 
     // `g.sdk_root` (--sdk-root) is an unrelated global flag meaning "the SDK
@@ -471,22 +619,20 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     };
 
     if !Path::new(&sdk_path).exists() {
-        return emit_failure(
-            g,
-            SwitchData {
+        return Err(Box::new(SwitchFailure {
+            data: SwitchData {
                 subcommand: "switch",
                 sdk_path: sdk_path.clone(),
                 version: None,
                 scope,
             },
-            ExitCode::RuntimeFailure,
-            "path-not-found",
-            format!("SDK path not found: {sdk_path}"),
-            vec![
+            code: "path-not-found",
+            message: format!("SDK path not found: {sdk_path}"),
+            text: vec![
                 format!("sdk switch: SDK path does not exist: {sdk_path}"),
                 "Run 'tan sdk install <version>' first.".to_string(),
             ],
-        );
+        }));
     }
 
     // The path can exist without being an SDK checkout (wrong nesting level,
@@ -496,24 +642,22 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
     // auto-discovery — every later command then builds/flashes against a
     // DIFFERENT SDK than the one the user was just told they switched to.
     if !crate::util::has_loader_script(Path::new(&sdk_path)) {
-        return emit_failure(
-            g,
-            SwitchData {
+        return Err(Box::new(SwitchFailure {
+            data: SwitchData {
                 subcommand: "switch",
                 sdk_path: sdk_path.clone(),
                 version: None,
                 scope,
             },
-            ExitCode::RuntimeFailure,
-            "not-an-sdk-checkout",
-            format!(
+            code: "not-an-sdk-checkout",
+            message: format!(
                 "{sdk_path} does not look like an alp-sdk checkout (missing scripts/alp_project.py)."
             ),
-            vec![
+            text: vec![
                 format!("sdk switch: {sdk_path} does not look like an alp-sdk checkout."),
                 "Expected scripts/alp_project.py under the given path.".to_string(),
             ],
-        );
+        }));
     }
 
     let pointer_path = switch_pointer_path(
@@ -524,22 +668,20 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
         args.global,
     );
     if let Err(message) = write_sdk_pointer(&pointer_path, &sdk_path) {
-        return emit_failure(
-            g,
-            SwitchData {
-                subcommand: "switch",
+        return Err(Box::new(SwitchFailure {
+            data: SwitchData {
                 sdk_path: sdk_path.clone(),
+                subcommand: "switch",
                 version: None,
                 scope,
             },
-            ExitCode::RuntimeFailure,
-            "switch-failed",
-            message.clone(),
-            vec![
+            code: "switch-failed",
+            message: message.clone(),
+            text: vec![
                 "sdk switch: failed to update active SDK pointer.".to_string(),
                 message,
             ],
-        );
+        }));
     }
 
     let readiness = readiness_for(&sdk_path);
@@ -695,18 +837,16 @@ fn run_switch(g: &GlobalArgs, args: &SdkArgs) -> CommandRun {
         });
     }
 
-    emit_success(
-        g,
-        SwitchData {
+    Ok(SwitchOutcome {
+        data: SwitchData {
             subcommand: "switch",
             sdk_path,
             version: readiness.version,
             scope,
         },
-        ExitCode::Success,
-        issues,
         text,
-    )
+        issues,
+    })
 }
 
 /// Cache roots a BARE `tan sdk switch <version>` may resolve against, most
@@ -810,6 +950,54 @@ fn default_cache_root() -> String {
         .join("sdk-cache")
         .to_string_lossy()
         .to_string()
+}
+
+/// Directory names directly under [`default_cache_root`] that hold a real SDK
+/// checkout (`scripts/alp_project.py` present), sorted for a stable message.
+/// tan-cli#162: what tells `sdk current`'s "nothing selected" message a
+/// populated cache from a genuinely empty one, so it can say `switch` instead
+/// of sending the user back to `install`. Deliberately does not guess which
+/// one to switch TO (this codebase's own `toolchain::ToolchainRoot::Ambiguous`
+/// makes the same call for the Zephyr SDK) — it only lists what exists and
+/// lets the user choose.
+fn cached_sdk_versions() -> Vec<String> {
+    cached_sdk_versions_in(&default_cache_root())
+}
+
+/// `sdk current`'s "nothing selected" message (tan-cli#162): `switch`, not
+/// `install` again, whenever `cached` says at least one version already sits
+/// in the cache. PURE over the already-scanned list, so the actual new
+/// wording decision is testable without touching this machine's real
+/// `~/.alp/sdk-cache`.
+fn no_active_sdk_text(cached: &[String]) -> Vec<String> {
+    if cached.is_empty() {
+        vec![
+            "No active SDK configured for this workspace.".to_string(),
+            "Run 'tan sdk install <version>' to get started.".to_string(),
+        ]
+    } else {
+        vec![
+            "No active SDK configured for this workspace.".to_string(),
+            format!("Already installed: {}", cached.join(", ")),
+            "Run 'tan sdk switch <version>' to select one.".to_string(),
+        ]
+    }
+}
+
+/// [`cached_sdk_versions`]'s scan, over an explicit root — split out purely so
+/// it is testable against a controlled temp directory rather than this
+/// machine's real `~/.alp/sdk-cache`.
+fn cached_sdk_versions_in(cache_root: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(cache_root) else {
+        return Vec::new();
+    };
+    let mut versions: Vec<String> = entries
+        .flatten()
+        .filter(|entry| crate::util::has_loader_script(&entry.path()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    versions.sort();
+    versions
 }
 
 /// Machine-global default-SDK pointer file, written by `tan sdk switch
@@ -1612,5 +1800,187 @@ mod tests {
         assert!(lines[2].contains("v2.0.0-rc1") && lines[2].contains("[prerelease]"));
         assert!(lines[3].contains("v3.0.0-draft") && lines[3].contains("[draft]"));
         assert!(lines[4].contains("v4.0.0-rc1") && lines[4].contains("[draft, prerelease]"));
+    }
+
+    // ── tan-cli#162: install selects, current recommends switch ──────────────
+
+    #[test]
+    fn fold_auto_select_appends_the_switch_text_and_reports_true_on_success() {
+        let mut text = vec!["SDK v0.13.0 installed".to_string()];
+        let mut issues: Vec<Issue> = Vec::new();
+        let outcome = Ok(SwitchOutcome {
+            data: SwitchData {
+                subcommand: "switch",
+                sdk_path: "/cache/v0.13.0".to_string(),
+                version: Some("0.13.0".to_string()),
+                scope: "project",
+            },
+            text: vec!["Switched project SDK to 0.13.0.".to_string()],
+            issues: vec![Issue {
+                code: "sdk.bootstrap-recommended".to_string(),
+                severity: "warning".to_string(),
+                message: "run tan bootstrap".to_string(),
+            }],
+        });
+        let selected = fold_auto_select(&mut text, &mut issues, outcome);
+        assert!(selected);
+        assert_eq!(
+            text,
+            vec![
+                "SDK v0.13.0 installed".to_string(),
+                String::new(),
+                "Switched project SDK to 0.13.0.".to_string(),
+                "  note    scoped to this directory -- run future commands from here, or \
+                 `tan sdk switch --global` to select machine-wide."
+                    .to_string(),
+            ]
+        );
+        assert_eq!(issues.len(), 1);
+        assert_eq!(issues[0].code, "sdk.bootstrap-recommended");
+    }
+
+    #[test]
+    fn fold_auto_select_omits_the_directory_note_for_a_global_switch() {
+        // A `--global` auto-select pins a machine-wide pointer, so the
+        // directory-scoping caveat above does not apply to it.
+        let mut text = vec!["SDK v0.13.0 installed".to_string()];
+        let mut issues: Vec<Issue> = Vec::new();
+        let outcome = Ok(SwitchOutcome {
+            data: SwitchData {
+                subcommand: "switch",
+                sdk_path: "/cache/v0.13.0".to_string(),
+                version: Some("0.13.0".to_string()),
+                scope: "global",
+            },
+            text: vec!["Switched global SDK to 0.13.0.".to_string()],
+            issues: vec![],
+        });
+        fold_auto_select(&mut text, &mut issues, outcome);
+        assert!(
+            !text.iter().any(|l| l.contains("scoped to this directory")),
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn fold_auto_select_reports_false_and_a_prefixed_warning_on_failure() {
+        let mut text = vec!["SDK v0.13.0 installed".to_string()];
+        let mut issues: Vec<Issue> = Vec::new();
+        let outcome: Result<SwitchOutcome, Box<SwitchFailure>> = Err(Box::new(SwitchFailure {
+            data: SwitchData {
+                subcommand: "switch",
+                sdk_path: String::new(),
+                version: None,
+                scope: "project",
+            },
+            code: "switch-failed",
+            message: "failed to update active SDK pointer".to_string(),
+            text: vec!["ignored -- install builds its own text".to_string()],
+        }));
+        let selected = fold_auto_select(&mut text, &mut issues, outcome);
+        assert!(!selected);
+        // The install-side install still succeeded -- only ONE new warning
+        // line naming why the auto-select didn't happen, plus a next step.
+        assert_eq!(text.len(), 4, "{text:?}");
+        assert!(
+            text[2].contains("could not select it automatically")
+                && text[2].contains("failed to update active SDK pointer"),
+            "{text:?}"
+        );
+        assert!(text[3].contains("tan sdk switch"), "{text:?}");
+        assert_eq!(issues.len(), 1);
+        // Prefixed with `sdk.` -- every other issue this file emits is.
+        assert_eq!(issues[0].code, "sdk.switch-failed");
+        assert_eq!(issues[0].severity, "warning");
+    }
+
+    #[test]
+    fn cached_sdk_versions_in_lists_only_real_checkouts_sorted() {
+        let root = tmp("cached-versions");
+        make_sdk_root(&root.join("v0.13.0"));
+        make_sdk_root(&root.join("v0.9.0"));
+        // Not a real checkout -- must be excluded, not just skipped-with-a-warning.
+        std::fs::create_dir_all(root.join("not-an-sdk")).unwrap();
+        // A stray FILE beside the version directories -- `read_dir` yields it,
+        // `has_loader_script` must reject it without panicking.
+        std::fs::write(root.join("README.txt"), "").unwrap();
+
+        let versions = cached_sdk_versions_in(&root.to_string_lossy());
+        assert_eq!(versions, vec!["v0.13.0".to_string(), "v0.9.0".to_string()]);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cached_sdk_versions_in_is_empty_for_a_missing_root() {
+        assert!(cached_sdk_versions_in("/tan-cli-test-no-such-cache-root-xyz").is_empty());
+    }
+
+    #[test]
+    fn no_active_sdk_text_recommends_install_only_when_the_cache_is_genuinely_empty() {
+        let empty = no_active_sdk_text(&[]);
+        assert!(empty.iter().any(|l| l.contains("sdk install")), "{empty:?}");
+        assert!(!empty.iter().any(|l| l.contains("sdk switch")), "{empty:?}");
+    }
+
+    #[test]
+    fn no_active_sdk_text_recommends_switch_and_names_the_cache_when_populated() {
+        // Regression: tan-cli#162 -- this used to say `install` even when the
+        // cache already held the version `install` had just written, sending
+        // the user back into the command that put them here.
+        let populated = no_active_sdk_text(&["v0.13.0".to_string(), "v0.9.0".to_string()]);
+        assert!(
+            populated.iter().any(|l| l.contains("sdk switch")),
+            "{populated:?}"
+        );
+        assert!(
+            populated
+                .iter()
+                .any(|l| l.contains("v0.13.0") && l.contains("v0.9.0")),
+            "{populated:?}"
+        );
+        assert!(
+            !populated.iter().any(|l| l.contains("sdk install")),
+            "{populated:?}"
+        );
+    }
+
+    #[test]
+    fn install_leaves_an_existing_selection_alone() {
+        // tan-cli#162's auto-select must not fire when something is ALREADY
+        // active -- installing a second version must never silently repoint a
+        // selection the user (or another tool) made on purpose. Deterministic
+        // via `--sdk-root`, which `resolve_sdk_tiered` honours unconditionally
+        // as the top tier regardless of the real machine's `~/.alp` state (see
+        // `resolve_sdk_tiered_prefers_sdk_root_flag`) -- the "nothing active"
+        // branch is covered instead by `fold_auto_select`'s own tests above,
+        // which do not depend on this host's real SDK configuration at all.
+        let ws = tmp("install-auto-select-already-active");
+        let cache_root = tmp("install-auto-select-cache");
+        let already_active = tmp("install-auto-select-existing-sdk");
+        make_sdk_root(&already_active);
+        // The version this install "clones" -- pre-seeded so `run_install`
+        // takes its `already_installed` shortcut and never touches the network.
+        make_sdk_root(&cache_root.join("v9.9.9"));
+
+        let g = global(&ws, Some(&already_active), Format::Json);
+        let run = run_install(
+            &g,
+            &SdkArgs {
+                subcommand: Some("install".to_string()),
+                arg: Some("v9.9.9".to_string()),
+                destination: Some(cache_root.to_string_lossy().into_owned()),
+                global: false,
+            },
+        );
+        assert_eq!(run.exit, ExitCode::Success);
+        let data = json_data(&run);
+        // An SDK was already active (the `--sdk-root` flag) -- install must
+        // not silently repoint it.
+        assert_eq!(data["data"]["selected"], false, "{data}");
+
+        let _ = std::fs::remove_dir_all(&ws);
+        let _ = std::fs::remove_dir_all(&cache_root);
+        let _ = std::fs::remove_dir_all(&already_active);
     }
 }

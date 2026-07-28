@@ -31,8 +31,8 @@ pub use manifest::{
 pub use prerequisites::{
     BOOTSTRAP_MANIFEST_REJECTED_FIX, BOOTSTRAP_MANIFEST_REJECTED_PREFIX, MissingPrerequisite,
     PrereqFailure, apply_prerequisite_check, doctor_prerequisite_check, hint_line,
-    posix_python_not_runnable, posix_refusal, python_too_old, reported_missing,
-    windows_python_not_runnable, windows_refusal,
+    posix_python_not_runnable, posix_refusal, posix_venv_unusable, python_too_old,
+    reported_missing, windows_python_not_runnable, windows_refusal,
 };
 pub use runtime::{
     HostOs, OS_OFF, YoctoGate, in_play_runtimes, runtime_for_topology_core, yocto_gate,

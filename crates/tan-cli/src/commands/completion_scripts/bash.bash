@@ -41,8 +41,11 @@ _tan_complete() {
     scaffold)
       COMPREPLY=( $(compgen -W "$global_flags --template --name --destination --preview --force" -- "$cur") )
       ;;
-    diff|presets|examples)
+    diff|presets)
       COMPREPLY=( $(compgen -W "$global_flags" -- "$cur") )
+      ;;
+    examples)
+      COMPREPLY=( $(compgen -W "$global_flags --filter" -- "$cur") )
       ;;
     completion)
       COMPREPLY=( $(compgen -W "$global_flags --shell" -- "$cur") )
