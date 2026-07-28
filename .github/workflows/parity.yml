@@ -218,6 +218,37 @@ jobs:
       - name: west + SDK python deps
         run: python3 -m pip install --upgrade pip west pyyaml jsonschema pyelftools
 
+      # `tan generate` live-run e2e (tan-cli#113 + the SoM-swap regression
+      # test for PR #157's output-directory bug): spawns the REAL
+      # `alp_project.py` from the checkout above (already pinned to
+      # PINNED_SDK_TAG by the `clone alp-sdk` step) and asserts what actually
+      # lands on disk -- `zephyr-board`/`west-libraries`/`hw-info-h`, the
+      # SoM-swap non-collision case, `--core` forwarded vs. refused, and the
+      # ValidationFailure(2)-not-InternalFailure(5) exit-code mapping. Needs
+      # only python + the SDK checkout + the pyyaml/jsonschema deps the step
+      # above just installed (no Zephyr SDK/west workspace/Renode, no
+      # separate `cargo build` -- `cargo test` builds the tan binary itself),
+      # so it genuinely runs BEFORE those -- placed here, not after them, so a
+      # Renode CDN hiccup or a Zephyr-SDK sha256 mismatch downstream can never
+      # cost the PR this coverage (tan-cli#158 review finding 4: an earlier
+      # revision of this step made this same claim in its comment while
+      # sitting after all three installs). `TAN_LIVE_RUN_SDK_ROOT` pointed at
+      # THIS job's own pinned `alp-sdk/` checkout is what lets the suite
+      # inherit the pin by construction rather than a second hardcoded SHA --
+      # see `crates/tan-cli/tests/live_run_generate.rs`'s module docs.
+      # `TAN_LIVE_RUN_REQUIRED=1` is what makes a missing root here a hard
+      # panic instead of a quiet skip -- this is the one job that wires the
+      # root, so absence here means the wiring broke, not "not applicable"
+      # (deliberately not keyed off the generic `CI` var: this repo's own
+      # `ci.yml` `test` job also runs under `CI=true` with neither var set,
+      # and gating on `CI` alone made that unrelated job hard-panic instead
+      # of skipping -- tan-cli#158 review finding 1).
+      - name: generate live-run e2e (tan generate vs pinned alp-sdk)
+        env:
+          TAN_LIVE_RUN_SDK_ROOT: ${{ github.workspace }}/alp-sdk
+          TAN_LIVE_RUN_REQUIRED: "1"
+        run: cargo test --locked -p alp-tan-cli --test live_run_generate
+
       # Zephyr itself. `west init -l` against alp-sdk's own manifest is what a
       # customer's `tan bootstrap` does, so the tree under test is the pinned
       # one rather than whatever Zephyr happens to be newest.

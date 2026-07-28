@@ -18,17 +18,21 @@ use crate::exit::ExitCode;
 /// `alp,pin-array` on `zephyr,gpio-emul`) that makes a GPIO app resolve under
 /// `native_sim`. `west-libraries` (tan-cli#114) is the `west.yml` library
 /// auto-pin fragment, a single-file board-derived emit exactly like the
-/// other four `build/generated/` targets. All three are intentionally
-/// `generate` targets only: none is in `tan_core::ALL_EMIT_MODES` (the set
-/// `trace` / `support-bundle` enumerate), because those model the *build*
-/// generation a slice runs.
+/// other four `build/generated/` targets. `hw-info-h` (tan-cli#113) is the
+/// `ALP_HW_BUILD_*` build-time identifier header companion to
+/// `<alp/hw_info.h>` — another project-wide, board-derived single-file emit
+/// owned by the same `alp_project.py --emit hw-info-h` front door (delegated
+/// to `scripts/alp_project_emit/hw_info.py` at the pinned SDK tag). All four
+/// are intentionally `generate` targets only: none is in
+/// `tan_core::ALL_EMIT_MODES` (the set `trace` / `support-bundle` enumerate),
+/// because those model the *build* generation a slice runs.
 ///
 /// `zephyr-board` (tan-cli#116) is deliberately NOT here: unlike every mode
 /// above, it hard-requires `--core <id>` and writes a DIRECTORY of files, not
 /// one fixed conventional file, so it cannot be defaulted by a bare
-/// `tan generate` / `--all` the way these seven can. It is reachable only via
+/// `tan generate` / `--all` the way these eight can. It is reachable only via
 /// explicit `--target zephyr-board --core <id>` — see `resolve_generate_targets`.
-const ALL_EMIT_MODES: [&str; 7] = [
+const ALL_EMIT_MODES: [&str; 8] = [
     "zephyr-conf",
     "dts-overlay",
     "native-sim-overlay",
@@ -36,14 +40,17 @@ const ALL_EMIT_MODES: [&str; 7] = [
     "yocto-conf",
     "carrier-netlist",
     "west-libraries",
+    "hw-info-h",
 ];
 
 /// Targets `--core` optionally scopes, beyond `zephyr-board` (which hard-
 /// requires it). Verbatim from `alp_project.py`'s own `--core` help at the
 /// pinned SDK tag: for the per-core modes (`zephyr-conf`/`yocto-conf`/
 /// `cmake-args`) it picks the single slice to emit; for the project-wide
-/// modes (`dts-overlay`/`west-libraries`) it scopes the union calculation to
-/// one slice. The SDK itself hard-errors when `--core` names a core outside
+/// modes (`dts-overlay`/`west-libraries`/`hw-info-h`) it scopes the union
+/// calculation to one slice (for `hw-info-h` specifically: which slice's OS
+/// lands in the generated `ALP_HW_BUILD_OS`/`ALP_HW_BUILD_PRIMARY_CORE`
+/// macros). The SDK itself hard-errors when `--core` names a core outside
 /// a per-core mode's OS class (e.g. `--emit yocto-conf --core <a-zephyr-core>`),
 /// so `tan` does not need to re-validate that compatibility here.
 ///
@@ -51,12 +58,13 @@ const ALL_EMIT_MODES: [&str; 7] = [
 /// set: both are board-/SoM-mounting facts `alp_project.py` never reads
 /// `--core` for at all, so passing it would silently do nothing -- the
 /// footgun `resolve_generate_targets` refuses instead of tolerating.
-const CORE_SCOPABLE_TARGETS: [&str; 5] = [
+const CORE_SCOPABLE_TARGETS: [&str; 6] = [
     "zephyr-conf",
     "yocto-conf",
     "cmake-args",
     "dts-overlay",
     "west-libraries",
+    "hw-info-h",
 ];
 
 /// True when `emit` accepts `--core` as an optional scoping flag (in addition
@@ -429,6 +437,10 @@ fn output_path_for_emit(
         "yocto-conf" => "alp-yocto.conf",
         "carrier-netlist" => "carrier-netlist.json",
         "west-libraries" => "alp-west-libs.yml",
+        // tan-cli#113: matches alp-sdk docs/board-config-emit.md's own
+        // "Build-time identifier header (`--emit hw-info-h`)" example
+        // verbatim, at the pinned SDK tag.
+        "hw-info-h" => "alp_hw_info_build.h",
         _ => "alp.out",
     };
 
@@ -598,6 +610,26 @@ mod tests {
     }
 
     #[test]
+    fn target_resolution_accepts_hw_info_h() {
+        // tan-cli#113: the ALP_HW_BUILD_* identifier-header emit must reach
+        // the SDK spawn as a normal default-set target -- no --core required.
+        let resolved = resolve_generate_targets(Some("hw-info-h"), false, None).unwrap();
+        assert_eq!(resolved, vec!["hw-info-h"]);
+        assert!(ALL_EMIT_MODES.contains(&"hw-info-h"));
+    }
+
+    #[test]
+    fn hw_info_h_writes_the_documented_conventional_path() {
+        // Matches alp-sdk docs/board-config-emit.md's own example verbatim,
+        // read at the pinned SDK tag (not copied from a floating `dev`).
+        let path = output_path_for_emit(Path::new("/ws"), "hw-info-h", None);
+        assert!(
+            path.ends_with("build/generated/alp_hw_info_build.h"),
+            "{path:?}"
+        );
+    }
+
+    #[test]
     fn target_resolution_zephyr_board_requires_core() {
         // tan-cli#116: the FAILING case -- no --core must be refused, not
         // silently defaulted, since alp_project.py itself hard-requires it.
@@ -650,6 +682,7 @@ mod tests {
         assert!(target_accepts_core("cmake-args"));
         assert!(target_accepts_core("dts-overlay"));
         assert!(target_accepts_core("west-libraries"));
+        assert!(target_accepts_core("hw-info-h"));
         // The FAILING case: a target --core does nothing for must stay false,
         // or the command-building loop would silently forward a flag the SDK
         // never reads for it.
