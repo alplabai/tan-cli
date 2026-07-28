@@ -142,6 +142,39 @@
   the default/`--all` set, none of which the SDK ever reads `--core` for).
 
 ### Fixed
+- **`tan debug-config` silently deleted every JSONC comment (plus any BOM and
+  trailing comma) in the customer's `.vscode/launch.json` on every write, not
+  just the one entry actually being changed (#182).** Root cause:
+  `create_launch_json_write_plan` parsed the whole file into a `serde_json::Value`
+  (via the existing, still-correct `strip_jsonc` tolerant read) and then
+  re-serialized the WHOLE document with `serde_json::to_string_pretty` — so a
+  `// remote probe, do not commit` note or a hand-written `// swap to m55_he
+  for the HP build` was gone at exit 0, with no diff shown and no mention in
+  the run's own output, on a file the customer owns and hand-edits. Reproduced
+  end-to-end against the real binary: a 4-comment, BOM-carrying, trailing-comma
+  fixture went to 0 comments and lost its BOM on a single `tan debug-config`
+  run, including on an entry the run wasn't even asked to touch. Considered a
+  jsonc-preserving parser crate first and rejected it: the write plan only
+  ever changes ONE array element (or appends one), so a targeted byte-level
+  splice needs no parser at all, and — unlike a round-trip through even a
+  jsonc-aware library — guarantees every byte outside the edited span survives
+  by construction (there is no re-serialization pass over it to lose
+  anything), rather than merely "usually". New `tan_core::jsonc_splice` locates
+  the target entry's exact byte span in the ORIGINAL text (mirroring
+  `strip_jsonc`'s own string/comment tracking so the two never disagree about
+  what counts as structure) and the write copies everything outside that span
+  through unconditionally. Falls back to the old whole-document re-serialize
+  only when there is no original text to splice into (a brand-new file) or the
+  locator can't confidently place the array (no top-level `configurations` key
+  in the raw text) — never a malformed write. A comment sitting ABOVE the
+  edited entry survives (it's outside the entry's own `{...}` span); a comment
+  BETWEEN that one entry's own keys is the one unavoidable loss, exactly like
+  any tool that overwrites one JSON object's fields — every comment on every
+  OTHER entry, the BOM, and any trailing comma are untouched. A file tan
+  genuinely cannot parse still refuses to write rather than guessing, unchanged
+  from before — the bug was always "destroys and reports success", not "fails
+  to parse a good file". The four `debug-config-preview` envelope goldens are
+  unaffected: preview never reads the customer's file.
 - **The sdk-switch-pristine stamp recorded only the resolved `--sdk-root`
   PATH, so an SDK checkout that changes CONTENT at the SAME path was silently
   reused — the #163 symptom, still live after the `--pristine`/no-stamp fix

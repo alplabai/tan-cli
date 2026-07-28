@@ -456,10 +456,17 @@ pub fn create_launch_json_write_plan(
         .iter()
         .position(|c| c.get("name").and_then(Value::as_str) == Some(next_name));
 
-    let (replaced, migrated_from) = match existing_index {
+    // `splice_index` mirrors, into the ORIGINAL raw text, exactly which
+    // element `entry` is replacing (`None` means append) — see
+    // `write_content` below. It is an index into the SAME filtered,
+    // object-only ordering `parse_launch_json_or_default` already applied, so
+    // it lines up with `jsonc_splice`'s own object-only element count without
+    // either side re-deriving the other's filter.
+    let (replaced, migrated_from, splice_index, entry) = match existing_index {
         Some(index) => {
-            configs[index] = merge_configuration(&configs[index], draft);
-            (true, None)
+            let merged = merge_configuration(&configs[index], draft);
+            configs[index] = merged.clone();
+            (true, None, Some(index), merged)
         }
         None => {
             let legacy_index = legacy_name(next_name).and_then(|legacy| {
@@ -473,26 +480,64 @@ pub fn create_launch_json_write_plan(
                         .get("name")
                         .and_then(Value::as_str)
                         .map(str::to_string);
-                    configs[index] = merge_configuration(&configs[index], draft);
-                    (true, from)
+                    let merged = merge_configuration(&configs[index], draft);
+                    configs[index] = merged.clone();
+                    (true, from, Some(index), merged)
                 }
                 None => {
                     configs.push(draft.clone());
-                    (false, None)
+                    (false, None, None, draft.clone())
                 }
             }
         }
     };
 
-    let content = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&document).expect("launch document is serializable")
-    );
+    let content = write_content(existing_content, &document, splice_index, &entry);
     Ok(LaunchJsonWritePlan {
         content,
         replaced,
         migrated_from,
     })
+}
+
+/// Render the write plan's final bytes.
+///
+/// tan-cli#182: this used to be `serde_json::to_string_pretty(&document)`
+/// unconditionally — re-serializing the WHOLE document destroyed every
+/// comment, trailing comma, and leading BOM in a customer's hand-edited
+/// launch.json on every single run, not just the one entry actually being
+/// changed. Now the write is a targeted splice into `existing_content`'s own
+/// bytes whenever `jsonc_splice::locate_configuration_edit` can confidently
+/// place it: everything outside the edited entry is copied through
+/// unconditionally, because there is no re-serialization pass over it to lose
+/// anything. Only the entry actually being written is reformatted — that
+/// entry's own prior comments (if it had any) are the one unavoidable
+/// casualty, the same way any tool that edits one JSON object's fields must
+/// discard stray comments sitting BETWEEN those fields; a comment ABOVE the
+/// entry (outside its `{...}` byte span) survives along with everything else.
+///
+/// Falls back to the old whole-document re-serialize when there is no
+/// original text to splice into (a fresh file) or the locator can't
+/// confidently place the edit (no top-level `"configurations"` array in the
+/// raw text — possible only when the LOGICAL parse filled one in by default,
+/// e.g. an existing file with no `configurations` key at all). That fallback
+/// path is lossy of comments exactly as before, but never malformed: it is
+/// the documented safety net, not a second bug.
+fn write_content(
+    existing_content: Option<&str>,
+    document: &Value,
+    splice_index: Option<usize>,
+    entry: &Value,
+) -> String {
+    if let Some(original) = existing_content {
+        if let Some(edit) = crate::jsonc_splice::locate_configuration_edit(original, splice_index) {
+            return crate::jsonc_splice::apply_edit(original, &edit, entry);
+        }
+    }
+    format!(
+        "{}\n",
+        serde_json::to_string_pretty(document).expect("launch document is serializable")
+    )
 }
 
 /// Strip a leading UTF-8 BOM plus `//` / `/* */` comments from JSONC text,
@@ -1409,9 +1454,13 @@ mod tests {
         let draft =
             create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
         let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
-        // `inputs` is preserved; version kept as the (valid) existing value.
+        // `inputs` is preserved; version kept as the (valid) existing value —
+        // AND in its original compact byte form (tan-cli#182: the write is a
+        // targeted splice of the `configurations` array now, not a whole-
+        // document re-serialize, so untouched keys keep their original
+        // formatting rather than being reformatted to serde's pretty style).
         assert!(plan.content.contains("\"inputs\""));
-        assert!(plan.content.contains("\"version\": \"0.1.0\""));
+        assert!(plan.content.contains("\"version\":\"0.1.0\""));
     }
 
     #[test]
@@ -1431,8 +1480,77 @@ mod tests {
             create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
         let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
         assert!(!plan.replaced);
-        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        // tan-cli#182: the write no longer strips the BOM/comment it just
+        // read — `plan.content` is legitimately JSONC now, not strict JSON,
+        // whenever the input was. Read it back with the SAME tolerant parser
+        // the write path itself used to decide what to merge, not raw
+        // `serde_json::from_str` (which would reject its own BOM here).
+        assert!(plan.content.starts_with('\u{feff}'), "the BOM must survive");
+        assert!(
+            plan.content.contains("// Use IntelliSense"),
+            "the stock template comment must survive: {}",
+            plan.content
+        );
+        let doc = parse_launch_json_or_default(Some(&plan.content)).unwrap();
         assert_eq!(doc["configurations"].as_array().unwrap().len(), 1);
+    }
+
+    /// tan-cli#182, the reported bug: a comment sitting on an UNTOUCHED
+    /// sibling entry used to be destroyed by every write, because the whole
+    /// document was re-serialized regardless of which one entry actually
+    /// changed. This drives an update to `"Alp: Zephyr Debug (J-Link)"` and
+    /// asserts the completely unrelated `"Alp: Native Sim Debug"` entry comes
+    /// back BYTE-FOR-BYTE identical, comments included — not merely "a
+    /// comment survives somewhere", but that entry's exact bytes, unmoved.
+    #[test]
+    fn a_comment_on_an_untouched_sibling_entry_survives_the_write() {
+        let native_sim_entry = "{\n      \"name\": \"Alp: Native Sim Debug\",\n      \"type\": \"lldb\",\n      \"request\": \"launch\",\n      \"program\": \"${workspaceFolder}/build/native_sim/zephyr/zephyr.exe\", // no probe needed\n      \"cwd\": \"${workspaceFolder}\"\n    }";
+        let existing = format!(
+            "{{\n  \"version\": \"0.2.0\",\n  \"configurations\": [\n    {{\n      \"name\": \"Alp: Zephyr Debug (J-Link)\",\n      \"type\": \"cortex-debug\",\n      \"request\": \"launch\",\n      \"cwd\": \"${{workspaceFolder}}\",\n      \"executable\": \"${{workspaceFolder}}/build/app/zephyr/zephyr.elf\",\n      \"servertype\": \"jlink\",\n      \"device\": \"AE822F4M55_HP\",\n      \"interface\": \"swd\"\n    }},\n    {native_sim_entry}\n  ]\n}}\n"
+        );
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(plan.replaced);
+        assert!(
+            plan.content.contains(native_sim_entry),
+            "the untouched sibling entry, comment included, must appear byte-for-byte: {}",
+            plan.content
+        );
+        // And the field this run WAS asked to preserve on the entry it DID
+        // touch still survives the merge, same as every other migration test.
+        // `plan.content` now legitimately carries the sibling's `//` comment,
+        // so it is read back with the tolerant parser, not raw serde_json.
+        let doc = parse_launch_json_or_default(Some(&plan.content)).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 2);
+        let touched = configs
+            .iter()
+            .find(|c| c["name"] == "Alp: Zephyr Debug (J-Link)")
+            .unwrap();
+        assert_eq!(touched["device"], "AE822F4M55_HP");
+    }
+
+    /// The companion case: appending a brand-new entry must not disturb an
+    /// existing entry's comments either, including a UTF-8 BOM at the very
+    /// start of the file and a trailing comma before `]`.
+    #[test]
+    fn appending_a_new_entry_leaves_an_existing_commented_entry_untouched() {
+        let existing = "\u{feff}{\n  // do not commit board-specific probe settings\n  \"version\": \"0.2.0\",\n  \"configurations\": [\n    {\n      \"name\": \"Alp: Native Sim Debug\",\n      \"type\": \"lldb\",\n      \"program\": \"${workspaceFolder}/build/native_sim/zephyr/zephyr.exe\" // native only\n    },\n  ],\n}\n";
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
+        assert!(!plan.replaced);
+        assert!(plan.content.starts_with('\u{feff}'));
+        assert!(
+            plan.content
+                .contains("// do not commit board-specific probe settings")
+        );
+        assert!(plan.content.contains("// native only"));
+        let doc = parse_launch_json_or_default(Some(&plan.content)).unwrap();
+        assert_eq!(doc["configurations"].as_array().unwrap().len(), 2);
     }
 
     #[test]

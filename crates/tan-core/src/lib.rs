@@ -26,6 +26,7 @@ pub mod diff;
 pub mod flash;
 pub mod host_env;
 pub mod image_bundle;
+pub mod jsonc_splice;
 pub mod kconfig;
 pub mod loader;
 pub mod model;
