@@ -33,7 +33,7 @@ on:
   # that job diffs alp-sdk's emit against alp-sdk's own frozen oracle and never
   # runs tan at all.
   repository_dispatch:
-    types: [alp-sdk-contract-changed]
+    types: [alp-sdk-planner-change]
 
 env:
   # Fallback alp-sdk ref for a plain `pull_request` run (no dispatch payload).
@@ -77,9 +77,9 @@ jobs:
           # A dispatch carries the alp-sdk SHA that just landed; a plain PR run
           # has no payload and falls back to the pin. Written as one expression
           # so the two paths cannot drift apart.
-          ref='${{ github.event.client_payload.sha || env.PINNED_SDK_TAG }}'
+          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          if [ -n "${{ github.event.client_payload.sha }}" ]; then
+          if [ -n "${{ github.event.client_payload.sdk_ref }}" ]; then
             echo "::notice::DISPATCHED by alp-sdk -- comparing against the ref that just landed: ${ref}"
           else
             echo "::notice::comparing against the pinned alp-sdk ref: ${ref}"
@@ -215,9 +215,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ref='${{ github.event.client_payload.sha || env.PINNED_SDK_TAG }}'
+          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
           echo "ref=${ref}" >> "$GITHUB_OUTPUT"
-          if [ -n "${{ github.event.client_payload.sha }}" ]; then
+          if [ -n "${{ github.event.client_payload.sdk_ref }}" ]; then
             echo "::notice::seam2 DISPATCHED by alp-sdk -- building against the ref that just landed: ${ref}"
           else
             echo "::notice::seam2 building against the pinned alp-sdk ref: ${ref}"
