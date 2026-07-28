@@ -13,6 +13,7 @@ pub const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/alplabai/alp
 const LOADER_SCRIPT_RELATIVE: &str = "scripts/alp_project.py";
 const VERSION_FILE_RELATIVE: &str = "VERSION";
 const METADATA_DIR_RELATIVE: &str = "metadata";
+const SDK_VERSION_YAML_RELATIVE: &str = "metadata/sdk_version.yaml";
 
 /// A single SDK release entry parsed from the GitHub Releases API.
 #[derive(Debug, Clone, Serialize)]
@@ -197,6 +198,23 @@ pub fn check_sdk_readiness(
             None => issues.push("VERSION file could not be read.".to_string()),
         }
     }
+    // tan-cli#162: no released alp-sdk ships a top-level `VERSION` file (it
+    // does not exist anywhere in the real repo's history), so every `sdk
+    // install`/`current`/`switch` reported `version (unknown)` -- while
+    // `tan doctor`'s `sdkProvenance` check, reading a DIFFERENT file, resolved
+    // a real one (`alp-sdk 0.13.0 @ 93ef572`). `metadata/sdk_version.yaml` is
+    // that file, and it is the real "single source of truth for the Alp SDK
+    // release version" per its own header comment -- VERSION stays first
+    // (never regressing an install path that DOES carry one, e.g. an
+    // extracted release archive) and this is the fallback for the git-clone
+    // path `tan sdk install` actually uses, which is every path this command
+    // has.
+    if version.is_none() {
+        let sdk_version_yaml = join(SDK_VERSION_YAML_RELATIVE);
+        if path_exists(&sdk_version_yaml) {
+            version = read_file(&sdk_version_yaml).and_then(|c| parse_sdk_version_yaml(&c));
+        }
+    }
 
     let state = if !loader_script_present {
         SdkReadinessState::Missing
@@ -347,6 +365,31 @@ fn join_path(base: &str, relative: &str) -> String {
     path.to_string_lossy().to_string()
 }
 
+/// Extract the release version from `metadata/sdk_version.yaml`'s text: a
+/// `version: X` line if present, else the first bare (no `:`) scalar. `None`
+/// when neither is found. Deliberately a tiny hand-rolled scan rather than a
+/// real YAML parse (`serde_yaml` is already a workspace dependency, but this
+/// one file is comment-heavy prose around a single scalar, and a full parse
+/// buys nothing a `strip_prefix` does not already give).
+pub fn parse_sdk_version_yaml(text: &str) -> Option<String> {
+    let mut bare: Option<String> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("version:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        } else if bare.is_none() && !line.contains(':') {
+            bare = Some(line.trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+    bare
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -493,6 +536,84 @@ mod tests {
         assert_eq!(report.state, SdkReadinessState::Ready);
         assert_eq!(report.version.as_deref(), Some("v1.5.0"));
         assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn readiness_falls_back_to_sdk_version_yaml_when_version_is_absent() {
+        // tan-cli#162: no released alp-sdk ships a top-level `VERSION` -- every
+        // real git-clone install (what `tan sdk install` actually does) hits
+        // this branch, which used to leave `version: None` and render
+        // `version (unknown)`. `metadata/sdk_version.yaml` is the file
+        // `tan doctor`'s `sdkProvenance` check already reads successfully.
+        let report = check_sdk_readiness(
+            "/sdk",
+            |p| {
+                p.ends_with("alp_project.py")
+                    || p.ends_with("metadata")
+                    || p.ends_with("sdk_version.yaml")
+            },
+            |p| {
+                if p.ends_with("sdk_version.yaml") {
+                    Some("# comment\nversion: 0.13.0\nstatus: released\n".to_string())
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(report.state, SdkReadinessState::Ready);
+        assert_eq!(report.version.as_deref(), Some("0.13.0"));
+    }
+
+    #[test]
+    fn readiness_prefers_version_file_over_the_yaml_fallback() {
+        // The fallback must never SHADOW a real VERSION file (e.g. an
+        // extracted release archive that does carry one) -- only fill the gap
+        // when VERSION has nothing to say.
+        let report = check_sdk_readiness(
+            "/sdk",
+            |p| {
+                p.ends_with("alp_project.py")
+                    || p.ends_with("metadata")
+                    || p.ends_with("VERSION")
+                    || p.ends_with("sdk_version.yaml")
+            },
+            |p| {
+                if p.ends_with("VERSION") {
+                    Some("v9.9.9".to_string())
+                } else if p.ends_with("sdk_version.yaml") {
+                    Some("version: 0.13.0".to_string())
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(report.version.as_deref(), Some("v9.9.9"));
+    }
+
+    #[test]
+    fn parse_sdk_version_yaml_reads_the_labelled_line_over_comments() {
+        assert_eq!(
+            parse_sdk_version_yaml(
+                "# Single source of truth for the Alp SDK release version.\n\
+                 #\n\
+                 version: 0.13.0\n\
+                 status:  released\n"
+            ),
+            Some("0.13.0".to_string())
+        );
+        // Quoted forms.
+        assert_eq!(
+            parse_sdk_version_yaml("version: \"0.13.0\"\n"),
+            Some("0.13.0".to_string())
+        );
+        // A bare scalar with no `version:` label at all.
+        assert_eq!(
+            parse_sdk_version_yaml("0.13.0\n"),
+            Some("0.13.0".to_string())
+        );
+        // Nothing usable.
+        assert_eq!(parse_sdk_version_yaml("# just a comment\n"), None);
+        assert_eq!(parse_sdk_version_yaml(""), None);
     }
 
     #[test]

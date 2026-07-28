@@ -55,6 +55,7 @@ pub use build_plan::{
 };
 pub use build_readiness::{
     BuildOs, BuildReadinessReport, BuildToolProbe, board_os_set, build_readiness_report,
+    zephyr_sdk_toolchain_check,
 };
 pub use clean::{
     CleanAction, CleanPlan, RejectedTarget, TargetOrigin, classify as clean_classify,
@@ -82,7 +83,9 @@ pub use flash::{
     plan_swd_probe, plan_xspi_flashwriter, plan_yocto_wic, plan_zephyr_west_flash, registry_keys,
     resolve_artefact_path, tool_gate,
 };
-pub use host_env::{HostEnvProbe, ZEPHYR_SDK_HOSTS, host_environment_checks};
+pub use host_env::{
+    HostEnvProbe, ZEPHYR_SDK_HOSTS, ZEPHYR_SDK_INSTALL_VERSION, host_environment_checks,
+};
 pub use image_bundle::{
     BundleHelperEntry, BundleManifest, BundleSliceEntry, assemble_bundle_manifest,
     helper_artefact_rel, raw_passthrough, slice_archive_name, slice_artefact_rel,
@@ -126,8 +129,9 @@ pub use run::{
 };
 pub use sdk::{
     GITHUB_RELEASES_URL, SdkReadinessReport, SdkReadinessState, SdkRelease, SdkSourceTier,
-    check_sdk_readiness, describe_network_error, parse_remote_sdk_releases, resolve_active_sdk,
-    resolve_global_default_sdk, resolve_sdk_source_tier, resolve_sdk_version_root,
+    check_sdk_readiness, describe_network_error, parse_remote_sdk_releases, parse_sdk_version_yaml,
+    resolve_active_sdk, resolve_global_default_sdk, resolve_sdk_source_tier,
+    resolve_sdk_version_root,
 };
 pub use sdk_catalogue::{
     AcceleratorAvail, BoardPreset, ChipChoice, ChipDef, ChipKconfig, I2cDevice, MemorySpec,
