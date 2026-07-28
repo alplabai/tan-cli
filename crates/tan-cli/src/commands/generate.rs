@@ -8,40 +8,35 @@ use super::CommandRun;
 use crate::cli::{GenerateArgs, GlobalArgs};
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
-
-/// Every supported `--emit` mode, used as the default target set when neither
-/// `--target` nor `--all` narrows the selection.
-///
-/// `carrier-netlist` is a board-level export — the deterministic carrier
-/// netlist + BOM handoff Alp Studio consumes (alp-sdk#419) — not a per-core
-/// build config. `native-sim-overlay` is a Zephyr board overlay (the canonical
-/// `alp,pin-array` on `zephyr,gpio-emul`) that makes a GPIO app resolve under
-/// `native_sim`. `west-libraries` (tan-cli#114) is the `west.yml` library
-/// auto-pin fragment, a single-file board-derived emit exactly like the
-/// other four `build/generated/` targets. `hw-info-h` (tan-cli#113) is the
-/// `ALP_HW_BUILD_*` build-time identifier header companion to
-/// `<alp/hw_info.h>` — another project-wide, board-derived single-file emit
-/// owned by the same `alp_project.py --emit hw-info-h` front door (delegated
-/// to `scripts/alp_project_emit/hw_info.py` at the pinned SDK tag). All four
-/// are intentionally `generate` targets only: none is in
-/// `tan_core::ALL_EMIT_MODES` (the set `trace` / `support-bundle` enumerate),
-/// because those model the *build* generation a slice runs.
-///
-/// `zephyr-board` (tan-cli#116) is deliberately NOT here: unlike every mode
-/// above, it hard-requires `--core <id>` and writes a DIRECTORY of files, not
-/// one fixed conventional file, so it cannot be defaulted by a bare
-/// `tan generate` / `--all` the way these eight can. It is reachable only via
-/// explicit `--target zephyr-board --core <id>` — see `resolve_generate_targets`.
-const ALL_EMIT_MODES: [&str; 8] = [
-    "zephyr-conf",
-    "dts-overlay",
-    "native-sim-overlay",
-    "cmake-args",
-    "yocto-conf",
-    "carrier-netlist",
-    "west-libraries",
-    "hw-info-h",
-];
+// Every supported `--emit` mode, used as the default target set when neither
+// `--target` nor `--all` narrows the selection.
+//
+// tan-cli#165: this used to be a SECOND, hand-maintained copy of the target
+// list, independent of `tan_core::loader::GENERATION_TARGET_CATALOG` (the
+// list `explain`/`trace`/`support-bundle` read) -- exactly how the two
+// drifted apart, silently, with nothing to catch it (the catalog carried
+// only 4 of these 8). Fixed by deleting this copy: `generate` now reads
+// `tan_core::ALL_EMIT_MODES` directly, the same single source `explain`
+// (`generation_target_support`/`list_generation_target_support`) and
+// `trace`/`support-bundle` (`ALL_EMIT_MODES` itself) already read.
+//
+// `os-topology` (tan-cli#115) is the ninth entry: `--emit os-topology
+// --output <path>` was measured live against the pinned SDK tag and writes
+// a normal single file exactly like the other eight (its own docs describe
+// the bare/no-`--output` invocation as "JSON to stdout, for IDEs", but that
+// is a documented convenience default, not a technical restriction --
+// `alp_project.py`'s shared `_write_or_print` helper honors `--output` for
+// it identically to `carrier-netlist`/`west-libraries`/`hw-info-h`), so it
+// drops into this same `generate --target` shape rather than needing a new
+// `tan inspect` verb.
+//
+// `zephyr-board` (tan-cli#116) is deliberately NOT in `ALL_EMIT_MODES`:
+// unlike every mode above, it hard-requires `--core <id>` and writes a
+// DIRECTORY of files, not one fixed conventional file, so it cannot be
+// defaulted by a bare `tan generate` / `--all` the way these nine can. It
+// is reachable only via explicit `--target zephyr-board --core <id>` -- see
+// `resolve_generate_targets`.
+use tan_core::ALL_EMIT_MODES;
 
 /// Targets `--core` optionally scopes, beyond `zephyr-board` (which hard-
 /// requires it). Verbatim from `alp_project.py`'s own `--core` help at the
@@ -58,6 +53,12 @@ const ALL_EMIT_MODES: [&str; 8] = [
 /// set: both are board-/SoM-mounting facts `alp_project.py` never reads
 /// `--core` for at all, so passing it would silently do nothing -- the
 /// footgun `resolve_generate_targets` refuses instead of tolerating.
+/// `os-topology` (tan-cli#115) is likewise excluded: measured live, the SDK
+/// accepts `--core` for it but ignores it outright (`alp_project.py: --core
+/// is ignored for --emit os-topology (project-level emit)`, printed to
+/// stderr, exit 0, unchanged output covering every core regardless) --
+/// exactly the same "does nothing" shape `carrier-netlist`/`native-sim-overlay`
+/// are refused for, not a genuine per-core scope.
 const CORE_SCOPABLE_TARGETS: [&str; 6] = [
     "zephyr-conf",
     "yocto-conf",
@@ -394,31 +395,38 @@ fn resolve_generate_targets(
     Err(format!("Unsupported generate target '{target}'."))
 }
 
-/// Map an emit mode to its output file. Most land under
-/// `<workspace_root>/build/generated/` (ephemeral build artifacts), but the
-/// `native_sim` overlay is a Zephyr board overlay: it must live at
+/// Map an emit mode to its output file.
+///
+/// tan-cli#165: this used to hand-duplicate a `match emit { .. }` file-name
+/// table that had already drifted out of sync with
+/// `tan_core::loader::GENERATION_TARGET_CATALOG` (the same paths, a second
+/// hand-maintained copy). Fixed by reading
+/// [`tan_core::generation_target_support`] instead -- its
+/// `output_relative_path` is exactly this path, workspace-root-relative,
+/// for every target except `zephyr-board`. Most land under
+/// `<workspace_root>/build/generated/` (ephemeral build artifacts); the
+/// `native_sim` overlay's catalog entry instead points at
 /// `boards/native_sim_native_64.overlay` in the app source tree so
-/// `west build -b native_sim/native/64` auto-discovers it. `zephyr-board`
-/// writes a DIRECTORY of files (tan-cli#116), not one file: one subdirectory
-/// per SDK board-dir name, under `build/boards/`, so `west build
-/// --board-root build/boards` (docs/porting-new-som.md Step 7, which pairs
-/// `--output build/boards/alp_e1m_aen901_m55_hp/` with `--board-root
-/// build/boards`) finds every generated board's tree without them colliding.
-/// `board_dir_name` (the caller's already-resolved
-/// [`tan_core::zephyr_board_dir_name`] result, e.g.
-/// `alp_e1m_aen801_m55_hp` -- NOT a bare core id: two SoMs sharing a core id
-/// must never collide, tan-cli#116 review finding 1) is `None` for every
-/// other target.
+/// `west build -b native_sim/native/64` auto-discovers it -- no special
+/// case needed here, the catalog value already differs per-target.
+///
+/// `zephyr-board` writes a DIRECTORY of files (tan-cli#116), not one file:
+/// one subdirectory per SDK board-dir name, under `build/boards/`, so
+/// `west build --board-root build/boards` (docs/porting-new-som.md Step 7,
+/// which pairs `--output build/boards/alp_e1m_aen901_m55_hp/` with
+/// `--board-root build/boards`) finds every generated board's tree without
+/// them colliding. Its catalog entry's `output_relative_path` is
+/// documentary only (`is_directory: true`), so this is the one target still
+/// special-cased here rather than read from the catalog: `board_dir_name`
+/// (the caller's already-resolved [`tan_core::zephyr_board_dir_name`]
+/// result, e.g. `alp_e1m_aen801_m55_hp` -- NOT a bare core id: two SoMs
+/// sharing a core id must never collide, tan-cli#116 review finding 1) is
+/// `None` for every other target.
 fn output_path_for_emit(
     workspace_root: &Path,
     emit: &str,
     board_dir_name: Option<&str>,
 ) -> PathBuf {
-    if emit == "native-sim-overlay" {
-        return workspace_root
-            .join("boards")
-            .join("native_sim_native_64.overlay");
-    }
     if emit == "zephyr-board" {
         // `run` always resolves `board_dir_name` before reaching this target
         // (returning a validation failure otherwise), so it is always Some in
@@ -430,24 +438,10 @@ fn output_path_for_emit(
             .join(board_dir_name.unwrap_or("board"));
     }
 
-    let file_name = match emit {
-        "zephyr-conf" => "alp.conf",
-        "dts-overlay" => "alp.overlay",
-        "cmake-args" => "alp-cmake-args.txt",
-        "yocto-conf" => "alp-yocto.conf",
-        "carrier-netlist" => "carrier-netlist.json",
-        "west-libraries" => "alp-west-libs.yml",
-        // tan-cli#113: matches alp-sdk docs/board-config-emit.md's own
-        // "Build-time identifier header (`--emit hw-info-h`)" example
-        // verbatim, at the pinned SDK tag.
-        "hw-info-h" => "alp_hw_info_build.h",
-        _ => "alp.out",
-    };
-
-    workspace_root
-        .join("build")
-        .join("generated")
-        .join(file_name)
+    let relative = tan_core::generation_target_support(emit)
+        .map(|target| target.output_relative_path)
+        .unwrap_or("build/generated/alp.out");
+    workspace_root.join(relative)
 }
 
 /// True when a bare `tan generate` (or `--target native-sim-overlay`) would
@@ -630,6 +624,29 @@ mod tests {
     }
 
     #[test]
+    fn target_resolution_accepts_os_topology() {
+        // tan-cli#115: the per-core natural-vs-effective OS facts emit must
+        // reach the SDK spawn as a normal default-set target -- no --core
+        // (the SDK ignores it for this target; see CORE_SCOPABLE_TARGETS'
+        // doc comment) required.
+        let resolved = resolve_generate_targets(Some("os-topology"), false, None).unwrap();
+        assert_eq!(resolved, vec!["os-topology"]);
+        assert!(ALL_EMIT_MODES.contains(&"os-topology"));
+    }
+
+    #[test]
+    fn os_topology_writes_a_json_artefact() {
+        // tan-cli#115: measured live against the pinned SDK tag -- `--emit
+        // os-topology --output <path>` writes a normal single JSON file
+        // exactly like carrier-netlist, not stdout-only.
+        let path = output_path_for_emit(Path::new("/ws"), "os-topology", None);
+        assert!(
+            path.ends_with("build/generated/os-topology.json"),
+            "{path:?}"
+        );
+    }
+
+    #[test]
     fn target_resolution_zephyr_board_requires_core() {
         // tan-cli#116: the FAILING case -- no --core must be refused, not
         // silently defaulted, since alp_project.py itself hard-requires it.
@@ -647,14 +664,17 @@ mod tests {
     fn target_resolution_rejects_core_on_targets_that_dont_consume_it() {
         // The footgun this guards: --core silently doing nothing for a target
         // that doesn't consume it (carrier-netlist/native-sim-overlay are
-        // board-/SoM-mounting facts alp_project.py never reads --core for),
-        // or for the default/--all set (which mixes core-scoped and
-        // core-blind targets in one run).
+        // board-/SoM-mounting facts alp_project.py never reads --core for;
+        // os-topology accepts but ignores it, tan-cli#115), or for the
+        // default/--all set (which mixes core-scoped and core-blind targets
+        // in one run).
         let err =
             resolve_generate_targets(Some("carrier-netlist"), false, Some("m55_hp")).unwrap_err();
         assert!(err.contains("--core"), "{err}");
         let err = resolve_generate_targets(Some("native-sim-overlay"), false, Some("m55_hp"))
             .unwrap_err();
+        assert!(err.contains("--core"), "{err}");
+        let err = resolve_generate_targets(Some("os-topology"), false, Some("m55_hp")).unwrap_err();
         assert!(err.contains("--core"), "{err}");
         let err = resolve_generate_targets(None, false, Some("m55_hp")).unwrap_err();
         assert!(err.contains("--core"), "{err}");
@@ -689,6 +709,7 @@ mod tests {
         assert!(!target_accepts_core("carrier-netlist"));
         assert!(!target_accepts_core("native-sim-overlay"));
         assert!(!target_accepts_core("zephyr-board"));
+        assert!(!target_accepts_core("os-topology"));
     }
 
     #[test]

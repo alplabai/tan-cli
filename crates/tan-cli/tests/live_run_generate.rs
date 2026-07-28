@@ -417,6 +417,66 @@ fn zephyr_board_som_swap_does_not_collide() {
     let _ = std::fs::remove_dir_all(work_dir.parent().unwrap());
 }
 
+/// tan-cli#115: `--target os-topology` against the real loader must write a
+/// file that PARSES as JSON and carries the actual per-core fields
+/// alp-sdk#95's heterogeneous-SoM configurator UI needs -- `core_type`,
+/// `runtime_class`, `default_os`/`effective_os`, `overridden`, and
+/// `allowed_os` -- richer than `system-manifest`'s flat `slices[].os`. Read
+/// live rather than assumed: this is the case the task write-up specifically
+/// warns not to model on another target's golden (`zephyr-board` turned out
+/// to write SEVEN files, richer than assumed).
+#[test]
+fn os_topology_target_writes_the_per_core_os_facts() {
+    let Some(sdk_root) = require_live_sdk("os_topology_target_writes_the_per_core_os_facts") else {
+        return;
+    };
+    let work_dir = fresh_dir("os-topology");
+    std::fs::write(work_dir.join("board.yaml"), AEN801_BOARD_YAML).unwrap();
+
+    let envelope = run_tan(
+        &sdk_root,
+        &work_dir,
+        &["generate", "--target", "os-topology"],
+    );
+    assert_ok(&envelope, "os-topology generate");
+
+    let path = work_dir
+        .join("build")
+        .join("generated")
+        .join("os-topology.json");
+    assert!(path.is_file(), "{path:?} was not written");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let parsed: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|e| panic!("{path:?} is not valid JSON: {e}\n---\n{text}"));
+
+    let cores = parsed["cores"]
+        .as_array()
+        .unwrap_or_else(|| panic!("cores must be an array:\n{text}"));
+    assert!(!cores.is_empty(), "cores must not be empty:\n{text}");
+
+    // E1M-AEN801 declares an a32_cluster (Yocto-class) plus two Zephyr-class
+    // M55 cores at the pinned SDK tag; assert m55_hp specifically, matching
+    // the exact shape the issue's own JSON example carries.
+    let m55_hp = cores
+        .iter()
+        .find(|c| c["core_id"] == "m55_hp")
+        .unwrap_or_else(|| panic!("no m55_hp core in:\n{text}"));
+    assert_eq!(m55_hp["core_type"], "cortex-m55", "{text}");
+    assert_eq!(m55_hp["runtime_class"], "rtos", "{text}");
+    assert_eq!(m55_hp["default_os"], "zephyr", "{text}");
+    assert_eq!(m55_hp["effective_os"], "zephyr", "{text}");
+    assert_eq!(m55_hp["overridden"], false, "{text}");
+    let allowed: Vec<&str> = m55_hp["allowed_os"]
+        .as_array()
+        .unwrap_or_else(|| panic!("allowed_os must be an array:\n{text}"))
+        .iter()
+        .map(|v| v.as_str().expect("allowed_os entries are strings"))
+        .collect();
+    assert_eq!(allowed, vec!["zephyr", "baremetal", "off"], "{text}");
+
+    let _ = std::fs::remove_dir_all(work_dir.parent().unwrap());
+}
+
 /// tan-cli#114: `--target west-libraries` against the real loader must write
 /// a file that PARSES as YAML (not merely a non-empty file -- a truncated or
 /// half-written stream would still pass a bytes-not-empty check) and whose

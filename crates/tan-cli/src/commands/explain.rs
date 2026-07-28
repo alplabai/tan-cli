@@ -280,10 +280,23 @@ fn module_template_details(mt: &ModuleTemplateDefinition) -> Vec<String> {
 
 /// Builds the detail lines for a generation target: display name, output path,
 /// and preview label/language.
+///
+/// tan-cli#165: `zephyr-board`'s `output_relative_path` is a documentary
+/// template (`is_directory: true`), not a literal path -- the "(writes a
+/// directory of files, not one path)" suffix says so instead of implying a
+/// real single file the way the other nine targets' paths are.
 fn generation_target_details(target: &GenerationTargetSupport) -> Vec<String> {
+    let output_note = if target.is_directory {
+        " (writes a directory of files, not one path)"
+    } else {
+        ""
+    };
     vec![
         format!("Display name: {}", target.display_name),
-        format!("Output path: {}", target.output_relative_path),
+        format!(
+            "Output path: {}{}",
+            target.output_relative_path, output_note
+        ),
         format!("Preview label: {}", target.preview_label),
         format!("Preview language: {}", target.preview_language_id),
     ]
@@ -490,6 +503,73 @@ mod tests {
             assert!(
                 text.contains("- Default libraries: (none)"),
                 "{id} got:\n{text}"
+            );
+        }
+    }
+
+    fn globals_with_target(format: Format, target: &str) -> GlobalArgs {
+        let mut g = globals(format);
+        g.target = Some(target.to_string());
+        g
+    }
+
+    #[test]
+    fn os_topology_is_explainable() {
+        // tan-cli#115/#165: os-topology must be discoverable through
+        // `tan explain --target os-topology`, not just spawnable through
+        // `tan generate --target os-topology`.
+        let args = ExplainArgs { template: None };
+        let run = run(&globals_with_target(Format::Text, "os-topology"), &args);
+        assert_eq!(run.exit, ExitCode::Success);
+        let text = run.text.join("\n");
+        assert!(text.contains("OS topology"), "got:\n{text}");
+        assert!(
+            text.contains("build/generated/os-topology.json"),
+            "got:\n{text}"
+        );
+    }
+
+    #[test]
+    fn zephyr_board_is_explainable_and_flagged_as_a_directory() {
+        // tan-cli#165: zephyr-board is one of the five targets the catalog
+        // used to omit entirely -- `tan explain --target zephyr-board` used
+        // to report "Unknown generation target". Its directory shape must
+        // also be called out, not silently presented as a single file path.
+        let args = ExplainArgs { template: None };
+        let run = run(&globals_with_target(Format::Text, "zephyr-board"), &args);
+        assert_eq!(run.exit, ExitCode::Success);
+        let text = run.text.join("\n");
+        assert!(text.contains("Zephyr board tree"), "got:\n{text}");
+        assert!(text.contains("writes a directory of files"), "got:\n{text}");
+    }
+
+    #[test]
+    fn available_generation_targets_lists_all_ten() {
+        // tan-cli#165's core regression: only 4 of 10 real generate targets
+        // used to be discoverable at all.
+        let args = ExplainArgs { template: None };
+        let run = run(&globals(Format::Json), &args);
+        let json = run.json.expect("json envelope must be present");
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let targets = parsed["data"]["available"]["generationTargets"]
+            .as_array()
+            .expect("generationTargets must be an array");
+        assert_eq!(targets.len(), 10, "got:\n{json}");
+        for expected in [
+            "zephyr-conf",
+            "dts-overlay",
+            "cmake-args",
+            "yocto-conf",
+            "native-sim-overlay",
+            "carrier-netlist",
+            "west-libraries",
+            "hw-info-h",
+            "os-topology",
+            "zephyr-board",
+        ] {
+            assert!(
+                targets.iter().any(|t| t == expected),
+                "missing {expected} in {targets:?}"
             );
         }
     }
