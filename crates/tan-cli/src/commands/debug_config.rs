@@ -111,6 +111,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
             &notes,
             &draft,
             &workspace_root,
+            Vec::new(),
         );
     }
 
@@ -171,6 +172,18 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         );
     }
 
+    // #133 reopened: report a legacy-entry migration so the customer knows
+    // WHY the file changed under them (their old `"ALP: ..."` entry is gone,
+    // folded into the correctly-named one) rather than discovering it only by
+    // diffing the file themselves.
+    let issues = match &plan.migrated_from {
+        Some(from) => vec![legacy_entry_migrated_issue(
+            from,
+            draft["name"].as_str().unwrap_or_default(),
+        )],
+        None => Vec::new(),
+    };
+
     success(
         g,
         &generated_at,
@@ -182,7 +195,28 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         &notes,
         &draft,
         &workspace_root,
+        issues,
     )
+}
+
+/// The #133 migration report: emitted when a pre-#155 `"ALP: ..."` entry was
+/// found in place of the current `"Alp: ..."` name and adopted onto it (see
+/// `tan_core::debug_launch::create_launch_json_write_plan`). Severity `info`,
+/// not `warning` or `error` — nothing failed and no action is required; this
+/// exists so an automated consumer (or a customer reading `--format json`)
+/// can tell WHY the file changed under them instead of only diffing it.
+fn legacy_entry_migrated_issue(from: &str, to: &str) -> Issue {
+    Issue {
+        code: "debug-config.legacy-entry-migrated".to_string(),
+        severity: "info".to_string(),
+        message: format!(
+            "Migrated the legacy launch-configuration entry \"{from}\" into \"{to}\". \
+             Any value you had hand-filled in on the old entry for an unresolved-\
+             placeholder field (device, miDebuggerServerAddress, configFiles, …) \
+             carried across; every other field tan owns was refreshed to this run's \
+             values, same as an ordinary re-run. The old entry is gone."
+        ),
+    }
 }
 
 /// Build a success `CommandRun`: emit the JSON envelope (or text lines) for a
@@ -199,6 +233,7 @@ fn success(
     notes: &[String],
     draft: &Value,
     workspace_root: &Path,
+    issues: Vec<Issue>,
 ) -> CommandRun {
     let data = DebugConfigData {
         schema_version: "1".to_string(),
@@ -223,6 +258,7 @@ fn success(
             notes,
             draft,
             g,
+            &issues,
         )
     };
     let project = Project {
@@ -234,7 +270,7 @@ fn success(
             "debug-config",
             project,
             data,
-            Vec::new(),
+            issues,
             ExitCode::Success.code(),
         )
         .to_json()
@@ -361,6 +397,7 @@ fn debug_config_text(
     notes: &[String],
     draft: &Value,
     g: &GlobalArgs,
+    issues: &[Issue],
 ) -> Vec<String> {
     let mut lines = Vec::new();
     if preview {
@@ -385,6 +422,14 @@ fn debug_config_text(
             server.as_str()
         ));
         lines.push(format!("launch.json: {launch_json_path}"));
+        // Always shown, even under --quiet: this is a one-time notice that the
+        // file just lost a differently-named entry (folded into this one), not
+        // routine noise like the resolution notes below it.
+        for issue in issues {
+            if issue.code == "debug-config.legacy-entry-migrated" {
+                lines.push(format!("debug-config: {}", issue.message));
+            }
+        }
         if !g.quiet {
             lines.extend(notes.iter().map(|n| format!("note: {n}")));
         }
@@ -864,6 +909,171 @@ mod tests {
         assert_eq!(
             opted_in["data"]["configuration"]["preLaunchTask"],
             "alpRun: build"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #133 reopened, driven end-to-end through `run()`: the exact reported
+    /// transcript — a hand-filled `"device": "AE822F4M55_HP"` sitting on the
+    /// orphaned legacy `"ALP: Zephyr Debug (J-Link)"` entry. Asserts the value
+    /// survives onto the correctly-named entry (both in the returned envelope
+    /// AND in the file actually written to disk), and that the run reports
+    /// the migration as an `issues[]` entry rather than silently rewriting the
+    /// customer's file.
+    #[test]
+    fn run_migrates_a_legacy_alp_entry_and_reports_it_as_an_issue() {
+        let dir = tmp("migrate-legacy");
+        let vscode_dir = dir.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        let launch_json = vscode_dir.join("launch.json");
+        std::fs::write(
+            &launch_json,
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": "0.2.0",
+                "configurations": [{
+                    "name": "ALP: Zephyr Debug (J-Link)",
+                    "type": "cortex-debug",
+                    "request": "launch",
+                    "cwd": "${workspaceFolder}",
+                    "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+                    "servertype": "jlink",
+                    "device": "AE822F4M55_HP",
+                    "interface": "swd",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            preview: false,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        // `data.configuration` is always the freshly generated draft (with its
+        // own `<resolved-device>` placeholder) — never the post-merge result —
+        // in every mode, migration included; that is pre-existing and
+        // unrelated to #133. `data.replaced: true` is this envelope's signal
+        // that an existing entry was folded into; the FILE ON DISK (checked
+        // below) is what actually carries the merged, hand-filled value.
+        assert_eq!(
+            envelope["data"]["configuration"]["name"],
+            "Alp: Zephyr Debug (J-Link)"
+        );
+        assert_eq!(envelope["data"]["replaced"], true);
+        let issues = envelope["issues"].as_array().unwrap();
+        assert_eq!(issues.len(), 1, "{envelope}");
+        assert_eq!(issues[0]["code"], "debug-config.legacy-entry-migrated");
+        assert_eq!(issues[0]["severity"], "info");
+        assert!(
+            issues[0]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ALP: Zephyr Debug (J-Link)"),
+            "{envelope}"
+        );
+
+        // The actual file on disk, not just the in-memory draft, carries the
+        // migrated after-state.
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&launch_json).unwrap()).unwrap();
+        let configs = after["configurations"].as_array().unwrap();
+        assert_eq!(
+            configs.len(),
+            1,
+            "the legacy entry must be adopted in place, not left behind: {after}"
+        );
+        assert_eq!(configs[0]["name"], "Alp: Zephyr Debug (J-Link)");
+        assert_eq!(configs[0]["device"], "AE822F4M55_HP");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The failing-case pairing #133 asks for: on a workspace with NO legacy
+    /// entry at all (the common case — a fresh `.vscode/launch.json`), the
+    /// migration issue must never appear. A test that only proves migration
+    /// happens when it should, with nothing proving it does not happen when it
+    /// should not, would pass a version that unconditionally attaches the
+    /// issue.
+    #[test]
+    fn run_emits_no_migration_issue_when_no_legacy_entry_exists() {
+        let dir = tmp("no-migration");
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("native-host".to_string()),
+            server: None,
+            pre_launch_task: None,
+            preview: false,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert_eq!(
+            envelope["issues"].as_array().unwrap().len(),
+            0,
+            "a fresh launch.json must not report a migration that never happened: {envelope}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The migration notice is printed in TEXT mode even under `--quiet`
+    /// (`global()` sets `quiet: true`) — this is a one-time, meaningful notice
+    /// about a file change under the customer's feet, not routine resolution
+    /// noise that `--quiet` is meant to suppress.
+    #[test]
+    fn text_mode_reports_the_migration_even_when_quiet() {
+        let dir = tmp("migrate-legacy-text");
+        let vscode_dir = dir.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("launch.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": "0.2.0",
+                "configurations": [{
+                    "name": "ALP: Native Sim Debug",
+                    "type": "lldb",
+                    "request": "launch",
+                    "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
+                    "cwd": "${workspaceFolder}",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let g = global(&dir);
+        assert!(g.quiet, "this test only proves something if quiet is set");
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("native-host".to_string()),
+            server: None,
+            pre_launch_task: None,
+            preview: false,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+        assert!(
+            run_result
+                .text
+                .iter()
+                .any(|l| l.contains("Migrated the legacy launch-configuration entry")),
+            "{:?}",
+            run_result.text
         );
 
         let _ = std::fs::remove_dir_all(&dir);
