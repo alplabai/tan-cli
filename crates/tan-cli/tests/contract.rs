@@ -295,7 +295,20 @@ contract_case!(
 /// Not a golden-diff case: `tan --version`'s first stdout line is its own
 /// small contract (the vscode extension parses it to gate feature
 /// availability by CLI version), but a literal golden would need editing on
-/// every version bump. Pin the FORMAT (`tan MAJOR.MINOR.PATCH`) instead.
+/// every version bump. Pin the FORMAT (`tan MAJOR.MINOR.PATCH[-PRERELEASE]`)
+/// instead.
+///
+/// The optional pre-release suffix is part of the contract, not a loophole.
+/// This test used to require all three segments to be strictly numeric, which
+/// made `tan 0.4.0-rc1` fail `must be numeric` — so tan could not cut a release
+/// candidate at all without reddening its own contract suite. That was a
+/// producer-only restriction: the consumer had ALREADY been built for it, on
+/// purpose. `alp-sdk-vscode/src/alpCli/service.ts` matches the line with
+/// `/^tan \d+\.\d+\.\d+/` (no `$`, so a suffix is fine), `parseTanVersion`
+/// deliberately KEEPS the suffix rather than dropping it, and `cliSkew`
+/// implements SemVer §11 so `0.4.0-rc1` sorts strictly BELOW `0.4.0` — which is
+/// what stops an rc from passing as the finished release. Found by cutting
+/// v0.4.0-rc1.
 #[test]
 fn version_first_line_matches_contract() {
     let output = Command::new(env!("CARGO_BIN_EXE_tan"))
@@ -314,18 +327,45 @@ fn version_first_line_matches_contract() {
         "tan --version first token must be 'tan', got: {first_line:?}"
     );
     let version = parts.next().unwrap_or_default();
-    let segments: Vec<&str> = version.split('.').collect();
+
+    // Split the SemVer core from an optional pre-release. `split_once('-')` and
+    // not `rsplit_once`: the pre-release itself may contain `-`
+    // (`0.4.0-rc.1-hotfix` is legal SemVer), and the FIRST `-` is always the
+    // separator because the core is digits and dots only.
+    let (core, pre) = match version.split_once('-') {
+        Some((core, pre)) => (core, Some(pre)),
+        None => (version, None),
+    };
+
+    let segments: Vec<&str> = core.split('.').collect();
     assert_eq!(
         segments.len(),
         3,
-        "tan --version must read 'tan MAJOR.MINOR.PATCH', got: {first_line:?}"
+        "tan --version must read 'tan MAJOR.MINOR.PATCH[-PRERELEASE]', got: {first_line:?}"
     );
     assert!(
         segments
             .iter()
             .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit())),
-        "tan --version segments must be numeric, got: {first_line:?}"
+        "tan --version MAJOR.MINOR.PATCH segments must be numeric, got: {first_line:?}"
     );
+
+    // A pre-release is allowed, but only in the charset the consumer's regex
+    // accepts (`(-[0-9A-Za-z.-]+)?`). Anything outside it parses to `null`
+    // there, and a `null` version makes every skew check report "unknown" —
+    // which every caller treats as "stay quiet". So a malformed suffix does not
+    // warn the user, it silently disables the warnings, and only this assertion
+    // would say so.
+    if let Some(pre) = pre {
+        assert!(
+            !pre.is_empty()
+                && pre
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
+            "tan --version pre-release must match the consumer's [0-9A-Za-z.-]+ \
+             charset, got: {first_line:?}"
+        );
+    }
 }
 
 /// Strips whole-line `//` comments so a code-literal search cannot be
