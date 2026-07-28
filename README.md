@@ -50,23 +50,81 @@ irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1 | iex
 
 ### Manual
 
-Pick the asset for your host (full table in [`docs/release-contract.md`](docs/release-contract.md)):
+Pick the asset for your host (full table in [`docs/release-contract.md`](docs/release-contract.md)).
+
+**Verify the digest — the scripts refuse to install without it, and so should
+you.** Two rules the installers follow and these snippets follow too: pin the
+tag ONCE and build both URLs from it (resolving `latest` separately for the
+binary and for `checksums.txt` can straddle a release and check one release's
+bytes against another's digests — the digest for a given filename really does
+move between tags), and do not put the binary in place until it matches.
+`tan --version` is not a check: it proves something runs, not that it is what
+we published.
+
+Substitute the tag you want from the
+[releases page](https://github.com/alplabai/tan-cli/releases).
 
 **Linux / macOS**
 
 ```sh
-# x86_64 linux; swap the asset name for your platform
-curl -fsSL -o tan https://github.com/alplabai/tan-cli/releases/latest/download/tan-x86_64-unknown-linux-gnu
-chmod +x tan && sudo mv tan /usr/local/bin/tan
+TAG=v0.4.0                            # pick a real tag; do not use `latest` here
+ASSET=tan-x86_64-unknown-linux-gnu    # swap for your platform
+BASE=https://github.com/alplabai/tan-cli/releases/download/$TAG
+
+curl -fsSL -o "$ASSET" "$BASE/$ASSET"
+curl -fsSL -o checksums.txt "$BASE/checksums.txt"
+
+# Prints "<asset>: OK", or fails loudly. macOS: shasum -a 256 -c -
+awk -v a="$ASSET" '$2 == a' checksums.txt | sha256sum -c -
+
+# Only after OK:
+chmod +x "$ASSET" && sudo mv "$ASSET" /usr/local/bin/tan
 tan --version
 ```
 
 **Windows (PowerShell)**
 
 ```powershell
-Invoke-WebRequest -Uri https://github.com/alplabai/tan-cli/releases/latest/download/tan-x86_64-pc-windows-msvc.exe -OutFile tan.exe
+$Tag   = 'v0.4.0'                              # pick a real tag
+$Asset = 'tan-x86_64-pc-windows-msvc.exe'
+$Base  = "https://github.com/alplabai/tan-cli/releases/download/$Tag"
+
+# Download beside the destination, never onto it: a bad binary written straight
+# to tan.exe has already landed, and may already be locked or on PATH.
+Invoke-WebRequest -Uri "$Base/$Asset" -OutFile "$Asset.download"
+Invoke-WebRequest -Uri "$Base/checksums.txt" -OutFile checksums.txt
+
+# Exact field match, same as install.ps1 -- a substring match would accept a
+# neighbouring asset's line.
+$want = Get-Content checksums.txt | ForEach-Object {
+  $p = $_ -split '\s+', 2
+  if ($p.Count -eq 2 -and $p[1].Trim() -eq $Asset) { $p[0].Trim().ToLower() }
+} | Select-Object -First 1
+$got  = (Get-FileHash -LiteralPath "$Asset.download" -Algorithm SHA256).Hash.ToLower()
+if (-not $want -or $got -ne $want) {
+  Remove-Item "$Asset.download"
+  throw "sha256 mismatch for $Asset at $Tag (expected '$want', got '$got') -- nothing installed."
+}
+
+Move-Item -Force "$Asset.download" tan.exe
 .\tan.exe --version
 ```
+
+**Stronger, when you have [`gh`](https://cli.github.com/):** every asset —
+`checksums.txt` included — carries a GitHub build-provenance attestation.
+
+```sh
+gh attestation verify <downloaded-file> --repo alplabai/tan-cli
+```
+
+Both are documented rather than one, because they answer different questions.
+sha256 proves the bytes match what is published beside them and needs nothing
+but coreutils (or PowerShell's built-in `Get-FileHash`) — so it is the baseline
+every host can run, including one that cannot install `gh`. The attestation
+proves the file was built by this repo's release workflow, which a digest
+published in the same release cannot. Run the digest check always; add the
+attestation when `gh` is available. Details in
+[`docs/release-contract.md`](docs/release-contract.md).
 
 **From source** (Rust **1.86+**, edition 2024):
 

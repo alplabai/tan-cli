@@ -81,6 +81,32 @@
   no consumer binds to any of them yet.
 
 ### Security
+- **README's Manual install section taught the unverified download the scripts
+  had just been made to refuse** (#188). #176 stopped `install.sh` /
+  `install.ps1` installing a binary they cannot verify; a few lines below the
+  one-liners, on the same page, the Manual snippets still fetched a binary with
+  no digest step, offered `tan --version` as the confirmation, and — on Windows
+  — wrote straight to `tan.exe`, the exact ordering #176 changed because a bad
+  binary that has already landed may already be locked or on PATH. That made
+  the fallback for the higher-risk population (a locked-down host, a policy
+  against `curl | sh`, a hand-carried air-gapped binary) the weaker path, and
+  left a documented route to the unverified-`tan`-on-PATH state
+  alp-sdk-vscode#393 describes.
+  Both snippets now pin the tag ONCE and build the binary and `checksums.txt`
+  URLs from it — `releases/latest/download/…` resolves `latest` separately per
+  fetch, which is the two-resolutions problem #176 fixed in the scripts, and
+  the digest for a given filename really does move between tags
+  (`tan-x86_64-pc-windows-msvc.exe` is `f159c1dc…` at `v0.4.0-rc1` and
+  `a80fb5da…` at `v0.4.0`). They match the asset by exact field, as the
+  installers do, so a neighbouring asset's line cannot satisfy the check; the
+  PowerShell one downloads beside the destination and moves into place only
+  after the digest matches.
+  **Both** mechanisms are documented, and deliberately: sha256 needs nothing
+  but coreutils (or PowerShell's built-in `Get-FileHash`), so it is the
+  baseline a host that cannot install `gh` can still run, while `gh attestation
+  verify <file> --repo alplabai/tan-cli` proves the file came from this repo's
+  release workflow, which a digest published in the same release cannot. The
+  README now says why each is there, so neither gets "fixed" back out.
 - **`install.sh` and `install.ps1` now verify the downloaded binary against the
   release's `checksums.txt` and refuse to install on any failure** (#176).
   Previously both wrote the download straight to the install destination with
