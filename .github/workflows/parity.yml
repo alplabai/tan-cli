@@ -60,7 +60,7 @@ env:
   # that proves them here. Re-bump (to a released tag once alp-sdk cuts one at
   # or after this SHA, or straight to a later SHA) on every alp-sdk change this
   # repo's parity gate should track.
-  PINNED_SDK_TAG: 3ffd87743d7648b317e6b3e34fc2fbb57745e7d2
+  PINNED_SDK_TAG: cdfe13684e362c75f6df2b190ec1c3e736c48731
 
 jobs:
   seam1-plan-shape:
