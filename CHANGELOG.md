@@ -35,9 +35,21 @@
   never write into the same directory), `west-libraries` (output parses as
   real YAML), `hw-info-h`, `--core` forwarded vs. refused, and the
   `ValidationFailure`(2)-not-`InternalFailure`(5) exit-code mapping. Wired
-  into CI's `seam2` job against the same `PINNED_SDK_TAG` checkout the
-  materialise/build steps already use; hard-fails (not skips) if
-  `TAN_LIVE_RUN_SDK_ROOT` is unset under `CI=true`, self-skips locally.
+  into `parity.yml`'s `seam2` job (right after its `west`/PyYAML/jsonschema
+  deps install, ahead of the Zephyr SDK/Renode installs it needs neither of)
+  against the same `PINNED_SDK_TAG` checkout the materialise/build steps
+  already use; hard-fails (not skips) if `TAN_LIVE_RUN_SDK_ROOT` is unset
+  where `seam2` also sets `TAN_LIVE_RUN_REQUIRED=1`, self-skips everywhere
+  else -- including this repo's own bare `cargo test` CI job, which wires
+  neither var and would otherwise hard-panic on all five tests on every push
+  and PR (an env-detection bug caught in review before merge: gating the
+  panic on the generic `CI=true` GitHub Actions sets on every runner, rather
+  than a dedicated opt-in, made that unrelated job fail). A spawn/module
+  environment failure (missing interpreter, missing PyYAML/jsonschema) is
+  also now correctly distinguished from a real target failure in the panic
+  message on every platform, including the `program not found` text Rust's
+  `Command::output()` reports on Windows and the `is required.  Install via`
+  text `alp_project.py` itself exits with for either missing dependency.
 - **`tan generate --target zephyr-board --core <id>`** (#116) — the tan front
   door for the per-core Zephyr board tree generator
   (`scripts/gen_zephyr_board.py` via `--emit zephyr-board`), the step

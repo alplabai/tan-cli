@@ -42,15 +42,26 @@
 //! The trap that shape has: a suite that quietly no-ops EVERYWHERE is a
 //! suite that never runs, and `cargo test` reports it as a plain pass either
 //! way -- there is no "skipped" verdict a human scanning CI would notice. So
-//! this file additionally checks `CI` (GitHub Actions sets `CI=true` on every
-//! runner, unconditionally): with `CI` set, a missing `TAN_LIVE_RUN_SDK_ROOT`
-//! is a HARD PANIC, not a quiet return. CI's environment is guaranteed to
-//! have the var wired (`.github/workflows/parity.yml`'s `seam2` job sets it);
-//! a missing var there means that wiring itself broke, and that must be loud.
+//! this file additionally checks `TAN_LIVE_RUN_REQUIRED` (set to `"1"` by
+//! exactly one job -- `.github/workflows/parity.yml`'s `seam2`, alongside
+//! `TAN_LIVE_RUN_SDK_ROOT` itself): with it set, a missing SDK root is a HARD
+//! PANIC, not a quiet return, because that job's environment is guaranteed to
+//! have the root wired -- a missing root there means that wiring itself
+//! broke, and that must be loud. This is deliberately NOT the generic `CI`
+//! var GitHub Actions sets on every runner: this repo's own `.github/
+//! workflows/ci.yml` `test` job also runs under `CI=true`, as a bare
+//! `cargo test --locked` with no alp-sdk checkout and no wiring for either
+//! var -- gating the panic on `CI` alone made that unrelated, never-wired job
+//! hard-panic on all five tests here on every push and PR (tan-cli#158 review
+//! finding 1). `TAN_LIVE_RUN_REQUIRED` is set ONLY where the wiring actually
+//! exists, so its absence there really does mean "the wiring broke"; its
+//! absence in `ci.yml`'s `test` job means "this job was never supposed to
+//! run these", which is exactly the quiet local-skip path.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SDK_ROOT_ENV: &str = "TAN_LIVE_RUN_SDK_ROOT";
+const REQUIRED_ENV: &str = "TAN_LIVE_RUN_REQUIRED";
 
 /// A fresh, empty scratch directory for one case, nested under its own fresh
 /// parent -- mirrors `contract.rs`'s `fresh_dir` (never directly under the
@@ -65,24 +76,31 @@ fn fresh_dir(tag: &str) -> PathBuf {
     dir
 }
 
-/// True on every GitHub Actions runner (and most other CI providers, which
-/// all set this by convention) -- the signal that the environment THIS TEST
-/// needs is supposed to already be there, so a skip must not happen quietly.
-fn ci_environment() -> bool {
-    matches!(std::env::var("CI"), Ok(v) if v == "true" || v == "1")
+/// Set to `"1"` by exactly one job -- parity.yml's `seam2`, alongside
+/// `TAN_LIVE_RUN_SDK_ROOT` itself -- meaning "this environment is supposed
+/// to have the pinned SDK checkout wired; a missing root here is a CI wiring
+/// defect, not a legitimate skip." Deliberately narrower than the generic
+/// `CI` var GitHub Actions sets on every runner: this repo's own `ci.yml`
+/// `test` job runs under `CI=true` too, with no alp-sdk checkout and no
+/// wiring for this suite at all, and gating the panic on `CI` alone made
+/// that unrelated job hard-panic on every push/PR (tan-cli#158 review
+/// finding 1).
+fn live_run_required() -> bool {
+    matches!(std::env::var(REQUIRED_ENV), Ok(v) if v == "1" || v == "true")
 }
 
 /// Resolves `TAN_LIVE_RUN_SDK_ROOT` to a checkout that actually has the
 /// loader script, or decides how to react to its absence.
 ///
-/// `None` is returned ONLY for the "not wired at all, and we are not in CI"
-/// case -- a legitimate local skip. Every other absence/misconfiguration
-/// (var set but the path has no `scripts/alp_project.py`; var unset AND
-/// `CI` is set) is a hard panic: those are not "the environment doesn't have
-/// this", they are "the environment claims to have this and is wrong",
-/// which is exactly the transport-artefact-vs-real-answer distinction this
-/// suite's own task write-up calls out (a first result that looks like an
-/// answer can be a harness defect, not the real verdict).
+/// `None` is returned ONLY for the "not wired at all, and it isn't required
+/// here" case -- a legitimate local (or unrelated-CI-job) skip. Every other
+/// absence/misconfiguration (var set but the path has no
+/// `scripts/alp_project.py`; var unset AND `TAN_LIVE_RUN_REQUIRED` is set)
+/// is a hard panic: those are not "the environment doesn't have this", they
+/// are "the environment claims to have this and is wrong", which is exactly
+/// the transport-artefact-vs-real-answer distinction this suite's own task
+/// write-up calls out (a first result that looks like an answer can be a
+/// harness defect, not the real verdict).
 fn require_live_sdk(test_name: &str) -> Option<PathBuf> {
     match std::env::var(SDK_ROOT_ENV) {
         Ok(raw) if !raw.trim().is_empty() => {
@@ -96,19 +114,21 @@ fn require_live_sdk(test_name: &str) -> Option<PathBuf> {
             );
             Some(root)
         }
-        _ if ci_environment() => {
+        _ if live_run_required() => {
             panic!(
-                "{test_name}: {SDK_ROOT_ENV} is not set, but CI=true -- this suite's CI \
-                 wiring (.github/workflows/parity.yml's `seam2` job) is supposed to set it \
-                 to its pinned alp-sdk checkout. A live-run e2e that can silently skip in \
-                 CI is a live-run e2e that never actually runs there; failing loudly here \
-                 is the whole point."
+                "{test_name}: {SDK_ROOT_ENV} is not set, but {REQUIRED_ENV}=1 -- this \
+                 suite's CI wiring (.github/workflows/parity.yml's `seam2` job) is supposed \
+                 to set {SDK_ROOT_ENV} to its pinned alp-sdk checkout whenever it sets \
+                 {REQUIRED_ENV}. A live-run e2e that can silently skip where it is required \
+                 is a live-run e2e that never actually runs there; failing loudly here is \
+                 the whole point."
             );
         }
         _ => {
             eprintln!(
                 "{test_name}: skipping -- {SDK_ROOT_ENV} is not set (no local alp-sdk \
-                 checkout wired up). This is a LOCAL-ONLY no-op; CI always sets it (see \
+                 checkout wired up). This is a no-op wherever {REQUIRED_ENV} isn't set \
+                 (any local run, and any CI job other than parity.yml's `seam2` -- see \
                  require_live_sdk's panic branch)."
             );
             None
@@ -156,12 +176,27 @@ fn run_tan(sdk_root: &Path, work_dir: &Path, extra_args: &[&str]) -> serde_json:
 /// asserting `ok == true` and reporting a bare "target X failed" on a missing
 /// interpreter would misdirect exactly the way this suite's own task
 /// write-up warns against.
+///
+/// tan-cli#158 review finding 2: the two real failures this list exists to
+/// catch did not actually match it, verified by forcing both and reading the
+/// real message. (1) Missing interpreter: `Command::output()`'s spawn error
+/// on Windows Displays as `program not found` -- not `os error 2`, not
+/// `cannot find the file specified` (confirmed with a standalone probe: a
+/// `Command::new("<nonexistent>").output()` on this platform prints exactly
+/// `program not found`, nothing else). (2) Missing PyYAML/jsonschema:
+/// `scripts/alp_project.py` (at the pinned SHA, lines 59/64) catches the
+/// `ImportError` itself and does `sys.exit("alp_project: PyYAML is
+/// required.  Install via \`pip install pyyaml\`.")` (jsonschema: same
+/// shape) -- so `No module named`/`ModuleNotFoundError` never reach tan's
+/// stderr capture on ANY platform; the SDK's own guard text is all there is.
 const ENVIRONMENT_FAILURE_SIGNATURES: &[&str] = &[
     "No module named",
     "ModuleNotFoundError",
     "os error 2",
     "cannot find the file specified",
     "is not recognized as an internal or external command",
+    "program not found",
+    "is required.  Install via",
     "python-too-old",
     "sdk-root-unresolved",
 ];
