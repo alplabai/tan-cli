@@ -113,8 +113,10 @@ pub(super) fn execute_slices(
     plan: &BuildPlan,
     base: &str,
 ) -> CommandRun {
-    // No tokened plans in this module's own tests — nothing is ever demoted.
-    execute_slices_outcome(g, context, project, plan, base, &[]).run
+    // No tokened plans in this module's own tests — nothing is ever demoted;
+    // no forced --pristine either — tests that need it call
+    // execute_slices_outcome directly.
+    execute_slices_outcome(g, context, project, plan, base, &[], false).run
 }
 
 /// Shared skip/fail shaping for the dispatch loop's early-exit branches
@@ -155,6 +157,15 @@ fn report_slice_outcome(
 /// build live (inherited stdio) with per-slice headers; JSON mode captures and
 /// folds per-slice results into the envelope. Commandless slices are skipped.
 /// Runs all slices (does not abort early) and exits non-zero if any failed.
+///
+/// `force_pristine` is `tan build --pristine` (tan-cli#163): unconditionally
+/// treat the sdk-switch-pristine decision as [`SdkStampAction::Pristine`]
+/// instead of consulting the stamp, for the manual case the automatic stamp
+/// comparison doesn't (or can't yet) cover. It is NOT a second wipe path — it
+/// forces the SAME decision the automatic check already makes, still inside
+/// the same two structural safety guards below (`build_dir_overridden` /
+/// `cwd_under_build_root`), so it still never touches a build dir tan cannot
+/// vouch for.
 pub(crate) fn execute_slices_outcome(
     g: &GlobalArgs,
     context: &ProjectContext,
@@ -162,6 +173,7 @@ pub(crate) fn execute_slices_outcome(
     plan: &BuildPlan,
     base: &str,
     demoted: &[SliceDemotion],
+    force_pristine: bool,
 ) -> NativeBuildOutcome {
     let base_path = Path::new(base);
     let text_mode = !g.is_json();
@@ -514,26 +526,46 @@ pub(crate) fn execute_slices_outcome(
             .is_some_and(|c| c.as_os_str() == CONSUMER_BUILD_ROOT);
         if !build_dir_overridden && cwd_under_build_root {
             let cached_sdk_root = manifest::read_sdk_stamp(&cwd);
-            let action = sdk_stamp_action(
-                cached_sdk_root.as_deref(),
-                sdk_root_str.as_deref(),
-                manifest::cmake_cache_configured(&cwd),
-                build_dir_overridden,
-                cwd_under_build_root,
-            );
+            // `--pristine` (tan-cli#163) forces the SAME decision the
+            // automatic stamp comparison makes, rather than a second wipe
+            // path — still inside the two guards above, so it never touches
+            // a build dir tan cannot vouch for. Only when the nested build
+            // dir actually exists: forcing a wipe of nothing would otherwise
+            // hit remove_dir_all's NotFound and misreport a harmless
+            // first-ever configure as a failed pristine.
+            let action = if force_pristine && cwd.join("build").exists() {
+                SdkStampAction::Pristine
+            } else if force_pristine {
+                SdkStampAction::Keep
+            } else {
+                sdk_stamp_action(
+                    cached_sdk_root.as_deref(),
+                    sdk_root_str.as_deref(),
+                    manifest::cmake_cache_configured(&cwd),
+                    build_dir_overridden,
+                    cwd_under_build_root,
+                )
+            };
             if action == SdkStampAction::Pristine {
                 let new_root = sdk_root_str.as_deref().unwrap_or("?");
-                let message = match &cached_sdk_root {
-                    Some(old) => format!(
-                        "{}: build dir was configured against SDK root `{old}`; \
-                         active SDK is `{new_root}` — running pristine",
+                let message = if force_pristine {
+                    format!(
+                        "{}: --pristine passed; wiping build dir before dispatch",
                         slice.core_id
-                    ),
-                    None => format!(
-                        "{}: build dir predates the SDK-switch stamp (no recorded \
-                         SDK root); running pristine against the active SDK `{new_root}`",
-                        slice.core_id
-                    ),
+                    )
+                } else {
+                    match &cached_sdk_root {
+                        Some(old) => format!(
+                            "{}: build dir was configured against SDK root `{old}`; \
+                             active SDK is `{new_root}` — running pristine",
+                            slice.core_id
+                        ),
+                        None => format!(
+                            "{}: build dir predates the SDK-switch stamp (no recorded \
+                             SDK root); running pristine against the active SDK `{new_root}`",
+                            slice.core_id
+                        ),
+                    }
                 };
                 if text_mode {
                     eprintln!("note: {message}");
@@ -1181,6 +1213,7 @@ mod tests {
             &plan,
             base.to_str().unwrap(),
             &demoted,
+            false,
         );
         assert_eq!(outcome.run.exit.code(), 0);
 
@@ -1264,6 +1297,7 @@ mod tests {
             &plan,
             base.to_str().unwrap(),
             &demoted,
+            false,
         );
         assert_eq!(outcome.run.exit.code(), 1);
 
@@ -1657,6 +1691,7 @@ mod tests {
             &plan,
             base.to_str().unwrap(),
             &[],
+            false,
         );
         assert_eq!(outcome.run.exit.code(), 0);
         assert!(!outcome.manifest_written);
@@ -1825,6 +1860,170 @@ mod tests {
     }
 
     #[test]
+    fn execute_slices_outcome_force_pristine_wipes_even_a_matching_stamp() {
+        // tan-cli#163's manual case: `tan build --pristine` must force the
+        // wipe even when the stamp already matches (the case the previous
+        // test proves the AUTOMATIC comparison correctly leaves alone) — the
+        // whole point of a manual override is to cover what the heuristic
+        // doesn't. Same wipe code path, forced.
+        let sdk_a = fake_sdk_root("sdkswitch-force-a");
+        let base = unique_temp_dir("exec-sdkswitch-force");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(
+            nested.join(".tan-sdk-root"),
+            sdk_a.to_string_lossy().as_ref(),
+        )
+        .unwrap();
+        std::fs::write(nested.join("stale-cmake-state.marker"), "x").unwrap();
+
+        let g = global_with_sdk_root(&sdk_a);
+        let plan = one_slice_plan_at("build/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let outcome = execute_slices_outcome(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+            &[],
+            true, // force_pristine
+        );
+
+        assert!(
+            !nested.join("stale-cmake-state.marker").exists(),
+            "--pristine must wipe even a build dir whose stamp already matches"
+        );
+        let codes = sdk_switch_issue_codes(outcome.run.json.as_deref().unwrap());
+        assert!(
+            codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&sdk_a).ok();
+    }
+
+    #[test]
+    fn execute_slices_outcome_force_pristine_still_respects_both_wipe_guards() {
+        // The destructive-code requirement: --pristine must NOT widen where
+        // the wipe can land. Two slices in one plan, one per guard, both with
+        // force_pristine: true — an overridden build dir (-d) and a cwd
+        // outside CONSUMER_BUILD_ROOT must both come out untouched, exactly
+        // as they do for the automatic path.
+        let base = unique_temp_dir("exec-force-pristine-guards");
+        let _ = std::fs::remove_dir_all(&base);
+
+        let overridden_nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&overridden_nested).unwrap();
+        std::fs::write(overridden_nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(overridden_nested.join("user-data.marker"), "x").unwrap();
+
+        let outside_nested = base.join("src").join("c2").join("build");
+        std::fs::create_dir_all(&outside_nested).unwrap();
+        std::fs::write(outside_nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(outside_nested.join("user-data.marker"), "x").unwrap();
+
+        let (tool, override_args) = if cfg!(windows) {
+            ("cmd", r#"["/C", "exit", "0", "-d", "../elsewhere"]"#)
+        } else {
+            ("true", r#"["-d", "../elsewhere"]"#)
+        };
+        let no_args = if cfg!(windows) {
+            r#"["/C", "exit", "0"]"#
+        } else {
+            "[]"
+        };
+        let json = format!(
+            r#"{{
+              "schemaVersion": 1, "boardYaml": "b", "sku": "S", "buildRoot": "build",
+              "slices": [
+                {{ "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1",
+                   "command": {{ "tool": "{tool}", "args": {override_args}, "cwd": "build/c1" }} }},
+                {{ "coreId": "c2", "backend": "zephyr", "buildDir": "src/c2",
+                   "command": {{ "tool": "{tool}", "args": {no_args}, "cwd": "src/c2" }} }}
+              ],
+              "sharedArtefacts": []
+            }}"#
+        );
+        let plan = parse_build_plan(&json).unwrap();
+        let g = global_with_sdk_root(&fake_sdk_root("sdkswitch-force-guards"));
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let outcome = execute_slices_outcome(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+            &[],
+            true, // force_pristine
+        );
+
+        assert!(
+            overridden_nested.join("user-data.marker").exists(),
+            "--pristine must not wipe an overridden (-d) build dir"
+        );
+        assert!(
+            outside_nested.join("user-data.marker").exists(),
+            "--pristine must not wipe a cwd outside CONSUMER_BUILD_ROOT"
+        );
+        let codes = sdk_switch_issue_codes(outcome.run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn execute_slices_outcome_force_pristine_is_a_no_op_on_a_never_configured_dir() {
+        // A first-ever `tan build --pristine` (no prior build dir at all)
+        // must not misreport a harmless no-op as a failed wipe: without the
+        // `cwd.join("build").exists()` check, forcing Pristine unconditionally
+        // would hit remove_dir_all's NotFound and surface
+        // `build.sdk-switch-pristine-failed` for a dir that never existed.
+        let base = unique_temp_dir("exec-force-pristine-fresh");
+        let _ = std::fs::remove_dir_all(&base);
+
+        let g = global_with_sdk_root(&fake_sdk_root("sdkswitch-force-fresh"));
+        let plan = one_slice_plan_at("build/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let outcome = execute_slices_outcome(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+            &[],
+            true, // force_pristine
+        );
+
+        let codes = sdk_switch_issue_codes(outcome.run.json.as_deref().unwrap());
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "nothing existed to wipe -- no pristine issue expected: {codes:?}"
+        );
+        assert!(
+            !codes.contains(&"build.sdk-switch-pristine-failed".to_string()),
+            "a never-configured dir must not report a failed wipe: {codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
     fn execute_slices_skips_the_wipe_when_the_build_dir_is_overridden() {
         // Guard 1: an explicit -d/--build-dir means west wrote somewhere this
         // check cannot know — mirrors resolve_zephyr_artefact's own refusal.
@@ -1935,6 +2134,65 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&sdk_a).ok();
+        std::fs::remove_dir_all(&sdk_b).ok();
+    }
+
+    #[test]
+    fn execute_slices_wipes_a_pre_feature_build_dir_with_no_stamp_at_all() {
+        // tan-cli#163, driven end to end instead of only at the pure
+        // `sdk_stamp_action` unit-test level: a build dir left by a tan
+        // release that PREDATES the SDK-switch stamp (issue #52 landed in
+        // v0.4.0 — a build made under v0.3.1 never wrote `.tan-sdk-root` at
+        // all, unlike the other tests above, which stamp it for sdk_a first).
+        // `cached_sdk_root` is therefore `None`, not "stamped for sdk_a" —
+        // the exact shape of the #163 repro (built under v0.3.1/v0.11.1,
+        // then `tan sdk switch` to v0.13.0 under v0.4.0, then `tan build`).
+        // A missing stamp on an already-configured dir must still pristine
+        // (`sdk_stamp_action_pristines_a_missing_stamp_on_an_already_configured_dir`
+        // is the pure half of this same assertion) — this proves the wiring
+        // reaches that pure decision in the real executor, not just in
+        // isolation.
+        let sdk_b = fake_sdk_root("sdkswitch-nofeature-b");
+        let base = unique_temp_dir("exec-sdkswitch-nofeature");
+        let _ = std::fs::remove_dir_all(&base);
+        let nested = base.join("build").join("c1").join("build");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("CMakeCache.txt"), "").unwrap();
+        std::fs::write(nested.join("leftover-from-pre-feature-build.marker"), "x").unwrap();
+        assert!(
+            !nested.join(".tan-sdk-root").exists(),
+            "setup sanity: no stamp must exist yet"
+        );
+
+        let g = global_with_sdk_root(&sdk_b);
+        let plan = one_slice_plan_at("build/c1");
+        let project = Project {
+            root: None,
+            board_yaml: None,
+        };
+        let run = execute_slices(
+            &g,
+            &no_sdk_context(),
+            project,
+            &plan,
+            base.to_str().unwrap(),
+        );
+
+        assert!(
+            !nested
+                .join("leftover-from-pre-feature-build.marker")
+                .exists(),
+            "a pre-feature build dir (no stamp, but already configured) must be wiped"
+        );
+        let stamped = std::fs::read_to_string(nested.join(".tan-sdk-root")).unwrap();
+        assert_eq!(stamped, sdk_b.to_string_lossy());
+        let codes = sdk_switch_issue_codes(run.json.as_deref().unwrap());
+        assert!(
+            codes.contains(&"build.sdk-switch-pristine".to_string()),
+            "{codes:?}"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&sdk_b).ok();
     }
 
