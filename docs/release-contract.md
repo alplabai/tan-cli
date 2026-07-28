@@ -36,10 +36,28 @@ dist-tag -- an unguarded rc would become plain `npm i -g @alplabai/tan` for
 every consumer, and npm unpublish is far more restricted than a crates.io
 yank. The relaxation, when an rc should be installable, is `--tag next`.
 
-This is load-bearing rather than cosmetic. [`install.sh`](../install.sh) fetches
-`releases/latest/download/<asset>` directly, and GitHub excludes a release from
-`/latest` **only when it is marked `prerelease`**. So an unflagged rc becomes
-`latest` and is handed to every customer running the documented install command.
+This is load-bearing rather than cosmetic. Both [`install.sh`](../install.sh)
+and [`install.ps1`](../install.ps1) resolve what `latest` means through GitHub,
+and GitHub excludes a release from `latest` **only when it is marked
+`prerelease`**. So an unflagged rc becomes `latest` and is handed to every
+customer running the documented install command.
+
+The two scripts ask two different endpoints -- `install.sh` follows the
+`/releases/latest` redirect, `install.ps1` reads the API's `tag_name`, each
+being the mechanism that is actually robust on its host (see the comment in
+either script). Both honour the same `prerelease` flag, so they agree: with
+v0.4.0 marked prerelease, both resolve `latest` to **v0.3.1** rather than to the
+higher version number.
+
+Neither fetches `releases/latest/download/<asset>` any more. They pin the
+resolved tag first and build **both** the binary URL and the `checksums.txt`
+URL from it (#176), because resolving `latest` twice is not the same as
+resolving it once: a release cut between the two fetches would verify one
+release's asset against another release's digests, which yields a wrong verdict
+rather than an error. The digest for a given filename genuinely moves between
+tags -- `tan-x86_64-pc-windows-msvc.exe` is `f159c1dc…` at `v0.4.0-rc1` and
+`a80fb5da…` at `v0.4.0` -- so anything that caches or hardcodes a digest is
+wrong by construction.
 
 crates.io is skipped for a pre-release deliberately: a crates.io publish can
 only be **yanked**, never deleted, while a GitHub pre-release can be removed
