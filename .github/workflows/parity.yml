@@ -296,14 +296,20 @@ jobs:
 
       # 3. The artefact must EXIST. `tan build` reporting ok while producing no
       #    ELF is exactly the #97 defect class, one layer up.
-      - name: locate the built ELF
+      # Pick the M55-HP slice EXPLICITLY. `-print -quit` takes whichever slice
+      # `find` reaches first, which on the first run was m55_he -- then booted
+      # against a descriptor written for the HP core. The descriptor decides
+      # which artefact is meaningful here, so the selection cannot be
+      # whichever-comes-first.
+      - name: locate the built ELF (m55_hp slice)
         run: |
           set -euo pipefail
-          ELF="$(find "${GITHUB_WORKSPACE}/alp-sdk/examples/peripheral-io/hello-world/build" \
-                   -name 'zephyr.elf' -print -quit 2>/dev/null || true)"
-          if [ -z "${ELF}" ]; then
-            echo "::error::seam2: tan build reported success but produced no zephyr.elf. Tree:"
-            find "${GITHUB_WORKSPACE}/alp-sdk/examples/peripheral-io/hello-world/build" -maxdepth 3 -type d || true
+          BUILD="${GITHUB_WORKSPACE}/alp-sdk/examples/peripheral-io/hello-world/build"
+          ELF="${BUILD}/m55_hp-zephyr/build/zephyr/zephyr.elf"
+          if [ ! -f "${ELF}" ]; then
+            echo "::error::seam2: tan build reported success but produced no ${ELF}. Tree:"
+            find "${BUILD}" -maxdepth 3 -type d || true
+            find "${BUILD}" -name 'zephyr.elf' || true
             exit 1
           fi
           file "${ELF}"
@@ -320,8 +326,15 @@ jobs:
         run: |
           set -euo pipefail
           LOG=/tmp/seam2-renode.log
+          # `$repl` MUST be passed. The .resc defaults it to the RELATIVE path
+          # `metadata/renode/alif_ensemble_e8.repl`, which only resolves when
+          # renode's cwd is the alp-sdk root. Omitting it on the first run gave
+          #   Could not find file 'metadata/renode/alif_ensemble_e8.repl'
+          # and then the absent-PC assertion fired -- a real failure, but for a
+          # harness reason rather than the boot reason it is meant to report.
           set +e
           "$HOME/renode/renode" --console --disable-xwt --plain \
+              -e "\$repl=@${GITHUB_WORKSPACE}/alp-sdk/metadata/renode/alif_ensemble_e8.repl" \
               -e "\$elf=@${SEAM2_ELF}" \
               -e "i @${GITHUB_WORKSPACE}/alp-sdk/metadata/renode/alif_ensemble_e8.resc" \
               -e "quit" > "${LOG}" 2>&1
@@ -330,6 +343,16 @@ jobs:
           echo "----- renode log -----"; cat "${LOG}"
           if [ "$RC" -ne 0 ]; then
             echo "::error::seam2 Renode smoke: renode exited ${RC}."
+            exit 1
+          fi
+          # Renode exits 0 even when a monitor command fails -- the first run
+          # here failed to load the .repl and still returned 0, so the exit code
+          # alone is not a verdict. Catch the harness failure by name, before
+          # the boot assertions, or a broken setup reports itself as a boot
+          # failure and sends the next reader after the wrong thing.
+          if grep -qE "There was an error executing command|Could not find file" "${LOG}"; then
+            echo "::error::seam2 Renode smoke: a monitor command failed (renode still exited 0) -- this is a HARNESS failure, not a boot failure. First offending line:"
+            grep -m1 -E "There was an error executing command|Could not find file" "${LOG}"
             exit 1
           fi
           if ! grep -q "Setting initial values: PC = 0x" "${LOG}"; then
