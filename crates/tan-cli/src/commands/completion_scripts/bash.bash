@@ -75,7 +75,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags --no-pip --no-west --print-env" -- "$cur") )
       ;;
     build)
-      COMPREPLY=( $(compgen -W "$global_flags --plan --plan-from --materialise --native --manifest --manifest-from --no-auto-bootstrap" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --plan --plan-from --materialise --native --manifest --manifest-from --no-auto-bootstrap --pristine" -- "$cur") )
       ;;
     kconfig)
       COMPREPLY=( $(compgen -W "$global_flags --core" -- "$cur") )

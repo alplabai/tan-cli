@@ -483,6 +483,7 @@ mod materialise_toolchain_demotion_tests {
             manifest: false,
             manifest_from: None,
             no_auto_bootstrap: false,
+            pristine: false,
         }
     }
 

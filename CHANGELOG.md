@@ -4,6 +4,15 @@
 ## [Unreleased]
 
 ### Added
+- **`tan build --pristine`** (#163) — force-wipe every slice's build dir
+  before dispatch, the manual counterpart to the automatic sdk-switch-pristine
+  wipe (issue #52) for a stale build dir the recorded-stamp heuristic doesn't
+  (or can't yet) catch. Not a second wipe mechanism: it forces the SAME
+  `SdkStampAction::Pristine` decision the automatic check already makes, still
+  inside the same two structural safety guards (an explicit `-d`/
+  `--build-dir` in the slice's own command; a plan cwd outside `build/`) — it
+  never touches a build dir tan cannot vouch for, forced or not. A no-op on a
+  never-configured build dir (nothing to wipe).
 - **`tan generate --target os-topology`** (#115) — the per-core
   natural-vs-effective OS facts `scripts/alp_project.py --emit os-topology`
   produces (`core_type`, `runtime_class`, `default_os`/`effective_os`,
@@ -98,6 +107,78 @@
   the default/`--all` set, none of which the SDK ever reads `--core` for).
 
 ### Fixed
+- **The sdk-switch-pristine stamp recorded only the resolved `--sdk-root`
+  PATH, so an SDK checkout that changes CONTENT at the SAME path was silently
+  reused — the #163 symptom, still live after the `--pristine`/no-stamp fix
+  above closed only the path-changing case (review follow-up on #163).**
+  Reproduced end-to-end and with a unit test: seed a build dir under one SDK
+  commit, `git checkout` a different tag in the SAME `--sdk-root` checkout (or
+  `tan sdk switch <path>` back to a literal path that never moved — `sdk.rs`
+  resolves that to an unchanged pointer), and a plain re-run of `tan build`
+  never noticed — no `build.sdk-switch-pristine` issue, stale build state
+  intact. The plan already carries the fix's own input: a freshly emitted
+  plan's `sdkCommit` reflects the checkout's CURRENT git HEAD. A new
+  `tan_core::plan_exec::sdk_stamp_key` folds it into the identity
+  `sdk_stamp_action` compares and the executor writes to `.tan-sdk-root`
+  (`<root>@<sdkCommit>`, degrading to the root alone on an older/commit-less
+  plan — matching, and staying compatible with, the historical stamp). An
+  existing root-only stamp mismatches the new key exactly once, the first
+  build after upgrading — the same "fail toward a spurious rebuild, never
+  toward trusting a stale one" trade-off the original mechanism already makes.
+- **`tan build --pristine` misreported a harmless no-op as a wipe for a slice
+  whose build tool never used `<cwd>/build` at all (review follow-up on
+  #163).** The `--pristine` guard checked bare `cwd.join("build").exists()` —
+  but `write_sdk_stamp` itself `create_dir_all`s that exact directory to write
+  `.tan-sdk-root`, so after ANY prior successful build (a yocto/bitbake slice
+  included, whose own state lands elsewhere — bitbake's TMPDIR defaults to
+  `<TOPDIR>/tmp`, not `<cwd>/build`) the directory `.exists()` with nothing in
+  it but tan's own stamp. Reproduced end-to-end against a real E1M-V2N101
+  plan: `tan build --native --pristine` reported `build.sdk-switch-pristine —
+  a55_cluster: --pristine passed; wiping build dir before dispatch` for the
+  bitbake slice's build dir, which held only `.tan-sdk-root`. Not destructive
+  (nothing bitbake wrote was there to lose), but exactly the "misreport a
+  harmless no-op as a wipe" the `.exists()` guard was added to prevent. Now
+  gated on `cmake_cache_configured` — the SAME "was this dir ever really
+  configured" signal the automatic (non-forced) branch already uses.
+- **`kconfig_fixture_parity.py` and `scaffold_byte_parity.py` still treated an
+  explicit `--sdk` as a hint inside the required `seam1 -- plan-shape parity`
+  job (#175).** #173 fixed this for `toolchain_lock_parity.py` and
+  `bootstrap_manifest_parity.py`, deliberately leaving these two — the finding
+  scoped only the two it named. Both vendored their own
+  `_looks_like_sdk_checkout`/`resolve_sdk_root` pair instead of the shared
+  `tests/parity/_sdk_checkout.py`, so a `--sdk` that failed to resolve (e.g.
+  the checkout path moving, or alp-sdk reorganising `scripts/alp_orchestrate/`
+  away) silently fell through to `$ALP_SDK_ROOT` / a sibling checkout and,
+  finding neither, printed SKIP and exited 0 — both steps run inside
+  `parity.yml`'s required `seam1-plan-shape` job with a real `--sdk alp-sdk`,
+  so a moved checkout would go green having checked nothing. Both now import
+  `sdk_root_or_exit_code`, same as the other two: an explicit `--sdk` that
+  does not resolve is a hard FAIL (exit 1); omitting `--sdk` keeps the
+  existing local-dev-loop SKIP (exit 0). Verified against a real pinned
+  alp-sdk checkout: both now reach an actual byte-diff/scaffold-emit
+  comparison and PASS, not skip.
+- **A build dir from a PRE-#52 tan release (no `.tan-sdk-root` stamp at all,
+  not just one stamped for a different SDK root) is the exact shape a
+  reporter saw silently reused after `tan sdk switch` (#163).** Root-cause
+  finding: the auto-pristine machinery landed in v0.4.0 (issue #52) and is
+  unchanged since — `sdk_stamp_action` (`tan-core::plan_exec`) already treats
+  a missing stamp on an already-configured build dir as stale by design (the
+  one way a pre-feature build dir ever self-heals), and every guard/input in
+  the wiring (`crates/tan-cli/src/commands/build/execute/mod.rs`) traces
+  through to `Pristine` for this exact input shape. A new end-to-end test,
+  `execute_slices_wipes_a_pre_feature_build_dir_with_no_stamp_at_all` —
+  reproducing the reporter's precise shape (`CMakeCache.txt` present,
+  `.tan-sdk-root` absent, switched `--sdk-root`) rather than only the
+  pure-function unit test's coverage of it — confirms the mechanism fires
+  correctly today; mutating either the pure decision or the executor wiring
+  makes it fail. No second pristine mechanism was added. What the mechanism
+  cannot give a user in retrospect: the wipe + warning fire exactly ONCE, on
+  the run that detects the switch (deliberately, so a compile-error retry
+  loop keeps its incremental state) — a build that then fails for an
+  unrelated reason (as the reporter's did, #160's missing Zephyr SDK
+  toolchain) and is retried shows nothing about the switch on any later
+  attempt, because by then the stamp already matches. `tan build --pristine`
+  (above) covers the manual case the issue asked for.
 - **`ZEPHYR_SDK_INSTALL_VERSION` was a hand-ported copy of a fact alp-sdk
   owns and guards, on a side alp-sdk's own drift gate cannot see (#172).**
   `tan doctor`'s `zephyrSdk` check names the exact `west sdk install

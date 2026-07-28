@@ -75,6 +75,9 @@ pub fn run(g: &GlobalArgs, args: &RunArgs) -> CommandRun {
         // `tan run` is "build then run", so it inherits `build`'s default
         // auto-bootstrap; `--no-auto-bootstrap` is a `build`-only flag.
         no_auto_bootstrap: false,
+        // Same reasoning: `--pristine` is a `build`-only flag; `tan run` never
+        // forces one on its own.
+        pristine: false,
     };
     let outcome = build::run_build_native_outcome(g, &build_args);
     let built = outcome.run;

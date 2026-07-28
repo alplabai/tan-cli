@@ -56,6 +56,7 @@ complete -c tan -n '__fish_seen_subcommand_from build' -l native -d 'Build nativ
 complete -c tan -n '__fish_seen_subcommand_from build' -l manifest -d 'Show the system manifest'
 complete -c tan -n '__fish_seen_subcommand_from build' -l manifest-from -d 'Read manifest from file'
 complete -c tan -n '__fish_seen_subcommand_from build' -l no-auto-bootstrap -d 'Never bootstrap implicitly'
+complete -c tan -n '__fish_seen_subcommand_from build' -l pristine -d 'Force-wipe build dirs before dispatch'
 complete -c tan -n '__fish_seen_subcommand_from kconfig' -l core -d 'Core id to scope the menu to'
 complete -c tan -n '__fish_seen_subcommand_from image flash clean renode size' -l build-root -d 'Override build root'
 complete -c tan -n '__fish_seen_subcommand_from flash' -l dry-run -d 'Print planned commands only'

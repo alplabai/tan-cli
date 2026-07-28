@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 """Shared alp-sdk-checkout resolution for the optionally-self-skipping
-byte-parity gates (`toolchain_lock_parity.py`, `bootstrap_manifest_parity.py`).
+byte-parity gates (`toolchain_lock_parity.py`, `bootstrap_manifest_parity.py`,
+`kconfig_fixture_parity.py`, `scaffold_byte_parity.py`).
 
 Both scripts vendored an identical `_looks_like_sdk_checkout`/
 `resolve_sdk_root` pair and, with it, an identical gap a #172 review caught:

@@ -407,6 +407,15 @@ pub struct BuildArgs {
     /// keep `tan build` to building and get the readiness report instead.
     #[arg(long = "no-auto-bootstrap")]
     pub no_auto_bootstrap: bool,
+    /// Force-wipe every slice's build dir before dispatch, regardless of the
+    /// recorded SDK-switch stamp (tan-cli#163) — the manual counterpart to the
+    /// automatic sdk-switch-pristine wipe, for a stale build dir the stamp
+    /// heuristic doesn't (or can't yet) catch. Same wipe, same two safety
+    /// guards (an explicit `-d`/`--build-dir` in the slice's own command, or a
+    /// plan cwd outside `build/`): this never touches a dir tan can't vouch
+    /// for, same as the automatic path.
+    #[arg(long)]
+    pub pristine: bool,
 }
 
 /// Args for `kconfig`: scope the board-scoped Kconfig symbol menu to one core.
