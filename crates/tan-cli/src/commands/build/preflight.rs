@@ -109,10 +109,17 @@ pub(super) fn maybe_auto_bootstrap(
             .iter()
             .any(|c| c.name == name && c.status == DoctorStatus::Fail)
     };
-    let is_warn = |name: &str| {
+    // "not pass", NOT "is Warn". #159 moved `zephyrVersion` from Warn to Fail
+    // (a stale workspace builds against the wrong Zephyr, so a readiness report
+    // must be able to fail on it) -- and a predicate that matched Warn
+    // specifically would have read the new Fail as "not stale" and silently
+    // stopped auto-bootstrapping the exact case #98 added this branch for.
+    // Severity is the report's vocabulary; this decision only cares whether the
+    // check is satisfied.
+    let is_not_pass = |name: &str| {
         checks
             .iter()
-            .any(|c| c.name == name && c.status == DoctorStatus::Warn)
+            .any(|c| c.name == name && c.status != DoctorStatus::Pass)
     };
     // Bootstrap when there is no workspace at all, OR when the reused workspace's
     // Zephyr diverges from the SDK pin (stale reuse — `tan bootstrap` refreshes
@@ -125,7 +132,7 @@ pub(super) fn maybe_auto_bootstrap(
     // the default bootstraps a "stale" workspace, and against a `v4.4.0` tree on
     // a `v4.4.1` pin it previously did not.
     let missing_workspace = is_fail("workspace");
-    let stale_zephyr = is_warn("zephyrVersion");
+    let stale_zephyr = is_not_pass("zephyrVersion");
     if (!missing_workspace && !stale_zephyr) || is_fail("sdk") || is_fail("boardYaml") {
         return None;
     }

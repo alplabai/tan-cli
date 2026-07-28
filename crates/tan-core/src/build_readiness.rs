@@ -381,12 +381,26 @@ pub fn build_readiness_report(
             "Install gperf.",
         );
         // Zephyr SDK is detected (env / install dir), not a PATH binary.
+        //
+        // FAIL, not warn (#159), and it is the ONE Zephyr check with no host
+        // exemption. The argument that keeps `dtc`/`gperf` at Warn is that the
+        // Zephyr SDK's native-Windows hosttools bundle ships neither
+        // (alp-sdk#967) -- i.e. the SDK is what supplies them. So an ABSENT SDK
+        // is not the same class of finding at all: there is no host, Windows
+        // included, on which a Zephyr build succeeds without a toolchain.
+        //
+        // Measured on the fresh-host run in alp-sdk#855: this reported `[!]`,
+        // the report said `10 passed · 7 warnings · 0 failed`, `tan doctor
+        // --build` exited 0, and the very next command died with
+        // `Could not find a package configuration file provided by
+        // "Zephyr-sdk"`. A readiness command that cannot fail hands a green
+        // light into a guaranteed failure.
         checks.push(DoctorCheck {
             name: "zephyrSdk".to_string(),
             status: if probe.zephyr_sdk {
                 DoctorStatus::Pass
             } else {
-                DoctorStatus::Warn
+                DoctorStatus::Fail
             },
             detail: if probe.zephyr_sdk {
                 "Zephyr SDK toolchain detected.".to_string()
@@ -887,10 +901,11 @@ mod tests {
             &install(HostOs::Linux),
             FLOOR,
         );
-        // west + zephyrSdk + dtc + gperf stay advisory; cmake + ninja + git +
-        // python block the build (#103, widened by #120).
-        assert_eq!(report.summary.warn, 4);
-        assert_eq!(report.summary.fail, 4);
+        // west + dtc + gperf stay advisory; cmake + ninja + git + python
+        // block the build (#103, widened by #120), and zephyrSdk joins them
+        // (#159) -- no host builds Zephyr without a toolchain.
+        assert_eq!(report.summary.warn, 3);
+        assert_eq!(report.summary.fail, 5);
         assert!(!report.next_steps.is_empty());
     }
 
@@ -903,8 +918,17 @@ mod tests {
         //
         // `west` stays `Warn` on purpose: this check probes bare PATH, but the
         // executor resolves west from the workspace venv, so a bootstrapped host
-        // that builds fine routinely fails this probe. `zephyrSdk` and
-        // `vendorToolchain` are advisory by design.
+        // that builds fine routinely fails this probe. `vendorToolchain` is
+        // advisory by design.
+        //
+        // `zephyrSdk` is NOT advisory any more (#159). The reason `dtc`/`gperf`
+        // stay `Warn` is that the Zephyr SDK's native-Windows bundle supplies
+        // them (alp-sdk#967) -- which is exactly why an ABSENT SDK is a
+        // different finding: there is no host on which a Zephyr build survives
+        // it. Measured on a fresh host in alp-sdk#855, this reported `Warn`,
+        // the report said `0 failed`, rc was 0, and the next command died on
+        // `Could not find a package configuration file provided by
+        // "Zephyr-sdk"`.
         let report = build_readiness_report(
             "t".to_string(),
             vec![BuildOs::Zephyr, BuildOs::Baremetal],
@@ -923,7 +947,7 @@ mod tests {
         assert_eq!(status("ninja"), DoctorStatus::Fail);
         assert_eq!(status("cmake"), DoctorStatus::Fail);
         assert_eq!(status("west"), DoctorStatus::Warn);
-        assert_eq!(status("zephyrSdk"), DoctorStatus::Warn);
+        assert_eq!(status("zephyrSdk"), DoctorStatus::Fail);
         assert_eq!(status("vendorToolchain"), DoctorStatus::Warn);
         // #120: `git`/`python` widen the same `Fail` line; `dtc`/`gperf` stay
         // `Warn`, matching the retired `alp doctor`'s own verdict.
