@@ -4,6 +4,26 @@
 ## [Unreleased]
 
 ### Changed
+- **Re-vendored the scaffold fixtures and the toolchain lock against alp-sdk
+  `cdfe1368` (alp-sdk#1016), and bumped `PINNED_SDK_TAG` to match.** #1016
+  rewrote the `Customer workflow:` header in every example `board.yaml` from
+  "copy this directory … and `west build`" to "`tan init --from-example
+  <category>/<name>` … and `tan build`" (ADR-0020: tan is the whole command
+  surface). Because `scripts/alp_cli/init.py` points `TEMPLATE_DIR` at
+  `examples/peripheral-io/hello-world` and `--emit scaffold` copies those files
+  verbatim, comments included, an alp-sdk comment sweep changes scaffold output
+  — so `scaffold_byte_parity.py` went red, exactly as designed. Six vendored
+  `board.yaml` files moved (`diagnostics`, `minimal`, `sensor`, each for both
+  SKUs); `edge-ai` and `iot` were unaffected. Comment-only: no schema, core or
+  peripheral content changed. Re-vendored by re-running the emit, not by
+  hand-editing the files.
+  `contract/fixtures/toolchains/toolchains.json` also moved, and the change is
+  worth recording: alp-sdk adopted tan-cli#1012's note and now documents in
+  that file's own comment that `check_toolchain_lock.py` scans only alp-sdk's
+  workflows, naming `ZEPHYR_SDK_INSTALL_VERSION` as a cross-repo consumer
+  covered solely by tan-cli's own byte-parity assertion. `zephyrSdk.version`
+  is **unchanged at `1.0.1`**, so `ZEPHYR_SDK_INSTALL_VERSION` and the install
+  command `tan doctor` prints are unaffected.
 - **BEHAVIOUR CHANGE: `tan bootstrap` no longer sprays `zephyr/`, `modules/`,
   `.west/` and its venv into whatever directory the alp-sdk checkout happens
   to sit in — it now guards that parent, and refuses (or, interactively,
