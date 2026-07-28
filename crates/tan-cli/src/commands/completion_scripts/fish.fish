@@ -3,7 +3,7 @@ complete -c tan -n '__fish_use_subcommand' -a 'validate generate init scaffold e
 complete -c tan -l project -d 'Project root'
 complete -c tan -l board-yaml -d 'board.yaml path'
 complete -c tan -l sdk-root -d 'SDK root path'
-complete -c tan -l target -d 'Generation target' -a 'zephyr-conf dts-overlay native-sim-overlay cmake-args yocto-conf carrier-netlist west-libraries zephyr-board'
+complete -c tan -l target -d 'Generation target' -a 'zephyr-conf dts-overlay native-sim-overlay cmake-args yocto-conf carrier-netlist west-libraries zephyr-board hw-info-h'
 complete -c tan -l all -d 'Generate all targets'
 complete -c tan -l format -d 'Output format' -a 'text json'
 complete -c tan -l verbose -d 'Verbose output'
