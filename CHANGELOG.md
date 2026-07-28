@@ -4,6 +4,14 @@
 ## [Unreleased]
 
 ### Changed
+- **BEHAVIOUR CHANGE: `tan init --name <NAME>` no longer asks for a
+  destination** (#187). `--name` is documented as "creates a sub-directory when
+  provided", so it had already decided where the files land; asking
+  `Destination directory: (.)` afterwards asked a question the caller had
+  answered. At a real terminal, a user who used to answer `out` and get
+  `out/my-app` now gets `./my-app` — pass `--destination out` for the old
+  result. A name TYPED at the interactive prompt still leaves the destination
+  genuinely open, and that human is still asked; only the flag suppresses it.
 - **BEHAVIOUR CHANGE: `tan bootstrap` no longer sprays `zephyr/`, `modules/`,
   `.west/` and its venv into whatever directory the alp-sdk checkout happens
   to sit in — it now guards that parent, and refuses (or, interactively,
@@ -104,6 +112,47 @@
   binary had already landed by the time anything could detect it.
 
 ### Fixed
+- **`tan init` prompted with no terminal to prompt on and blocked forever**
+  (#187). `tan init --from-example peripheral-io/uart-echo --name my-app
+  </dev/null` wrote the prompt's bracketed-paste (`?2004h`) and cursor-hide
+  (`?25l`) escapes into a redirected stderr and then blocked: no timeout, no
+  diagnostic, no exit, nothing created. From the caller's side that is
+  indistinguishable from a slow operation, and it hit every non-TTY caller — CI,
+  a `sh -c` from a script, an IDE task runner, another tool's
+  `Command::output()` — i.e. exactly where a customer pastes the documented
+  on-ramp command from ADR-0020 / alp-sdk#1010.
+  - The prompt gate was the flag triple `!--non-interactive && !--ci &&
+    !--format json`, which describes *intent* and never *capability*. It is now
+    `GlobalArgs::can_prompt()`, which additionally requires **both**
+    `stdin().is_terminal()` and `stderr().is_terminal()`.
+  - Both handles, because inquire splits them: it renders to **stderr** (so a
+    redirected stderr hides the prompt) and reads through crossterm's
+    `tty_fd()`, which **opens `/dev/tty`** when stdin is not a terminal. The
+    blocking read was therefore never on the redirected stdin on Unix — `tan
+    init </dev/null` from a real terminal session blocked on `/dev/tty`, and the
+    `init: Cancelled.` exit 1 seen instead on CI and in agent shells is only
+    what happens where `/dev/tty` cannot be opened. A stdin-only check would
+    have left `stdin=tty, stderr=piped` — any wrapper doing
+    `.stderr(Stdio::piped())` — hanging exactly as before.
+  - A missing terminal falls back to the flag-derived defaults rather than
+    erroring: that is what `--template`'s own help already promised ("defaults
+    to `zephyr-app` when not given and there is no TTY to prompt on"), so the
+    documented commands now run unchanged under redirected stdio instead of
+    needing an undocumented `--non-interactive`. `--non-interactive`'s own help
+    and the README flag table now say which commands default and which refuse.
+  - `tan scaffold` shared the gate and the hang. Its non-interactive contract is
+    to refuse (a module name has no sane default), so a redirected-stdio `tan
+    scaffold` now exits 2 with `scaffold.name-required` instead of blocking.
+    `tan bootstrap` had already fixed this inline for itself (#185) and nowhere
+    else — which is precisely how `init`/`scaffold` kept the flags-only gate; it
+    now calls the shared `can_prompt()` too.
+  - The non-TTY path is now driven in `tests/init_non_tty_stdin.rs`, which
+    spawns the real binary with `Stdio::null()` and captured stderr under a 60s
+    watchdog — the interactive path was exercised and the redirected-stdio path
+    was not, the same shape as #176's `irm | iex`-tested /
+    `.\install.ps1`-untested parse bug. The PROMPTING branch remains manual: no
+    CI runner has a TTY, so an `is_terminal()` false negative would degrade `tan
+    init` to a silent default scaffold with every gate green.
 - **`.\install.ps1` did not parse at all under Windows PowerShell 5.1** — the
   PowerShell that ships with Windows (#176, found while adding the above). The
   file is BOM-less UTF-8; 5.1 decodes such a file using the system ANSI

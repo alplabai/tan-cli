@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Command-line surface (clap derive). Global flags mirror CLI.md §3.1.
 
+use std::io::IsTerminal;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// Top-level parsed CLI: global flags plus the selected subcommand.
@@ -58,7 +60,10 @@ pub struct GlobalArgs {
     #[arg(long = "no-color", global = true)]
     pub no_color: bool,
 
-    /// Never prompt; fail instead of asking for input.
+    /// Never prompt. A command with a documented default takes it (`tan init`
+    /// scaffolds `zephyr-app` into `.`); one without fails instead of asking
+    /// (`tan scaffold` needs `--name`). The same rule applies unasked when
+    /// stdin or stderr is not a terminal — piped, redirected, or a CI runner.
     #[arg(long = "non-interactive", global = true)]
     pub non_interactive: bool,
 
@@ -71,6 +76,46 @@ impl GlobalArgs {
     /// True when `--format json` was selected.
     pub fn is_json(&self) -> bool {
         matches!(self.format, Format::Json)
+    }
+
+    /// True when `tan` may block on an interactive prompt: none of
+    /// `--non-interactive` / `--ci` / `--format json` was given, AND **both**
+    /// stdin and stderr are real terminals.
+    ///
+    /// The terminal checks are the tan-cli #187 fix. The flag triple alone
+    /// described *intent* ("nobody asked me to stay quiet"), never *capability*
+    /// — so `tan init --from-example peripheral-io/uart-echo --name my-app
+    /// </dev/null` wrote bracketed-paste (`?2004h`) and cursor-hide (`?25l`)
+    /// escapes and then blocked forever: no timeout, no diagnostic, no exit,
+    /// nothing created. Every non-TTY caller was affected — CI, a `sh -c` from
+    /// a script, an IDE task runner, a `Command::output()` from another tool —
+    /// and `tan init` is the command the docs tell a new customer to paste into
+    /// exactly those places.
+    ///
+    /// BOTH handles, because inquire splits them and either half alone leaves a
+    /// live hang:
+    /// - It renders to **stderr** (`inquire::terminal::crossterm`, `IO::Std(
+    ///   stderr())`), so a redirected stderr makes the prompt invisible.
+    /// - It reads through crossterm's `tty_fd()`, which uses stdin only when
+    ///   stdin is a terminal and otherwise **opens `/dev/tty`**. So on Unix the
+    ///   blocking read was never on the redirected stdin at all: `tan init
+    ///   </dev/null` from a real terminal session blocked on `/dev/tty`, and
+    ///   the `init: Cancelled.` exit 1 seen instead on CI and in agent shells
+    ///   is only what happens where `/dev/tty` cannot be opened.
+    ///
+    /// A missing terminal is treated as non-interactive (flag-derived
+    /// defaults), not as an error: that is what `--template`'s own help already
+    /// promised ("defaults to zephyr-app when not given and there is no TTY to
+    /// prompt on"), so the documented commands run unchanged under redirected
+    /// stdio instead of demanding an undocumented `--non-interactive`.
+    /// `progress::spinner` and `style::Theme::from_args` already gate on
+    /// `stderr().is_terminal()` for the same reason.
+    pub fn can_prompt(&self) -> bool {
+        !self.non_interactive
+            && !self.ci
+            && !self.is_json()
+            && std::io::stdin().is_terminal()
+            && std::io::stderr().is_terminal()
     }
 }
 
@@ -629,7 +674,9 @@ pub struct InitArgs {
         conflicts_with = "template"
     )]
     pub from_example: Option<String>,
-    /// Project name; creates a sub-directory when provided.
+    /// Project name; creates a sub-directory when provided. Giving it also
+    /// answers the destination question — `--name` alone scaffolds into
+    /// `./<name>` without prompting.
     #[arg(long)]
     pub name: Option<String>,
     /// Destination directory (default: current directory or --project).
