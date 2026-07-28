@@ -48,6 +48,16 @@ pub enum SpliceEdit {
         after: usize,
         needs_leading_comma: bool,
         indent: String,
+        /// Set only when appending into an array collapsed onto one line
+        /// (`"configurations": []` — VS Code's own stock template, the
+        /// single most common real input). `original` supplies no line break
+        /// of its own before the `]` in that case, so without this the
+        /// freshly appended entry's own trailing newline drags the `]` down
+        /// to column 0 instead of leaving it aligned with the array's own
+        /// line (tan-cli#182 review finding #5). `None` for every other
+        /// append site, where `original` already carries the closing
+        /// bracket's formatting and nothing extra is needed.
+        closing_indent: Option<String>,
     },
 }
 
@@ -133,15 +143,30 @@ pub fn locate_configuration_edit(original: &str, index: Option<usize>) -> Option
                     after,
                     needs_leading_comma,
                     indent,
+                    closing_indent: None,
                 })
             }
             None => {
-                // Empty array: insert right after the `[`.
+                // Empty array: insert right after the `[`. Indent one level
+                // deeper than the array's OWN line (not the flat default),
+                // so the entry lines up under whatever indentation width the
+                // rest of the file already uses.
                 let after = s.byte_at(array_open + 1);
+                let array_line_indent = indent_before(original, s.byte_at(array_open));
+                let entry_indent = format!("{array_line_indent}    ");
+                // `cursor` still holds the position of the closing `]` (the
+                // loop above broke on it before ever entering the element
+                // branch): collapsed onto one line (`[]`, no whitespace
+                // between the brackets) means `original` supplies no line
+                // break of its own for `]` to land on, so supply the array's
+                // own indent for it explicitly. An already-multi-line empty
+                // array (`[\n]`) keeps its own existing formatting untouched.
+                let closing_indent = (cursor == array_open + 1).then_some(array_line_indent);
                 Some(SpliceEdit::Append {
                     after,
                     needs_leading_comma: false,
-                    indent: default_indent(),
+                    indent: entry_indent,
+                    closing_indent,
                 })
             }
         },
@@ -156,11 +181,12 @@ pub fn locate_configuration_edit(original: &str, index: Option<usize>) -> Option
 /// the file survives byte-for-byte.
 pub fn apply_edit(original: &str, edit: &SpliceEdit, entry: &Value) -> String {
     let pretty = serde_json::to_string_pretty(entry).expect("configuration entry is serializable");
+    let eol = dominant_eol(original);
     match edit {
         SpliceEdit::Replace { start, end, indent } => {
             let mut out = String::with_capacity(original.len() + pretty.len());
             out.push_str(&original[..*start]);
-            out.push_str(&reindent(&pretty, indent));
+            out.push_str(&reindent(&pretty, indent, eol));
             out.push_str(&original[*end..]);
             out
         }
@@ -168,19 +194,37 @@ pub fn apply_edit(original: &str, edit: &SpliceEdit, entry: &Value) -> String {
             after,
             needs_leading_comma,
             indent,
+            closing_indent,
         } => {
-            let mut out = String::with_capacity(original.len() + pretty.len() + indent.len() + 4);
+            let mut out = String::with_capacity(original.len() + pretty.len() + indent.len() + 8);
             out.push_str(&original[..*after]);
             if *needs_leading_comma {
                 out.push(',');
             }
-            out.push('\n');
+            out.push_str(eol);
             out.push_str(indent);
-            out.push_str(&reindent(&pretty, indent));
-            out.push('\n');
+            out.push_str(&reindent(&pretty, indent, eol));
+            out.push_str(eol);
+            if let Some(closing_indent) = closing_indent {
+                out.push_str(closing_indent);
+            }
             out.push_str(&original[*after..]);
             out
         }
+    }
+}
+
+/// The line ending already dominant in `original` — `\r\n` if it contains at
+/// least one, `\n` otherwise — so a spliced-in entry's own newlines match its
+/// neighbours instead of leaving a mixed-EOL file behind on a CRLF-authored
+/// (Windows-default) `launch.json` (tan-cli#182 review finding #4).
+/// `serde_json::to_string_pretty` and this module's own literals are
+/// otherwise LF-only regardless of platform.
+fn dominant_eol(original: &str) -> &'static str {
+    if original.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
     }
 }
 
@@ -192,17 +236,19 @@ fn default_indent() -> String {
     "    ".to_string()
 }
 
-/// Re-prefix every line of `pretty` AFTER the first with `indent`, so a block
-/// that `serde_json::to_string_pretty` rendered starting at column 0 nests
-/// correctly wherever it is spliced in. The first line is left alone: for a
-/// [`SpliceEdit::Replace`] it takes the position of the old `{`, which
-/// already sits after whatever indentation preceded it in `original`; for an
-/// [`SpliceEdit::Append`] the caller pushes `indent` itself before calling.
-fn reindent(pretty: &str, indent: &str) -> String {
+/// Re-prefix every line of `pretty` AFTER the first with `indent`, joined
+/// with `eol` rather than a bare `\n`, so a block that
+/// `serde_json::to_string_pretty` rendered LF-only and starting at column 0
+/// nests correctly, in the file's own line-ending style, wherever it is
+/// spliced in. The first line is left alone: for a [`SpliceEdit::Replace`] it
+/// takes the position of the old `{`, which already sits after whatever
+/// indentation preceded it in `original`; for an [`SpliceEdit::Append`] the
+/// caller pushes `indent` itself before calling.
+fn reindent(pretty: &str, indent: &str, eol: &str) -> String {
     let mut lines = pretty.lines();
     let mut out = String::from(lines.next().unwrap_or(""));
     for line in lines {
-        out.push('\n');
+        out.push_str(eol);
         out.push_str(indent);
         out.push_str(line);
     }
@@ -228,16 +274,27 @@ fn indent_before(text: &str, byte_pos: usize) -> String {
 /// token index of its value's opening `[`, or `None` if the key is absent, is
 /// not the very next thing after `:`, or the document doesn't open with `{`
 /// at all (every case the caller treats as "fall back to full re-serialize").
+///
+/// A SECOND top-level `"configurations"` key also returns `None`: JSON
+/// doesn't forbid a duplicate key, and `serde_json` (like VS Code's own
+/// `jsonc-parser`) resolves one to its LAST occurrence, but this scan would
+/// otherwise hand back the FIRST — splicing into the array nothing downstream
+/// actually reads, while `existing_index` (computed against the parsed,
+/// last-wins `Value`) silently addresses the other one (tan-cli#182 review
+/// finding #3). Bailing here routes a document with this pre-existing defect
+/// through the same safe whole-document fallback every other unrecognised
+/// shape already takes, rather than guessing which array is authoritative.
 fn find_configurations_array(s: &Scanner<'_>) -> Option<usize> {
     let mut p = s.skip_ws_and_comments(0);
     if s.char_at(p) != Some('{') {
         return None;
     }
     p += 1;
+    let mut found: Option<usize> = None;
     loop {
         p = s.skip_ws_and_comments(p);
         match s.char_at(p) {
-            Some('}') => return None,
+            Some('}') => return found,
             Some(',') => {
                 p += 1;
             }
@@ -251,7 +308,13 @@ fn find_configurations_array(s: &Scanner<'_>) -> Option<usize> {
                 }
                 p = s.skip_ws_and_comments(p + 1);
                 if key_text == "configurations" {
-                    return (s.char_at(p) == Some('[')).then_some(p);
+                    if found.is_some() {
+                        return None;
+                    }
+                    if s.char_at(p) != Some('[') {
+                        return None;
+                    }
+                    found = Some(p);
                 }
                 p = s.skip_value(p)?;
             }
@@ -581,6 +644,108 @@ mod tests {
         match edit {
             SpliceEdit::Replace { indent, .. } => assert_eq!(indent, "        "),
             other => panic!("expected Replace, got {other:?}"),
+        }
+    }
+
+    /// tan-cli#182 review finding #3: a document with two top-level
+    /// `"configurations"` keys is ambiguous -- `serde_json` resolves it to the
+    /// LAST one, so an `existing_index` computed against the parsed `Value`
+    /// would address the SECOND array, while a scan that stopped at the first
+    /// match would splice into the FIRST. That mismatch destroys whichever
+    /// entry happened to sit in the array actually spliced, and leaves the
+    /// other array untouched and stale. Bailing to `None` here is what routes
+    /// the caller to the safe (if lossy) whole-document fallback instead.
+    #[test]
+    fn a_duplicate_top_level_configurations_key_returns_none() {
+        let text = "{\"configurations\": [{\"name\": \"DECOY\"}], \"version\": \"0.2.0\", \
+                     \"configurations\": [{\"name\": \"real\"}]}";
+        assert_eq!(locate_configuration_edit(text, None), None);
+        assert_eq!(locate_configuration_edit(text, Some(0)), None);
+    }
+
+    /// tan-cli#182 review finding #4: a splice into a CRLF-authored document
+    /// must not leave the entry's own newlines as bare LF -- that strands a
+    /// mixed-EOL file behind (Windows is tan's primary platform, and this
+    /// repo's own standing weak spot).
+    #[test]
+    fn replace_matches_the_documents_own_crlf_line_endings() {
+        let text = "{\r\n  \"configurations\": [\r\n    {\r\n      \"name\": \"a\",\r\n      \"device\": \"old\"\r\n    }\r\n  ]\r\n}\r\n";
+        let edit = locate_configuration_edit(text, Some(0)).unwrap();
+        let out = apply_edit(text, &edit, &json!({"name": "a", "device": "new"}));
+        assert!(!out.contains("\r\n\r"), "no doubled CR: {out:?}");
+        // Every line break in the spliced entry itself is `\r\n`, not a bare
+        // `\n` -- i.e. there are no lone LFs anywhere in the output.
+        let lone_lf = out
+            .as_bytes()
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| w[1] == b'\n' && w[0] != b'\r')
+            .count();
+        assert_eq!(lone_lf, 0, "a bare LF survived the splice: {out:?}");
+        let doc: Value = serde_json::from_str(&out.replace("\r\n", "\n")).unwrap();
+        assert_eq!(doc["configurations"][0]["device"], "new");
+    }
+
+    /// tan-cli#182 review finding #4, the append counterpart: an append into a
+    /// CRLF document must not introduce bare LFs either.
+    #[test]
+    fn append_matches_the_documents_own_crlf_line_endings() {
+        let text = "{\r\n  \"configurations\": [\r\n    {\"name\": \"a\"}\r\n  ]\r\n}\r\n";
+        let edit = locate_configuration_edit(text, None).unwrap();
+        let out = apply_edit(text, &edit, &json!({"name": "b"}));
+        let lone_lf = out
+            .as_bytes()
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| w[1] == b'\n' && w[0] != b'\r')
+            .count();
+        assert_eq!(lone_lf, 0, "a bare LF survived the append: {out:?}");
+        let doc: Value = serde_json::from_str(&out.replace("\r\n", "\n")).unwrap();
+        assert_eq!(doc["configurations"].as_array().unwrap().len(), 2);
+    }
+
+    /// tan-cli#182 review finding #5: appending into an array collapsed on
+    /// one line (`"configurations": []`, the VS Code stock template's own
+    /// shape) must indent the new entry one level under the array's OWN
+    /// indentation, not the flat 4-space default -- and must not strand the
+    /// closing `]` at column 0.
+    #[test]
+    fn append_into_an_empty_array_on_a_four_space_file_indents_one_level_deeper() {
+        let text = "{\n    \"version\": \"0.2.0\",\n    \"configurations\": []\n}\n";
+        let edit = locate_configuration_edit(text, None).unwrap();
+        match &edit {
+            SpliceEdit::Append {
+                indent,
+                closing_indent,
+                ..
+            } => {
+                assert_eq!(
+                    indent, "        ",
+                    "one level deeper than the 4-space array line"
+                );
+                assert_eq!(closing_indent.as_deref(), Some("    "));
+            }
+            other => panic!("expected Append, got {other:?}"),
+        }
+        let out = apply_edit(text, &edit, &json!({"name": "b"}));
+        assert_eq!(
+            out,
+            "{\n    \"version\": \"0.2.0\",\n    \"configurations\": [\n        {\n          \"name\": \"b\"\n        }\n    ]\n}\n"
+        );
+        let doc: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["configurations"].as_array().unwrap().len(), 1);
+    }
+
+    /// The companion case: an empty array already spread across its own lines
+    /// (not collapsed) is left to its existing formatting -- `closing_indent`
+    /// must be `None`, matching every other append site.
+    #[test]
+    fn append_into_an_empty_array_already_spread_across_lines_gets_no_closing_indent() {
+        let text = "{\n  \"configurations\": [\n  ]\n}\n";
+        let edit = locate_configuration_edit(text, None).unwrap();
+        match &edit {
+            SpliceEdit::Append { closing_indent, .. } => assert_eq!(*closing_indent, None),
+            other => panic!("expected Append, got {other:?}"),
         }
     }
 }

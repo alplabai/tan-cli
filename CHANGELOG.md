@@ -175,6 +175,40 @@
   from before — the bug was always "destroys and reports success", not "fails
   to parse a good file". The four `debug-config-preview` envelope goldens are
   unaffected: preview never reads the customer's file.
+- **A semantically no-op `debug-config` re-run still spliced (and reformatted)
+  the maintained entry, destroying a comment inside it even though nothing
+  about the entry had actually changed (review follow-up on #182).**
+  Reproduced end-to-end: generate the entry once, hand-add
+  `// DO NOT DELETE: probe serial 000123456789` between two of its keys with
+  nothing else touched, re-run the identical command — 444 → 394 bytes, the
+  comment gone, exit 0, `issues: []`. The extension shells `debug-config`
+  before every debug session, so the no-change re-run is the COMMON case, not
+  an edge case. `create_launch_json_write_plan` now compares the merged entry
+  against what was already on disk and, when they are identical, skips the
+  splice entirely and hands back `original`'s own bytes verbatim — an
+  unchanged entry means an unchanged document, since the splice never touches
+  anything else anyway. Also closes the silent half of #182 itself: a write
+  that DOES drop a comment (the one still-unavoidable case — a comment
+  sitting between two keys of the entry actually being replaced, or the
+  whole-document fallback) now reports it as an `issues[]` entry,
+  `debug-config.comments-dropped` (severity `info`, registered `reserved` in
+  `contract/issue-codes.json`, no consumer yet), plus a `note:` line in text
+  mode — #182 named "a tool that deletes user-authored content must not report
+  unqualified success" as the non-negotiable floor, and silence on that one
+  remaining loss path did not meet it. Also fixed: a document with two
+  top-level `"configurations"` keys (`serde_json` resolves the duplicate to
+  the LAST one; the byte-level locator used to stop at the FIRST) could splice
+  into the wrong array, destroying whichever entry sat in the one actually
+  rewritten and leaving the other stale — the locator now bails to the safe
+  whole-document fallback on a duplicate instead of guessing. Also fixed: a
+  splice into a CRLF-authored `launch.json` used to emit the new entry's own
+  newlines as bare LF, leaving a mixed-EOL file (Windows is tan's primary
+  platform); the splice now matches whichever line ending is already dominant
+  in the file. Also fixed: appending into an array collapsed onto one line
+  (`"configurations": []`, VS Code's own stock template) used to indent the
+  new entry at a flat 4 spaces regardless of the file's actual indent width
+  and leave the closing `]` stranded at column 0; it now derives the entry's
+  indent from its neighbours and keeps the closing bracket aligned.
 - **The sdk-switch-pristine stamp recorded only the resolved `--sdk-root`
   PATH, so an SDK checkout that changes CONTENT at the SAME path was silently
   reused — the #163 symptom, still live after the `--pristine`/no-stamp fix

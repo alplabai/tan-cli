@@ -299,6 +299,16 @@ pub struct LaunchJsonWritePlan {
     /// (that case never looks for a legacy counterpart at all — see
     /// [`create_launch_json_write_plan`]).
     pub migrated_from: Option<String>,
+    /// `true` when this write discarded a comment (or trailing comma) that
+    /// sat inside the byte span actually rewritten — either the one
+    /// maintained entry the splice replaced, or, on the whole-document
+    /// fallback, anywhere in the original file. `false` on a fresh file, an
+    /// append (nothing existing is ever touched), and the [`create_launch_json_write_plan`]
+    /// no-op path where the merge produced no semantic change and `content`
+    /// is `original` verbatim. The caller surfaces this as an `issues[]`
+    /// entry (tan-cli#182 review finding #2) instead of the prior silent
+    /// unqualified success.
+    pub comments_dropped: bool,
 }
 
 /// The pre-#155 spelling of a current launch-configuration name, or `None` if
@@ -462,11 +472,13 @@ pub fn create_launch_json_write_plan(
     // object-only ordering `parse_launch_json_or_default` already applied, so
     // it lines up with `jsonc_splice`'s own object-only element count without
     // either side re-deriving the other's filter.
-    let (replaced, migrated_from, splice_index, entry) = match existing_index {
+    let (replaced, migrated_from, splice_index, entry, unchanged) = match existing_index {
         Some(index) => {
+            let pre_merge = configs[index].clone();
             let merged = merge_configuration(&configs[index], draft);
+            let unchanged = merged == pre_merge;
             configs[index] = merged.clone();
-            (true, None, Some(index), merged)
+            (true, None, Some(index), merged, unchanged)
         }
         None => {
             let legacy_index = legacy_name(next_name).and_then(|legacy| {
@@ -480,23 +492,44 @@ pub fn create_launch_json_write_plan(
                         .get("name")
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    let pre_merge = configs[index].clone();
                     let merged = merge_configuration(&configs[index], draft);
+                    let unchanged = merged == pre_merge;
                     configs[index] = merged.clone();
-                    (true, from, Some(index), merged)
+                    (true, from, Some(index), merged, unchanged)
                 }
                 None => {
                     configs.push(draft.clone());
-                    (false, None, None, draft.clone())
+                    (false, None, None, draft.clone(), false)
                 }
             }
         }
     };
 
-    let content = write_content(existing_content, &document, splice_index, &entry);
+    // tan-cli#182 review finding #1: a semantically no-op re-run (the merged
+    // entry is byte-identical, ignoring formatting, to what was already
+    // there) still spliced the maintained entry back into itself, which
+    // reformats it and discards any comment sitting inside — on a file the
+    // extension re-runs `debug-config` against on every session, "nothing
+    // changed" is the COMMON case, not an edge case. The splice only ever
+    // touches the one entry that changed (the rest of `document` is
+    // discarded either way), so an unchanged entry means an unchanged
+    // document: skip the write entirely and hand back `original`'s own bytes.
+    let (content, comments_dropped) = if unchanged {
+        (
+            existing_content
+                .expect("an unchanged merge only happens against an existing entry")
+                .to_string(),
+            false,
+        )
+    } else {
+        write_content(existing_content, &document, splice_index, &entry)
+    };
     Ok(LaunchJsonWritePlan {
         content,
         replaced,
         migrated_from,
+        comments_dropped,
     })
 }
 
@@ -523,20 +556,43 @@ pub fn create_launch_json_write_plan(
 /// e.g. an existing file with no `configurations` key at all). That fallback
 /// path is lossy of comments exactly as before, but never malformed: it is
 /// the documented safety net, not a second bug.
+///
+/// Returns the content alongside whether the write dropped a comment (or
+/// trailing comma) the customer's file held — tan-cli#182 review finding #2:
+/// disclosing that is the non-negotiable floor #182 itself named, not an
+/// optional nicety. On the splice path this is exactly the entry's own
+/// span being reformatted (a comment BETWEEN two of its keys is the one
+/// documented, unavoidable casualty); on the fallback it is the whole
+/// original document, since none of its original bytes survive the
+/// re-serialize.
 fn write_content(
     existing_content: Option<&str>,
     document: &Value,
     splice_index: Option<usize>,
     entry: &Value,
-) -> String {
+) -> (String, bool) {
     if let Some(original) = existing_content {
         if let Some(edit) = crate::jsonc_splice::locate_configuration_edit(original, splice_index) {
-            return crate::jsonc_splice::apply_edit(original, &edit, entry);
+            let dropped = match &edit {
+                crate::jsonc_splice::SpliceEdit::Replace { start, end, .. } => {
+                    strip_jsonc(&original[*start..*end]) != original[*start..*end]
+                }
+                // An append never rewrites any existing byte span.
+                crate::jsonc_splice::SpliceEdit::Append { .. } => false,
+            };
+            return (
+                crate::jsonc_splice::apply_edit(original, &edit, entry),
+                dropped,
+            );
         }
     }
-    format!(
-        "{}\n",
-        serde_json::to_string_pretty(document).expect("launch document is serializable")
+    let dropped = existing_content.is_some_and(|original| strip_jsonc(original) != original);
+    (
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(document).expect("launch document is serializable")
+        ),
+        dropped,
     )
 }
 
@@ -1560,5 +1616,149 @@ mod tests {
         let configs = doc["configurations"].as_array().unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0]["name"], "has // slashes /* not a comment */");
+    }
+
+    /// tan-cli#182 review finding #1, the repro exactly as run against the
+    /// real binary: generate the entry once, hand-add a comment INSIDE it
+    /// that changes nothing else, then re-run with the identical target/
+    /// server. The merge is semantically a no-op (every field the second
+    /// draft produces is already present with the same value), so the second
+    /// write must return `existing` byte-for-byte -- comment included -- not
+    /// re-splice the unchanged entry and destroy it.
+    #[test]
+    fn a_semantic_no_op_rerun_returns_the_original_bytes_verbatim_comment_included() {
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        let first = create_launch_json_write_plan(None, &draft).unwrap();
+        assert!(!first.replaced);
+
+        let with_comment = first.content.replacen(
+            "\"request\": \"launch\",",
+            "\"request\": \"launch\",\n      // DO NOT DELETE: probe serial 000123456789",
+            1,
+        );
+        assert!(
+            with_comment.contains("000123456789"),
+            "fixture is malformed"
+        );
+
+        let second = create_launch_json_write_plan(Some(&with_comment), &draft).unwrap();
+        assert_eq!(
+            second.content, with_comment,
+            "a semantically no-op re-run must return the original bytes verbatim"
+        );
+        assert!(
+            second.content.contains("000123456789"),
+            "the hand-added comment must survive a no-op re-run: {}",
+            second.content
+        );
+        assert!(!second.comments_dropped);
+    }
+
+    /// The inverse: when the re-run genuinely changes the entry (a build
+    /// resolved a placeholder), the no-op guard must NOT suppress the write —
+    /// only byte-identical merges take the verbatim path.
+    #[test]
+    fn a_genuinely_changed_rerun_still_writes() {
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        let first = create_launch_json_write_plan(None, &draft).unwrap();
+
+        let mut resolved_draft = draft.clone();
+        apply_launch_resolution(
+            &mut resolved_draft,
+            &LaunchResolution {
+                device: Some("AE822F4M55_HP".into()),
+                ..Default::default()
+            },
+        );
+        let second = create_launch_json_write_plan(Some(&first.content), &resolved_draft).unwrap();
+        assert_ne!(second.content, first.content);
+        assert!(second.content.contains("AE822F4M55_HP"));
+    }
+
+    /// tan-cli#182 review finding #2: a comment sitting BETWEEN two keys of
+    /// the entry actually being replaced is the one documented, unavoidable
+    /// casualty of a splice — but it must be DISCLOSED via
+    /// `comments_dropped`, not silently eaten. Distinct from the previous
+    /// no-op test: here the entry genuinely changes (a new `device`), so the
+    /// no-op short-circuit does not apply and the splice really does run.
+    #[test]
+    fn a_genuine_write_that_drops_an_inline_comment_reports_it() {
+        let existing = "{\n  \"version\": \"0.2.0\",\n  \"configurations\": [\n    {\n      \"name\": \"Alp: Zephyr Debug (J-Link)\",\n      \"type\": \"cortex-debug\",\n      \"request\": \"launch\",\n      // hand-picked after bring-up, do not overwrite\n      \"cwd\": \"${workspaceFolder}\",\n      \"executable\": \"${workspaceFolder}/build/app/zephyr/zephyr.elf\",\n      \"servertype\": \"jlink\",\n      \"device\": \"AE822F4M55_HP\",\n      \"interface\": \"swd\"\n    }\n  ]\n}\n";
+        let mut draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        apply_launch_resolution(
+            &mut draft,
+            &LaunchResolution {
+                device: Some("AE822F4M55_NEW".into()),
+                ..Default::default()
+            },
+        );
+
+        let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
+        assert!(plan.replaced);
+        assert!(
+            !plan
+                .content
+                .contains("hand-picked after bring-up, do not overwrite"),
+            "the comment inside the replaced entry is expected to be lost: {}",
+            plan.content
+        );
+        assert!(
+            plan.comments_dropped,
+            "a write that drops a comment must report it: {}",
+            plan.content
+        );
+    }
+
+    /// The fallback path's own comments-dropped signal: a file with no
+    /// top-level `configurations` key (the locator can't confidently place
+    /// the edit) goes through the whole-document re-serialize, which drops
+    /// every comment in the original file — that must also be reported.
+    #[test]
+    fn the_whole_document_fallback_reports_dropped_comments_too() {
+        let existing = "{\n  // compounds-only launch.json, no configurations key\n  \"version\": \"0.2.0\",\n  \"compounds\": [{\"name\": \"x\", \"configurations\": []}]\n}\n";
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
+        assert!(
+            !plan.content.contains("compounds-only launch.json"),
+            "the fallback re-serialize is expected to drop the comment: {}",
+            plan.content
+        );
+        assert!(plan.comments_dropped);
+    }
+
+    /// A brand-new file (no existing content at all) has nothing to drop.
+    #[test]
+    fn a_fresh_file_never_reports_dropped_comments() {
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        let plan = create_launch_json_write_plan(None, &draft).unwrap();
+        assert!(!plan.comments_dropped);
+    }
+
+    /// The append path's own negative case: appending a brand-new entry into
+    /// an EXISTING, comment-free file must not report `comments_dropped` —
+    /// an append never rewrites any of the file's existing bytes, so there is
+    /// nothing for it to have dropped.
+    #[test]
+    fn appending_into_an_existing_comment_free_file_reports_no_dropped_comments() {
+        let existing = existing_with(json!({
+            "name": "Alp: Native Sim Debug",
+            "type": "lldb",
+            "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(
+            !plan.replaced,
+            "a different-named draft must append, not replace"
+        );
+        assert!(!plan.comments_dropped);
     }
 }
