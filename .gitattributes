@@ -32,3 +32,12 @@ contract/fixtures/toolchains/** text eol=lf
 # the windows-latest leg only, since ubuntu/macos and a `core.autocrlf=false`
 # dev box never see it.
 crates/tan-cli/src/commands/completion_scripts/** text eol=lf
+
+# The installers are fetched and executed on a customer's machine. A CRLF
+# `install.sh` fails on every POSIX host with `bad interpreter: /usr/bin/env
+# sh^M` -- a first-contact failure with a cause that reads like nothing to do
+# with line endings. `core.autocrlf=true` (the Windows default, and this
+# machine's setting) CRLF-converts it on checkout, so the only thing keeping
+# LF in the blob is git's normalise-on-commit; pin it rather than rely on
+# every future contributor's config matching.
+install.sh text eol=lf

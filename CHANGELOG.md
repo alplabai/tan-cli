@@ -3,6 +3,41 @@
 
 ## [Unreleased]
 
+### Security
+- **`install.sh` and `install.ps1` now verify the downloaded binary against the
+  release's `checksums.txt` and refuse to install on any failure** (#176).
+  Previously both wrote the download straight to the install destination with
+  nothing but TLS behind it; the only occurrence of "verify" in either file was
+  prose telling the user to run `tan --version` afterwards, which establishes
+  that something runs, not that it is what we published. `alp-sdk-vscode`
+  already verified its own managed download against the same file
+  (alplabai/alp-sdk-vscode#389), so the two acquisition paths for the same
+  binary disagreed about whether they checked it — and the unverified one is
+  what the extension's **"Install tan CLI (global)"** button runs, whose result
+  the extension's resolver then prefers over its own verified copy, on every
+  activation.
+  Failures are worded as the distinct facts they are, all of them refusing and
+  leaving the install destination untouched: digest **mismatch**;
+  `checksums.txt` **could not be fetched** (says nothing about the binary);
+  the asset **not listed** in it; and, POSIX only, **no `sha256sum`/`shasum`**
+  on PATH. There is deliberately no `--no-verify` escape hatch — a flag that
+  turns the check off is the hole this closes, wearing a consent form.
+  `install.ps1` now downloads to a temp file and moves it into place only after
+  the digest matches; it previously wrote directly to the destination, so a bad
+  binary had already landed by the time anything could detect it.
+
+### Fixed
+- **`.\install.ps1` did not parse at all under Windows PowerShell 5.1** — the
+  PowerShell that ships with Windows (#176, found while adding the above). The
+  file is BOM-less UTF-8; 5.1 decodes such a file using the system ANSI
+  codepage, and the em dash `—` (`0xe2 0x80 0x94`) has a third byte that decodes
+  to **U+201D**, which PowerShell honours as a string delimiter. The result was
+  `The string is missing the terminator: "` and a cascade of brace errors, none
+  of them near the real cause. Both installers are now pure ASCII.
+  The documented `irm … | iex` one-liner was NOT affected — that path decodes
+  UTF-8 correctly before parsing — which is why this survived: the pipe-to-shell
+  form was exercised and the download-and-run form was not.
+
 ### Added
 - **`tan build --pristine`** (#163) — force-wipe every slice's build dir
   before dispatch, the manual counterpart to the automatic sdk-switch-pristine

@@ -267,13 +267,20 @@ jobs:
       # a real release never does. Both flags are derived from that one fact so
       # they cannot disagree with each other or with the tag.
       #
-      # This is load-bearing, not hygiene. `install.sh` fetches
-      # `releases/latest/download/<asset>` directly, and GitHub excludes a
-      # release from `/latest` ONLY when it is marked `prerelease`. Publishing an
-      # rc without these flags therefore hands it to every customer running the
-      # documented install command. Neither flag was set before, so the
-      # classification rested entirely on the action's default -- an
-      # unacceptable place for that blast radius to live.
+      # This is load-bearing, not hygiene. Both installers resolve what `latest`
+      # means through GitHub, and GitHub excludes a release from `latest` ONLY
+      # when it is marked `prerelease`. Publishing an rc without these flags
+      # therefore hands it to every customer running the documented install
+      # command. Neither flag was set before, so the classification rested
+      # entirely on the action's default -- an unacceptable place for that blast
+      # radius to live.
+      #
+      # The two scripts ask two different endpoints -- `install.sh` follows the
+      # `/releases/latest` redirect, `install.ps1` reads the API's `tag_name`
+      # (see each script for why its host needs that one). Both exclude
+      # prereleases on the same flag, so they agree; verified against this repo
+      # with v0.4.0 marked prerelease, where both resolve `latest` to v0.3.1
+      # rather than to the higher version number.
       #
       # `make_latest` is spelled as an explicit "true"/"false" string because the
       # action takes a string, not a boolean.
