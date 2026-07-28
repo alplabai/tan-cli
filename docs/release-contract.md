@@ -196,4 +196,23 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
 - **Race-free publish.** Matrix jobs upload artifacts; a single `release` job
   collates and creates the release, so parallel jobs never race on release
   creation.
-- **No secrets.** Same-repo release uses the default `GITHUB_TOKEN` only.
+- **The GitHub release needs no secrets** — binaries, `checksums.txt`,
+  `envelope-contract.json` and the provenance attestation all run on the default
+  `GITHUB_TOKEN`. **The two registry publishes do not**, and this bullet used to
+  say "No secrets" flatly, which is how nobody noticed that neither was
+  configured:
+
+  | Job | Secret | Without it |
+  |---|---|---|
+  | `publish · crates.io` | `CARGO_REGISTRY_TOKEN` | `cargo install alp-tan-cli` does not resolve |
+  | `publish · npm shim` | `NPM_TOKEN` | `npm i -g @alplabai/tan` does not resolve |
+
+  Both previously emitted a `::warning::` and exited **0**, so the run summary
+  read `publish · crates.io  success` while crates.io answered
+  `crate 'alp-tan-cli' does not exist`. That is what shipped for v0.4.0 (#151).
+  On a FINAL tag a missing secret now **fails the job** and writes the outcome
+  to the run summary; both jobs are `needs: release`, so the GitHub assets are
+  already published and unaffected — the run goes red to tell the truth about
+  the two registry channels, not to withhold the release. Pre-release tags never
+  reach either job (`!contains(github.ref_name, '-')`), so nothing about an rc
+  changes.

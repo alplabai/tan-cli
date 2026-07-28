@@ -77,6 +77,16 @@ cargo install --path crates/tan-cli --locked
 
 ### Package managers
 
+> [!WARNING]
+> **Neither package-manager path resolves yet.** The release workflow's
+> crates.io and npm publish jobs have never run with a token, so no version of
+> `alp-tan-cli` exists on crates.io and no version of `@alplabai/tan` exists on
+> npm — both jobs reported success while publishing nothing
+> ([#151](https://github.com/alplabai/tan-cli/issues/151)). Use the release
+> binaries above, or build from source. The commands below are the contract
+> these channels will honour once the tokens are configured; they are documented
+> now so the naming does not change under anyone later.
+
 **crates.io** (Rust **1.86+**, edition 2024) — the published crate is named
 `alp-tan-cli` (`tan`/`tan-cli` were already taken on crates.io by an unrelated
 project); the installed binary is still `tan`:

@@ -317,21 +317,37 @@ jobs:
           toolchain: stable
           rustflags: "" # keep parity with the local gates (see ci.yml's lint job)
 
+      # This job ONLY runs on a final tag -- the `if:` above excludes every
+      # pre-release -- so a missing token here is not "an optional channel we
+      # skipped", it is a release advertising `cargo install alp-tan-cli` when
+      # that command does not resolve. v0.4.0 shipped exactly that: this job
+      # reported `success`, the `::warning::` went unread, and crates.io
+      # answered `crate 'alp-tan-cli' does not exist` (#151).
+      - name: Refuse to "publish" with no token
+        if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
+        run: |
+          echo "### crates.io: NOT PUBLISHED" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`CARGO_REGISTRY_TOKEN\` is not set, so \`cargo install alp-tan-cli\` will not resolve for this release." >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::CARGO_REGISTRY_TOKEN is not set. A FINAL release must not report a successful crates.io publish it did not perform (#151). Add the secret, or drop the crates.io install path from the docs and this job."
+          exit 1
+
       - name: Publish tan-core then alp-tan-cli
-        if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
         # tan-core first; cargo publish waits for it to hit the index before
         # alp-tan-cli (which depends on it) is published.
         run: |
           cargo publish --package tan-core --locked
           cargo publish --package alp-tan-cli --locked
 
-      - name: Note when crates.io publish was skipped
-        if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
-        run: echo "::warning::CARGO_REGISTRY_TOKEN not set — skipped crates.io publish. The GitHub release binaries + npm shim still ship."
+      # The run summary, not just an annotation. An annotation is the weakest
+      # signal GitHub has and #151 is the proof: the skip warning was emitted
+      # correctly on v0.4.0 and still read as a publish.
+      - name: Record the crates.io outcome
+        run: |
+          echo "### crates.io: published \`alp-tan-cli@${GITHUB_REF_NAME#v}\`" >> "$GITHUB_STEP_SUMMARY"
 
   # npm shim — `npm i -g @alplabai/tan` / `npx @alplabai/tan`. One release tag
-  # scheme (v*), one workflow. Gated on NPM_TOKEN; skipped (not failed) when
-  # unset, mirroring the crates.io gating above.
+  # scheme (v*), one workflow. Gated on NPM_TOKEN; on a FINAL tag a missing
+  # token FAILS rather than skipping, mirroring the crates.io job above (#151).
   #
   # A pre-release tag is skipped here too, and this path was the sharpest of the
   # three: `npm publish` below passes no `--tag`, so npm defaults the release to
@@ -369,12 +385,24 @@ jobs:
           npm pack --dry-run
           node -e "const p=require('./package.json'); if(!p.bin||!p.bin.tan) throw new Error('shim missing bin.tan')"
 
+      # Same rule as the crates.io job, and for the same reason: this job only
+      # runs on a final tag, so a missing token means the release advertises
+      # `npm i -g @alplabai/tan` for a package that does not exist. v0.4.0 did
+      # (#151). The pack smoke above still runs first, so a genuinely broken
+      # shim is reported as a broken shim rather than as a missing secret.
+      - name: Refuse to "publish" with no token
+        if: ${{ env.NPM_TOKEN == '' }}
+        run: |
+          echo "### npm: NOT PUBLISHED" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`NPM_TOKEN\` is not set, so \`npm i -g @alplabai/tan\` will not resolve for this release. The shim packed cleanly." >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::NPM_TOKEN is not set. A FINAL release must not report a successful npm publish it did not perform (#151). Add the secret, or drop the npm install path from the docs and this job."
+          exit 1
+
       - name: Publish to npm
-        if: ${{ env.NPM_TOKEN != '' }}
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Note when npm publish was skipped
-        if: ${{ env.NPM_TOKEN == '' }}
-        run: echo "::warning::NPM_TOKEN not set — packed the shim but skipped npm publish. Add the NPM_TOKEN repo secret to enable it."
+      - name: Record the npm outcome
+        run: |
+          echo "### npm: published \`@alplabai/tan@${GITHUB_REF_NAME#v}\`" >> "$GITHUB_STEP_SUMMARY"
