@@ -4,6 +4,29 @@
 ## [Unreleased]
 
 ### Added
+- **`tan generate --target os-topology`** (#115) — the per-core
+  natural-vs-effective OS facts `scripts/alp_project.py --emit os-topology`
+  produces (`core_type`, `runtime_class`, `default_os`/`effective_os`,
+  `overridden`, `allowed_os`), the shape alp-sdk#95's heterogeneous-SoM
+  configurator UI needs and `system-manifest`'s flat `slices[].os` cannot
+  provide. Previously reachable only via a raw `python -m alp_cli emit
+  os-topology`. alp-sdk's own docs describe the bare invocation as "JSON to
+  stdout, for IDEs" (unlike the file-writing targets), which raised a real
+  question over `tan generate --target` vs. a new `tan inspect` reader —
+  resolved by measuring live against the pinned SDK checkout rather than
+  guessing: `--output <path>` writes a normal file for this target exactly
+  like `carrier-netlist`/`west-libraries`/`hw-info-h` (the SDK's shared
+  `_write_or_print` helper honors it identically), so it drops into the
+  existing `generate` shape. Writes to `build/generated/os-topology.json`,
+  is in the default (`tan generate`/`--all`) target set, and `--core` is
+  refused rather than silently tolerated: measured live, the SDK accepts but
+  ignores it for this target (`alp_project.py: --core is ignored for --emit
+  os-topology (project-level emit)`, stderr, exit 0, output unchanged) —
+  the same "does nothing" shape `carrier-netlist`/`native-sim-overlay` are
+  already refused for. Covered by `live_run_generate.rs`'s real spawn suite
+  (`os_topology_target_writes_the_per_core_os_facts`), which asserts the
+  actual written JSON's `m55_hp` core entry rather than assuming its shape
+  from another target's golden.
 - **`tan generate --target west-libraries`** (#114) — the `west.yml` library
   auto-pin fragment `scripts/alp_project.py --emit west-libraries` produces,
   listing the Zephyr modules and exact west project pins a project's
@@ -75,6 +98,54 @@
   the default/`--all` set, none of which the SDK ever reads `--core` for).
 
 ### Fixed
+- **`tan_core::GENERATION_TARGET_CATALOG` (what `tan explain`/`tan trace`
+  read) listed only 4 of the 10 real `tan generate --target` values (#165),
+  omitting `hw-info-h`, `west-libraries`, `zephyr-board`, `carrier-netlist`,
+  and `native-sim-overlay` — two of which shipped in the immediately
+  preceding PR, so the discovery surface was already behind the command
+  surface.** Root cause: `generate.rs` kept its OWN second, hand-maintained
+  copy of the target list (`ALL_EMIT_MODES` + a `match emit {..}` output-path
+  table), independent of the catalog — exactly how the two drifted apart,
+  silently, with nothing to catch it. Fixed by unifying the direction of
+  derivation the other way round from a naive merge: the catalog (plus
+  `tan_core::ALL_EMIT_MODES`, now the SOLE copy) is the single source of
+  every target's `emit` key and output path; `generate.rs` reads
+  `tan_core::ALL_EMIT_MODES` directly and derives `output_path_for_emit` from
+  `tan_core::generation_target_support` instead of hand-duplicating either.
+  `zephyr-board` is the one target that genuinely does not fit a single
+  `output_relative_path` string (it writes a per-SKU/core DIRECTORY of
+  files, not one file) — it stays a documented, explicit exception
+  (`GenerationTargetSupport::is_directory`), not a second silent divergence:
+  a new `catalog_matches_all_emit_modes_plus_zephyr_board` test fails if the
+  catalog's target set ever again differs from `ALL_EMIT_MODES` plus
+  `zephyr-board`. The stale "the four emit targets" module doc comment is
+  also corrected. `tan explain --target <mode>` now covers all ten
+  `generate` targets, including the `os-topology` target added above
+  (#115). `tan trace`/`tan support-bundle` deliberately do NOT: they
+  enumerate a separate, narrower `tan_core::BUILD_CONFIG_EMIT_MODES` (the
+  four per-core build-config targets a `tan build` slice actually
+  materialises — `zephyr-conf`/`dts-overlay`/`cmake-args`/`yocto-conf`,
+  unchanged from before this PR), since their own module docs describe
+  reporting "the generation decisions a build would make" — pointing them
+  at the full nine-target set instead (an earlier revision of this fix did)
+  would have them claim project-level exports like `carrier-netlist`/
+  `os-topology` that no build ever runs (review finding 1).
+
+  Two more defects surfaced measuring this against the real generated
+  output. The catalog's own `zephyr-board` entry named its documentary
+  output path `build/boards/<sku-slug>_<core>/`, missing the `alp_e1m_`
+  prefix `zephyr_board_dir_name` actually writes, so `tan explain --target
+  zephyr-board` pointed at a directory that does not exist (review finding
+  3) — fixed to `build/boards/alp_e1m_<sku-slug>_<core>/`. And
+  `generate.rs`'s `output_path_for_emit` joined the catalog's
+  `/`-separated literal in one `Path::join` call, leaving its internal
+  `/`s untranslated on Windows while `zephyr-board`'s own component-wise
+  join used the native separator — so a single `tan generate` envelope's
+  `data.written[]` mixed `build/generated/alp.conf` next to
+  `build\boards\alp_e1m_aen801_m55_hp` (review finding 4) — fixed by
+  splitting the relative literal on `/` and folding each component onto
+  the workspace root, so every target's path is native and internally
+  consistent.
 - **`tan generate`'s argument-shape errors (`--core` paired with a target it
   doesn't scope; `--target zephyr-board` with no `--core`) now exit
   `ValidationFailure` (2) with issue code `generate.invalid-target`, not
