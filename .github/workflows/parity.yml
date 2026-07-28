@@ -154,6 +154,16 @@ jobs:
       - name: bootstrap manifest byte-parity (vendored vs. pinned alp-sdk)
         run: python3 tests/parity/bootstrap_manifest_parity.py --sdk alp-sdk
 
+      # `tan doctor`'s zephyrSdk check (tan-cli#160) prints a hand-ported copy
+      # of alp-sdk's metadata/toolchains.json zephyrSdk.version
+      # (crates/tan-core/src/host_env.rs::ZEPHYR_SDK_INSTALL_VERSION).
+      # scripts/check_toolchain_lock.py guards every CI *workflow* copy of
+      # that pin but cannot see this checkout (tan-cli#172) -- this is the
+      # tan-side half, reusing this job's alp-sdk checkout rather than a
+      # second clone.
+      - name: toolchain lock byte-parity (vendored vs. pinned alp-sdk)
+        run: python3 tests/parity/toolchain_lock_parity.py --sdk alp-sdk
+
       # Vendored wizard scaffold tree vs. the pinned alp-sdk's live
       # `--emit scaffold`. Reuses this job's alp-sdk checkout + emit deps (same
       # as the kconfig step above) rather than a second clone. The vendored tree

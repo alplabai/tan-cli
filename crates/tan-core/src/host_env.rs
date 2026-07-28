@@ -408,6 +408,40 @@ pub fn home_path_check(home: Option<&str>) -> DoctorCheck {
 mod tests {
     use super::*;
 
+    /// The real `alp-sdk/metadata/toolchains.json` (alp-sdk#949 item 3),
+    /// vendored so [`ZEPHYR_SDK_INSTALL_VERSION`] is tested against the actual
+    /// producer output rather than trusted by construction — the same shape
+    /// [`crate::bootstrap::manifest`]'s `REAL_MANIFEST` uses for
+    /// `metadata/bootstrap.json`. `tests/parity/toolchain_lock_parity.py`
+    /// byte-diffs this copy against the pinned alp-sdk checkout in CI; this
+    /// test is the follow-on that makes a re-vendor here fail loudly if
+    /// [`ZEPHYR_SDK_INSTALL_VERSION`] was not updated to match (tan-cli#172).
+    const REAL_TOOLCHAIN_LOCK: &str =
+        include_str!("../../../contract/fixtures/toolchains/toolchains.json");
+
+    /// tan-cli#172: `ZEPHYR_SDK_INSTALL_VERSION` is a hand-ported copy of a
+    /// fact alp-sdk owns and guards with `scripts/check_toolchain_lock.py` —
+    /// a gate that cannot see this repo. This is the tan-side half: the
+    /// constant must equal the vendored fixture's `zephyrSdk.version`
+    /// field, so a re-vendor (parity script above) that lands a bumped
+    /// version fails HERE until the constant is updated too, instead of
+    /// `tan doctor` silently naming a stale `west sdk install --version`.
+    #[test]
+    fn zephyr_sdk_install_version_matches_the_real_toolchain_lock() {
+        let doc: serde_json::Value =
+            serde_json::from_str(REAL_TOOLCHAIN_LOCK).expect("vendored toolchains.json parses");
+        let real_version = doc["zephyrSdk"]["version"]
+            .as_str()
+            .expect("zephyrSdk.version is a string in the real manifest");
+        assert_eq!(
+            ZEPHYR_SDK_INSTALL_VERSION, real_version,
+            "ZEPHYR_SDK_INSTALL_VERSION has drifted from the vendored \
+             contract/fixtures/toolchains/toolchains.json's zephyrSdk.version -- re-vendor the \
+             fixture (tests/parity/toolchain_lock_parity.py) if alp-sdk bumped the pin, then \
+             update this constant to match"
+        );
+    }
+
     /// A probe for a clean `linux-x86_64` host — the shape CI runs on, and
     /// therefore the ONE shape these tests must not be limited to.
     fn clean() -> HostEnvProbe<'static> {
