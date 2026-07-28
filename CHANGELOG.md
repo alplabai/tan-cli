@@ -98,6 +98,44 @@
   the default/`--all` set, none of which the SDK ever reads `--core` for).
 
 ### Fixed
+- **`ZEPHYR_SDK_INSTALL_VERSION` was a hand-ported copy of a fact alp-sdk
+  owns and guards, on a side alp-sdk's own drift gate cannot see (#172).**
+  `tan doctor`'s `zephyrSdk` check names the exact `west sdk install
+  --version <..>` command a customer needs (#160), sourced from a Rust
+  constant in `crates/tan-core/src/host_env.rs`. alp-sdk's
+  `metadata/toolchains.json` is the single source of truth for that pin and
+  is policed by `scripts/check_toolchain_lock.py` — but that gate's scope is
+  CI *workflows*, and it cannot see a tan-cli checkout, so a future SDK-side
+  Zephyr SDK bump would leave `tan` silently printing a stale, wrong install
+  command with no test or CI job on either side catching it. Measured
+  runtime-read (resolving the SDK root and reading the manifest live) and
+  rejected it: `zephyr_sdk_toolchain_check` is a pure function taking only a
+  `bool`, and the string is wanted precisely when the toolchain — and often
+  the SDK itself — is not yet resolved on a fresh host, which is the exact
+  case #160 was filed over. Instead, `metadata/toolchains.json` is now
+  vendored at `contract/fixtures/toolchains/toolchains.json`
+  (`tests/parity/toolchain_lock_parity.py` byte-diffs it against the pinned
+  alp-sdk checkout in CI, the same pattern already used for
+  `metadata/bootstrap.json`), and a new `cargo test`
+  (`host_env::tests::zephyr_sdk_install_version_matches_the_real_toolchain_lock`)
+  asserts the constant equals the vendored fixture's `zephyrSdk.version`
+  field — so a re-vendor that isn't matched by a constant update now fails
+  loudly instead of shipping a wrong remedy. Review follow-up: a second,
+  unguarded hand-ported copy of the same pin survived in
+  `zephyr_sdk_host_check`'s macos-x86_64 fix string (a literal `1.0.1` no
+  test exercised) — it now reads `ZEPHYR_SDK_INSTALL_VERSION` too, so an SDK
+  version bump can no longer leave `tan doctor` naming two different Zephyr
+  SDK versions on the same Intel Mac report. `tests/parity/
+  toolchain_lock_parity.py` and `bootstrap_manifest_parity.py`'s shared
+  `--sdk` resolution also no longer treats an explicit `--sdk <path>` as a
+  hint: previously a `--sdk` that didn't resolve silently fell through to
+  `$ALP_SDK_ROOT` / a sibling checkout and, finding neither, printed SKIP and
+  exited 0 — meaning `seam1-plan-shape`'s required `--sdk alp-sdk` step would
+  turn green without checking anything if that checkout path ever moved or
+  stopped shipping `scripts/alp_orchestrate/`. It now hard-fails (exit 1)
+  when an explicit `--sdk` doesn't resolve; the no-`--sdk` local dev-loop
+  skip is unchanged. Factored into a shared `tests/parity/_sdk_checkout.py`
+  instead of two more copies of the same resolution logic.
 - **The four first-blink blockers a customer actually hits on a fresh host
   (alp-sdk#855's deliberate fresh-host run), closing #159 (PR #166)'s
   companion set:**
