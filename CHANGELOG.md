@@ -181,6 +181,45 @@
   binary had already landed by the time anything could detect it.
 
 ### Fixed
+- **`tan scaffold` still hung on a non-TTY stdio, and `tan init` still hung
+  whenever stderr was the redirected handle** (#187 follow-up to #198). #198
+  fixed the reported command by adding a `stdin_is_tty` term to `init`'s own
+  local predicate. Two live hangs survived it.
+  - **`tan scaffold` was never touched.** It carried the same flags-only gate
+    (`!--non-interactive && !--ci && !--format json`) and blocked on its own
+    `Text::new("Module name:")` prompt under exactly the redirected stdin the
+    issue described. It now refuses instead — its non-interactive contract is a
+    refusal, not a default, since a module name has no sane one — exiting 2 with
+    `scaffold.name-required`.
+  - **`stdin=tty, stderr=piped` still hangs on a stdin-only gate**, and that is
+    not an exotic shape: it is every wrapper that captures output while
+    inheriting the terminal, `.stderr(Stdio::piped())` included. inquire splits
+    the two handles — it renders to **stderr** (so a redirected stderr hides the
+    prompt) and reads through crossterm's `tty_fd()`, which **opens `/dev/tty`**
+    when stdin is not a terminal. Confirmed live under a pty: still running
+    after 12s, zero files created, the prompt's escapes sitting in the capture.
+    The same mechanism means the Unix block was never on the redirected stdin at
+    all — `tan init </dev/null` from a real terminal session blocked on
+    `/dev/tty`, and the `init: Cancelled.` exit 1 seen instead on CI and in
+    agent shells is only what happens where `/dev/tty` cannot be opened.
+  - **One home for the rule, because it was three.** #198's `init`-local
+    `interactive_mode` predicate (and its test table) moved to `cli.rs`, gained
+    the `stderr_is_tty` term, and is now reached through
+    `GlobalArgs::can_prompt()`. `init`, `scaffold` and `bootstrap` all call it.
+    `bootstrap` had grown its own inline copy in #185 — fixing the rule in one
+    command and not the others is exactly how this bug outlived its own fix.
+  - A missing terminal still falls back to the flag-derived defaults rather than
+    erroring, unchanged from #198: that is what `--template`'s own help already
+    promised ("defaults to `zephyr-app` when not given and there is no TTY to
+    prompt on"). `--non-interactive`'s own help and the README flag table now
+    say which commands default and which refuse.
+  - The non-TTY path is now driven in `tests/init_non_tty_stdin.rs`, which
+    spawns the real binary with `Stdio::null()` and captured stderr under a 60s
+    watchdog — the interactive path was exercised and the redirected-stdio path
+    was not, the same shape as #176's `irm | iex`-tested /
+    `.\install.ps1`-untested parse bug. The PROMPTING branch remains manual: no
+    CI runner has a TTY, so an `is_terminal()` false negative would degrade `tan
+    init` to a silent default scaffold with every gate green.
 - **`.\install.ps1` did not parse at all under Windows PowerShell 5.1** — the
   PowerShell that ships with Windows (#176, found while adding the above). The
   file is BOM-less UTF-8; 5.1 decodes such a file using the system ANSI

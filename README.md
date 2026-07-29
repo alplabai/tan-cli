@@ -251,8 +251,8 @@ ANY other entry besides the checkout itself — dotfiles included; a stray
 cloning into `~/Downloads` or `$HOME` — `bootstrap` guards it instead of
 spraying multiple gigabytes there unannounced: interactively it offers to
 move the checkout into a dedicated `alp-workspace/` sibling; under a
-non-interactive stdin (`--non-interactive`/`--ci`/`--format json`, or stdin is
-simply not a terminal — piped, redirected, or a CI runner) it refuses
+non-interactive stdio (`--non-interactive`/`--ci`/`--format json`, or stdin or
+stderr is simply not a terminal — piped, redirected, or a CI runner) it refuses
 outright, naming the fix. If a dedicated parent is inconvenient, the one-line
 answer is `tan bootstrap --workspace <path>` — no guard, no prompt, workspace
 built there. A parent already holding a REAL `.west` workspace (a readable
@@ -278,6 +278,7 @@ foreign content either.
 | `--board-yaml <PATH>` | Explicit `board.yaml`, overriding project resolution. |
 | `--sdk-root <PATH>` | alp-sdk checkout to plan against. |
 | `--format json` | Machine-readable envelope instead of text. |
+| `--non-interactive` | Never prompt. A command with a documented default takes it (`init` scaffolds `zephyr-app` into `.`); one without fails naming the missing flag (`scaffold` needs `--name`). Applied unasked when stdin or stderr is not a terminal — piped, redirected, or a CI runner (#187). |
 | `--ci` | Implies `--non-interactive` and disables color. |
 | `--quiet` / `--verbose` / `--no-color` | Output volume and styling. |
 

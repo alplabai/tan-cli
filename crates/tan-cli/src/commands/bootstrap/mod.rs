@@ -25,7 +25,6 @@ mod relocate;
 mod steps;
 mod west_config;
 
-use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -330,9 +329,11 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     // which hung `inquire::Confirm::new(..).prompt()` forever instead of
     // reaching the non-interactive `Resolution::Refuse` path. Same rule
     // `progress::spinner`/`style::Theme::from_args` already apply to the
-    // decision of whether a human is actually there to answer.
-    let is_interactive =
-        !g.non_interactive && !g.ci && !g.is_json() && std::io::stdin().is_terminal();
+    // decision of whether a human is actually there to answer. That rule now
+    // lives in ONE place — `GlobalArgs::can_prompt()` — because fixing it here
+    // and nowhere else is exactly how `tan init`/`tan scaffold` kept the
+    // flags-only gate and hung on the same redirected stdin (#187).
+    let is_interactive = g.can_prompt();
     // A `$ZEPHYR_BASE` workspace that `select_workspace` (below) is about to
     // ADOPT repoints the write target away from `repo_root`'s parent
     // entirely — so a dirty parent is not a problem when nothing is going to
