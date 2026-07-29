@@ -4,6 +4,9 @@ diff them. Rust is authoritative: a divergence is a port bug until proven
 otherwise, and Rust is retired for a capability only once this harness confirms
 it.
 
+Lives at ``python/tests/parity/`` -- NOT the repo-root ``tests/parity/``, which
+belongs to the Rust workspace. The names overlap; the trees do not.
+
 **Parity is defined PER SURFACE, and the scope is the load-bearing part.**
 A whole-document diff of every command would go red for reasons that are not
 port bugs, and a harness that is red for a non-bug gets muted -- so each case
@@ -27,31 +30,44 @@ declares the surface both binaries genuinely produce:
     -- and a side that fails the regex outright is reported even when both
     sides fail identically.
 
+    Matched with ``fullmatch``, not ``match``. The extension's own regex is
+    prefix-anchored, but this harness ALSO claims "stdout carries the envelope
+    and NOTHING else", and a prefix match returns before ever reaching the raw
+    compare that would enforce it. Prefix-anchoring here silently accepted
+    ``"tan 0.5.0-dev\\nLEAKED EXTRA STDOUT LINE"`` and
+    ``"tan 9.9.9 THIS IS NOT TAN AT ALL"`` as parity -- on the one case that
+    actually runs today. Rust prints exactly ``tan 0.4.1-dev``.
+
 ``PLAN``
-    Exit code, the envelope shell, and -- inside ``data`` -- only the keys the
-    Rust side actually models. ``crates/tan-core/src/build_plan.rs``'s
-    ``BuildSlice`` does not model ``appDir``, ``toolchain``, ``artifacts`` or
-    ``debug``, and ``crates/tan-cli/src/commands/build/plan_modes.rs:237-262``
-    says why: ``--plan --format json`` passes the SDK's **raw, unsubstituted**
-    JSON straight through, because re-serialising the typed struct "would drop
-    them and emit a schema-invalid plan". The Python port models and
-    token-substitutes those keys because the plan schema requires them. Diffing
-    the two whole documents therefore compares different things and always
-    differs -- a Rust gap, not a port bug.
+    Exit code, the envelope shell, and -- inside ``data`` -- a NARROWED view of
+    the plan. See ``narrow_plan`` before widening or trusting it: the exclusion
+    is PROVISIONAL, and it is NOT justified by the Rust side failing to emit
+    those keys.
 
-    Scoping was chosen over the alternative (adding ``app_dir`` et al to the
-    Rust struct): this port does not touch ``crates/``, and the Rust side is the
-    one that is behind. Consequence recorded honestly: the four unmodeled keys
-    are UNCHECKED by this oracle, so they stay owned by
-    ``tests/core/test_build_plan.py`` and by the alp-sdk plan schema.
+    Rust emits every key. ``--plan --format json`` parses the SDK's raw JSON
+    into a generic ``serde_json::Value`` and puts it in the envelope verbatim
+    (``crates/tan-cli/src/commands/build/plan_modes.rs:256-268``), and Rust's own
+    ``json_envelope_preserves_fields_the_typed_plan_does_not_model``
+    (``plan_modes.rs:404-442``) asserts ``data.slices[0].appDir``,
+    ``.sdkVersion`` and ``.sdkCommit`` are all PRESENT in the output. What
+    ``BuildSlice`` models governs what Rust can *validate*, never what it emits.
 
-    Second, separate divergence on this surface, for whoever promotes the case:
-    Rust emits the plan unsubstituted here (substitution runs only on the
-    ``--materialise`` path), so on a ``planPathMode: "tokened"`` plan even the
-    MODELED keys -- ``buildDir``, ``command.args``, ``env`` -- differ, Rust
-    carrying literal ``${SDK_ROOT}`` where Python carries the resolved path.
-    That needs its own scoping decision at promotion time; it is not covered
-    here, because no Python ``build`` command exists to compare yet.
+    The real divergence axis is SUBSTITUTION, not key presence -- and it does
+    not line up with the modeled-key split at all:
+
+    * On an UNTOKENED plan (``planPathMode`` absent, which is what the real
+      fixture is; ``python/tan/core/plan_tokens.py`` makes substitution a no-op
+      there) every key is byte-identical on both sides, so narrowing suppresses
+      coverage of a divergence that does not exist.
+    * On a TOKENED plan, Rust's ``--plan`` is unsubstituted -- substitution runs
+      only on the ``--materialise`` branch (``plan_modes.rs:131-151``) -- while
+      Python substitutes. The path-bearing keys then diverge whether or not the
+      typed struct models them: ``buildDir``, ``command.args`` and ``env`` are
+      all modeled and would all differ. Narrowing does not help.
+
+    So this scope must be RE-DERIVED on the tokened/untokened axis when case 5
+    is promoted. It stays narrowed only because no Python ``build`` command
+    exists to compare yet.
 """
 import json
 import os
@@ -69,16 +85,24 @@ REPO_ROOT = PACKAGE_ROOT.parent
 
 _EXE = ".exe" if sys.platform == "win32" else ""
 
-#: The extension's own acceptance probe for a ``tan`` binary.
-VERSION_RE = re.compile(r"^tan \d+\.\d+\.\d+")
+#: The extension's acceptance probe, tightened to the WHOLE of stdout: anchored
+#: at both ends and applied with ``fullmatch``, so a shape-valid first line
+#: cannot smuggle trailing output past the VERSION surface. ``\S*`` carries the
+#: pre-release tail (``-dev``); a space after the patch number is a failure.
+VERSION_RE = re.compile(r"tan \d+\.\d+\.\d+\S*\Z")
 
 ENVELOPE = "envelope"
 VERSION = "version"
 PLAN = "plan"
 
-#: Top-level build-plan keys ``BuildPlan`` models
-#: (``crates/tan-core/src/build_plan.rs:208-253``). ``sdkVersion`` is absent on
-#: purpose -- the Rust struct does not carry it.
+#: Top-level build-plan keys retained by ``narrow_plan``. NOT "the keys Rust
+#: emits" -- Rust emits the SDK's JSON verbatim (see the module docstring) --
+#: but the keys the Rust side also *models*, which is all the current narrowing
+#: has ever meant. ``sdkVersion``/``sdkCommit`` are kept because they are plain
+#: version strings: never path-bearing, never touched by substitution, carried
+#: verbatim by both sides from the same emit. They could not produce a false
+#: red, so excluding them was pure lost coverage on exactly the field a
+#: version-skew guard cares about.
 RUST_PLAN_KEYS = frozenset(
     {
         "schemaVersion",
@@ -91,15 +115,32 @@ RUST_PLAN_KEYS = frozenset(
         "warnings",
         "executionPolicy",
         "planPathMode",
+        "sdkVersion",
         "sdkCommit",
     }
 )
 
-#: Per-slice keys ``BuildSlice`` models (``build_plan.rs:138-164``). The four
-#: absentees -- ``appDir``, ``toolchain``, ``artifacts``, ``debug`` -- are the
-#: documented Rust gap this scope exists for.
+#: Per-slice keys retained. ``sdkVersion``/``sdkCommit`` appear here too -- the
+#: Rust fixture in ``plan_modes.rs:404-442`` carries them at SLICE level -- and
+#: are kept for the reason above.
+#:
+#: The four absentees (``appDir``, ``toolchain``, ``artifacts``, ``debug``) are
+#: excluded PROVISIONALLY, pending case-5 promotion. The exclusion is NOT
+#: because Rust drops them; Rust's own test asserts it emits them. It is a
+#: holding position until the scope is re-derived on the tokened/untokened axis
+#: -- the axis that actually separates the two implementations.
 RUST_SLICE_KEYS = frozenset(
-    {"coreId", "backend", "buildDir", "configArtefacts", "command", "env", "envAppendPath"}
+    {
+        "coreId",
+        "backend",
+        "buildDir",
+        "configArtefacts",
+        "command",
+        "env",
+        "envAppendPath",
+        "sdkVersion",
+        "sdkCommit",
+    }
 )
 
 
@@ -111,11 +152,24 @@ class ParityResult:
 
 def rust_binary() -> str | None:
     """``TAN_RUST_BINARY`` if set, else a build in the usual places. Returns
-    ``None`` when there is no oracle to diff against, so the caller can skip
-    rather than invent a comparison."""
+    ``None`` only when NOBODY named an oracle and none was built, so the caller
+    can skip rather than invent a comparison.
+
+    A set-but-missing ``TAN_RUST_BINARY`` RAISES instead. It must not fall back
+    to some other binary -- an operator who named one should not silently get a
+    different one -- but it must not skip either: a typo'd path in CI would then
+    produce an all-skip, all-green run that certifies nothing, which is the
+    exact failure mode this harness exists to prevent.
+    """
     override = os.environ.get("TAN_RUST_BINARY")
     if override:
-        return override if Path(override).exists() else None
+        if not Path(override).exists():
+            raise RuntimeError(
+                f"TAN_RUST_BINARY={override!r} does not exist. Refusing to skip: "
+                "a named-but-missing oracle would make this suite pass vacuously. "
+                "Fix the path, or unset it to fall back to target/{release,debug}."
+            )
+        return override
     for profile in ("release", "debug"):
         candidate = REPO_ROOT / "target" / profile / f"tan{_EXE}"
         if candidate.exists():
@@ -173,11 +227,24 @@ def _run(command: list[str], argv: list[str], cwd: Path, home: Path):
 
 
 def narrow_plan(payload: dict) -> dict:
-    """Restrict a ``build --plan`` envelope's ``data`` to the keys the Rust side
-    models. Left alone when ``data`` is not a plan object (the no-SDK path emits
-    ``data: null`` plus an issue, and that whole envelope IS comparable)."""
+    """Restrict a ``build --plan`` envelope's ``data`` to the retained plan keys.
+
+    ``data`` is left WHOLE unless it actually looks like a plan -- a dict
+    carrying ``slices``. Two guards, not one:
+
+    * ``data: null`` is the no-SDK error path (Rust's ``plan_error_run`` emits
+      ``Value::Null`` plus an issue); that envelope is fully comparable.
+    * A dict with no ``slices`` key would otherwise narrow to ``{}`` on BOTH
+      sides and compare vacuously equal no matter what it held --
+      ``{"message": "plan A"}`` and ``{"message": "plan B"}`` alike. Not
+      reachable today, but it goes live the moment case 5 is promoted, and a
+      comparator that returns "equal" for two different documents is the one
+      thing this harness must never do.
+
+    See the module docstring for why the retained-key split is provisional.
+    """
     data = payload.get("data")
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or "slices" not in data:
         return payload
     plan = {k: v for k, v in data.items() if k in RUST_PLAN_KEYS}
     if isinstance(plan.get("slices"), list):
@@ -216,11 +283,14 @@ def compare(
     if surface == VERSION:
         # The literals differ by design; the CONTRACT is the shape. Report a
         # side that fails the regex even when both fail the same way, so
-        # identically-broken output cannot pass as parity.
+        # identically-broken output cannot pass as parity. `fullmatch` covers
+        # the WHOLE of stdout, not just its first line -- this branch returns
+        # before the raw compare below, so it is the only thing standing
+        # between a leaked stdout line and a green run.
         for name, out in (("rust", r_out), ("python", p_out)):
             line = out.get("__raw__", "")
-            if not VERSION_RE.match(line):
-                diffs.append(f"{name} --version does not match /^tan \\d+\\.\\d+\\.\\d+/: {line!r}")
+            if not VERSION_RE.fullmatch(line):
+                diffs.append(f"{name} --version is not exactly /{VERSION_RE.pattern}/: {line!r}")
         return ParityResult(not diffs, diffs)
 
     if surface == PLAN:

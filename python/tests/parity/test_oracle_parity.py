@@ -21,6 +21,7 @@ mis-classified as "not ported" forever.
 """
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -99,15 +100,30 @@ def test_harness_reports_a_planted_exit_code_difference(work_dir, tmp_path):
 
 
 @pytest.mark.skipif(not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
-def test_harness_reports_a_planted_version_shape_difference(work_dir, tmp_path):
-    # Shape-scoping must not degrade into "any stdout passes": a version line
-    # that does not satisfy the extension's regex is still a failure.
-    stub = [sys.executable, "-c", "print('tan v0.5-dev')"]
+@pytest.mark.parametrize(
+    "printed",
+    [
+        # Shape-scoping must not degrade into "any stdout passes": a version
+        # line that does not satisfy the extension's regex is still a failure.
+        "print('tan v0.5-dev')",
+        # ...and the shape must cover the WHOLE of stdout. A prefix-anchored
+        # match let both of these through as parity, on the one case that
+        # actually runs today. Rust prints exactly `tan 0.4.1-dev`.
+        "print('tan 0.5.0-dev'); print('LEAKED EXTRA STDOUT LINE')",
+        "print('tan 9.9.9 THIS IS NOT TAN AT ALL')",
+    ],
+    ids=["malformed", "trailing-line", "trailing-words"],
+)
+def test_harness_reports_a_planted_version_shape_difference(printed, work_dir, tmp_path):
     result = compare(
-        ["--version"], cwd=work_dir, surface=VERSION, home=tmp_path / "home", python=stub
+        ["--version"],
+        cwd=work_dir,
+        surface=VERSION,
+        home=tmp_path / "home",
+        python=[sys.executable, "-c", printed],
     )
     assert not result.matches
-    assert any("does not match" in d for d in result.diffs), result.diffs
+    assert any("is not exactly" in d for d in result.diffs), result.diffs
 
 
 @pytest.mark.skipif(not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
@@ -118,10 +134,23 @@ def test_harness_reports_a_planted_envelope_difference(work_dir, tmp_path):
     assert any(d.startswith("command:") for d in result.diffs), result.diffs
 
 
+@pytest.mark.skipif(RUST is None, reason="needs a real path to exist for the negative case")
+def test_a_named_but_missing_rust_binary_is_an_error_not_a_skip(monkeypatch):
+    # A typo'd TAN_RUST_BINARY in CI must not yield an all-skip green run. It
+    # must also not fall back to some other binary the operator did not name.
+    monkeypatch.setenv("TAN_RUST_BINARY", str(Path("no") / "such" / "tan"))
+    with pytest.raises(RuntimeError, match="does not exist"):
+        rust_binary()
+
+
 # --- the PLAN scope must be narrow, not blind -------------------------------
 #
 # No binary needed: `narrow_plan` is the whole scoping decision, and it is the
 # one piece of this harness that will still be load-bearing when `build` lands.
+# Its retained-key split is PROVISIONAL -- see oracle.py's module docstring; the
+# Rust side emits every key here verbatim, so the split must be re-derived on
+# the tokened/untokened axis when case 5 is promoted. These tests pin the
+# narrowing's mechanics, not the correctness of the split.
 
 RAW_SLICE = {
     "coreId": "m55_hp",
@@ -131,7 +160,10 @@ RAW_SLICE = {
     "command": {"tool": "west", "args": ["build"], "cwd": "."},
     "env": {},
     "envAppendPath": {},
-    # The four keys BuildSlice does not model, verbatim from the SDK's emit.
+    "sdkVersion": "0.11.0",
+    "sdkCommit": "deadbeef",
+    # The four provisionally-excluded keys. Rust DOES emit these -- verbatim
+    # from the SDK -- per plan_modes.rs:404-442.
     "appDir": "${SDK_ROOT}/examples/blinky",
     "toolchain": {"name": "zephyr"},
     "artifacts": {"elf": "zephyr/zephyr.elf"},
@@ -143,7 +175,7 @@ def _envelope(slice_):
     return {"command": "build", "ok": True, "exitCode": 0, "data": {"slices": [slice_]}}
 
 
-def test_plan_scope_ignores_the_keys_rust_does_not_model():
+def test_plan_scope_drops_the_provisionally_excluded_keys():
     substituted = {
         **RAW_SLICE,
         "appDir": "/home/dev/alp-sdk/examples/blinky",
@@ -154,16 +186,29 @@ def test_plan_scope_ignores_the_keys_rust_does_not_model():
     assert narrow_plan(_envelope(RAW_SLICE)) == narrow_plan(_envelope(substituted))
 
 
-def test_plan_scope_still_catches_a_key_rust_does_model():
-    drifted = {**RAW_SLICE, "buildDir": "${PROJECT_ROOT}/build/WRONG"}
+@pytest.mark.parametrize("key", ["buildDir", "coreId", "sdkVersion", "sdkCommit"])
+def test_plan_scope_still_catches_a_retained_key(key):
+    # sdkVersion/sdkCommit are the version-skew guard's own fields; they are
+    # never path-bearing and never substituted, so excluding them was pure lost
+    # coverage rather than false-red avoidance.
+    drifted = {**RAW_SLICE, key: "DRIFTED"}
     assert narrow_plan(_envelope(RAW_SLICE)) != narrow_plan(_envelope(drifted))
 
 
-def test_plan_scope_leaves_a_non_plan_envelope_whole():
+def test_plan_scope_leaves_a_null_data_envelope_whole():
     # The no-SDK path emits `data: null` plus an issue; that envelope is
     # comparable in full and must not be silently narrowed away.
     envelope = {"command": "build", "exitCode": 1, "data": None, "issues": [{"code": "x"}]}
     assert narrow_plan(envelope) == envelope
+
+
+def test_plan_scope_does_not_collapse_a_dict_that_is_not_a_plan():
+    # Without the `slices` guard both of these narrow to {} and compare
+    # VACUOUSLY EQUAL -- a comparator answering "identical" for two different
+    # documents, which is the one thing this harness must never do.
+    a = {"command": "build", "data": {"message": "plan A", "count": 1}}
+    b = {"command": "build", "data": {"message": "plan B", "count": 2}}
+    assert narrow_plan(a) != narrow_plan(b)
 
 
 def test_rust_oracle_is_present_or_the_suite_says_so():
