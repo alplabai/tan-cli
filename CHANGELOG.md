@@ -3,6 +3,19 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`tan init` no longer blocks forever when stdin is not a terminal** (#187).
+  It rendered an inquire prompt (`Destination directory:`, ANSI escapes and all)
+  to a terminal that was not there, then blocked on a stdin already at EOF --
+  no timeout, no diagnostic, no exit. From the caller's side that is
+  indistinguishable from a slow operation, so every non-TTY caller hung: CI, a
+  `sh -c` from a script, an IDE task runner, a `Command::output()` from another
+  tool. `--non-interactive` was the only workaround and nothing said so.
+  The missing term was `std::io::stdin().is_terminal()`, which `bootstrap`
+  already had; `init`'s own comment shows the `--format json` half of the same
+  hang was fixed earlier, and the no-TTY half was simply never added. The
+  predicate is now the pure, unit-tested `interactive_mode()`.
+
 ### Changed
 - **Re-vendored the scaffold fixtures and the toolchain lock against alp-sdk
   `cdfe1368` (alp-sdk#1016), and bumped `PINNED_SDK_TAG` to match.** #1016
