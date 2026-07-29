@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
+import sys
 
 from tan.envelope import Envelope, Issue, Project, SdkInfo
 from tan.exit_codes import ExitCode
@@ -40,6 +41,26 @@ def test_to_json_never_raises_on_unserialisable_payload():
     with zero bytes on stdout."""
     env = Envelope("test", Project(None, None), {(1, 2): 3}, [], ExitCode.SUCCESS)
     parsed = json.loads(env.to_json())
+    assert parsed["ok"] is False
+    assert parsed["exitCode"] == 5
+    assert parsed["issues"][0]["code"] == "envelope.serialize-failed"
+
+
+def test_to_json_never_raises_on_recursion_error():
+    """json.dumps raises RecursionError (not TypeError/ValueError) on a deeply nested
+    payload -- to_json() must still catch it and emit the same fallback envelope."""
+    old_limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(200)
+    try:
+        nested: list = []
+        cur = nested
+        for _ in range(1000):
+            cur.append([])
+            cur = cur[0]
+        env = Envelope("test", Project(None, None), nested, [], ExitCode.SUCCESS)
+        parsed = json.loads(env.to_json())
+    finally:
+        sys.setrecursionlimit(old_limit)
     assert parsed["ok"] is False
     assert parsed["exitCode"] == 5
     assert parsed["issues"][0]["code"] == "envelope.serialize-failed"

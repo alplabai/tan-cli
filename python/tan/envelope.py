@@ -61,7 +61,7 @@ class Envelope:
     def to_json(self) -> str:
         try:
             return json.dumps(self._as_dict(), separators=(",", ":"))
-        except (TypeError, ValueError) as err:
+        except Exception as err:  # noqa: BLE001 -- no payload may ever crash stdout
             fallback = {
                 "command": self.command,
                 "ok": False,
