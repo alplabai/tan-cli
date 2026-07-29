@@ -29,12 +29,31 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# `tan init`'s scaffold trees are DATA, and PyInstaller follows the static IMPORT
+# graph, which reaches no non-.py file. Without this line the frozen binary is
+# missing five of its six templates -- which reports `init.template-unreadable`
+# (exit 5) rather than a traceback precisely because this is an easy line to
+# lose. The destination mirrors the source layout's package-relative path, which
+# is what lets `tan/templates/__init__.py` resolve it off `__file__` in both
+# modes (PyInstaller points a frozen module's `__file__` under `sys._MEIPASS`).
+# PyInstaller splits SOURCE from DEST on os.pathsep: `;` on Windows.
+#
+# The leading `../` is not a typo: a relative SOURCE is resolved against the
+# generated spec file's directory, which `--specpath .build` puts one level below
+# this script's cwd (proven -- without it the build dies with "Unable to find
+# .../python/.build/tan/templates/vendored"). An absolute path would avoid the
+# question but not portably: under Git Bash on Windows `$PWD` is an MSYS path
+# (`/e/...`) that the native-Windows PyInstaller cannot open.
+ADD_DATA_SEP=':'
+case "${OS:-}" in Windows_NT) ADD_DATA_SEP=';' ;; esac
+
 # --paths . pins the package root explicitly. PyInstaller 6.21 happens to
 # resolve `tan` without it (it puts the CWD on the analysis path), but the dir
 # it derives from the script is tan/, not the package root, so the implicit
 # resolution is an accident of running from python/ -- state it instead.
 "${PYTHON:-python}" -m PyInstaller --onefile --name tan --clean --noconfirm \
   --console --distpath dist --workpath .build --specpath .build \
+  --add-data "../tan/templates/vendored${ADD_DATA_SEP}tan/templates/vendored" \
   --paths . tan/__main__.py
 
 # Fail the BUILD, not merely the test suite, on a dirty interpreter. $PYTHON

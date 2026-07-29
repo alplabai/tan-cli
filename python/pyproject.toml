@@ -53,5 +53,12 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["tan*"]
 
+# `tan init`'s scaffold trees are DATA, not code, so nothing in the import graph
+# pulls them into a wheel on its own -- and without them five of the six
+# templates fail (`init.template-unreadable`). The frozen binary needs the
+# equivalent `--add-data`, see `scripts/build_binary.sh`.
+[tool.setuptools.package-data]
+"tan.templates" = ["vendored/**/*"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]

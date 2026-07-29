@@ -6,6 +6,7 @@ the extension's 3 s budget (alp-sdk-vscode/src/alpCli/vscodeAdapter.ts:288-290).
 Skips when ``dist/tan[.exe]`` is absent so the normal suite is unaffected; run
 ``scripts/build_binary.sh`` to produce it.
 """
+import json
 import re
 import subprocess
 import sys
@@ -66,3 +67,36 @@ def test_version_probe_completes_within_the_3s_budget():
     elapsed = time.monotonic() - start
     assert elapsed < 3.0, f"--version took {elapsed:.2f}s; extension probe timeout is 3s"
     print(f"\nstartup: {elapsed:.3f}s")
+
+
+def test_the_artifact_carries_its_scaffold_templates(tmp_path):
+    """`tan init`'s vendored scaffold trees are DATA, so PyInstaller's static
+    import graph does not reach them -- they ship only because
+    `scripts/build_binary.sh` passes `--add-data`. Nothing in the source-run
+    suite can notice that flag going missing, and the symptom in the field is a
+    customer's FIRST command failing.
+
+    `zephyr-app` deliberately: it is the non-interactive default AND vendored, so
+    this is the literal `tan init` path. `--preview` keeps it read-only.
+    """
+    out = subprocess.run(
+        [str(BINARY), "init", "--template", "zephyr-app", "--preview", "--format", "json"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=str(tmp_path),
+    )
+    envelope = json.loads(out.stdout)
+    codes = [issue["code"] for issue in envelope.get("issues", [])]
+
+    # `dist/` is gitignored build output, so it can easily be an artefact built
+    # before this command existed. That is a STALE BINARY, not a packaging
+    # regression, and it has its own signature (Click rejects the unknown
+    # subcommand). The failure this test is for looks nothing like it:
+    # `init.template-unreadable`, exit 5, from a build that dropped --add-data.
+    if out.returncode == 2 and "cli.parse-error" in codes:
+        pytest.skip("dist/ predates `tan init` -- rerun scripts/build_binary.sh")
+
+    assert out.returncode == 0, envelope.get("issues")
+    assert len(envelope["data"]["fileChanges"]) >= 6
+    assert list(tmp_path.iterdir()) == [], "--preview must not touch disk"

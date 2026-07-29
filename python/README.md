@@ -6,9 +6,12 @@ MCU and MPU alike — and `tan` turns it into firmware.
 ```bash
 pip install alp-tan
 tan --version
+tan init            # scaffold a project (add --preview to see the plan first)
 tan doctor          # is this host able to build and flash?
 tan build           # build every core the module declares
 ```
+
+`tan init` needs no alp-sdk checkout: the scaffold templates ship inside `tan`.
 
 The distribution is named `alp-tan` because `tan` is taken on PyPI; the command
 you run is still `tan`.

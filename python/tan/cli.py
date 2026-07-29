@@ -14,6 +14,7 @@ import typer
 
 from tan.commands.build_cmd import build
 from tan.commands.doctor_cmd import doctor
+from tan.commands.init_cmd import init
 from tan.commands.validate_cmd import validate
 from tan.envelope import Envelope, Issue, Project, envelope_emitted
 from tan.exit_codes import ExitCode
@@ -29,6 +30,7 @@ app = typer.Typer(add_completion=False)
 # which would otherwise be a cycle.
 app.command("build")(build)
 app.command("doctor")(doctor)
+app.command("init")(init)
 app.command("validate")(validate)
 
 

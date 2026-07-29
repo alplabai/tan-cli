@@ -1,0 +1,633 @@
+# SPDX-License-Identifier: Apache-2.0
+"""What files a `tan init` template lays down, and the disk diff/write around it.
+
+Pure domain plus reads of tan's OWN template data. Mirrors
+`crates/tan-core/src/wizard/` (`service/c_project.rs`, `service/vendored.rs`,
+`service/example_catalog.rs`, `filesystem.rs`); the command shell that turns
+these results into an envelope is `tan.commands.init_cmd`.
+
+**No SDK checkout is consulted anywhere in here (I-32).** Five of the six
+templates render a byte-for-byte capture of the SDK's own `--emit scaffold`
+output, checked in under `tan/templates/vendored/` (see that package's
+docstring); the sixth, `minimal-app`, is tan's OWN hand-generated stub and has
+no SDK catalog entry at all. So a fresh customer with no alp-sdk anywhere gets
+a real project, and -- the reason the contract fixture can exist -- `tan init
+--template minimal-app --preview` is deterministic in an empty temp directory.
+`--from-example` is the one init path that genuinely needs a checkout, because
+it copies a directory out of one; it reports `init.sdk-root-unresolved`.
+
+Deliberately NOT reimplemented here: the SDK's own
+`scripts/alp_template.py::_scaffold_cmakelists()` regex rewrite of a scaffolded
+`CMakeLists.txt`. That rewrite matches the *current* boilerplate text and
+returns its input unchanged when it does not recognise the shape, so a second
+implementation of it in tan is a silent `ALP_SDK_ROOT`-guess bug waiting for
+the next SDK CMake change. It ran ONCE, at vendor time, and its output is what
+`vendored/` holds.
+
+**Hardware facts (the one documented exception).** `app_core_for_sku` maps a SKU
+prefix to a core id, and `_family_bucket` maps one to a vendored tree. Both are
+ported verbatim from the Rust, both are the *only* hardware knowledge in the
+port, and both exist because a scaffold has to name a core before any SDK is
+reachable -- `tan validate` re-checks the guess once one is. Do not grow this:
+no SKU list, no addresses, no pin names. Note what is NOT here as a result: the
+OS is never selected (I-01/I-02) -- every generated core entry is `os: zephyr`
+because the app source this scaffold writes is Zephyr source, and a scaffolded
+`board.yaml` carries no top-level `os:` key at all.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path, PureWindowsPath
+
+from tan.templates import VENDORED_ROOT
+
+#: Template ids, in registry order (`WizardTemplateId::as_str`). Wire contract:
+#: `data.templateId` echoes one of these verbatim.
+TEMPLATE_IDS = (
+    "minimal-app",
+    "zephyr-app",
+    "sensor-starter",
+    "iot-starter",
+    "edge-ai-starter",
+    "board-diagnostics",
+)
+
+#: The template a non-interactive `tan init` with no `--template` gets.
+#: `zephyr-app`, NOT `minimal-app` (tan-cli #97): minimal-app's hand-generated
+#: `CMakeLists.txt` never calls `find_package(Zephyr ...)`, so a bare `tan init`
+#: followed by `tan build` used to point west at a plain host CMake project and
+#: link an x86-64 binary for a core declared `os: zephyr`. Do not "simplify"
+#: this back to the first registry entry.
+DEFAULT_TEMPLATE_ID = "zephyr-app"
+
+#: tan template id -> its vendored SDK scaffold-catalog directory.
+#: `minimal-app` is absent deliberately: it is the one template with no SDK
+#: catalog entry (`vendored/MANIFEST.md`, "minimal-app stays hand-generated").
+_VENDORED_TEMPLATE_DIR = {
+    "zephyr-app": "minimal",
+    "sensor-starter": "sensor",
+    "iot-starter": "iot",
+    "edge-ai-starter": "edge-ai",
+    "board-diagnostics": "diagnostics",
+}
+
+#: The SKU assumed when `--som` is absent (`tan_core::DEFAULT_SOM_SKU`).
+DEFAULT_SOM_SKU = "E1M-AEN801"
+
+#: `iot-starter`'s only supported SKU. Its Wi-Fi transport is the CC3501E
+#: bridge, silicon-validated on this SKU alone, so the SDK catalog's `iot`
+#: entry gates `supported.som_skus` to exactly this one-item set and only ONE
+#: family tree was vendored. Any other `--som` is refused up front rather than
+#: silently rendered against it.
+IOT_STARTER_SUPPORTED_SKU = "E1M-AEN801"
+
+#: Vendored directory name per SoM family, `(alif_ensemble, renesas_v2n)` --
+#: the two representative SKUs the SDK catalog declares.
+_FAMILY_TREES = ("E1M-AEN801", "E1M-V2N101")
+
+
+def _read_verbatim(path: Path) -> str:
+    """Read `path` as UTF-8 text with newlines UNTRANSLATED.
+
+    Every scaffold byte round-trips through here. Universal-newline mode would
+    fold a CRLF file's `\\r\\n` to `\\n` on read and expand it back on write, so on
+    Windows an LF template would be written CRLF (breaking byte-parity with the
+    Rust binary's output and with the vendored LF capture) and an existing CRLF
+    file would compare EQUAL to LF planned content -- a real on-disk difference
+    reported as `unchanged`.
+
+    `open(newline="")`, not `Path.read_text(newline=...)`: that keyword landed in
+    3.13 and this package's floor is 3.12.
+    """
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return handle.read()
+
+
+def _write_verbatim(path: Path, content: str) -> None:
+    """The write half of [`_read_verbatim`] -- same reasoning, same keyword."""
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(content)
+
+
+class TemplateDataError(Exception):
+    """tan's own vendored template tree is missing or unreadable.
+
+    Not a user error and not reachable from a correct build: the tree ships
+    inside the package. It IS reachable from a frozen binary built without the
+    `--add-data` that carries it, which is why this is an exception with its own
+    issue code instead of an `IOError` escaping as a traceback.
+    """
+
+
+class ExampleReadError(Exception):
+    """`--from-example`'s source directory is missing, or a file in it is not
+    readable UTF-8 text. `not_found` separates the two: a missing example is
+    the user's typo (exit 2), an unreadable one is a runtime failure (exit 1)."""
+
+    def __init__(self, message: str, *, not_found: bool) -> None:
+        super().__init__(message)
+        self.not_found = not_found
+
+
+@dataclass(frozen=True)
+class PlannedFile:
+    """One file the template will lay down: its project-relative, forward-slash
+    path and its exact content."""
+
+    relative_path: str
+    content: str
+
+
+@dataclass(frozen=True)
+class FileChange:
+    #: `new` | `update` | `unchanged` -- `WizardFileChangeKind::as_str`, wire
+    #: contract via `data.fileChanges[].kind`.
+    relative_path: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class WriteResult:
+    written: list[str]
+    unchanged: list[str]
+
+
+class ScaffoldWriteError(Exception):
+    """A write failed part-way. Carries the `partial` result accumulated before
+    the failure: reporting `written: []` for a project that really is half on
+    disk leaves a consumer with no idea what to clean up or reopen."""
+
+    def __init__(self, message: str, partial: WriteResult) -> None:
+        super().__init__(message)
+        self.partial = partial
+
+
+# ---------------------------------------------------------------------------
+# Path guard
+# ---------------------------------------------------------------------------
+
+
+def is_plain_relative(raw: str) -> bool:
+    """True when `raw` is a plain relative path: non-empty, no `.`/`..`, not
+    absolute, not drive-rooted or root-relative.
+
+    `tan_core::is_plain_relative`. Guards the two inputs that decide WHERE
+    files come from and go to: `--name` (joined onto the destination, so an
+    unchecked `..` or absolute value put the project root -- and with `--force`
+    an overwrite target -- anywhere the process can write) and `--from-example`
+    (joined onto the SDK `examples/` root).
+
+    Evaluated with WINDOWS path semantics on every platform: `C:foo` and `\\x`
+    are not `is_absolute()` on Windows yet still escape a join, and being
+    stricter than POSIX needs to be costs nothing -- no template or example
+    path legitimately contains a backslash or a drive letter.
+
+    A bare `.` and a leading `./` are rejected, not normalised away: `.` made
+    `--from-example .` clear this guard, join back to `examples/` itself, and
+    copy the SDK's entire examples tree in as one "example".
+    """
+    if not raw or raw[0] in "/\\":
+        return False
+    if PureWindowsPath(raw).drive:
+        return False
+    segments = [s for s in re.split(r"[\\/]", raw) if s]
+    if not segments:
+        return False
+    return all(s not in (".", "..") for s in segments)
+
+
+# ---------------------------------------------------------------------------
+# Hardware-adjacent derivations (see the module docstring)
+# ---------------------------------------------------------------------------
+
+
+def app_core_for_sku(sku: str) -> str:
+    """Canonical Zephyr app-core id for a SoM family. `tan init` is SDK-free,
+    so this maps by SKU prefix; `tan validate` re-checks it against the real SoM
+    catalogue once an SDK resolves. Used ONLY by the hand-generated
+    `minimal-app` template -- every vendored template's core id comes from its
+    own vendored `board.yaml`, so the two derivations can never disagree."""
+    if sku.startswith(("E1M-V2N", "E1M-V2M")):
+        return "m33_sm"  # Renesas RZ/V2N, RZ/V2M
+    if sku.startswith("E1M-NX9"):
+        return "m33"  # NXP
+    return "m55_hp"  # Alif Ensemble (E1M-AEN*) + default
+
+
+def _family_bucket(sku: str) -> str:
+    """The vendored tree directory for `sku`, mirroring `app_core_for_sku`'s own
+    family split. An unrecognised family (E1M-NX9* included -- the SDK catalog
+    ships no NXP scaffold) defaults to the Alif tree rather than inventing
+    content or erroring; `retarget_board_yaml_som` still puts the caller's real
+    SKU in the rendered `board.yaml`."""
+    return _FAMILY_TREES[1] if sku.startswith(("E1M-V2N", "E1M-V2M")) else _FAMILY_TREES[0]
+
+
+# ---------------------------------------------------------------------------
+# board.yaml SoM retargeting
+# ---------------------------------------------------------------------------
+
+
+def retarget_board_yaml_som(content: str, sku: str) -> str:
+    """Rewrite the FIRST `som:` -> `sku:` value to `sku`, leaving the rest of
+    that line byte-for-byte alone.
+
+    `wizard::retarget_board_yaml_som`. Only the value token moves: the gap
+    before a trailing comment is preserved, so a column-aligned inline comment
+    (the vendored `iot` scaffold's `sku:` line has one) survives, and passing a
+    tree its OWN vendored SKU is a byte-exact no-op. Reconstructing the tail as
+    a fixed two-space gap silently collapsed that alignment even in the no-op
+    case.
+    """
+    out: list[str] = []
+    in_som = False
+    done = False
+    for line in content.split("\n"):
+        if not done:
+            trimmed = line.lstrip(" \t")
+            if line and not line[0] in " \t":
+                # A new top-level key: entering `som:`, or leaving it.
+                in_som = trimmed.startswith("som:")
+            elif in_som and trimmed.startswith("sku:"):
+                indent = line[: len(line) - len(trimmed)]
+                after_key = trimmed[len("sku:") :]
+                stripped = after_key.lstrip(" \t")
+                leading_ws = after_key[: len(after_key) - len(stripped)]
+                if not stripped or stripped.startswith("#"):
+                    # `sku:` with nothing after it, or `sku:  # comment` with a
+                    # comment but no value. Splicing at the first whitespace run
+                    # would either glue the value onto `sku:` (read back as a
+                    # scalar, not a mapping entry) or eat the `#` into it.
+                    out.append(f"{indent}sku: {sku}{after_key}")
+                else:
+                    match = re.search(r"\s", stripped)
+                    tail = stripped[match.start() :] if match else ""
+                    out.append(f"{indent}sku:{leading_ws}{sku}{tail}")
+                done = True
+                continue
+        out.append(line)
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Template planning
+# ---------------------------------------------------------------------------
+
+
+def plan_template_files(template_id: str, sku: str) -> list[PlannedFile]:
+    """The files `template_id` lays down for `sku`.
+
+    Raises `TemplateDataError` when a vendored tree cannot be read, and
+    `KeyError`-free otherwise: the caller has already validated `template_id`
+    against `TEMPLATE_IDS`.
+    """
+    if template_id == "minimal-app":
+        return _minimal_app_files(sku)
+    return _vendored_files(_VENDORED_TEMPLATE_DIR[template_id], template_id, sku)
+
+
+def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
+    """Read a vendored scaffold tree and retarget its `board.yaml` onto `sku`.
+
+    Files come back sorted by their relative POSIX path, which is byte-for-byte
+    the order the Rust `vendored_tree!` macro lists them in for every tree
+    (`CMakeLists.txt`, `README.md`, `board.yaml`, ... -- uppercase first) -- so
+    `data.fileChanges[]` matches the shipped binary's without a hand-kept list
+    here to drift out of step with it.
+
+    Sorted on that STRING, never on the `Path`: `PurePath.__lt__` compares a
+    case-FOLDED key on Windows, so sorting paths ordered `board.yaml` before
+    `CMakeLists.txt` there and after it on Linux -- the same command emitting a
+    different `fileChanges[]` order per platform.
+    """
+    # `iot` has exactly one vendored tree, no family split (its caller rejects
+    # any other SKU first); every other template has two.
+    family = IOT_STARTER_SUPPORTED_SKU if template_id == "iot-starter" else _family_bucket(sku)
+    root = VENDORED_ROOT / tree / family
+    try:
+        paths = sorted(
+            (p for p in root.rglob("*") if p.is_file()),
+            key=lambda p: p.relative_to(root).as_posix(),
+        )
+        if not paths:
+            raise TemplateDataError(
+                f"tan's vendored template tree for '{template_id}' is empty at "
+                f"'{root}'. This is a broken tan installation, not a project problem "
+                f"-- reinstall tan, or rebuild the binary with the template data "
+                f"(scripts/build_binary.sh)."
+            )
+        files = []
+        for path in paths:
+            relative = path.relative_to(root).as_posix()
+            content = _read_verbatim(path)
+            if relative == "board.yaml":
+                content = retarget_board_yaml_som(content, sku)
+            files.append(PlannedFile(relative, content))
+    except OSError as err:
+        raise TemplateDataError(
+            f"tan's vendored template tree for '{template_id}' could not be read at "
+            f"'{root}': {err}"
+        ) from err
+    return files
+
+
+# ---------------------------------------------------------------------------
+# `minimal-app`: the one hand-generated template
+# ---------------------------------------------------------------------------
+#
+# tan's OWN content, not a copy of anything the SDK ships -- the SDK catalog has
+# no `minimal-app` entry (its `minimal` entry is what `zephyr-app` vendors).
+# Deliberately a plain-CMake, non-west-buildable stub: it is the "I want full
+# control over bring-up order" baseline, which is also why it is not the
+# non-interactive default (see `DEFAULT_TEMPLATE_ID`). Ported from
+# `wizard/service/c_project.rs`; `contract/envelopes/init-preview-minimal-app`
+# pins its exact eight-file list.
+
+#: minimal-app's one feature file: `(path, unit name, TODO line)`.
+_MINIMAL_APP_FEATURE_FILE = (
+    "src/features/app_bootstrap.c",
+    "app_bootstrap",
+    "TODO: register app services and initialize runtime modules.",
+)
+
+_MINIMAL_APP_EXPLANATION = (
+    "Minimal template keeps generated code intentionally small and neutral.",
+    "Use this baseline when you want full control over feature bring-up order.",
+)
+
+_MINIMAL_APP_BODY_LINES = (
+    "Alp minimal starter boot",
+    "TODO: add your application logic",
+)
+
+
+def _minimal_app_files(sku: str) -> list[PlannedFile]:
+    feature_path, unit_name, todo_line = _MINIMAL_APP_FEATURE_FILE
+    return [
+        PlannedFile("board.yaml", _minimal_app_board_yaml(sku)),
+        PlannedFile("README.md", _minimal_app_readme(sku)),
+        # No `prj_conf_extras`: minimal-app declares none.
+        PlannedFile("prj.conf", "CONFIG_ASSERT=y\nCONFIG_NEWLIB_LIBC=y\n"),
+        PlannedFile(
+            "CMakeLists.txt",
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(alp_starter C)\n"
+            "\n"
+            "add_subdirectory(src)\n",
+        ),
+        PlannedFile("src/CMakeLists.txt", _minimal_app_src_cmake()),
+        PlannedFile(
+            "include/app/app.h",
+            "// SPDX-License-Identifier: Apache-2.0\n"
+            "\n"
+            "#ifndef ALP_APP_APP_H\n"
+            "#define ALP_APP_APP_H\n"
+            "\n"
+            "int alp_app_init(void);\n"
+            "int alp_app_run(void);\n"
+            "\n"
+            "#endif /* ALP_APP_APP_H */\n",
+        ),
+        PlannedFile("src/main.c", _minimal_app_main_c()),
+        PlannedFile(feature_path, _feature_file(unit_name, todo_line)),
+    ]
+
+
+def _minimal_app_board_yaml(sku: str) -> str:
+    """A board.yaml conforming to the SDK board schema: `som` + `cores` are the
+    only required top-level keys, and the OS is per-core. There is deliberately
+    NO top-level `os:` key (I-02) and no way to ask for one -- a core's runtime
+    follows its Cortex class, and this scaffold's app source is Zephyr."""
+    return (
+        "# Generated by `tan init`.\n"
+        "# board.yaml describes hardware: the SoM SKU + per-core app map.\n"
+        "# Validate it with `tan validate` once an SDK is resolved.\n"
+        "\n"
+        "som:\n"
+        f"  sku: {sku}\n"
+        "cores:\n"
+        f"  {app_core_for_sku(sku)}:\n"
+        "    os: zephyr\n"
+        "    app: ./src\n"
+    )
+
+
+def _minimal_app_readme(sku: str) -> str:
+    notes = "".join(f"- {line}\n" for line in _MINIMAL_APP_EXPLANATION)
+    return (
+        "# Alp Starter Project\n"
+        "\n"
+        "Template: minimal-app\n"
+        f"SoM: {sku}\n"
+        f"App core: {app_core_for_sku(sku)} (Zephyr)\n"
+        "\n"
+        "## Generated Starter Notes\n"
+        "\n"
+        f"{notes}"
+        "\n"
+        "## Next Steps\n"
+        "\n"
+        "- Run Alp: Validate board.yaml.\n"
+        "- Run Alp: Generate all to produce derived outputs under build/generated/.\n"
+        "- Extend source files under src/features/ for your target behavior.\n"
+        "\n"
+        "This workspace was generated by Alp: New Project Wizard.\n"
+        "Use Alp commands to validate, generate, and build outputs.\n"
+    )
+
+
+def _minimal_app_src_cmake() -> str:
+    feature_path = _MINIMAL_APP_FEATURE_FILE[0]
+    rel = feature_path[len("src/") :] if feature_path.startswith("src/") else feature_path
+    return (
+        "set(ALP_APP_SOURCES\n"
+        "  main.c\n"
+        f"  {rel}\n"
+        ")\n"
+        "\n"
+        "add_executable(alp_app ${ALP_APP_SOURCES})\n"
+        "target_include_directories(alp_app PRIVATE ../include)\n"
+    )
+
+
+def _minimal_app_main_c() -> str:
+    line1, line2 = _MINIMAL_APP_BODY_LINES
+    return (
+        "// SPDX-License-Identifier: Apache-2.0\n"
+        "\n"
+        '#include "app/app.h"\n'
+        "#include <stdio.h>\n"
+        "\n"
+        "int alp_app_init(void) {\n"
+        "  // TODO: initialize app-level services.\n"
+        "  return 0;\n"
+        "}\n"
+        "\n"
+        "int alp_app_run(void) {\n"
+        "  // TODO: execute one app cycle.\n"
+        "  return 0;\n"
+        "}\n"
+        "\n"
+        "int main(void) {\n"
+        "  if (alp_app_init() != 0) {\n"
+        '    puts("alp_app_init failed");\n'
+        "    return 1;\n"
+        "  }\n"
+        "\n"
+        "  if (alp_app_run() != 0) {\n"
+        '    puts("alp_app_run failed");\n'
+        "    return 1;\n"
+        "  }\n"
+        "\n"
+        f'  puts("{line1}");\n'
+        f'  puts("{line2}");\n'
+        "  return 0;\n"
+        "}\n"
+    )
+
+
+def _feature_file(unit_name: str, todo_line: str) -> str:
+    return (
+        "// SPDX-License-Identifier: Apache-2.0\n"
+        "\n"
+        "#include <stdio.h>\n"
+        "\n"
+        f"int {unit_name}_step(void) {{\n"
+        f"  // {todo_line}\n"
+        "  return 0;\n"
+        "}\n"
+    )
+
+
+# ---------------------------------------------------------------------------
+# `--from-example`: copy an SDK example verbatim
+# ---------------------------------------------------------------------------
+
+
+def read_example_tree(source_dir: Path) -> list[PlannedFile]:
+    """Read every regular file under `source_dir` verbatim as UTF-8 text, paths
+    forward-slash normalised and sorted by that relative path (NOT by `Path` --
+    see `_vendored_files` for why that ordering is platform-dependent).
+
+    UTF-8 only, like the Rust: a binary-carrying example surfaces as an
+    `ExampleReadError` instead of being copied corrupt. All shipped examples are
+    text today.
+    """
+    if not source_dir.is_dir():
+        raise ExampleReadError(f"'{source_dir}' is not a directory.", not_found=True)
+    files: list[PlannedFile] = []
+    try:
+        for path in sorted(
+            (p for p in source_dir.rglob("*") if p.is_file()),
+            key=lambda p: p.relative_to(source_dir).as_posix(),
+        ):
+            files.append(
+                PlannedFile(path.relative_to(source_dir).as_posix(), _read_verbatim(path))
+            )
+    except (OSError, UnicodeDecodeError) as err:
+        # UnicodeDecodeError is a ValueError, not an OSError -- catching only
+        # OSError would let a binary file in an example escape as a traceback.
+        raise ExampleReadError(str(err), not_found=False) from err
+    return files
+
+
+# ---------------------------------------------------------------------------
+# Disk: diff, then write
+# ---------------------------------------------------------------------------
+
+
+def _existing_content(path: Path) -> str | None:
+    """The file's content, or None when it is absent/unreadable -- an unreadable
+    file compares unequal to anything, so it is planned as an `update`."""
+    try:
+        return _read_verbatim(path)
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def collect_file_changes(project_root: Path, files: list[PlannedFile]) -> list[FileChange]:
+    """Classify each planned file as `new` / `update` / `unchanged` relative to
+    `project_root`. Read-only: `--preview` stops after this."""
+    changes = []
+    for planned in files:
+        path = project_root / planned.relative_path
+        if not path.exists():
+            kind = "new"
+        else:
+            existing = _existing_content(path)
+            kind = "unchanged" if existing == planned.content else "update"
+        changes.append(FileChange(planned.relative_path, kind))
+    return changes
+
+
+def write_files(project_root: Path, files: list[PlannedFile]) -> WriteResult:
+    """Write every planned file under `project_root`, creating parents as
+    needed. A file whose content already matches is skipped and counted
+    `unchanged`.
+
+    Raises `ScaffoldWriteError` carrying the partial result on the first
+    failure -- an unwritable destination, a path component that is a file
+    rather than a directory, a read-only tree, a full disk. Every one of those
+    is the user's environment, not a tan bug, so none may escape as a
+    traceback.
+    """
+    written: list[str] = []
+    unchanged: list[str] = []
+    for planned in files:
+        path = project_root / planned.relative_path
+        if path.exists() and _existing_content(path) == planned.content:
+            unchanged.append(planned.relative_path)
+            continue
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            _write_verbatim(path, planned.content)
+        except OSError as err:
+            raise ScaffoldWriteError(str(err), WriteResult(written, unchanged)) from err
+        written.append(planned.relative_path)
+    return WriteResult(written, unchanged)
+
+
+def scaffold_tree_preview(files: list[PlannedFile]) -> str:
+    """The planned files as an ASCII `tree`-style listing, paths sorted, last
+    entry marked ``\\`-- ``. Text mode only -- JSON callers read
+    `data.fileChanges`."""
+    paths = sorted(f.relative_path for f in files)
+    lines = ["."]
+    for i, path in enumerate(paths):
+        lines.append(f"{'`--' if i + 1 == len(paths) else '|--'} {path}")
+    return "\n".join(lines) + "\n"
+
+
+def sdk_pointer_json(sdk_path: str) -> str:
+    """The `.alp/sdk-path` pointer file's contents, so a new project is
+    reproducible without a separate `tan sdk switch`. Shape and two-space indent
+    from `commands::sdk::write_sdk_pointer`; the path is recorded exactly as the
+    caller resolved it.
+
+    `SOURCE_DATE_EPOCH` wins over the clock, so a captured pointer is
+    reproducible -- `tan.commands.doctor_cmd._generated_at` carries the same
+    four lines for `data.generatedAt`. Two small twins, deliberately: hoisting
+    them into a shared util is a cross-command refactor, not part of `tan init`.
+    """
+    import json  # noqa: PLC0415 -- one call site, not worth a module-level import
+    import time  # noqa: PLC0415
+
+    raw = os.environ.get("SOURCE_DATE_EPOCH")
+    seconds = time.time()
+    if raw is not None:
+        try:
+            seconds = int(raw.strip())
+        except ValueError:
+            pass
+    updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+    return json.dumps({"sdkPath": sdk_path, "updatedAt": updated_at}, indent=2) + "\n"
+
+
+def posix(path: Path) -> str:
+    """`path` as a string with forward slashes -- what the envelope's path-shaped
+    fields carry (the conformance harness normalises `\\` -> `/` on those keys,
+    and a golden is authored in the normalised form)."""
+    return str(path).replace(os.sep, "/")
