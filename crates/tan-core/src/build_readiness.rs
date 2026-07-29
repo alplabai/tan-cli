@@ -81,7 +81,7 @@ pub fn zephyr_sdk_install_command() -> String {
 /// gated bootstrap and was never added. That makes this the one install command
 /// in this file the SDK does not own, and it is written down here rather than
 /// invented at the call site so the follow-up that moves it into
-/// `metadata/bootstrap.json` (alp-sdk#1013) has a single thing to delete.
+/// `metadata/bootstrap.json` (alp-sdk#1036) has a single thing to delete.
 ///
 /// Verified resolvable before being written down (`winget show 7zip.7zip` ->
 /// `Found 7-Zip [7zip.7zip]`, publisher Igor Pavlov), and shaped like the
