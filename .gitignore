@@ -6,3 +6,4 @@
 # Python bytecode cache (tests/parity/seam1_field_diff.py)
 __pycache__/
 *.pyc
+.pytest_cache/
