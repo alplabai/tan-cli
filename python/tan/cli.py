@@ -13,6 +13,7 @@ import sys
 import typer
 
 from tan.commands.build_cmd import build
+from tan.commands.doctor_cmd import doctor
 from tan.envelope import Envelope, Issue, Project, envelope_emitted
 from tan.exit_codes import ExitCode
 from tan.version import TAN_VERSION
@@ -26,6 +27,7 @@ app = typer.Typer(add_completion=False)
 # the command module keeps `tan.commands.*` free of any `tan.cli` import,
 # which would otherwise be a cycle.
 app.command("build")(build)
+app.command("doctor")(doctor)
 
 
 @app.callback(invoke_without_command=True)

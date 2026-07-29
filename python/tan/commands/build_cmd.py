@@ -89,7 +89,7 @@ def _is_sdk_root(path: Path) -> bool:
     return path.joinpath(*SDK_MARKER).is_file()
 
 
-def _discover_sdk_root(workspace_root: Path) -> Path | None:
+def discover_sdk_root(workspace_root: Path) -> Path | None:
     """Find an alp-sdk checkout near `workspace_root`, mirroring Rust's
     `discover_sdk_root` (`crates/tan-cli/src/util.rs`) candidate for
     candidate: the root itself, then its CHILD `alp-sdk/`, then the sibling
@@ -467,7 +467,7 @@ def build(
 
     explicit_sdk = sdk_root is not None
     if sdk_root is None:
-        found = _discover_sdk_root(Path.cwd())
+        found = discover_sdk_root(Path.cwd())
         sdk_root = str(found) if found else None
     sdk = (
         SdkInfo(sdk_root, "sdkRootFlag" if explicit_sdk else "discovery")
