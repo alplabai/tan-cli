@@ -540,9 +540,22 @@ pub(super) fn pip_phase(ws: &Workspace, venv: &VenvBin, log: &mut Log, runner: &
         cmd.args(["-m", "pip", "install", "-q", "-r"])
             .arg(&requirements);
         if runner.run(&mut cmd).is_err() {
+            // Stays NON-FATAL (see this function's doc comment), but "check
+            // manually" told the reader nothing actionable. Measured in CI on a
+            // stock ubuntu-24.04 runner: the failure is `hidapi` building from
+            // source, which needs pkg-config and the libusb-1.0 headers --
+            // `Exception: pkg-config package 'libusb-1.0 >= 1.0.9' not found`.
+            // The workspace still looks complete afterwards (.west/, .venv,
+            // zephyr/ and modules/ all exist), so the next command a customer
+            // runs is where it surfaces, far from the cause. Name the likely
+            // remedy here rather than leaving them to read pip's traceback.
             log.warn(
                 "zephyr-requirements",
-                "Zephyr requirements install reported a problem -- check manually",
+                "Zephyr requirements install reported a problem -- the venv is \
+                 incomplete and a later `tan init`/`tan build` may fail. On \
+                 Linux this is usually `hidapi` needing native headers: \
+                 `sudo apt-get install -y pkg-config libusb-1.0-0-dev`, then \
+                 re-run `tan bootstrap`.",
             );
         }
     }
