@@ -114,6 +114,50 @@
   no consumer binds to any of them yet.
 
 ### Security
+- **README's Manual install section taught the unverified download the scripts
+  had just been made to refuse** (#188). #176 stopped `install.sh` /
+  `install.ps1` installing a binary they cannot verify; a few lines below the
+  one-liners, on the same page, the Manual snippets still fetched a binary with
+  no digest step, offered `tan --version` as the confirmation, and — on Windows
+  — wrote straight to `tan.exe`, the exact ordering #176 changed because a bad
+  binary that has already landed may already be locked or on PATH. That made
+  the fallback for the higher-risk population (a locked-down host, a policy
+  against `curl | sh`, a hand-carried air-gapped binary) the weaker path, and
+  left a documented route to the unverified-`tan`-on-PATH state
+  alp-sdk-vscode#393 describes.
+  Both snippets now resolve `latest` ONCE — through the same redirect
+  `install.sh` follows and the same API field `install.ps1` reads, so the manual
+  path lands on the tag the one-liners land on — and build the binary and
+  `checksums.txt` URLs from it. `releases/latest/download/…` resolves `latest`
+  separately per fetch, which is the two-resolutions problem #176 fixed in the
+  scripts, and the digest for a given filename really does move between tags
+  (`tan-x86_64-pc-windows-msvc.exe` is `f159c1dc…` at `v0.4.0-rc1` and
+  `a80fb5da…` at `v0.4.0`).
+  They also download into a **fresh directory** and chain every step, because
+  pinning the tag alone is not enough: with a fixed filename in the working
+  directory and no gating, a reader who edits the tag and whose fetches 404
+  verifies the PREVIOUS tag's binary against the PREVIOUS tag's digests and gets
+  a confident `OK` — the same wrong-verdict class #176 removed, reproduced live
+  against the real releases during review. The matching is by exact field as the
+  installers do, so a neighbouring asset's line cannot satisfy the check, and an
+  asset missing from `checksums.txt` is refused explicitly rather than left to
+  `sha256sum -c`, which **exits 0 on empty input**. The two refusals are worded
+  apart — an incomplete release is not a tampered download — and the PowerShell
+  snippet additionally sets `$ErrorActionPreference = 'Stop'`, negotiates TLS
+  1.2, and passes `-UseBasicParsing`, all three of which `install.ps1` already
+  carries for Windows PowerShell 5.1 hosts.
+  The Linux default is now the static `-musl` asset, matching what `install.sh`
+  selects rather than the `-gnu` build with its glibc floor — this section is
+  the fallback for exactly the old or locked-down host that floor excludes.
+  **Both** mechanisms are documented, and deliberately: sha256 needs nothing
+  but coreutils (or PowerShell's built-in `Get-FileHash`), so it is the
+  baseline a host that cannot install `gh` can still run, while `gh attestation
+  verify <file> --repo alplabai/tan-cli --signer-workflow
+  alplabai/tan-cli/.github/workflows/release.yml` proves the file came out of
+  that workflow, which a digest published in the same release cannot.
+  `--signer-workflow` is not optional garnish: without it the command binds the
+  artefact to *some* workflow in the repo, not to the release job. The README
+  now says why each check is there, so neither gets "fixed" back out.
 - **`install.sh` and `install.ps1` now verify the downloaded binary against the
   release's `checksums.txt` and refuse to install on any failure** (#176).
   Previously both wrote the download straight to the install destination with
