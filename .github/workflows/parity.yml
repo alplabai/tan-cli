@@ -591,7 +591,7 @@ jobs:
 
       # Deliberately NOT pip-installing west here: `tan bootstrap` creating the
       # venv and installing west into it is one of the things under test.
-      # pkg-config + libusb-1.0-0-dev are NOT decoration: this job's own second
+      # pkg-config + libusb-1.0-0-dev + libudev-dev are NOT decoration: this job's own second
       # run proved `hidapi` builds from source inside bootstrap's Zephyr
       # requirements install and fails without them
       # (`Exception: pkg-config package 'libusb-1.0 >= 1.0.9' not found`).
@@ -605,7 +605,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
               ninja-build device-tree-compiler gperf ca-certificates curl xz-utils \
-              pkg-config libusb-1.0-0-dev
+              pkg-config libusb-1.0-0-dev libudev-dev
 
       - name: build tan
         run: cargo build --locked --bin tan

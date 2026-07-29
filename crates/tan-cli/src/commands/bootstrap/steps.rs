@@ -554,7 +554,7 @@ pub(super) fn pip_phase(ws: &Workspace, venv: &VenvBin, log: &mut Log, runner: &
                 "Zephyr requirements install reported a problem -- the venv is \
                  incomplete and a later `tan init`/`tan build` may fail. On \
                  Linux this is usually `hidapi` needing native headers: \
-                 `sudo apt-get install -y pkg-config libusb-1.0-0-dev`, then \
+                 `sudo apt-get install -y pkg-config libusb-1.0-0-dev libudev-dev`, then \
                  re-run `tan bootstrap`.",
             );
         }
