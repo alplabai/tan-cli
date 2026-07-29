@@ -125,9 +125,28 @@ def _generated_at() -> str:
             seconds = float(int(raw.strip()))
         except ValueError:
             pass
-    millis = int((seconds - int(seconds)) * 1000)
-    stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(int(seconds)))
-    return f"{stamp}.{millis:03d}Z"
+    # NEVER raise. This helper is also called from the recovery path of the
+    # exception guard in `_emit_outcome`, so a throw here DOUBLE-FAULTS: the
+    # first failure is caught, the recovery re-raises, and the process dies with
+    # a raw traceback and EMPTY stdout -- precisely the break that guard exists
+    # to prevent, and the only path in the port that could still do it.
+    #
+    # The realistic trigger is `SOURCE_DATE_EPOCH` in MILLISECONDS
+    # (1700000000000 -> year 55838), and CI / reproducible-build environments are
+    # exactly what set this variable. `time.gmtime` raises OverflowError or
+    # OSError (Errno 22 on Windows) once past the platform's `time_t` range, and
+    # that range differs per platform, so the value cannot be portably
+    # pre-validated -- catch rather than predict. Rust does not fail here either:
+    # `crates/tan-cli/src/util.rs` parses and falls back to the clock.
+    for candidate in (seconds, time.time()):
+        try:
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(int(candidate)))
+        except (OverflowError, OSError, ValueError):
+            continue
+        millis = int((candidate - int(candidate)) * 1000)
+        return f"{stamp}.{millis:03d}Z"
+    # Supplied stamp AND wall clock both unusable: still no throw.
+    return "1970-01-01T00:00:00.000Z"
 
 
 def _normalise(path: str) -> str:

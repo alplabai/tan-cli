@@ -606,3 +606,42 @@ def test_select_slice_ignores_a_qualified_native_sim_lookalike():
     slices = [{"core_id": "c", "os": "zephyr", "board": "native_simulated_foo"}]
 
     assert _select_slice(slices, NATIVE_HOST, None) is None
+
+
+@pytest.mark.parametrize(
+    "epoch",
+    ["1700000000000", "99999999999", "-99999999999", "253402300799"],
+)
+def test_an_out_of_range_source_date_epoch_still_emits_one_envelope(epoch, tmp_path):
+    """A SOURCE_DATE_EPOCH outside the platform's time_t range must not throw.
+
+    `_generated_at()` is called from the recovery path of the exception guard, so
+    a throw there DOUBLE-FAULTS: the first failure is caught, the recovery
+    re-raises, and the process dies with a raw traceback and EMPTY stdout -- the
+    exact break the guard exists to prevent.
+
+    Milliseconds is the realistic trigger (1700000000000 -> year 55838), and CI
+    and reproducible-build environments are what set this variable. `time.gmtime`
+    raises OverflowError or OSError (Errno 22 on Windows) past the range, and the
+    range differs per platform.
+
+    The pre-existing guard test plants a RuntimeError inside `_run`, so it cannot
+    see this: the failure happens in the recovery itself, not in the body.
+    """
+    env = dict(
+        os.environ,
+        SOURCE_DATE_EPOCH=epoch,
+        PYTHONPATH=os.pathsep.join(
+            [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+        ),
+    )
+    proc = subprocess.run(
+        [sys.executable, "-m", "tan", "debug-config",
+         "--target-kind", "native-host", "--preview", "--format", "json"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=tmp_path, env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)          # exactly one parseable document
+    assert payload["command"] == "debug-config"
+    assert payload["ok"] is True
