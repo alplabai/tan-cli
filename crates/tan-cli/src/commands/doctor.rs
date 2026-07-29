@@ -17,7 +17,7 @@ use tan_core::{
     append_doctor_check, board_os_set, build_doctor_report, build_readiness_report,
     collect_runtime_capabilities_from_commands, create_debug_workspace_context,
     host_environment_checks, is_server_supported_for_target, parse_board_model, parse_server_kind,
-    parse_target_kind, prepend_doctor_checks,
+    parse_target_kind, prepend_doctor_checks, server_choices_for_target,
 };
 
 use tan_core::bootstrap::{
@@ -51,13 +51,37 @@ pub fn run(g: &GlobalArgs, args: &DoctorArgs) -> CommandRun {
         board_yaml: context.board_yaml_path.clone(),
     };
 
-    let target = match parse_target_kind(args.target_kind.as_deref()) {
-        Ok(value) => value,
-        Err(message) => return internal_failure(g, &generated_at, message),
+    // An ABSENT `--target-kind` used to parse to `native-host`, and an absent
+    // `--server` to `none`, so plain `tan doctor` reported debug readiness for
+    // the host binary no matter what board the project declared: it checked for
+    // CodeLLDB on a project whose only debuggable artefact is an ELF on an M33
+    // behind a SWD probe (#208). Every debug verdict it printed was answering a
+    // question about a different target. An explicitly PASSED flag still wins
+    // outright -- this only supplies the default the flag omits.
+    let target = match args.target_kind.as_deref() {
+        Some(raw) => match parse_target_kind(Some(raw)) {
+            Ok(value) => value,
+            Err(message) => return internal_failure(g, &generated_at, message),
+        },
+        None => default_target_kind(&project),
     };
-    let server = match parse_server_kind(args.server.as_deref()) {
-        Ok(value) => value,
-        Err(message) => return internal_failure(g, &generated_at, message),
+    // Derived from the target, not defaulted to `none` beside it. `none` is
+    // valid for `native-host` ALONE (`server_choices_for_target`), so pairing a
+    // derived `zephyr-mcu` with a hardcoded `none` would trip
+    // `is_server_supported_for_target` below and turn every plain `tan doctor`
+    // in a real project into a `serverCompatibility` failure. Taking the
+    // target's own first supported choice reuses that existing table instead of
+    // opening a second one to disagree with it, and for `native-host` it still
+    // resolves to `none` -- byte-identical to the old default.
+    let server = match args.server.as_deref() {
+        Some(raw) => match parse_server_kind(Some(raw)) {
+            Ok(value) => value,
+            Err(message) => return internal_failure(g, &generated_at, message),
+        },
+        None => server_choices_for_target(target)
+            .first()
+            .copied()
+            .unwrap_or(DebugServerKind::None),
     };
 
     if !is_server_supported_for_target(target, server) {
@@ -123,6 +147,7 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
                 no_pip: false,
                 no_west: false,
                 print_env: false,
+                workspace: None,
             },
         );
         bootstrap_fix_check = Some(bootstrap_fix_doctor_check(&bootstrap_run));
@@ -137,17 +162,6 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
     let os_set = read_board_model(&context)
         .map(|board| board_os_set(&board))
         .unwrap_or_else(|| vec![BuildOs::Zephyr, BuildOs::Yocto, BuildOs::Baremetal]);
-
-    let probe = BuildToolProbe {
-        west: command_on_path("west"),
-        cmake: command_on_path("cmake"),
-        ninja: command_on_path("ninja"),
-        bitbake: command_on_path("bitbake"),
-        zephyr_sdk: crate::toolchain::zephyr_sdk_detected(),
-        bmaptool: command_on_path("bmaptool"),
-        dd: command_on_path("dd"),
-        is_linux: cfg!(target_os = "linux"),
-    };
 
     // `missingPrerequisites[].command` — the one field the extension's
     // `runToolchainFix` puts behind a Fix button — comes from the SDK's
@@ -167,13 +181,63 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
     // same message into `hostPrerequisites`' detail tail; this mode has no such
     // check, so it gets its own, sharing the wording constants so the two modes
     // cannot word one verdict two ways.
+    //
+    // Resolved BEFORE the probe below (not after, as originally): the `python`
+    // check (#120) needs `facts.python_min_version` — the SAME floor `tan
+    // bootstrap` enforces — to decide Pass vs Fail, not a second, tan-compiled-in
+    // one that could drift from it.
     let (facts, manifest_error) = resolve_bootstrap_facts(context.sdk_root.as_deref());
+
+    let probe = BuildToolProbe {
+        west: command_on_path("west"),
+        west_version: crate::util::tool_version("west"),
+        cmake: command_on_path("cmake"),
+        cmake_version: crate::util::tool_version("cmake"),
+        ninja: command_on_path("ninja"),
+        ninja_version: crate::util::tool_version("ninja"),
+        bitbake: command_on_path("bitbake"),
+        bitbake_version: crate::util::tool_version("bitbake"),
+        zephyr_sdk: crate::toolchain::zephyr_sdk_detected(),
+        bmaptool: command_on_path("bmaptool"),
+        dd: command_on_path("dd"),
+        is_linux: cfg!(target_os = "linux"),
+        is_windows: cfg!(target_os = "windows"),
+        // ANY of the accepted extractors counts -- patoolib takes the first it
+        // finds, so probing only `7z` would call a host with `7zz` unequipped.
+        seven_zip: tan_core::SEVEN_ZIP_PROGRAMS
+            .iter()
+            .any(|name| command_on_path(name)),
+        git: command_on_path("git"),
+        git_version: crate::util::tool_version("git"),
+        // Resolved via bootstrap's own multi-candidate probe (`py -3`, `python3`,
+        // `python`, ...) against the manifest floor, so this check's Pass/Fail is
+        // driven by the EXACT SAME resolution `tan bootstrap` itself uses (#120)
+        // — not a second, independent guess at which interpreter tan would run.
+        python_version: crate::util::probe_host_python(facts.python_min_version).map(|h| h.version),
+        dtc: command_on_path("dtc"),
+        dtc_version: crate::util::tool_version("dtc"),
+        gperf: command_on_path("gperf"),
+        gperf_version: crate::util::tool_version("gperf"),
+    };
+
     let mut report = build_readiness_report(
         generated_at.to_string(),
         os_set,
         &probe,
         facts.install.for_host(HostOs::detect(std::env::consts::OS)),
+        facts.python_min_version,
     );
+    // `westResolved`'s check (from `probe_build_preflight`, appended below by
+    // `prepend_doctor_checks`) reports only PRESENCE. Its version (#123) is
+    // resolved independently here, through the IDENTICAL `west_program` lookup
+    // that check's own probe used — never `probe.west_version` (bare PATH) —
+    // so the two rows can never be attributed to the wrong resolver, which is
+    // precisely the bug tan-cli#123 was filed over.
+    if let Some(version) = resolve_west_resolved_version(g, &context) {
+        report
+            .check_versions
+            .insert("westResolved".to_string(), version);
+    }
     if let Some(message) = manifest_error {
         // `Warn`, matching what plain `doctor` downgrades the same rejection to:
         // a read-only report should not be the thing that exits `DoctorFailure`
@@ -236,6 +300,21 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
     CommandRun { exit, text, json }
 }
 
+/// The version of the SAME `west` `westResolved`'s check verified is present:
+/// the workspace-venv binary [`crate::venv::west_program`] resolves, not
+/// bare PATH's. `probe_build_preflight` (which builds the `westResolved`
+/// check itself) reports only presence, not a version, so this resolves the
+/// identical lookup independently rather than threading a version back out of
+/// that call — the two must never end up naming different binaries (tan-cli#123:
+/// the reported bug was exactly a version read off a DIFFERENT resolver than
+/// the one the verdict came from).
+fn resolve_west_resolved_version(g: &GlobalArgs, context: &ProjectContext) -> Option<String> {
+    let base = crate::commands::build::base_dir(context);
+    let sdk_root = crate::util::resolve_sdk_root(g, &crate::util::cli_workspace_root(g));
+    let west = crate::venv::west_program(&base, sdk_root.as_deref());
+    crate::util::tool_version(&west)
+}
+
 /// The plain `tan doctor` report: the pure check set, plus the checks that can
 /// only be built with IO — the host prerequisite gate, the host-environment
 /// probes, the SDK provenance, and the shared build-readiness preflight.
@@ -294,6 +373,7 @@ fn assemble_doctor_report(
     );
     append_host_prerequisites(&mut report, context.sdk_root.as_deref());
     append_host_environment(&mut report);
+    append_zephyr_sdk_toolchain(&mut report);
     append_sdk_provenance(
         &mut report.summary,
         &mut report.checks,
@@ -301,6 +381,35 @@ fn assemble_doctor_report(
         context.sdk_root.as_deref(),
     );
     report
+}
+
+/// Append the `zephyrSdk` check to PLAIN `tan doctor` (tan-cli#160). It
+/// already exists under `--build`, gated on the active `board.yaml` declaring
+/// a Zephyr core; here it is unconditional, for the same reason
+/// `append_host_environment`'s checks are — this is a HOST fact (env var /
+/// scanned install dir, `crate::toolchain::zephyr_sdk_detected`), needing no
+/// `board.yaml`, no workspace and no SDK, and ADR 0021 Lane 1 P0a runs `tan
+/// doctor` before anything project-shaped exists. Most boards this SDK
+/// targets pair a Zephyr-on-M core with Yocto-on-A (`project_v05...` /
+/// H2-2026 scope), so a Yocto-only project seeing this check too is the
+/// uncommon case, and a `Fail` on it is still true regardless: this host
+/// genuinely has no Zephyr SDK.
+///
+/// This is the check the alp-sdk#855 fresh-host run needed and never got: on
+/// that run `tan doctor` (plain) never mentioned the word "toolchain" at all,
+/// and `tan doctor --build`'s equivalent check was reached only after
+/// `tan init` — a full project creation — stood between the user and the
+/// first sign of trouble. Surfacing it at the FIRST command a customer runs
+/// closes that gap directly rather than relying on `zephyrSdkAvailableForHost`
+/// (which answers "can one be provisioned here", not "is one installed") to
+/// be read as a substitute for it.
+fn append_zephyr_sdk_toolchain(report: &mut DoctorReport) {
+    append_doctor_check(
+        &mut report.summary,
+        &mut report.checks,
+        &mut report.next_steps,
+        tan_core::zephyr_sdk_toolchain_check(crate::toolchain::zephyr_sdk_detected()),
+    );
 }
 
 /// Append the `hostPrerequisites` check: run `bootstrap`'s own prerequisite
@@ -384,8 +493,8 @@ fn resolve_bootstrap_facts(sdk_root: Option<&str>) -> (BootstrapFacts, Option<St
     }
 }
 
-/// Append the host-environment checks — `zephyrSdkHost`, `longPaths`
-/// (Windows only) and `homePath` (alp-sdk ADR 0021, "Cross-cutting
+/// Append the host-environment checks — `zephyrSdkAvailableForHost`,
+/// `longPaths` (Windows only) and `homePath` (alp-sdk ADR 0021, "Cross-cutting
 /// requirements").
 ///
 /// This function is the IO half and nothing else: three probes, then one call
@@ -400,10 +509,14 @@ fn resolve_bootstrap_facts(sdk_root: Option<&str>) -> (BootstrapFacts, Option<St
 /// [`append_host_prerequisites`] is: these need no `board.yaml`, no workspace
 /// and no SDK, and ADR 0021 Lane 1 P0a runs `tan doctor` before anything
 /// project-shaped exists. `--build` deliberately does NOT get them.
-/// `zephyrSdkHost` looks adjacent to `--build`'s `zephyrSdk` probe but answers
-/// the opposite question — "can an SDK be installed on this host at all" versus
-/// "is one installed here" — and reporting the SDK story twice under two names
-/// is exactly the trap #81 documents.
+/// `zephyrSdkAvailableForHost` looks adjacent to `--build`'s `zephyrSdk` probe
+/// but answers the opposite question — "can an SDK be installed on this host
+/// at all" versus "is one installed here" — and reporting the SDK story twice
+/// under two names that could be confused for each other is exactly the trap
+/// #81 documents (renamed from `zephyrSdkHost` in tan-cli#160 to make the two
+/// impossible to conflate at a glance, after #159/#166 turned the SECOND check
+/// into a hard `Fail` — a `[+]` here beside a hard-failing `zephyrSdk` was
+/// worse than either alone).
 ///
 /// `pub(crate)`: `commands::support_bundle` builds the same report and must
 /// carry the same facts. A bundle from a `windows-arm64` or Intel-Mac host that
@@ -690,29 +803,62 @@ fn git_behind_upstream(root: &str) -> Option<u32> {
 
 /// Read a version from `<root>/metadata/sdk_version.yaml`: a `version: X` line
 /// if present, else the first bare scalar. `None` when the file is absent.
+///
+/// The parse itself is `tan_core::parse_sdk_version_yaml` — shared with
+/// `check_sdk_readiness`'s fallback (tan-cli#162), so `tan sdk
+/// install`/`current`/`switch` and this `sdkProvenance` check read the SAME
+/// version out of the SAME file rather than two copies of the scan able to
+/// disagree.
 fn read_sdk_version(root: &str) -> Option<String> {
     let path = Path::new(root).join("metadata").join("sdk_version.yaml");
     let text = std::fs::read_to_string(path).ok()?;
-    let mut bare: Option<String> = None;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("version:") {
-            let value = rest.trim().trim_matches('"').trim_matches('\'');
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        } else if bare.is_none() && !line.contains(':') {
-            bare = Some(line.trim_matches('"').trim_matches('\'').to_string());
-        }
-    }
-    bare
+    tan_core::parse_sdk_version_yaml(&text)
 }
 
 /// Read + parse the active `board.yaml`, returning `None` when it is absent or
 /// unparseable (the preflight then falls back to checking all three backends).
+/// The debug target plain `tan doctor` reports on when `--target-kind` is
+/// omitted, resolved from the project's own `board.yaml` (#208).
+///
+/// `native-host` is kept for the case it is actually right — no `board.yaml`
+/// resolves, so there is no board to debug and the host binary is the only
+/// target there is. That is also the directory alp-sdk's bootstrap tells a
+/// customer to run `tan doctor` from (see `board_yaml_check`), so it stays the
+/// quiet, unsurprising answer there rather than a guess about hardware.
+///
+/// With a board, the OS set decides, reusing [`board_os_set`] rather than
+/// re-reading `board.yaml` a second way. A multicore board declares several, and
+/// only one target can be reported, so the priority is fixed and stated:
+///
+/// 1. `zephyr` — `zephyr-mcu`
+/// 2. `baremetal` — `baremetal-mcu`
+/// 3. `yocto` — `yocto-userspace`
+///
+/// MCU-class first because that is what the checks below actually answer — a
+/// probe, a GDB server and a debugger extension, all host-side tooling. The
+/// `yocto-userspace` path needs a booted target running `gdbserver`, which no
+/// amount of host inspection can establish, so it is the weakest default of the
+/// three and ranks last. A board that declares nothing at all resolves to all
+/// three (`board_os_set`'s documented fallback) and therefore lands on
+/// `zephyr-mcu`, which is the SDK's primary backend.
+///
+/// `--target-kind` overrides all of it; this only fills the gap.
+fn default_target_kind(context: &ProjectContext) -> DebugTargetKind {
+    let Some(board) = read_board_model(context) else {
+        return DebugTargetKind::NativeHost;
+    };
+    let os_set = board_os_set(&board);
+    if os_set.contains(&BuildOs::Zephyr) {
+        DebugTargetKind::ZephyrMcu
+    } else if os_set.contains(&BuildOs::Baremetal) {
+        DebugTargetKind::BaremetalMcu
+    } else if os_set.contains(&BuildOs::Yocto) {
+        DebugTargetKind::YoctoUserspace
+    } else {
+        DebugTargetKind::NativeHost
+    }
+}
+
 fn read_board_model(context: &ProjectContext) -> Option<tan_core::BoardModel> {
     let path = context.board_yaml_path.as_deref()?;
     let source = std::fs::read_to_string(path).ok()?;
@@ -813,22 +959,21 @@ pub(crate) fn project_selected(g: &GlobalArgs) -> bool {
 
 /// The `DebuggerExtensionsState` for the standalone `tan` binary.
 ///
-/// The five flags are NOT MEANINGFUL here and nothing may read them as facts:
+/// The three flags are NOT MEANINGFUL here and nothing may read them as facts:
 /// only a VS Code extension host can enumerate its own marketplace extensions,
 /// so these are an inherited assumption from the TS `resolveCliDebugContext`
 /// (where `true` is correct, because that code CAN introspect its host). They
-/// are kept so the port stays faithful, and `observable: false` is what stops
-/// them being reported — every derived check renders `unknown` instead of
-/// printing "vadimcn.vscode-lldb is installed." on a headless container and
-/// counting itself among the passes (#102).
+/// are kept so the port stays faithful to `createExtensionCheck`'s three real
+/// TS counterparts, and `observable: false` is what stops them being reported
+/// — every derived check renders `unknown` instead of printing "vadimcn.
+/// vscode-lldb is installed." on a headless container and counting itself
+/// among the passes (#102).
 ///
 /// `pub(crate)`: `inspect` and `support-bundle` build the same context and must
 /// carry the same disclaimer, not a third copy of the literal.
 pub(crate) fn standalone_debugger_extensions() -> DebuggerExtensionsState {
     DebuggerExtensionsState {
         cortex_debug: true,
-        peripheral_viewer: true,
-        memory_view: true,
         cpp_tools: true,
         code_lldb: true,
         observable: false,
@@ -1131,6 +1276,141 @@ pub(crate) mod tests {
         assert!(json.contains("Choose a supported server for the selected target-kind."));
     }
 
+    /// #208. Plain `tan doctor` reported `native-host` for every project, so a
+    /// Zephyr board got a CodeLLDB verdict and no word about a probe. `TempTree`
+    /// gives each case a real `board.yaml` on disk, because `default_target_kind`
+    /// resolves through `read_board_model`, which reads the file.
+    #[test]
+    fn the_default_debug_target_comes_from_the_board_not_from_native_host() {
+        let tree = TempTree::new("target-kind");
+        let context = |yaml: Option<&str>| {
+            let path = tree.path().join("board.yaml");
+            match yaml {
+                Some(body) => std::fs::write(&path, body).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            ProjectContext {
+                workspace_root: Some(tree.path().to_string_lossy().to_string()),
+                sdk_root: None,
+                board_yaml_path: Some(path.to_string_lossy().to_string()),
+                west_cwd: None,
+                python_binary: "python3".to_string(),
+            }
+        };
+
+        let core =
+            |os: &str| format!("schemaVersion: 2\ncores:\n  c0:\n    os: {os}\n    app: ./s\n");
+        assert_eq!(
+            default_target_kind(&context(Some(&core("zephyr")))),
+            DebugTargetKind::ZephyrMcu
+        );
+        assert_eq!(
+            default_target_kind(&context(Some(&core("baremetal")))),
+            DebugTargetKind::BaremetalMcu
+        );
+        assert_eq!(
+            default_target_kind(&context(Some(&core("yocto")))),
+            DebugTargetKind::YoctoUserspace
+        );
+
+        // Multicore: one target must be reported, and the stated priority is
+        // zephyr > baremetal > yocto.
+        assert_eq!(
+            default_target_kind(&context(Some(
+                "schemaVersion: 2\ncores:\n  a55:\n    os: yocto\n    app: ./a\n  m33:\n    os: zephyr\n    app: ./m\n"
+            ))),
+            DebugTargetKind::ZephyrMcu,
+            "a board with both must not be reported as a Linux userspace target"
+        );
+
+        // No board.yaml on disk -- the one case `native-host` is genuinely right,
+        // and the directory alp-sdk's bootstrap tells a customer to run `tan
+        // doctor` from.
+        assert_eq!(
+            default_target_kind(&context(None)),
+            DebugTargetKind::NativeHost
+        );
+    }
+
+    /// The unit test above proves `default_target_kind` computes the right
+    /// answer; this one proves `run` USES it. Without it, replacing the call
+    /// with a bare `DebugTargetKind::NativeHost` left the suite green -- the
+    /// defect #208 reports would have been fully reintroduced with no test
+    /// noticing. Drives the whole command and reads the envelope, so it covers
+    /// the flag-precedence branch too.
+    #[test]
+    fn run_reports_the_derived_target_in_the_envelope_and_an_explicit_flag_still_wins() {
+        let tree = TempTree::new("run-target-kind");
+        std::fs::write(
+            tree.path().join("board.yaml"),
+            "schemaVersion: 2\ncores:\n  m33:\n    os: zephyr\n    app: ./src\n",
+        )
+        .unwrap();
+        let g = json_global(Some(tree.path()));
+        let target_of = |args: &DoctorArgs| {
+            let json = run(&g, args).json.expect("json envelope");
+            let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+            value["data"]["targetKind"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no data.targetKind: {json}"))
+                .to_string()
+        };
+
+        assert_eq!(
+            target_of(&DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: false,
+                fix: false,
+            }),
+            "zephyr-mcu",
+            "a zephyr board must not be reported as native-host (#208)"
+        );
+
+        // An explicit flag is still absolute -- the derivation only fills a gap.
+        assert_eq!(
+            target_of(&DoctorArgs {
+                target_kind: Some("native-host".to_string()),
+                server: None,
+                build: false,
+                fix: false,
+            }),
+            "native-host"
+        );
+    }
+
+    /// The derived target must bring a server its own compatibility table
+    /// accepts, or every plain `tan doctor` in a real project turns into a
+    /// `serverCompatibility` failure — the regression the derivation would
+    /// otherwise introduce.
+    #[test]
+    fn every_derivable_target_has_a_supported_default_server() {
+        for target in [
+            DebugTargetKind::ZephyrMcu,
+            DebugTargetKind::BaremetalMcu,
+            DebugTargetKind::YoctoUserspace,
+            DebugTargetKind::NativeHost,
+        ] {
+            let server = server_choices_for_target(target)
+                .first()
+                .copied()
+                .unwrap_or(DebugServerKind::None);
+            assert!(
+                is_server_supported_for_target(target, server),
+                "{target:?} defaults to an unsupported {server:?}"
+            );
+        }
+        // native-host still resolves to `none`, byte-identical to the old default.
+        assert_eq!(
+            server_choices_for_target(DebugTargetKind::NativeHost)
+                .first()
+                .copied(),
+            Some(DebugServerKind::None)
+        );
+    }
+
     #[test]
     fn the_plain_doctor_report_carries_both_io_built_checks() {
         // `run` resolves a real project and shells `git`, so the two appends
@@ -1375,12 +1655,60 @@ pub(crate) mod tests {
         // binary with none of the three checks and every other test still
         // green, because they drive the pure functions directly. The ENVELOPE
         // is what closes it. Names only -- the statuses are this host's.
-        assert!(names.iter().any(|n| n == "zephyrSdkHost"), "{names:?}");
+        assert!(
+            names.iter().any(|n| n == "zephyrSdkAvailableForHost"),
+            "{names:?}"
+        );
         assert!(names.iter().any(|n| n == "homePath"), "{names:?}");
         assert_eq!(
             names.iter().any(|n| n == "longPaths"),
             cfg!(windows),
             "longPaths is Windows-only: {names:?}"
+        );
+        // tan-cli#160: this used to appear ONLY under `--build`, reached only
+        // after a full project existed -- nothing before `tan build` itself
+        // ever said "toolchain" on the alp-sdk#855 fresh-host run. Dropping
+        // `append_zephyr_sdk_toolchain` from `assemble_doctor_report` would
+        // leave every OTHER test green (they drive the pure function
+        // directly); only the emitted envelope catches it.
+        assert!(names.iter().any(|n| n == "zephyrSdk"), "{names:?}");
+    }
+
+    #[test]
+    fn plain_doctor_and_build_zephyr_sdk_checks_never_disagree_in_status() {
+        // The exact contradiction tan-cli#160 named: `zephyrSdkAvailableForHost`
+        // (`[+]`) sitting beside a hard-failing `zephyrSdk` on the SAME run
+        // would be worse than either alone. Both checks are now driven by the
+        // identical `crate::toolchain::zephyr_sdk_detected()` probe under
+        // `--build`'s `zephyrSdk`, and plain doctor's `zephyrSdk` uses the SAME
+        // probe -- so the two run modes cannot report a different verdict for
+        // "is the Zephyr SDK installed here" no matter what this host's real
+        // state is.
+        let tree = TempTree::new("doctor-plain-vs-build-zephyrsdk-agree");
+        let g = json_global(Some(tree.path()));
+        let plain = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: false,
+                fix: false,
+            },
+        );
+        let build = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        );
+        let plain_status = envelope_check_status(&plain.json.expect("json envelope"), "zephyrSdk");
+        let build_status = envelope_check_status(&build.json.expect("json envelope"), "zephyrSdk");
+        assert_eq!(
+            plain_status, build_status,
+            "plain vs --build zephyrSdk status disagree"
         );
     }
 
@@ -1393,6 +1721,20 @@ pub(crate) mod tests {
             .iter()
             .find(|c| c["name"] == name)
             .unwrap_or_else(|| panic!("no `{name}` check in {json}"))["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// One check's `status` out of a serialized doctor envelope.
+    fn envelope_check_status(json: &str, name: &str) -> String {
+        let value: serde_json::Value = serde_json::from_str(json).expect("envelope is JSON");
+        value["data"]["checks"]
+            .as_array()
+            .expect("data.checks is an array")
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no `{name}` check in {json}"))["status"]
             .as_str()
             .unwrap_or_default()
             .to_string()
@@ -1637,10 +1979,11 @@ pub(crate) mod tests {
         assert_eq!(keys(&value["data"]["summary"]), ["fail", "pass", "warn"]);
         assert_eq!(value["command"], "doctor");
 
-        // Every check keeps `{name, status, detail}` (+ optional `fix`), and no
-        // `--build` check is ever `unknown` — the new status is produced only by
-        // the VS Code extension-presence set, which this mode does not emit. A
-        // consumer that only knows pass/warn/fail must stay correct here.
+        // Every check keeps `{name, status, detail}` (+ optional `fix`, +
+        // optional `version` since tan-cli#123), and no `--build` check is ever
+        // `unknown` — the new status is produced only by the VS Code
+        // extension-presence set, which this mode does not emit. A consumer
+        // that only knows pass/warn/fail must stay correct here.
         for check in value["data"]["checks"].as_array().expect("checks array") {
             for key in ["name", "status", "detail"] {
                 assert!(check.get(key).is_some(), "{key} missing from {check}");
@@ -1648,7 +1991,7 @@ pub(crate) mod tests {
             assert!(
                 keys(check)
                     .iter()
-                    .all(|k| ["detail", "fix", "name", "status"].contains(&k.as_str())),
+                    .all(|k| ["detail", "fix", "name", "status", "version"].contains(&k.as_str())),
                 "unexpected key in {check}"
             );
             assert_ne!(check["status"], "unknown", "{check}");
@@ -1656,12 +1999,123 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn doctor_build_wires_git_python_dtc_and_gperf_into_the_real_envelope() {
+        // Integration proof for tan-cli#120/#123's actual wiring (the pure
+        // logic is unit-tested exhaustively in `tan_core::build_readiness`;
+        // this is the ONE test that proves `BuildToolProbe`'s new fields are
+        // actually populated by `run_build_readiness`, not just accepted by
+        // its signature). No `board.yaml` -> `os_set` defaults to all three
+        // backends, so `dtc`/`gperf` (Zephyr-gated) are reachable too.
+        let tree = TempTree::new("build-new-checks-wired");
+        let json = run(
+            &json_global(Some(tree.path())),
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        )
+        .json
+        .expect("json envelope");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+        let names: Vec<&str> = value["data"]["checks"]
+            .as_array()
+            .expect("checks array")
+            .iter()
+            .map(|c| c["name"].as_str().unwrap_or_default())
+            .collect();
+        for expected in ["git", "python", "dtc", "gperf"] {
+            assert!(names.contains(&expected), "{expected} missing: {names:?}");
+        }
+    }
+
+    #[test]
+    fn doctor_build_reports_westresolved_version_from_the_resolved_venv_not_bare_path() {
+        // tan-cli#123's exact bug, guarded end-to-end: `westResolved`'s
+        // reported version must come from `resolve_west_resolved_version`'s
+        // OWN `west_program` lookup, never a re-probe of a bare-PATH `west`
+        // (`BuildToolProbe::west_version`) that can be a different binary
+        // entirely. Before this test, deleting `resolve_west_resolved_version`'s
+        // `&west` argument (regressing it to a bare `"west"`) or deleting the
+        // `report.check_versions.insert("westResolved", ...)` call in
+        // `run_build_readiness` both left the full suite green.
+        //
+        // Precondition, not an assumption: a bare-PATH `west` that itself
+        // reports a version would make the assertion below pass under BOTH
+        // the correct code and the `tool_version("west")` regression, proving
+        // nothing. Skip on the rare host where one is globally installed --
+        // `west` normally lives only inside a bootstrapped venv (`venv.rs`'s
+        // module doc).
+        if crate::util::tool_version("west").is_some() {
+            return;
+        }
+
+        let tree = TempTree::new("west-resolved-version");
+        let (bin_sub, west_name) = if cfg!(windows) {
+            ("Scripts", "west.exe")
+        } else {
+            ("bin", "west")
+        };
+        let bin_dir = tree.path().join(".venv").join(bin_sub);
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let west_path = bin_dir.join(west_name);
+        // The stand-in only has to print a dotted number for `--version`.
+        // On unix that is a `sh` script, NOT a copy of a real binary: copying
+        // rustup's `cargo` out of its toolchain dir breaks the `$ORIGIN/../lib`
+        // RPATH it resolves `libstd-*.so` through, so the copy fails to start
+        // and `tool_version` reports `None` (green on Windows and macOS, red on
+        // Linux). On Windows the venv west must be a real `west.exe` -- a
+        // script cannot carry that name -- and a Rust binary there links std
+        // statically, so the copy does run.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::write(&west_path, "#!/bin/sh\necho 'West version: v99.98.97'\n")
+                .expect("write the west stand-in script");
+            let mut perms = std::fs::metadata(&west_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&west_path, perms).unwrap();
+        }
+        #[cfg(windows)]
+        std::fs::copy(env!("CARGO"), &west_path).expect("copy cargo as a west stand-in");
+        let expected = crate::util::tool_version(&west_path.to_string_lossy())
+            .expect("the copied cargo binary reports its own --version");
+
+        let json = run(
+            &json_global(Some(tree.path())),
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        )
+        .json
+        .expect("json envelope");
+        let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+        let west_resolved = value["data"]["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == "westResolved")
+            .unwrap_or_else(|| panic!("westResolved missing: {json}"));
+        assert_eq!(
+            west_resolved["version"].as_str(),
+            Some(expected.as_str()),
+            "westResolved must carry the RESOLVED venv west's version, not a \
+             bare-PATH re-probe: {json}"
+        );
+    }
+
+    #[test]
     fn doctor_build_does_not_repeat_the_host_environment_checks() {
         // The deliberate NEGATIVE half of the placement decision (#81's "one
         // fact, one check" trap). `--build` already carries a `zephyrSdk` probe
-        // -- "is an SDK installed here" -- and `zephyrSdkHost` answers the
-        // opposite question. Adding these there later, by reflex, would report
-        // the SDK story twice under two names; this fails if someone does.
+        // -- "is an SDK installed here" -- and `zephyrSdkAvailableForHost`
+        // answers the opposite question. Adding these there later, by reflex,
+        // would report the SDK story twice under two names; this fails if
+        // someone does.
         let tree = TempTree::new("run-build-no-hostenv");
         let g = json_global(Some(tree.path()));
         let run = run(
@@ -1674,7 +2128,7 @@ pub(crate) mod tests {
             },
         );
         let names = envelope_check_names(&run.json.expect("json envelope"));
-        for name in ["zephyrSdkHost", "longPaths", "homePath"] {
+        for name in ["zephyrSdkAvailableForHost", "longPaths", "homePath"] {
             assert!(!names.contains(&name.to_string()), "{name} in {names:?}");
         }
     }

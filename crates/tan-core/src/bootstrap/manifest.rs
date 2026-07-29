@@ -399,6 +399,19 @@ pub fn parse_bootstrap_manifest(text: &str) -> Result<BootstrapFacts, BootstrapM
                 doc.prerequisites.python_min_version
             ))
         })?;
+    // `venv.dirName` joins straight onto `workspace_dir` and the join's result
+    // is later handed to `remove_dir_all` when a stale venv is recreated
+    // (tan-cli#161) — an unvalidated `..`-bearing or absolute value would let
+    // the manifest name an arbitrary removal/write target outside the
+    // workspace. Reject the shape here, the one seam every consumer of
+    // `venv_dir_name` reads through, rather than re-deriving the check at each
+    // call site (see `tan_core::path_guard`'s own module doc).
+    if !crate::path_guard::is_plain_relative(std::path::Path::new(&doc.venv.dir_name)) {
+        return Err(BootstrapManifestError::Malformed(format!(
+            "venv.dirName `{}` is not a plain relative path",
+            doc.venv.dir_name
+        )));
+    }
     Ok(BootstrapFacts {
         zephyr_version: doc.zephyr.version,
         zephyr_requirements_path: doc.zephyr.requirements_path,
@@ -453,11 +466,18 @@ fn fallback_install_commands() -> InstallCommands {
             ("git", "sudo apt-get install -y git"),
             ("cmake", "sudo apt-get install -y cmake"),
             ("python3", "sudo apt-get install -y python3"),
+            // Zephyr's default CMake generator on every host, so its absence
+            // stops `west build` outright rather than degrading it. Transcribed
+            // from alp-sdk's manifest (alp-sdk#971/#981, merged as d6fd3a18);
+            // note the PACKAGE name differs from the binary name, which is
+            // exactly why this lives in data rather than being guessed.
+            ("ninja", "sudo apt-get install -y ninja-build"),
         ]),
         macos: map(&[
             ("git", "brew install git"),
             ("cmake", "brew install cmake"),
             ("python3", "brew install python3"),
+            ("ninja", "brew install ninja"),
         ]),
         windows: map(&[
             ("git", "winget install -e --id Git.Git"),
@@ -537,7 +557,14 @@ pub fn fallback_facts(min_python: (u32, u32)) -> BootstrapFacts {
         venv_dir_name: ".venv".to_string(),
         venv_posix_bin_dir: posix.bin_dir.to_string(),
         venv_windows_bin_dir: windows.bin_dir.to_string(),
-        prerequisites_posix: owned(&["git", "cmake", "python3"]),
+        // `ninja` is POSIX too, not Windows-only. Zephyr picks Ninja as its
+        // default CMake generator on every host, so a POSIX box without it
+        // fails `west build` with a CMake error naming nothing useful. The
+        // asymmetry here was the fallback half of alp-sdk#971/#981: the
+        // manifest was fixed upstream (d6fd3a18) and the fixture re-vendored,
+        // while THIS hand-ported copy -- the one a legacy SDK with no manifest
+        // actually uses -- still said Windows-only.
+        prerequisites_posix: owned(&["git", "cmake", "python3", "ninja"]),
         prerequisites_windows: owned(&["git", "cmake", "python", "ninja"]),
         python_min_version: min_python,
         install: fallback_install_commands(),
@@ -667,7 +694,13 @@ mod tests {
         assert_eq!(facts.venv_dir_name, ".venv");
         assert_eq!(facts.venv_posix_bin_dir, "bin");
         assert_eq!(facts.venv_windows_bin_dir, "Scripts");
-        assert_eq!(facts.prerequisites_posix, ["git", "cmake", "python3"]);
+        // `ninja` joined the POSIX list in alp-sdk#971/#981 (d6fd3a18); this
+        // fixture was re-vendored past it. The expectation moves because the
+        // upstream manifest moved, not to make the suite green.
+        assert_eq!(
+            facts.prerequisites_posix,
+            ["git", "cmake", "python3", "ninja"]
+        );
         assert_eq!(
             facts.prerequisites_windows,
             ["git", "cmake", "python", "ninja"]
@@ -915,6 +948,28 @@ mod tests {
         let err = parse_bootstrap_manifest(&doc).unwrap_err();
         assert_eq!(err, BootstrapManifestError::UnsupportedSchemaVersion(2));
         assert!(err.to_string().contains("schemaVersion 2"), "{err}");
+    }
+
+    #[test]
+    fn a_venv_dir_name_that_escapes_the_workspace_is_rejected() {
+        // tan-cli#161 review: `venv.dirName` joins onto `workspace_dir` and,
+        // when a stale venv is found, the join's result is later fed to
+        // `remove_dir_all`. A manifest value of `".."` would make that target
+        // the west topdir's PARENT -- reject the shape before it ever reaches
+        // a caller, rather than letting the removal decide.
+        for bad in ["..", "../elsewhere", "/etc", "."] {
+            let doc = REAL_MANIFEST.replace("\".venv\"", &format!("\"{bad}\""));
+            let err = parse_bootstrap_manifest(&doc).unwrap_err();
+            assert!(
+                matches!(err, BootstrapManifestError::Malformed(ref m) if m.contains("venv.dirName")),
+                "{bad}: {err}"
+            );
+        }
+        // A nested-but-plain value stays accepted (dirName is not required to
+        // be a single segment).
+        let doc = REAL_MANIFEST.replace("\".venv\"", "\"tools/.venv\"");
+        let facts = parse_bootstrap_manifest(&doc).expect("plain relative dirName must parse");
+        assert_eq!(facts.venv_dir_name, "tools/.venv");
     }
 
     #[test]

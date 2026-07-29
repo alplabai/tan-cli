@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use tan_core::{
-    ALL_EMIT_MODES, DebugGenerationTraceDecision, DebugTraceOutcome, create_loader_plan,
+    BUILD_CONFIG_EMIT_MODES, DebugGenerationTraceDecision, DebugTraceOutcome, create_loader_plan,
     generation_target_support,
 };
 
@@ -174,16 +174,24 @@ pub fn run(g: &GlobalArgs, args: &TraceArgs) -> CommandRun {
     }
 }
 
-/// Resolve the emit targets to trace: all of `ALL_EMIT_MODES` when `raw` is
-/// `None`, or the single matching mode. Returns `Err` for an unknown target.
+/// Resolve the emit targets to trace: all of `BUILD_CONFIG_EMIT_MODES` when
+/// `raw` is `None`, or the single matching mode. Returns `Err` for an unknown
+/// target. Deliberately the narrower build-config set, not the full
+/// `generate` surface -- tan-cli#165 review finding 1: `tan trace` reports
+/// "the generation decisions a build would make" (this file's own module
+/// doc), and a build only ever materialises these four.
 fn resolve_targets(raw: Option<&str>) -> Result<Vec<&'static str>, String> {
     match raw {
-        None => Ok(ALL_EMIT_MODES.to_vec()),
-        Some(target) => match ALL_EMIT_MODES.iter().copied().find(|m| *m == target) {
+        None => Ok(BUILD_CONFIG_EMIT_MODES.to_vec()),
+        Some(target) => match BUILD_CONFIG_EMIT_MODES
+            .iter()
+            .copied()
+            .find(|m| *m == target)
+        {
             Some(m) => Ok(vec![m]),
             None => Err(format!(
                 "Unsupported trace target '{target}'. Allowed values: {}.",
-                ALL_EMIT_MODES.join(", ")
+                BUILD_CONFIG_EMIT_MODES.join(", ")
             )),
         },
     }
@@ -240,5 +248,37 @@ fn outcome_label(outcome: DebugTraceOutcome) -> &'static str {
         DebugTraceOutcome::Planned => "planned",
         DebugTraceOutcome::Written => "written",
         DebugTraceOutcome::Failed => "failed",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// tan-cli#165 review finding 1: `tan trace` must keep enumerating only
+    /// the four per-core build-config targets, not the full `generate`
+    /// surface -- the FAILING case this guards is exactly what shipped: an
+    /// earlier revision pointed this at `tan_core::ALL_EMIT_MODES` (nine
+    /// targets) instead, so a bare `tan trace` claimed a build runs
+    /// project-level exports (`carrier-netlist`, `os-topology`, ...) it
+    /// never does.
+    #[test]
+    fn default_targets_are_exactly_the_build_config_set() {
+        assert_eq!(
+            resolve_targets(None).unwrap(),
+            vec!["zephyr-conf", "dts-overlay", "cmake-args", "yocto-conf"]
+        );
+    }
+
+    #[test]
+    fn a_generate_only_target_is_not_a_valid_trace_target() {
+        // carrier-netlist is a real `tan generate --target`, but not a
+        // build-config target -- `tan trace` must still refuse it.
+        let err = resolve_targets(Some("carrier-netlist")).unwrap_err();
+        assert_eq!(
+            err,
+            "Unsupported trace target 'carrier-netlist'. Allowed values: zephyr-conf, \
+             dts-overlay, cmake-args, yocto-conf."
+        );
     }
 }

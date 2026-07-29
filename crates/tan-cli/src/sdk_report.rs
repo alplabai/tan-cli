@@ -59,6 +59,31 @@ pub fn record(root: &str, tier: SdkSourceTier) {
     });
 }
 
+/// Force-overwrite the recorded SDK root after `tan bootstrap`'s
+/// workspace-parent guard (tan-cli#185, review finding 6) relocates the
+/// checkout AFTER the ordinary [`record`] already ran during project
+/// resolution: the checkout's own root just moved, so the root that resolver
+/// call recorded now names a location that no longer exists. Unlike
+/// [`record`], this always wins — first-writer-wins is the right rule for two
+/// resolvers racing over the SAME checkout, but a relocation is a fact about
+/// the root the first call recorded being stale, not a second, competing
+/// resolution.
+///
+/// The tier is left as whatever was already recorded (or `Discovery` if
+/// nothing was — bootstrap always resolves an SDK root before it can reach a
+/// relocation, so this fallback is defensive, not a real path): a relocation
+/// changes WHERE the checkout is, not by what precedence tan found it.
+pub fn override_after_relocation(root: &str) {
+    RESOLVED.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let tier = slot
+            .take()
+            .map(|(_, tier)| tier)
+            .unwrap_or(SdkSourceTier::Discovery);
+        *slot = Some((root.replace('\\', "/"), tier));
+    });
+}
+
 /// Take (and clear) this thread's recorded value. `Envelope::new` calls this
 /// exactly once per envelope, so a second, unrelated `Envelope::new` built on
 /// the same thread right after (routine in `#[cfg(test)]` unit tests, which
@@ -101,6 +126,31 @@ mod tests {
         record("/only", SdkSourceTier::ProjectPin);
         assert!(take().is_some());
         assert_eq!(take(), None);
+    }
+
+    #[test]
+    fn override_after_relocation_wins_over_an_earlier_record_and_keeps_its_tier() {
+        reset();
+        record("/old/alp-sdk", SdkSourceTier::SdkRootFlag);
+        override_after_relocation(r"E:\new\parent\alp-sdk");
+        // The tier is preserved -- only WHERE the checkout is changed.
+        assert_eq!(
+            take(),
+            Some((
+                "E:/new/parent/alp-sdk".to_string(),
+                SdkSourceTier::SdkRootFlag
+            ))
+        );
+    }
+
+    #[test]
+    fn override_after_relocation_with_nothing_recorded_yet_falls_back_to_discovery() {
+        reset();
+        override_after_relocation("/new/alp-sdk");
+        assert_eq!(
+            take(),
+            Some(("/new/alp-sdk".to_string(), SdkSourceTier::Discovery))
+        );
     }
 
     #[test]

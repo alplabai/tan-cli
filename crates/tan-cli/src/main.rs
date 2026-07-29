@@ -42,7 +42,7 @@ fn main() {
         Command::Generate(args) => commands::generate::run(&global, &args),
         Command::Init(args) => commands::init::run(&global, &args),
         Command::Scaffold(args) => commands::scaffold::run(&global, &args),
-        Command::Examples => commands::examples::run(&global),
+        Command::Examples(args) => commands::examples::run(&global, &args),
         Command::Doctor(args) => commands::doctor::run(&global, &args),
         Command::Completion(args) => commands::completion::run(&global, &args),
         Command::Diff => commands::diff::run(&global),

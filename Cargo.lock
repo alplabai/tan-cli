@@ -10,7 +10,7 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "alp-tan-cli"
-version = "0.3.1"
+version = "0.4.1-dev"
 dependencies = [
  "anyhow",
  "clap",
@@ -22,6 +22,7 @@ dependencies = [
  "rustls-native-certs",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
  "tan-core",
  "tar",
@@ -1144,7 +1145,7 @@ dependencies = [
 
 [[package]]
 name = "tan-core"
-version = "0.3.1"
+version = "0.4.1-dev"
 dependencies = [
  "object",
  "serde",

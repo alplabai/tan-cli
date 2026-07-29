@@ -11,7 +11,7 @@
 //! reachable, through the real argv and the real envelope.
 //!
 //! The other two host facts cannot be driven this way and are honest about it:
-//! `zephyrSdkHost` reads `std::env::consts::{OS, ARCH}`, which are compile-time
+//! `zephyrSdkAvailableForHost` reads `std::env::consts::{OS, ARCH}`, which are compile-time
 //! constants, and `longPaths` reads `HKLM`, which a test must not write. Their
 //! decisions are unit-tested exhaustively in `tan_core::host_env` instead; what
 //! is asserted HERE is only that the command emits them at all.
@@ -106,7 +106,10 @@ fn a_home_path_with_a_space_is_reported_with_the_path_itself() {
 
     // The two compile-time-decided checks: presence only, from the command
     // itself rather than from a helper called directly.
-    assert_eq!(find("zephyrSdkHost")["name"], "zephyrSdkHost");
+    assert_eq!(
+        find("zephyrSdkAvailableForHost")["name"],
+        "zephyrSdkAvailableForHost"
+    );
     assert_eq!(
         checks.iter().any(|c| c["name"] == "longPaths"),
         cfg!(windows),

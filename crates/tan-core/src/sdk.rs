@@ -13,6 +13,7 @@ pub const GITHUB_RELEASES_URL: &str = "https://api.github.com/repos/alplabai/alp
 const LOADER_SCRIPT_RELATIVE: &str = "scripts/alp_project.py";
 const VERSION_FILE_RELATIVE: &str = "VERSION";
 const METADATA_DIR_RELATIVE: &str = "metadata";
+const SDK_VERSION_YAML_RELATIVE: &str = "metadata/sdk_version.yaml";
 
 /// A single SDK release entry parsed from the GitHub Releases API.
 #[derive(Debug, Clone, Serialize)]
@@ -28,6 +29,13 @@ pub struct SdkRelease {
     pub release_notes_summary: String,
     /// Full release body (Markdown), for an expandable changelog.
     pub release_notes: String,
+    /// Whether GitHub has this release marked as a draft (unpublished).
+    /// Defaults to `false` when the field is absent or not a boolean —
+    /// absent means "not flagged", never a reason to drop the release.
+    pub draft: bool,
+    /// Whether GitHub has this release marked as a pre-release. Same
+    /// missing/non-boolean default as `draft`.
+    pub prerelease: bool,
 }
 
 /// Append the likely environmental cause to a raw network error.
@@ -98,12 +106,15 @@ pub fn parse_remote_sdk_releases(raw: &Value) -> Result<Vec<SdkRelease>, String>
                     .to_string()
             };
             let body = item.get("body").and_then(Value::as_str).unwrap_or("");
+            let bool_field = |key: &str| item.get(key).and_then(Value::as_bool).unwrap_or(false);
             SdkRelease {
                 tag: str_field("tag_name"),
                 published_at: str_field("published_at"),
                 tarball_url: str_field("tarball_url"),
                 release_notes_summary: extract_first_paragraph(body),
                 release_notes: body.trim().to_string(),
+                draft: bool_field("draft"),
+                prerelease: bool_field("prerelease"),
             }
         })
         .collect())
@@ -163,7 +174,7 @@ pub fn check_sdk_readiness(
     let loader_script_present = path_exists(&join(LOADER_SCRIPT_RELATIVE));
     if !loader_script_present {
         issues.push(format!(
-            "scripts/alp_project.py not found — \"{sdk_path}\" is not a valid ALP SDK root."
+            "scripts/alp_project.py not found — \"{sdk_path}\" is not a valid Alp SDK root."
         ));
     }
 
@@ -185,6 +196,23 @@ pub fn check_sdk_readiness(
                 };
             }
             None => issues.push("VERSION file could not be read.".to_string()),
+        }
+    }
+    // tan-cli#162: no released alp-sdk ships a top-level `VERSION` file (it
+    // does not exist anywhere in the real repo's history), so every `sdk
+    // install`/`current`/`switch` reported `version (unknown)` -- while
+    // `tan doctor`'s `sdkProvenance` check, reading a DIFFERENT file, resolved
+    // a real one (`alp-sdk 0.13.0 @ 93ef572`). `metadata/sdk_version.yaml` is
+    // that file, and it is the real "single source of truth for the Alp SDK
+    // release version" per its own header comment -- VERSION stays first
+    // (never regressing an install path that DOES carry one, e.g. an
+    // extracted release archive) and this is the fallback for the git-clone
+    // path `tan sdk install` actually uses, which is every path this command
+    // has.
+    if version.is_none() {
+        let sdk_version_yaml = join(SDK_VERSION_YAML_RELATIVE);
+        if path_exists(&sdk_version_yaml) {
+            version = read_file(&sdk_version_yaml).and_then(|c| parse_sdk_version_yaml(&c));
         }
     }
 
@@ -337,6 +365,31 @@ fn join_path(base: &str, relative: &str) -> String {
     path.to_string_lossy().to_string()
 }
 
+/// Extract the release version from `metadata/sdk_version.yaml`'s text: a
+/// `version: X` line if present, else the first bare (no `:`) scalar. `None`
+/// when neither is found. Deliberately a tiny hand-rolled scan rather than a
+/// real YAML parse (`serde_yaml` is already a workspace dependency, but this
+/// one file is comment-heavy prose around a single scalar, and a full parse
+/// buys nothing a `strip_prefix` does not already give).
+pub fn parse_sdk_version_yaml(text: &str) -> Option<String> {
+    let mut bare: Option<String> = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("version:") {
+            let value = rest.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        } else if bare.is_none() && !line.contains(':') {
+            bare = Some(line.trim_matches('"').trim_matches('\'').to_string());
+        }
+    }
+    bare
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -353,6 +406,77 @@ mod tests {
         assert_eq!(releases[0].tag, "v1.5.0");
         assert_eq!(releases[0].release_notes_summary, "First line.");
         assert_eq!(releases[0].release_notes, "First line.\n\nrest");
+        // #122: absent draft/prerelease keys must default to false, never drop
+        // the release or panic.
+        assert!(!releases[0].draft);
+        assert!(!releases[0].prerelease);
+    }
+
+    #[test]
+    fn parses_draft_and_prerelease_flags() {
+        // #122: GitHub's `draft`/`prerelease` booleans must survive the parse
+        // so a consumer can tell a release candidate or an unpublished draft
+        // apart from a real latest release, instead of tan silently dropping
+        // the fact.
+        let raw = json!([
+            {"tag_name": "v2.0.0-rc1", "published_at": "t", "tarball_url": "u", "body": "b",
+             "draft": true, "prerelease": true},
+        ]);
+        let releases = parse_remote_sdk_releases(&raw).unwrap();
+        assert_eq!(releases.len(), 1);
+        assert!(releases[0].draft);
+        assert!(releases[0].prerelease);
+    }
+
+    #[test]
+    fn draft_and_prerelease_default_false_when_absent_or_non_boolean() {
+        let raw = json!([
+            {"tag_name": "v1.0.0", "published_at": "t", "tarball_url": "u", "body": "b"},
+            {"tag_name": "v1.0.1", "published_at": "t", "tarball_url": "u", "body": "b",
+             "draft": "yes", "prerelease": 1},
+        ]);
+        let releases = parse_remote_sdk_releases(&raw).unwrap();
+        // Neither a missing key nor a non-boolean value drops the release.
+        assert_eq!(releases.len(), 2);
+        assert!(!releases[0].draft);
+        assert!(!releases[0].prerelease);
+        assert!(!releases[1].draft);
+        assert!(!releases[1].prerelease);
+    }
+
+    #[test]
+    fn sdk_release_json_keys_are_exactly_the_seven_fields() {
+        // The membership test #122 asks for: pins the emitted per-release key
+        // set so a later silent rename or drop (the #106 failure class) is
+        // caught here, since no golden covers `sdk list` at all.
+        let release = SdkRelease {
+            tag: "v1.5.0".to_string(),
+            published_at: "2024-01-02T00:00:00Z".to_string(),
+            tarball_url: "u".to_string(),
+            release_notes_summary: "s".to_string(),
+            release_notes: "s".to_string(),
+            draft: false,
+            prerelease: true,
+        };
+        let value = serde_json::to_value(&release).unwrap();
+        let keys: std::collections::BTreeSet<&str> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "tag",
+                "publishedAt",
+                "tarballUrl",
+                "releaseNotesSummary",
+                "releaseNotes",
+                "draft",
+                "prerelease",
+            ])
+        );
     }
 
     #[test]
@@ -412,6 +536,84 @@ mod tests {
         assert_eq!(report.state, SdkReadinessState::Ready);
         assert_eq!(report.version.as_deref(), Some("v1.5.0"));
         assert!(report.issues.is_empty());
+    }
+
+    #[test]
+    fn readiness_falls_back_to_sdk_version_yaml_when_version_is_absent() {
+        // tan-cli#162: no released alp-sdk ships a top-level `VERSION` -- every
+        // real git-clone install (what `tan sdk install` actually does) hits
+        // this branch, which used to leave `version: None` and render
+        // `version (unknown)`. `metadata/sdk_version.yaml` is the file
+        // `tan doctor`'s `sdkProvenance` check already reads successfully.
+        let report = check_sdk_readiness(
+            "/sdk",
+            |p| {
+                p.ends_with("alp_project.py")
+                    || p.ends_with("metadata")
+                    || p.ends_with("sdk_version.yaml")
+            },
+            |p| {
+                if p.ends_with("sdk_version.yaml") {
+                    Some("# comment\nversion: 0.13.0\nstatus: released\n".to_string())
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(report.state, SdkReadinessState::Ready);
+        assert_eq!(report.version.as_deref(), Some("0.13.0"));
+    }
+
+    #[test]
+    fn readiness_prefers_version_file_over_the_yaml_fallback() {
+        // The fallback must never SHADOW a real VERSION file (e.g. an
+        // extracted release archive that does carry one) -- only fill the gap
+        // when VERSION has nothing to say.
+        let report = check_sdk_readiness(
+            "/sdk",
+            |p| {
+                p.ends_with("alp_project.py")
+                    || p.ends_with("metadata")
+                    || p.ends_with("VERSION")
+                    || p.ends_with("sdk_version.yaml")
+            },
+            |p| {
+                if p.ends_with("VERSION") {
+                    Some("v9.9.9".to_string())
+                } else if p.ends_with("sdk_version.yaml") {
+                    Some("version: 0.13.0".to_string())
+                } else {
+                    None
+                }
+            },
+        );
+        assert_eq!(report.version.as_deref(), Some("v9.9.9"));
+    }
+
+    #[test]
+    fn parse_sdk_version_yaml_reads_the_labelled_line_over_comments() {
+        assert_eq!(
+            parse_sdk_version_yaml(
+                "# Single source of truth for the Alp SDK release version.\n\
+                 #\n\
+                 version: 0.13.0\n\
+                 status:  released\n"
+            ),
+            Some("0.13.0".to_string())
+        );
+        // Quoted forms.
+        assert_eq!(
+            parse_sdk_version_yaml("version: \"0.13.0\"\n"),
+            Some("0.13.0".to_string())
+        );
+        // A bare scalar with no `version:` label at all.
+        assert_eq!(
+            parse_sdk_version_yaml("0.13.0\n"),
+            Some("0.13.0".to_string())
+        );
+        // Nothing usable.
+        assert_eq!(parse_sdk_version_yaml("# just a comment\n"), None);
+        assert_eq!(parse_sdk_version_yaml(""), None);
     }
 
     #[test]

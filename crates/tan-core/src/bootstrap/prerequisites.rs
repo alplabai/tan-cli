@@ -340,6 +340,41 @@ pub fn posix_python_not_runnable() -> PrereqFailure {
     }
 }
 
+/// Linux: `python3` runs, but its `venv` module cannot create a usable
+/// virtual environment because `ensurepip` is missing (tan-cli#161) —
+/// Debian/Ubuntu split `python3-venv` out of the base `python3` package, so
+/// the interpreter is genuinely present and passes every check above while
+/// `python3 -m venv` still dies.
+///
+/// A SECOND check, deliberately not folded into the `prerequisites.posix`
+/// list `check_prerequisites` walks: that list is an alp-sdk manifest fact
+/// (`metadata/bootstrap.json`), pinned byte-equal to the fallback by
+/// `the_fallback_matches_the_real_manifest_field_for_field`, and `python3-venv`
+/// is not in it upstream as of tan's pinned SDK. Adding it here — a
+/// tool-less refusal with its own code, exactly like
+/// [`windows_python_not_runnable`] and [`python_too_old`] beside it — reports
+/// the finding without diverging tan's copy of a fact alp-sdk owns.
+///
+/// `python3-venv` (not the version-specific `python3.NN-venv` Python's own
+/// error names): apt resolves the unversioned meta-package to the matching
+/// versioned one, and this message has no way to know which minor version is
+/// running.
+pub fn posix_venv_unusable() -> PrereqFailure {
+    PrereqFailure {
+        code: "venv-unusable",
+        lines: vec![
+            "python3 found, but its venv module cannot create a usable virtual environment \
+             (ensurepip is missing).  On Debian/Ubuntu: sudo apt-get install -y python3-venv, \
+             then re-run."
+                .to_string(),
+        ],
+        missing: vec![MissingPrerequisite {
+            tool: "python3-venv".to_string(),
+            command: Some("sudo apt-get install -y python3-venv".to_string()),
+        }],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::HostOs;
@@ -464,10 +499,16 @@ mod tests {
             vec!["Missing required tools: cmake ninja.  Install them and re-run."]
         );
         // Issue #90's "also still true": every POSIX entry reported
-        // `command: null` because this side had no install commands at all. It
-        // has them now -- per tool, so `ninja` (which `prerequisites.posix` does
-        // not even list, hence no `install.linux` entry) stays `null` while
-        // `cmake` becomes runnable.
+        // `command: null` because this side had no install commands at all.
+        // It has them now, per tool -- and as of alp-sdk#971/#981 that includes
+        // `ninja`, which used to be the standing exception here precisely
+        // BECAUSE `prerequisites.posix` did not list it. Both halves are fixed:
+        // the manifest declares it upstream and this fallback now transcribes
+        // it, so the last commandless POSIX entry is gone.
+        //
+        // Note the package name is `ninja-build`, not `ninja` -- which is the
+        // whole argument for carrying these as data instead of deriving them
+        // from the binary name.
         assert_eq!(
             refusal.missing,
             vec![
@@ -477,7 +518,7 @@ mod tests {
                 },
                 MissingPrerequisite {
                     tool: "ninja".to_string(),
-                    command: None,
+                    command: Some("sudo apt-get install -y ninja-build".to_string()),
                 },
             ]
         );
@@ -719,6 +760,72 @@ mod tests {
                 "Python 3.9 found; the SDK tooling needs >= 3.10 (winget install -e --id \
                  Python.Python.3.12)."
             ]
+        );
+    }
+
+    #[test]
+    fn posix_venv_unusable_names_the_debian_package_and_a_runnable_command() {
+        // tan-cli#161: python3 IS on PATH and DID run (unlike the two refusals
+        // above), so this needs its OWN code -- folding it into
+        // `prerequisites-missing` would report a tool ("python3") that this
+        // host, per `hostPrerequisites`, does not consider missing at all.
+        let refusal = posix_venv_unusable();
+        assert_eq!(refusal.code, "venv-unusable");
+        assert_eq!(refusal.lines.len(), 1);
+        assert!(
+            refusal.lines[0].contains("ensurepip"),
+            "{:?}",
+            refusal.lines
+        );
+        assert!(
+            refusal.lines[0].contains("python3-venv"),
+            "{:?}",
+            refusal.lines
+        );
+        // Unlike the tool-less Python-floor refusals, THIS one has a real
+        // `{tool, command}` pair -- alp-sdk-vscode's Fix button (and any other
+        // consumer of `missingPrerequisites[].command`) needs something
+        // runnable, not just prose.
+        assert_eq!(
+            refusal.missing,
+            vec![MissingPrerequisite {
+                tool: "python3-venv".to_string(),
+                command: Some("sudo apt-get install -y python3-venv".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn posix_venv_unusable_reports_as_a_doctor_fail_with_the_structured_pair() {
+        // Wired the SAME way as every other refusal `doctor_prerequisite_check`
+        // renders (tan-cli#161's "plain `tan doctor` greenlights a host that
+        // cannot bootstrap" — this is the check that stops it).
+        let checked = vec![
+            "git".to_string(),
+            "cmake".to_string(),
+            "python3".to_string(),
+        ];
+        let refusal = posix_venv_unusable();
+        let mut report = empty_doctor_report();
+        apply_prerequisite_check(
+            &mut report,
+            doctor_prerequisite_check(Some(&refusal), &checked, false, None),
+            refusal.missing.clone(),
+        );
+        assert_eq!(
+            (
+                report.summary.pass,
+                report.summary.warn,
+                report.summary.fail
+            ),
+            (0, 0, 1)
+        );
+        assert_eq!(
+            report.missing_prerequisites,
+            Some(vec![MissingPrerequisite {
+                tool: "python3-venv".to_string(),
+                command: Some("sudo apt-get install -y python3-venv".to_string()),
+            }])
         );
     }
 }

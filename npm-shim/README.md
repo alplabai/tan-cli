@@ -51,7 +51,10 @@ mismatch aborts the install rather than running an unverified binary.
 
 1. Bump the version in **both** the workspace `Cargo.toml`
    (`[workspace.package] version`) and `npm-shim/package.json` to the same
-   value.
+   value. This is enforced, not just documented: `release.yml`'s
+   `verify-version` job fails the tag if they disagree (`postinstall.js`
+   resolves its download tag from `package.json`'s version alone, so a stale
+   shim version silently fetches the wrong release's binaries).
 2. Tag `v<version>` and push. `release.yml`:
    - builds the six target binaries and attaches them to the GitHub release
      (`build` + `release` jobs);

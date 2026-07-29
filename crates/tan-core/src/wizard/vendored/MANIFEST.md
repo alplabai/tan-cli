@@ -9,6 +9,18 @@ from an un-revendored SDK change.
 
 ## Source
 
+- **Current vendor point (all templates):** commit
+  `cdfe13684e362c75f6df2b190ec1c3e736c48731` — alp-sdk#1016, which rewrote the
+  `Customer workflow:` header in every example `board.yaml` from "copy this
+  directory … and `west build`" to "`tan init --from-example
+  <category>/<name>` … and `tan build`" (ADR-0020: tan is the whole command
+  surface). Six `board.yaml` files moved — `diagnostics`, `minimal` and
+  `sensor`, each for both SKUs; `edge-ai` and `iot` were unaffected because
+  their headers do not carry that line. Comment-only: no schema, core or
+  peripheral content changed. This is also `parity.yml`'s `PINNED_SDK_TAG`.
+  - Re-vendored by re-running the emit, not by editing these files. A
+    hand-edit that happens to match today is a copy that drifts tomorrow;
+    the point of this tree is that it is generated.
 - Repo: `alplabai/alp-sdk`
 - Ref: `v0.13.0` (release tag — `git checkout v0.13.0` reproduces the exact
   pinned commit; `dev`'s tip does not)

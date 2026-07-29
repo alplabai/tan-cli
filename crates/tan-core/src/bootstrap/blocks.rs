@@ -205,8 +205,10 @@ pub fn optional_libs_block(facts: &BootstrapFacts, host: HostOs) -> Vec<String> 
 }
 
 /// The closing "Next steps:" block: activate the venv, export the manifest's
-/// `env` map, run `tan doctor`, and one ready-to-paste `west build` for the
-/// platform's canonical example target.
+/// `env` map, run `tan doctor`, and one ready-to-paste build command for the
+/// platform's canonical example target — `tan build` on POSIX, raw `west
+/// build` on native Windows (`tan build` has no board-override flag yet, so
+/// it cannot select `native_sim`; see the POSIX arm's own comment).
 pub fn next_steps_block(
     facts: &BootstrapFacts,
     tokens: Tokens,
@@ -230,10 +232,27 @@ pub fn next_steps_block(
     lines.push(String::new());
     lines.push("  # Make Zephyr reachable for builds:".to_string());
     lines.extend(render_env_lines(&facts.env, tokens, "  ", is_windows));
+    // The pinned install.sh/install.ps1 one-liner (README.md's own "Automatic"
+    // section) -- NOT `cargo install --git ...` (issue #117): that built
+    // unpinned HEAD and was retired repo-wide by alp-sdk#988 except here, where
+    // it lived as a hardcoded copy in the Rust binary rather than in a doc or
+    // script alp-sdk#988 could reach. `tan doctor` (not `--build`): since #100
+    // plain doctor already folds in the build-readiness preflight (see
+    // `assemble_doctor_report`'s doc comment), and bootstrap's next-steps is
+    // explicitly one of the sites that fold was written to cover -- so the
+    // plain form is already the right advice; only the install command needed
+    // to change.
+    let install_line = if is_windows {
+        "  # for: irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1 | iex):"
+            .to_string()
+    } else {
+        "  # for: curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh):"
+            .to_string()
+    };
     lines.extend([
         String::new(),
         "  # Sanity-check the host environment (needs tan on PATH -- see README.md".to_string(),
-        "  # for `cargo install --git https://github.com/alplabai/tan-cli --bin tan`):".to_string(),
+        install_line,
         "  tan doctor".to_string(),
         String::new(),
     ]);
@@ -243,7 +262,10 @@ pub fn next_steps_block(
         // raw forward-slash `${SDK_ROOT}` would print mixed. See `print_env_block`.
         let repo_root = tokens.sdk_root.replace('/', "\\");
         lines.extend([
-            "  # Or jump straight into building an example for real silicon:".to_string(),
+            "  # Or jump straight into building an example for real silicon".to_string(),
+            "  # (needs the Zephyr SDK toolchain, which bootstrap does NOT install --".to_string(),
+            "  #  the `tan doctor` above reports it, and names the exact install command):"
+                .to_string(),
             "  west build -b alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he `".to_string(),
             format!(
                 "      examples\\peripheral-io\\uart-echo -- -DEXTRA_ZEPHYR_MODULES={repo_root}"
@@ -254,13 +276,42 @@ pub fn next_steps_block(
             "  - docs\\cli.md                   -- the tan CLI verb reference".to_string(),
         ]);
     } else {
+        // Routed through `tan build`, not a raw `west build -b native_sim/...`
+        // (issue: the printed success message routed the customer around
+        // tan's own README claim that it is "the single executor and the
+        // user command surface"). `--sdk-root`/`--project` are ABSOLUTE
+        // (`tokens.sdk_root`, not `$PWD`): the workspace-parent guard above
+        // this block can have just moved the checkout to a sibling
+        // `alp-workspace/alp-sdk`, so `$PWD` -- correct only when the reader
+        // happens to be standing IN the checkout -- silently builds from the
+        // wrong tree, or nothing at all, everywhere else. Matches the
+        // Windows arm above, which already interpolates `tokens.sdk_root`
+        // for the same reason.
+        //
+        // `tan build` has no `-b`/board-override flag (unlike raw `west
+        // build`), so it cannot target `native_sim` for this example -- its
+        // board.yaml (`examples/peripheral-io/uart-echo`) only declares the
+        // real-silicon EVK presets, and the board comes from the SDK's own
+        // plan, never a CLI override. This lands on the SAME real-hardware
+        // target the Windows arm already names (`alp_e1m_aen801_m55_he/...`,
+        // verified live: `tan build --plan` against this exact project
+        // resolves that slice), so POSIX now needs the same Zephyr SDK
+        // toolchain Windows already requires -- trading the old "no
+        // hardware/toolchain needed" native_sim smoke build for a command
+        // that is real and tan-routed, which native_sim currently is not.
         lines.extend([
             "  # Run the local test suite:".to_string(),
             "  bash scripts/test-all.sh".to_string(),
             String::new(),
-            "  # Or jump straight into building an example:".to_string(),
-            "  west build -b native_sim/native/64 examples/peripheral-io/uart-echo \\".to_string(),
-            "      -- -DEXTRA_ZEPHYR_MODULES=$PWD".to_string(),
+            "  # Or jump straight into building an example for real silicon".to_string(),
+            "  # (needs the Zephyr SDK toolchain, which bootstrap does NOT install --".to_string(),
+            "  #  the `tan doctor` above reports it, and names the exact install command):"
+                .to_string(),
+            format!("  tan build --sdk-root \"{}\" \\", tokens.sdk_root),
+            format!(
+                "      --project \"{}/examples/peripheral-io/uart-echo\"",
+                tokens.sdk_root
+            ),
             String::new(),
             "References:".to_string(),
             "  - docs/testing.md          -- full test-coverage map + how to run from scratch"
@@ -567,7 +618,21 @@ bootstrap: Optional native libraries unlock the Yocto-side backends:
             posix.contains("  export ZEPHYR_BASE=\"/ws/zephyr\""),
             "{posix}"
         );
-        assert!(posix.contains("native_sim/native/64"), "{posix}");
+        // Routed through `tan` (issue: the printed command sent the customer
+        // around tan's own README claim to be "the single executor"), with
+        // the SDK root taken from `tokens.sdk_root` rather than `$PWD` (issue:
+        // `$PWD` is wrong once the workspace-parent guard has relocated the
+        // checkout out from under the reader's cwd).
+        assert!(
+            posix.contains("  tan build --sdk-root \"/ws/alp-sdk\" \\"),
+            "{posix}"
+        );
+        assert!(
+            posix.contains("      --project \"/ws/alp-sdk/examples/peripheral-io/uart-echo\""),
+            "{posix}"
+        );
+        assert!(!posix.contains("west build"), "{posix}");
+        assert!(!posix.contains("$PWD"), "{posix}");
         assert!(posix.contains("bash scripts/test-all.sh"), "{posix}");
 
         // FORWARD-slash tokens, as production hands in: the `west build` line
@@ -609,6 +674,50 @@ bootstrap: Optional native libraries unlock the Yocto-side backends:
         );
         // native_sim does not exist on native Windows — must NOT be suggested.
         assert!(!win.contains("native_sim"), "{win}");
+    }
+
+    /// #117: the retired, unpinned `cargo install --git ... --bin tan` must
+    /// never reappear, and each platform must name ITS OWN install one-liner
+    /// (the same two commands README.md documents) -- not the other OS's.
+    #[test]
+    fn next_steps_names_the_pinned_install_one_liner_not_the_retired_git_form() {
+        let facts = manifest_facts();
+        let tokens = Tokens {
+            sdk_root: "/ws/alp-sdk",
+            workspace_dir: "/ws",
+        };
+        let posix = next_steps_block(&facts, tokens, "/ws/.venv", "bin", false).join("\n");
+        let win = next_steps_block(&facts, tokens, "C:\\ws\\.venv", "Scripts", true).join("\n");
+        for rendered in [&posix, &win] {
+            assert!(
+                !rendered.contains("cargo install --git"),
+                "retired install command resurfaced: {rendered}"
+            );
+        }
+        assert!(
+            posix.contains(
+                "curl -fsSL https://raw.githubusercontent.com/alplabai/tan-cli/main/install.sh | sh"
+            ),
+            "{posix}"
+        );
+        assert!(!posix.contains("install.ps1"), "{posix}");
+        assert!(
+            win.contains(
+                "irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1 | iex"
+            ),
+            "{win}"
+        );
+        assert!(!win.contains("install.sh"), "{win}");
+        // The suggested next command stays plain `tan doctor`: since #100 it
+        // already folds in the build-readiness preflight, and this site is one
+        // of the ones that decision deliberately targets (see
+        // `assemble_doctor_report`'s doc comment in tan-cli's doctor.rs).
+        assert!(
+            posix.contains("  tan doctor\n") || posix.ends_with("  tan doctor"),
+            "{posix}"
+        );
+        assert!(!posix.contains("tan doctor --build"), "{posix}");
+        assert!(!win.contains("tan doctor --build"), "{win}");
     }
 
     /// The reuse path repoints WORKSPACE_DIR after `--print-env` has returned;

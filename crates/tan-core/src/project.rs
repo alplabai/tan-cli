@@ -249,6 +249,42 @@ pub fn resolve_project_context(
     }
 }
 
+/// Rebase `context`'s paths that fall under `old_root` onto `new_root`, after
+/// the alp-sdk checkout physically moved (`tan bootstrap`'s workspace-parent
+/// guard, tan-cli#185: review finding 6). A project that lives INSIDE the
+/// checkout (the `alp-sdk/examples/.../hello-world` shape parity's `seam2`
+/// job uses) must keep pointing at real files, not the location the checkout
+/// just vacated — otherwise `read_board_model` silently reads nothing and
+/// falls back to `BoardModel::default()`, which can no longer refuse a
+/// Yocto-only project on a non-Linux host.
+///
+/// `old_root`/`new_root` are forward-slash, matching every field here (see
+/// [`to_posix`]). A field that does not fall under `old_root` — the common
+/// case, a project nowhere near the checkout — is returned unchanged, never
+/// force-rebased. `sdk_root` is unconditionally set to `new_root`: it names
+/// the checkout itself, which always moved.
+pub fn rebase_under_relocated_sdk(
+    context: &ProjectContext,
+    old_root: &str,
+    new_root: &str,
+) -> ProjectContext {
+    let rebase = |value: &Option<String>| {
+        value.as_ref().map(|v| match v.strip_prefix(old_root) {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+                format!("{new_root}{rest}")
+            }
+            _ => v.clone(),
+        })
+    };
+    ProjectContext {
+        workspace_root: rebase(&context.workspace_root),
+        sdk_root: Some(new_root.to_string()),
+        board_yaml_path: rebase(&context.board_yaml_path),
+        west_cwd: rebase(&context.west_cwd),
+        python_binary: context.python_binary.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,5 +520,68 @@ mod tests {
         assert_eq!(ctx.workspace_root, None);
         assert_eq!(ctx.board_yaml_path, None);
         assert_eq!(ctx.west_cwd, None);
+    }
+
+    #[test]
+    fn rebase_moves_a_project_that_lives_inside_the_relocated_checkout() {
+        // The parity seam2 shape: the project IS a subdirectory of the SDK
+        // checkout that just moved.
+        let ctx = ProjectContext {
+            workspace_root: Some("/old/alp-sdk/examples/peripheral-io/hello-world".to_string()),
+            sdk_root: Some("/old/alp-sdk".to_string()),
+            board_yaml_path: Some(
+                "/old/alp-sdk/examples/peripheral-io/hello-world/board.yaml".to_string(),
+            ),
+            west_cwd: Some("/old/alp-sdk/examples/peripheral-io/hello-world".to_string()),
+            python_binary: "python3".to_string(),
+        };
+        let rebased = rebase_under_relocated_sdk(&ctx, "/old/alp-sdk", "/new/parent/alp-sdk");
+        assert_eq!(
+            rebased.workspace_root.as_deref(),
+            Some("/new/parent/alp-sdk/examples/peripheral-io/hello-world")
+        );
+        assert_eq!(rebased.sdk_root.as_deref(), Some("/new/parent/alp-sdk"));
+        assert_eq!(
+            rebased.board_yaml_path.as_deref(),
+            Some("/new/parent/alp-sdk/examples/peripheral-io/hello-world/board.yaml")
+        );
+        assert_eq!(
+            rebased.west_cwd.as_deref(),
+            Some("/new/parent/alp-sdk/examples/peripheral-io/hello-world")
+        );
+    }
+
+    #[test]
+    fn rebase_leaves_a_project_outside_the_checkout_untouched() {
+        // The common case: the project shares no path prefix with the SDK at
+        // all, so relocating the SDK checkout must not touch it.
+        let ctx = ProjectContext {
+            workspace_root: Some("/work/my-app".to_string()),
+            sdk_root: Some("/old/alp-sdk".to_string()),
+            board_yaml_path: Some("/work/my-app/board.yaml".to_string()),
+            west_cwd: Some("/work/my-app".to_string()),
+            python_binary: "python3".to_string(),
+        };
+        let rebased = rebase_under_relocated_sdk(&ctx, "/old/alp-sdk", "/new/parent/alp-sdk");
+        assert_eq!(rebased.workspace_root, ctx.workspace_root);
+        assert_eq!(rebased.board_yaml_path, ctx.board_yaml_path);
+        assert_eq!(rebased.west_cwd, ctx.west_cwd);
+        // sdk_root always follows the move, even when nothing else does.
+        assert_eq!(rebased.sdk_root.as_deref(), Some("/new/parent/alp-sdk"));
+    }
+
+    #[test]
+    fn rebase_does_not_treat_a_prefix_match_without_a_separator_as_containment() {
+        // "/old/alp-sdk-vendor" textually starts with "/old/alp-sdk" but is a
+        // SIBLING checkout, not a subdirectory -- must not be rebased.
+        let ctx = ProjectContext {
+            workspace_root: Some("/old/alp-sdk-vendor/proj".to_string()),
+            sdk_root: Some("/old/alp-sdk".to_string()),
+            board_yaml_path: None,
+            west_cwd: None,
+            python_binary: "python3".to_string(),
+        };
+        let rebased = rebase_under_relocated_sdk(&ctx, "/old/alp-sdk", "/new/alp-sdk");
+        assert_eq!(rebased.workspace_root, ctx.workspace_root);
     }
 }

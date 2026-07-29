@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Command-line surface (clap derive). Global flags mirror CLI.md §3.1.
 
+use std::io::IsTerminal;
+
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// Top-level parsed CLI: global flags plus the selected subcommand.
@@ -58,7 +60,10 @@ pub struct GlobalArgs {
     #[arg(long = "no-color", global = true)]
     pub no_color: bool,
 
-    /// Never prompt; fail instead of asking for input.
+    /// Never prompt. A command with a documented default takes it (`tan init`
+    /// scaffolds `zephyr-app` into `.`); one without fails instead of asking
+    /// (`tan scaffold` needs `--name`). The same rule applies unasked when
+    /// stdin or stderr is not a terminal — piped, redirected, or a CI runner.
     #[arg(long = "non-interactive", global = true)]
     pub non_interactive: bool,
 
@@ -71,6 +76,108 @@ impl GlobalArgs {
     /// True when `--format json` was selected.
     pub fn is_json(&self) -> bool {
         matches!(self.format, Format::Json)
+    }
+
+    /// True when `tan` may block on an interactive prompt: none of
+    /// `--non-interactive` / `--ci` / `--format json` was given, AND **both**
+    /// stdin and stderr are real terminals.
+    ///
+    /// The thin wrapper over [`interactive_mode`] that reads the real process
+    /// handles. ONE home for the rule, because it was three: #198 added the
+    /// terminal term to `init` alone, `bootstrap` had grown its own copy in
+    /// #185, and `scaffold` had neither and still hung.
+    ///
+    /// A missing terminal is treated as non-interactive (flag-derived
+    /// defaults), not as an error: that is what `--template`'s own help already
+    /// promised ("defaults to zephyr-app when not given and there is no TTY to
+    /// prompt on"), so the documented commands run unchanged under redirected
+    /// stdio instead of demanding an undocumented `--non-interactive`.
+    /// `progress::spinner` and `style::Theme::from_args` already gate on
+    /// `stderr().is_terminal()` for the same reason.
+    pub fn can_prompt(&self) -> bool {
+        interactive_mode(
+            self.non_interactive,
+            self.ci,
+            self.is_json(),
+            std::io::stdin().is_terminal(),
+            std::io::stderr().is_terminal(),
+        )
+    }
+}
+
+/// Whether `tan` may prompt.
+///
+/// A pure predicate so every term has a failing test — inlined in `can_prompt`,
+/// the terminal terms are unreachable from a unit test and the only way to
+/// notice one had been dropped would be a customer hanging. Introduced in #198
+/// as an `init`-local `interactive_mode`; lifted here so `scaffold` and
+/// `bootstrap` answer the same question from the same place.
+///
+/// `stdin_is_tty` was the term missing from `init` (#187): without it `tan init`
+/// rendered an inquire prompt to a terminal that was not there and then blocked
+/// — no timeout, no diagnostic, no exit. From the caller's side that is
+/// indistinguishable from a slow operation, which is the worst of the available
+/// failure modes: CI, a `sh -c` from a script, an IDE task runner and a
+/// `Command::output()` from another tool all hang.
+///
+/// `stderr_is_tty` is the OTHER half, and it is not redundant, because inquire
+/// splits the two handles:
+/// - It renders to **stderr** (`inquire::terminal::crossterm`, `IO::Std(
+///   stderr())`), so a redirected stderr makes the prompt invisible.
+/// - It reads through crossterm's `tty_fd()`, which uses stdin only when stdin
+///   is a terminal and otherwise **opens `/dev/tty`**.
+///
+/// So `stdin=tty, stderr=piped` — every wrapper that captures output while
+/// inheriting the terminal — still hangs on a stdin-only gate, with the prompt
+/// written into the capture where nobody sees it. Confirmed live under a pty.
+/// It also means the Unix block was never on the redirected stdin at all: `tan
+/// init </dev/null` from a real terminal session blocked on `/dev/tty`, and the
+/// `init: Cancelled.` exit 1 seen instead on CI and in agent shells is only
+/// what happens where `/dev/tty` cannot be opened.
+fn interactive_mode(
+    non_interactive: bool,
+    ci: bool,
+    is_json: bool,
+    stdin_is_tty: bool,
+    stderr_is_tty: bool,
+) -> bool {
+    !non_interactive && !ci && !is_json && stdin_is_tty && stderr_is_tty
+}
+
+#[cfg(test)]
+mod interactive_mode_tests {
+    use super::interactive_mode;
+
+    /// #187/#198: the terminal terms are the ones that were missing, so they
+    /// get the failing cases. Every flag term was already right; this table
+    /// exists so that dropping one again turns a test red instead of turning a
+    /// customer's terminal into a hang with no output and no timeout.
+    #[test]
+    fn a_prompt_needs_a_terminal_to_prompt_on() {
+        // The only combination that may prompt: a human, at a TTY, with no
+        // machine-mode flag set.
+        assert!(interactive_mode(false, false, false, true, true));
+
+        // No stdin TTY -> never prompt, whatever the flags say. This is #187.
+        assert!(!interactive_mode(false, false, false, false, true));
+
+        // No stderr TTY -> never prompt either. inquire renders there, and
+        // reads via /dev/tty regardless, so a stdin-only gate leaves this case
+        // hanging with the prompt written into whatever captured stderr.
+        assert!(!interactive_mode(false, false, false, true, false));
+
+        // Each machine-mode flag independently suppresses prompting even with a
+        // real terminal attached -- pinned so a refactor cannot quietly make
+        // one of them advisory.
+        assert!(
+            !interactive_mode(true, false, false, true, true),
+            "--non-interactive"
+        );
+        assert!(!interactive_mode(false, true, false, true, true), "--ci");
+        assert!(
+            !interactive_mode(false, false, true, true, true),
+            "--format json"
+        );
     }
 }
 
@@ -95,7 +202,7 @@ pub enum Command {
     /// Scaffold a module into an existing project.
     Scaffold(ScaffoldArgs),
     /// List the SDK's ready-made example projects (source for `tan init --from-example`).
-    Examples,
+    Examples(ExamplesArgs),
     /// Diagnose host build readiness plus debug readiness for a target/server pair.
     Doctor(DoctorArgs),
     /// Emit a shell completion script (bash, zsh, or fish).
@@ -167,6 +274,16 @@ pub struct PinmuxArgs {
     /// Pinmux family stem directly (e.g. `aen`, `v2n`); overrides `--sku`.
     #[arg(long)]
     pub family: Option<String>,
+}
+
+/// Args for `examples`: a case-insensitive substring filter over the catalog's
+/// `id`/`title` (tan-cli#164 — 97 entries is too many to scan unfiltered).
+#[derive(Debug, Args)]
+pub struct ExamplesArgs {
+    /// Case-insensitive substring to match against `id` or `title`; unset lists
+    /// every example.
+    #[arg(long, value_name = "SUBSTRING")]
+    pub filter: Option<String>,
 }
 
 /// Args for `clean`: app-path + build-root override + dry-run. Native — mirrors
@@ -397,6 +514,15 @@ pub struct BuildArgs {
     /// keep `tan build` to building and get the readiness report instead.
     #[arg(long = "no-auto-bootstrap")]
     pub no_auto_bootstrap: bool,
+    /// Force-wipe every slice's build dir before dispatch, regardless of the
+    /// recorded SDK-switch stamp (tan-cli#163) — the manual counterpart to the
+    /// automatic sdk-switch-pristine wipe, for a stale build dir the stamp
+    /// heuristic doesn't (or can't yet) catch. Same wipe, same two safety
+    /// guards (an explicit `-d`/`--build-dir` in the slice's own command, or a
+    /// plan cwd outside `build/`): this never touches a dir tan can't vouch
+    /// for, same as the automatic path.
+    #[arg(long)]
+    pub pristine: bool,
 }
 
 /// Args for `kconfig`: scope the board-scoped Kconfig symbol menu to one core.
@@ -420,6 +546,12 @@ pub struct BootstrapArgs {
     /// Only print the environment-variable lines and exit.
     #[arg(long = "print-env")]
     pub print_env: bool,
+    /// Build the west workspace under this directory instead of the
+    /// checkout's parent, moving the checkout there first if it isn't
+    /// already (tan-cli#185). Answers the workspace-parent guard outright —
+    /// no prompt, no refusal, whatever the parent otherwise holds.
+    #[arg(long, value_name = "PATH")]
+    pub workspace: Option<String>,
 }
 
 /// Args for `sdk`: a free-form subcommand verb plus its positional argument and cache destination.
@@ -451,6 +583,27 @@ pub struct DoctorArgs {
     #[arg(long, value_name = "SERVER")]
     pub server: Option<String>,
     /// Run the build-readiness preflight instead of the debug-readiness checks.
+    ///
+    /// KEPT DELIBERATELY (tan-cli#112), not merely tolerated: since #100
+    /// folded build-readiness into PLAIN `tan doctor` too, this flag reads as
+    /// redundant, and the natural cleanup would be to retire it. It must not
+    /// be retired, or turned into a usage error, because both
+    /// `alp-sdk-vscode` call sites pinned to `SUPPORTED_CLI_VERSION "0.4.0"`
+    /// hardcode it as a literal argv entry with no fallback --
+    /// `["doctor", "--build"]` (the Toolchain Doctor panel) and
+    /// `["doctor", "--build", "--fix"]` (its "Bootstrap now" remedy, the
+    /// primary recovery path from a failed check). Either change breaks both
+    /// at the same moment.
+    ///
+    /// This is NOT a deprecation-window shim scheduled to collapse into plain
+    /// `doctor` on a timer: `--build` and plain `doctor` stay two distinct,
+    /// permanent modes (own OS-set resolution, own check vocabulary -- see
+    /// `run_build_readiness`'s doc comment in `commands/doctor.rs`), and there
+    /// is no planned removal date. What WOULD have to be true before dropping
+    /// it: `alp-sdk-vscode` stops calling it at both sites, in the same PR
+    /// that bumps its `SUPPORTED_CLI_VERSION` pin past `"0.4.0"` -- and even
+    /// then, retiring the flag here is its own deliberate decision, not
+    /// something that falls out of that bump automatically.
     #[arg(long)]
     pub build: bool,
     /// With `--build`: auto-repair a fixable blocker — run `tan bootstrap` when no
@@ -511,6 +664,19 @@ pub struct DebugConfigArgs {
     /// name your own `tasks.json` or `TaskProvider` registers.
     #[arg(long = "pre-launch-task", value_name = "TASK")]
     pub pre_launch_task: Option<String>,
+    /// Point cortex-debug's Cortex Peripherals (register) view at an SVD file
+    /// you supply. This is the ONLY source of one: the SDK ships no SVD
+    /// (alp-sdk#948, whose blocker is an open vendor-redistribution licence
+    /// question), so without this flag `svdFile`/`svdPath` are always dropped
+    /// and the peripheral view is simply absent. Point it at the vendor's own
+    /// SVD, which you are entitled to download.
+    ///
+    /// A relative path resolves against the CURRENT DIRECTORY. A path that
+    /// does not name a readable file fails the command — it never falls back
+    /// to "no SVD", because a typo would otherwise be indistinguishable from
+    /// not passing the flag at all.
+    #[arg(long, value_name = "PATH")]
+    pub svd: Option<String>,
     /// Print the launch configuration without writing launch.json.
     #[arg(long)]
     pub preview: bool,
@@ -552,12 +718,19 @@ pub struct CompletionArgs {
 }
 
 /// Args for `generate`: overwrite toggle for the one target (`native-sim-overlay`)
-/// that writes into the hand-editable app source tree instead of `build/generated/`.
+/// that writes into the hand-editable app source tree instead of `build/generated/`,
+/// plus the core selector `--target zephyr-board` requires.
 #[derive(Debug, Args)]
 pub struct GenerateArgs {
     /// Allow overwriting existing files.
     #[arg(long)]
     pub force: bool,
+    /// Core id to generate a Zephyr board tree for. Required by (and only
+    /// meaningful for) `--target zephyr-board` (alp-sdk#523, tan-cli#116): it
+    /// picks which core's board tree gets generated, matching `--core` on
+    /// `tan kconfig`.
+    #[arg(long, value_name = "CORE_ID")]
+    pub core: Option<String>,
 }
 
 /// Args for `init`: template, naming, destination, SoM/cores selection, and preview/force toggles.

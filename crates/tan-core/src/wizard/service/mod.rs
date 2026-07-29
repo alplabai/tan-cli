@@ -21,7 +21,7 @@ pub use registry::{list_module_templates, list_wizard_templates};
 pub use vendored::{
     IOT_STARTER_SUPPORTED_SKU, vendored_app_core_for_sku, vendored_core_ids_for,
     vendored_diagnostics_app_core_for_sku, vendored_edge_ai_app_core_for_sku,
-    vendored_iot_app_core_for_sku, vendored_sensor_app_core_for_sku,
+    vendored_iot_app_core_for_sku, vendored_library_names_for, vendored_sensor_app_core_for_sku,
 };
 
 // ---------------------------------------------------------------------------

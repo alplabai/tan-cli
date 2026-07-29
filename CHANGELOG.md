@@ -1,13 +1,1189 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
+## [Unreleased]
+
+### Added
+- **A CI job that actually runs the commands a customer types.** Until now NO
+  workflow in either repo ran `tan bootstrap`, `tan init` or `tan build` --
+  grepping `.github` for them returned three comment lines and no `run:` step.
+  `parity.yml`'s `seam2` hand-assembles the workspace itself (`west init -l` /
+  `west update` / `west zephyr-export`) and then builds an example that already
+  exists, so it exercises the loader seam but never the customer path. Every
+  regression in the venv phase, the west phase, the prerequisite gate or the
+  workspace guard could reach customers with a green board. The new
+  `first blink` job runs bootstrap -> doctor -> init -> build in that order on
+  a runner that starts with none of it, and asserts the workspace artefacts
+  (`.west/config`, `.venv`, `zephyr/`, `modules/`) actually exist rather than
+  trusting exit 0. It clones alp-sdk into a DEDICATED parent (`ws/alp-sdk`),
+  which is both what #185's workspace guard requires and the layout README
+  tells customers to use -- a flat checkout beside the tan-cli tree would make
+  `tan bootstrap --non-interactive` exit 2 by design.
+
+### Added
+- **`getting-started.yml` — the first CI job that runs `install.sh`,
+  `tan bootstrap` or `tan init` at all** (#207). Before this file, a grep for
+  tan subcommand invocations across `.github/**` returned three COMMENT lines
+  (`parity.yml`) and no `run:` step, and `install.sh` was neither executed nor
+  shellchecked by any workflow in either repo — so the whole
+  environment-provisioning path a first-install customer walks (installer →
+  venv → west workspace → scaffold → build) had no signal, and a regression in
+  any phase of it would reach customers with an otherwise-green board. The
+  `install.sh` evidence that existed was #176's one-off manual Ubuntu 20.04 LTS
+  run, which is good evidence and which nothing preserved.
+  The new job walks the README Quickstart in order on a stock `ubuntu-latest`:
+  `shellcheck --shell=sh install.sh`, then `./install.sh` (a real GitHub
+  Releases download verified against that release's `checksums.txt`, so the
+  sha256 path is exercised rather than mocked), then `tan bootstrap`, then
+  `west sdk install --version <v> -t arm-zephyr-eabi` — the remedy
+  `build_readiness.rs` PRINTS and tan deliberately does not run itself, so
+  running it here is the only way the printed remedy gets tested — then
+  `tan init --name my-app` on its defaults with no TTY to prompt on (the
+  #187/#198 hang class), then `tan validate` from the scaffolded project so the
+  Quickstart's sibling `../alp-sdk` resolution is what resolves the SDK, then a
+  real `tan build`, asserted down to an ARM ELF rather than to an exit code.
+  Three deliberate choices, each of which would otherwise read as an
+  inconsistency:
+  1. **The job runs this checkout's `install.sh`, not the documented
+     `curl … | sh`** — that pipe fetches `main`'s copy, so a PR editing
+     `install.sh` would get no signal from its own diff. Same bytes, different
+     transport.
+  2. **`install.sh` installs the last RELEASE, so the binary it installs is
+     replaced by a `cargo build` of the PR at the same path** before bootstrap
+     runs. Otherwise every step after the installer would test a binary that
+     predates the diff, and a bootstrap or init regression would sail through
+     green. The installer is verified for real first; the swap is what gives
+     the rest of the path its signal.
+  3. **alp-sdk is cloned into a dedicated `alp-workspace/` parent**, which is
+     exactly what the workspace-parent guard's own migration note in this
+     release predicted a fresh `tan bootstrap` job would need: the guard REFUSES
+     outright under a CI runner's non-terminal stdio, so cloning beside this
+     repo's own checkout would fail before bootstrap did any real work.
+  The alp-sdk pin is READ out of `parity.yml`'s `PINNED_SDK_TAG` rather than
+  copied, and the Zephyr SDK version out of the SDK's own
+  `metadata/toolchains.json` (the same read `seam2` does, and the same file
+  `tests/parity/toolchain_lock_parity.py` holds `host_env.rs`'s
+  `ZEPHYR_SDK_INSTALL_VERSION` against) — a second hardcoded copy of either
+  would rot independently and let this gate quietly test a different SDK than
+  the parity gate while both reported green. Both reads hard-fail rather than
+  falling back to a default, since a silent fallback is worst in exactly the
+  case where somebody moved the pin without knowing this file reads it.
+  Deliberately not `paths`-filtered: a gate that skips itself on a "docs-only"
+  PR reports green for a run that checked nothing.
+- **`tan debug-config --svd <PATH>` — a user-supplied SVD, the first and only
+  producer of `LaunchResolution.svd`** (#197). The resolution path for
+  `svdFile`/`svdPath` was complete and tested, and structurally dead: the field
+  is read at `debug_launch.rs:245` and was assigned nowhere in the workspace
+  outside tests, so it was always `None`, both keys were always dropped, and
+  cortex-debug's Cortex Peripherals (register) view was unreachable on every
+  target tan supports. A green test suite said nothing about whether the
+  feature could work, because the drop path's input could never be anything
+  else.
+  The SDK ships no SVD and may never ship one — alp-sdk#948's blocker is an
+  unresolved Alif/Renesas redistribution-licence question on a public repo. A
+  user-supplied path is the only route that survives that question going either
+  way: a customer who downloaded the vendor's own SVD, which they are entitled
+  to do, can point tan at it today.
+  Two behaviours decided explicitly rather than by omission, since #67
+  established what a bad `svdFile` costs:
+  1. **A path that does not name a readable file FAILS the command** (no
+     launch.json written) — it never falls back to dropping the key. That
+     fallback would make a typo indistinguishable from not passing the flag,
+     and the user explicitly named the file. A directory and an empty string
+     are refused the same way.
+  2. **A relative `--svd` anchors on the CURRENT DIRECTORY**, not the project
+     root, because a flag typed at a shell prompt means what the shell means by
+     it. The emitted value then goes through the same `workspace_relative`
+     rewrite as `executable`: `${workspaceFolder}/…` inside the project,
+     absolute outside it — and outside is the normal case, since a vendor SVD
+     lives in the vendor SDK.
+  A `--svd` on a target kind whose draft carries no `svdFile` field
+  (`native-host`, `yocto-userspace`) is reported as a note rather than accepted
+  in silence. A `debug.svd` key in `board.yaml` is deliberately NOT part of
+  this change: it has a different lifetime (it travels with the project, so it
+  would anchor on the project root) and belongs with the alp-sdk metadata
+  contract, not with a per-invocation flag.
+
+### Fixed
+- **The Zephyr SDK — the one build-blocking `Fail` a first-install customer
+  hits — was the only prerequisite that could never carry a Fix button**
+  (#203, #210). `missingPrerequisites` was written in exactly one place,
+  `push_tool`, whose shape is "PATH binary, keyed into the manifest's
+  `prerequisites.install` map". `zephyrSdk` is neither — it is an env/install-dir
+  detection with a command the SDK does not own — so it was pushed straight to
+  `checks` and silently never reached the list. The extension reads that list to
+  decide a check is actionable, so CMake, Ninja, git and Python all rendered
+  with a Fix button and the one row that stops the build rendered without one.
+  It is now recorded like every other absent prerequisite, carrying the real
+  `west sdk install --version 1.0.1 -t arm-zephyr-eabi` rather than `null` — the
+  exact command alp-sdk#855's fresh-host reporter needed and could not find. tan
+  still does not run it; a download-and-extract is west's job once a workspace
+  exists, not a read-only doctor's side effect. That command is also now
+  assembled in ONE function instead of formatted at four call sites, so a
+  version bump cannot leave the button running a different toolchain than the
+  prose beside it recommends.
+- **7-Zip is a hard prerequisite of `west sdk install` on native Windows and had
+  no check anywhere** (#204). west delegates `.7z` extraction to `patoolib`,
+  which shells out to an external `7z`/`7za`/`7zr`/`7zz`/`7zzs`/`unar` and has no
+  pure-Python fallback, so without one the install dies inside patoolib with an
+  error naming no Alp surface and no mention of 7-Zip. The fact existed in
+  exactly one place — a prose line in `tan bootstrap`'s TEXT output
+  (`manualInstallHints.windows.note[1]`) — reaching no JSON consumer, so the IDE
+  could not surface it either. `doctor --build` now emits a `sevenZip` check
+  with a runnable `winget install -e --id 7zip.7zip` (verified resolvable before
+  being written down, not guessed). Native Windows only, and only while the SDK
+  is still absent: the extractor is irrelevant once the toolchain is installed,
+  so the row appears beside the `zephyrSdk` Fail it unblocks and vanishes with
+  it rather than lingering as noise on every later run.
+- **Every remedy `tan doctor` computed was hidden unless you already knew to
+  pass `--verbose`** (#208). The "Next steps" block was gated on that flag, so
+  the person who runs `doctor` *because* something broke — the one person who
+  does not know to re-run it louder — saw the failures and none of the commands
+  that repair them. It renders at default verbosity now. `--quiet` still
+  suppresses it, and a clean report has no steps to print, so nothing changes on
+  a host with nothing wrong.
+- **Plain `tan doctor` reported debug readiness for `native-host` / `none` no
+  matter what board the project declared** (#208). An absent `--target-kind`
+  parsed to `native-host` and an absent `--server` to `none`, so a Zephyr project
+  got a CodeLLDB verdict and not one word about a probe or a GDB server — every
+  debug row was answering a question about a different target. The default is
+  now derived from the project's own `board.yaml` (`zephyr` → `zephyr-mcu`,
+  `baremetal` → `baremetal-mcu`, `yocto` → `yocto-userspace`; MCU-class first on
+  a multicore board), with the server taken from that target's own supported
+  list rather than a second hardcoded default that would have disagreed with it.
+  No `board.yaml` still means `native-host` — the one case it is right, and the
+  directory alp-sdk's bootstrap tells a customer to run `tan doctor` from. An
+  explicit `--target-kind` / `--server` still wins outright.
+- **`tan init` could not find the SDK `tan bootstrap` had just set up, breaking
+  the documented Quickstart at step 3** (#218). SDK discovery checked the
+  workspace root itself, its siblings (`../alp-sdk`, `../alp-sdk-upstream`) and
+  then its nearest ancestor -- never a CHILD. That misses the exact moment the
+  documented flow puts the user in: bootstrap runs with the checkout at
+  `<ws>/alp-sdk`, and `tan init` is then typed from `<ws>`, because the project
+  directory it is about to create does not exist yet. The checkout only becomes
+  the documented "sibling `../alp-sdk`" one step later, once the user has cd'd
+  into the new project -- which is why `tan build` worked while the `tan init`
+  immediately before it failed with "alp-sdk root is unresolved" and no hint
+  that the answer was one directory down. Discovery now also considers
+  `<root>/alp-sdk`, ordered ahead of the siblings so a workspace holding both
+  prefers the one bootstrap actually set up. Found by the new `first blink` CI
+  job, which had to pass `--sdk-root alp-sdk` to get past it; that flag is now
+  removed, so the job is the regression test.
+- **`baremetal-mcu` × OpenOCD shipped a resolved `serverpath`/`searchDir` with
+  NO `configFiles` to load, and `baremetal-mcu` × pyOCD had no target to
+  select** (#139). `create_launch_draft`'s `BaremetalMcu` arm was ONE
+  un-branched object for every server, unlike `ZephyrMcu` right above it,
+  which already branches. `resolve_from_build` computed `config_files` and
+  `target_id` for every target, but `apply_launch_resolution` only replaces a
+  key the draft already carries — and the `baremetal-mcu` draft carried
+  neither — so both values were silently discarded while OpenOCD's
+  `serverpath`/`searchDir` extras (written unconditionally) still landed.
+  `jlink` was unaffected, which is exactly why this shipped: a jlink-only
+  bench pass proved nothing about the other two servers. `BaremetalMcu` now
+  branches per server the same way `ZephyrMcu` does — OpenOCD gets
+  `configFiles`, pyOCD gets `targetId` — so `apply_launch_resolution`'s
+  existing `contains_key` guards finally have something to fill. Reachable
+  hermetically: the `debug-config-preview-baremetal-mcu` golden (server
+  `openocd`) now pins `configFiles` in the emitted `configuration`.
+- **`tan debug-config`'s envelope reported the pre-merge draft's own
+  `<resolved-…>` placeholders even after a write merged in the customer's
+  real, hand-filled values — so a file a merge or legacy migration genuinely
+  FIXED was reported back as still broken** (#180). `debug_config.rs`'s
+  `success()` set `data.configuration` to `draft.clone()` unconditionally, in
+  every mode; the merged document `create_launch_json_write_plan` computes
+  internally was never put anywhere the caller could read it. Concretely: seed
+  a legacy `"ALP: Zephyr Debug (J-Link)"` entry with a hand-filled
+  `"device": "AE822F4M55_HP"`, run `tan debug-config`; the file on disk ends
+  up with the real device, but the envelope's `data.configuration.device` read
+  `"<resolved-device>"`. alp-sdk-vscode#342 folds exactly this field
+  (`written.configuration`) into its debug-readiness report, so the customer
+  was told placeholders remained on a file that no longer had any.
+  `LaunchJsonWritePlan` now carries its own `written_configuration` — the
+  entry actually written, merged or appended — and `debug-config.rs` reports
+  THAT for a write, never the stale draft. `--preview` is unaffected by
+  construction: it returns before the customer's file is ever read, so the
+  draft IS the only configuration there is to report — proven by a new test
+  and unmoved by the four `debug-config-preview-*` goldens (which never merge
+  and therefore never had this bug).
+- **A leftover legacy `"ALP: ..."` launch-configuration entry sitting
+  alongside the maintained `"Alp: ..."` one was left completely silent, even
+  for the customer whose real hand-filled values are still stranded on it**
+  (#179). When BOTH a current-named and a legacy-named entry exist at once (a
+  workspace that ran a pre-#155 `tan` and then a post-#155 one), the ordinary
+  same-name merge runs on the `Alp:` entry and — correctly, per #133's own
+  data-safety call — never touches the `ALP:` one, since nothing decides
+  which of two possibly-hand-edited entries is authoritative. That
+  correctness was undocumented at runtime: no `issues[]` entry, no text-mode
+  line, `migrated_from: None`. A customer in exactly this shape gets `F5`
+  aimed at the entry with the unresolved placeholder while their real values
+  sit one entry down, and `tan` reports bare success. `create_launch_json_write_plan`
+  now reports a new `legacy_entry_present` alongside `migrated_from`, and
+  `debug-config` surfaces it as a new `debug-config.legacy-entry-untouched`
+  issue (severity `info`, registered `reserved` in `contract/issue-codes.json`
+  — no consumer yet), shown in text mode even under `--quiet` like the
+  migration notice beside it. Still silent on the common cases that must stay
+  silent: an ordinary re-run with no legacy entry anywhere, and the MISS/
+  migration path itself (which already reports the same fact via
+  `migrated_from` and must not double-report it).
+- **`tan debug-config` hardcoded `project.boardYaml: null` on every
+  invocation, even a success with a valid `board.yaml` sitting in the
+  resolved project root** (#170). Every other command that reports a
+  `Project` (`bootstrap`, `doctor`, `presets`, `validate`, …) populates
+  `board_yaml` from the shared `resolve_cli_project_context` resolver;
+  `debug-config` was the one holdout still hardcoding it `None`. It now uses
+  the same resolver. Reporting-only — no consumer binds `project.boardYaml`
+  yet, so nothing downstream changes behaviour — but a consumer that DID trust
+  it to mean "no board.yaml was found" would have drawn the wrong conclusion.
+  The four `debug-config-preview-*` goldens move as a direct, intended
+  consequence: they run in a directory with no `board.yaml` on disk, and this
+  resolver reports the CANDIDATE path unconditionally rather than only when
+  the file exists — matching every other command's own pinned goldens
+  (`presets-no-sdk`, `presets-heterogeneous-som`), not a new inconsistency.
+- **The npm shim (`@alplabai/tan`) was pinned six releases behind — `npm i -g
+  @alplabai/tan` would have fetched `v0.1.1`'s binaries under the current
+  release tag.** `npm-shim/postinstall.js` resolves its download tag from
+  `npm-shim/package.json`'s own `version` field, not the workspace version,
+  and nothing enforced the two staying in sync — `npm-shim/README.md` only
+  *documented* bumping both by hand. Measured on this machine: `Cargo.toml`
+  `0.4.1-dev` vs. `npm-shim/package.json` `0.1.1`. Bumped the shim's version to
+  match the workspace, and `release.yml`'s `verify-version` job now fails a
+  tag outright if the two disagree again (same grep-based style as its
+  existing tag-vs-`Cargo.toml` check, not a `cargo metadata`/JSON parse).
+- **`tan bootstrap`'s POSIX "Next steps" told the customer to run a raw `west
+  build -b native_sim/native/64 examples/peripheral-io/uart-echo --
+  -DEXTRA_ZEPHYR_MODULES=$PWD`** — wrong twice over. `$PWD` resolves to the
+  alp-sdk checkout only when the reader's shell happens to be sitting in it,
+  which is never true right after the workspace-parent guard has relocated
+  the checkout (the Windows arm already used the correct `tokens.sdk_root`
+  instead; POSIX did not). And `west build` bypasses `tan` itself, contradicting
+  README.md's own claim that tan is "the single executor and the user command
+  surface." Now prints `tan build --sdk-root "<sdk_root>" --project
+  "<sdk_root>/examples/peripheral-io/uart-echo"`. `tan build` has no
+  board-override flag yet, so it cannot select `native_sim`; POSIX now suggests
+  the same real-silicon target the Windows arm already does (verified live:
+  `tan build --plan` against the pinned example resolves that exact slice).
+- **A relocated alp-sdk checkout broke README.md's own next documented step.**
+  `tan bootstrap`'s workspace-parent guard can move the checkout into a
+  sibling `alp-workspace/` directory (#185); afterward, `tan init --name
+  my-app` — run in the same shell, or a fresh one tomorrow — had no sibling
+  `../alp-sdk` left to auto-discover, and `tan build` in the new project
+  failed with "alp-sdk root is unresolved." The relocation now also repoints
+  the machine-global default-SDK pointer (`~/.alp/sdk-default`) at the
+  checkout's new location — which `tan init` already pins into every new
+  project's own `.alp/sdk-path`, so closing the gap needed no change to
+  `init` itself. Chosen over printing a corrected next command: a pointer
+  file survives a closed terminal and a new shell tomorrow; printed text does
+  not.
+- **`tan init` no longer blocks forever when stdin is not a terminal** (#187).
+  It rendered an inquire prompt (`Destination directory:`, ANSI escapes and all)
+  to a terminal that was not there, then blocked on a stdin already at EOF --
+  no timeout, no diagnostic, no exit. From the caller's side that is
+  indistinguishable from a slow operation, so every non-TTY caller hung: CI, a
+  `sh -c` from a script, an IDE task runner, a `Command::output()` from another
+  tool. `--non-interactive` was the only workaround and nothing said so.
+  The missing term was `std::io::stdin().is_terminal()`, which `bootstrap`
+  already had; `init`'s own comment shows the `--format json` half of the same
+  hang was fixed earlier, and the no-TTY half was simply never added. The
+  predicate is now the pure, unit-tested `interactive_mode()`.
+
+### Changed
+- **`contract/issue-codes.json` was a strict subset of what `tan` actually
+  emits — sixteen real codes were reachable with no registry entry at all, so
+  `frozen_issue_codes` gated nothing about them and a rename would have been
+  invisible in both this repo's CI and alp-sdk-vscode's simultaneously**
+  (#111). An initial pass here registered only five of those (below); a
+  follow-up audit of every `Issue { code: ... }` / `Log::warn` / `failure()`
+  call site under `crates/tan-cli/src/commands/bootstrap/` and
+  `debug_config.rs` found eleven more still unregistered and reaching the
+  wire — `bootstrap.zephyr-base-stale`, `zephyr-base-incompatible`,
+  `west-config-reconciled`, `west-config-reconcile-failed`, `pip-upgrade`,
+  `zephyr-requirements`, `sdk-extras`, `editable-install`, `failed`, and
+  `debug-config.internal-failure`, `write-failure`. All eleven are now
+  registered `reserved` too, so the registry actually covers every code these
+  two command families emit, not just the ones a prior pass happened to name.
+  `contract/README.md`'s frozen-codes table now states its own selection
+  criterion (`frozen`/`retired` only; `reserved` codes are enumerated by name
+  in prose instead, since there are too many to table usefully) rather than
+  silently including some reserved codes and omitting others with no stated
+  reason.
+  Registers `bootstrap.manifest` (fires at the FIRST
+  `load_facts(&sdk_root)` call, strictly BEFORE `select_workspace`, the
+  workspace-parent guard (#185), and any venv/west/pip phase — a doubled run
+  costs seconds and leaves nothing on disk), `bootstrap.sdk-root-unresolved`
+  (the one refusal that predates project resolution) and
+  `bootstrap.zephyr-base-manifest-mismatch` (a `warning`, fired from
+  `select_workspace`) as `reserved` — no consumer binds any of the three yet.
+  Also **promotes `bootstrap.python-not-runnable` and `bootstrap.python-too-old`
+  from undocumented to `frozen`**: verified in the read-only alp-sdk-vscode
+  checkout that `PREREQ_CODES` (`src/alpCli/service.ts`,
+  `prerequisitesMissingIssue`) already matches both by exact string alongside
+  `bootstrap.prerequisites-missing`, so they were a real, already-bound
+  contract this registry simply never recorded — `contract/README.md`
+  documented the gap as a workaround ("a consumer that wants those two must
+  match them by name") instead of the fix. Renaming either today is now a
+  breaking-wire change like every other frozen code, not a silent one.
+  Registers one more `reserved` code, `debug-config.legacy-entry-untouched`,
+  for the new signal described under Fixed (#179) — folded into this same
+  registry edit rather than a second PR, since both changes touch
+  `contract/issue-codes.json`.
+- **Re-vendored the scaffold fixtures and the toolchain lock against alp-sdk
+  `cdfe1368` (alp-sdk#1016), and bumped `PINNED_SDK_TAG` to match.** #1016
+  rewrote the `Customer workflow:` header in every example `board.yaml` from
+  "copy this directory … and `west build`" to "`tan init --from-example
+  <category>/<name>` … and `tan build`" (ADR-0020: tan is the whole command
+  surface). Because `scripts/alp_cli/init.py` points `TEMPLATE_DIR` at
+  `examples/peripheral-io/hello-world` and `--emit scaffold` copies those files
+  verbatim, comments included, an alp-sdk comment sweep changes scaffold output
+  — so `scaffold_byte_parity.py` went red, exactly as designed. Six vendored
+  `board.yaml` files moved (`diagnostics`, `minimal`, `sensor`, each for both
+  SKUs); `edge-ai` and `iot` were unaffected. Comment-only: no schema, core or
+  peripheral content changed. Re-vendored by re-running the emit, not by
+  hand-editing the files.
+  `contract/fixtures/toolchains/toolchains.json` also moved, and the change is
+  worth recording: alp-sdk adopted tan-cli#1012's note and now documents in
+  that file's own comment that `check_toolchain_lock.py` scans only alp-sdk's
+  workflows, naming `ZEPHYR_SDK_INSTALL_VERSION` as a cross-repo consumer
+  covered solely by tan-cli's own byte-parity assertion. `zephyrSdk.version`
+  is **unchanged at `1.0.1`**, so `ZEPHYR_SDK_INSTALL_VERSION` and the install
+  command `tan doctor` prints are unaffected.
+- **BEHAVIOUR CHANGE: `tan bootstrap` no longer sprays `zephyr/`, `modules/`,
+  `.west/` and its venv into whatever directory the alp-sdk checkout happens
+  to sit in — it now guards that parent, and refuses (or, interactively,
+  offers to relocate) when it holds anything else** (#185). `west init -l
+  <alp-sdk>` forces the west topdir to be the checkout's own PARENT (#769) —
+  a customer who clones into `~/Downloads` used to get multi-gigabyte
+  `~/Downloads/zephyr`, `~/Downloads/modules`, `~/Downloads/.west` and
+  `~/Downloads/.venv`, unannounced, and OUTSIDE the checkout so no
+  `.gitignore` could ever reach them.
+  The trigger is a predicate, not a directory-name list (`Downloads`/
+  `Desktop`/… would be locale-dependent and incomplete by construction):
+  **proceed silently when the checkout's parent holds nothing but the
+  checkout itself, bootstrap's own venv, and/or an existing west workspace
+  (a `.west/config` that is actually readable — not merely an entry NAMED
+  `.west`, which a plain file or an empty directory could also be, and which
+  used to be enough to wave the guard through); otherwise guard.**
+  `mkdir alp && cd alp && git clone …` — the documented flow — never
+  prompts; a parent already holding a real `.west` workspace is never
+  guarded either, and neither is a bootstrap that died between creating its
+  venv and `west init` ever writing `.west` (a network drop mid pip
+  install) — its own retry over that exact state reaches the existing venv
+  recovery path instead of being refused. `$HOME` and `~/Downloads` always
+  hold other entries, so they always guard.
+  Interactively, an accepted guard relocates the checkout (its ENTIRE tree —
+  `.git`, uncommitted changes, untracked files — via one atomic directory
+  rename, never a copy that could half-complete) to `<parent>/alp-workspace/
+  <checkout-name>` and builds the workspace there instead. A prompt needs an
+  actual human at a console: `--non-interactive`/`--ci`/`--format json` all
+  say so explicitly, and so does stdin simply not being a terminal (piped,
+  redirected, or a CI runner with none of those flags set) — the guard
+  **fails outright** (exit 2) rather than hanging on a prompt nothing will
+  ever answer, naming the remedy: run `tan bootstrap --workspace <path>`
+  (which relocates with NO guard at all — the customer has answered the
+  question) or clone alp-sdk into a dedicated directory. `--workspace`
+  itself is validated before anything touches disk — an empty/whitespace
+  value (`--workspace ""`, the classic unset-`$WS` shell accident) and an
+  ambiguous drive-relative root (an MSYS-style `/e/foo/ws` on Windows, which
+  used to resolve against whichever drive the process happened to be
+  running from) are both refused rather than guessed at, and `--print-env
+  --workspace <path>` is refused too, rather than printing env lines for a
+  directory nothing was ever moved into. A `$ZEPHYR_BASE` workspace that
+  bootstrap is about to ADOPT is checked first, so a dirty checkout parent
+  no longer trips the guard (or, interactively, offers to move the
+  checkout) for a run that was never going to write there in the first
+  place. A failed relocation attempt (destination collision, cross-device
+  move, a Windows sharing violation — the latter two now name their own
+  remedy) always leaves the checkout exactly where it was — the atomic
+  rename cannot leave a customer with neither the original nor a working
+  workspace. `tan build` and `tan doctor --build --fix` inherit this same
+  guard via their delegated auto-bootstrap, and their refusal names `tan
+  bootstrap --workspace <path>` explicitly, since neither has a `--workspace`
+  flag of its own.
+  When a relocation moves a project that lives INSIDE the checkout (the
+  `alp-sdk/examples/.../hello-world` shape), the reported `project.root`/
+  `project.boardYaml`/`sdk.root` are rebased onto the new location too,
+  instead of continuing to name the path the checkout just vacated.
+  **Migration note:** a CI pipeline that clones alp-sdk into a directory it
+  shares with other content and then runs `tan bootstrap` there will newly
+  fail instead of bootstrapping. No `.github/workflows/**` job in this repo
+  invokes `tan bootstrap` DIRECTLY, but `parity.yml`'s `seam2` job reaches it
+  INDIRECTLY: its `real build (tan build)` step runs in text mode with
+  neither `--ci` nor `--format json`, and `tan build`'s auto-bootstrap
+  (`preflight::maybe_auto_bootstrap`, gated only on text mode) would call
+  `bootstrap::run` if the workspace readiness check ever failed there. That
+  path is saved today not by the absence of a `tan bootstrap` call but by
+  `west init -l alp-sdk` (`parity.yml`'s earlier `west workspace` step)
+  having already created `$GITHUB_WORKSPACE/.west` as a real, config-bearing
+  workspace before that step runs — which the guard now recognizes as such.
+  The moment a workflow adds a genuinely fresh `tan bootstrap`/`tan build`
+  call over a directory that is NOT already a west topdir, it will need
+  `--workspace` or a dedicated clone directory like every other pipeline.
+  Registers four new `reserved` issue codes (`bootstrap.workspace-guard`,
+  `bootstrap.workspace-relocated`, `bootstrap.workspace-invalid`,
+  `bootstrap.print-env-workspace-conflict`) in `contract/issue-codes.json` —
+  no consumer binds to any of them yet.
+
+### Security
+- **README's Manual install section taught the unverified download the scripts
+  had just been made to refuse** (#188). #176 stopped `install.sh` /
+  `install.ps1` installing a binary they cannot verify; a few lines below the
+  one-liners, on the same page, the Manual snippets still fetched a binary with
+  no digest step, offered `tan --version` as the confirmation, and — on Windows
+  — wrote straight to `tan.exe`, the exact ordering #176 changed because a bad
+  binary that has already landed may already be locked or on PATH. That made
+  the fallback for the higher-risk population (a locked-down host, a policy
+  against `curl | sh`, a hand-carried air-gapped binary) the weaker path, and
+  left a documented route to the unverified-`tan`-on-PATH state
+  alp-sdk-vscode#393 describes.
+  Both snippets now resolve `latest` ONCE — through the same redirect
+  `install.sh` follows and the same API field `install.ps1` reads, so the manual
+  path lands on the tag the one-liners land on — and build the binary and
+  `checksums.txt` URLs from it. `releases/latest/download/…` resolves `latest`
+  separately per fetch, which is the two-resolutions problem #176 fixed in the
+  scripts, and the digest for a given filename really does move between tags
+  (`tan-x86_64-pc-windows-msvc.exe` is `f159c1dc…` at `v0.4.0-rc1` and
+  `a80fb5da…` at `v0.4.0`).
+  They also download into a **fresh directory** and chain every step, because
+  pinning the tag alone is not enough: with a fixed filename in the working
+  directory and no gating, a reader who edits the tag and whose fetches 404
+  verifies the PREVIOUS tag's binary against the PREVIOUS tag's digests and gets
+  a confident `OK` — the same wrong-verdict class #176 removed, reproduced live
+  against the real releases during review. The matching is by exact field as the
+  installers do, so a neighbouring asset's line cannot satisfy the check, and an
+  asset missing from `checksums.txt` is refused explicitly rather than left to
+  `sha256sum -c`, which **exits 0 on empty input**. The two refusals are worded
+  apart — an incomplete release is not a tampered download — and the PowerShell
+  snippet additionally sets `$ErrorActionPreference = 'Stop'`, negotiates TLS
+  1.2, and passes `-UseBasicParsing`, all three of which `install.ps1` already
+  carries for Windows PowerShell 5.1 hosts.
+  The Linux default is now the static `-musl` asset, matching what `install.sh`
+  selects rather than the `-gnu` build with its glibc floor — this section is
+  the fallback for exactly the old or locked-down host that floor excludes.
+  **Both** mechanisms are documented, and deliberately: sha256 needs nothing
+  but coreutils (or PowerShell's built-in `Get-FileHash`), so it is the
+  baseline a host that cannot install `gh` can still run, while `gh attestation
+  verify <file> --repo alplabai/tan-cli --signer-workflow
+  alplabai/tan-cli/.github/workflows/release.yml` proves the file came out of
+  that workflow, which a digest published in the same release cannot.
+  `--signer-workflow` is not optional garnish: without it the command binds the
+  artefact to *some* workflow in the repo, not to the release job. The README
+  now says why each check is there, so neither gets "fixed" back out.
+- **`install.sh` and `install.ps1` now verify the downloaded binary against the
+  release's `checksums.txt` and refuse to install on any failure** (#176).
+  Previously both wrote the download straight to the install destination with
+  nothing but TLS behind it; the only occurrence of "verify" in either file was
+  prose telling the user to run `tan --version` afterwards, which establishes
+  that something runs, not that it is what we published. `alp-sdk-vscode`
+  already verified its own managed download against the same file
+  (alplabai/alp-sdk-vscode#389), so the two acquisition paths for the same
+  binary disagreed about whether they checked it — and the unverified one is
+  what the extension's **"Install tan CLI (global)"** button runs, whose result
+  the extension's resolver then prefers over its own verified copy, on every
+  activation.
+  Failures are worded as the distinct facts they are, all of them refusing and
+  leaving the install destination untouched: digest **mismatch**;
+  `checksums.txt` **could not be fetched** (says nothing about the binary);
+  the asset **not listed** in it; and, POSIX only, **no `sha256sum`/`shasum`**
+  on PATH. There is deliberately no `--no-verify` escape hatch — a flag that
+  turns the check off is the hole this closes, wearing a consent form.
+  `install.ps1` now downloads to a temp file and moves it into place only after
+  the digest matches; it previously wrote directly to the destination, so a bad
+  binary had already landed by the time anything could detect it.
+
+### Fixed
+- **`tan scaffold` still hung on a non-TTY stdio, and `tan init` still hung
+  whenever stderr was the redirected handle** (#187 follow-up to #198). #198
+  fixed the reported command by adding a `stdin_is_tty` term to `init`'s own
+  local predicate. Two live hangs survived it.
+  - **`tan scaffold` was never touched.** It carried the same flags-only gate
+    (`!--non-interactive && !--ci && !--format json`) and blocked on its own
+    `Text::new("Module name:")` prompt under exactly the redirected stdin the
+    issue described. It now refuses instead — its non-interactive contract is a
+    refusal, not a default, since a module name has no sane one — exiting 2 with
+    `scaffold.name-required`.
+  - **`stdin=tty, stderr=piped` still hangs on a stdin-only gate**, and that is
+    not an exotic shape: it is every wrapper that captures output while
+    inheriting the terminal, `.stderr(Stdio::piped())` included. inquire splits
+    the two handles — it renders to **stderr** (so a redirected stderr hides the
+    prompt) and reads through crossterm's `tty_fd()`, which **opens `/dev/tty`**
+    when stdin is not a terminal. Confirmed live under a pty: still running
+    after 12s, zero files created, the prompt's escapes sitting in the capture.
+    The same mechanism means the Unix block was never on the redirected stdin at
+    all — `tan init </dev/null` from a real terminal session blocked on
+    `/dev/tty`, and the `init: Cancelled.` exit 1 seen instead on CI and in
+    agent shells is only what happens where `/dev/tty` cannot be opened.
+  - **One home for the rule, because it was three.** #198's `init`-local
+    `interactive_mode` predicate (and its test table) moved to `cli.rs`, gained
+    the `stderr_is_tty` term, and is now reached through
+    `GlobalArgs::can_prompt()`. `init`, `scaffold` and `bootstrap` all call it.
+    `bootstrap` had grown its own inline copy in #185 — fixing the rule in one
+    command and not the others is exactly how this bug outlived its own fix.
+  - A missing terminal still falls back to the flag-derived defaults rather than
+    erroring, unchanged from #198: that is what `--template`'s own help already
+    promised ("defaults to `zephyr-app` when not given and there is no TTY to
+    prompt on"). `--non-interactive`'s own help and the README flag table now
+    say which commands default and which refuse.
+  - The non-TTY path is now driven in `tests/init_non_tty_stdin.rs`, which
+    spawns the real binary with `Stdio::null()` and captured stderr under a 60s
+    watchdog — the interactive path was exercised and the redirected-stdio path
+    was not, the same shape as #176's `irm | iex`-tested /
+    `.\install.ps1`-untested parse bug. The PROMPTING branch remains manual: no
+    CI runner has a TTY, so an `is_terminal()` false negative would degrade `tan
+    init` to a silent default scaffold with every gate green.
+- **`.\install.ps1` did not parse at all under Windows PowerShell 5.1** — the
+  PowerShell that ships with Windows (#176, found while adding the above). The
+  file is BOM-less UTF-8; 5.1 decodes such a file using the system ANSI
+  codepage, and the em dash `—` (`0xe2 0x80 0x94`) has a third byte that decodes
+  to **U+201D**, which PowerShell honours as a string delimiter. The result was
+  `The string is missing the terminator: "` and a cascade of brace errors, none
+  of them near the real cause. Both installers are now pure ASCII.
+  The documented `irm … | iex` one-liner was NOT affected — that path decodes
+  UTF-8 correctly before parsing — which is why this survived: the pipe-to-shell
+  form was exercised and the download-and-run form was not.
+
+### Added
+- **`tan build --pristine`** (#163) — force-wipe every slice's build dir
+  before dispatch, the manual counterpart to the automatic sdk-switch-pristine
+  wipe (issue #52) for a stale build dir the recorded-stamp heuristic doesn't
+  (or can't yet) catch. Not a second wipe mechanism: it forces the SAME
+  `SdkStampAction::Pristine` decision the automatic check already makes, still
+  inside the same two structural safety guards (an explicit `-d`/
+  `--build-dir` in the slice's own command; a plan cwd outside `build/`) — it
+  never touches a build dir tan cannot vouch for, forced or not. A no-op on a
+  never-configured build dir (nothing to wipe).
+- **`tan generate --target os-topology`** (#115) — the per-core
+  natural-vs-effective OS facts `scripts/alp_project.py --emit os-topology`
+  produces (`core_type`, `runtime_class`, `default_os`/`effective_os`,
+  `overridden`, `allowed_os`), the shape alp-sdk#95's heterogeneous-SoM
+  configurator UI needs and `system-manifest`'s flat `slices[].os` cannot
+  provide. Previously reachable only via a raw `python -m alp_cli emit
+  os-topology`. alp-sdk's own docs describe the bare invocation as "JSON to
+  stdout, for IDEs" (unlike the file-writing targets), which raised a real
+  question over `tan generate --target` vs. a new `tan inspect` reader —
+  resolved by measuring live against the pinned SDK checkout rather than
+  guessing: `--output <path>` writes a normal file for this target exactly
+  like `carrier-netlist`/`west-libraries`/`hw-info-h` (the SDK's shared
+  `_write_or_print` helper honors it identically), so it drops into the
+  existing `generate` shape. Writes to `build/generated/os-topology.json`,
+  is in the default (`tan generate`/`--all`) target set, and `--core` is
+  refused rather than silently tolerated: measured live, the SDK accepts but
+  ignores it for this target (`alp_project.py: --core is ignored for --emit
+  os-topology (project-level emit)`, stderr, exit 0, output unchanged) —
+  the same "does nothing" shape `carrier-netlist`/`native-sim-overlay` are
+  already refused for. Covered by `live_run_generate.rs`'s real spawn suite
+  (`os_topology_target_writes_the_per_core_os_facts`), which asserts the
+  actual written JSON's `m55_hp` core entry rather than assuming its shape
+  from another target's golden.
+- **`tan generate --target west-libraries`** (#114) — the `west.yml` library
+  auto-pin fragment `scripts/alp_project.py --emit west-libraries` produces,
+  listing the Zephyr modules and exact west project pins a project's
+  `board.yaml` `libraries:` declarations require. Drops into the existing
+  single-file target shape exactly like the other five, writing to
+  `build/generated/alp-west-libs.yml` (alp-sdk's own documented convention,
+  `docs/board-config-emit.md`) and included in the default (`tan generate` /
+  `--all`) target set. Companion gap #113 (`hw-info-h`) is addressed below.
+- **`tan generate --target hw-info-h`** (#113) — the build-time
+  `ALP_HW_BUILD_*` identifier header companion to `<alp/hw_info.h>` that
+  `scripts/alp_project.py --emit hw-info-h` produces (delegated to
+  `scripts/alp_project_emit/hw_info.py`), baking `board.yaml`'s SoM SKU/
+  family/hw_rev and (when declared) board name/hw_rev into string macros an
+  app cross-checks against the runtime EEPROM read via
+  `alp_hw_info_assert_matches_build()`. Previously reachable only via a raw
+  `python -m alp_cli emit hw-info-h --output <path>` that bypassed `tan`
+  entirely. Same single-file, project-wide shape as `west-libraries`: writes
+  to `build/generated/alp_hw_info_build.h` (alp-sdk's own documented
+  convention, `docs/board-config-emit.md`), is in the default (`tan
+  generate`/`--all`) target set, and `--core` is optional -- forwarded
+  through to `alp_project.py`, where it picks which core's OS lands in the
+  generated `ALP_HW_BUILD_OS`/`ALP_HW_BUILD_PRIMARY_CORE` macros.
+- **`tan generate` live-run e2e** (`crates/tan-cli/tests/live_run_generate.rs`)
+  — spawns a REAL `alp_project.py` from a real alp-sdk checkout and asserts
+  what actually lands on disk, closing the gap unit tests against a stub
+  loader script cannot: that alp-sdk accepts the argv `tan` composes, and
+  that files land where `tan` claims. Covers `zephyr-board` (including the
+  SoM-swap non-collision case PR #157 fixed: two SoMs sharing a core id must
+  never write into the same directory), `west-libraries` (output parses as
+  real YAML), `hw-info-h`, `--core` forwarded vs. refused, and the
+  `ValidationFailure`(2)-not-`InternalFailure`(5) exit-code mapping. Wired
+  into `parity.yml`'s `seam2` job (right after its `west`/PyYAML/jsonschema
+  deps install, ahead of the Zephyr SDK/Renode installs it needs neither of)
+  against the same `PINNED_SDK_TAG` checkout the materialise/build steps
+  already use; hard-fails (not skips) if `TAN_LIVE_RUN_SDK_ROOT` is unset
+  where `seam2` also sets `TAN_LIVE_RUN_REQUIRED=1`, self-skips everywhere
+  else -- including this repo's own bare `cargo test` CI job, which wires
+  neither var and would otherwise hard-panic on all five tests on every push
+  and PR (an env-detection bug caught in review before merge: gating the
+  panic on the generic `CI=true` GitHub Actions sets on every runner, rather
+  than a dedicated opt-in, made that unrelated job fail). A spawn/module
+  environment failure (missing interpreter, missing PyYAML/jsonschema) is
+  also now correctly distinguished from a real target failure in the panic
+  message on every platform, including the `program not found` text Rust's
+  `Command::output()` reports on Windows and the `is required.  Install via`
+  text `alp_project.py` itself exits with for either missing dependency.
+- **`tan generate --target zephyr-board --core <id>`** (#116) — the tan front
+  door for the per-core Zephyr board tree generator
+  (`scripts/gen_zephyr_board.py` via `--emit zephyr-board`), the step
+  alp-sdk's `docs/porting-new-som.md` documents right after `tan new-som`
+  scaffolds a new SoM. Previously reachable only via a raw
+  `python -m alp_cli emit zephyr-board --core <id> --output <dir>` that `tan`
+  otherwise never requires. Unlike every other `generate` target this one
+  hard-requires `--core` and writes a DIRECTORY of files (`<board>.dts`,
+  `.yaml`, `_defconfig`, two `Kconfig.*`, the pinctrl `.dtsi`, `board.yml`)
+  rather than one fixed file, so it is deliberately NOT part of the
+  default/`--all` set -- reachable only via an explicit `--target
+  zephyr-board --core <id>`, landing under `build/boards/<board-dir>/` where
+  `<board-dir>` is the SDK's own `alp_e1m_<sku-slug>_<core>` board-directory
+  name (matching `docs/porting-new-som.md` Step 7's own `--output
+  build/boards/alp_e1m_aen901_m55_hp/` example), never a bare core id -- two
+  SoMs that share a core id (a first-class SoM-swap flow) write to different
+  directories instead of colliding in one. `--core` is required for this
+  target, optionally accepted -- forwarded straight through to
+  `alp_project.py` -- on `zephyr-conf`/`yocto-conf`/`cmake-args`/
+  `dts-overlay`/`west-libraries`/`hw-info-h` (`alp_project.py`'s own `--core`
+  help documents it as meaningful there too, at the pinned SDK tag), and
+  refused on every other target (`carrier-netlist`, `native-sim-overlay`, and
+  the default/`--all` set, none of which the SDK ever reads `--core` for).
+
+### Fixed
+- **`tan debug-config` silently deleted every JSONC comment (plus any BOM and
+  trailing comma) in the customer's `.vscode/launch.json` on every write, not
+  just the one entry actually being changed (#182).** Root cause:
+  `create_launch_json_write_plan` parsed the whole file into a `serde_json::Value`
+  (via the existing, still-correct `strip_jsonc` tolerant read) and then
+  re-serialized the WHOLE document with `serde_json::to_string_pretty` — so a
+  `// remote probe, do not commit` note or a hand-written `// swap to m55_he
+  for the HP build` was gone at exit 0, with no diff shown and no mention in
+  the run's own output, on a file the customer owns and hand-edits. Reproduced
+  end-to-end against the real binary: a 4-comment, BOM-carrying, trailing-comma
+  fixture went to 0 comments and lost its BOM on a single `tan debug-config`
+  run, including on an entry the run wasn't even asked to touch. Considered a
+  jsonc-preserving parser crate first and rejected it: the write plan only
+  ever changes ONE array element (or appends one), so a targeted byte-level
+  splice needs no parser at all, and — unlike a round-trip through even a
+  jsonc-aware library — guarantees every byte outside the edited span survives
+  by construction (there is no re-serialization pass over it to lose
+  anything), rather than merely "usually". New `tan_core::jsonc_splice` locates
+  the target entry's exact byte span in the ORIGINAL text (mirroring
+  `strip_jsonc`'s own string/comment tracking so the two never disagree about
+  what counts as structure) and the write copies everything outside that span
+  through unconditionally. Falls back to the old whole-document re-serialize
+  only when there is no original text to splice into (a brand-new file) or the
+  locator can't confidently place the array (no top-level `configurations` key
+  in the raw text) — never a malformed write. A comment sitting ABOVE the
+  edited entry survives (it's outside the entry's own `{...}` span); a comment
+  BETWEEN that one entry's own keys is the one unavoidable loss, exactly like
+  any tool that overwrites one JSON object's fields — every comment on every
+  OTHER entry, the BOM, and any trailing comma are untouched. A file tan
+  genuinely cannot parse still refuses to write rather than guessing, unchanged
+  from before — the bug was always "destroys and reports success", not "fails
+  to parse a good file". The four `debug-config-preview` envelope goldens are
+  unaffected: preview never reads the customer's file.
+- **A semantically no-op `debug-config` re-run still spliced (and reformatted)
+  the maintained entry, destroying a comment inside it even though nothing
+  about the entry had actually changed (review follow-up on #182).**
+  Reproduced end-to-end: generate the entry once, hand-add
+  `// DO NOT DELETE: probe serial 000123456789` between two of its keys with
+  nothing else touched, re-run the identical command — 444 → 394 bytes, the
+  comment gone, exit 0, `issues: []`. The extension shells `debug-config`
+  before every debug session, so the no-change re-run is the COMMON case, not
+  an edge case. `create_launch_json_write_plan` now compares the merged entry
+  against what was already on disk and, when they are identical, skips the
+  splice entirely and hands back `original`'s own bytes verbatim — an
+  unchanged entry means an unchanged document, since the splice never touches
+  anything else anyway. Also closes the silent half of #182 itself: a write
+  that DOES drop a comment (the one still-unavoidable case — a comment
+  sitting between two keys of the entry actually being replaced, or the
+  whole-document fallback) now reports it as an `issues[]` entry,
+  `debug-config.comments-dropped` (severity `info`, registered `reserved` in
+  `contract/issue-codes.json`, no consumer yet), plus a `note:` line in text
+  mode — #182 named "a tool that deletes user-authored content must not report
+  unqualified success" as the non-negotiable floor, and silence on that one
+  remaining loss path did not meet it. Also fixed: a document with two
+  top-level `"configurations"` keys (`serde_json` resolves the duplicate to
+  the LAST one; the byte-level locator used to stop at the FIRST) could splice
+  into the wrong array, destroying whichever entry sat in the one actually
+  rewritten and leaving the other stale — the locator now bails to the safe
+  whole-document fallback on a duplicate instead of guessing. Also fixed: a
+  splice into a CRLF-authored `launch.json` used to emit the new entry's own
+  newlines as bare LF, leaving a mixed-EOL file (Windows is tan's primary
+  platform); the splice now matches whichever line ending is already dominant
+  in the file. Also fixed: appending into an array collapsed onto one line
+  (`"configurations": []`, VS Code's own stock template) used to indent the
+  new entry at a flat 4 spaces regardless of the file's actual indent width
+  and leave the closing `]` stranded at column 0; it now derives the entry's
+  indent from its neighbours and keeps the closing bracket aligned.
+- **The sdk-switch-pristine stamp recorded only the resolved `--sdk-root`
+  PATH, so an SDK checkout that changes CONTENT at the SAME path was silently
+  reused — the #163 symptom, still live after the `--pristine`/no-stamp fix
+  above closed only the path-changing case (review follow-up on #163).**
+  Reproduced end-to-end and with a unit test: seed a build dir under one SDK
+  commit, `git checkout` a different tag in the SAME `--sdk-root` checkout (or
+  `tan sdk switch <path>` back to a literal path that never moved — `sdk.rs`
+  resolves that to an unchanged pointer), and a plain re-run of `tan build`
+  never noticed — no `build.sdk-switch-pristine` issue, stale build state
+  intact. The plan already carries the fix's own input: a freshly emitted
+  plan's `sdkCommit` reflects the checkout's CURRENT git HEAD. A new
+  `tan_core::plan_exec::sdk_stamp_key` folds it into the identity
+  `sdk_stamp_action` compares and the executor writes to `.tan-sdk-root`
+  (`<root>@<sdkCommit>`, degrading to the root alone on an older/commit-less
+  plan — matching, and staying compatible with, the historical stamp). An
+  existing root-only stamp mismatches the new key exactly once, the first
+  build after upgrading — the same "fail toward a spurious rebuild, never
+  toward trusting a stale one" trade-off the original mechanism already makes.
+- **`tan build --pristine` misreported a harmless no-op as a wipe for a slice
+  whose build tool never used `<cwd>/build` at all (review follow-up on
+  #163).** The `--pristine` guard checked bare `cwd.join("build").exists()` —
+  but `write_sdk_stamp` itself `create_dir_all`s that exact directory to write
+  `.tan-sdk-root`, so after ANY prior successful build (a yocto/bitbake slice
+  included, whose own state lands elsewhere — bitbake's TMPDIR defaults to
+  `<TOPDIR>/tmp`, not `<cwd>/build`) the directory `.exists()` with nothing in
+  it but tan's own stamp. Reproduced end-to-end against a real E1M-V2N101
+  plan: `tan build --native --pristine` reported `build.sdk-switch-pristine —
+  a55_cluster: --pristine passed; wiping build dir before dispatch` for the
+  bitbake slice's build dir, which held only `.tan-sdk-root`. Not destructive
+  (nothing bitbake wrote was there to lose), but exactly the "misreport a
+  harmless no-op as a wipe" the `.exists()` guard was added to prevent. Now
+  gated on `cmake_cache_configured` — the SAME "was this dir ever really
+  configured" signal the automatic (non-forced) branch already uses.
+- **`kconfig_fixture_parity.py` and `scaffold_byte_parity.py` still treated an
+  explicit `--sdk` as a hint inside the required `seam1 -- plan-shape parity`
+  job (#175).** #173 fixed this for `toolchain_lock_parity.py` and
+  `bootstrap_manifest_parity.py`, deliberately leaving these two — the finding
+  scoped only the two it named. Both vendored their own
+  `_looks_like_sdk_checkout`/`resolve_sdk_root` pair instead of the shared
+  `tests/parity/_sdk_checkout.py`, so a `--sdk` that failed to resolve (e.g.
+  the checkout path moving, or alp-sdk reorganising `scripts/alp_orchestrate/`
+  away) silently fell through to `$ALP_SDK_ROOT` / a sibling checkout and,
+  finding neither, printed SKIP and exited 0 — both steps run inside
+  `parity.yml`'s required `seam1-plan-shape` job with a real `--sdk alp-sdk`,
+  so a moved checkout would go green having checked nothing. Both now import
+  `sdk_root_or_exit_code`, same as the other two: an explicit `--sdk` that
+  does not resolve is a hard FAIL (exit 1); omitting `--sdk` keeps the
+  existing local-dev-loop SKIP (exit 0). Verified against a real pinned
+  alp-sdk checkout: both now reach an actual byte-diff/scaffold-emit
+  comparison and PASS, not skip.
+- **A build dir from a PRE-#52 tan release (no `.tan-sdk-root` stamp at all,
+  not just one stamped for a different SDK root) is the exact shape a
+  reporter saw silently reused after `tan sdk switch` (#163).** Root-cause
+  finding: the auto-pristine machinery landed in v0.4.0 (issue #52) and is
+  unchanged since — `sdk_stamp_action` (`tan-core::plan_exec`) already treats
+  a missing stamp on an already-configured build dir as stale by design (the
+  one way a pre-feature build dir ever self-heals), and every guard/input in
+  the wiring (`crates/tan-cli/src/commands/build/execute/mod.rs`) traces
+  through to `Pristine` for this exact input shape. A new end-to-end test,
+  `execute_slices_wipes_a_pre_feature_build_dir_with_no_stamp_at_all` —
+  reproducing the reporter's precise shape (`CMakeCache.txt` present,
+  `.tan-sdk-root` absent, switched `--sdk-root`) rather than only the
+  pure-function unit test's coverage of it — confirms the mechanism fires
+  correctly today; mutating either the pure decision or the executor wiring
+  makes it fail. No second pristine mechanism was added. What the mechanism
+  cannot give a user in retrospect: the wipe + warning fire exactly ONCE, on
+  the run that detects the switch (deliberately, so a compile-error retry
+  loop keeps its incremental state) — a build that then fails for an
+  unrelated reason (as the reporter's did, #160's missing Zephyr SDK
+  toolchain) and is retried shows nothing about the switch on any later
+  attempt, because by then the stamp already matches. `tan build --pristine`
+  (above) covers the manual case the issue asked for.
+- **`ZEPHYR_SDK_INSTALL_VERSION` was a hand-ported copy of a fact alp-sdk
+  owns and guards, on a side alp-sdk's own drift gate cannot see (#172).**
+  `tan doctor`'s `zephyrSdk` check names the exact `west sdk install
+  --version <..>` command a customer needs (#160), sourced from a Rust
+  constant in `crates/tan-core/src/host_env.rs`. alp-sdk's
+  `metadata/toolchains.json` is the single source of truth for that pin and
+  is policed by `scripts/check_toolchain_lock.py` — but that gate's scope is
+  CI *workflows*, and it cannot see a tan-cli checkout, so a future SDK-side
+  Zephyr SDK bump would leave `tan` silently printing a stale, wrong install
+  command with no test or CI job on either side catching it. Measured
+  runtime-read (resolving the SDK root and reading the manifest live) and
+  rejected it: `zephyr_sdk_toolchain_check` is a pure function taking only a
+  `bool`, and the string is wanted precisely when the toolchain — and often
+  the SDK itself — is not yet resolved on a fresh host, which is the exact
+  case #160 was filed over. Instead, `metadata/toolchains.json` is now
+  vendored at `contract/fixtures/toolchains/toolchains.json`
+  (`tests/parity/toolchain_lock_parity.py` byte-diffs it against the pinned
+  alp-sdk checkout in CI, the same pattern already used for
+  `metadata/bootstrap.json`), and a new `cargo test`
+  (`host_env::tests::zephyr_sdk_install_version_matches_the_real_toolchain_lock`)
+  asserts the constant equals the vendored fixture's `zephyrSdk.version`
+  field — so a re-vendor that isn't matched by a constant update now fails
+  loudly instead of shipping a wrong remedy. Review follow-up: a second,
+  unguarded hand-ported copy of the same pin survived in
+  `zephyr_sdk_host_check`'s macos-x86_64 fix string (a literal `1.0.1` no
+  test exercised) — it now reads `ZEPHYR_SDK_INSTALL_VERSION` too, so an SDK
+  version bump can no longer leave `tan doctor` naming two different Zephyr
+  SDK versions on the same Intel Mac report. `tests/parity/
+  toolchain_lock_parity.py` and `bootstrap_manifest_parity.py`'s shared
+  `--sdk` resolution also no longer treats an explicit `--sdk <path>` as a
+  hint: previously a `--sdk` that didn't resolve silently fell through to
+  `$ALP_SDK_ROOT` / a sibling checkout and, finding neither, printed SKIP and
+  exited 0 — meaning `seam1-plan-shape`'s required `--sdk alp-sdk` step would
+  turn green without checking anything if that checkout path ever moved or
+  stopped shipping `scripts/alp_orchestrate/`. It now hard-fails (exit 1)
+  when an explicit `--sdk` doesn't resolve; the no-`--sdk` local dev-loop
+  skip is unchanged. Factored into a shared `tests/parity/_sdk_checkout.py`
+  instead of two more copies of the same resolution logic.
+- **The four first-blink blockers a customer actually hits on a fresh host
+  (alp-sdk#855's deliberate fresh-host run), closing #159 (PR #166)'s
+  companion set:**
+  - **#160 — nothing installed or named the Zephyr SDK toolchain, and
+    `zephyrSdkHost` read as "installed" when it meant only "a host build
+    exists for this platform".** Renamed to `zephyrSdkAvailableForHost` so a
+    `[+]` cannot be misread as "the toolchain is present" — the check that
+    means that, `zephyrSdk`, is a hard `Fail` when absent since #159/#166, and
+    the two sitting under confusable names on the same report was worse than
+    either alone. `zephyrSdk` now also appears in PLAIN `tan doctor`, not only
+    `--build`, both driven by the identical `crate::toolchain::zephyr_sdk_detected()`
+    probe so the two run modes can never disagree. Its `fix` now names the
+    EXACT command that got the alp-sdk#855 reporter past this — `west sdk
+    install --version 1.0.1 -t arm-zephyr-eabi` — instead of a bare docs URL;
+    tan does not run it itself (a real download+extract belongs to `west`
+    once a workspace exists, not a `doctor`-time side effect). That command
+    now also lands in the check's `detail`, not only `fix` — `fix` renders
+    only under `--verbose`, so plain `tan doctor` was still showing this
+    Fail with no remedy at all, matching the `sdk`/`workspace`/
+    `hostPrerequisites` checks that already inline theirs.
+  - **#161 — a partially-failed bootstrap left a broken `.venv` that every
+    retry silently reused, repeating the identical failure with no new
+    information.** Reproduced on a real Debian/Ubuntu host missing
+    `python3-venv`: `python3 -m venv` fails with `ensurepip is not
+    available`, but the interpreter file it leaves behind IS real, so
+    `tan bootstrap`'s presence check accepted it and died again at `No module
+    named pip`. `ensure_venv` now probes an existing venv's own `python -m
+    pip --version` before reusing it; an unusable one is removed and
+    recreated rather than adopted. Additionally, `tan doctor`/`tan bootstrap`
+    now probe venv CAPABILITY (`import ensurepip`) rather than merely
+    `python3`'s presence, so this fails loudly at `doctor` time, before
+    `bootstrap` ever runs — `python3-venv` itself could not be added to the
+    prerequisite list here, since that list is pinned byte-equal to alp-sdk's
+    `metadata/bootstrap.json` (a manifest fact this repo does not own; filed
+    upstream as alp-sdk#1011). The new `remove_dir_all` this recreate path
+    added now refuses a manifest `venv.dirName` that is not a plain relative
+    path segment (e.g. `".."`) at `metadata/bootstrap.json` parse time —
+    unvalidated, that field joins straight onto the west topdir, so a
+    manifest naming `".."` would have pointed the removal at the topdir's
+    PARENT.
+  - **#162 — `tan sdk install` left nothing selected, and `tan sdk current`
+    sent the user back to `install` with no exit.** `tan sdk install` now
+    auto-selects the version it just installed whenever nothing is currently
+    active (never overriding an existing selection), reusing the exact
+    `tan sdk switch` repair alp-sdk-vscode#388 already shells rather than a
+    second copy of it. `tan sdk current`'s "nothing selected" message now
+    recommends `switch` (naming what's already cached) instead of `install`
+    again whenever the cache is populated. Also fixed: `sdk install`/
+    `current`/`switch` reported `version (unknown)` for every git-clone
+    install because no released alp-sdk ships a top-level `VERSION` file;
+    `check_sdk_readiness` now falls back to `metadata/sdk_version.yaml`, the
+    same file `tan doctor`'s `sdkProvenance` check already read successfully.
+    Deliberately NOT done: an automatic "pick the newest `~/.alp/sdk-cache`
+    entry" global fallback for the directory-scoped-selection gap — this
+    codebase already refuses to guess among ambiguous Zephyr SDK installs for
+    the same reason ("newest" is not even a well-defined ordering), and the
+    two fixes above close the loop for the common case without it. `install`'s
+    own auto-select now says so explicitly, too: its success text gets a
+    `note` line stating the selection is scoped to the current directory,
+    since `install` is typically the very first command a new user runs,
+    often from a directory they will not `cd` back into.
+  - **#164 — `tan examples` printed only a count, never the list
+    `--from-example` needs a source dir from.** Text mode now renders
+    `id`/`title` per line (`--verbose` adding the description), plus a new
+    `--filter <substring>` (matched case-insensitively against `id`/`title`)
+    for narrowing the 97-entry catalog. Text mode also strips
+    README-derived markdown noise (`![alt](url)` image/badge spans — a real
+    example's title otherwise renders a raw `shields.io` badge URL inline —
+    and `**bold**` emphasis markers) from the rendered `title`/`description`;
+    the JSON `data.examples[]` payload keeps the raw value unchanged.
+- **`tan_core::GENERATION_TARGET_CATALOG` (what `tan explain`/`tan trace`
+  read) listed only 4 of the 10 real `tan generate --target` values (#165),
+  omitting `hw-info-h`, `west-libraries`, `zephyr-board`, `carrier-netlist`,
+  and `native-sim-overlay` — two of which shipped in the immediately
+  preceding PR, so the discovery surface was already behind the command
+  surface.** Root cause: `generate.rs` kept its OWN second, hand-maintained
+  copy of the target list (`ALL_EMIT_MODES` + a `match emit {..}` output-path
+  table), independent of the catalog — exactly how the two drifted apart,
+  silently, with nothing to catch it. Fixed by unifying the direction of
+  derivation the other way round from a naive merge: the catalog (plus
+  `tan_core::ALL_EMIT_MODES`, now the SOLE copy) is the single source of
+  every target's `emit` key and output path; `generate.rs` reads
+  `tan_core::ALL_EMIT_MODES` directly and derives `output_path_for_emit` from
+  `tan_core::generation_target_support` instead of hand-duplicating either.
+  `zephyr-board` is the one target that genuinely does not fit a single
+  `output_relative_path` string (it writes a per-SKU/core DIRECTORY of
+  files, not one file) — it stays a documented, explicit exception
+  (`GenerationTargetSupport::is_directory`), not a second silent divergence:
+  a new `catalog_matches_all_emit_modes_plus_zephyr_board` test fails if the
+  catalog's target set ever again differs from `ALL_EMIT_MODES` plus
+  `zephyr-board`. The stale "the four emit targets" module doc comment is
+  also corrected. `tan explain --target <mode>` now covers all ten
+  `generate` targets, including the `os-topology` target added above
+  (#115). `tan trace`/`tan support-bundle` deliberately do NOT: they
+  enumerate a separate, narrower `tan_core::BUILD_CONFIG_EMIT_MODES` (the
+  four per-core build-config targets a `tan build` slice actually
+  materialises — `zephyr-conf`/`dts-overlay`/`cmake-args`/`yocto-conf`,
+  unchanged from before this PR), since their own module docs describe
+  reporting "the generation decisions a build would make" — pointing them
+  at the full nine-target set instead (an earlier revision of this fix did)
+  would have them claim project-level exports like `carrier-netlist`/
+  `os-topology` that no build ever runs (review finding 1).
+
+  Two more defects surfaced measuring this against the real generated
+  output. The catalog's own `zephyr-board` entry named its documentary
+  output path `build/boards/<sku-slug>_<core>/`, missing the `alp_e1m_`
+  prefix `zephyr_board_dir_name` actually writes, so `tan explain --target
+  zephyr-board` pointed at a directory that does not exist (review finding
+  3) — fixed to `build/boards/alp_e1m_<sku-slug>_<core>/`. And
+  `generate.rs`'s `output_path_for_emit` joined the catalog's
+  `/`-separated literal in one `Path::join` call, leaving its internal
+  `/`s untranslated on Windows while `zephyr-board`'s own component-wise
+  join used the native separator — so a single `tan generate` envelope's
+  `data.written[]` mixed `build/generated/alp.conf` next to
+  `build\boards\alp_e1m_aen801_m55_hp` (review finding 4) — fixed by
+  splitting the relative literal on `/` and folding each component onto
+  the workspace root, so every target's path is native and internally
+  consistent.
+- **`tan generate`'s argument-shape errors (`--core` paired with a target it
+  doesn't scope; `--target zephyr-board` with no `--core`) now exit
+  `ValidationFailure` (2) with issue code `generate.invalid-target`, not
+  `InternalFailure` (5) with `generate.internal-failure`.** An ordinary usage
+  mistake used to be indistinguishable from a genuine internal bug on both
+  the exit code and the wire.
+- **`tan bootstrap`'s printed next steps still told the user to reinstall via
+  the retired, unpinned `cargo install --git https://github.com/alplabai/tan-cli
+  --bin tan` (#117).** alp-sdk#988 replaced every such site repo-wide with the
+  pinned `install.sh`/`install.ps1` one-liner except this one, which lives in
+  the Rust binary rather than a doc or script alp-sdk#988's sweep could reach.
+  Now prints the same platform-appropriate one-liner README.md's own
+  "Automatic" section documents -- verified live (`curl`/`irm` against both
+  raw GitHub URLs answer HTTP 200; `cargo install alp-tan-cli` was checked too
+  and still 404s on crates.io, per #151, so it was deliberately NOT used as
+  the replacement). Left as plain `tan doctor`, not `--build`: since #100
+  plain doctor already folds in the build-readiness preflight, and
+  `bootstrap`'s next-steps block is explicitly one of the sites that fold was
+  written to cover (see `assemble_doctor_report`'s doc comment).
+- **`tan doctor --build` stays accepted, permanently, as a deliberate
+  compatibility surface (#112).** #100 folded build-readiness into plain `tan
+  doctor`, making `--build` read as redundant -- but both `alp-sdk-vscode`
+  call sites (pinned to `SUPPORTED_CLI_VERSION "0.4.0"`) hardcode literal
+  `["doctor", "--build"]` / `["doctor", "--build", "--fix"]` argv with no
+  fallback. Removing the flag, or turning it into a usage error, would break
+  the Toolchain Doctor panel and its "Bootstrap now" remedy -- the primary
+  recovery path from a failed readiness check -- at the same moment. No
+  deprecation window and no planned removal date: the two commands stay
+  permanently distinct (own OS-set resolution, own check vocabulary), not a
+  shim scheduled to collapse into one.
+- **A release can no longer report a registry publish it did not perform
+  (#151).** `publish · crates.io` and `publish · npm shim` each emitted a
+  `::warning::` and exited **0** when their token was unset, so the v0.4.0 run
+  summary read `success` for both while the registries answered
+  `crate 'alp-tan-cli' does not exist` and `dist-tags: None`. `cargo install
+  alp-tan-cli` and `npm i -g @alplabai/tan` were documented install paths that
+  had never worked, and every signal the workflow produced said otherwise.
+
+  Both jobs already run on FINAL tags only (`!contains(github.ref_name, '-')`),
+  so the graceful skip only ever applied where it is least defensible: a
+  finished release advertising two install channels. A missing token now FAILS
+  that job and writes the outcome to `$GITHUB_STEP_SUMMARY` rather than an
+  annotation -- #151 is the proof an annotation is too weak, since the warning
+  was emitted correctly and still read as a publish. A successful publish
+  writes its own summary line too, so the run states what shipped either way.
+
+  The GitHub release is untouched: both jobs are `needs: release`, so the
+  binaries, `checksums.txt`, `envelope-contract.json` and the attestation are
+  already published before either can fail. The run going red reports the truth
+  about two registry channels; it does not withhold the release. Pre-release
+  tags never reach either job, so rc behaviour is unchanged.
+
+  `docs/release-contract.md` claimed "**No secrets.** Same-repo release uses the
+  default `GITHUB_TOKEN` only" -- flatly, with two secret-dependent jobs in the
+  same workflow. That line is why nobody noticed, and it is now a table naming
+  each secret and what breaks without it.
+
+  The README advertised both commands with no caveat, so a customer following
+  it today hits a failure. It now carries a warning naming #151 and pointing at
+  the release binaries, while keeping the command names documented so they do
+  not change under anyone once the tokens land.
+
+  Also corrected: the crates.io skip message asserted "The GitHub release
+  binaries + npm shim still ship". The npm shim did NOT ship, for the same
+  reason, and that job had no way to know.
+
+- **Seam 1's oracle carried a stale `multicore_rpmsg-imx93` fixture, papered
+  over with a tolerance that could pass a silently dropped command
+  (#855).** The vendored oracle predated alp-sdk#999 (merged `ff39401d`),
+  which teaches the planner to refuse a `west build -b <board>` command for a
+  Zephyr slice whose board has no tree, emitting `command: null` plus a
+  `board-tree-missing` warning instead. Rather than re-vendor the one stale
+  fixture, a prior pass added a `command -> null` tolerance to
+  `tests/parity/seam1_field_diff.py` -- a comparator-local workaround alp-sdk's
+  own copy of this comparator carries no equivalent of, and one that was
+  uncoupled from the warning it claimed to require: it accepted a command
+  vanishing with **no** accompanying warning at all, so seam 1 could go green
+  on a silently dropped command. Fixed by re-vendoring
+  `tests/parity/oracle/multicore_rpmsg-imx93.build-plan.json` byte-for-byte
+  from alp-sdk at `PINNED_SDK_TAG`, rather than hand-editing it here, and
+  deleting the tolerance outright -- `slices[*].debug.probe` is once again the
+  *only* delta `seam1_field_diff.py` allows through the gate. The comparator's
+  own negative-matrix suite (`tests/parity/test_seam1_field_diff.py`) now also
+  runs in CI, ahead of the live comparator, so a future comparator regression
+  fails before it is trusted to judge alp-sdk.
+- **`tan debug-config` wrote `"ALP: ..."` launch-configuration names while the
+  `alp-sdk-vscode` extension writes the same four configurations `"Alp: ..."`
+  (#133).** Both sides merge into `.vscode/launch.json` by exact `name` match,
+  so the two spellings never matched and every debug configuration a customer
+  generated with both tools ended up duplicated. `tan` now emits `Alp:` --
+  byte-for-byte identical to the extension's four names.
+
+  **Migration, corrected (#133 reopened):** this note originally said an
+  existing `ALP: ...` entry is left in place and has to be deleted by hand.
+  That was wrong, and not merely cosmetic: the orphaned `ALP:` entry is
+  exactly where a customer's own hand-resolved fields (a hand-filled
+  `device`, for instance) already lived, while the maintained `Alp:` entry
+  kept the unresolved placeholder -- so the advice to delete it would have
+  thrown away the working value. `tan debug-config` now adopts a legacy
+  `ALP: ...` entry onto its `Alp: ...` counterpart the first time it runs
+  after this fix, via the same merge an ordinary re-run already uses: a
+  hand-filled value on an unresolved-placeholder field (`device`,
+  `miDebuggerServerAddress`, `configFiles`, ...) carries across, while every
+  other field tan owns (`executable`, `cwd`, `runToEntryPoint`, ...)
+  refreshes to this run's values exactly as on an ordinary re-run. It
+  reports the migration as a `debug-config.legacy-entry-migrated` issue
+  (severity `info`) so an automated consumer or a `--format json` reader can
+  tell why the file changed. No manual deletion is needed, and none should
+  be done. The one case left alone on purpose: a workspace that already has
+  BOTH a maintained
+  `Alp: ...` entry and a legacy `ALP: ...` one (from running `tan
+  debug-config` both before and after this fix) keeps the legacy entry
+  exactly as it is -- nothing here decides which of two possibly-hand-edited
+  entries is authoritative, so that specific case is the only one where a
+  customer may still want to look at the file by hand.
+
+  The company is "Alp Lab" (never "ALP Lab"), and the same misspelling had
+  spread to other user-facing strings: the `tan sdk list` spinner and table
+  header ("Fetching ALP SDK releases...", "ALP SDK releases (N)"), the
+  `sdk.rs` error contradicting its own "Alp SDK: ..." string 79 lines above it
+  ("... is not a valid ALP SDK root."), and the New Project / module-scaffold
+  wizard's generated `README.md` headings ("# ALP Starter Project", "# ALP
+  Module Scaffold") and its `body_line1` for the minimal template, which
+  reaches the device console via `puts()`. All corrected to `Alp`. Left
+  untouched, deliberately: the `ALP_SDK_ROOT`/`ALP_FLASH_FORCE` env vars, the
+  `__ALP_SIM_DONE_N__` Renode sentinel, the `ALP-B*` diagnostic codes, and the
+  `ALP_*`/`CONFIG_ALP_*` C/Kconfig identifiers in vendored scaffold sources --
+  those are identifiers, not brand prose, and renaming them breaks real
+  behaviour.
+
+- **Doctor/inspect prose that named a VS Code setting on a path a terminal
+  user hits, finishing the sweep #127 started (#134).** Four sites still told
+  a `tan`-only user to "set `alpSdk.pythonPath`" or "open a workspace" -- a
+  setting and an editor action neither exists for them. `util.rs`'s
+  `python_too_old` (read by `build`, `validate`, `generate`, and the SDK
+  passthrough commands, and landing in `issues[].message` under `--format
+  json`, so it stays useful to both readers) now names the CLI remedy first
+  and keeps the VS Code setting as a parenthetical. `tan inspect`'s
+  `sdkRoot`/`workspaceRoot` details and `tan doctor`'s plain (non-`--build`)
+  `workspaceRoot` check -- both unreached by the extension, which only ever
+  shells `--build` -- now point at `--project <dir>` / `--sdk-root <path>` /
+  `tan sdk switch <path>`, reusing the vocabulary `build_preflight_checks`
+  already uses for the same facts.
+
+- **doctor: retired the permanently-`unknown` `peripheralViewerExtension` /
+  `memoryViewExtension` checks (#132).** Both mirrored a TS
+  `MCU_COMPANION_VIEWERS` constant that does not exist on any shipped
+  `alp-sdk-vscode` branch, and `marus25.cortex-debug` force-installs both
+  `mcu-debug.peripheral-viewer` and `mcu-debug.memory-view` as hard
+  `extensionDependencies` regardless -- `cortexDebugExtension` already covers
+  the same ground on the only host that can actually answer the question.
+  Neither check code is in the frozen `contract/issue-codes.json` registry, so
+  nothing on the wire contract changes.
+
+- **doctor: the native-host `lldb` check no longer warns and recommends
+  installing a debugger CodeLLDB already ships (#131).** `vadimcn.vscode-lldb`
+  bundles a complete LLDB inside its own extension directory and never reads
+  PATH, so a bare-PATH miss used to `Warn` and suggest "Install LLDB or
+  lldb-dap for native-host debug flows" -- a no-op remedy that fired on
+  essentially every customer machine, immediately under a line that (post-#102)
+  already said "vadimcn.vscode-lldb: unknown -- the standalone tan binary
+  cannot see VS Code's installed extensions." The check is now informational
+  and always `Pass`, mirroring `alp-sdk-vscode`'s own fix for this exact class
+  (PR #369): no `fix`, so nothing lands in `nextSteps` and no `doctor.lldb`
+  issue is raised. The resolved executable name is still reported when one is
+  found on PATH -- only the verdict and the advice for a miss were wrong.
+
 All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-07-28
 
 ### Added
+- **The JSON envelope vocabulary alp-sdk-vscode gates on is now a frozen,
+  tested, published contract (#106).** The extension matches four issue codes
+  with `===` and reads a dozen `data` field names behind `?? []` fallbacks, and
+  **every one of those matches fails open** — rename any and the extension does
+  not error, does not log and does not warn, it silently skips the check or
+  renders stale data, CI green on both sides. The headline case: rename
+  `data.soms` and the New Project wizard falls back to a static catalogue that
+  carries no `cores`, so a heterogeneous SoM scaffolds single-core with no IPC.
+  The reference part E1M-AEN801 is multi-core, so that is the default path, not
+  an edge case.
+  - `contract/issue-codes.json` is the single source for the frozen codes
+    (`bootstrap.windows-unsupported` — retired but RESERVED,
+    `bootstrap.yocto-host`, `bootstrap.prerequisites-missing`,
+    `presets.sdk-root-unresolved`), gated by `frozen_issue_codes` in
+    `crates/tan-cli/tests/contract.rs`. The consumer is deliberately NOT
+    loosened to prefix matching: a prefix match on `bootstrap.` would swallow
+    codes it has no verdict for.
+  - Four new golden envelopes extend the existing `contract/envelopes/` suite
+    (12 → 18 tests): `presets-no-sdk`, `presets-heterogeneous-som` (an `a55`
+    yocto + `m33` zephyr fixture SoM — the worked example above, made
+    executable), `explain-overview`, and `examples-catalog`. A case fixture can
+    now be a directory tree, so a case can carry a synthetic `sdk/` checkout
+    and pass `--sdk-root ./sdk`.
+  - `doctor --build`'s `data` keys get a key-set assertion rather than a golden
+    (its values are host facts): `summary.{pass,warn,fail}`, `nextSteps`,
+    `checks[].{name,status}`, and the literal check name `workspace`.
+  - Tagged releases now publish **`envelope-contract.json`** beside the
+    binaries — the frozen codes plus one golden envelope per command family —
+    so the extension's contract test can diff against a published artefact
+    instead of a hand-copied fixture.
+  - Two consumer fields stay UNCOVERED and are documented as such in
+    `contract/README.md` rather than quietly omitted: `build --materialise`'s
+    `data.written` (needs a resolvable SDK + a Python spawn) and `sdk list`'s
+    `data.releases` (network).
+- **`tan sdk list` carries GitHub's `draft`/`prerelease` flags through (#122).**
+  Both booleans were already in the Releases API response `tan` parses but were
+  dropped before reaching either the JSON envelope or the text table — a
+  consumer asking "what is the latest SDK?" could not tell a release candidate
+  apart from a genuine release, with no error and no log line. `SdkRelease`
+  now carries `draft`/`prerelease` (default `false` when GitHub omits or
+  misencodes either key, never a reason to drop the release), and the
+  `tan sdk list` table marks a flagged entry with `[draft]`/`[prerelease]`.
+  tan does not filter on either flag or add a `--include-prereleases` switch —
+  the consumer decides what "latest" means; tan's job is only to publish the
+  fact it already has instead of destroying it. One caveat: `fetch_releases`
+  sends no `Authorization` header, and GitHub returns `draft: true` entries
+  only to a caller with push access, so against the public `alp-sdk` repo
+  `[draft]` never renders today — it activates the moment a token is added.
+- **`tan doctor --build` checks `git`, `python`, `dtc` and `gperf`, and every
+  check can now carry a resolved `version` (#120, #123).** Four of the six
+  host tools a build needs were previously invisible to `data.checks[]`; `git`
+  and `python` are checked unconditionally (every backend's build-plan
+  emission runs `alp_project.py` through both, not just Zephyr's), `dtc` and
+  `gperf` are gated on the Zephyr entry in `data.osSet` (Yocto/baremetal-only
+  projects never see them) and — matching the retired `alp doctor`'s own
+  `_check_dtc`/`_check_gperf` — stay `warn` rather than `fail`. `python`
+  reports a version FLOOR, not bare presence: an interpreter below the
+  manifest's `pythonMinVersion` fails with its own detail, distinct from "not
+  found".
+  - Each `data.checks[]` entry gains an optional `version` — absent, never
+    `null`, when unresolved or not meaningful (`zephyrSdk`, `vendorToolchain`)
+    — reporting whatever tan itself resolved rather than leaving a consumer to
+    re-probe PATH and risk a second, disagreeing answer. `westResolved`'s
+    version comes from the SAME workspace-venv resolver its status does,
+    kept independent of `west`'s bare-PATH version so the two rows can never
+    be attributed to the wrong resolver.
+  - `missingPrerequisites[].tool` for python is now host-correct — `python3`
+    on a served POSIX host, `python` on Windows — matching `prerequisites.
+    install.linux`/`.macos`'s own key and `tan bootstrap`'s `posix_refusal`
+    naming for the identical missing tool, instead of always `python`, which
+    a POSIX consumer could not re-key back into that same install map.
 - **Vendor `board-diagnostics` and `iot-starter` from the SDK scaffold catalog
   (#14).** Closes out the last two vendorable entries from alp-sdk#864's
   scaffold catalog (added by alp-sdk#903): `board-diagnostics` now emits the
@@ -285,6 +1461,15 @@ All notable changes to `tan` are documented here. Format follows
   reported as `build.sdk-switch-pristine` naming both SDK roots. The wipe
   skips any slice with an explicit `-d`/`--build-dir` and only fires under
   the project's own `build` root. (#52)
+- **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
+  project in the headless smoke. A manifest with more than one Zephyr slice (an
+  E1M-AEN801's `m55_hp` + `m55_he`) was refused outright with "the Renode smoke
+  boots a single-Zephyr-slice system", leaving no way to smoke-test such a
+  project at all. `--core` narrows the zephyr set before the runnable filter, so
+  an explicitly named blocked/skipped slice still boots exactly like a lone one
+  does (the smoke touches no hardware). A name matching no zephyr slice fails
+  with `UnknownCore`, listing the manifest's zephyr cores. The refusal message
+  now names the flag. Unchanged for a single-slice project.
 
 ### Changed
 - **`tan sdk switch <version>` resolves the bare version against more than one
@@ -470,6 +1655,83 @@ All notable changes to `tan` are documented here. Format follows
   an in-flight contract-surface change).
 
 ### Fixed
+- **`ninja` was a Windows-only prerequisite in tan's own fallback, so a POSIX
+  host on a legacy SDK still hit the original defect (#121).** alp-sdk declared
+  `ninja` a POSIX prerequisite with real `install.linux`/`install.macos`
+  commands in #971/#981 (merged `d6fd3a18`), but the fact lives in THREE places
+  and only one had moved:
+  - `metadata/bootstrap.json` upstream -- fixed there;
+  - `contract/fixtures/bootstrap/manifest.json`, tan's vendored copy -- now
+    re-vendored byte-exact (sha256 `5202025aac269040f1893c843b2071d69f0a7f4bdd7b91755d832aa706466c7a`,
+    5577 bytes, LF) with `PINNED_SDK_TAG` moved `0ed078a6` -> `3ffd8774`,
+    20 commits forward;
+  - **`fallback_facts`, the hand-ported constants a legacy SDK with no manifest
+    actually uses** -- which still said `prerequisites_posix: [git, cmake,
+    python3]` and served no POSIX `ninja` command. Fixed here. That third copy
+    is the one a customer on a released SDK hits.
+  - Three expectations moved with it, each because the data moved and not to
+    make the suite green: `parses_every_field_of_the_real_manifest` (reads the
+    re-vendored fixture), `the_posix_refusal_stays_one_line_but_now_carries_real_commands`
+    (whose name had outrun its assertion -- `ninja` was the last commandless
+    POSIX entry), and `a_posix_host_gets_its_own_package_manager_and_never_winget`,
+    which carried a written prediction that it would go red on exactly this
+    change, with instructions not to weaken it.
+  - Note `ninja-build` vs `ninja`: the package name differs from the binary
+    name, which is the whole argument for carrying these as data.
+- **A pre-release tag would have shipped to every customer as `latest`.**
+  `release.yml` set neither `prerelease` nor `make_latest`, so a `v0.4.0-rc1`
+  tag's classification rested entirely on the action's default -- and
+  `install.sh` fetches `releases/latest/download/<asset>` directly, which
+  GitHub excludes a pre-release from ONLY when the flag is set. Both flags are
+  now derived from the one fact that distinguishes them, the hyphen in the tag,
+  so they cannot disagree with each other or with the tag.
+  - `publish_crates` and `publish_npm` skip a pre-release. npm was the sharpest
+    of the three: `npm publish` passes no `--tag`, so it defaults to the
+    `latest` dist-tag, and an unguarded rc would have become plain
+    `npm i -g @alplabai/tan` -- with npm unpublish far more restricted than a
+    crates.io yank. Skipping keeps an rc fully retractable, which is the reason
+    to cut one; `--tag next` is the documented relaxation.
+  - `docs/release-contract.md` gains the pre-release contract, and its Linux
+    target table is corrected: it documented `linux/x64`+`linux/arm64` as
+    consuming the `-gnu` assets with musl "not (yet) wired into"
+    `releaseAssetForTarget`, while the extension has mapped both to `-musl`
+    because the `-gnu` assets carry a glibc floor. The doc now separates the
+    zigbuild PIN (`2.31`) from the MEASURED floor of the shipped binary
+    (`GLIBC_2.30`, per `readelf -V`), and warns off the "2.31 floor /
+    GLIBC_2.39 not found" wording the extension still carries -- the
+    phenomenon is real but both numbers in it are wrong
+    (alp-sdk-vscode#370).
+    alp-sdk fixed the same mix-up in its own install docs in alp-sdk#990.
+- **`tan explain --template edge-ai-starter` described a project that is not
+  the one `tan init` writes (#124).** `project_template_details` read the
+  wizard registry's `libs` field unconditionally, but that field is
+  deliberately blanked for a vendored template (its files come from the SDK's
+  `--emit scaffold` tree instead) — `edge-ai-starter` reported "Default
+  libraries: (none)" while its vendored `board.yaml` declares
+  `libraries: [tflite-micro]`, one line under prose that names TFLite-Micro
+  directly. `iot-starter` and `board-diagnostics` had already been hand-synced
+  correct ahead of this fix (#128); `edge-ai-starter` was the one live wrong
+  answer. `explain`'s "Default libraries" line now derives from the vendored
+  `board.yaml`'s own `libraries:` block (`vendored_library_names_for`, new in
+  `tan-core::wizard::service::vendored`) for every vendored template, instead
+  of a second hand-synced registry field that can drift from it — the
+  registry's `libs` stays authoritative only for `minimal-app`, the one
+  template left hand-generated. "Default features" is unchanged (still
+  registry-sourced): a vendored `board.yaml` has no representation for
+  `iot-starter`'s inherent `mqtt: true`, so deriving that line fully is not
+  possible without reintroducing a different self-contradiction.
+  - Follow-up hardening (review of #137): `vendored_library_names` parsed the
+    vendored `board.yaml`'s `libraries:` block with a hand-rolled line scan
+    that matched only the `- name: <value>` spelling, not the bare-shorthand
+    `- <value>` form `tan_core::model`'s own `LibraryEntry` already accepts —
+    a future re-vendor shipping the shorthand form would have silently gone
+    back to "Default libraries: (none)" with no test catching it. It now
+    parses through `tan_core::model::BoardModel`/`LibraryEntry` directly, so
+    both spellings are covered. Also widened
+    `vendored_library_names_matches_across_families` from asserting only the
+    `edge-ai` AEN/V2N pair to all four (`minimal`/`sensor`/`edge-ai`/
+    `diagnostics`) — the doc comment already claimed family-invariance for
+    every vendored template, but only one pair was checked.
 - **`tan bootstrap` reused a workspace across a patch-level Zephyr bump, so the
   next build was green against the wrong Zephyr AND the wrong hal_alif (#98).**
   The reuse test compared only `MAJOR.MINOR`, so upgrading alp-sdk `v0.13.0` ->
@@ -973,18 +2235,6 @@ All notable changes to `tan` are documented here. Format follows
   Arm-toolchain scoping. The single degraded case is an alp-sdk `dev` checkout
   between #917 and #961, where the manifest exists but still has the
   one-sentence note; it is dev-only and customer-unreachable. (#82)
-
-### Added
-- **`tan renode --core <CORE_ID>`** — boot ONE Zephyr slice of a multicore
-  project in the headless smoke. A manifest with more than one Zephyr slice (an
-  E1M-AEN801's `m55_hp` + `m55_he`) was refused outright with "the Renode smoke
-  boots a single-Zephyr-slice system", leaving no way to smoke-test such a
-  project at all. `--core` narrows the zephyr set before the runnable filter, so
-  an explicitly named blocked/skipped slice still boots exactly like a lone one
-  does (the smoke touches no hardware). A name matching no zephyr slice fails
-  with `UnknownCore`, listing the manifest's zephyr cores. The refusal message
-  now names the flag. Unchanged for a single-slice project.
-
 ## [0.3.1] — 2026-07-25
 
 ### Added

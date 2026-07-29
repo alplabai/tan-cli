@@ -99,8 +99,8 @@ _PYTHON_TOKEN = "__PYTHON__"
 # `;`-joined multi-value arg keeps its other segments.
 _PYTHON_EXE_RE = re.compile(r"-DPython3_EXECUTABLE=[^;]*")
 
-# The one delta ADR-0020 hand-reviewed and allows through the gate:
-# debug.probe "openocd" (oracle, 97ad481b) -> null (df312cec+, #848).
+# The one delta hand-reviewed and allowed through the gate: debug.probe
+# "openocd" (oracle, 97ad481b) -> null (df312cec+, #848).
 _ALLOWED_OLD_PROBE = "openocd"
 _ALLOWED_NEW_PROBE = None
 
@@ -307,8 +307,7 @@ def diff_plans(oracle: dict, live: dict) -> tuple[list[tuple[str, Any, Any]], li
     failing: list[tuple[str, Any, Any]] = []
     for path, old, new in _walk_diff("", oracle, live):
         is_probe_field = path.endswith(".debug.probe")
-        if (is_probe_field and old == _ALLOWED_OLD_PROBE
-                and new == _ALLOWED_NEW_PROBE):
+        if is_probe_field and old == _ALLOWED_OLD_PROBE and new == _ALLOWED_NEW_PROBE:
             allowed.append((path, old, new))
         else:
             failing.append((path, old, new))

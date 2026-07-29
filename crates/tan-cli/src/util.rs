@@ -139,6 +139,51 @@ pub fn python_version(binary: &str) -> Option<(u32, u32)> {
     parse_python_version(&String::from_utf8_lossy(&out.stdout))
 }
 
+/// Probe `program`'s version by spawning `program --version` and extracting
+/// the first dotted-number token from its output (stdout, falling back to
+/// stderr for a tool that banners there). `None` when the program cannot be
+/// spawned or nothing in its output looks like a version.
+///
+/// The version tan-cli#123's `doctor --build` reports: WHATEVER TAN ITSELF
+/// RESOLVED for `program`, never a second, independent re-probe a consumer
+/// would have to reconcile against the presence check beside it. Presence
+/// still comes from [`command_on_path`]/[`tool_available`]; this is purely the
+/// extra, optional fact.
+///
+/// `ponytail:` one shared `--version` flag plus a generic first-dotted-token
+/// scan, not a per-tool parser — every tool this feeds today (`git`, `cmake`,
+/// `ninja`, `west`, `bitbake`, `dtc`, `gperf`) accepts long `--version`, and a
+/// banner with an unrelated dotted number ahead of the real one would
+/// misparse; add a per-tool parser if that's ever observed in practice.
+pub fn tool_version(program: &str) -> Option<String> {
+    let output = Command::new(program).arg("--version").output().ok()?;
+    let text = if !output.stdout.is_empty() {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    } else {
+        String::from_utf8_lossy(&output.stderr).into_owned()
+    };
+    first_version_token(&text)
+}
+
+/// The leading `v`-optional dotted-number run of the first whitespace token
+/// that has one, e.g. `"West version: v1.5.0"` -> `"1.5.0"`, `"cmake version
+/// 3.28.1\n\n..."` -> `"3.28.1"`, `"Version: DTC 1.7.0-g0c1e5cb"` -> `"1.7.0"`.
+/// `None` when no token qualifies — requiring a literal `.` means a bare
+/// year/count (e.g. a copyright line) is never mistaken for a version.
+fn first_version_token(text: &str) -> Option<String> {
+    for raw in text.split_whitespace() {
+        let word = raw.trim_start_matches(['v', 'V']);
+        let digits: String = word
+            .chars()
+            .take_while(|c| c.is_ascii_digit() || *c == '.')
+            .collect();
+        if digits.contains('.') && digits.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            return Some(digits.trim_end_matches('.').to_string());
+        }
+    }
+    None
+}
+
 /// A user-facing error string when `binary` is a Python older than
 /// [`MIN_PYTHON`]; `None` when it is new enough OR its version can't be
 /// determined (don't block on an unknown — let the real call run and surface
@@ -148,8 +193,8 @@ pub fn python_too_old(binary: &str) -> Option<String> {
     match python_version(binary) {
         Some(found) if found < MIN_PYTHON => Some(format!(
             "Python {}.{} found at `{}`, but alp-sdk requires Python {}.{}+. \
-             Put a newer `python` on PATH (or set alpSdk.pythonPath in the \
-             VS Code extension).",
+             Put a newer `python` first on PATH (VS Code users can instead set \
+             alpSdk.pythonPath).",
             found.0, found.1, binary, MIN_PYTHON.0, MIN_PYTHON.1
         )),
         _ => None,
@@ -177,6 +222,29 @@ impl HostPython {
     pub fn display(&self) -> String {
         self.argv.join(" ")
     }
+}
+
+/// Whether `python`'s `venv` module can actually create a usable virtual
+/// environment (tan-cli#161). `python -m venv --help` cannot tell — argparse
+/// answers it before `ensurepip` is ever touched — so this probes the real
+/// dependency: `import ensurepip`, which fails fast (no venv directory
+/// created) on the Debian/Ubuntu split where `python3-venv` is a separate,
+/// unmet package. Verified against a real Ubuntu 24.04 host missing it:
+/// `python3 -m venv --help` exits 0 while `python3 -c "import ensurepip"`
+/// exits 1 with `ModuleNotFoundError: No module named 'ensurepip'` — the exact
+/// shape `python3 -m venv` itself fails with a moment later.
+///
+/// `true` when the probe cannot be run at all (spawn failure) — this is not
+/// the check that should block a host on an inconclusive answer; the real
+/// `python -m venv` a moment later surfaces its own error if something is
+/// genuinely wrong.
+pub fn python_venv_capable(python: &HostPython) -> bool {
+    python
+        .command()
+        .args(["-c", "import ensurepip"])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(true)
 }
 
 /// Find the host interpreter `tan bootstrap` creates the workspace venv with:
@@ -403,6 +471,18 @@ fn discover_sdk_root(workspace_root: &Path) -> Option<PathBuf> {
     let parent = workspace_root.parent().map(Path::to_path_buf);
     let candidates = [
         workspace_root.to_path_buf(),
+        // CHILD, before the siblings (#218). `tan init` runs from the directory
+        // the new project is about to be created IN, so at that moment the
+        // checkout is a child of the cwd -- it only becomes the documented
+        // "sibling `../alp-sdk`" once the project directory exists and the user
+        // has cd'd into it. Without this candidate the documented Quickstart
+        // breaks at step 3: `tan bootstrap` succeeds in `<ws>/alp-sdk`, and
+        // `tan init --from-example` run from `<ws>` reports "alp-sdk root is
+        // unresolved" with the checkout sitting right there. Proven by the
+        // first-blink CI job (#215), which had to pass `--sdk-root` to get past
+        // it. Ordered ahead of the siblings so a workspace that has both
+        // prefers the one bootstrap actually set up.
+        workspace_root.join("alp-sdk"),
         parent
             .as_ref()
             .map(|p| p.join("alp-sdk"))
@@ -480,10 +560,13 @@ pub fn resolve_sdk_tiered(
     )
 }
 
-/// Resolve the project context from the global args, mirroring the TS commands'
-/// `path.resolve(cwd, project) + resolveProjectContext` boilerplate. Shared by
-/// `validate`, `diff`, `presets`, and `doctor`.
-pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
+/// The resolution shared by [`resolve_cli_project_context`] and
+/// [`resolve_cli_project_context_no_sdk_report`] — everything except whether
+/// to also tell [`crate::sdk_report`] what was resolved. Split out so a
+/// command that wants `board_yaml_path`/`workspace_root` for REPORTING only
+/// can reuse the identical resolution without duplicating it, rather than
+/// re-deriving a narrower version by hand (tan-cli#111 follow-up).
+fn resolve_cli_project_context_inner(g: &GlobalArgs) -> (ProjectContext, Option<SdkSourceTier>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_arg = g.project.clone().unwrap_or_else(|| ".".to_string());
     let workspace_root = normalize_path(&cwd.join(&project_arg))
@@ -511,6 +594,15 @@ pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
         },
         |p| Path::new(p).exists(),
     );
+    (context, sdk_tier_hint)
+}
+
+/// Resolve the project context from the global args, mirroring the TS commands'
+/// `path.resolve(cwd, project) + resolveProjectContext` boilerplate. Shared by
+/// `validate`, `diff`, `presets`, `doctor`, and every command that actually
+/// drives the resolved SDK.
+pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
+    let (context, sdk_tier_hint) = resolve_cli_project_context_inner(g);
 
     // Report to `sdk_report` what THIS call actually resolved — never a
     // fresh resolution. `sdk_tier_hint` is only a hint from `effective_sdk_path`'s
@@ -527,6 +619,18 @@ pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
     context
 }
 
+/// Same resolution as [`resolve_cli_project_context`], but never calls
+/// [`crate::sdk_report::record`] — for a command that only wants
+/// `board_yaml_path`/`workspace_root` off the shared resolver and does not
+/// itself resolve-and-use an SDK in the sense `envelope.rs`'s `sdk` field
+/// documents. `debug-config` calls this: it reads only `board/system-manifest.yaml`
+/// under the workspace, never the SDK checkout, so recording one would add an
+/// undeclared `sdk` envelope key as a side effect of a field it merely
+/// reports (tan-cli#111 follow-up).
+pub fn resolve_cli_project_context_no_sdk_report(g: &GlobalArgs) -> ProjectContext {
+    resolve_cli_project_context_inner(g).0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,6 +644,73 @@ mod tests {
         assert_eq!(parse_python_version("noise\n3.12\n"), Some((3, 12)));
         assert_eq!(parse_python_version(""), None);
         assert_eq!(parse_python_version("python 3"), None);
+    }
+
+    /// Real `/bin/true` and `/bin/false` stand in for a working vs. broken
+    /// `ensurepip` import without needing an actual Python on the test host —
+    /// both ignore whatever args `python_venv_capable` appends and exit
+    /// 0/1 respectively, which is all the function reads.
+    #[cfg(unix)]
+    #[test]
+    fn venv_capable_reads_the_probe_exit_status() {
+        let ok = HostPython {
+            argv: vec!["true".to_string()],
+            version: (3, 12),
+        };
+        assert!(python_venv_capable(&ok));
+
+        let broken = HostPython {
+            argv: vec!["false".to_string()],
+            version: (3, 12),
+        };
+        assert!(!python_venv_capable(&broken));
+    }
+
+    /// A python that cannot even be spawned (bogus argv) must NOT block —
+    /// that verdict belongs to the real `python -m venv` call a moment later,
+    /// not to this probe guessing at a launch failure.
+    #[test]
+    fn venv_capable_fails_open_when_the_probe_cannot_launch() {
+        let unlaunchable = HostPython {
+            argv: vec!["tan-cli-no-such-interpreter-xyz".to_string()],
+            version: (3, 12),
+        };
+        assert!(python_venv_capable(&unlaunchable));
+    }
+
+    #[test]
+    fn first_version_token_handles_real_tool_banners() {
+        assert_eq!(
+            first_version_token("West version: v1.5.0\n"),
+            Some("1.5.0".to_string())
+        );
+        assert_eq!(
+            first_version_token(
+                "cmake version 3.28.1\n\nCMake suite maintained and supported by Kitware."
+            ),
+            Some("3.28.1".to_string())
+        );
+        assert_eq!(first_version_token("1.11.1\n"), Some("1.11.1".to_string()));
+        assert_eq!(
+            first_version_token("git version 2.43.0"),
+            Some("2.43.0".to_string())
+        );
+        assert_eq!(
+            first_version_token("GNU gperf 3.1\nCopyright (C) 2024 Free Software Foundation"),
+            Some("3.1".to_string())
+        );
+        // A trailing git-describe suffix must not swallow the version with it.
+        assert_eq!(
+            first_version_token("Version: DTC 1.7.0-g0c1e5cb\n"),
+            Some("1.7.0".to_string())
+        );
+        // A bare year/count is never mistaken for a version (no `.`).
+        assert_eq!(
+            first_version_token("Copyright (C) 2024 Free Software Foundation"),
+            None
+        );
+        assert_eq!(first_version_token("no digits here"), None);
+        assert_eq!(first_version_token(""), None);
     }
 
     #[test]
@@ -704,6 +875,53 @@ mod tests {
             effective_sdk_path_with(None, "/work", "/home/.alp", &|_| false, &exists, &read);
         assert_eq!(got, "");
         assert_eq!(tier, None);
+    }
+
+    /// tan-cli#218, the documented Quickstart at step 3. `tan bootstrap`
+    /// succeeds in `<ws>/alp-sdk`; `tan init` then runs from `<ws>`, where the
+    /// checkout is a CHILD -- it only becomes the documented "sibling
+    /// `../alp-sdk`" after the project exists and the user has cd'd in. Before
+    /// the child candidate, discovery checked the root, its siblings and its
+    /// ancestors, so this returned None and init refused with "alp-sdk root is
+    /// unresolved" while the checkout sat one level down.
+    #[test]
+    fn discovery_finds_a_checkout_that_is_a_child_of_the_workspace_root() {
+        let ws = tmp("218-child-checkout");
+        let sdk = ws.join("alp-sdk");
+        std::fs::create_dir_all(sdk.join("scripts")).unwrap();
+        std::fs::write(sdk.join("scripts").join("alp_project.py"), b"# stub").unwrap();
+
+        assert_eq!(
+            discover_sdk_root(&ws),
+            Some(sdk),
+            "a child alp-sdk/ must resolve: it is what `tan init` sees before the project exists"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// The child must not outrank an explicit sibling that ALSO has the loader
+    /// script by accident of ordering alone -- but when both exist, the child is
+    /// the one `tan bootstrap` just set up, so it is the intended winner. Pinned
+    /// so a later reorder is a deliberate decision rather than a silent one.
+    #[test]
+    fn a_child_checkout_wins_over_a_sibling_when_both_exist() {
+        let root = tmp("218-child-vs-sibling");
+        let ws = root.join("ws");
+        let child = ws.join("alp-sdk");
+        let sibling = root.join("alp-sdk");
+        for p in [&child, &sibling] {
+            std::fs::create_dir_all(p.join("scripts")).unwrap();
+            std::fs::write(p.join("scripts").join("alp_project.py"), b"# stub").unwrap();
+        }
+
+        assert_eq!(
+            discover_sdk_root(&ws),
+            Some(child),
+            "the child is the checkout bootstrap set up under this workspace root"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

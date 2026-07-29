@@ -182,6 +182,11 @@ fn validate_name(name: String) -> Result<String, ResolveErr> {
 
 /// Resolve the destination directory, preferring `--destination`, then the
 /// global `--project`, then an interactive prompt, defaulting to `.`.
+///
+/// `--name` deliberately does NOT answer this: it names a SUBDIRECTORY created
+/// under the destination, so "which directory does `my-app` go in" is still a
+/// real question with `--name` set. #187's report claimed otherwise and its
+/// author corrected that in #198 — do not re-add the suppression.
 pub(super) fn resolve_destination(
     arg: Option<&str>,
     project: Option<&str>,

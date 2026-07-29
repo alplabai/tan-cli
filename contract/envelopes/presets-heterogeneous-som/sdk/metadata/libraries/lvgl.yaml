@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
+# One ADR-0018 curated library, so `data.boardLibraries` is non-empty here and
+# its discovery (stem of `<name>.yaml`) is pinned rather than trivially `[]`.
+name: lvgl

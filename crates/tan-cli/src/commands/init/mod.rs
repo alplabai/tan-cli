@@ -73,7 +73,13 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
     // caller with an unset optional flag (e.g. no `--template`) block forever
     // on an inquire prompt rendered to stderr, or — if stdin was already
     // closed — cancel it and exit 1 with zero bytes on stdout.
-    let is_interactive = !g.non_interactive && !g.ci && !g.is_json();
+    //
+    // #198 added the missing terminal term here as a local `interactive_mode`
+    // predicate. That predicate now lives on `GlobalArgs` — with its tests, and
+    // with the stderr term it was missing — so `scaffold` and `bootstrap`
+    // answer the same question from the same place instead of each carrying
+    // their own copy. See `GlobalArgs::can_prompt`.
+    let is_interactive = g.can_prompt();
 
     // From-example path: copy an existing SDK example verbatim. Short-circuits
     // before template resolution so it never engages the non-interactive

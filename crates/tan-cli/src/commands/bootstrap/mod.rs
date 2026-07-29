@@ -21,6 +21,7 @@
 //! captures it and emits exactly one envelope, folding a failing step's output
 //! tail into the issue message and every non-fatal warning into an issue.
 
+mod relocate;
 mod steps;
 mod west_config;
 
@@ -73,11 +74,16 @@ struct BootstrapData {
     /// Payload schema version (`"2"`); serialized as `schemaVersion`.
     #[serde(rename = "schemaVersion")]
     schema_version: String,
-    /// Resolved alp-sdk root; empty on failure paths.
+    /// Resolved alp-sdk root; empty on failure paths. Reflects a
+    /// workspace-parent-guard relocation (tan-cli#185) when one happened —
+    /// this is the checkout's CURRENT location, not necessarily where the
+    /// project was originally cloned.
     #[serde(rename = "sdkRoot")]
     sdk_root: String,
-    /// The west topdir the run targeted (`<sdkRoot>/..`, or a reused
-    /// `$ZEPHYR_BASE` workspace); empty when unresolved.
+    /// The west topdir the run targeted (`<sdkRoot>/..`, a reused
+    /// `$ZEPHYR_BASE` workspace, or the workspace-parent-guard's relocation
+    /// target — tan-cli#185, `--workspace <path>` or an accepted prompt);
+    /// empty when unresolved.
     #[serde(rename = "workspaceDir")]
     workspace_dir: String,
     /// `<workspaceDir>/<venv.dirName>` — the hermetic west + Python deps venv.
@@ -131,9 +137,13 @@ struct BootstrapData {
 
 /// Mutable run state the envelope reports, threaded through the phases.
 struct RunPaths {
-    /// `REPO_ROOT` — the alp-sdk checkout.
+    /// `REPO_ROOT` — the alp-sdk checkout. Repointed when the
+    /// workspace-parent guard relocates it (tan-cli#185).
     repo_root: PathBuf,
-    /// `WORKSPACE_DIR` — repointed when a `$ZEPHYR_BASE` workspace is adopted.
+    /// `WORKSPACE_DIR` — repointed when a `$ZEPHYR_BASE` workspace is adopted,
+    /// or when the workspace-parent guard relocates the checkout
+    /// (tan-cli#185; that repoint happens FIRST, before `select_workspace`
+    /// ever runs).
     workspace_dir: PathBuf,
     /// `<WORKSPACE_DIR>/<venv.dirName>` — follows `workspace_dir`.
     venv_dir: PathBuf,
@@ -152,20 +162,22 @@ impl RunPaths {
 }
 
 /// Runs `tan bootstrap`. Resolves the SDK root and the west topdir beside it,
-/// loads the workspace facts, short-circuits on `--print-env`, gates a
-/// Yocto-only project on a non-Linux host, then walks the venv → west → pip
-/// phases in the scripts' order.
+/// loads the workspace facts, short-circuits on `--print-env`, applies the
+/// workspace-parent guard (relocating the checkout if the parent is dirty and
+/// the customer agrees — tan-cli#185), gates a Yocto-only project on a
+/// non-Linux host, then walks the venv → west → pip phases in the scripts'
+/// order.
 pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     let is_windows = cfg!(windows);
     let host = HostOs::detect(std::env::consts::OS);
     let mut log = Log::new(g.is_json());
 
-    let context = resolve_cli_project_context(g);
-    let project = Project {
+    let mut context = resolve_cli_project_context(g);
+    let mut project = Project {
         root: context.workspace_root.clone(),
         board_yaml: context.board_yaml_path.clone(),
     };
-    let Some(sdk_root) = context.sdk_root.clone() else {
+    let Some(mut sdk_root) = context.sdk_root.clone() else {
         return failure(
             g,
             ExitCode::ValidationFailure,
@@ -225,6 +237,60 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         &facts.zephyr_version,
     );
 
+    // `--workspace <path>` is validated + absolutised HERE, before anything
+    // else touches it (tan-cli#185 review finding 3) — this relocates a
+    // customer's checkout, so an empty value (`--workspace ""`, the classic
+    // unset-`$WS` shell accident) or an ambiguous drive-relative one (an
+    // MSYS-style `/e/foo/ws` on Windows) must never resolve to a guess.
+    // `tan_core::path_guard::resolve_workspace_target` does no IO of its
+    // own — this is a pure validation step, before `relocate::resolve_workspace`
+    // is ever called.
+    //
+    // `--print-env --workspace <path>` is refused outright (tan-cli#185
+    // review finding 7) rather than rendering env lines for a directory
+    // nothing was ever moved into: `--print-env`'s whole contract is "tell me
+    // what an already-resolved workspace exports", and `--workspace`'s whole
+    // job is choosing where that workspace goes — combining them would print
+    // paths for a location the run never touches.
+    let workspace_override = match args.workspace.as_deref() {
+        None => None,
+        Some(_) if args.print_env => {
+            let data = data_for(args, &sdk_root, &paths, &facts, &pin);
+            return failure(
+                g,
+                ExitCode::ValidationFailure,
+                "print-env-workspace-conflict",
+                vec![
+                    "--print-env and --workspace cannot be combined: --print-env only prints \
+                     what an already-resolved workspace exports and moves nothing, while \
+                     --workspace's whole job is choosing where the workspace goes. Run `tan \
+                     bootstrap --workspace <path>` first, then `tan bootstrap --print-env` \
+                     against the workspace that produced."
+                        .to_string(),
+                ],
+                data,
+                project,
+            );
+        }
+        Some(raw) => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            match tan_core::path_guard::resolve_workspace_target(raw, &cwd) {
+                Ok(target) => Some(target),
+                Err(message) => {
+                    let data = data_for(args, &sdk_root, &paths, &facts, &pin);
+                    return failure(
+                        g,
+                        ExitCode::ValidationFailure,
+                        "workspace-invalid",
+                        vec![message],
+                        data,
+                        project,
+                    );
+                }
+            }
+        }
+    };
+
     // `--print-env` short-circuits before any prerequisite check or venv work.
     //
     // Both scripts moved this AFTER their prereq check under #917, because
@@ -242,6 +308,100 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         let text = print_env_block(&facts, tokens, facts.venv_bin_dir(is_windows), is_windows);
         let data = data_for(args, &sdk_root, &paths, &facts, &pin);
         return finish(g, ExitCode::Success, project, data, Vec::new(), text);
+    }
+
+    // Workspace-parent guard (tan-cli#185): `west init -l` forces the topdir
+    // to be the checkout's own PARENT (#769, above), so a customer who clones
+    // into e.g. ~/Downloads gets zephyr/modules/.west/venv sprayed there,
+    // unannounced, outside the checkout where no .gitignore can reach it.
+    // `--workspace <path>` answers the question outright (no guard at all,
+    // whatever the parent holds); otherwise the guard fires only when the
+    // parent holds content this checkout does not account for and is not
+    // itself already a west workspace (`tan_core::bootstrap::
+    // parent_needs_workspace_guard`). Placed before ANY write below — the
+    // venv, west and pip phases all come later — so a refusal (interactive
+    // decline or `--non-interactive`) leaves nothing on disk.
+    //
+    // A prompt needs an actual human at a console: `--non-interactive`/`--ci`/
+    // `--format json` all say so explicitly, but a piped or redirected stdin
+    // (`tan bootstrap </dev/null`, a CI runner with neither flag set — #185
+    // review finding 1) says so just as loudly and was NOT checked here,
+    // which hung `inquire::Confirm::new(..).prompt()` forever instead of
+    // reaching the non-interactive `Resolution::Refuse` path. Same rule
+    // `progress::spinner`/`style::Theme::from_args` already apply to the
+    // decision of whether a human is actually there to answer. That rule now
+    // lives in ONE place — `GlobalArgs::can_prompt()` — because fixing it here
+    // and nowhere else is exactly how `tan init`/`tan scaffold` kept the
+    // flags-only gate and hung on the same redirected stdin (#187).
+    let is_interactive = g.can_prompt();
+    // A `$ZEPHYR_BASE` workspace that `select_workspace` (below) is about to
+    // ADOPT repoints the write target away from `repo_root`'s parent
+    // entirely — so a dirty parent is not a problem when nothing is going to
+    // be written there (#185 review finding 5: the guard used to run BEFORE
+    // this was known, and refused — or, interactively, offered to move the
+    // checkout for — a run that was never going to touch the guarded
+    // directory at all). An explicit `--workspace` always answers the
+    // question outright regardless, matching its existing "no guard, no
+    // prompt" contract.
+    let guard_applies =
+        workspace_override.is_some() || !zephyr_base_will_adopt(&pin, &paths.repo_root);
+    if guard_applies {
+        match relocate::resolve_workspace(
+            &paths.repo_root,
+            &paths.workspace_dir,
+            workspace_override.as_deref(),
+            is_interactive,
+            &facts.venv_dir_name,
+            &crate::commands::sdk::global_default_pointer_path(),
+        ) {
+            relocate::Resolution::Unchanged => {}
+            relocate::Resolution::Relocated {
+                repo_root,
+                workspace_dir,
+                notice,
+            } => {
+                let old_repo_root = sdk_root.clone();
+                paths.repo_root = repo_root;
+                paths.workspace_dir = workspace_dir;
+                paths.venv_dir = paths.workspace_dir.join(&facts.venv_dir_name);
+                sdk_root = paths.repo_root.to_string_lossy().into_owned();
+                log.warn("workspace-relocated", &notice);
+                // The project may live INSIDE the checkout (parity's `seam2`
+                // shape) -- rebase any path under the OLD repo_root onto the
+                // new one, and force the envelope's `sdk.root` to follow too,
+                // so nothing downstream (the Yocto gate's `read_board_model`
+                // right below, the reported `project`, `sdk.root`) keeps
+                // naming a location the checkout just vacated (#185 review
+                // finding 6). `ProjectContext` fields are forward-slash by
+                // contract (see that module's own doc) even though `sdk_root`
+                // itself stays native for `BootstrapData` -- normalize the
+                // rebase target the same way `sdk_report` already normalizes
+                // its own recordings.
+                context = tan_core::rebase_under_relocated_sdk(
+                    &context,
+                    &old_repo_root,
+                    &sdk_root.replace('\\', "/"),
+                );
+                project = Project {
+                    root: context.workspace_root.clone(),
+                    board_yaml: context.board_yaml_path.clone(),
+                };
+                crate::sdk_report::override_after_relocation(&sdk_root);
+            }
+            relocate::Resolution::Refuse {
+                exit,
+                code,
+                message,
+            } => {
+                let data = data_for(args, &sdk_root, &paths, &facts, &pin);
+                return failure(g, exit, code, vec![message], data, project);
+            }
+            relocate::Resolution::MoveFailed(message) => {
+                let issues = log.take_issues();
+                let data = data_for(args, &sdk_root, &paths, &facts, &pin);
+                return fatal(g, project, data, issues, message);
+            }
+        }
     }
 
     // Host gate: refuse ONLY a project whose every in-play core is Yocto, on a
@@ -517,6 +677,41 @@ impl WorkspacePlan {
         adopted: false,
         clear_zephyr_base: false,
     };
+}
+
+/// Whether `$ZEPHYR_BASE`, if set, will be ADOPTED by [`select_workspace`]
+/// below (its `Reuse`/`Stale` branches) rather than ignored — a read-only
+/// restatement of that same detection, used ONLY to decide whether the
+/// workspace-parent guard (which runs BEFORE `select_workspace` — #185
+/// review finding 5) even applies to `repo_root`'s parent: when adoption is
+/// about to repoint the write target at the `$ZEPHYR_BASE` topdir instead, a
+/// dirty `<sdkRoot>/..` is not a problem, because nothing is going to be
+/// written there. `select_workspace` re-derives the same facts when it
+/// actually runs (a few extra filesystem reads, never a second source of
+/// truth for the DECISION itself: both call [`decide_workspace_reuse`]).
+fn zephyr_base_will_adopt(pin: &str, repo_root: &Path) -> bool {
+    let Some(zephyr_base) = std::env::var("ZEPHYR_BASE")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return false;
+    };
+    let zephyr_base_path = PathBuf::from(&zephyr_base);
+    let Ok(version_file) = std::fs::read_to_string(zephyr_base_path.join("VERSION")) else {
+        return false;
+    };
+    let top = zephyr_base_path.parent().map(Path::to_path_buf);
+    let existing = ExistingWorkspace {
+        version_file: &version_file,
+        top_is_west_workspace: top.as_ref().is_some_and(|t| t.join(".west").is_dir()),
+        manifest_is_sdk: top
+            .as_deref()
+            .is_some_and(|t| manifest_points_at(t, repo_root)),
+    };
+    matches!(
+        decide_workspace_reuse(&existing, pin),
+        WorkspaceChoice::Reuse { .. } | WorkspaceChoice::Stale { .. }
+    )
 }
 
 /// Workspace selection over the `$ZEPHYR_BASE` tree, and, when it is adopted,
@@ -933,6 +1128,7 @@ mod tests {
             no_pip: false,
             no_west: false,
             print_env: false,
+            workspace: None,
         }
     }
 
