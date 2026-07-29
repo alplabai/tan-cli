@@ -101,8 +101,6 @@ NOT_PORTED = {
     "presets-no-sdk": "presets lands in a later sub-project",
     "sdk-current-no-sdk": "sdk lands in a later sub-project",
     "sdk-unknown-subcommand": "sdk lands in a later sub-project",
-    "validate-offline-clean": "validate lands in a later sub-project",
-    "validate-offline-schema-violation": "validate lands in a later sub-project",
 }
 
 
