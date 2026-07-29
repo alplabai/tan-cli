@@ -5,7 +5,7 @@ Strict producer / tolerant consumer: the required keys are enforced, the
 optional-but-always-emitted ones default cleanly, and an unsupported
 schemaVersion is REFUSED rather than silently hand-ported around."""
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 from tan.core.plan_exec import ExecutionPolicy, PolicyAction
@@ -44,7 +44,7 @@ class Slice:
     app_dir: str
     config_artefacts: list[dict[str, Any]]
     toolchain: Any
-    artifacts: list[Any]
+    artifacts: dict[str, Any]
     debug: dict[str, Any]
     command: SliceCommand | None
     env: dict[str, str]
@@ -106,7 +106,16 @@ def parse_build_plan(text: str) -> BuildPlan:
     except ValueError as err:
         raise PlanParseError("build.plan-invalid", f"plan is not valid JSON: {err}") from err
 
-    version = raw.get("schemaVersion")
+    if not isinstance(raw, dict):
+        raise PlanParseError("build.plan-invalid", "plan is not a JSON object")
+
+    if "schemaVersion" not in raw:
+        raise PlanParseError(
+            "build.plan-invalid",
+            "plan is missing required key(s): schemaVersion",
+        )
+
+    version = raw["schemaVersion"]
     if version != SUPPORTED_SCHEMA_VERSION:
         raise PlanParseError(
             "build.plan-unsupported-schema",

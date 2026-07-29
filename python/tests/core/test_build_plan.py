@@ -43,7 +43,7 @@ def test_parses_slice_env_append_and_policy():
       "executionPolicy": {"missingTool": "skip", "unknownBackend": "fail"},
       "slices": [{
         "coreId": "m55_hp", "backend": "zephyr", "buildDir": "build/m55_hp",
-        "appDir": "app", "configArtefacts": [], "toolchain": null, "artifacts": [],
+        "appDir": "app", "configArtefacts": [], "toolchain": null, "artifacts": {},
         "debug": {}, "command": {"tool": "west", "args": ["build"], "cwd": "build/m55_hp"},
         "env": {"ALP_SDK_ROOT": "/sdk"}, "envAppendPath": {"PYTHONPATH": ["/sdk/scripts"]}
       }]
@@ -64,8 +64,33 @@ def test_null_command_slice_parses_as_none():
       "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
       "slices": [{
         "coreId": "a55", "backend": "yocto", "buildDir": "build/a55", "appDir": "app",
-        "configArtefacts": [], "toolchain": null, "artifacts": [], "debug": {},
+        "configArtefacts": [], "toolchain": null, "artifacts": {}, "debug": {},
         "command": null, "env": {}, "envAppendPath": {}
       }]
     }""")
     assert plan.slices[0].command is None
+
+
+def test_missing_schemaVersion_reports_build_plan_invalid():
+    """Missing schemaVersion key (not wrong version) is a missing-required-key error,
+    not a version-skew error."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(MINIMAL.replace('"schemaVersion": 1, ', ""))
+    assert e.value.code == "build.plan-invalid"
+    assert "schemaVersion" in e.value.message
+
+
+def test_rejects_non_object_json_array():
+    """Non-object top-level JSON (e.g., array) raises PlanParseError, not AttributeError."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan("[1, 2, 3]")
+    assert e.value.code == "build.plan-invalid"
+    assert "not a JSON object" in e.value.message
+
+
+def test_rejects_non_object_json_null():
+    """Non-object top-level JSON (e.g., null) raises PlanParseError, not AttributeError."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan("null")
+    assert e.value.code == "build.plan-invalid"
+    assert "not a JSON object" in e.value.message
