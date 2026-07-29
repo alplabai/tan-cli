@@ -246,7 +246,7 @@ pub(crate) fn check_prerequisites(
     let is_windows = host == HostOs::Windows;
     let install = facts.install.for_host(host);
     let missing: Vec<&str> = facts
-        .prerequisites(is_windows)
+        .prerequisites(host)
         .iter()
         .filter(|tool| !prereq_present(tool, is_windows))
         .map(String::as_str)
@@ -1011,6 +1011,7 @@ mod tests {
         // testable for `ninja` too, which this test could never assume absent.
         let mut facts = fallback_facts((3, 10));
         facts.prerequisites_posix = vec!["tan-no-such-tool-xyz".to_string()];
+        facts.prerequisites_macos = vec!["tan-no-such-tool-xyz".to_string()];
         facts.prerequisites_windows = vec!["tan-no-such-tool-xyz".to_string()];
 
         let win = check_prerequisites(&facts, HostOs::Windows).unwrap_err();
@@ -1035,9 +1036,53 @@ mod tests {
             );
         }
 
+        // macOS reads `prerequisites.macos` when the manifest declares one, and
+        // `prerequisites.posix` when it does not (alp-sdk v0.14.0). Both
+        // directions asserted, because getting this wrong is not cosmetic: the
+        // v0.14.0 `posix` list carries `xz` and `wget`, which stock macOS does
+        // not ship, so reading `posix` there refuses the bootstrap outright on a
+        // supported host.
+        let mut split = fallback_facts((3, 10));
+        split.prerequisites_posix = vec!["tan-posix-only-xyz".to_string()];
+        split.prerequisites_macos = vec!["tan-macos-only-xyz".to_string()];
+        let mac = check_prerequisites(&split, HostOs::MacOs).unwrap_err();
+        assert_eq!(
+            mac.missing
+                .iter()
+                .map(|m| m.tool.as_str())
+                .collect::<Vec<_>>(),
+            ["tan-macos-only-xyz"],
+            "macOS must read prerequisites.macos, not prerequisites.posix"
+        );
+        let lin = check_prerequisites(&split, HostOs::Linux).unwrap_err();
+        assert_eq!(
+            lin.missing
+                .iter()
+                .map(|m| m.tool.as_str())
+                .collect::<Vec<_>>(),
+            ["tan-posix-only-xyz"],
+            "Linux must keep reading prerequisites.posix"
+        );
+
+        // An SDK that predates `prerequisites.macos` leaves it empty, and macOS
+        // must then behave exactly as it always did -- read `posix`. The
+        // fallback is the OLD behaviour, not a new guess.
+        split.prerequisites_macos = Vec::new();
+        let mac_legacy = check_prerequisites(&split, HostOs::MacOs).unwrap_err();
+        assert_eq!(
+            mac_legacy
+                .missing
+                .iter()
+                .map(|m| m.tool.as_str())
+                .collect::<Vec<_>>(),
+            ["tan-posix-only-xyz"],
+            "an undeclared prerequisites.macos must fall back to posix"
+        );
+
         // A tool that IS present must not be reported -- `cargo` runs this
         // test, so it is on PATH by construction.
         facts.prerequisites_posix = vec!["cargo".to_string()];
+        facts.prerequisites_macos = vec!["cargo".to_string()];
         facts.prerequisites_windows = vec!["cargo".to_string()];
         let refused = check_prerequisites(&facts, HostOs::detect(std::env::consts::OS))
             .err()

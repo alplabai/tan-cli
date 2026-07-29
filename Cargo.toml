@@ -4,7 +4,7 @@ resolver = "2"
 members = ["crates/tan-core", "crates/tan-cli"]
 
 [workspace.package]
-version = "0.4.1-dev"
+version = "0.4.1"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/alplabai/tan-cli"
