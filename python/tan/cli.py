@@ -17,6 +17,7 @@ from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.generate_cmd import generate
 from tan.commands.init_cmd import init
+from tan.commands.presets_cmd import presets
 from tan.commands.sdk_cmd import sdk
 from tan.commands.validate_cmd import validate
 from tan.envelope import Envelope, Issue, Project, envelope_emitted
@@ -36,6 +37,7 @@ app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("generate")(generate)
 app.command("init")(init)
+app.command("presets")(presets)
 app.command("sdk")(sdk)
 app.command("validate")(validate)
 

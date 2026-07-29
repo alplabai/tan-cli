@@ -46,6 +46,13 @@ CASES = [
     # tests/test_cli_skeleton.py::test_bare_invocation_exits_2_with_help_on_stderr).
     ([], ENVELOPE, None),
     (["validate", "--format", "json"], ENVELOPE, "validate lands in a later sub-project"),
+    # The first case that compares a whole SUCCESS envelope from a ported
+    # command, not a usage error: `presets` with nothing resolvable exits 0 and
+    # reports the frozen `presets.sdk-root-unresolved` warning plus the built-in
+    # defaults. Deterministic on any host -- `work_dir`'s isolated parent and the
+    # per-case `home` are exactly what stop a stray checkout resolving here, and
+    # `project.root` is the same absolute cwd for both sides.
+    (["presets", "--format", "json"], ENVELOPE, None),
     (
         ["build", "--plan", "--format", "json"],
         PLAN,

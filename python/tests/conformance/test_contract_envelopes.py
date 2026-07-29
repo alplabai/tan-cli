@@ -93,8 +93,6 @@ NOT_PORTED = {
     "debug-config-preview-yocto-userspace": "debug-config lands in a later sub-project",
     "debug-config-preview-zephyr-mcu": "debug-config lands in a later sub-project",
     "explain-overview": "explain lands in a later sub-project",
-    "presets-heterogeneous-som": "presets lands in a later sub-project",
-    "presets-no-sdk": "presets lands in a later sub-project",
 }
 
 
