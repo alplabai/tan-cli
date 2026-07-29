@@ -152,6 +152,13 @@ def test_a_named_but_missing_rust_binary_is_an_error_not_a_skip(monkeypatch):
 # the tokened/untokened axis when case 5 is promoted. These tests pin the
 # narrowing's mechanics, not the correctness of the split.
 
+# Shaped after the six REAL plans at `tests/parity/oracle/*.build-plan.json`
+# (repo root, Rust workspace), NOT after the hand-authored `raw_json` in
+# plan_modes.rs:404-442. That string exists only to prove pass-through for an
+# arbitrary unmodeled key, and it puts `sdkVersion`/`sdkCommit` INSIDE a slice
+# -- which no real plan does, and which neither `BuildSlice` nor Python's
+# `Slice` models. Every real plan carries them at TOP level. Read this fixture
+# as ground truth for the emit's shape; read that one for its one narrow claim.
 RAW_SLICE = {
     "coreId": "m55_hp",
     "backend": "zephyr",
@@ -160,19 +167,21 @@ RAW_SLICE = {
     "command": {"tool": "west", "args": ["build"], "cwd": "."},
     "env": {},
     "envAppendPath": {},
-    "sdkVersion": "0.11.0",
-    "sdkCommit": "deadbeef",
-    # The four provisionally-excluded keys. Rust DOES emit these -- verbatim
-    # from the SDK -- per plan_modes.rs:404-442.
+    # The four provisionally-excluded keys. Rust DOES emit these, verbatim from
+    # the SDK; they are excluded pending the tokened/untokened re-derivation.
     "appDir": "${SDK_ROOT}/examples/blinky",
     "toolchain": {"name": "zephyr"},
     "artifacts": {"elf": "zephyr/zephyr.elf"},
     "debug": {"gdb": "arm-none-eabi-gdb"},
 }
 
+#: Top-level keys, values taken from the real fixtures.
+RAW_TOP = {"schemaVersion": 1, "sdkVersion": "0.11.1", "sdkCommit": "97ad481b"}
 
-def _envelope(slice_):
-    return {"command": "build", "ok": True, "exitCode": 0, "data": {"slices": [slice_]}}
+
+def _envelope(slice_=None, **top):
+    data = {**RAW_TOP, **top, "slices": [slice_ or RAW_SLICE]}
+    return {"command": "build", "ok": True, "exitCode": 0, "data": data}
 
 
 def test_plan_scope_drops_the_provisionally_excluded_keys():
@@ -183,16 +192,20 @@ def test_plan_scope_drops_the_provisionally_excluded_keys():
         "artifacts": {"elf": "/abs/zephyr.elf"},
         "debug": {"gdb": "/opt/gdb"},
     }
-    assert narrow_plan(_envelope(RAW_SLICE)) == narrow_plan(_envelope(substituted))
+    assert narrow_plan(_envelope()) == narrow_plan(_envelope(substituted))
 
 
-@pytest.mark.parametrize("key", ["buildDir", "coreId", "sdkVersion", "sdkCommit"])
-def test_plan_scope_still_catches_a_retained_key(key):
-    # sdkVersion/sdkCommit are the version-skew guard's own fields; they are
-    # never path-bearing and never substituted, so excluding them was pure lost
-    # coverage rather than false-red avoidance.
-    drifted = {**RAW_SLICE, key: "DRIFTED"}
-    assert narrow_plan(_envelope(RAW_SLICE)) != narrow_plan(_envelope(drifted))
+@pytest.mark.parametrize("key", ["buildDir", "coreId"])
+def test_plan_scope_still_catches_a_retained_slice_key(key):
+    assert narrow_plan(_envelope()) != narrow_plan(_envelope({**RAW_SLICE, key: "DRIFTED"}))
+
+
+@pytest.mark.parametrize("key", ["sdkVersion", "sdkCommit"])
+def test_plan_scope_still_catches_a_drifted_version_skew_field(key):
+    # The version-skew guard's own fields, pinned where they actually live: top
+    # level. Never path-bearing, never substituted -- so retaining them costs no
+    # false red, and dropping them would be pure lost coverage.
+    assert narrow_plan(_envelope()) != narrow_plan(_envelope(**{key: "DRIFTED"}))
 
 
 def test_plan_scope_leaves_a_null_data_envelope_whole():

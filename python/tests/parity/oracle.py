@@ -52,6 +52,12 @@ declares the surface both binaries genuinely produce:
     ``.sdkVersion`` and ``.sdkCommit`` are all PRESENT in the output. What
     ``BuildSlice`` models governs what Rust can *validate*, never what it emits.
 
+    That test's ``raw_json`` is hand-authored to prove pass-through for an
+    ARBITRARY unmodeled key, so read it for that claim only -- its per-slice
+    placement of ``sdkVersion``/``sdkCommit`` matches no real plan. For the
+    emit's actual shape use the six fixtures at
+    ``tests/parity/oracle/*.build-plan.json``.
+
     The real divergence axis is SUBSTITUTION, not key presence -- and it does
     not line up with the modeled-key split at all:
 
@@ -101,8 +107,10 @@ PLAN = "plan"
 #: has ever meant. ``sdkVersion``/``sdkCommit`` are kept because they are plain
 #: version strings: never path-bearing, never touched by substitution, carried
 #: verbatim by both sides from the same emit. They could not produce a false
-#: red, so excluding them was pure lost coverage on exactly the field a
-#: version-skew guard cares about.
+#: red, so excluding them was pure lost coverage on exactly the fields a
+#: version-skew guard cares about. Grounded in the six real plans at
+#: ``tests/parity/oracle/*.build-plan.json``: every one carries both keys, and
+#: carries them HERE, at top level.
 RUST_PLAN_KEYS = frozenset(
     {
         "schemaVersion",
@@ -120,9 +128,14 @@ RUST_PLAN_KEYS = frozenset(
     }
 )
 
-#: Per-slice keys retained. ``sdkVersion``/``sdkCommit`` appear here too -- the
-#: Rust fixture in ``plan_modes.rs:404-442`` carries them at SLICE level -- and
-#: are kept for the reason above.
+#: Per-slice keys retained -- the keys ``BuildSlice``
+#: (``crates/tan-core/src/build_plan.rs:138-164``) and Python's ``Slice``
+#: (``python/tan/core/build_plan.py:39-51``) BOTH model. No ``sdkVersion`` or
+#: ``sdkCommit``: those live at top level in all six real plans
+#: (``tests/parity/oracle/*.build-plan.json``) and appear in no slice of any of
+#: them. The slice-shaped ``sdkVersion`` in ``plan_modes.rs:404-442`` is a
+#: hand-authored string inside a unit test demonstrating pass-through for an
+#: arbitrary unmodeled key -- illustrative, not representative of the emit.
 #:
 #: The four absentees (``appDir``, ``toolchain``, ``artifacts``, ``debug``) are
 #: excluded PROVISIONALLY, pending case-5 promotion. The exclusion is NOT
@@ -130,17 +143,7 @@ RUST_PLAN_KEYS = frozenset(
 #: holding position until the scope is re-derived on the tokened/untokened axis
 #: -- the axis that actually separates the two implementations.
 RUST_SLICE_KEYS = frozenset(
-    {
-        "coreId",
-        "backend",
-        "buildDir",
-        "configArtefacts",
-        "command",
-        "env",
-        "envAppendPath",
-        "sdkVersion",
-        "sdkCommit",
-    }
+    {"coreId", "backend", "buildDir", "configArtefacts", "command", "env", "envAppendPath"}
 )
 
 
