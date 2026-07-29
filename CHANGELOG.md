@@ -21,6 +21,55 @@
   `tan bootstrap --non-interactive` exit 2 by design.
 
 ### Added
+- **`getting-started.yml` — the first CI job that runs `install.sh`,
+  `tan bootstrap` or `tan init` at all** (#207). Before this file, a grep for
+  tan subcommand invocations across `.github/**` returned three COMMENT lines
+  (`parity.yml`) and no `run:` step, and `install.sh` was neither executed nor
+  shellchecked by any workflow in either repo — so the whole
+  environment-provisioning path a first-install customer walks (installer →
+  venv → west workspace → scaffold → build) had no signal, and a regression in
+  any phase of it would reach customers with an otherwise-green board. The
+  `install.sh` evidence that existed was #176's one-off manual Ubuntu 20.04 LTS
+  run, which is good evidence and which nothing preserved.
+  The new job walks the README Quickstart in order on a stock `ubuntu-latest`:
+  `shellcheck --shell=sh install.sh`, then `./install.sh` (a real GitHub
+  Releases download verified against that release's `checksums.txt`, so the
+  sha256 path is exercised rather than mocked), then `tan bootstrap`, then
+  `west sdk install --version <v> -t arm-zephyr-eabi` — the remedy
+  `build_readiness.rs` PRINTS and tan deliberately does not run itself, so
+  running it here is the only way the printed remedy gets tested — then
+  `tan init --name my-app` on its defaults with no TTY to prompt on (the
+  #187/#198 hang class), then `tan validate` from the scaffolded project so the
+  Quickstart's sibling `../alp-sdk` resolution is what resolves the SDK, then a
+  real `tan build`, asserted down to an ARM ELF rather than to an exit code.
+  Three deliberate choices, each of which would otherwise read as an
+  inconsistency:
+  1. **The job runs this checkout's `install.sh`, not the documented
+     `curl … | sh`** — that pipe fetches `main`'s copy, so a PR editing
+     `install.sh` would get no signal from its own diff. Same bytes, different
+     transport.
+  2. **`install.sh` installs the last RELEASE, so the binary it installs is
+     replaced by a `cargo build` of the PR at the same path** before bootstrap
+     runs. Otherwise every step after the installer would test a binary that
+     predates the diff, and a bootstrap or init regression would sail through
+     green. The installer is verified for real first; the swap is what gives
+     the rest of the path its signal.
+  3. **alp-sdk is cloned into a dedicated `alp-workspace/` parent**, which is
+     exactly what the workspace-parent guard's own migration note in this
+     release predicted a fresh `tan bootstrap` job would need: the guard REFUSES
+     outright under a CI runner's non-terminal stdio, so cloning beside this
+     repo's own checkout would fail before bootstrap did any real work.
+  The alp-sdk pin is READ out of `parity.yml`'s `PINNED_SDK_TAG` rather than
+  copied, and the Zephyr SDK version out of the SDK's own
+  `metadata/toolchains.json` (the same read `seam2` does, and the same file
+  `tests/parity/toolchain_lock_parity.py` holds `host_env.rs`'s
+  `ZEPHYR_SDK_INSTALL_VERSION` against) — a second hardcoded copy of either
+  would rot independently and let this gate quietly test a different SDK than
+  the parity gate while both reported green. Both reads hard-fail rather than
+  falling back to a default, since a silent fallback is worst in exactly the
+  case where somebody moved the pin without knowing this file reads it.
+  Deliberately not `paths`-filtered: a gate that skips itself on a "docs-only"
+  PR reports green for a run that checked nothing.
 - **`tan debug-config --svd <PATH>` — a user-supplied SVD, the first and only
   producer of `LaunchResolution.svd`** (#197). The resolution path for
   `svdFile`/`svdPath` was complete and tested, and structurally dead: the field
@@ -105,6 +154,21 @@
   No `board.yaml` still means `native-host` — the one case it is right, and the
   directory alp-sdk's bootstrap tells a customer to run `tan doctor` from. An
   explicit `--target-kind` / `--server` still wins outright.
+- **`tan init` could not find the SDK `tan bootstrap` had just set up, breaking
+  the documented Quickstart at step 3** (#218). SDK discovery checked the
+  workspace root itself, its siblings (`../alp-sdk`, `../alp-sdk-upstream`) and
+  then its nearest ancestor -- never a CHILD. That misses the exact moment the
+  documented flow puts the user in: bootstrap runs with the checkout at
+  `<ws>/alp-sdk`, and `tan init` is then typed from `<ws>`, because the project
+  directory it is about to create does not exist yet. The checkout only becomes
+  the documented "sibling `../alp-sdk`" one step later, once the user has cd'd
+  into the new project -- which is why `tan build` worked while the `tan init`
+  immediately before it failed with "alp-sdk root is unresolved" and no hint
+  that the answer was one directory down. Discovery now also considers
+  `<root>/alp-sdk`, ordered ahead of the siblings so a workspace holding both
+  prefers the one bootstrap actually set up. Found by the new `first blink` CI
+  job, which had to pass `--sdk-root alp-sdk` to get past it; that flag is now
+  removed, so the job is the regression test.
 - **`baremetal-mcu` × OpenOCD shipped a resolved `serverpath`/`searchDir` with
   NO `configFiles` to load, and `baremetal-mcu` × pyOCD had no target to
   select** (#139). `create_launch_draft`'s `BaremetalMcu` arm was ONE
