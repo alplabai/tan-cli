@@ -329,7 +329,14 @@ def test_current_reports_a_resolved_sdk_with_the_optional_sdk_key(tmp_path, isol
     assert env["data"]["sourceTier"] == "sdkRootFlag"
     assert env["data"]["readiness"]["state"] == "ready"
     assert env["data"]["readiness"]["version"] == "0.14.0"
-    assert env["sdk"] == {"root": str(root), "sourceTier": "sdkRootFlag"}
+    # POSIX separators, not the host's: Rust normalises in `sdk_report.rs`
+    # (`root.replace('\\', "/")`) and guarantees `sdk.root` never diverges by
+    # separator style. Asserting `str(root)` here would pin the platform-native
+    # form and bake the bug in -- see `SdkInfo.as_dict`.
+    assert env["sdk"] == {
+        "root": str(root).replace("\\", "/"),
+        "sourceTier": "sdkRootFlag",
+    }
     assert env["project"] == {"root": None, "boardYaml": None}
 
 
