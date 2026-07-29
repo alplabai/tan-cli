@@ -12,11 +12,20 @@ import sys
 
 import typer
 
-from tan.envelope import Envelope, Issue, Project
+from tan.commands.build_cmd import build
+from tan.envelope import Envelope, Issue, Project, envelope_emitted
 from tan.exit_codes import ExitCode
 from tan.version import TAN_VERSION
 
 app = typer.Typer(add_completion=False)
+
+# Registered with a STATIC import, deliberately -- PyInstaller follows the
+# static import graph only, so a pkgutil/importlib auto-registry works from
+# source and produces a frozen `tan` that cannot find its own commands (see
+# `tan.commands.__init__`). Registering here rather than with a decorator in
+# the command module keeps `tan.commands.*` free of any `tan.cli` import,
+# which would otherwise be a cycle.
+app.command("build")(build)
 
 
 @app.callback(invoke_without_command=True)
@@ -114,6 +123,11 @@ def main() -> None:
             code = int(ExitCode.SUCCESS)
         elif not isinstance(code, int):
             code = int(ExitCode.RUNTIME_FAILURE)
-        if json_mode and code != 0:
+        # `not envelope_emitted()`: this fallback exists for the Click-level
+        # usage error, which exits before any command runs and so leaves
+        # stdout empty. A command that already wrote its own envelope and then
+        # exited non-zero (every failed `tan build`) must not get a second one
+        # appended -- two JSON documents on stdout is the same break as none.
+        if json_mode and code != 0 and not envelope_emitted():
             print(_usage_error_envelope(code))
         raise

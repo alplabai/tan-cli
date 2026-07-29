@@ -10,9 +10,11 @@ has to be honest about two things:
 module docstring of ``oracle.py`` for why a naive whole-plan diff is red for a
 reason that is not a port bug, and which side was declared correct.
 
-**Coverage.** The port registers only ``--version`` today -- the MVP built the
-plan parser, token substitution, materialise and execute as LIBRARIES, not as a
-wired CLI. Most cases therefore cannot run end to end. They are marked
+**Coverage.** The port registers ``--version`` and ``build`` today. ``build``
+is wired end to end (acquire the plan, substitute, materialise, execute), but
+its plan-INSPECTION modes (``--plan``/``--materialise``/``--manifest``) are
+not, and no other command exists yet. Cases naming any of those therefore
+cannot run end to end. They are marked
 ``xfail(strict=True)`` and listed by name rather than skipped or softened,
 following the precedent in ``tests/conformance/test_contract_envelopes.py``: a
 case that starts genuinely passing then reports XPASS and FAILS the run, which
@@ -47,7 +49,15 @@ CASES = [
     (
         ["build", "--plan", "--format", "json"],
         PLAN,
-        "build lands in a later sub-project; the port registers no `build` command",
+        # `tan build` itself IS ported now (the executing path: acquire the
+        # plan, materialise, run each slice). What this case compares is
+        # `--plan`, the SHOW-the-plan-and-stop mode, which is not -- so the
+        # port answers a usage error where Rust answers a plan envelope. When
+        # `--plan` lands, re-derive the PLAN surface on the tokened/untokened
+        # axis first (see oracle.py's module docstring): the current narrowing
+        # was chosen while nothing on the Python side emitted a plan at all.
+        "`build --plan` (show the plan, build nothing) is not ported; the "
+        "executing `tan build` is",
     ),
 ]
 

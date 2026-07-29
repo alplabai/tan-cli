@@ -79,3 +79,28 @@ class Envelope:
                 ).as_dict()
             ]
             return json.dumps(fallback, separators=(",", ":"))
+
+
+#: Whether this process has already written its one envelope to stdout.
+#: Process-global because the thing it guards is process-global: stdout.
+_emitted = False
+
+
+def emit(envelope: Envelope) -> None:
+    """Write THE envelope to stdout, and record that it went out.
+
+    A command signals failure by exiting non-zero, and `tan.cli.main` wraps
+    the whole dispatch to add a `cli.parse-error` envelope when a `--format
+    json` run exits non-zero with nothing on stdout -- the Click-usage-error
+    path, which never reaches a command at all. Without this flag that
+    fallback also fires after a command that ALREADY printed its own
+    envelope, putting two JSON documents on stdout: valid JSON lines, and a
+    consumer that parses stdout whole gets neither.
+    """
+    global _emitted
+    print(envelope.to_json())
+    _emitted = True
+
+
+def envelope_emitted() -> bool:
+    return _emitted
