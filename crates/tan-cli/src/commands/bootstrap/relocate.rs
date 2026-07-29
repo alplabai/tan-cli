@@ -10,11 +10,25 @@
 //! change. What this module decides is WHICH directory gets to be that parent:
 //! the checkout's current one (unchanged), a dedicated `alp-workspace/` sibling
 //! the customer accepted, or an explicit `--workspace <path>`.
+//!
+//! A relocation also repoints the machine-global default-SDK pointer
+//! (`~/.alp/sdk-default`) at the checkout's new location. Without that, the
+//! README Quickstart's very next documented step — `tan init --name my-app`
+//! run from the SAME shell, or a fresh one tomorrow — has no sibling
+//! `../alp-sdk` left to auto-discover: the checkout now sits one level
+//! deeper, under `alp-workspace/`, and `tan build` in the new project would
+//! fail with "alp-sdk root is unresolved." `tan init` already pins whatever
+//! `resolve_sdk_root` resolves into the new project's own `.alp/sdk-path`
+//! (`init::from_example::pin_resolved_sdk`), so updating the global default
+//! here is enough to close the gap — no change to `init` needed. A printed
+//! "next command" would not have survived past the terminal it was printed
+//! into; a written pointer does.
 
 use std::path::{Path, PathBuf};
 
 use tan_core::bootstrap::{DEFAULT_WORKSPACE_DIR_NAME, parent_needs_workspace_guard};
 
+use crate::commands::sdk::write_sdk_pointer;
 use crate::exit::ExitCode;
 
 use super::steps::native;
@@ -59,12 +73,21 @@ pub(super) enum Resolution {
 /// evaluated, matching the issue ("no guard at all"). Otherwise the guard
 /// fires only when `parent_needs_workspace_guard` says so, and `interactive`
 /// decides whether that becomes a prompt or an immediate refusal.
+///
+/// `global_sdk_pointer` is the machine-global default-SDK pointer file to
+/// update on a successful move (real callers pass
+/// [`crate::commands::sdk::global_default_pointer_path`]; injected — not read
+/// from `$HOME` in here — so a test can point it at a temp file instead of
+/// the real `~/.alp/sdk-default`, matching that function's own "not
+/// injectable" note about why `sdk::switch_pointer_path` stops short of
+/// testing that write end-to-end).
 pub(super) fn resolve_workspace(
     repo_root: &Path,
     workspace_dir: &Path,
     explicit: Option<&Path>,
     interactive: bool,
     venv_dir_name: &str,
+    global_sdk_pointer: &Path,
 ) -> Resolution {
     let target_parent = match explicit {
         Some(path) => path.to_path_buf(),
@@ -98,9 +121,16 @@ pub(super) fn resolve_workspace(
     match relocate_checkout(repo_root, &target_parent) {
         Ok(new_repo_root) if new_repo_root == repo_root => Resolution::Unchanged,
         Ok(new_repo_root) => {
+            // Best-effort, like `west_config::record_workspace_sdk` right next
+            // to this call chain: a failed write is never a reason to fail a
+            // relocation that otherwise succeeded, and every later resolver
+            // already tolerates a stale/missing pointer by falling through to
+            // the next tier.
+            let _ = write_sdk_pointer(global_sdk_pointer, &new_repo_root.to_string_lossy());
             let notice = format!(
                 "moved the alp-sdk checkout from {} to {} so the west workspace \
-                 (zephyr/modules/.west/venv) stays out of {} (tan-cli#185)",
+                 (zephyr/modules/.west/venv) stays out of {}, and set it as your \
+                 default SDK (`tan sdk switch --global` to change) (tan-cli#185)",
                 native(repo_root),
                 native(&new_repo_root),
                 native(workspace_dir),
@@ -301,6 +331,14 @@ mod tests {
         d
     }
 
+    /// A scratch global-pointer path for tests that pass it into
+    /// [`resolve_workspace`] — a real temp file, NEVER the process's actual
+    /// `$HOME/.alp/sdk-default` (that file is not injectable; see the
+    /// function's own doc comment).
+    fn scratch_pointer(tag: &str) -> PathBuf {
+        tmp(tag).join("sdk-default")
+    }
+
     #[test]
     fn a_clean_parent_or_one_already_holding_dot_west_needs_no_relocation() {
         let clean = tmp("default-target-clean");
@@ -389,7 +427,14 @@ mod tests {
         std::fs::create_dir_all(&repo_root).unwrap();
         std::fs::write(dirty.join("unrelated.txt"), b"").unwrap();
 
-        match resolve_workspace(&repo_root, &dirty, None, false, ".venv") {
+        match resolve_workspace(
+            &repo_root,
+            &dirty,
+            None,
+            false,
+            ".venv",
+            &scratch_pointer("non-interactive-refuse-pointer"),
+        ) {
             Resolution::Refuse {
                 exit,
                 code,
@@ -420,7 +465,14 @@ mod tests {
         std::fs::create_dir_all(&repo_root).unwrap();
 
         assert!(matches!(
-            resolve_workspace(&repo_root, &clean, None, false, ".venv"),
+            resolve_workspace(
+                &repo_root,
+                &clean,
+                None,
+                false,
+                ".venv",
+                &scratch_pointer("non-interactive-clean-pointer"),
+            ),
             Resolution::Unchanged
         ));
 
@@ -436,12 +488,14 @@ mod tests {
         std::fs::write(dirty.join("unrelated.txt"), b"").unwrap(); // would guard, but --workspace bypasses it entirely
 
         let target_parent = tmp("explicit-workspace-target");
+        let pointer = scratch_pointer("explicit-workspace-pointer");
         match resolve_workspace(
             &repo_root,
             &dirty,
             Some(target_parent.as_path()),
             false, // non-interactive -- must still succeed with NO prompt
             ".venv",
+            &pointer,
         ) {
             Resolution::Relocated {
                 repo_root: new_root,
@@ -451,6 +505,7 @@ mod tests {
                 assert_eq!(new_root, target_parent.join("alp-sdk"));
                 assert_eq!(workspace_dir, target_parent);
                 assert!(notice.contains("tan-cli#185"), "{notice}");
+                assert!(notice.contains("default SDK"), "{notice}");
             }
             _ => panic!("expected Relocated"),
         }
@@ -461,9 +516,43 @@ mod tests {
             "uncommitted work",
             "untracked/uncommitted content must move with the directory, unmodified"
         );
+        // The whole point of A5: the machine-global default now names the
+        // checkout's NEW location, so a `tan init` run afterward (this shell
+        // or a fresh one tomorrow) still finds it with no sibling `alp-sdk`
+        // beside the new project.
+        let pointer_json: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&pointer).unwrap()).unwrap();
+        assert_eq!(
+            pointer_json["sdkPath"].as_str().unwrap(),
+            target_parent.join("alp-sdk").to_string_lossy()
+        );
 
         let _ = std::fs::remove_dir_all(&dirty);
         let _ = std::fs::remove_dir_all(&target_parent);
+    }
+
+    #[test]
+    fn a_declined_or_refused_relocation_never_touches_the_global_pointer() {
+        // The write sits behind the SAME `Ok(new_repo_root)` arm as the
+        // notice text -- a Refuse/MoveFailed/Unchanged outcome must leave the
+        // pointer file exactly as it started (here: absent), never create it
+        // as a side effect of a relocation that did not happen.
+        let dirty = tmp("refused-pointer-untouched");
+        let repo_root = dirty.join("alp-sdk");
+        std::fs::create_dir_all(&repo_root).unwrap();
+        std::fs::write(dirty.join("unrelated.txt"), b"").unwrap();
+        let pointer = scratch_pointer("refused-pointer-untouched-pointer");
+
+        match resolve_workspace(&repo_root, &dirty, None, false, ".venv", &pointer) {
+            Resolution::Refuse { .. } => {}
+            _ => panic!("expected Refuse"),
+        }
+        assert!(
+            !pointer.exists(),
+            "a refused relocation must not write the global pointer"
+        );
+
+        let _ = std::fs::remove_dir_all(&dirty);
     }
 
     #[test]
@@ -482,6 +571,7 @@ mod tests {
             Some(target_parent.as_path()),
             false,
             ".venv",
+            &scratch_pointer("collision-pointer"),
         ) {
             Resolution::MoveFailed(message) => {
                 assert!(message.contains("already exists"), "{message}");
@@ -507,7 +597,14 @@ mod tests {
         std::fs::create_dir_all(&repo_root).unwrap();
 
         assert!(matches!(
-            resolve_workspace(&repo_root, &parent, Some(parent.as_path()), false, ".venv"),
+            resolve_workspace(
+                &repo_root,
+                &parent,
+                Some(parent.as_path()),
+                false,
+                ".venv",
+                &scratch_pointer("explicit-already-there-pointer"),
+            ),
             Resolution::Unchanged
         ));
         assert!(repo_root.is_dir());

@@ -39,6 +39,41 @@
   contract, not with a per-invocation flag.
 
 ### Fixed
+- **The npm shim (`@alplabai/tan`) was pinned six releases behind — `npm i -g
+  @alplabai/tan` would have fetched `v0.1.1`'s binaries under the current
+  release tag.** `npm-shim/postinstall.js` resolves its download tag from
+  `npm-shim/package.json`'s own `version` field, not the workspace version,
+  and nothing enforced the two staying in sync — `npm-shim/README.md` only
+  *documented* bumping both by hand. Measured on this machine: `Cargo.toml`
+  `0.4.1-dev` vs. `npm-shim/package.json` `0.1.1`. Bumped the shim's version to
+  match the workspace, and `release.yml`'s `verify-version` job now fails a
+  tag outright if the two disagree again (same grep-based style as its
+  existing tag-vs-`Cargo.toml` check, not a `cargo metadata`/JSON parse).
+- **`tan bootstrap`'s POSIX "Next steps" told the customer to run a raw `west
+  build -b native_sim/native/64 examples/peripheral-io/uart-echo --
+  -DEXTRA_ZEPHYR_MODULES=$PWD`** — wrong twice over. `$PWD` resolves to the
+  alp-sdk checkout only when the reader's shell happens to be sitting in it,
+  which is never true right after the workspace-parent guard has relocated
+  the checkout (the Windows arm already used the correct `tokens.sdk_root`
+  instead; POSIX did not). And `west build` bypasses `tan` itself, contradicting
+  README.md's own claim that tan is "the single executor and the user command
+  surface." Now prints `tan build --sdk-root "<sdk_root>" --project
+  "<sdk_root>/examples/peripheral-io/uart-echo"`. `tan build` has no
+  board-override flag yet, so it cannot select `native_sim`; POSIX now suggests
+  the same real-silicon target the Windows arm already does (verified live:
+  `tan build --plan` against the pinned example resolves that exact slice).
+- **A relocated alp-sdk checkout broke README.md's own next documented step.**
+  `tan bootstrap`'s workspace-parent guard can move the checkout into a
+  sibling `alp-workspace/` directory (#185); afterward, `tan init --name
+  my-app` — run in the same shell, or a fresh one tomorrow — had no sibling
+  `../alp-sdk` left to auto-discover, and `tan build` in the new project
+  failed with "alp-sdk root is unresolved." The relocation now also repoints
+  the machine-global default-SDK pointer (`~/.alp/sdk-default`) at the
+  checkout's new location — which `tan init` already pins into every new
+  project's own `.alp/sdk-path`, so closing the gap needed no change to
+  `init` itself. Chosen over printing a corrected next command: a pointer
+  file survives a closed terminal and a new shell tomorrow; printed text does
+  not.
 - **`tan init` no longer blocks forever when stdin is not a terminal** (#187).
   It rendered an inquire prompt (`Destination directory:`, ANSI escapes and all)
   to a terminal that was not there, then blocked on a stdin already at EOF --
