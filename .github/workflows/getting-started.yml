@@ -79,9 +79,21 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
               ninja-build device-tree-compiler gperf xz-utils
 
+      # Pinned, NOT `3.x` like parity.yml's. `3.x` floats to whatever is newest
+      # -- 3.14.6 on the first run of this job -- and bootstrap's Zephyr
+      # requirements install failed there, which is what left `patoolib` absent
+      # and killed `west sdk install` two steps later. parity.yml gets away with
+      # `3.x` because it never installs Zephyr's requirements at all (just west,
+      # pyyaml, jsonschema, pyelftools).
+      #
+      # 3.12 is a version a customer plausibly has (Ubuntu 24.04 LTS ships it)
+      # and that Zephyr v4.4.1's requirements are built against. This gate is
+      # about the documented path working on a realistic host; "does Zephyr
+      # v4.4.1 support the newest CPython released this month" is a different
+      # question and does not belong on this job's critical path.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: "3.12"
 
       # ---- 3. install.sh, for real ----------------------------------------
 
@@ -200,7 +212,12 @@ jobs:
         working-directory: alp-workspace
         run: |
           set -euo pipefail
-          tan bootstrap --sdk-root ./alp-sdk --format json > /tmp/gs-bootstrap.json
+          # stderr is captured AND echoed: in `--format json` the envelope is the
+          # only thing on stdout, so when a phase degrades, the reason is on
+          # stderr or nowhere. The first run of this job hit exactly that -- a
+          # `bootstrap.zephyr-requirements` warning with no visible cause.
+          tan bootstrap --sdk-root ./alp-sdk --format json \
+              > /tmp/gs-bootstrap.json 2> >(tee /tmp/gs-bootstrap.stderr >&2)
           python3 - <<'PY'
           import json, os, sys
           e = json.load(open("/tmp/gs-bootstrap.json"))
@@ -208,6 +225,26 @@ jobs:
               print("::error::tan bootstrap reported not-ok:",
                     json.dumps(e.get("issues"), indent=2))
               sys.exit(1)
+
+          # `ok` alone is NOT the assertion. bootstrap's Zephyr-requirements
+          # phase reports a WARNING and still exits 0 -- and on this job's first
+          # run that warning was the whole story: the requirements install
+          # failed, `patoolib` was never installed, `ok: true` was reported, and
+          # the failure surfaced two steps later as an unrelated-looking
+          # ModuleNotFoundError inside `west sdk install`. A degraded bootstrap
+          # that reports success is precisely the silent-pass shape this gate
+          # exists to catch, so any warning-or-worse issue fails it HERE, where
+          # the diagnosis is one line long.
+          issues = e.get("issues") or []
+          bad = [i for i in issues if i.get("severity") in ("warning", "error")]
+          if bad:
+              print("::error::tan bootstrap exited 0 but reported",
+                    len(bad), "warning/error issue(s) -- the environment it just "
+                    "built is degraded, and the next documented command is the one "
+                    "that will fail:")
+              print(json.dumps(bad, indent=2))
+              sys.exit(1)
+
           d = e.get("data") or {}
           for key in ("workspaceDir", "venvDir", "zephyrBase"):
               if not d.get(key):
@@ -220,15 +257,22 @@ jobs:
                   print(f"::error::tan bootstrap reported {key}={d[key]} but no such "
                         "directory exists.")
                   sys.exit(1)
+
+          # `data.venvDir`/`zephyrBase` come back CWD-RELATIVE (`./.venv`,
+          # `./zephyr`) while `project.root` in the same envelope is absolute --
+          # tan-cli#217. Resolve them here rather than exporting a relative PATH
+          # entry that happens to work in this step's cwd and silently resolves
+          # to nothing from `alp-workspace/my-app` two steps later.
+          resolve = lambda p: os.path.abspath(p)
           with open(os.environ["GITHUB_ENV"], "a") as fh:
-              fh.write("ZEPHYR_BASE=%s\n" % d["zephyrBase"])
+              fh.write("ZEPHYR_BASE=%s\n" % resolve(d["zephyrBase"]))
           # The workflow equivalent of the `source <venv>/bin/activate` line
           # `tan bootstrap --print-env` prints -- a customer runs it, so this job
           # runs it. It is not here to cover for tan's own venv discovery; that
           # has its own tests (crates/tan-cli/src/venv.rs), and the subject of
           # THIS job is the documented customer path.
           with open(os.environ["GITHUB_PATH"], "a") as fh:
-              fh.write(os.path.join(d["venvDir"], "bin") + "\n")
+              fh.write(resolve(os.path.join(d["venvDir"], "bin")) + "\n")
           print("bootstrap ok -- workspace", d["workspaceDir"])
           PY
 
@@ -337,6 +381,7 @@ jobs:
           name: first-install-logs
           path: |
             /tmp/gs-bootstrap.json
+            /tmp/gs-bootstrap.stderr
             /tmp/gs-print-env.sh
             /tmp/gs-badflag.log
             /tmp/gs-build.log
