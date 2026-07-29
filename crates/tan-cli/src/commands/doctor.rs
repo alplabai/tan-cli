@@ -1574,6 +1574,15 @@ pub(crate) mod tests {
         .unwrap();
         doc["prerequisites"]["posix"] = serde_json::json!([ABSENT_TOOL]);
         doc["prerequisites"]["windows"] = serde_json::json!([ABSENT_TOOL]);
+        // ALL THREE lists, since alp-sdk v0.14.0 added `prerequisites.macos`.
+        // Repointing only two left the macOS runner reading the real list --
+        // `git`/`cmake`/`python3`/`ninja`, all present there -- so nothing was
+        // refused and `status` was `Pass`, and this test failed on macOS ALONE
+        // while Linux and Windows stayed green. Caught by CI on the v0.14.0
+        // re-vendor. Same shape as the defect that re-vendor exposed in
+        // `BootstrapFacts::prerequisites`: a third list, and a code path that
+        // only knew about two.
+        doc["prerequisites"]["macos"] = serde_json::json!([ABSENT_TOOL]);
         std::fs::write(metadata.join("bootstrap.json"), doc.to_string()).unwrap();
 
         let mut report = empty_report(
