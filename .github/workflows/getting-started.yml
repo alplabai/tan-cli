@@ -302,6 +302,23 @@ jobs:
       # copy of a pin that already has one authority.
       - name: install the Zephyr SDK (west sdk install, the printed remedy)
         working-directory: alp-workspace
+        env:
+          # `west sdk install` lists the SDK releases through the GitHub API, and
+          # unauthenticated calls are rate-limited PER IP -- shared across every
+          # hosted runner in the region, so this fails on someone else's traffic,
+          # not ours. Observed on this job:
+          #
+          #   fetch_releases API rate limit exceeded. Try executing install
+          #   script with --personal-access-token argument or use a .netrc file
+          #
+          # followed by a traceback out of `sdk.py`'s `fetch_releases`, and four
+          # skipped steps behind it. The workflow's own GITHUB_TOKEN lifts the
+          # limit to the authenticated per-repo quota and needs no new secret --
+          # `contents: read` is enough to list public releases.
+          #
+          # Passed via env rather than inlined into the command so the token is
+          # not part of an argv that gets echoed.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # bootstrap's venv is already on PATH (see the step above), so this is
@@ -309,7 +326,12 @@ jobs:
           command -v west
           version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
           echo "Zephyr SDK pin from alp-sdk metadata/toolchains.json: ${version}"
-          west sdk install --version "${version}" -t arm-zephyr-eabi
+          # NOTE: `--personal-access-token` is an authentication detail of THIS
+          # runner, not part of the remedy tan prints. The command under test is
+          # still `west sdk install --version <v> -t arm-zephyr-eabi`; a customer
+          # on a home IP has their own unauthenticated quota and needs no token.
+          west sdk install --version "${version}" -t arm-zephyr-eabi \
+              --personal-access-token "${GH_TOKEN}"
 
       # ---- 8. tan init ------------------------------------------------------
 
