@@ -3,6 +3,41 @@
 
 ## [Unreleased]
 
+### Added
+- **`tan debug-config --svd <PATH>` — a user-supplied SVD, the first and only
+  producer of `LaunchResolution.svd`** (#197). The resolution path for
+  `svdFile`/`svdPath` was complete and tested, and structurally dead: the field
+  is read at `debug_launch.rs:245` and was assigned nowhere in the workspace
+  outside tests, so it was always `None`, both keys were always dropped, and
+  cortex-debug's Cortex Peripherals (register) view was unreachable on every
+  target tan supports. A green test suite said nothing about whether the
+  feature could work, because the drop path's input could never be anything
+  else.
+  The SDK ships no SVD and may never ship one — alp-sdk#948's blocker is an
+  unresolved Alif/Renesas redistribution-licence question on a public repo. A
+  user-supplied path is the only route that survives that question going either
+  way: a customer who downloaded the vendor's own SVD, which they are entitled
+  to do, can point tan at it today.
+  Two behaviours decided explicitly rather than by omission, since #67
+  established what a bad `svdFile` costs:
+  1. **A path that does not name a readable file FAILS the command** (no
+     launch.json written) — it never falls back to dropping the key. That
+     fallback would make a typo indistinguishable from not passing the flag,
+     and the user explicitly named the file. A directory and an empty string
+     are refused the same way.
+  2. **A relative `--svd` anchors on the CURRENT DIRECTORY**, not the project
+     root, because a flag typed at a shell prompt means what the shell means by
+     it. The emitted value then goes through the same `workspace_relative`
+     rewrite as `executable`: `${workspaceFolder}/…` inside the project,
+     absolute outside it — and outside is the normal case, since a vendor SVD
+     lives in the vendor SDK.
+  A `--svd` on a target kind whose draft carries no `svdFile` field
+  (`native-host`, `yocto-userspace`) is reported as a note rather than accepted
+  in silence. A `debug.svd` key in `board.yaml` is deliberately NOT part of
+  this change: it has a different lifetime (it travels with the project, so it
+  would anchor on the project root) and belongs with the alp-sdk metadata
+  contract, not with a per-invocation flag.
+
 ### Fixed
 - **`tan init` no longer blocks forever when stdin is not a terminal** (#187).
   It rendered an inquire prompt (`Destination directory:`, ANSI escapes and all)
