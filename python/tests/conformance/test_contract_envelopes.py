@@ -88,10 +88,6 @@ CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit"})
 #: turns that XPASS into a FAILURE, so landing a command forces the one-line
 #: promotion: delete its entry here. Costs nothing while a case genuinely fails.
 NOT_PORTED = {
-    "debug-config-preview-baremetal-mcu": "debug-config lands in a later sub-project",
-    "debug-config-preview-native-host": "debug-config lands in a later sub-project",
-    "debug-config-preview-yocto-userspace": "debug-config lands in a later sub-project",
-    "debug-config-preview-zephyr-mcu": "debug-config lands in a later sub-project",
     "explain-overview": "explain lands in a later sub-project",
     "presets-heterogeneous-som": "presets lands in a later sub-project",
     "presets-no-sdk": "presets lands in a later sub-project",

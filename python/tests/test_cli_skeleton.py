@@ -21,6 +21,19 @@ def test_version_first_line_matches_the_extension_probe():
     assert p.stdout.splitlines()[0].startswith("tan ")
 
 
+def test_version_under_format_json_is_an_envelope_not_a_bare_line():
+    """Rust routes clap's `--version` output through `emit_parse_error`
+    (main.rs): exit 0, no issues, the rendered line as `data.message`. stdout is
+    the envelope channel under `--format json`, `--version` included -- a bare
+    `tan X.Y.Z` there is not JSON and a consumer parsing stdout gets nothing."""
+    for argv in (["--format", "json", "--version"], ["--format=json", "--version"]):
+        p = run(*argv)
+        assert p.returncode == 0, p.stderr
+        env = json.loads(p.stdout)
+        assert env["command"] == "cli" and env["issues"] == []
+        assert env["data"]["message"].startswith("tan ")
+
+
 def test_unknown_command_exits_2_and_emits_an_envelope_in_json_mode():
     p = run("definitely-not-a-command", "--format", "json")
     assert p.returncode == 2

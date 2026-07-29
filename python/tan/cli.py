@@ -13,13 +13,14 @@ import sys
 import typer
 
 from tan.commands.build_cmd import build
+from tan.commands.debug_config_cmd import debug_config
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.generate_cmd import generate
 from tan.commands.init_cmd import init
 from tan.commands.sdk_cmd import sdk
 from tan.commands.validate_cmd import validate
-from tan.envelope import Envelope, Issue, Project, envelope_emitted
+from tan.envelope import Envelope, Issue, Project, emit, envelope_emitted
 from tan.exit_codes import ExitCode
 from tan.version import TAN_VERSION
 
@@ -32,6 +33,7 @@ app = typer.Typer(add_completion=False)
 # the command module keeps `tan.commands.*` free of any `tan.cli` import,
 # which would otherwise be a cycle.
 app.command("build")(build)
+app.command("debug-config")(debug_config)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("generate")(generate)
@@ -39,11 +41,48 @@ app.command("init")(init)
 app.command("sdk")(sdk)
 app.command("validate")(validate)
 
+#: Commands that read the root `--format` off `ctx.obj`, so the flag may precede
+#: the subcommand name for them (clap's `global = true`). Grow this as each
+#: command is taught to; see `root` for why an unlisted command must REFUSE the
+#: pre-subcommand position rather than silently ignore it.
+_HONOURS_ROOT_FORMAT = frozenset({"debug-config"})
+
 
 @app.callback(invoke_without_command=True)
-def root(ctx: typer.Context, version: bool = typer.Option(False, "--version")) -> None:
+def root(
+    ctx: typer.Context,
+    version: bool = typer.Option(False, "--version"),
+    output_format: str = typer.Option(
+        None, "--format", metavar="FORMAT", help="Output format: text or json."
+    ),
+) -> None:
     """tan CLI -- board configuration, generation, and project tooling."""
+    # Rust's `--format` is `global = true`, so clap accepts it on EITHER side of
+    # the subcommand name; four committed goldens invoke `tan --format json
+    # debug-config ...`. Click gives the group only what precedes the subcommand,
+    # so the value is recorded here and read off `ctx.obj` by any command that
+    # honours the pre-subcommand position. A command's OWN `--format` (declared
+    # after the command name) still wins -- that is the position every other
+    # golden uses.
+    ctx.obj = {"format": output_format}
     if version:
+        if output_format == "json":
+            # Under `--format json`, stdout is the envelope channel even for
+            # `--version`: Rust routes clap's version output through
+            # `emit_parse_error` (main.rs), giving exit 0, no `issues`, and the
+            # rendered line as `data.message`. Reachable only now that `--format`
+            # is a root option -- before, this argv was a Click usage error -- so
+            # honouring it here is part of adding the flag, not a separate change.
+            emit(
+                Envelope(
+                    "cli",
+                    Project(root=None, board_yaml=None),
+                    {"message": f"tan {TAN_VERSION}"},
+                    [],
+                    ExitCode.SUCCESS,
+                )
+            )
+            return
         # MUST match /^tan \d+\.\d+\.\d+/ -- the extension rejects the binary
         # otherwise (alp-sdk-vscode/src/alpCli/service.ts:107-121).
         typer.echo(f"tan {TAN_VERSION}")
@@ -60,6 +99,26 @@ def root(ctx: typer.Context, version: bool = typer.Option(False, "--version")) -
         # already gets, so bare invocation does not need its own bespoke
         # rendering.
         ctx.fail("a command is required")
+    if output_format is not None and ctx.invoked_subcommand not in _HONOURS_ROOT_FORMAT:
+        # A command that does not read `ctx.obj` would ACCEPT `--format json`
+        # here and then run in text mode: exit 0, human text on stderr, and
+        # NOTHING on stdout -- an envelope-less `--format json` run, which is the
+        # exact break this port exists to prevent (the extension renders an empty
+        # panel with no error). Refusing is the status quo for those commands
+        # (Click's own usage error, exit 2, plus `main`'s `cli.parse-error`
+        # envelope). Each command joins `_HONOURS_ROOT_FORMAT` when it learns to
+        # read `ctx.obj`; until then the flag only works in its documented
+        # position, after the subcommand name.
+        #
+        # LAST in this callback deliberately: `--version` and the bare-invocation
+        # refusal both have their own answers, and checking first hijacked them
+        # with a worse message (`tan --format json --version` exits 0 with the
+        # version line in Rust, and bare `tan --format json` must say "a command
+        # is required", not name a `None` subcommand).
+        ctx.fail(
+            f"--format must be given after the '{ctx.invoked_subcommand}' "
+            "subcommand, not before it"
+        )
 
 
 def _wants_json(argv: list[str]) -> bool:

@@ -46,6 +46,24 @@ CASES = [
     # tests/test_cli_skeleton.py::test_bare_invocation_exits_2_with_help_on_stderr).
     ([], ENVELOPE, None),
     (["validate", "--format", "json"], ENVELOPE, "validate lands in a later sub-project"),
+    # `debug-config`'s refusal envelope, which no conformance golden reaches:
+    # all four are exit-0 previews. Pins exit 5, the `zephyr-mcu`/`none`
+    # placeholder payload, `configuration: null`, the null project AND the
+    # message string, across both implementations.
+    (
+        ["--format", "json", "debug-config", "--target-kind", "bogus"],
+        ENVELOPE,
+        None,
+    ),
+    # …and `--format` BEFORE the subcommand, which is how the four goldens
+    # invoke it (clap's `global = true`). Worth its own case: Click gives the
+    # group only what precedes the subcommand, so this position is a separate
+    # code path in the port and not in Rust.
+    (
+        ["--format", "json", "debug-config", "--target-kind", "native-host", "--preview"],
+        ENVELOPE,
+        None,
+    ),
     (
         ["build", "--plan", "--format", "json"],
         PLAN,
@@ -89,6 +107,90 @@ def work_dir(tmp_path):
 )
 def test_python_matches_rust(argv, surface, pending, work_dir, tmp_path):
     result = compare(argv, cwd=work_dir, surface=surface, home=tmp_path / "home")
+    assert result.matches, "\n".join(result.diffs)
+
+
+#: A post-build manifest with a Cortex-M Zephyr slice FIRST and a `native_sim`
+#: slice SECOND -- the ordering that broke `native-host` resolution (#83), plus a
+#: `runners.yaml` for the MCU slice so the J-Link `device` and the toolchain GDB
+#: actually resolve. BOTH slices record `zephyr.elf`, because that is the only
+#: thing tan ever writes (`resolve_zephyr_artefact` has no `.exe` branch and
+#: alp-sdk never writes the field), which is what makes the sibling `.exe` swap
+#: observable.
+PARITY_MANIFEST = """\
+schema_version: 1
+hw_info:
+  sku: E1M-AEN701
+slices:
+- core_id: m55_hp
+  os: zephyr
+  board: alp_e1m_aen701_m55_hp
+  status: ok
+  build_dir: {root}/build/m55_hp-zephyr/build
+  output_artefact: {root}/build/m55_hp-zephyr/build/zephyr/zephyr.elf
+- core_id: native_sim
+  os: zephyr
+  board: native_sim/native/64
+  status: ok
+  output_artefact: {root}/build/native_sim-zephyr/build/zephyr/zephyr.elf
+ipc: []
+helper_mcus: []
+boot_order: []
+"""
+
+PARITY_RUNNERS = """\
+runners:
+- jlink
+- openocd
+config:
+  gdb: /zephyr-sdk/arm-zephyr-eabi-gdb
+  openocd: /usr/bin/openocd
+  openocd_search:
+  - /usr/share/openocd/scripts
+args:
+  jlink:
+  - --device=AE822F4M55_HP
+  openocd:
+  - --config=board/alp.cfg
+"""
+
+
+@pytest.mark.skipif(not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
+@pytest.mark.parametrize(
+    "target,server",
+    [
+        # J-Link resolves `device` + `gdbPath`; OpenOCD resolves
+        # `serverpath`/`searchDir`/`configFiles`; pyOCD resolves NOTHING (the
+        # board registers no such runner) and must keep its placeholder AND gain
+        # the "registers no runner" note; native-host must take the native_sim
+        # slice's sibling `.exe`, not the first `os: zephyr` slice's ELF.
+        ("zephyr-mcu", "jlink"),
+        ("zephyr-mcu", "openocd"),
+        ("zephyr-mcu", "pyocd"),
+        ("native-host", "none"),
+    ],
+)
+def test_debug_config_resolution_matches_rust(target, server, work_dir, tmp_path):
+    """The `<resolved-...>` overlay read off this project's OWN build output
+    (#66/#83), diffed against the oracle. `--preview` only: `compare` runs both
+    binaries in the SAME cwd, so a write-mode case would have the second run
+    merge into what the first one wrote."""
+    root = str(work_dir).replace("\\", "/")
+    build = work_dir / "build"
+    build.mkdir()
+    (build / "system-manifest.yaml").write_text(
+        PARITY_MANIFEST.format(root=root), encoding="utf-8"
+    )
+    zephyr = work_dir / "build" / "m55_hp-zephyr" / "build" / "zephyr"
+    zephyr.mkdir(parents=True)
+    (zephyr / "runners.yaml").write_text(PARITY_RUNNERS, encoding="utf-8")
+
+    result = compare(
+        ["debug-config", "--target-kind", target, "--server", server,
+         "--preview", "--format", "json"],
+        cwd=work_dir,
+        home=tmp_path / "home",
+    )
     assert result.matches, "\n".join(result.diffs)
 
 
