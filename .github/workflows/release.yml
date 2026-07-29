@@ -257,17 +257,45 @@ jobs:
           python3 - "$VERSION" <<'PY' > release_notes.md
           import sys, re
           version = sys.argv[1]
-          out, capturing = [], False
+          out, capturing, found = [], False, False
           for line in open("CHANGELOG.md", encoding="utf-8"):
               if re.match(rf"^## \[{re.escape(version)}\]", line):
-                  capturing = True
+                  capturing = found = True
                   continue
               if capturing and line.startswith("## ["):
                   break
               if capturing:
                   out.append(line)
           body = "".join(out).strip()
-          print(body if body else f"See CHANGELOG.md for {version}.")
+          # #212: this used to `print(body if body else f"See CHANGELOG.md for
+          # {version}.")` and exit 0, so a tag whose section was never written
+          # published a release whose entire body was that one sentence -- and
+          # nothing anywhere said so. The failure mode is not hypothetical: the
+          # version bump renames `## [Unreleased]` to `## [X.Y.Z]`, and a bump
+          # that edits the version files but forgets the CHANGELOG header leaves
+          # exactly this state. Checked against dev before this change: a v0.4.1
+          # tag would have found no section and shipped the stub.
+          #
+          # A release with no notes is not a degraded release, it is a broken
+          # one -- the notes are the only human-readable record of what changed,
+          # and the tag is immutable once pushed. Fail before publishing, not
+          # after. `shell: bash` runs with `-eo pipefail`, so a non-zero exit
+          # here stops the job.
+          if not found:
+              sys.exit(
+                  f"::error::CHANGELOG.md has no `## [{version}]` section, so this "
+                  f"release would publish with an empty body. The version bump "
+                  f"renames `## [Unreleased]` to `## [{version}] -- <date>`; that "
+                  f"edit is missing. Fix CHANGELOG.md on the release branch, then "
+                  f"re-tag."
+              )
+          if not body:
+              sys.exit(
+                  f"::error::CHANGELOG.md's `## [{version}]` section is empty. A "
+                  f"release body has to say what changed; write the section, then "
+                  f"re-tag."
+              )
+          print(body)
           PY
           cat >> release_notes.md <<'NOTES'
 
