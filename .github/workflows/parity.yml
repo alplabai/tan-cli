@@ -537,3 +537,152 @@ jobs:
             /tmp/seam2-build.log
             /tmp/seam2-renode.log
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # tan-cli#A6: until this job existed, NO workflow in either repo ran `tan
+  # bootstrap`, `tan init` or `tan build` at all -- grepping .github for them
+  # returned three COMMENT lines and no `run:` step. seam2 above hand-assembles
+  # the workspace itself (`west init -l` / `west update` / `west zephyr-export`)
+  # and then builds an EXISTING example, so it exercises the loader seam but
+  # never the commands a customer actually types. Every regression in the venv
+  # phase, the west phase, the prerequisite gate or the workspace guard reached
+  # customers with a green board.
+  #
+  # This job is the customer path and nothing else: bootstrap -> doctor ->
+  # init -> build, in that order, on a machine that starts with none of it.
+  first-blink:
+    name: "first blink -- tan bootstrap -> init -> build"
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout tan-cli
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
+
+      - name: resolve alp-sdk ref
+        id: sdk_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "::notice::first-blink building against alp-sdk ref: ${ref}"
+
+      # Into `ws/alp-sdk`, NOT `alp-sdk`, and the nesting is load-bearing.
+      # `west init -l <checkout>` forces the west topdir to be the checkout's
+      # PARENT (alp-sdk#769), so tan-cli#185's workspace guard refuses to
+      # bootstrap when that parent holds anything besides the checkout. At
+      # $GITHUB_WORKSPACE the parent also holds the whole tan-cli tree, so a
+      # flat `path: alp-sdk` would make `tan bootstrap --non-interactive` exit
+      # 2 by design. A dedicated parent is what the guard asks for and what
+      # README tells customers to do -- this job runs the documented layout.
+      - name: clone alp-sdk into a dedicated workspace parent
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.sdk_ref.outputs.ref }}
+          path: ws/alp-sdk
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # Deliberately NOT pip-installing west here: `tan bootstrap` creating the
+      # venv and installing west into it is one of the things under test.
+      - name: host deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              ninja-build device-tree-compiler gperf ca-certificates curl xz-utils
+
+      - name: build tan
+        run: cargo build --locked --bin tan
+
+      # THE STEP THAT DID NOT EXIST. Exit 0 is necessary but not sufficient --
+      # a bootstrap that "succeeds" without creating the workspace is exactly
+      # the silent failure this job is for, so the artefacts are asserted.
+      - name: tan bootstrap (the customer's first command)
+        working-directory: ws/alp-sdk
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/target/debug/tan" bootstrap --non-interactive
+          for p in ../.west/config ../.venv ../zephyr ../modules; do
+            if [ ! -e "$p" ]; then
+              echo "::error::tan bootstrap exited 0 but did not create $p"
+              exit 1
+            fi
+          done
+          echo "bootstrap created .west/, .venv/, zephyr/ and modules/ in the workspace parent."
+
+      - name: tan doctor
+        working-directory: ws/alp-sdk
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/target/debug/tan" doctor --format json \
+              > /tmp/first-blink-doctor.json
+
+      # Pinned + sha256-verified, same source of truth as seam2: alp-sdk's own
+      # metadata/toolchains.json, never a hardcoded version (see that file's
+      # comment on check_toolchain_lock.py).
+      - name: read Zephyr SDK pin
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import json
+          d = json.load(open("ws/alp-sdk/metadata/toolchains.json"))
+          sdk = d["zephyrSdk"]
+          art = next(a for a in sdk["artifacts"]
+                     if a["host"] == "linux-x86_64" and a["component"] == "minimal-sdk")
+          version = sdk["version"]
+          url = sdk["baseUrl"] + art["filename"]
+          sha256 = art["sha256"]
+          print(f"ZEPHYR_SDK_VERSION={version}")
+          print(f"ZEPHYR_SDK_URL={url}")
+          print(f"ZEPHYR_SDK_SHA256={sha256}")
+          ' >> "$GITHUB_ENV"
+
+      - name: install Zephyr SDK (arm-zephyr-eabi)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zephyr-sdk.tar.xz "${ZEPHYR_SDK_URL}"
+          ACTUAL="$(sha256sum /tmp/zephyr-sdk.tar.xz | awk '{print $1}')"
+          if [ "${ACTUAL}" != "${ZEPHYR_SDK_SHA256}" ]; then
+            echo "::error::Zephyr SDK sha256 mismatch: expected ${ZEPHYR_SDK_SHA256}, got ${ACTUAL}"
+            exit 1
+          fi
+          mkdir -p "$HOME/zephyr-sdk"
+          tar -xJf /tmp/zephyr-sdk.tar.xz -C "$HOME/zephyr-sdk" --strip-components=1
+          "$HOME/zephyr-sdk/setup.sh" -t arm-zephyr-eabi -c
+          echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk" >> "$GITHUB_ENV"
+
+      # `--from-example` is the path tan-cli#164 exists to make discoverable;
+      # `peripheral-io/hello-world` is the id that issue names as the one a
+      # customer could not find because `tan examples` printed only a count.
+      - name: tan init --from-example
+        working-directory: ws
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/target/debug/tan" init \
+              --from-example peripheral-io/hello-world \
+              --name my-app --non-interactive
+          test -f my-app/board.yaml || { echo "::error::tan init wrote no board.yaml"; exit 1; }
+
+      - name: tan build
+        working-directory: ws/my-app
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/target/debug/tan" build 2>&1 | tee /tmp/first-blink-build.log
+          echo "first blink: bootstrap -> doctor -> init -> build, all from the commands a customer types."
+
+      - name: upload first-blink logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-blink-logs
+          path: |
+            /tmp/first-blink-doctor.json
+            /tmp/first-blink-build.log
+          if-no-files-found: warn
