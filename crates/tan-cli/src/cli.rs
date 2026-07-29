@@ -543,7 +543,10 @@ pub struct BootstrapArgs {
     /// Skip the west init/update step.
     #[arg(long = "no-west")]
     pub no_west: bool,
-    /// Only print the environment-variable lines and exit.
+    /// Only print the environment-variable lines and exit, installing nothing.
+    /// Written to STDOUT (tan-cli#227) — unlike every other text output, which
+    /// goes to stderr — so `eval "$(tan bootstrap --print-env)"` and
+    /// `tan bootstrap --print-env > env.sh` both work.
     #[arg(long = "print-env")]
     pub print_env: bool,
     /// Report success even when a dependency install failed and the workspace

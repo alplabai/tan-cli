@@ -292,13 +292,14 @@ jobs:
         working-directory: alp-workspace
         run: |
           set -euo pipefail
-          # `2>&1` is load-bearing: the block goes to STDERR (tan-cli#227), so
-          # the plain pipe this step used to have captured zero bytes -- and
-          # `sh -n` on an empty file PASSES, because an empty file is a valid
-          # shell script. The step reported green having read nothing. Hence
-          # the size check below: never assert on a file without first proving
-          # something reached it.
-          tan bootstrap --sdk-root ./alp-sdk --print-env 2>&1 | tee /tmp/gs-print-env.sh
+          # A PLAIN pipe, deliberately -- no `2>&1`. The block is on stdout as
+          # of tan-cli#227, so this step is now that fix's gate: if it ever
+          # returns to stderr, the capture is empty again and the size check
+          # below fails. It was that empty capture -- with `sh -n` passing,
+          # because an empty file is a valid shell script -- that had this step
+          # reporting green while asserting nothing at all. Never assert on a
+          # file without first proving something reached it.
+          tan bootstrap --sdk-root ./alp-sdk --print-env | tee /tmp/gs-print-env.sh
           if [ ! -s /tmp/gs-print-env.sh ]; then
             echo "::error::tan bootstrap --print-env produced no output at all."
             exit 1
