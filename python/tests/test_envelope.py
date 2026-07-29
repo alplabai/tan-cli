@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
-import sys
 
 from tan.envelope import Envelope, Issue, Project, SdkInfo
 from tan.exit_codes import ExitCode
@@ -46,21 +45,33 @@ def test_to_json_never_raises_on_unserialisable_payload():
     assert parsed["issues"][0]["code"] == "envelope.serialize-failed"
 
 
+class _RecursionBomb(dict):
+    """A payload that makes `json.dumps` raise RecursionError -- deterministically,
+    on every interpreter.
+
+    A dict SUBCLASS on purpose: `_json.c`'s `encoder_listencode_dict` walks an
+    exact dict with `PyDict_Next` and only calls `items()` for a subclass, so
+    this is the seam that raises from inside the encoder rather than from the
+    test. Non-empty because the encoder short-circuits an empty dict to `{}`
+    before it ever reaches `items()`.
+
+    It replaces the obvious provocation -- 1000-deep nesting under
+    `setrecursionlimit(200)` -- which stopped provoking anything in CPython
+    3.12: the C encoder's stack guard there is no longer driven by
+    `sys.getrecursionlimit()`, so `json.dumps` simply SUCCEEDS and the old test
+    asserted its way to a failure on a claim it had quietly stopped making.
+    """
+
+    def items(self):
+        raise RecursionError("maximum recursion depth exceeded while encoding a JSON object")
+
+
 def test_to_json_never_raises_on_recursion_error():
-    """json.dumps raises RecursionError (not TypeError/ValueError) on a deeply nested
-    payload -- to_json() must still catch it and emit the same fallback envelope."""
-    old_limit = sys.getrecursionlimit()
-    sys.setrecursionlimit(200)
-    try:
-        nested: list = []
-        cur = nested
-        for _ in range(1000):
-            cur.append([])
-            cur = cur[0]
-        env = Envelope("test", Project(None, None), nested, [], ExitCode.SUCCESS)
-        parsed = json.loads(env.to_json())
-    finally:
-        sys.setrecursionlimit(old_limit)
+    """RecursionError is neither TypeError nor ValueError, so `to_json`'s catch has
+    to be broad enough to hold it too -- otherwise a payload the encoder chokes on
+    puts ZERO bytes on stdout instead of one fallback envelope."""
+    env = Envelope("test", Project(None, None), _RecursionBomb(a=1), [], ExitCode.SUCCESS)
+    parsed = json.loads(env.to_json())
     assert parsed["ok"] is False
     assert parsed["exitCode"] == 5
     assert parsed["issues"][0]["code"] == "envelope.serialize-failed"

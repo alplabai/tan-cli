@@ -1,7 +1,14 @@
 [project]
 name = "tan"
 version = "0.5.0.dev0"
-requires-python = ">=3.11"
+# 3.12, not 3.11: the floor is what the BUILD needs, not what this package's own
+# syntax needs. Zephyr's `cmake/modules/python.cmake` sets
+# `PYTHON_MINIMUM_REQUIRED 3.12`, and `tan build` bakes the interpreter it
+# resolves into every Zephyr slice as `-DPython3_EXECUTABLE` -- so a `tan` frozen
+# against 3.11 hands Zephyr an interpreter its own configure step then rejects,
+# and the customer gets an error naming Zephyr rather than tan. Same effective
+# floor `tan doctor` enforces (`ZEPHYR_PYTHON_FLOOR`, tan/commands/doctor_cmd.py).
+requires-python = ">=3.12"
 dependencies = ["typer>=0.12", "rich>=13"]
 
 [project.scripts]
