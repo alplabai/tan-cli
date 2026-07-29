@@ -11,3 +11,5 @@ __pycache__/
 /python/dist/
 /python/.build/
 /python/.venv-build/
+python/build/
+python/*.egg-info/

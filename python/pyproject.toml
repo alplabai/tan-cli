@@ -1,6 +1,21 @@
 [project]
-name = "tan"
+# DISTRIBUTION name is `alp-tan`, not `tan`: the name `tan` is already taken on
+# PyPI ("The compromising code formatter", v23.7.0), so `pip install tan` would
+# fetch an unrelated package. The IMPORT package stays `tan` and the console
+# script stays `tan`, so a customer still types `tan build` -- only the install
+# line differs:
+#
+#     pip install alp-tan   ->   tan --version
+#
+# `tan-cli` was also free; `alp-tan` is preferred because the other Alp Lab
+# artefacts are `alp-`prefixed.
+name = "alp-tan"
 version = "0.5.0.dev0"
+description = "The Alp Lab build CLI: one board.yaml to firmware, across MCU and MPU cores."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{ name = "Alp Lab AB" }]
+keywords = ["embedded", "firmware", "zephyr", "yocto", "som", "build"]
 # 3.12, not 3.11: the floor is what the BUILD needs, not what this package's own
 # syntax needs. Zephyr's `cmake/modules/python.cmake` sets
 # `PYTHON_MINIMUM_REQUIRED 3.12`, and `tan build` bakes the interpreter it
@@ -10,6 +25,20 @@ version = "0.5.0.dev0"
 # floor `tan doctor` enforces (`ZEPHYR_PYTHON_FLOOR`, tan/commands/doctor_cmd.py).
 requires-python = ">=3.12"
 dependencies = ["typer>=0.12", "rich>=13"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Build Tools",
+  "Topic :: Software Development :: Embedded Systems",
+]
+
+[project.urls]
+Homepage = "https://github.com/alplabai/tan-cli"
+Repository = "https://github.com/alplabai/tan-cli"
+Issues = "https://github.com/alplabai/tan-cli/issues"
 
 [project.scripts]
 tan = "tan.__main__:main"
@@ -17,6 +46,12 @@ tan = "tan.__main__:main"
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
+
+# Explicit, so `tests/` can never be shipped by an auto-discovery change and a
+# new subpackage is never silently omitted from the wheel.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tan*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
