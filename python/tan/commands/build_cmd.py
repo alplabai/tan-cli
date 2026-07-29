@@ -57,11 +57,6 @@ from tan.exit_codes import ExitCode
 #: breaks every `--sdk-root` resolution in the CLI, so it is spelled once.
 SDK_MARKER = ("scripts", "alp_project.py")
 
-#: Plan-document codes: the plan itself is malformed or from a schema this
-#: binary does not consume. Everything else in the `build.*` family is a
-#: runtime fact (a file that would not read, a checkout that is not there).
-_VALIDATION_CODES = frozenset({"build.plan-invalid", "build.plan-unsupported-schema"})
-
 #: Envelope `data.slices[].status`, from `SliceOutcome.status`. The wire
 #: vocabulary is the Rust one (`ok` / `skipped` / `failed`), NOT the executor's
 #: internal spelling -- `succeeded` on the wire would break a consumer written
@@ -245,7 +240,19 @@ def _acquire_plan(
     try:
         return parse_build_plan(text)
     except PlanParseError as err:
-        raise BuildError(err.code, err.message, ExitCode.VALIDATION_FAILURE) from err
+        # Exit 1, NOT 2. A malformed plan reads like a validation failure and
+        # the semantic pull toward `ValidationFailure` is real -- but the
+        # shipped binary reports RuntimeFailure here
+        # (`crates/tan-cli/src/commands/build/plan_modes.rs:140-146` and
+        # `native.rs:110-116` both call `plan_error_run(..., "build.plan-
+        # invalid", ..., ExitCode::RuntimeFailure)`), and the exit ladder is a
+        # frozen contract. The consumer makes it worse than cosmetic:
+        # `alp-sdk-vscode/src/alpCli/service.ts:253-259` renders exit 2 as
+        # `severity: "warning"` and exit 1 as `"error"`, so "2" would downgrade
+        # a plan that will not parse -- a hard failure -- to a yellow banner.
+        # 2 stays for a genuine validation failure in Rust's own terms, e.g.
+        # `validate`'s schema violation, whose fixture pins exit 2.
+        raise BuildError(err.code, err.message, ExitCode.RUNTIME_FAILURE) from err
 
 
 def _slice_result(core_id: str, backend: str, outcome: SliceOutcome) -> dict:
@@ -375,13 +382,11 @@ def _build(
             toolchain_root=None,
         )
     except TokenSubstitutionError as err:
-        raise BuildError(
-            err.code,
-            err.message,
-            ExitCode.VALIDATION_FAILURE
-            if err.code in _VALIDATION_CODES
-            else ExitCode.RUNTIME_FAILURE,
-        ) from err
+        # RuntimeFailure for every code this pass raises, `build.plan-invalid`
+        # (an unknown `planPathMode`) included -- same ladder position the Rust
+        # oracle gives them (`native.rs:132-142`), and the same code must not
+        # mean two different exits depending on which module raised it.
+        raise BuildError(err.code, err.message, ExitCode.RUNTIME_FAILURE) from err
 
     # I-20. ALL of them, then dispatch -- never interleaved.
     try:

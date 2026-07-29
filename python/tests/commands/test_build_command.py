@@ -308,15 +308,38 @@ def test_a_missing_plan_file_is_a_coded_envelope(project):
     assert "Traceback" not in proc.stderr
 
 
-def test_an_unparseable_plan_is_a_validation_failure(project):
+def test_an_unparseable_plan_exits_1_not_2(project):
+    # DO NOT "fix" this to 2. A plan that will not parse reads like a
+    # validation failure, but the shipped binary reports RuntimeFailure --
+    # `crates/tan-cli/src/commands/build/plan_modes.rs:140-146` and
+    # `native.rs:110-116` -- and the exit ladder is frozen for this port.
+    # The consumer makes the difference load-bearing rather than cosmetic:
+    # `alp-sdk-vscode/src/alpCli/service.ts:253-259` renders exit 2 as
+    # `severity: "warning"` and exit 1 as `"error"`, so 2 would show a plan
+    # that cannot be built as a yellow banner instead of a failure.
     plan = project / "plan.json"
     plan.write_text("{not json at all", encoding="utf-8", newline="")
     proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
 
     env = envelope_of(proc)
-    assert proc.returncode == 2, env
+    assert proc.returncode == 1, env
+    assert env["exitCode"] == 1
     assert [i["code"] for i in env["issues"]] == ["build.plan-invalid"]
     assert "Traceback" not in proc.stderr
+
+
+def test_an_unknown_plan_path_mode_exits_1_from_the_substitution_pass_too(project):
+    # The SAME `build.plan-invalid` code, raised by a different module
+    # (`token_substitution.py`, not `build_plan.py`). One code must not mean
+    # two different exit codes depending on which module raised it.
+    doc = two_slice_plan(ALL_ARTEFACTS)
+    doc["planPathMode"] = "legacy"
+    plan = write_plan(project, doc)
+    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert proc.returncode == 1, env
+    assert [i["code"] for i in env["issues"]] == ["build.plan-invalid"]
 
 
 def test_an_unsupported_schema_version_is_refused_not_hand_ported(project):
@@ -326,7 +349,9 @@ def test_an_unsupported_schema_version_is_refused_not_hand_ported(project):
     proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
 
     env = envelope_of(proc)
-    assert proc.returncode == 2, env
+    # Exit 1 for the same reason as the case above: a refused schemaVersion
+    # takes Rust's `build.plan-invalid` ladder position, not `validate`'s.
+    assert proc.returncode == 1, env
     assert [i["code"] for i in env["issues"]] == ["build.plan-unsupported-schema"]
 
 
