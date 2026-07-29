@@ -22,7 +22,7 @@ use super::CommandRun;
 use crate::cli::{DebugConfigArgs, GlobalArgs};
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
-use crate::util::{generated_at_iso, normalize_path, resolve_cli_project_context};
+use crate::util::{generated_at_iso, normalize_path, resolve_cli_project_context_no_sdk_report};
 
 /// `data` payload of the `debug-config` envelope (serialized as camelCase JSON).
 #[derive(serde::Serialize)]
@@ -91,12 +91,25 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         .to_string_lossy()
         .to_string();
 
-    // tan-cli#170: every other command's `Project.board_yaml` comes from this
-    // SAME shared resolver (`bootstrap`, `doctor`, `presets`, `validate`, …);
-    // `debug-config` was the one holdout still hardcoding it `None` on every
-    // path, even a success with a valid `board.yaml` sitting in the resolved
-    // root. Reporting-only — no consumer binds it yet.
-    let board_yaml = resolve_cli_project_context(g).board_yaml_path;
+    // tan-cli#170: every other command's `Project.root`/`Project.board_yaml`
+    // come from this SAME shared resolver (`bootstrap`, `doctor`, `presets`,
+    // `validate`, …); `debug-config` was the one holdout still hardcoding
+    // `board_yaml: None` on every path, even a success with a valid
+    // `board.yaml` sitting in the resolved root. Bound once (not just for
+    // `board_yaml_path`) so the reported `project.root` is this SAME
+    // `context.workspace_root` — already posix-normalized, like every other
+    // command's golden — instead of the locally-computed `workspace_root:
+    // PathBuf` below's native `to_string_lossy()`, which put a
+    // native-backslash `root` next to a forward-slash `boardYaml` in the same
+    // envelope object on Windows (#170 follow-up). Reporting-only — no
+    // consumer binds either field yet. The `_no_sdk_report` variant: unlike
+    // every other caller of this resolver, `debug-config` never drives the
+    // SDK it might resolve here as a side detail, so it must not add an
+    // undeclared `sdk` envelope key as a side effect of a field it merely
+    // reports (tan-cli#111 follow-up).
+    let context = resolve_cli_project_context_no_sdk_report(g);
+    let board_yaml = context.board_yaml_path.clone();
+    let project_root = context.workspace_root.clone().unwrap_or_default();
 
     // Fill the `<resolved-…>` placeholders from what this project's own build
     // recorded (#66). Nothing here fails the command: pre-build, or against a
@@ -117,7 +130,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
             false,
             &notes,
             &draft,
-            &workspace_root,
+            &project_root,
             board_yaml,
             Vec::new(),
         );
@@ -219,7 +232,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         // carries its own `<resolved-…>` placeholders even after a merge
         // resolved them from the customer's real, hand-filled values.
         &plan.written_configuration,
-        &workspace_root,
+        &project_root,
         board_yaml,
         issues,
     )
@@ -311,7 +324,7 @@ fn success(
     replaced: bool,
     notes: &[String],
     configuration: &Value,
-    workspace_root: &Path,
+    project_root: &str,
     board_yaml: Option<String>,
     issues: Vec<Issue>,
 ) -> CommandRun {
@@ -342,9 +355,12 @@ fn success(
         )
     };
     // tan-cli#170: same resolver every other command's envelope already uses
-    // for this field; `debug-config` was the one holdout hardcoding `None`.
+    // for both fields; `debug-config` was the one holdout hardcoding
+    // `board_yaml: None`, and (follow-up) the one reporting `root` from its
+    // own native-separator `PathBuf` instead of this already posix-normalized
+    // string.
     let project = Project {
-        root: Some(workspace_root.to_string_lossy().to_string()),
+        root: Some(project_root.to_string()),
         board_yaml,
     };
     let json = g.is_json().then(|| {

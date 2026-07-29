@@ -548,10 +548,13 @@ pub fn resolve_sdk_tiered(
     )
 }
 
-/// Resolve the project context from the global args, mirroring the TS commands'
-/// `path.resolve(cwd, project) + resolveProjectContext` boilerplate. Shared by
-/// `validate`, `diff`, `presets`, and `doctor`.
-pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
+/// The resolution shared by [`resolve_cli_project_context`] and
+/// [`resolve_cli_project_context_no_sdk_report`] — everything except whether
+/// to also tell [`crate::sdk_report`] what was resolved. Split out so a
+/// command that wants `board_yaml_path`/`workspace_root` for REPORTING only
+/// can reuse the identical resolution without duplicating it, rather than
+/// re-deriving a narrower version by hand (tan-cli#111 follow-up).
+fn resolve_cli_project_context_inner(g: &GlobalArgs) -> (ProjectContext, Option<SdkSourceTier>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_arg = g.project.clone().unwrap_or_else(|| ".".to_string());
     let workspace_root = normalize_path(&cwd.join(&project_arg))
@@ -579,6 +582,15 @@ pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
         },
         |p| Path::new(p).exists(),
     );
+    (context, sdk_tier_hint)
+}
+
+/// Resolve the project context from the global args, mirroring the TS commands'
+/// `path.resolve(cwd, project) + resolveProjectContext` boilerplate. Shared by
+/// `validate`, `diff`, `presets`, `doctor`, and every command that actually
+/// drives the resolved SDK.
+pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
+    let (context, sdk_tier_hint) = resolve_cli_project_context_inner(g);
 
     // Report to `sdk_report` what THIS call actually resolved — never a
     // fresh resolution. `sdk_tier_hint` is only a hint from `effective_sdk_path`'s
@@ -593,6 +605,18 @@ pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
     }
 
     context
+}
+
+/// Same resolution as [`resolve_cli_project_context`], but never calls
+/// [`crate::sdk_report::record`] — for a command that only wants
+/// `board_yaml_path`/`workspace_root` off the shared resolver and does not
+/// itself resolve-and-use an SDK in the sense `envelope.rs`'s `sdk` field
+/// documents. `debug-config` calls this: it reads only `board/system-manifest.yaml`
+/// under the workspace, never the SDK checkout, so recording one would add an
+/// undeclared `sdk` envelope key as a side effect of a field it merely
+/// reports (tan-cli#111 follow-up).
+pub fn resolve_cli_project_context_no_sdk_report(g: &GlobalArgs) -> ProjectContext {
+    resolve_cli_project_context_inner(g).0
 }
 
 #[cfg(test)]

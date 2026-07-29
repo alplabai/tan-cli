@@ -88,10 +88,25 @@
 
 ### Changed
 - **`contract/issue-codes.json` was a strict subset of what `tan` actually
-  emits — five real codes were reachable with no registry entry at all, so
+  emits — sixteen real codes were reachable with no registry entry at all, so
   `frozen_issue_codes` gated nothing about them and a rename would have been
   invisible in both this repo's CI and alp-sdk-vscode's simultaneously**
-  (#111). Registers `bootstrap.manifest` (fires at the FIRST
+  (#111). An initial pass here registered only five of those (below); a
+  follow-up audit of every `Issue { code: ... }` / `Log::warn` / `failure()`
+  call site under `crates/tan-cli/src/commands/bootstrap/` and
+  `debug_config.rs` found eleven more still unregistered and reaching the
+  wire — `bootstrap.zephyr-base-stale`, `zephyr-base-incompatible`,
+  `west-config-reconciled`, `west-config-reconcile-failed`, `pip-upgrade`,
+  `zephyr-requirements`, `sdk-extras`, `editable-install`, `failed`, and
+  `debug-config.internal-failure`, `write-failure`. All eleven are now
+  registered `reserved` too, so the registry actually covers every code these
+  two command families emit, not just the ones a prior pass happened to name.
+  `contract/README.md`'s frozen-codes table now states its own selection
+  criterion (`frozen`/`retired` only; `reserved` codes are enumerated by name
+  in prose instead, since there are too many to table usefully) rather than
+  silently including some reserved codes and omitting others with no stated
+  reason.
+  Registers `bootstrap.manifest` (fires at the FIRST
   `load_facts(&sdk_root)` call, strictly BEFORE `select_workspace`, the
   workspace-parent guard (#185), and any venv/west/pip phase — a doubled run
   costs seconds and leaves nothing on disk), `bootstrap.sdk-root-unresolved`

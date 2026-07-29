@@ -62,6 +62,13 @@ alp-sdk-vscode issue. A `status: "reserved"` code has no consumer yet
 emission site, but renaming or dropping it costs nothing on the wire —
 promote it to `frozen` the moment a consumer actually binds to it.
 
+**Selection criterion for the table below: `frozen`/`retired` codes only** —
+the ones where a rename or removal is the actual breaking wire change this
+whole file exists to guard against. `reserved` codes are cheap to rename by
+definition (nothing binds them with `===` yet), there are more of them than
+usefully fit a table, and `issue-codes.json` is already their single source
+with a full `consumerEffect` per entry — this table does not duplicate them.
+
 | Code | Status | Consumer effect if renamed |
 |---|---|---|
 | `bootstrap.windows-unsupported` (severity `error`) | retired | Emitted by tan ≤ v0.3.0 only. The consumer branch is permanent back-compat for anyone pinned to an old binary via `alpSdk.cliPath`, so the spelling is RESERVED and must never be re-used for a different verdict. |
@@ -70,8 +77,6 @@ promote it to `frozen` the moment a consumer actually binds to it.
 | `presets.sdk-root-unresolved` (severity `warning`) | frozen | The New Project wizard silently falls back to its static catalogue, which carries no `cores`, so a **heterogeneous SoM scaffolds single-core with no IPC**. The reference part E1M-AEN801 is multi-core, so that is the default path. |
 | `bootstrap.python-not-runnable` (severity `error`) | frozen | `python`/`python3` resolves on PATH but will not run (a Microsoft Store alias, or similar). Renamed, `alp-sdk-vscode`'s `prerequisitesMissingIssue` (`PREREQ_CODES`, `src/alpCli/service.ts`) no longer recognises tan's own refusal, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost — same failure shape as `bootstrap.prerequisites-missing`. Carries no `missingPrerequisites[]` entry: a `{tool, command}` pair cannot represent "the Python you have will not run", so the fix travels only in `issues[].message`. |
 | `bootstrap.python-too-old` (severity `error`) | frozen | The resolved Python is below the SDK tooling's floor (currently >= 3.10). Same consumer and the same failure shape as `bootstrap.python-not-runnable`; also tool-less. |
-| `debug-config.legacy-entry-migrated` (severity `info`) | reserved | None yet — no consumer matches it. A stale pre-#155 `"ALP: ..."` launch-configuration entry was folded into the maintained `"Alp: ..."` one: a hand-resolved value on an unresolved-placeholder field carried across, while every other field tan owns refreshed to this run's values (tan-cli#133). |
-| `debug-config.legacy-entry-untouched` (severity `info`) | reserved | None yet — no consumer matches it. The ordinary same-name merge left a leftover legacy `"ALP: ..."` entry untouched alongside the maintained one this run updated — the customer's real hand-filled values may still be stranded on it (tan-cli#179). |
 
 `bootstrap.prerequisites-missing`, `bootstrap.python-not-runnable` and
 `bootstrap.python-too-old` are the three codes `alp-sdk-vscode`'s
@@ -80,9 +85,18 @@ promote it to `frozen` the moment a consumer actually binds to it.
 bootstrap that has already been refused. The latter two carry no missing
 TOOL at all, so `missingPrerequisites[]` is always empty for them; the fix
 travels only in `issues[].message` (see
-`crates/tan-core/src/bootstrap/prerequisites.rs`). `bootstrap.manifest`,
-`bootstrap.sdk-root-unresolved` and `bootstrap.zephyr-base-manifest-mismatch`
-are registered `reserved` — no consumer binds them yet.
+`crates/tan-core/src/bootstrap/prerequisites.rs`).
+
+Every other registered code is `reserved` — no consumer binds any of them
+yet, so renaming or dropping one costs nothing on the wire, and none is
+tabled above per the criterion stated: `bootstrap.workspace-guard`,
+`workspace-relocated`, `workspace-invalid`, `print-env-workspace-conflict`,
+`manifest`, `sdk-root-unresolved`, `zephyr-base-manifest-mismatch`,
+`zephyr-base-stale`, `zephyr-base-incompatible`, `west-config-reconciled`,
+`west-config-reconcile-failed`, `pip-upgrade`, `zephyr-requirements`,
+`sdk-extras`, `editable-install`, `failed`; and
+`debug-config.comments-dropped`, `legacy-entry-migrated`,
+`legacy-entry-untouched`, `internal-failure`, `write-failure`.
 
 ### Frozen `data` field names, and exactly what covers each
 
