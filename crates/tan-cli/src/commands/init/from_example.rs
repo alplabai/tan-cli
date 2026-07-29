@@ -62,7 +62,6 @@ pub(super) fn run_from_example(
     let destination = match resolve_destination(
         args.destination.as_deref(),
         g.project.as_deref(),
-        args.name.is_some(),
         is_interactive,
     ) {
         Ok(d) => d,

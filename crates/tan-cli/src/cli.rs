@@ -82,26 +82,10 @@ impl GlobalArgs {
     /// `--non-interactive` / `--ci` / `--format json` was given, AND **both**
     /// stdin and stderr are real terminals.
     ///
-    /// The terminal checks are the tan-cli #187 fix. The flag triple alone
-    /// described *intent* ("nobody asked me to stay quiet"), never *capability*
-    /// — so `tan init --from-example peripheral-io/uart-echo --name my-app
-    /// </dev/null` wrote bracketed-paste (`?2004h`) and cursor-hide (`?25l`)
-    /// escapes and then blocked forever: no timeout, no diagnostic, no exit,
-    /// nothing created. Every non-TTY caller was affected — CI, a `sh -c` from
-    /// a script, an IDE task runner, a `Command::output()` from another tool —
-    /// and `tan init` is the command the docs tell a new customer to paste into
-    /// exactly those places.
-    ///
-    /// BOTH handles, because inquire splits them and either half alone leaves a
-    /// live hang:
-    /// - It renders to **stderr** (`inquire::terminal::crossterm`, `IO::Std(
-    ///   stderr())`), so a redirected stderr makes the prompt invisible.
-    /// - It reads through crossterm's `tty_fd()`, which uses stdin only when
-    ///   stdin is a terminal and otherwise **opens `/dev/tty`**. So on Unix the
-    ///   blocking read was never on the redirected stdin at all: `tan init
-    ///   </dev/null` from a real terminal session blocked on `/dev/tty`, and
-    ///   the `init: Cancelled.` exit 1 seen instead on CI and in agent shells
-    ///   is only what happens where `/dev/tty` cannot be opened.
+    /// The thin wrapper over [`interactive_mode`] that reads the real process
+    /// handles. ONE home for the rule, because it was three: #198 added the
+    /// terminal term to `init` alone, `bootstrap` had grown its own copy in
+    /// #185, and `scaffold` had neither and still hung.
     ///
     /// A missing terminal is treated as non-interactive (flag-derived
     /// defaults), not as an error: that is what `--template`'s own help already
@@ -111,11 +95,89 @@ impl GlobalArgs {
     /// `progress::spinner` and `style::Theme::from_args` already gate on
     /// `stderr().is_terminal()` for the same reason.
     pub fn can_prompt(&self) -> bool {
-        !self.non_interactive
-            && !self.ci
-            && !self.is_json()
-            && std::io::stdin().is_terminal()
-            && std::io::stderr().is_terminal()
+        interactive_mode(
+            self.non_interactive,
+            self.ci,
+            self.is_json(),
+            std::io::stdin().is_terminal(),
+            std::io::stderr().is_terminal(),
+        )
+    }
+}
+
+/// Whether `tan` may prompt.
+///
+/// A pure predicate so every term has a failing test — inlined in `can_prompt`,
+/// the terminal terms are unreachable from a unit test and the only way to
+/// notice one had been dropped would be a customer hanging. Introduced in #198
+/// as an `init`-local `interactive_mode`; lifted here so `scaffold` and
+/// `bootstrap` answer the same question from the same place.
+///
+/// `stdin_is_tty` was the term missing from `init` (#187): without it `tan init`
+/// rendered an inquire prompt to a terminal that was not there and then blocked
+/// — no timeout, no diagnostic, no exit. From the caller's side that is
+/// indistinguishable from a slow operation, which is the worst of the available
+/// failure modes: CI, a `sh -c` from a script, an IDE task runner and a
+/// `Command::output()` from another tool all hang.
+///
+/// `stderr_is_tty` is the OTHER half, and it is not redundant, because inquire
+/// splits the two handles:
+/// - It renders to **stderr** (`inquire::terminal::crossterm`, `IO::Std(
+///   stderr())`), so a redirected stderr makes the prompt invisible.
+/// - It reads through crossterm's `tty_fd()`, which uses stdin only when stdin
+///   is a terminal and otherwise **opens `/dev/tty`**.
+///
+/// So `stdin=tty, stderr=piped` — every wrapper that captures output while
+/// inheriting the terminal — still hangs on a stdin-only gate, with the prompt
+/// written into the capture where nobody sees it. Confirmed live under a pty.
+/// It also means the Unix block was never on the redirected stdin at all: `tan
+/// init </dev/null` from a real terminal session blocked on `/dev/tty`, and the
+/// `init: Cancelled.` exit 1 seen instead on CI and in agent shells is only
+/// what happens where `/dev/tty` cannot be opened.
+fn interactive_mode(
+    non_interactive: bool,
+    ci: bool,
+    is_json: bool,
+    stdin_is_tty: bool,
+    stderr_is_tty: bool,
+) -> bool {
+    !non_interactive && !ci && !is_json && stdin_is_tty && stderr_is_tty
+}
+
+#[cfg(test)]
+mod interactive_mode_tests {
+    use super::interactive_mode;
+
+    /// #187/#198: the terminal terms are the ones that were missing, so they
+    /// get the failing cases. Every flag term was already right; this table
+    /// exists so that dropping one again turns a test red instead of turning a
+    /// customer's terminal into a hang with no output and no timeout.
+    #[test]
+    fn a_prompt_needs_a_terminal_to_prompt_on() {
+        // The only combination that may prompt: a human, at a TTY, with no
+        // machine-mode flag set.
+        assert!(interactive_mode(false, false, false, true, true));
+
+        // No stdin TTY -> never prompt, whatever the flags say. This is #187.
+        assert!(!interactive_mode(false, false, false, false, true));
+
+        // No stderr TTY -> never prompt either. inquire renders there, and
+        // reads via /dev/tty regardless, so a stdin-only gate leaves this case
+        // hanging with the prompt written into whatever captured stderr.
+        assert!(!interactive_mode(false, false, false, true, false));
+
+        // Each machine-mode flag independently suppresses prompting even with a
+        // real terminal attached -- pinned so a refactor cannot quietly make
+        // one of them advisory.
+        assert!(
+            !interactive_mode(true, false, false, true, true),
+            "--non-interactive"
+        );
+        assert!(!interactive_mode(false, true, false, true, true), "--ci");
+        assert!(
+            !interactive_mode(false, false, true, true, true),
+            "--format json"
+        );
     }
 }
 
@@ -674,9 +736,7 @@ pub struct InitArgs {
         conflicts_with = "template"
     )]
     pub from_example: Option<String>,
-    /// Project name; creates a sub-directory when provided. Giving it also
-    /// answers the destination question — `--name` alone scaffolds into
-    /// `./<name>` without prompting.
+    /// Project name; creates a sub-directory when provided.
     #[arg(long)]
     pub name: Option<String>,
     /// Destination directory (default: current directory or --project).

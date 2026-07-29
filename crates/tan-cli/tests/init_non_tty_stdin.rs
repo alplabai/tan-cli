@@ -184,8 +184,11 @@ fn from_example_with_name_does_not_hang_on_redirected_stdin() {
     );
 
     assert_eq!(run.code, 0, "expected success, stderr:\n{}", run.stderr);
-    // `--name` alone decides the destination: `./my-app`, no prompt, no
-    // `--destination`, and no `--non-interactive` incantation.
+    // The destination prompt is skipped because there is no terminal, so the
+    // `.` default stands and `--name` puts the project in `./my-app` — with no
+    // `--destination` and no `--non-interactive` incantation. `--name` itself
+    // does NOT answer that prompt (#198 corrected #187's report on that
+    // point); it only names the subdirectory under whichever destination wins.
     assert!(
         work.join("my-app").join("board.yaml").is_file(),
         "example was not copied into ./my-app, stderr:\n{}",

@@ -3,15 +3,20 @@
 
 ## [Unreleased]
 
+### Fixed
+- **`tan init` no longer blocks forever when stdin is not a terminal** (#187).
+  It rendered an inquire prompt (`Destination directory:`, ANSI escapes and all)
+  to a terminal that was not there, then blocked on a stdin already at EOF --
+  no timeout, no diagnostic, no exit. From the caller's side that is
+  indistinguishable from a slow operation, so every non-TTY caller hung: CI, a
+  `sh -c` from a script, an IDE task runner, a `Command::output()` from another
+  tool. `--non-interactive` was the only workaround and nothing said so.
+  The missing term was `std::io::stdin().is_terminal()`, which `bootstrap`
+  already had; `init`'s own comment shows the `--format json` half of the same
+  hang was fixed earlier, and the no-TTY half was simply never added. The
+  predicate is now the pure, unit-tested `interactive_mode()`.
+
 ### Changed
-- **BEHAVIOUR CHANGE: `tan init --name <NAME>` no longer asks for a
-  destination** (#187). `--name` is documented as "creates a sub-directory when
-  provided", so it had already decided where the files land; asking
-  `Destination directory: (.)` afterwards asked a question the caller had
-  answered. At a real terminal, a user who used to answer `out` and get
-  `out/my-app` now gets `./my-app` — pass `--destination out` for the old
-  result. A name TYPED at the interactive prompt still leaves the destination
-  genuinely open, and that human is still asked; only the flag suppresses it.
 - **Re-vendored the scaffold fixtures and the toolchain lock against alp-sdk
   `cdfe1368` (alp-sdk#1016), and bumped `PINNED_SDK_TAG` to match.** #1016
   rewrote the `Customer workflow:` header in every example `board.yaml` from
@@ -132,40 +137,38 @@
   binary had already landed by the time anything could detect it.
 
 ### Fixed
-- **`tan init` prompted with no terminal to prompt on and blocked forever**
-  (#187). `tan init --from-example peripheral-io/uart-echo --name my-app
-  </dev/null` wrote the prompt's bracketed-paste (`?2004h`) and cursor-hide
-  (`?25l`) escapes into a redirected stderr and then blocked: no timeout, no
-  diagnostic, no exit, nothing created. From the caller's side that is
-  indistinguishable from a slow operation, and it hit every non-TTY caller — CI,
-  a `sh -c` from a script, an IDE task runner, another tool's
-  `Command::output()` — i.e. exactly where a customer pastes the documented
-  on-ramp command from ADR-0020 / alp-sdk#1010.
-  - The prompt gate was the flag triple `!--non-interactive && !--ci &&
-    !--format json`, which describes *intent* and never *capability*. It is now
-    `GlobalArgs::can_prompt()`, which additionally requires **both**
-    `stdin().is_terminal()` and `stderr().is_terminal()`.
-  - Both handles, because inquire splits them: it renders to **stderr** (so a
-    redirected stderr hides the prompt) and reads through crossterm's
-    `tty_fd()`, which **opens `/dev/tty`** when stdin is not a terminal. The
-    blocking read was therefore never on the redirected stdin on Unix — `tan
-    init </dev/null` from a real terminal session blocked on `/dev/tty`, and the
-    `init: Cancelled.` exit 1 seen instead on CI and in agent shells is only
-    what happens where `/dev/tty` cannot be opened. A stdin-only check would
-    have left `stdin=tty, stderr=piped` — any wrapper doing
-    `.stderr(Stdio::piped())` — hanging exactly as before.
-  - A missing terminal falls back to the flag-derived defaults rather than
-    erroring: that is what `--template`'s own help already promised ("defaults
-    to `zephyr-app` when not given and there is no TTY to prompt on"), so the
-    documented commands now run unchanged under redirected stdio instead of
-    needing an undocumented `--non-interactive`. `--non-interactive`'s own help
-    and the README flag table now say which commands default and which refuse.
-  - `tan scaffold` shared the gate and the hang. Its non-interactive contract is
-    to refuse (a module name has no sane default), so a redirected-stdio `tan
-    scaffold` now exits 2 with `scaffold.name-required` instead of blocking.
-    `tan bootstrap` had already fixed this inline for itself (#185) and nowhere
-    else — which is precisely how `init`/`scaffold` kept the flags-only gate; it
-    now calls the shared `can_prompt()` too.
+- **`tan scaffold` still hung on a non-TTY stdio, and `tan init` still hung
+  whenever stderr was the redirected handle** (#187 follow-up to #198). #198
+  fixed the reported command by adding a `stdin_is_tty` term to `init`'s own
+  local predicate. Two live hangs survived it.
+  - **`tan scaffold` was never touched.** It carried the same flags-only gate
+    (`!--non-interactive && !--ci && !--format json`) and blocked on its own
+    `Text::new("Module name:")` prompt under exactly the redirected stdin the
+    issue described. It now refuses instead — its non-interactive contract is a
+    refusal, not a default, since a module name has no sane one — exiting 2 with
+    `scaffold.name-required`.
+  - **`stdin=tty, stderr=piped` still hangs on a stdin-only gate**, and that is
+    not an exotic shape: it is every wrapper that captures output while
+    inheriting the terminal, `.stderr(Stdio::piped())` included. inquire splits
+    the two handles — it renders to **stderr** (so a redirected stderr hides the
+    prompt) and reads through crossterm's `tty_fd()`, which **opens `/dev/tty`**
+    when stdin is not a terminal. Confirmed live under a pty: still running
+    after 12s, zero files created, the prompt's escapes sitting in the capture.
+    The same mechanism means the Unix block was never on the redirected stdin at
+    all — `tan init </dev/null` from a real terminal session blocked on
+    `/dev/tty`, and the `init: Cancelled.` exit 1 seen instead on CI and in
+    agent shells is only what happens where `/dev/tty` cannot be opened.
+  - **One home for the rule, because it was three.** #198's `init`-local
+    `interactive_mode` predicate (and its test table) moved to `cli.rs`, gained
+    the `stderr_is_tty` term, and is now reached through
+    `GlobalArgs::can_prompt()`. `init`, `scaffold` and `bootstrap` all call it.
+    `bootstrap` had grown its own inline copy in #185 — fixing the rule in one
+    command and not the others is exactly how this bug outlived its own fix.
+  - A missing terminal still falls back to the flag-derived defaults rather than
+    erroring, unchanged from #198: that is what `--template`'s own help already
+    promised ("defaults to `zephyr-app` when not given and there is no TTY to
+    prompt on"). `--non-interactive`'s own help and the README flag table now
+    say which commands default and which refuse.
   - The non-TTY path is now driven in `tests/init_non_tty_stdin.rs`, which
     spawns the real binary with `Stdio::null()` and captured stderr under a 60s
     watchdog — the interactive path was exercised and the redirected-stdio path

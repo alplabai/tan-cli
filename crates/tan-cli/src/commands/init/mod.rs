@@ -68,14 +68,17 @@ struct InitData {
 /// interactive), build the scaffold plan (heterogeneous when `--cores` is given),
 /// then preview or write files — guarding overwrites behind `--force`.
 pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
-    // `can_prompt` covers both halves: the flag triple (`--format json` is the
-    // mode the extension always uses and never has a human at the keyboard to
-    // answer a prompt, so omitting it let a JSON caller with an unset optional
-    // flag — e.g. no `--template` — block forever on an inquire prompt rendered
-    // to stderr, or, if stdin was already closed, cancel it and exit 1 with zero
-    // bytes on stdout) AND, since #187, whether stdin is a terminal at all —
-    // which is what made a plain `tan init … </dev/null` hang with no output,
-    // no diagnostic and no exit.
+    // `--format json` is the mode the extension always uses and never has a
+    // human at the keyboard to answer a prompt; omitting it here let a JSON
+    // caller with an unset optional flag (e.g. no `--template`) block forever
+    // on an inquire prompt rendered to stderr, or — if stdin was already
+    // closed — cancel it and exit 1 with zero bytes on stdout.
+    //
+    // #198 added the missing terminal term here as a local `interactive_mode`
+    // predicate. That predicate now lives on `GlobalArgs` — with its tests, and
+    // with the stderr term it was missing — so `scaffold` and `bootstrap`
+    // answer the same question from the same place instead of each carrying
+    // their own copy. See `GlobalArgs::can_prompt`.
     let is_interactive = g.can_prompt();
 
     // From-example path: copy an existing SDK example verbatim. Short-circuits
@@ -133,7 +136,6 @@ pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
     let destination = match resolve_destination(
         args.destination.as_deref(),
         g.project.as_deref(),
-        args.name.is_some(),
         is_interactive,
     ) {
         Ok(d) => d,

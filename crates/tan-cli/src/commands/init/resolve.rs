@@ -183,18 +183,13 @@ fn validate_name(name: String) -> Result<String, ResolveErr> {
 /// Resolve the destination directory, preferring `--destination`, then the
 /// global `--project`, then an interactive prompt, defaulting to `.`.
 ///
-/// `name_given` is `--name`'s presence, and suppresses the prompt: `--name` is
-/// documented as "creates a sub-directory when provided", so it has already
-/// decided where the files land (`./<name>`). Asking `Destination directory:
-/// (.)` after being handed `--name my-app` asks a question the caller answered
-/// — a wrong prompt even at a real terminal, and half of tan-cli #187. The
-/// RESOLVED name is deliberately not what gates this: a name typed at the
-/// interactive prompt above leaves the destination question genuinely open, so
-/// that human still gets asked.
+/// `--name` deliberately does NOT answer this: it names a SUBDIRECTORY created
+/// under the destination, so "which directory does `my-app` go in" is still a
+/// real question with `--name` set. #187's report claimed otherwise and its
+/// author corrected that in #198 — do not re-add the suppression.
 pub(super) fn resolve_destination(
     arg: Option<&str>,
     project: Option<&str>,
-    name_given: bool,
     interactive: bool,
 ) -> Result<String, ResolveErr> {
     if let Some(s) = arg {
@@ -203,7 +198,7 @@ pub(super) fn resolve_destination(
     if let Some(p) = project {
         return Ok(p.to_string());
     }
-    if interactive && !name_given {
+    if interactive {
         return match Text::new("Destination directory:")
             .with_default(".")
             .prompt()
@@ -225,41 +220,8 @@ pub(super) fn resolve_destination(
 #[cfg(test)]
 mod tests {
     use super::{
-        WizardTemplateId, app_core_for_template, parse_cores, resolve_destination, resolve_name,
-        resolve_template,
+        WizardTemplateId, app_core_for_template, parse_cores, resolve_name, resolve_template,
     };
-
-    #[test]
-    fn a_given_name_answers_the_destination_question() {
-        // tan-cli #187, second defect: `--name my-app` is documented as
-        // "creates a sub-directory when provided", so it has already said
-        // where the files go — yet `Destination directory: (.)` was asked
-        // anyway. `interactive` is TRUE here on purpose: reaching the prompt
-        // is the regression, and the only correct outcome is the `.` default
-        // returned without asking.
-        //
-        // Deliberate exception to the "no prompt in a unit test" rule that
-        // `tests/init_non_tty_stdin.rs` states, and it is not free: if this
-        // ever regresses, on a DEVELOPER terminal `isatty(stdin)` is true and
-        // crossterm reads the keyboard while the test harness swallows the
-        // prompt's render — i.e. it blocks with a blank screen rather than
-        // failing. On CI (no TTY and no openable `/dev/tty`) the prompt errors
-        // into `Cancelled` and `.unwrap()` panics, which is a clean failure.
-        // Kept because this is the only assertion of the flag's meaning at a
-        // real terminal — the subprocess suite can only test the non-TTY half.
-        assert_eq!(resolve_destination(None, None, true, true).unwrap(), ".");
-        // Explicit inputs still outrank it, in the documented order.
-        assert_eq!(
-            resolve_destination(Some("out"), None, true, true).unwrap(),
-            "out"
-        );
-        assert_eq!(
-            resolve_destination(None, Some("proj"), true, true).unwrap(),
-            "proj"
-        );
-        // Without `--name` and without a terminal, the default stands.
-        assert_eq!(resolve_destination(None, None, false, false).unwrap(), ".");
-    }
 
     #[test]
     fn the_non_interactive_default_template_is_a_real_zephyr_app() {
