@@ -68,11 +68,21 @@ promote it to `frozen` the moment a consumer actually binds to it.
 | `bootstrap.yocto-host` (severity `error`) | frozen | A Yocto-only project is sent into a bootstrap that cannot work on this host. The mixed-board case reuses the suffix at severity `warning` and must stay a warning. |
 | `bootstrap.prerequisites-missing` (severity `error`) | frozen | tan's own refusal is not recognised, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost. |
 | `presets.sdk-root-unresolved` (severity `warning`) | frozen | The New Project wizard silently falls back to its static catalogue, which carries no `cores`, so a **heterogeneous SoM scaffolds single-core with no IPC**. The reference part E1M-AEN801 is multi-core, so that is the default path. |
+| `bootstrap.python-not-runnable` (severity `error`) | frozen | `python`/`python3` resolves on PATH but will not run (a Microsoft Store alias, or similar). Renamed, `alp-sdk-vscode`'s `prerequisitesMissingIssue` (`PREREQ_CODES`, `src/alpCli/service.ts`) no longer recognises tan's own refusal, so the extension spawns the real bootstrap terminal anyway and the customer watches the identical failure scroll past with the install guidance lost — same failure shape as `bootstrap.prerequisites-missing`. Carries no `missingPrerequisites[]` entry: a `{tool, command}` pair cannot represent "the Python you have will not run", so the fix travels only in `issues[].message`. |
+| `bootstrap.python-too-old` (severity `error`) | frozen | The resolved Python is below the SDK tooling's floor (currently >= 3.10). Same consumer and the same failure shape as `bootstrap.python-not-runnable`; also tool-less. |
 | `debug-config.legacy-entry-migrated` (severity `info`) | reserved | None yet — no consumer matches it. A stale pre-#155 `"ALP: ..."` launch-configuration entry was folded into the maintained `"Alp: ..."` one: a hand-resolved value on an unresolved-placeholder field carried across, while every other field tan owns refreshed to this run's values (tan-cli#133). |
+| `debug-config.legacy-entry-untouched` (severity `info`) | reserved | None yet — no consumer matches it. The ordinary same-name merge left a leftover legacy `"ALP: ..."` entry untouched alongside the maintained one this run updated — the customer's real hand-filled values may still be stranded on it (tan-cli#179). |
 
-`bootstrap.python-not-runnable` and `bootstrap.python-too-old` are separate
-codes carrying no missing TOOL; a consumer that wants those two must match
-them by name (see `crates/tan-core/src/bootstrap/prerequisites.rs`).
+`bootstrap.prerequisites-missing`, `bootstrap.python-not-runnable` and
+`bootstrap.python-too-old` are the three codes `alp-sdk-vscode`'s
+`prerequisitesMissingIssue` matches (`PREREQ_CODES`, a `Set` matched with
+`.has()` — equivalent to `===` for this purpose) to stop it spawning a real
+bootstrap that has already been refused. The latter two carry no missing
+TOOL at all, so `missingPrerequisites[]` is always empty for them; the fix
+travels only in `issues[].message` (see
+`crates/tan-core/src/bootstrap/prerequisites.rs`). `bootstrap.manifest`,
+`bootstrap.sdk-root-unresolved` and `bootstrap.zephyr-base-manifest-mismatch`
+are registered `reserved` — no consumer binds them yet.
 
 ### Frozen `data` field names, and exactly what covers each
 
