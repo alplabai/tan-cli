@@ -1,0 +1,343 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The first-install gate (tan-cli#207).
+#
+# Every other workflow here tests `tan` from a cargo checkout. `ci.yml` runs the
+# four cargo gates; `parity.yml` builds a `target/debug/tan` and points it at a
+# west workspace it assembled BY HAND (`west init -l` / `west update` /
+# `west zephyr-export`), then builds an example that already existed in the SDK.
+# Neither ever ran `install.sh`, `tan bootstrap` or `tan init` -- before this
+# file, a grep for tan subcommand invocations across `.github` returned three
+# COMMENT lines (`parity.yml`) and no `run:` step at all.
+#
+# So the entire environment-provisioning path a first-install customer walks had
+# no signal: installer -> venv -> west workspace -> scaffold -> build. A
+# regression in any phase of it reached customers with an otherwise-green board.
+#
+# This job walks the README Quickstart in order, on a stock ubuntu-latest image:
+#
+#   shellcheck install.sh    <- never linted by any workflow in either repo
+#   ./install.sh             <- real release download, sha256 verify, install
+#   tan bootstrap            <- venv + west workspace + SDK Python deps
+#   west sdk install         <- the remedy tan's own build-readiness check PRINTS
+#   tan init --name my-app   <- default template (zephyr-app) + default SoM
+#   tan build                <- real ARM build of what `tan init` just scaffolded
+#
+# Deliberately NOT `paths`-filtered. A gate that skips itself on a "docs-only"
+# PR reports green for a run that checked nothing, and the classifier that
+# decides which diffs can break bootstrap does not exist.
+
+name: getting-started
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Same rule as ci.yml: a newer push to a PR supersedes the run in flight, but a
+# push-to-main run is never cancelled -- a rapid second merge would otherwise
+# leave the first commit with no status.
+concurrency:
+  group: getting-started-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  first-install:
+    name: "first install -- install.sh -> bootstrap -> init -> build"
+    runs-on: ubuntu-latest
+    # The west update is shallow+narrow (~30 MB) but `west sdk install` pulls the
+    # arm-zephyr-eabi toolchain and the Zephyr build itself is a real one.
+    timeout-minutes: 60
+    steps:
+      - name: checkout tan-cli
+        uses: actions/checkout@v4
+
+      # ---- 1. the installer, as a shell script ----------------------------
+
+      # `install.sh` is `#!/usr/bin/env sh` -- POSIX, not bash. Say so
+      # explicitly rather than leaning on shebang detection, so a future
+      # `#!/bin/bash` change has to be a deliberate edit here too. shellcheck is
+      # preinstalled on ubuntu-latest.
+      - name: shellcheck install.sh
+        run: shellcheck --shell=sh install.sh
+
+      # ---- 2. host prerequisites ------------------------------------------
+
+      # `tan bootstrap` NAMES missing prerequisites and refuses; it never
+      # installs system packages itself (that is ADR 0021 Tier A -- zero
+      # elevation). This is the customer following the apt-get line bootstrap
+      # would print, so it belongs here rather than being something tan is
+      # expected to do. ubuntu-latest already ships git/cmake/python3/curl.
+      - name: host prerequisites (what bootstrap refuses without)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              ninja-build device-tree-compiler gperf xz-utils
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      # ---- 3. install.sh, for real ----------------------------------------
+
+      # Runs THIS checkout's install.sh, not the documented
+      # `curl -fsSL .../main/install.sh | sh` -- that pipe fetches `main`'s copy
+      # and would give the PR editing install.sh no signal whatsoever. The bytes
+      # are the same file; only the transport differs.
+      #
+      # This does a genuine GitHub Releases download of the LATEST published
+      # release and verifies it against that release's checksums.txt, so the
+      # sha256 path (#176's four refusals live on the other side of it) is
+      # exercised for real rather than mocked.
+      - name: install tan via install.sh
+        run: |
+          set -euo pipefail
+          ./install.sh
+          if [ ! -x "$HOME/.local/bin/tan" ]; then
+            echo "::error::install.sh reported success but $HOME/.local/bin/tan is missing or not executable."
+            ls -la "$HOME/.local/bin" || true
+            exit 1
+          fi
+          "$HOME/.local/bin/tan" --version
+
+      # install.sh appends the PATH line to the login shell's rc file and tells
+      # the user to open a NEW shell. A workflow step is not a login shell and
+      # never sources an rc file, so this is that new shell -- it is NOT covering
+      # for the installer, whose own placement was asserted above.
+      - name: put the installed tan on PATH
+        run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Cheap, offline, and it is the one refusal that needs no network: an
+      # unknown flag must exit 2, not install something.
+      - name: install.sh refuses an unknown argument
+        run: |
+          set -uo pipefail
+          set +e
+          ./install.sh --definitely-not-a-flag >/tmp/gs-badflag.log 2>&1
+          rc=$?
+          set -e
+          cat /tmp/gs-badflag.log
+          if [ "$rc" -ne 2 ]; then
+            echo "::error::install.sh --definitely-not-a-flag exited ${rc}, expected 2."
+            exit 1
+          fi
+
+      # ---- 4. the binary under test ---------------------------------------
+
+      # install.sh installs the last RELEASE. That is exactly what it should do,
+      # and it is exactly why the rest of this job cannot use the result: every
+      # step below would test a binary that predates the PR, and a bootstrap or
+      # init regression in the diff would sail through green.
+      #
+      # So: the installer is verified for real above, and then the binary UNDER
+      # TEST replaces it at the path install.sh chose. Everything after this
+      # point runs the PR's `tan`, resolved off PATH the way a customer's shell
+      # resolves it. Debug build, like parity.yml's -- a release build costs
+      # minutes here and changes nothing this job asserts.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: "" # keep parity with the local gates (see ci.yml's lint job)
+
+      - name: build tan from this checkout and swap it in
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin tan
+          install -m 0755 target/debug/tan "$HOME/.local/bin/tan"
+          command -v tan
+          tan --version
+
+      # ---- 5. the SDK checkout --------------------------------------------
+
+      # Single source for the alp-sdk pin: parity.yml's PINNED_SDK_TAG, whose
+      # comment block explains what the SHA has to carry. A second hardcoded SHA
+      # here would rot independently, and this gate would then quietly exercise a
+      # different SDK than the parity gate does while both reported green.
+      #
+      # Hard-fail when the line is not where this expects. A fallback default
+      # would make the pin meaningless in exactly the case where somebody moved
+      # it and did not know this file was reading it.
+      - name: resolve the pinned alp-sdk ref (from parity.yml)
+        id: sdk_ref
+        run: |
+          set -euo pipefail
+          ref="$(sed -n 's/^[[:space:]]*PINNED_SDK_TAG:[[:space:]]*//p' \
+                 .github/workflows/parity.yml | head -1)"
+          if [ -z "${ref}" ]; then
+            echo "::error::could not read PINNED_SDK_TAG out of .github/workflows/parity.yml -- the pin moved or was reshaped. Point this step at its new home; do NOT add a second copy of the SHA here."
+            exit 1
+          fi
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "::notice::first-install running against pinned alp-sdk ${ref}"
+
+      # `alp-workspace/` holds the checkout and NOTHING else, on purpose.
+      # `west init -l` builds the workspace in the checkout's PARENT, so
+      # bootstrap guards a parent that holds any other entry -- and under a CI
+      # runner's non-terminal stdio that guard REFUSES outright rather than
+      # offering to relocate. Cloning into $GITHUB_WORKSPACE (which already holds
+      # this repo) would hit that refusal and the job would never reach
+      # bootstrap's real work. A dedicated parent is also what the guard's own
+      # remedy tells a customer to create.
+      - name: clone alp-sdk into a dedicated workspace parent
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.sdk_ref.outputs.ref }}
+          path: alp-workspace/alp-sdk
+
+      # ---- 6. tan bootstrap ------------------------------------------------
+
+      # README Quickstart line 1, verbatim except for `--format json`: the text
+      # run prints its outcome for a human, and this job needs the same outcome
+      # as a value it can assert on and read `venvDir` out of. `--format json`
+      # also implies non-interactive, which a CI runner's stdio would select
+      # anyway.
+      - name: tan bootstrap (venv + west workspace + SDK python deps)
+        working-directory: alp-workspace
+        run: |
+          set -euo pipefail
+          tan bootstrap --sdk-root ./alp-sdk --format json > /tmp/gs-bootstrap.json
+          python3 - <<'PY'
+          import json, os, sys
+          e = json.load(open("/tmp/gs-bootstrap.json"))
+          if not e.get("ok"):
+              print("::error::tan bootstrap reported not-ok:",
+                    json.dumps(e.get("issues"), indent=2))
+              sys.exit(1)
+          d = e.get("data") or {}
+          for key in ("workspaceDir", "venvDir", "zephyrBase"):
+              if not d.get(key):
+                  print(f"::error::tan bootstrap reported ok but left `data.{key}` empty.")
+                  sys.exit(1)
+          # A success envelope naming a path that was never created is exactly
+          # the silent-pass shape this gate exists to catch.
+          for key in ("venvDir", "zephyrBase"):
+              if not os.path.isdir(d[key]):
+                  print(f"::error::tan bootstrap reported {key}={d[key]} but no such "
+                        "directory exists.")
+                  sys.exit(1)
+          with open(os.environ["GITHUB_ENV"], "a") as fh:
+              fh.write("ZEPHYR_BASE=%s\n" % d["zephyrBase"])
+          # The workflow equivalent of the `source <venv>/bin/activate` line
+          # `tan bootstrap --print-env` prints -- a customer runs it, so this job
+          # runs it. It is not here to cover for tan's own venv discovery; that
+          # has its own tests (crates/tan-cli/src/venv.rs), and the subject of
+          # THIS job is the documented customer path.
+          with open(os.environ["GITHUB_PATH"], "a") as fh:
+              fh.write(os.path.join(d["venvDir"], "bin") + "\n")
+          print("bootstrap ok -- workspace", d["workspaceDir"])
+          PY
+
+      # `--print-env` is the documented way to learn what to export, and nothing
+      # ran it either. This asserts the block tan tells customers to paste into
+      # their shell profile actually parses as a shell script; the
+      # venv-activation line it emits is a comment, so the venv is sourced from
+      # `venvDir` below rather than from here.
+      - name: tan bootstrap --print-env is a parseable shell block
+        working-directory: alp-workspace
+        run: |
+          set -euo pipefail
+          tan bootstrap --sdk-root ./alp-sdk --print-env | tee /tmp/gs-print-env.sh
+          sh -n /tmp/gs-print-env.sh
+
+      # ---- 7. the Zephyr SDK, via tan's own printed remedy ------------------
+
+      # tan does not run this itself -- `west sdk install` needs an initialised
+      # west workspace, and build_readiness.rs prints it as the `fix` string
+      # instead (`west sdk install --version <v> -t arm-zephyr-eabi`). Running
+      # exactly that command here is the only way the printed remedy gets tested.
+      #
+      # The version comes from the SDK's own metadata/toolchains.json, the same
+      # read parity.yml's seam2 does and the same file
+      # tests/parity/toolchain_lock_parity.py holds host_env.rs's
+      # ZEPHYR_SDK_INSTALL_VERSION against. Hardcoding it here would be a third
+      # copy of a pin that already has one authority.
+      - name: install the Zephyr SDK (west sdk install, the printed remedy)
+        working-directory: alp-workspace
+        run: |
+          set -euo pipefail
+          # bootstrap's venv is already on PATH (see the step above), so this is
+          # the venv's own west -- the one the printed remedy means.
+          command -v west
+          version="$(python3 -c 'import json; print(json.load(open("alp-sdk/metadata/toolchains.json"))["zephyrSdk"]["version"])')"
+          echo "Zephyr SDK pin from alp-sdk metadata/toolchains.json: ${version}"
+          west sdk install --version "${version}" -t arm-zephyr-eabi
+
+      # ---- 8. tan init ------------------------------------------------------
+
+      # README Quickstart line 2. No `--template`, no `--som`: the point is that
+      # the DEFAULTS work (zephyr-app / E1M-AEN801) on a runner with no TTY to
+      # prompt on -- the #187/#198 hang class.
+      - name: tan init --name my-app (defaults, no TTY)
+        working-directory: alp-workspace
+        run: |
+          set -euo pipefail
+          tan init --name my-app
+          if [ ! -f my-app/board.yaml ]; then
+            echo "::error::tan init reported success but wrote no my-app/board.yaml. Tree:"
+            find my-app -maxdepth 2 || true
+            exit 1
+          fi
+          echo "----- generated board.yaml -----"
+          cat my-app/board.yaml
+
+      # README Quickstart line 3 (`tan validate`), run from the scaffolded
+      # project so the sibling `../alp-sdk` resolution the Quickstart promises is
+      # what resolves the SDK -- no `--sdk-root` here, deliberately.
+      - name: tan validate (sibling ../alp-sdk resolution)
+        working-directory: alp-workspace/my-app
+        run: tan validate
+
+      # ---- 9. tan build -----------------------------------------------------
+
+      - name: tan build (real ARM build of the scaffolded project)
+        working-directory: alp-workspace/my-app
+        run: |
+          set -euo pipefail
+          tan build 2>&1 | tee /tmp/gs-build.log
+          # `tee` would mask a non-zero tan exit without this.
+          rc="${PIPESTATUS[0]}"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::first-install: tan build exited ${rc}."
+            exit "$rc"
+          fi
+
+      # `tan build` reporting ok while producing no ELF is the tan-cli#97 defect
+      # class; a HOST binary where an ARM one belongs is that same defect
+      # reaching the artefact. Both are assertions parity.yml's seam2 already
+      # makes -- on an example that shipped in the SDK. This makes them on the
+      # project `tan init` wrote sixty seconds earlier, which is the part no gate
+      # covered.
+      - name: the scaffolded project produced an ARM ELF
+        working-directory: alp-workspace/my-app
+        run: |
+          set -euo pipefail
+          ELF="build/m55_hp-zephyr/build/zephyr/zephyr.elf"
+          if [ ! -f "${ELF}" ]; then
+            echo "::error::first-install: tan build reported success but produced no ${ELF}. Tree:"
+            find build -maxdepth 3 -type d || true
+            find build -name 'zephyr.elf' || true
+            exit 1
+          fi
+          file "${ELF}"
+          if ! file "${ELF}" | grep -q "ARM"; then
+            echo "::error::first-install: ${ELF} is not an ARM image -- a zephyr slice produced a host binary."
+            exit 1
+          fi
+          echo "first-install: install.sh -> bootstrap -> init -> validate -> build -> ARM ELF, all asserted."
+
+      - name: upload first-install logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-install-logs
+          path: |
+            /tmp/gs-bootstrap.json
+            /tmp/gs-print-env.sh
+            /tmp/gs-badflag.log
+            /tmp/gs-build.log
+          if-no-files-found: warn
