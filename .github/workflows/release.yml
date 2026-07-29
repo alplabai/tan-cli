@@ -70,6 +70,22 @@ jobs:
             echo "::error::tag v$tag does not match [workspace.package] version $cargo_version in Cargo.toml"
             exit 1
           fi
+      # #A1: npm-shim/package.json's version drives the ASSET TAG postinstall.js
+      # downloads (`TAG = v${pkg.version}`) — independently of everything above,
+      # so it can drift behind Cargo.toml/the release tag with nothing here
+      # catching it (npm-shim was six releases stale before this check existed).
+      # Same style as the check above deliberately: grep the one version line
+      # rather than parse the JSON with a tool this job doesn't otherwise need.
+      - name: npm-shim version == Cargo version
+        shell: bash
+        run: |
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          shim_version="$(grep -m1 '"version":' npm-shim/package.json | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
+          echo "cargo=$cargo_version  npm-shim=$shim_version"
+          if [ "$shim_version" != "$cargo_version" ]; then
+            echo "::error::npm-shim/package.json version $shim_version does not match [workspace.package] version $cargo_version in Cargo.toml"
+            exit 1
+          fi
 
   # The tagged commit must pass the same gates a PR does — a tag can be cut from
   # any commit, so "it was green on main" is an assumption, not a fact.

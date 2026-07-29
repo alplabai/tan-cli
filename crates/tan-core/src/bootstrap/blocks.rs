@@ -205,8 +205,10 @@ pub fn optional_libs_block(facts: &BootstrapFacts, host: HostOs) -> Vec<String> 
 }
 
 /// The closing "Next steps:" block: activate the venv, export the manifest's
-/// `env` map, run `tan doctor`, and one ready-to-paste `west build` for the
-/// platform's canonical example target.
+/// `env` map, run `tan doctor`, and one ready-to-paste build command for the
+/// platform's canonical example target — `tan build` on POSIX, raw `west
+/// build` on native Windows (`tan build` has no board-override flag yet, so
+/// it cannot select `native_sim`; see the POSIX arm's own comment).
 pub fn next_steps_block(
     facts: &BootstrapFacts,
     tokens: Tokens,
@@ -271,13 +273,39 @@ pub fn next_steps_block(
             "  - docs\\cli.md                   -- the tan CLI verb reference".to_string(),
         ]);
     } else {
+        // Routed through `tan build`, not a raw `west build -b native_sim/...`
+        // (issue: the printed success message routed the customer around
+        // tan's own README claim that it is "the single executor and the
+        // user command surface"). `--sdk-root`/`--project` are ABSOLUTE
+        // (`tokens.sdk_root`, not `$PWD`): the workspace-parent guard above
+        // this block can have just moved the checkout to a sibling
+        // `alp-workspace/alp-sdk`, so `$PWD` -- correct only when the reader
+        // happens to be standing IN the checkout -- silently builds from the
+        // wrong tree, or nothing at all, everywhere else. Matches the
+        // Windows arm above, which already interpolates `tokens.sdk_root`
+        // for the same reason.
+        //
+        // `tan build` has no `-b`/board-override flag (unlike raw `west
+        // build`), so it cannot target `native_sim` for this example -- its
+        // board.yaml (`examples/peripheral-io/uart-echo`) only declares the
+        // real-silicon EVK presets, and the board comes from the SDK's own
+        // plan, never a CLI override. This lands on the SAME real-hardware
+        // target the Windows arm already names (`alp_e1m_aen801_m55_he/...`,
+        // verified live: `tan build --plan` against this exact project
+        // resolves that slice), so POSIX now needs the same Zephyr SDK
+        // toolchain Windows already requires -- trading the old "no
+        // hardware/toolchain needed" native_sim smoke build for a command
+        // that is real and tan-routed, which native_sim currently is not.
         lines.extend([
             "  # Run the local test suite:".to_string(),
             "  bash scripts/test-all.sh".to_string(),
             String::new(),
-            "  # Or jump straight into building an example:".to_string(),
-            "  west build -b native_sim/native/64 examples/peripheral-io/uart-echo \\".to_string(),
-            "      -- -DEXTRA_ZEPHYR_MODULES=$PWD".to_string(),
+            "  # Or jump straight into building an example for real silicon:".to_string(),
+            format!("  tan build --sdk-root \"{}\" \\", tokens.sdk_root),
+            format!(
+                "      --project \"{}/examples/peripheral-io/uart-echo\"",
+                tokens.sdk_root
+            ),
             String::new(),
             "References:".to_string(),
             "  - docs/testing.md          -- full test-coverage map + how to run from scratch"
@@ -584,7 +612,21 @@ bootstrap: Optional native libraries unlock the Yocto-side backends:
             posix.contains("  export ZEPHYR_BASE=\"/ws/zephyr\""),
             "{posix}"
         );
-        assert!(posix.contains("native_sim/native/64"), "{posix}");
+        // Routed through `tan` (issue: the printed command sent the customer
+        // around tan's own README claim to be "the single executor"), with
+        // the SDK root taken from `tokens.sdk_root` rather than `$PWD` (issue:
+        // `$PWD` is wrong once the workspace-parent guard has relocated the
+        // checkout out from under the reader's cwd).
+        assert!(
+            posix.contains("  tan build --sdk-root \"/ws/alp-sdk\" \\"),
+            "{posix}"
+        );
+        assert!(
+            posix.contains("      --project \"/ws/alp-sdk/examples/peripheral-io/uart-echo\""),
+            "{posix}"
+        );
+        assert!(!posix.contains("west build"), "{posix}");
+        assert!(!posix.contains("$PWD"), "{posix}");
         assert!(posix.contains("bash scripts/test-all.sh"), "{posix}");
 
         // FORWARD-slash tokens, as production hands in: the `west build` line
