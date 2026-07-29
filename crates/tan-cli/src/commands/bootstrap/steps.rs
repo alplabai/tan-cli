@@ -64,18 +64,69 @@ impl Log {
         self.warnings.push((code.to_string(), message.to_string()));
     }
 
-    /// Drain the recorded warnings as `warning`-severity envelope issues.
-    pub(super) fn take_issues(&mut self) -> Vec<Issue> {
+    /// The recorded warnings that mean the WORKSPACE IS NOT USABLE, in the
+    /// order they were raised. Empty when the run only hit cosmetic problems.
+    ///
+    /// See [`WORKSPACE_BLOCKING`] for which ones those are and why.
+    pub(super) fn blocking(&self) -> Vec<&str> {
+        self.warnings
+            .iter()
+            .map(|(code, _)| code.as_str())
+            .filter(|code| WORKSPACE_BLOCKING.contains(code))
+            .collect()
+    }
+
+    /// Drain the recorded warnings as envelope issues.
+    ///
+    /// `escalate_blocking` promotes the [`WORKSPACE_BLOCKING`] ones to
+    /// `severity: "error"` — set when they actually blocked the verdict, i.e.
+    /// the run refused to report success over them. Under `--allow-partial`
+    /// they stay `warning`, because the customer was told and chose to proceed,
+    /// and an `error` on a run that exits 0 is its own kind of lie.
+    ///
+    /// Varying severity for one code is not new (`build.unknown-backend` does
+    /// the same under `executionPolicy`), and it is free on the wire here:
+    /// every affected code is `reserved` with no consumer.
+    pub(super) fn take_issues(&mut self, escalate_blocking: bool) -> Vec<Issue> {
         self.warnings
             .drain(..)
             .map(|(code, message)| Issue {
+                severity: if escalate_blocking && WORKSPACE_BLOCKING.contains(&code.as_str()) {
+                    "error".to_string()
+                } else {
+                    "warning".to_string()
+                },
                 code: format!("bootstrap.{code}"),
-                severity: "warning".to_string(),
                 message,
             })
             .collect()
     }
 }
+
+/// The `pip_phase` warnings after which the workspace cannot do the thing the
+/// customer bootstrapped it for (tan-cli#220). Each phase stays non-fatal in
+/// itself — the run continues and the workspace is left on disk — but a run
+/// that hit one of these has NOT produced a working environment and must not
+/// say `bootstrap: complete.`
+///
+/// * `zephyr-requirements` — Zephyr's own `requirements.txt`. The first-blink
+///   CI job measured the whole chain in one run: the install failed on `hidapi`
+///   needing `libudev.h`, bootstrap printed `complete.`, and the build that
+///   followed died with `ModuleNotFoundError: No module named 'elftools'`.
+/// * `sdk-extras` — `jsonschema` (which `alp_project.py`, the loader every
+///   plan emit goes through, imports) and `imgtool`.
+/// * `editable-install` — tan's own Python backend (`alp_cli`).
+///
+/// `pip-upgrade` is deliberately ABSENT: it upgrades `pip`/`wheel` themselves,
+/// and the pip that is already there still installs packages. It is the one
+/// genuinely cosmetic member of the phase.
+///
+/// This list is about the VERDICT, not about refusing to proceed. A venv
+/// missing `hidapi` still builds `native_sim` perfectly well, so nothing here
+/// blocks a later command — see the `--allow-partial` note in
+/// `commands::bootstrap::run`.
+pub(super) const WORKSPACE_BLOCKING: [&str; 3] =
+    ["zephyr-requirements", "sdk-extras", "editable-install"];
 
 /// Child-process launcher shared by every step.
 pub(super) struct Runner {
@@ -530,8 +581,22 @@ pub(super) fn west_phase(
     Ok(())
 }
 
-/// The Python dependency installs, all into the SAME workspace venv and all
-/// NON-FATAL (a recorded warn each), matching both scripts.
+/// The Python dependency installs, all into the SAME workspace venv, each
+/// PHASE non-fatal (a recorded warn, and the run continues to the next).
+///
+/// The phases stay non-fatal; the RUN's verdict does not. Three of these four
+/// warnings mean the workspace cannot do what it was bootstrapped for, and
+/// `commands::bootstrap::run` refuses to print `bootstrap: complete.` over them
+/// (tan-cli#220) — see [`WORKSPACE_BLOCKING`].
+///
+/// This USED TO SAY the phases were non-fatal "matching both scripts", and that
+/// parity claim no longer holds. alp-sdk's `scripts/bootstrap.sh` and
+/// `bootstrap.ps1` still warn and report success; tan does not. The divergence
+/// is deliberate — a command that predicts its own next failure and then calls
+/// itself complete has reported a false success, and tan is the surface ADR-0020
+/// makes customer-facing — but it IS a divergence, and pretending otherwise in
+/// this comment is how the two on-ramps drift apart unnoticed. Moving the
+/// scripts to match is tracked as alp-sdk#1038.
 pub(super) fn pip_phase(ws: &Workspace, venv: &VenvBin, log: &mut Log, runner: &Runner) {
     let requirements = ws.workspace_dir.join(&ws.facts.zephyr_requirements_path);
     if requirements.is_file() {
@@ -813,13 +878,61 @@ mod tests {
             "editable-install",
             "alp_cli editable install reported a problem",
         );
-        let issues = log.take_issues();
+        let issues = log.take_issues(false);
         assert_eq!(issues.len(), 2);
         assert_eq!(issues[0].code, "bootstrap.sdk-extras");
         assert_eq!(issues[0].severity, "warning");
         assert!(issues[1].message.contains("alp_cli editable install"));
         // Draining is idempotent -- no double-reporting on a second call.
-        assert!(log.take_issues().is_empty());
+        assert!(log.take_issues(false).is_empty());
+    }
+
+    /// #220. Both of the above are workspace-blocking, so a run that refused to
+    /// report success escalates them to `error` — an envelope that exits
+    /// non-zero while every issue in it says `warning` invites a consumer to
+    /// treat the whole thing as advisory.
+    #[test]
+    fn blocking_warnings_are_named_and_escalate_only_when_they_blocked_the_verdict() {
+        let mut log = Log::new(true);
+        log.warn("pip-upgrade", "pip/wheel upgrade reported a problem");
+        log.warn("sdk-extras", "alp-sdk extras install reported a problem");
+
+        // `pip-upgrade` is deliberately NOT blocking: the pip already present
+        // still installs packages.
+        assert_eq!(log.blocking(), vec!["sdk-extras"]);
+
+        let issues = log.take_issues(true);
+        let severity = |code: &str| {
+            issues
+                .iter()
+                .find(|i| i.code == format!("bootstrap.{code}"))
+                .map(|i| i.severity.as_str())
+                .unwrap_or("MISSING")
+        };
+        assert_eq!(severity("sdk-extras"), "error");
+        assert_eq!(
+            severity("pip-upgrade"),
+            "warning",
+            "a non-blocking warning must not be escalated just because a sibling was"
+        );
+    }
+
+    /// Under `--allow-partial` the run reports success, so the same codes stay
+    /// `warning`: an `error` issue on a run that exits 0 is its own kind of lie.
+    #[test]
+    fn blocking_warnings_stay_warnings_when_the_run_reported_success() {
+        let mut log = Log::new(true);
+        log.warn("zephyr-requirements", "requirements install failed");
+        let issues = log.take_issues(false);
+        assert_eq!(issues[0].severity, "warning");
+    }
+
+    /// A clean run has nothing to block on — pinned so the blocking set cannot
+    /// quietly start matching everything.
+    #[test]
+    fn a_run_with_no_warnings_blocks_nothing() {
+        let log = Log::new(true);
+        assert!(log.blocking().is_empty());
     }
 
     /// Unique scratch dir per tag, matching the other command test suites.

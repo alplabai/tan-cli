@@ -104,6 +104,37 @@
   would anchor on the project root) and belongs with the alp-sdk metadata
   contract, not with a per-invocation flag.
 
+### Changed
+- **`tan bootstrap` no longer reports success after failing to install the
+  dependencies its own next step needs** (#220). Measured end to end in one
+  `first blink` run: the Zephyr requirements install died on `libudev.h`,
+  bootstrap printed `bootstrap: complete.`, and the build that followed died
+  with `ModuleNotFoundError: No module named 'elftools'` — three commands from
+  the cause, with nothing linking back. That is a false success, not a warning.
+
+  The fix is to the **verdict, not the phase**. Each install stays non-fatal:
+  the run continues, the workspace is left on disk, and nothing downstream is
+  blocked — a venv missing `hidapi` still builds `native_sim` perfectly well, so
+  refusing outright would cost more customers than it saves. What changes is
+  that a run which cannot do what it was bootstrapped for now says
+  `bootstrap: INCOMPLETE`, names which installs failed, and exits 1.
+
+  Three of the four pip phases count: `zephyr-requirements`, `sdk-extras`
+  (`jsonschema`, which the loader imports) and `editable-install`.
+  `pip-upgrade` is deliberately excluded — the pip already present still
+  installs packages. **`--allow-partial`** reports success anyway, for the case
+  where the missing packages are ones you know you do not need; it still prints
+  what is missing, so it is an informed choice rather than a mute override. The
+  blocking issues are raised at `error` severity only when they actually blocked
+  the verdict — under `--allow-partial` they stay `warning`, because an `error`
+  on a run that exits 0 is its own kind of lie.
+
+  This BREAKS PARITY with alp-sdk's `bootstrap.sh` / `bootstrap.ps1`, which
+  still warn and report success. `pip_phase`'s doc comment claimed the phases
+  were non-fatal "matching both scripts"; that claim is now false and has been
+  replaced with the divergence and its reason, rather than left to rot. Moving
+  the scripts is alp-sdk#1038's decision.
+
 ### Fixed
 - **41 emitted issue codes were in the registry at no status, which left them
   ungated on BOTH sides of the seam at once** (#219). `frozen_issue_codes` only

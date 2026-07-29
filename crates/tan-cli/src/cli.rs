@@ -546,6 +546,12 @@ pub struct BootstrapArgs {
     /// Only print the environment-variable lines and exit.
     #[arg(long = "print-env")]
     pub print_env: bool,
+    /// Report success even when a dependency install failed and the workspace
+    /// cannot build (tan-cli#220). The failures are still printed and still
+    /// reported as issues — this only changes the verdict, for the case where
+    /// the missing packages are ones you know you do not need.
+    #[arg(long = "allow-partial")]
+    pub allow_partial: bool,
     /// Build the west workspace under this directory instead of the
     /// checkout's parent, moving the checkout there first if it isn't
     /// already (tan-cli#185). Answers the workspace-parent guard outright —

@@ -147,6 +147,7 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
                 no_pip: false,
                 no_west: false,
                 print_env: false,
+                allow_partial: false,
                 workspace: None,
             },
         );
