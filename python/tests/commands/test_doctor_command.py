@@ -353,14 +353,20 @@ def test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback(tmp_
     # `west`, `cmake` and `ninja` cannot resolve with no PATH, so this one is
     # certain on every host.
     assert "bootstrap.prerequisites-missing" in codes
-    # The Python verdict is host-dependent even here and BOTH outcomes are the
-    # point of this command: Windows finds `py.exe` in the Windows directory
-    # regardless of PATH (CreateProcess searches it before PATH), so a host
-    # whose launcher default is below the effective floor reports
-    # `python-too-old` where a POSIX host with a scrubbed PATH reports
-    # `python-not-runnable`. Asserting only one of them would make this case
-    # pass on one OS and fail on the other for no defect.
-    assert codes & {"bootstrap.python-not-runnable", "bootstrap.python-too-old"}
+    # The Python verdict is host-dependent even with PATH scrubbed, in all
+    # THREE directions -- so it is the CHECK's presence and vocabulary that is
+    # asserted, never a particular outcome. Windows resolves `py.exe` from the
+    # Windows directory regardless of PATH (CreateProcess searches it before
+    # PATH), so the launcher's default interpreter decides: below the effective
+    # floor gives `fail` (`bootstrap.python-too-old`), at or above it gives
+    # `pass` and NO issue at all, and a POSIX host with no PATH gives `fail`
+    # (`bootstrap.python-not-runnable`). Pinning any one of those makes this
+    # case flip on a host change that is not a defect -- installing Python 3.12
+    # beside a 3.11 was enough to move it from the second to the third.
+    host_python = next(c for c in envelope["data"]["checks"] if c["name"] == "hostPython")
+    assert host_python["status"] in ("pass", "fail")
+    if host_python["status"] == "fail":
+        assert codes & {"bootstrap.python-not-runnable", "bootstrap.python-too-old"}
     assert {"summary", "checks", "generatedAt", "nextSteps"} <= set(envelope["data"])
 
 
