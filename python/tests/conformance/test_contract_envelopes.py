@@ -94,7 +94,6 @@ NOT_PORTED = {
     "debug-config-preview-zephyr-mcu": "debug-config lands in a later sub-project",
     "examples-catalog": "examples lands in a later sub-project",
     "explain-overview": "explain lands in a later sub-project",
-    "generate-board-yaml-missing": "generate lands in a later sub-project",
     "presets-heterogeneous-som": "presets lands in a later sub-project",
     "presets-no-sdk": "presets lands in a later sub-project",
     "sdk-current-no-sdk": "sdk lands in a later sub-project",
