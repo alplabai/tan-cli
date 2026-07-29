@@ -23,11 +23,27 @@ pytestmark = pytest.mark.skipif(
     not BINARY.exists(), reason="run scripts/build_binary.sh first"
 )
 
+# Keep in step with MAX_ARTIFACT_BYTES in scripts/build_binary.sh.
+MAX_ARTIFACT_BYTES = 15_000_000
+
 
 def test_artifact_is_a_single_file():
     # --onedir would hand the extension a directory it has no unpack step for
     # (alp-sdk-vscode/src/alpCli/download.ts:159-162 writes the body to ONE path).
     assert BINARY.is_file(), "must be --onefile: the extension cannot unpack a directory"
+
+
+def test_artifact_was_built_from_a_clean_interpreter():
+    # The 3 s probe below does NOT catch a dirty build: an artifact built off an
+    # interpreter carrying numpy/Pillow/pywin32 measured 34349423 B and ~1.00 s
+    # -- 3x the size and 2x the startup, still comfortably green. Size is the
+    # only signal separating the two. Clean build is 10237542 B; the ceiling
+    # sits clear of both.
+    size = BINARY.stat().st_size
+    assert size < MAX_ARTIFACT_BYTES, (
+        f"{BINARY} is {size} B -- likely built from a dirty interpreter that "
+        f"pulled in modules tan never imports; see scripts/build_binary.sh"
+    )
 
 
 def test_version_line_matches_the_extension_regex():

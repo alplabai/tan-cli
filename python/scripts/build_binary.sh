@@ -36,3 +36,21 @@ cd "$(dirname "$0")/.."
 "${PYTHON:-python}" -m PyInstaller --onefile --name tan --clean --noconfirm \
   --console --distpath dist --workpath .build --specpath .build \
   --paths . tan/__main__.py
+
+# Fail the BUILD, not merely the test suite, on a dirty interpreter. $PYTHON
+# stays optional on purpose: an already-activated clean venv should not need
+# ceremony, and demanding the variable would only prove someone set it, never
+# that what it points at is clean. Size is the actual invariant -- assert that.
+# The 3 s --version probe cannot stand in for this check: the dirty 34349423 B
+# build answered in ~1.00 s and passed every timing assertion.
+MAX_ARTIFACT_BYTES=15000000  # keep in step with tests/conformance/test_packaged_binary.py
+artifact=dist/tan
+[ -f dist/tan.exe ] && artifact=dist/tan.exe
+size=$(wc -c <"$artifact")
+if [ "$size" -ge "$MAX_ARTIFACT_BYTES" ]; then
+  echo "ERROR: $artifact is $size B (ceiling $MAX_ARTIFACT_BYTES)." >&2
+  echo "       Built from a dirty interpreter -- PyInstaller bundled modules" >&2
+  echo "       tan never imports. Rebuild from a clean venv (see header)." >&2
+  exit 1
+fi
+echo "OK: $artifact is $size B"
