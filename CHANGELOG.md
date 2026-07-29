@@ -136,6 +136,37 @@
   the scripts is alp-sdk#1038's decision.
 
 ### Fixed
+- **`tan bootstrap` reported cwd-relative paths in `data.*` and `--print-env`
+  while `project.root` in the same envelope was absolute** (#217). Every path
+  the command reports is derived from `--sdk-root`, and the flag's spelling
+  travelled all the way out: the README Quickstart's own
+  `tan bootstrap --sdk-root ./alp-sdk` produced `data.workspaceDir: "."`,
+  `data.venvDir: "./.venv"`, `data.zephyrBase: "./zephyr"` and
+  `sdk.root: "./alp-sdk"` — beside a `project.root` that was already absolute.
+  One envelope described one directory two ways, so a consumer had no way to
+  know which fields it still had to resolve, and the failure mode was silence
+  rather than an error: a relative path prepended to `PATH` works in the
+  topdir and resolves to nothing anywhere else. `--print-env` carried the same
+  values into a block whose own heading reads *"Add to your shell profile"* —
+  a profile is sourced from `$HOME`, where `./zephyr` is not a directory.
+  `sdk_root` is now absolutized once, before anything is derived from it, and
+  the recorded `sdk.root` is overwritten to match (`sdk_report::record`'s
+  first-writer-wins had already captured the pre-absolute string during
+  project resolution — `override_after_relocation` is generalized to
+  `override_root` and now serves both callers).
+  `std::path::absolute`, deliberately **not** `canonicalize`: canonicalize
+  requires the path to exist, and this runs before any phase has created
+  anything; it also resolves symlinks, which would hand a customer back
+  `/private/tmp/…` for the `/tmp/…` they typed. An already-absolute
+  `--sdk-root` is therefore reported verbatim, which is its own regression
+  test.
+  Surfaced by `getting-started.yml` (#207) on its first run. That job now
+  ASSERTS the four `data` paths are absolute instead of calling
+  `os.path.abspath` on them, so the workaround cannot quietly outlive the fix.
+  Writing the regression test also found #227 (`--print-env` writes to stderr,
+  so the job's `| tee` had been capturing zero bytes and `sh -n` was reporting
+  green on an empty file); that step now redirects and refuses an empty
+  capture, and the underlying stream question is filed separately.
 - **A tag whose CHANGELOG section was never written published a release whose
   entire body was one stub sentence, and nothing said so** (#212). The notes
   step fell back to `print(body if body else f"See CHANGELOG.md for {version}.")`
