@@ -461,7 +461,7 @@ pub(crate) fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Opt
 
     let check = doctor_prerequisite_check(
         refusal.as_ref(),
-        facts.prerequisites(host == HostOs::Windows),
+        facts.prerequisites(host),
         facts.from_manifest,
         manifest_error.as_deref(),
     );

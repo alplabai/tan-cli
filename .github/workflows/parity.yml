@@ -59,14 +59,25 @@ env:
   # `manualInstallHints.windows.note` from one sentence to five elements and
   # bumped `zephyr.version` to v4.4.1 -- the re-vendor that let tan-cli#82
   # delete `optional_libs_block`'s duplicate hardcoded Arm/Zephyr-SDK block.
-  # Bootstrap manifest is 5473 bytes at this SHA (was 3180) and its byte-parity
-  # step is verified PASS locally against it; the kconfig / scaffold / seam1
-  # steps were verified at the previous SHA and are NOT re-verified at this one
-  # (they need an emit-capable Linux runner), so this bump is the first CI run
-  # that proves them here. Re-bump (to a released tag once alp-sdk cuts one at
-  # or after this SHA, or straight to a later SHA) on every alp-sdk change this
-  # repo's parity gate should track.
-  PINNED_SDK_TAG: cdfe13684e362c75f6df2b190ec1c3e736c48731
+  # Now a RELEASED TAG, which is what this comment previously asked for ("to a
+  # released tag once alp-sdk cuts one at or after this SHA"). alp-sdk v0.14.0
+  # contains the old dev pin plus 19 commits (`compare` reports
+  # `status=ahead, behind_by=0`), so it is a clean forward move, and a tag
+  # reproduces where a dev tip does not -- the same reason
+  # `wizard/vendored/MANIFEST.md` gives for pinning its vendor point to one.
+  #
+  # All FOUR parity gates were re-verified locally against this tag before the
+  # bump, in WSL because the scaffold gate re-runs a live SDK emit and needs a
+  # Linux host: toolchain-lock PASS, bootstrap-manifest PASS, kconfig-fixture
+  # PASS, scaffold byte-parity PASS across all 9 (template, sku) pairs. The
+  # first three passed only after re-vendoring the bootstrap manifest fixture
+  # (5577 -> 7498 bytes) and the last only after re-vendoring 7 scaffold
+  # READMEs, so this bump is NOT a lone one-line edit -- see the release commit.
+  #
+  # Re-bump on every alp-sdk change this repo's parity gate should track, and
+  # re-run all four locally first: this pin drives all of them, and the scaffold
+  # one cannot be checked on Windows.
+  PINNED_SDK_TAG: v0.14.0
 
 jobs:
   seam1-plan-shape:

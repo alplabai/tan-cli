@@ -125,12 +125,23 @@ pub struct ManualInstallHint {
     pub note: Vec<String>,
 }
 
-/// `manifest.json`'s `manualInstallHints` — Windows-only today (alp-sdk#917
-/// review item 7 moved the Arm-GNU-Toolchain/Zephyr-SDK sentence OUT of
-/// `nativeLibHints.windows.note`, where it used to print under an "OPTIONAL
-/// NATIVE LIBRARIES" heading it never belonged under). POSIX hosts have no
-/// manual-install fact, so this doesn't grow a `linux`/`macos` field until one
-/// exists.
+/// `manifest.json`'s `manualInstallHints` (alp-sdk#917 review item 7 moved the
+/// Arm-GNU-Toolchain/Zephyr-SDK sentence OUT of `nativeLibHints.windows.note`,
+/// where it used to print under an "OPTIONAL NATIVE LIBRARIES" heading it never
+/// belonged under).
+///
+/// This said "Windows-only today … POSIX hosts have no manual-install fact, so
+/// this doesn't grow a `linux`/`macos` field until one exists". **That stopped
+/// being true at alp-sdk v0.14.0**, which added `manualInstallHints.posix.note`
+/// — the POSIX counterpart, telling a Linux/macOS customer that the Zephyr SDK
+/// is a separate manual `west sdk install`.
+///
+/// tan does not read it yet, so that hint reaches no tan surface: `posix` has no
+/// field here and `optional_libs_block` renders only the Windows notes. Serde
+/// ignores the unknown key, so the re-vendor is safe — this is a MISSED
+/// improvement, not a regression, and the same class as the 7-Zip note being
+/// prose-only before #204. Tracked as tan-cli#230; the comment is corrected here
+/// rather than left asserting an absence the manifest has since filled.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ManualInstallHints {
     /// `manualInstallHints.windows`.
@@ -224,6 +235,11 @@ pub struct BootstrapFacts {
     pub venv_windows_bin_dir: String,
     /// `prerequisites.posix`.
     pub prerequisites_posix: Vec<String>,
+    /// `prerequisites.macos`, or EMPTY when the manifest does not declare one
+    /// (every SDK before v0.14.0). Empty means "fall back to
+    /// [`prerequisites_posix`](BootstrapFacts::prerequisites_posix)" — see
+    /// [`BootstrapFacts::prerequisites`].
+    pub prerequisites_macos: Vec<String>,
     /// `prerequisites.windows`.
     pub prerequisites_windows: Vec<String>,
     /// `prerequisites.pythonMinVersion`, as `(major, minor)`.
@@ -272,14 +288,28 @@ impl BootstrapFacts {
         }
     }
 
-    /// The prerequisite tool list for this host. The two lists genuinely differ
-    /// (Windows adds `ninja`) and the manifest records that faithfully rather
-    /// than unifying them — so does this.
-    pub fn prerequisites(&self, is_windows: bool) -> &[String] {
-        if is_windows {
-            &self.prerequisites_windows
-        } else {
-            &self.prerequisites_posix
+    /// The prerequisite tool list for this host. The lists genuinely differ and
+    /// the manifest records that faithfully rather than unifying them — so does
+    /// this.
+    ///
+    /// Takes the HOST, not `is_windows`, since alp-sdk v0.14.0. That release
+    /// added `xz` and `wget` to `prerequisites.posix` AND added a separate
+    /// `prerequisites.macos` that omits them. Keying off a bool would have
+    /// handed macOS the POSIX list and made `tan bootstrap` refuse outright on a
+    /// stock macOS host, which ships neither `wget` nor a standalone `xz` — a
+    /// hard refusal on a supported host, introduced by a re-vendor, for tools
+    /// the SDK itself does not ask macOS for.
+    ///
+    /// An EMPTY `prerequisites_macos` means the manifest declared none, which is
+    /// every SDK before v0.14.0, and macOS then reads `posix` exactly as it
+    /// always did. So the fallback is the old behaviour, not a guess.
+    pub fn prerequisites(&self, host: super::HostOs) -> &[String] {
+        match host {
+            super::HostOs::Windows => &self.prerequisites_windows,
+            super::HostOs::MacOs if !self.prerequisites_macos.is_empty() => {
+                &self.prerequisites_macos
+            }
+            _ => &self.prerequisites_posix,
         }
     }
 
@@ -333,6 +363,15 @@ struct VenvDoc {
 struct PrerequisitesDoc {
     posix: Vec<String>,
     windows: Vec<String>,
+    /// OPTIONAL, and its ABSENCE has to keep meaning "use `posix`" — see
+    /// [`BootstrapFacts::prerequisites`] for why that is load-bearing rather
+    /// than tidy. Arrived at alp-sdk v0.14.0 alongside `xz`/`wget` being added
+    /// to `posix`; every SDK before that declares only `posix` for both
+    /// POSIX hosts, and a required field here would turn each of them into a
+    /// hard `ValidationFailure` that `tan build` inherits through
+    /// auto-bootstrap, exactly as the `install` note below describes.
+    #[serde(default)]
+    macos: Vec<String>,
     python_min_version: String,
     /// OPTIONAL on the wire, deliberately. `install` arrived under alp-sdk#959
     /// with `schemaVersion` still `1` (the schema pins it `const: 1` and now
@@ -419,6 +458,7 @@ pub fn parse_bootstrap_manifest(text: &str) -> Result<BootstrapFacts, BootstrapM
         venv_posix_bin_dir: doc.venv.posix_bin_dir,
         venv_windows_bin_dir: doc.venv.windows_bin_dir,
         prerequisites_posix: doc.prerequisites.posix,
+        prerequisites_macos: doc.prerequisites.macos,
         prerequisites_windows: doc.prerequisites.windows,
         python_min_version,
         install: resolve_install_commands(doc.prerequisites.install),
@@ -472,12 +512,24 @@ fn fallback_install_commands() -> InstallCommands {
             // note the PACKAGE name differs from the binary name, which is
             // exactly why this lives in data rather than being guessed.
             ("ninja", "sudo apt-get install -y ninja-build"),
+            // `xz`/`wget` joined `prerequisites.posix` at alp-sdk v0.14.0. Same
+            // package-name-differs-from-binary-name point as `ninja` above:
+            // the binary is `xz`, the package is `xz-utils`.
+            ("xz", "sudo apt-get install -y xz-utils"),
+            ("wget", "sudo apt-get install -y wget"),
         ]),
         macos: map(&[
             ("git", "brew install git"),
             ("cmake", "brew install cmake"),
             ("python3", "brew install python3"),
             ("ninja", "brew install ninja"),
+            // Present even though `prerequisites.macos` does NOT list `xz`/`wget`
+            // — the manifest declares these commands for macOS regardless, and
+            // this table is byte-pinned to it. A user who needs them (a
+            // POSIX-list code path, or an SDK predating `prerequisites.macos`)
+            // gets the `brew` line rather than Linux's `apt-get`.
+            ("xz", "brew install xz"),
+            ("wget", "brew install wget"),
         ]),
         windows: map(&[
             ("git", "winget install -e --id Git.Git"),
@@ -564,7 +616,8 @@ pub fn fallback_facts(min_python: (u32, u32)) -> BootstrapFacts {
         // manifest was fixed upstream (d6fd3a18) and the fixture re-vendored,
         // while THIS hand-ported copy -- the one a legacy SDK with no manifest
         // actually uses -- still said Windows-only.
-        prerequisites_posix: owned(&["git", "cmake", "python3", "ninja"]),
+        prerequisites_posix: owned(&["git", "cmake", "python3", "ninja", "xz", "wget"]),
+        prerequisites_macos: owned(&["git", "cmake", "python3", "ninja"]),
         prerequisites_windows: owned(&["git", "cmake", "python", "ninja"]),
         python_min_version: min_python,
         install: fallback_install_commands(),
@@ -694,11 +747,20 @@ mod tests {
         assert_eq!(facts.venv_dir_name, ".venv");
         assert_eq!(facts.venv_posix_bin_dir, "bin");
         assert_eq!(facts.venv_windows_bin_dir, "Scripts");
-        // `ninja` joined the POSIX list in alp-sdk#971/#981 (d6fd3a18); this
-        // fixture was re-vendored past it. The expectation moves because the
-        // upstream manifest moved, not to make the suite green.
+        // `ninja` joined the POSIX list in alp-sdk#971/#981 (d6fd3a18), then
+        // `xz`/`wget` at v0.14.0; this fixture was re-vendored past both. The
+        // expectations move because the upstream manifest moved, not to make the
+        // suite green.
         assert_eq!(
             facts.prerequisites_posix,
+            ["git", "cmake", "python3", "ninja", "xz", "wget"]
+        );
+        // v0.14.0 added a macOS-specific list that deliberately OMITS `xz` and
+        // `wget` — stock macOS ships neither, and the SDK does not ask for them
+        // there. Asserted separately from `posix` precisely because reading the
+        // wrong one of the two makes `tan bootstrap` refuse on a supported host.
+        assert_eq!(
+            facts.prerequisites_macos,
             ["git", "cmake", "python3", "ninja"]
         );
         assert_eq!(
@@ -712,14 +774,49 @@ mod tests {
         // gap would silently become a `command: null` in the envelope.
         for (host, tools) in [
             (super::super::HostOs::Linux, &facts.prerequisites_posix),
-            (super::super::HostOs::MacOs, &facts.prerequisites_posix),
+            // macOS reads its OWN list now (v0.14.0), so this checks the list
+            // that host actually gates on -- checking `posix` here would assert
+            // install commands for tools macOS is never asked for.
+            (super::super::HostOs::MacOs, &facts.prerequisites_macos),
             (super::super::HostOs::Windows, &facts.prerequisites_windows),
         ] {
             let commands = facts.install.for_host(host);
-            assert_eq!(commands.len(), tools.len(), "{host:?}");
             for tool in tools {
                 assert!(commands.contains_key(tool), "{host:?} {tool}");
             }
+            // This used to also assert `commands.len() == tools.len()`, i.e. no
+            // command without a matching prerequisite. v0.14.0 broke that for
+            // macOS legitimately: `install.macos` carries `xz` and `wget` while
+            // `prerequisites.macos` asks for neither, so the map is a SUPERSET of
+            // the list (6 vs 4). Keeping the equality would force a choice
+            // between deleting real commands and asserting a falsehood.
+            //
+            // The containment above is the invariant that matters. A MISSING
+            // command becomes `command: null` in the envelope and costs a
+            // customer their Fix button; a SPARE one is a remedy nobody is
+            // currently sent to, which costs nothing. Linux and Windows are still
+            // exact, asserted here, so the relaxation is scoped to the one host
+            // it is true for rather than applied everywhere.
+            if host != super::super::HostOs::MacOs {
+                assert_eq!(
+                    commands.len(),
+                    tools.len(),
+                    "{host:?} has a command with no matching prerequisite"
+                );
+            }
+        }
+        // Pin the superset explicitly, so the relaxation above cannot quietly
+        // widen: exactly two spare macOS commands, exactly the two v0.14.0 added.
+        assert_eq!(
+            facts.install.macos.len(),
+            facts.prerequisites_macos.len() + 2
+        );
+        for spare in ["xz", "wget"] {
+            assert!(facts.install.macos.contains_key(spare), "{spare}");
+            assert!(
+                !facts.prerequisites_macos.iter().any(|t| t == spare),
+                "{spare}"
+            );
         }
         assert_eq!(
             facts.install.linux.get("cmake").map(String::as_str),

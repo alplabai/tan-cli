@@ -1,7 +1,11 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Changelog
 
-## [Unreleased]
+All notable changes to `tan` are documented here. Format follows
+[Keep a Changelog](https://keepachangelog.com/); versioning is
+[SemVer](https://semver.org/).
+
+## [0.4.1] — 2026-07-29
 
 ### Added
 - **A CI job that actually runs the commands a customer types.** Until now NO
@@ -19,8 +23,6 @@
   which is both what #185's workspace guard requires and the layout README
   tells customers to use -- a flat checkout beside the tan-cli tree would make
   `tan bootstrap --non-interactive` exit 2 by design.
-
-### Added
 - **`getting-started.yml` — the first CI job that runs `install.sh`,
   `tan bootstrap` or `tan init` at all** (#207). Before this file, a grep for
   tan subcommand invocations across `.github/**` returned three COMMENT lines
@@ -105,6 +107,29 @@
   contract, not with a per-invocation flag.
 
 ### Changed
+- **Re-vendored against alp-sdk `v0.14.0`, and macOS now reads its own
+  prerequisite list.** `parity.yml`'s `PINNED_SDK_TAG` moves from a dev commit
+  (`cdfe1368`) to the release tag — reproducible where a dev tip is not, and the
+  pin that all four parity gates resolve their SDK checkout from, so it is one
+  atomic bump rather than four. It carried: the bootstrap manifest fixture
+  (5577 → 7498 bytes), seven wizard-scaffold `README.md` files re-vendored from
+  the live emit, and `MANIFEST.md`'s vendor point.
+
+  v0.14.0 added `xz` and `wget` to `prerequisites.posix` **and** a separate
+  `prerequisites.macos` that omits them. tan keyed its prerequisite list off an
+  `is_windows` bool, so the re-vendor alone would have handed macOS the POSIX
+  list and made `tan bootstrap` refuse outright on a stock macOS host — which
+  ships neither `wget` nor a standalone `xz` — for tools the SDK does not ask
+  macOS for. `BootstrapFacts::prerequisites` now takes the HOST. An undeclared
+  `prerequisites.macos` (every SDK before v0.14.0) still falls back to `posix`,
+  so the fallback is the old behaviour rather than a new guess.
+
+  Also recorded rather than left to rot: `manualInstallHints`' doc comment
+  claimed POSIX hosts have no manual-install fact "until one exists". v0.14.0
+  added `manualInstallHints.posix.note`; tan does not read it yet, so that hint
+  reaches no tan surface. A missed improvement, not a regression — serde ignores
+  the key — and the same class as 7-Zip being prose-only before #204. Tracked as
+  #230.
 - **`tan bootstrap` no longer reports success after failing to install the
   dependencies its own next step needs** (#220). Measured end to end in one
   `first blink` run: the Zephyr requirements install died on `libudev.h`,
@@ -1183,9 +1208,6 @@
   issue is raised. The resolved executable name is still reported when one is
   found on PATH -- only the verdict and the advice for a miss were wrong.
 
-All notable changes to `tan` are documented here. Format follows
-[Keep a Changelog](https://keepachangelog.com/); versioning is
-[SemVer](https://semver.org/).
 
 ## [0.4.0] — 2026-07-28
 
