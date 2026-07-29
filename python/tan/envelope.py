@@ -32,7 +32,18 @@ class SdkInfo:
     source_tier: str
 
     def as_dict(self) -> dict[str, str]:
-        return {"root": self.root, "sourceTier": self.source_tier}
+        # Forward slashes ALWAYS, mirroring `crates/tan-cli/src/sdk_report.rs`'s
+        # `root.replace('\\', "/")` and the guarantee its own doc comment makes:
+        # "`sdk.root` never diverges by separator style depending on which
+        # resolver happened to record it." This is part of the extension
+        # handshake, so it must be platform-identical.
+        #
+        # Normalised HERE, at the one shared seam, rather than in each command:
+        # `build`, `doctor` and `sdk` all populate this field and all three had
+        # the same defect. No conformance fixture can catch it -- `sdk` is absent
+        # from every committed golden, because none of them resolves a checkout.
+        # `data.sdkPath` stays raw/native on both sides; only this key is posix.
+        return {"root": self.root.replace("\\", "/"), "sourceTier": self.source_tier}
 
 
 class Envelope:

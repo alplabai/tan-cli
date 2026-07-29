@@ -75,3 +75,28 @@ def test_to_json_never_raises_on_recursion_error():
     assert parsed["ok"] is False
     assert parsed["exitCode"] == 5
     assert parsed["issues"][0]["code"] == "envelope.serialize-failed"
+
+
+def test_sdk_root_is_always_posix_separated():
+    """`sdk.root` must never diverge by separator style.
+
+    Rust normalises in `crates/tan-cli/src/sdk_report.rs`
+    (`root.replace('\', "/")`) and its doc comment makes it a guarantee. The
+    field is part of the extension handshake, so a backslash on Windows and a
+    forward slash on POSIX for the same checkout is a contract break.
+
+    No conformance fixture can catch this: `sdk` is absent from every committed
+    golden, because none of them resolves an SDK checkout. `build`, `doctor` and
+    `sdk` all populate the field, so it is normalised once in `SdkInfo`.
+    """
+    env = Envelope(
+        "test",
+        Project(root=None, board_yaml=None),
+        1,
+        [],
+        ExitCode.SUCCESS,
+        sdk=SdkInfo(root=r"C:\Users\dev\alp-sdk", source_tier="sdkRootFlag"),
+    )
+    parsed = json.loads(env.to_json())
+    assert parsed["sdk"]["root"] == "C:/Users/dev/alp-sdk"
+    assert "\\" not in parsed["sdk"]["root"]
