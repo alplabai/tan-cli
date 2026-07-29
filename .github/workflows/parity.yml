@@ -718,8 +718,20 @@ jobs:
         working-directory: ws
         run: |
           set -euo pipefail
+          # `--sdk-root alp-sdk` is passed explicitly, and that is a FINDING,
+          # not a preference. Run from the workspace topdir with `alp-sdk/`
+          # sitting right there, `tan init` still reports "alp-sdk root is
+          # unresolved" -- bootstrap records the SDK only at
+          # `.west/tan-workspace-sdk` (its own staleness marker,
+          # west_config.rs:133), never as the `.alp/sdk-path` pointer that
+          # resolution actually reads, and A5's global pointer is written only
+          # on a RELOCATION, which a clean parent never triggers. README's own
+          # flow passes `--sdk-root ./alp-sdk` to bootstrap, so this matches
+          # documented usage -- but the documented NEXT step does not resolve
+          # on its own. Tracked separately; drop this flag once it does.
           "$GITHUB_WORKSPACE/target/debug/tan" init \
               --from-example peripheral-io/hello-world \
+              --sdk-root alp-sdk \
               --name my-app --non-interactive
           test -f my-app/board.yaml || { echo "::error::tan init wrote no board.yaml"; exit 1; }
 
