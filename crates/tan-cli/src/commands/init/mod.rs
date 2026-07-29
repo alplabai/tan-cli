@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! `tan init` — initialize a new tan project from a template.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use tan_core::wizard::{
@@ -67,13 +68,44 @@ struct InitData {
 /// Execute `tan init`: resolve template/name/destination (prompting when
 /// interactive), build the scaffold plan (heterogeneous when `--cores` is given),
 /// then preview or write files — guarding overwrites behind `--force`.
+/// Whether `init` may prompt.
+///
+/// Split out of [`run`] as a pure predicate so the no-TTY case has a failing
+/// test. Inlined, the `stdin_is_tty` term is unreachable from a unit test and
+/// the only way to notice it had been dropped would be a customer hanging.
+///
+/// `stdin_is_tty` is the term that was missing (#187). Without it `tan init`
+/// rendered an inquire prompt to a terminal that was not there and then blocked
+/// forever on a stdin already at EOF -- no timeout, no diagnostic, no exit. From
+/// the caller's side that is indistinguishable from a slow operation, which is
+/// the worst of the available failure modes: CI, a `sh -c` from a script, an
+/// IDE task runner and a `Command::output()` from another tool all hang.
+///
+/// `bootstrap` already had this right (`commands::bootstrap::mod`'s
+/// `!g.non_interactive && !g.ci && !g.is_json() && std::io::stdin().is_terminal()`),
+/// and `run`'s own comment shows the `is_json` term was added for exactly this
+/// hang on the extension's path. The no-TTY half was simply never added.
+pub(super) fn interactive_mode(
+    non_interactive: bool,
+    ci: bool,
+    is_json: bool,
+    stdin_is_tty: bool,
+) -> bool {
+    !non_interactive && !ci && !is_json && stdin_is_tty
+}
+
 pub fn run(g: &GlobalArgs, args: &InitArgs) -> CommandRun {
     // `--format json` is the mode the extension always uses and never has a
     // human at the keyboard to answer a prompt; omitting it here let a JSON
     // caller with an unset optional flag (e.g. no `--template`) block forever
     // on an inquire prompt rendered to stderr, or — if stdin was already
     // closed — cancel it and exit 1 with zero bytes on stdout.
-    let is_interactive = !g.non_interactive && !g.ci && !g.is_json();
+    let is_interactive = interactive_mode(
+        g.non_interactive,
+        g.ci,
+        g.is_json(),
+        std::io::stdin().is_terminal(),
+    );
 
     // From-example path: copy an existing SDK example verbatim. Short-circuits
     // before template resolution so it never engages the non-interactive
@@ -410,5 +442,35 @@ mod tests {
         assert!(message.contains("E1M-AEN801"), "message: {message}");
         assert!(message.contains("E1M-V2N101"), "message: {message}");
         assert!(!ws.exists(), "a rejected --som must not write any files");
+    }
+}
+
+#[cfg(test)]
+mod interactive_mode_tests {
+    use super::interactive_mode;
+
+    /// #187: the no-TTY term is the one that was missing, so it gets the
+    /// failing case. Every other term was already right; this table exists so
+    /// that dropping `stdin_is_tty` again turns a test red instead of turning a
+    /// customer's terminal into a hang with no output and no timeout.
+    #[test]
+    fn a_prompt_needs_a_terminal_to_prompt_on() {
+        // The only combination that may prompt: a human, at a TTY, with no
+        // machine-mode flag set.
+        assert!(interactive_mode(false, false, false, true));
+
+        // No TTY -> never prompt, whatever the flags say. This is #187: stdin
+        // at EOF plus an inquire prompt is an unbounded block, not an error.
+        assert!(!interactive_mode(false, false, false, false));
+
+        // Each machine-mode flag independently suppresses prompting even with a
+        // real terminal attached -- pinned so a refactor cannot quietly make
+        // one of them advisory.
+        assert!(
+            !interactive_mode(true, false, false, true),
+            "--non-interactive"
+        );
+        assert!(!interactive_mode(false, true, false, true), "--ci");
+        assert!(!interactive_mode(false, false, true, true), "--format json");
     }
 }
