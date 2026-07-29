@@ -308,6 +308,89 @@ def test_a_missing_plan_file_is_a_coded_envelope(project):
     assert "Traceback" not in proc.stderr
 
 
+@pytest.mark.parametrize(
+    "encode",
+    [
+        # What Windows PowerShell 5.1 actually writes for `tan build --plan
+        # --format json > plan.json`: UTF-16 with a BOM, whose leading 0xFF is
+        # not valid UTF-8.
+        lambda doc: json.dumps(doc).encode("utf-16"),
+        # A lone invalid byte anywhere in the file -- a truncated download, a
+        # file mangled by a transfer.
+        lambda doc: b"\xff" + json.dumps(doc).encode("utf-8"),
+    ],
+    ids=["utf-16-bom", "invalid-byte"],
+)
+def test_an_undecodable_plan_file_is_a_bad_input_not_a_tan_bug(project, encode):
+    # `UnicodeDecodeError` is a ValueError, NOT an OSError, so the original
+    # `except OSError` around `read_text` missed it and the catch-all reported
+    # a bad INPUT as `build.internal-failure` at exit 5 -- tan blaming itself
+    # for a file it was handed.
+    #
+    # Not an exotic path: `--plan-from` is the replay half of the
+    # capture-then-replay loop whose capture half is the redirect above. Rust
+    # answers `build.plan-unavailable` at exit 1.
+    plan = project / "plan.json"
+    plan.write_bytes(encode(two_slice_plan(ALL_ARTEFACTS)))
+    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert proc.returncode == 1, env
+    assert [i["code"] for i in env["issues"]] == ["build.plan-unavailable"]
+    assert "Traceback" not in proc.stderr
+
+
+def _mutate(doc, path, value):
+    """Set a dotted `path` inside a plan doc, so a case can name the field it
+    breaks instead of rebuilding the whole document."""
+    node = doc
+    *parents, leaf = [int(k) if k.isdigit() else k for k in path.split(".")]
+    for key in parents:
+        node = node[key]
+    node[leaf] = value
+    return doc
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # `enumerate(raw["slices"])` on a scalar -> TypeError -> exit 5.
+        ("slices", 5),
+        ("slices", {"m33": {}}),
+        # A slice that is not an object: `"coreId" not in 5` -> TypeError.
+        ("slices.0", 5),
+        # The forward-compatibility trap: `PolicyAction(raw)` -> ValueError.
+        # The day the SDK adds a fourth action, EVERY build on that SDK
+        # reported a tan bug instead of a coded refusal.
+        ("executionPolicy.missingTool", "retry"),
+        ("executionPolicy", "skip-everything"),
+        # `warnings` is copied verbatim to `data.warnings`: a consumer doing
+        # `data.warnings ?? []` then `.map()` breaks on a string.
+        ("warnings", "oops"),
+        # Scalars Rust types as String. `boardYaml` as an int reaches
+        # `str.replace` in the token pass; an unhashable `backend` reaches
+        # `in KNOWN_BACKENDS`. Both were AttributeError/TypeError at exit 5.
+        ("boardYaml", 7),
+        ("sdkCommit", 12345),
+        ("slices.0.backend", ["zephyr"]),
+        ("slices.0.coreId", None),
+    ],
+    ids=lambda v: str(v)[:24],
+)
+def test_a_structurally_broken_plan_is_refused_not_reported_as_a_tan_bug(project, field, value):
+    # Every one of these used to land in the exit-5 `build.internal-failure`
+    # catch-all -- tan blaming itself for a plan it was handed. Rust's serde
+    # refuses each as `build.plan-invalid` at exit 1, and so must this: the
+    # guard belongs at the shared parse site, not in each caller.
+    plan = write_plan(project, _mutate(two_slice_plan(ALL_ARTEFACTS), field, value))
+    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert proc.returncode == 1, env
+    assert [i["code"] for i in env["issues"]] == ["build.plan-invalid"], env["issues"]
+    assert "Traceback" not in proc.stderr
+
+
 def test_an_unparseable_plan_exits_1_not_2(project):
     # DO NOT "fix" this to 2. A plan that will not parse reads like a
     # validation failure, but the shipped binary reports RuntimeFailure --

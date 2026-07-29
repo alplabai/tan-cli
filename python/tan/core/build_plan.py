@@ -21,6 +21,19 @@ _REQUIRED_SLICE = (
     "toolchain", "artifacts", "debug", "command", "env", "envAppendPath",
 )
 
+# The scalar fields Rust models as `String` / `Option<String>`. Typed here for
+# the same reason serde types them there: unvalidated, a non-string escapes
+# parse entirely and only detonates much later and far away -- `boardYaml` as
+# an int reaches `str.replace` in the token pass, `sdkCommit` reaches
+# `.strip()`, an unhashable `backend` reaches `in KNOWN_BACKENDS` -- as a bare
+# AttributeError/TypeError in the executor's catch-all, i.e. reported as a tan
+# bug (exit 5) when the truth is a malformed plan (`build.plan-invalid`,
+# exit 1).
+_REQUIRED_STR_TOP = ("generatedBy", "boardYaml", "sku", "buildRoot")
+_OPTIONAL_STR_TOP = ("sdkVersion", "sdkCommit", "planPathMode")
+_REQUIRED_STR_SLICE = ("coreId", "backend", "buildDir")
+_OPTIONAL_STR_SLICE = ("appDir",)
+
 
 class PlanParseError(Exception):
     def __init__(self, code: str, message: str) -> None:
@@ -67,17 +80,54 @@ class BuildPlan:
     execution_policy: ExecutionPolicy | None = None
 
 
-def _action(raw: Any) -> PolicyAction | None:
-    return PolicyAction(raw) if raw is not None else None
+def _require_strings(
+    raw: dict[str, Any], required: tuple[str, ...], optional: tuple[str, ...], context: str
+) -> None:
+    """Type the scalar fields at parse time, where a mistyped one is still a
+    plan defect rather than a crash somewhere downstream. `context` is `""` at
+    the plan root and `slices[N]` inside a slice, so the message names the
+    field the way the plan spells it."""
+    prefix = f"{context}." if context else ""
+    for key in required:
+        if not isinstance(raw[key], str):
+            raise PlanParseError("build.plan-invalid", f"`{prefix}{key}` must be a string")
+    for key in optional:
+        if raw.get(key) is not None and not isinstance(raw[key], str):
+            raise PlanParseError("build.plan-invalid", f"`{prefix}{key}` must be a string or null")
 
 
-def _policy(raw: dict[str, Any] | None) -> ExecutionPolicy | None:
+def _action(raw: Any, context: str) -> PolicyAction | None:
+    """One `executionPolicy` entry, refused as a coded parse error rather than
+    a bare `ValueError` escaping the enum constructor.
+
+    This is a FORWARD-COMPATIBILITY trap, not a typo guard: the day the SDK
+    adds a fourth `executionPolicy` action, every plan carrying it hit
+    `PolicyAction(raw)` -> `ValueError` -> the caller's catch-all, so every
+    `tan build` against that SDK reported `build.internal-failure` at exit 5
+    -- a tan bug -- for a plan this binary merely does not understand yet.
+    Rust's serde refuses it as `build.plan-invalid` at exit 1; so does this."""
     if raw is None:
         return None
+    try:
+        return PolicyAction(raw)
+    except ValueError as err:
+        known = ", ".join(f"`{a.value}`" for a in PolicyAction)
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`{context}` must be one of {known} -- got `{raw}`. Upgrade tan if the SDK "
+            f"has added a newer execution policy.",
+        ) from err
+
+
+def _policy(raw: Any) -> ExecutionPolicy | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise PlanParseError("build.plan-invalid", "`executionPolicy` must be an object or null")
     return ExecutionPolicy(
-        unknown_backend=_action(raw.get("unknownBackend")),
-        missing_tool=_action(raw.get("missingTool")),
-        null_command=_action(raw.get("nullCommand")),
+        unknown_backend=_action(raw.get("unknownBackend"), "executionPolicy.unknownBackend"),
+        missing_tool=_action(raw.get("missingTool"), "executionPolicy.missingTool"),
+        null_command=_action(raw.get("nullCommand"), "executionPolicy.nullCommand"),
     )
 
 
@@ -157,13 +207,16 @@ def _env_append_path(raw: Any, context: str) -> dict[str, list[str]]:
     return {k: list(v) for k, v in raw.items()}
 
 
-def _slice(raw: dict[str, Any], i: int) -> Slice:
+def _slice(raw: Any, i: int) -> Slice:
+    if not isinstance(raw, dict):
+        raise PlanParseError("build.plan-invalid", f"`slices[{i}]` must be an object")
     missing = [k for k in _REQUIRED_SLICE if k not in raw]
     if missing:
         raise PlanParseError(
             "build.plan-invalid",
             f"slice is missing required key(s): {', '.join(missing)}",
         )
+    _require_strings(raw, _REQUIRED_STR_SLICE, _OPTIONAL_STR_SLICE, f"slices[{i}]")
     return Slice(
         core_id=raw["coreId"], backend=raw["backend"], build_dir=raw["buildDir"],
         app_dir=raw["appDir"],
@@ -205,6 +258,20 @@ def parse_build_plan(text: str) -> BuildPlan:
             "build.plan-invalid",
             f"plan is missing required key(s): {', '.join(missing)}",
         )
+
+    _require_strings(raw, _REQUIRED_STR_TOP, _OPTIONAL_STR_TOP, "")
+
+    if not isinstance(raw["slices"], list):
+        raise PlanParseError("build.plan-invalid", "`slices` must be a list")
+    # `warnings` is a CONTRACT SURFACE, not merely an internal field: `tan
+    # build` copies it verbatim into the envelope's `data.warnings`, and a
+    # consumer doing `data.warnings ?? []` then `.map()` breaks on a string.
+    # Rust types it `Vec<PlanWarning>` and refuses the plan; the list check is
+    # the part of that this port needs -- the ENTRIES stay untyped on purpose,
+    # since the schema says new warning codes may appear without a
+    # schemaVersion bump, so a consumer must not treat them as a closed set.
+    if not isinstance(raw["warnings"], list):
+        raise PlanParseError("build.plan-invalid", "`warnings` must be a list")
 
     return BuildPlan(
         schema_version=version, generated_by=raw["generatedBy"], board_yaml=raw["boardYaml"],

@@ -228,7 +228,14 @@ def _acquire_plan(
     if plan_from is not None:
         try:
             text = Path(plan_from).read_text(encoding="utf-8")
-        except OSError as err:
+        except (OSError, UnicodeDecodeError) as err:
+            # UnicodeDecodeError is a ValueError, NOT an OSError, so `except
+            # OSError` alone let it fall through to the catch-all and report a
+            # bad INPUT as a tan bug (`build.internal-failure`, exit 5).
+            # Reachable on the exact flow `--plan-from` exists for: `tan build
+            # --plan --format json > plan.json` in Windows PowerShell 5.1
+            # writes UTF-16LE, and this is the replay half of that
+            # capture-then-replay loop.
             raise BuildError(
                 "build.plan-unavailable",
                 f"failed to read plan file `{plan_from}`: {err}",
