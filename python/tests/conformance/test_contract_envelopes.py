@@ -97,8 +97,6 @@ NOT_PORTED = {
     "generate-board-yaml-missing": "generate lands in a later sub-project",
     "presets-heterogeneous-som": "presets lands in a later sub-project",
     "presets-no-sdk": "presets lands in a later sub-project",
-    "sdk-current-no-sdk": "sdk lands in a later sub-project",
-    "sdk-unknown-subcommand": "sdk lands in a later sub-project",
 }
 
 
