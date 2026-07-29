@@ -17,7 +17,7 @@ use tan_core::{
     append_doctor_check, board_os_set, build_doctor_report, build_readiness_report,
     collect_runtime_capabilities_from_commands, create_debug_workspace_context,
     host_environment_checks, is_server_supported_for_target, parse_board_model, parse_server_kind,
-    parse_target_kind, prepend_doctor_checks,
+    parse_target_kind, prepend_doctor_checks, server_choices_for_target,
 };
 
 use tan_core::bootstrap::{
@@ -51,13 +51,37 @@ pub fn run(g: &GlobalArgs, args: &DoctorArgs) -> CommandRun {
         board_yaml: context.board_yaml_path.clone(),
     };
 
-    let target = match parse_target_kind(args.target_kind.as_deref()) {
-        Ok(value) => value,
-        Err(message) => return internal_failure(g, &generated_at, message),
+    // An ABSENT `--target-kind` used to parse to `native-host`, and an absent
+    // `--server` to `none`, so plain `tan doctor` reported debug readiness for
+    // the host binary no matter what board the project declared: it checked for
+    // CodeLLDB on a project whose only debuggable artefact is an ELF on an M33
+    // behind a SWD probe (#208). Every debug verdict it printed was answering a
+    // question about a different target. An explicitly PASSED flag still wins
+    // outright -- this only supplies the default the flag omits.
+    let target = match args.target_kind.as_deref() {
+        Some(raw) => match parse_target_kind(Some(raw)) {
+            Ok(value) => value,
+            Err(message) => return internal_failure(g, &generated_at, message),
+        },
+        None => default_target_kind(&project),
     };
-    let server = match parse_server_kind(args.server.as_deref()) {
-        Ok(value) => value,
-        Err(message) => return internal_failure(g, &generated_at, message),
+    // Derived from the target, not defaulted to `none` beside it. `none` is
+    // valid for `native-host` ALONE (`server_choices_for_target`), so pairing a
+    // derived `zephyr-mcu` with a hardcoded `none` would trip
+    // `is_server_supported_for_target` below and turn every plain `tan doctor`
+    // in a real project into a `serverCompatibility` failure. Taking the
+    // target's own first supported choice reuses that existing table instead of
+    // opening a second one to disagree with it, and for `native-host` it still
+    // resolves to `none` -- byte-identical to the old default.
+    let server = match args.server.as_deref() {
+        Some(raw) => match parse_server_kind(Some(raw)) {
+            Ok(value) => value,
+            Err(message) => return internal_failure(g, &generated_at, message),
+        },
+        None => server_choices_for_target(target)
+            .first()
+            .copied()
+            .unwrap_or(DebugServerKind::None),
     };
 
     if !is_server_supported_for_target(target, server) {
@@ -123,6 +147,7 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
                 no_pip: false,
                 no_west: false,
                 print_env: false,
+                allow_partial: false,
                 workspace: None,
             },
         );
@@ -177,6 +202,12 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         bmaptool: command_on_path("bmaptool"),
         dd: command_on_path("dd"),
         is_linux: cfg!(target_os = "linux"),
+        is_windows: cfg!(target_os = "windows"),
+        // ANY of the accepted extractors counts -- patoolib takes the first it
+        // finds, so probing only `7z` would call a host with `7zz` unequipped.
+        seven_zip: tan_core::SEVEN_ZIP_PROGRAMS
+            .iter()
+            .any(|name| command_on_path(name)),
         git: command_on_path("git"),
         git_version: crate::util::tool_version("git"),
         // Resolved via bootstrap's own multi-candidate probe (`py -3`, `python3`,
@@ -430,7 +461,7 @@ pub(crate) fn append_host_prerequisites(report: &mut DoctorReport, sdk_root: Opt
 
     let check = doctor_prerequisite_check(
         refusal.as_ref(),
-        facts.prerequisites(host == HostOs::Windows),
+        facts.prerequisites(host),
         facts.from_manifest,
         manifest_error.as_deref(),
     );
@@ -787,6 +818,48 @@ fn read_sdk_version(root: &str) -> Option<String> {
 
 /// Read + parse the active `board.yaml`, returning `None` when it is absent or
 /// unparseable (the preflight then falls back to checking all three backends).
+/// The debug target plain `tan doctor` reports on when `--target-kind` is
+/// omitted, resolved from the project's own `board.yaml` (#208).
+///
+/// `native-host` is kept for the case it is actually right — no `board.yaml`
+/// resolves, so there is no board to debug and the host binary is the only
+/// target there is. That is also the directory alp-sdk's bootstrap tells a
+/// customer to run `tan doctor` from (see `board_yaml_check`), so it stays the
+/// quiet, unsurprising answer there rather than a guess about hardware.
+///
+/// With a board, the OS set decides, reusing [`board_os_set`] rather than
+/// re-reading `board.yaml` a second way. A multicore board declares several, and
+/// only one target can be reported, so the priority is fixed and stated:
+///
+/// 1. `zephyr` — `zephyr-mcu`
+/// 2. `baremetal` — `baremetal-mcu`
+/// 3. `yocto` — `yocto-userspace`
+///
+/// MCU-class first because that is what the checks below actually answer — a
+/// probe, a GDB server and a debugger extension, all host-side tooling. The
+/// `yocto-userspace` path needs a booted target running `gdbserver`, which no
+/// amount of host inspection can establish, so it is the weakest default of the
+/// three and ranks last. A board that declares nothing at all resolves to all
+/// three (`board_os_set`'s documented fallback) and therefore lands on
+/// `zephyr-mcu`, which is the SDK's primary backend.
+///
+/// `--target-kind` overrides all of it; this only fills the gap.
+fn default_target_kind(context: &ProjectContext) -> DebugTargetKind {
+    let Some(board) = read_board_model(context) else {
+        return DebugTargetKind::NativeHost;
+    };
+    let os_set = board_os_set(&board);
+    if os_set.contains(&BuildOs::Zephyr) {
+        DebugTargetKind::ZephyrMcu
+    } else if os_set.contains(&BuildOs::Baremetal) {
+        DebugTargetKind::BaremetalMcu
+    } else if os_set.contains(&BuildOs::Yocto) {
+        DebugTargetKind::YoctoUserspace
+    } else {
+        DebugTargetKind::NativeHost
+    }
+}
+
 fn read_board_model(context: &ProjectContext) -> Option<tan_core::BoardModel> {
     let path = context.board_yaml_path.as_deref()?;
     let source = std::fs::read_to_string(path).ok()?;
@@ -1204,6 +1277,141 @@ pub(crate) mod tests {
         assert!(json.contains("Choose a supported server for the selected target-kind."));
     }
 
+    /// #208. Plain `tan doctor` reported `native-host` for every project, so a
+    /// Zephyr board got a CodeLLDB verdict and no word about a probe. `TempTree`
+    /// gives each case a real `board.yaml` on disk, because `default_target_kind`
+    /// resolves through `read_board_model`, which reads the file.
+    #[test]
+    fn the_default_debug_target_comes_from_the_board_not_from_native_host() {
+        let tree = TempTree::new("target-kind");
+        let context = |yaml: Option<&str>| {
+            let path = tree.path().join("board.yaml");
+            match yaml {
+                Some(body) => std::fs::write(&path, body).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+            ProjectContext {
+                workspace_root: Some(tree.path().to_string_lossy().to_string()),
+                sdk_root: None,
+                board_yaml_path: Some(path.to_string_lossy().to_string()),
+                west_cwd: None,
+                python_binary: "python3".to_string(),
+            }
+        };
+
+        let core =
+            |os: &str| format!("schemaVersion: 2\ncores:\n  c0:\n    os: {os}\n    app: ./s\n");
+        assert_eq!(
+            default_target_kind(&context(Some(&core("zephyr")))),
+            DebugTargetKind::ZephyrMcu
+        );
+        assert_eq!(
+            default_target_kind(&context(Some(&core("baremetal")))),
+            DebugTargetKind::BaremetalMcu
+        );
+        assert_eq!(
+            default_target_kind(&context(Some(&core("yocto")))),
+            DebugTargetKind::YoctoUserspace
+        );
+
+        // Multicore: one target must be reported, and the stated priority is
+        // zephyr > baremetal > yocto.
+        assert_eq!(
+            default_target_kind(&context(Some(
+                "schemaVersion: 2\ncores:\n  a55:\n    os: yocto\n    app: ./a\n  m33:\n    os: zephyr\n    app: ./m\n"
+            ))),
+            DebugTargetKind::ZephyrMcu,
+            "a board with both must not be reported as a Linux userspace target"
+        );
+
+        // No board.yaml on disk -- the one case `native-host` is genuinely right,
+        // and the directory alp-sdk's bootstrap tells a customer to run `tan
+        // doctor` from.
+        assert_eq!(
+            default_target_kind(&context(None)),
+            DebugTargetKind::NativeHost
+        );
+    }
+
+    /// The unit test above proves `default_target_kind` computes the right
+    /// answer; this one proves `run` USES it. Without it, replacing the call
+    /// with a bare `DebugTargetKind::NativeHost` left the suite green -- the
+    /// defect #208 reports would have been fully reintroduced with no test
+    /// noticing. Drives the whole command and reads the envelope, so it covers
+    /// the flag-precedence branch too.
+    #[test]
+    fn run_reports_the_derived_target_in_the_envelope_and_an_explicit_flag_still_wins() {
+        let tree = TempTree::new("run-target-kind");
+        std::fs::write(
+            tree.path().join("board.yaml"),
+            "schemaVersion: 2\ncores:\n  m33:\n    os: zephyr\n    app: ./src\n",
+        )
+        .unwrap();
+        let g = json_global(Some(tree.path()));
+        let target_of = |args: &DoctorArgs| {
+            let json = run(&g, args).json.expect("json envelope");
+            let value: serde_json::Value = serde_json::from_str(&json).expect("envelope is JSON");
+            value["data"]["targetKind"]
+                .as_str()
+                .unwrap_or_else(|| panic!("no data.targetKind: {json}"))
+                .to_string()
+        };
+
+        assert_eq!(
+            target_of(&DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: false,
+                fix: false,
+            }),
+            "zephyr-mcu",
+            "a zephyr board must not be reported as native-host (#208)"
+        );
+
+        // An explicit flag is still absolute -- the derivation only fills a gap.
+        assert_eq!(
+            target_of(&DoctorArgs {
+                target_kind: Some("native-host".to_string()),
+                server: None,
+                build: false,
+                fix: false,
+            }),
+            "native-host"
+        );
+    }
+
+    /// The derived target must bring a server its own compatibility table
+    /// accepts, or every plain `tan doctor` in a real project turns into a
+    /// `serverCompatibility` failure — the regression the derivation would
+    /// otherwise introduce.
+    #[test]
+    fn every_derivable_target_has_a_supported_default_server() {
+        for target in [
+            DebugTargetKind::ZephyrMcu,
+            DebugTargetKind::BaremetalMcu,
+            DebugTargetKind::YoctoUserspace,
+            DebugTargetKind::NativeHost,
+        ] {
+            let server = server_choices_for_target(target)
+                .first()
+                .copied()
+                .unwrap_or(DebugServerKind::None);
+            assert!(
+                is_server_supported_for_target(target, server),
+                "{target:?} defaults to an unsupported {server:?}"
+            );
+        }
+        // native-host still resolves to `none`, byte-identical to the old default.
+        assert_eq!(
+            server_choices_for_target(DebugTargetKind::NativeHost)
+                .first()
+                .copied(),
+            Some(DebugServerKind::None)
+        );
+    }
+
     #[test]
     fn the_plain_doctor_report_carries_both_io_built_checks() {
         // `run` resolves a real project and shells `git`, so the two appends
@@ -1366,6 +1574,15 @@ pub(crate) mod tests {
         .unwrap();
         doc["prerequisites"]["posix"] = serde_json::json!([ABSENT_TOOL]);
         doc["prerequisites"]["windows"] = serde_json::json!([ABSENT_TOOL]);
+        // ALL THREE lists, since alp-sdk v0.14.0 added `prerequisites.macos`.
+        // Repointing only two left the macOS runner reading the real list --
+        // `git`/`cmake`/`python3`/`ninja`, all present there -- so nothing was
+        // refused and `status` was `Pass`, and this test failed on macOS ALONE
+        // while Linux and Windows stayed green. Caught by CI on the v0.14.0
+        // re-vendor. Same shape as the defect that re-vendor exposed in
+        // `BootstrapFacts::prerequisites`: a third list, and a code path that
+        // only knew about two.
+        doc["prerequisites"]["macos"] = serde_json::json!([ABSENT_TOOL]);
         std::fs::write(metadata.join("bootstrap.json"), doc.to_string()).unwrap();
 
         let mut report = empty_report(

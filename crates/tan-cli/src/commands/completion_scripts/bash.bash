@@ -63,7 +63,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags --path" -- "$cur") )
       ;;
     debug-config)
-      COMPREPLY=( $(compgen -W "$global_flags --target-kind --server --core --pre-launch-task --preview" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --target-kind --server --core --pre-launch-task --svd --preview" -- "$cur") )
       ;;
     support-bundle)
       COMPREPLY=( $(compgen -W "$global_flags --destination --target-kind --server --path" -- "$cur") )
@@ -72,7 +72,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags list install current switch --destination --global" -- "$cur") )
       ;;
     bootstrap)
-      COMPREPLY=( $(compgen -W "$global_flags --no-pip --no-west --print-env --workspace" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --no-pip --no-west --print-env --allow-partial --workspace" -- "$cur") )
       ;;
     build)
       COMPREPLY=( $(compgen -W "$global_flags --plan --plan-from --materialise --native --manifest --manifest-from --no-auto-bootstrap --pristine" -- "$cur") )

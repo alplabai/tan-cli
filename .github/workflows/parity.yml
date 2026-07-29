@@ -59,14 +59,25 @@ env:
   # `manualInstallHints.windows.note` from one sentence to five elements and
   # bumped `zephyr.version` to v4.4.1 -- the re-vendor that let tan-cli#82
   # delete `optional_libs_block`'s duplicate hardcoded Arm/Zephyr-SDK block.
-  # Bootstrap manifest is 5473 bytes at this SHA (was 3180) and its byte-parity
-  # step is verified PASS locally against it; the kconfig / scaffold / seam1
-  # steps were verified at the previous SHA and are NOT re-verified at this one
-  # (they need an emit-capable Linux runner), so this bump is the first CI run
-  # that proves them here. Re-bump (to a released tag once alp-sdk cuts one at
-  # or after this SHA, or straight to a later SHA) on every alp-sdk change this
-  # repo's parity gate should track.
-  PINNED_SDK_TAG: cdfe13684e362c75f6df2b190ec1c3e736c48731
+  # Now a RELEASED TAG, which is what this comment previously asked for ("to a
+  # released tag once alp-sdk cuts one at or after this SHA"). alp-sdk v0.14.0
+  # contains the old dev pin plus 19 commits (`compare` reports
+  # `status=ahead, behind_by=0`), so it is a clean forward move, and a tag
+  # reproduces where a dev tip does not -- the same reason
+  # `wizard/vendored/MANIFEST.md` gives for pinning its vendor point to one.
+  #
+  # All FOUR parity gates were re-verified locally against this tag before the
+  # bump, in WSL because the scaffold gate re-runs a live SDK emit and needs a
+  # Linux host: toolchain-lock PASS, bootstrap-manifest PASS, kconfig-fixture
+  # PASS, scaffold byte-parity PASS across all 9 (template, sku) pairs. The
+  # first three passed only after re-vendoring the bootstrap manifest fixture
+  # (5577 -> 7498 bytes) and the last only after re-vendoring 7 scaffold
+  # READMEs, so this bump is NOT a lone one-line edit -- see the release commit.
+  #
+  # Re-bump on every alp-sdk change this repo's parity gate should track, and
+  # re-run all four locally first: this pin drives all of them, and the scaffold
+  # one cannot be checked on Windows.
+  PINNED_SDK_TAG: v0.14.0
 
 jobs:
   seam1-plan-shape:
@@ -536,4 +547,231 @@ jobs:
             /tmp/seam2-materialise.json
             /tmp/seam2-build.log
             /tmp/seam2-renode.log
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # tan-cli#A6: until this job existed, NO workflow in either repo ran `tan
+  # bootstrap`, `tan init` or `tan build` at all -- grepping .github for them
+  # returned three COMMENT lines and no `run:` step. seam2 above hand-assembles
+  # the workspace itself (`west init -l` / `west update` / `west zephyr-export`)
+  # and then builds an EXISTING example, so it exercises the loader seam but
+  # never the commands a customer actually types. Every regression in the venv
+  # phase, the west phase, the prerequisite gate or the workspace guard reached
+  # customers with a green board.
+  #
+  # This job is the customer path and nothing else: bootstrap -> doctor ->
+  # init -> build, in that order, on a machine that starts with none of it.
+  first-blink:
+    name: "first blink -- tan bootstrap -> init -> build"
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout tan-cli
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
+
+      - name: resolve alp-sdk ref
+        id: sdk_ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}"
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+          echo "::notice::first-blink building against alp-sdk ref: ${ref}"
+
+      # Into `ws/alp-sdk`, NOT `alp-sdk`, and the nesting is load-bearing.
+      # `west init -l <checkout>` forces the west topdir to be the checkout's
+      # PARENT (alp-sdk#769), so tan-cli#185's workspace guard refuses to
+      # bootstrap when that parent holds anything besides the checkout. At
+      # $GITHUB_WORKSPACE the parent also holds the whole tan-cli tree, so a
+      # flat `path: alp-sdk` would make `tan bootstrap --non-interactive` exit
+      # 2 by design. A dedicated parent is what the guard asks for and what
+      # README tells customers to do -- this job runs the documented layout.
+      - name: clone alp-sdk into a dedicated workspace parent
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.sdk_ref.outputs.ref }}
+          path: ws/alp-sdk
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # Deliberately NOT pip-installing west here: `tan bootstrap` creating the
+      # venv and installing west into it is one of the things under test.
+      # pkg-config + libusb-1.0-0-dev + libudev-dev are NOT decoration: this job's own second
+      # run proved `hidapi` builds from source inside bootstrap's Zephyr
+      # requirements install and fails without them
+      # (`Exception: pkg-config package 'libusb-1.0 >= 1.0.9' not found`).
+      # bootstrap warns and continues by design, so the workspace looks
+      # complete and `tan init` dies later instead. Installing them here keeps
+      # the rest of the customer path under test; the warning itself is
+      # asserted below, so removing them turns this job red rather than green.
+      - name: host deps
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+              ninja-build device-tree-compiler gperf ca-certificates curl xz-utils \
+              pkg-config libusb-1.0-0-dev libudev-dev
+
+      - name: build tan
+        run: cargo build --locked --bin tan
+
+      # THE STEP THAT DID NOT EXIST. Exit 0 is necessary but not sufficient --
+      # a bootstrap that "succeeds" without creating the workspace is exactly
+      # the silent failure this job is for, so the artefacts are asserted.
+      - name: tan bootstrap (the customer's first command)
+        working-directory: ws/alp-sdk
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/target/debug/tan" bootstrap --non-interactive \
+              2>&1 | tee /tmp/first-blink-bootstrap.log
+          for p in ../.west/config ../.venv ../zephyr ../modules; do
+            if [ ! -e "$p" ]; then
+              echo "::error::tan bootstrap exited 0 but did not create $p"
+              exit 1
+            fi
+          done
+          # tan-cli#220's verdict, end to end. The rule itself is unit-tested
+          # (`verdict`), but `run` spawns real processes and cannot be driven
+          # from a unit test, so nothing else proves `run` USES it -- proven by
+          # mutation: replacing the call with a hardcoded success left the whole
+          # suite green. This step is what covers that wiring. A runner with the
+          # native headers installed is the clean path, so `complete.` is the
+          # correct verdict here and its ABSENCE would mean the rule fired when
+          # it should not have.
+          if ! grep -qF 'bootstrap: complete.' /tmp/first-blink-bootstrap.log; then
+            echo "::error::a clean bootstrap did not report 'bootstrap: complete.' (#220 verdict inverted?)"
+            exit 1
+          fi
+          if grep -qF 'bootstrap: INCOMPLETE' /tmp/first-blink-bootstrap.log; then
+            echo "::error::a clean bootstrap reported INCOMPLETE -- a dependency install failed on a runner that has the headers"
+            exit 1
+          fi
+          echo "bootstrap created .west/, .venv/, zephyr/ and modules/, and reported complete."
+
+      # BEFORE the toolchain exists, doctor must FAIL and must say why. This is
+      # the half a customer hits first: bootstrap has just succeeded, and the
+      # host still cannot build. Measured on this job's own first run -- doctor
+      # exits 4 here, because #159/#166 made a missing Zephyr SDK a hard Fail
+      # rather than a warning. Asserting the exit alone would pass for any
+      # failing check, so the zephyrSdk row itself is asserted.
+      - name: tan doctor reports the missing toolchain (expected to fail)
+        working-directory: ws/alp-sdk
+        run: |
+          set -euo pipefail
+          set +e
+          "$GITHUB_WORKSPACE/target/debug/tan" doctor --format json \
+              > /tmp/first-blink-doctor-before.json
+          code=$?
+          set -e
+          if [ "$code" -eq 0 ]; then
+            echo "::error::doctor exited 0 with no Zephyr SDK installed -- the hard Fail from #159/#166 is gone"
+            exit 1
+          fi
+          python3 -c '
+          import json, sys
+          d = json.load(open("/tmp/first-blink-doctor-before.json"))
+          checks = {c["name"]: c for c in d["data"]["checks"]}
+          row = checks.get("zephyrSdk")
+          if row is None:
+              sys.exit("zephyrSdk missing from checks[]; got: " + ", ".join(sorted(checks)))
+          status = row["status"]
+          if status != "fail":
+              sys.exit("zephyrSdk status is " + status + ", expected fail")
+          print("doctor correctly fails on the missing toolchain:", row["detail"])
+          '
+          echo "doctor exit was ${code} (non-zero), and zephyrSdk is a hard fail."
+
+      # Pinned + sha256-verified, same source of truth as seam2: alp-sdk's own
+      # metadata/toolchains.json, never a hardcoded version (see that file's
+      # comment on check_toolchain_lock.py).
+      - name: read Zephyr SDK pin
+        run: |
+          set -euo pipefail
+          python3 -c '
+          import json
+          d = json.load(open("ws/alp-sdk/metadata/toolchains.json"))
+          sdk = d["zephyrSdk"]
+          art = next(a for a in sdk["artifacts"]
+                     if a["host"] == "linux-x86_64" and a["component"] == "minimal-sdk")
+          version = sdk["version"]
+          url = sdk["baseUrl"] + art["filename"]
+          sha256 = art["sha256"]
+          print(f"ZEPHYR_SDK_VERSION={version}")
+          print(f"ZEPHYR_SDK_URL={url}")
+          print(f"ZEPHYR_SDK_SHA256={sha256}")
+          ' >> "$GITHUB_ENV"
+
+      - name: install Zephyr SDK (arm-zephyr-eabi)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zephyr-sdk.tar.xz "${ZEPHYR_SDK_URL}"
+          ACTUAL="$(sha256sum /tmp/zephyr-sdk.tar.xz | awk '{print $1}')"
+          if [ "${ACTUAL}" != "${ZEPHYR_SDK_SHA256}" ]; then
+            echo "::error::Zephyr SDK sha256 mismatch: expected ${ZEPHYR_SDK_SHA256}, got ${ACTUAL}"
+            exit 1
+          fi
+          mkdir -p "$HOME/zephyr-sdk"
+          tar -xJf /tmp/zephyr-sdk.tar.xz -C "$HOME/zephyr-sdk" --strip-components=1
+          "$HOME/zephyr-sdk/setup.sh" -t arm-zephyr-eabi -c
+          echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk" >> "$GITHUB_ENV"
+
+      # AFTER the install, the same command must now pass. Without this half the
+      # job would only prove doctor can fail, never that the remedy it names
+      # actually resolves the thing it complained about.
+      - name: tan doctor passes once the toolchain is installed
+        working-directory: ws/alp-sdk
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/target/debug/tan" doctor --format json \
+              > /tmp/first-blink-doctor-after.json
+          python3 -c '
+          import json, sys
+          d = json.load(open("/tmp/first-blink-doctor-after.json"))
+          row = {c["name"]: c for c in d["data"]["checks"]}["zephyrSdk"]
+          if row["status"] != "pass":
+              sys.exit("zephyrSdk still " + row["status"] + " after install: " + row["detail"])
+          print("zephyrSdk passes after the pinned install:", row["detail"])
+          '
+
+      # `--from-example` is the path tan-cli#164 exists to make discoverable;
+      # `peripheral-io/hello-world` is the id that issue names as the one a
+      # customer could not find because `tan examples` printed only a count.
+      - name: tan init --from-example
+        working-directory: ws
+        run: |
+          set -euo pipefail
+          # NO `--sdk-root`, deliberately. This step is the regression test for
+          # tan-cli#218: run from the workspace topdir with `alp-sdk/` sitting
+          # right there, `tan init` used to report "alp-sdk root is unresolved"
+          # because discovery checked the root, its siblings and its ancestors
+          # but never a CHILD (util.rs `discover_sdk_root`). Passing the flag
+          # here again would hide the bug it was found by.
+          "$GITHUB_WORKSPACE/target/debug/tan" init \
+              --from-example peripheral-io/hello-world \
+              --name my-app --non-interactive
+          test -f my-app/board.yaml || { echo "::error::tan init wrote no board.yaml"; exit 1; }
+
+      - name: tan build
+        working-directory: ws/my-app
+        run: |
+          set -euo pipefail
+          "$GITHUB_WORKSPACE/target/debug/tan" build 2>&1 | tee /tmp/first-blink-build.log
+          echo "first blink: bootstrap -> doctor -> init -> build, all from the commands a customer types."
+
+      - name: upload first-blink logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: first-blink-logs
+          path: |
+            /tmp/first-blink-bootstrap.log
+            /tmp/first-blink-doctor-before.json
+            /tmp/first-blink-doctor-after.json
+            /tmp/first-blink-build.log
           if-no-files-found: warn

@@ -94,19 +94,57 @@ pub fn create_launch_draft(
                 }),
             }
         }
-        DebugTargetKind::BaremetalMcu => json!({
-            "name": format!("Alp: Baremetal Debug ({})", server_label(server)),
-            "type": "cortex-debug",
-            "request": "launch",
-            "servertype": server.as_str(),
-            "cwd": "${workspaceFolder}",
-            "executable": "${workspaceFolder}/build/baremetal/app.elf",
-            "device": "<resolved-device>",
-            "interface": "swd",
-            "preLaunchTask": pre_launch_task,
-            "svdFile": "<resolved-svd>",
-            "svdPath": "<resolved-svd>",
-        }),
+        DebugTargetKind::BaremetalMcu => {
+            let name = format!("Alp: Baremetal Debug ({})", server_label(server));
+            // tan-cli#139: this used to be ONE un-branched object regardless
+            // of `server`, so OpenOCD and pyOCD got `device`/`interface` (a
+            // J-Link-only pair `apply_launch_resolution` never fills for
+            // them) and neither got the `configFiles`/`targetId` key its own
+            // resolution computes -- `apply_launch_resolution` only replaces
+            // a key the draft already carries, so OpenOCD shipped a resolved
+            // `serverpath`/`searchDir` with NO `configFiles` to load, and
+            // pyOCD had no target to select. Branch the same way `ZephyrMcu`
+            // already does above.
+            match server {
+                DebugServerKind::Openocd => json!({
+                    "name": name,
+                    "type": "cortex-debug",
+                    "request": "launch",
+                    "servertype": "openocd",
+                    "cwd": "${workspaceFolder}",
+                    "executable": "${workspaceFolder}/build/baremetal/app.elf",
+                    "preLaunchTask": pre_launch_task,
+                    "svdFile": "<resolved-svd>",
+                    "svdPath": "<resolved-svd>",
+                    "configFiles": ["<resolved-openocd-board-cfg>"],
+                }),
+                DebugServerKind::Pyocd => json!({
+                    "name": name,
+                    "type": "cortex-debug",
+                    "request": "launch",
+                    "servertype": "pyocd",
+                    "cwd": "${workspaceFolder}",
+                    "executable": "${workspaceFolder}/build/baremetal/app.elf",
+                    "preLaunchTask": pre_launch_task,
+                    "svdFile": "<resolved-svd>",
+                    "svdPath": "<resolved-svd>",
+                    "targetId": "<resolved-target-id>",
+                }),
+                _ => json!({
+                    "name": name,
+                    "type": "cortex-debug",
+                    "request": "launch",
+                    "servertype": server.as_str(),
+                    "cwd": "${workspaceFolder}",
+                    "executable": "${workspaceFolder}/build/baremetal/app.elf",
+                    "device": "<resolved-device>",
+                    "interface": "swd",
+                    "preLaunchTask": pre_launch_task,
+                    "svdFile": "<resolved-svd>",
+                    "svdPath": "<resolved-svd>",
+                }),
+            }
+        }
         DebugTargetKind::YoctoUserspace => json!({
             "name": "Alp: Yocto Remote Debug",
             "type": "cppdbg",
@@ -173,8 +211,10 @@ pub struct LaunchResolution {
     pub config_files: Vec<String>,
     /// pyOCD target id (`args.pyocd --target`).
     pub target_id: Option<String>,
-    /// SVD path, when one is ever resolvable. Nothing produces this yet —
-    /// alp-sdk#948 has to ship the files first.
+    /// SVD path. Produced ONLY by `tan debug-config --svd` (tan-cli#197):
+    /// the SDK ships no SVD file, and alp-sdk#948's vendor-redistribution
+    /// licence question may mean it never does — so a user-supplied path is
+    /// the only source, and this is `None` unless the caller passed one.
     pub svd: Option<String>,
 }
 
@@ -196,7 +236,9 @@ impl LaunchResolution {
 /// The `svdFile`/`svdPath` placeholders are REMOVED when no SVD resolved. A
 /// missing key costs the peripheral view; a path that doesn't exist makes
 /// cortex-debug fail on start, which is strictly worse than not offering the
-/// view — and no SVD is resolvable today (alp-sdk#948).
+/// view. Since tan-cli#197 the resolved case is reachable — `tan debug-config
+/// --svd` supplies it — and that command refuses an unreadable path outright
+/// rather than letting it reach this function.
 pub fn apply_launch_resolution(draft: &mut Value, resolution: &LaunchResolution) {
     let Some(map) = draft.as_object_mut() else {
         return;
@@ -309,6 +351,23 @@ pub struct LaunchJsonWritePlan {
     /// entry (tan-cli#182 review finding #2) instead of the prior silent
     /// unqualified success.
     pub comments_dropped: bool,
+    /// The legacy `"ALP: ..."` name of an entry that STILL sits in the file,
+    /// untouched, because the ordinary same-name merge ran instead (an
+    /// exact-name HIT against the current `"Alp: ..."` name). `None` on every
+    /// other path, including the [`migrated_from`](Self::migrated_from) case,
+    /// which is the MISS path and never leaves a legacy entry behind under
+    /// its old name. tan-cli#179: this used to be silent -- the customer's
+    /// real hand-filled values can still be stranded on that leftover entry
+    /// (the #133 symptom), with nothing in `tan`'s own output pointing at it.
+    pub legacy_entry_present: Option<String>,
+    /// The one configuration entry actually written to `configurations[]`
+    /// this run -- the merged/migrated result for a replace, or the draft
+    /// itself for an append. tan-cli#180: distinct from the DRAFT a caller
+    /// passed in, which still carries its own fresh `<resolved-…>`
+    /// placeholders even when this run merged over a customer's real,
+    /// resolved values. Set on every path, including the no-op short-circuit
+    /// (where it equals what was already on disk, since nothing changed).
+    pub written_configuration: Value,
 }
 
 /// The pre-#155 spelling of a current launch-configuration name, or `None` if
@@ -472,39 +531,59 @@ pub fn create_launch_json_write_plan(
     // object-only ordering `parse_launch_json_or_default` already applied, so
     // it lines up with `jsonc_splice`'s own object-only element count without
     // either side re-deriving the other's filter.
-    let (replaced, migrated_from, splice_index, entry, unchanged) = match existing_index {
-        Some(index) => {
-            let pre_merge = configs[index].clone();
-            let merged = merge_configuration(&configs[index], draft);
-            let unchanged = merged == pre_merge;
-            configs[index] = merged.clone();
-            (true, None, Some(index), merged, unchanged)
-        }
-        None => {
-            let legacy_index = legacy_name(next_name).and_then(|legacy| {
-                configs
-                    .iter()
-                    .position(|c| c.get("name").and_then(Value::as_str) == Some(legacy.as_str()))
-            });
-            match legacy_index {
-                Some(index) => {
-                    let from = configs[index]
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                    let pre_merge = configs[index].clone();
-                    let merged = merge_configuration(&configs[index], draft);
-                    let unchanged = merged == pre_merge;
-                    configs[index] = merged.clone();
-                    (true, from, Some(index), merged, unchanged)
-                }
-                None => {
-                    configs.push(draft.clone());
-                    (false, None, None, draft.clone(), false)
+    let (replaced, migrated_from, legacy_entry_present, splice_index, entry, unchanged) =
+        match existing_index {
+            Some(index) => {
+                let pre_merge = configs[index].clone();
+                let merged = merge_configuration(&configs[index], draft);
+                let unchanged = merged == pre_merge;
+                configs[index] = merged.clone();
+                // tan-cli#179: the ordinary same-name path never looks for a
+                // legacy counterpart to MERGE (see the doc comment above —
+                // that is deliberate, nothing decides which of two
+                // possibly-hand-edited entries is authoritative), but it can
+                // still SAY one is sitting there untouched, rather than the
+                // customer only finding out by grepping the file themselves.
+                let legacy_entry_present = legacy_name(next_name).and_then(|legacy| {
+                    configs
+                        .iter()
+                        .any(|c| c.get("name").and_then(Value::as_str) == Some(legacy.as_str()))
+                        .then_some(legacy)
+                });
+                (
+                    true,
+                    None,
+                    legacy_entry_present,
+                    Some(index),
+                    merged,
+                    unchanged,
+                )
+            }
+            None => {
+                let legacy_index = legacy_name(next_name).and_then(|legacy| {
+                    configs.iter().position(|c| {
+                        c.get("name").and_then(Value::as_str) == Some(legacy.as_str())
+                    })
+                });
+                match legacy_index {
+                    Some(index) => {
+                        let from = configs[index]
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .map(str::to_string);
+                        let pre_merge = configs[index].clone();
+                        let merged = merge_configuration(&configs[index], draft);
+                        let unchanged = merged == pre_merge;
+                        configs[index] = merged.clone();
+                        (true, from, None, Some(index), merged, unchanged)
+                    }
+                    None => {
+                        configs.push(draft.clone());
+                        (false, None, None, None, draft.clone(), false)
+                    }
                 }
             }
-        }
-    };
+        };
 
     // tan-cli#182 review finding #1: a semantically no-op re-run (the merged
     // entry is byte-identical, ignoring formatting, to what was already
@@ -530,6 +609,8 @@ pub fn create_launch_json_write_plan(
         replaced,
         migrated_from,
         comments_dropped,
+        legacy_entry_present,
+        written_configuration: entry,
     })
 }
 
@@ -838,6 +919,67 @@ mod resolution_tests {
         );
         assert!(draft.get("configFiles").is_none());
         assert!(draft.get("targetId").is_none());
+    }
+
+    /// tan-cli#139: before the per-server branch, `baremetal-mcu` was ONE
+    /// un-branched draft with no `configFiles`/`targetId` key at all, so
+    /// `apply_launch_resolution`'s `contains_key` guards silently discarded
+    /// both `resolve_from_build`'s computed values -- OpenOCD shipped a
+    /// resolved `serverpath`/`searchDir` (written unconditionally) with NO
+    /// config to load, and pyOCD had no target to select. This drives the
+    /// exact failing case rather than trusting the description: resolve
+    /// against the real drafts and assert both fields actually land.
+    #[test]
+    fn baremetal_mcu_openocd_resolves_config_files_and_serverpath() {
+        let mut draft = create_launch_draft(
+            DebugTargetKind::BaremetalMcu,
+            DebugServerKind::Openocd,
+            None,
+        )
+        .unwrap();
+        assert!(
+            draft.get("configFiles").is_some(),
+            "the draft must declare configFiles before resolution can fill it: {draft}"
+        );
+        apply_launch_resolution(
+            &mut draft,
+            &LaunchResolution {
+                server_path: Some("/zephyr-sdk-1.0.1/hosttools/usr/bin/openocd".into()),
+                search_dirs: vec![
+                    "/zephyr-sdk-1.0.1/hosttools/opt/openocd/share/openocd/scripts".into(),
+                ],
+                config_files: vec!["/boards/alp/board.cfg".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            draft["configFiles"],
+            json!(["/boards/alp/board.cfg"]),
+            "OpenOCD must have a config to load, not just a resolved binary+search dir: {draft}"
+        );
+        assert_eq!(
+            draft["serverpath"],
+            "/zephyr-sdk-1.0.1/hosttools/usr/bin/openocd"
+        );
+    }
+
+    #[test]
+    fn baremetal_mcu_pyocd_resolves_a_target_id() {
+        let mut draft =
+            create_launch_draft(DebugTargetKind::BaremetalMcu, DebugServerKind::Pyocd, None)
+                .unwrap();
+        assert!(
+            draft.get("targetId").is_some(),
+            "the draft must declare targetId before resolution can fill it: {draft}"
+        );
+        apply_launch_resolution(
+            &mut draft,
+            &LaunchResolution {
+                target_id: Some("cortex_m".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(draft["targetId"], "cortex_m");
     }
 }
 
@@ -1224,6 +1366,17 @@ mod tests {
             "a current-named entry already existed, so no legacy search must \
              have run at all"
         );
+        // tan-cli#179: the leftover legacy entry must not be silent — this is
+        // the exact scenario the code is silent about today, and the reason
+        // #179 exists: the customer's real hand-filled `device` above is
+        // sitting on `legacy`, unreachable from `F5`.
+        assert_eq!(
+            plan.legacy_entry_present.as_deref(),
+            Some("ALP: Zephyr Debug (J-Link)"),
+            "a leftover legacy entry sitting alongside the maintained one \
+             this run updated must be reported, not silently left for the \
+             customer to discover by diffing the file themselves"
+        );
 
         let doc: Value = serde_json::from_str(&plan.content).unwrap();
         let configs = doc["configurations"].as_array().unwrap();
@@ -1244,6 +1397,84 @@ mod tests {
              -- not merely 'device unchanged' -- proving it was not touched: {}",
             plan.content
         );
+    }
+
+    /// The failing-case pairing for tan-cli#179: the common case (an
+    /// ordinary re-run with no legacy entry anywhere in the file) must NOT
+    /// report one. A version that unconditionally sets
+    /// `legacy_entry_present` on every same-name replace would pass the test
+    /// above alone.
+    #[test]
+    fn an_ordinary_same_name_merge_with_no_legacy_entry_reports_none() {
+        let existing = existing_with(json!({
+            "name": "Alp: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "servertype": "jlink",
+            "device": "AE822F4M55_HP",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(plan.replaced);
+        assert_eq!(plan.legacy_entry_present, None);
+    }
+
+    /// The MISS/migration path (a legacy entry is the one ADOPTED onto the
+    /// current name) must not ALSO report `legacy_entry_present` — that would
+    /// double-report the same fact under two different signals for the exact
+    /// scenario `migrated_from` already names.
+    #[test]
+    fn a_migrated_legacy_entry_does_not_also_report_itself_as_left_untouched() {
+        let existing = existing_with(json!({
+            "name": "ALP: Native Sim Debug",
+            "type": "lldb",
+            "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(plan.migrated_from.as_deref(), Some("ALP: Native Sim Debug"));
+        assert_eq!(plan.legacy_entry_present, None);
+    }
+
+    /// tan-cli#180, at `tan-core`'s own boundary (the command-level driver
+    /// lives in `debug_config.rs`'s own tests): `written_configuration` must
+    /// be the MERGED result, not the fresh draft that still carries its own
+    /// `<resolved-…>` placeholder — the exact bug the envelope shipped.
+    #[test]
+    fn written_configuration_is_the_merged_result_not_the_stale_draft() {
+        let existing = existing_with(json!({
+            "name": "Alp: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "device": "AE822F4M55_HP",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        assert_eq!(draft["device"], "<resolved-device>");
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(
+            plan.written_configuration["device"], "AE822F4M55_HP",
+            "written_configuration must report what actually landed in the \
+             file, not the draft's own unresolved placeholder"
+        );
+        assert_eq!(
+            plan.written_configuration["name"],
+            "Alp: Zephyr Debug (J-Link)"
+        );
+    }
+
+    /// The append path's own `written_configuration`: with nothing to merge
+    /// over, it must equal the fresh draft exactly.
+    #[test]
+    fn written_configuration_on_an_append_equals_the_fresh_draft() {
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        let plan = create_launch_json_write_plan(None, &draft).unwrap();
+        assert!(!plan.replaced);
+        assert_eq!(plan.written_configuration, draft);
     }
 
     /// A legacy entry for a DIFFERENT target/server than the one being

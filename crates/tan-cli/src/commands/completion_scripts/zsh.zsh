@@ -105,7 +105,7 @@ _tan() {
           _arguments '--path[Field path]' "${global_args[@]}"
           ;;
         debug-config)
-          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--core[Build slice core id]' '--pre-launch-task[VS Code task to run before launching]' '--preview[Preview only]' "${global_args[@]}"
+          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--core[Build slice core id]' '--pre-launch-task[VS Code task to run before launching]' '--svd[Path to a user-supplied SVD for the peripheral view]:svd:_files -g "*.svd"' '--preview[Preview only]' "${global_args[@]}"
           ;;
         support-bundle)
           _arguments '--destination[Output directory]:path:_files -/' '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--path[Field path]' "${global_args[@]}"
@@ -114,7 +114,7 @@ _tan() {
           _arguments '1:subcommand:(list install current switch)' '--destination[Cache root]:path:_files -/' '--global[Pin the machine-global default]' "${global_args[@]}"
           ;;
         bootstrap)
-          _arguments '--no-pip[Skip pip install]' '--no-west[Skip west init/update]' '--print-env[Print environment lines only]' '--workspace[Build the workspace at this path]:path:_files -/' "${global_args[@]}"
+          _arguments '--no-pip[Skip pip install]' '--no-west[Skip west init/update]' '--print-env[Print environment lines only]' '--allow-partial[Report success despite a failed dependency install]' '--workspace[Build the workspace at this path]:path:_files -/' "${global_args[@]}"
           ;;
         build)
           _arguments '--plan[Show the build plan]' '--plan-from[Read build plan from file]:path:_files' '--materialise[Materialise plan files]' '--native[Build natively]' '--manifest[Show the system manifest]' '--manifest-from[Read manifest from file]:path:_files' '--no-auto-bootstrap[Never bootstrap implicitly]' '--pristine[Force-wipe build dirs before dispatch]' "${global_args[@]}"

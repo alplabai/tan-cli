@@ -1,6 +1,6 @@
 {
   "name": "@alplabai/tan",
-  "version": "0.1.1",
+  "version": "0.4.1",
   "description": "tan — the standalone Alp Lab build CLI (native `tan` binary). Installs the platform-specific binary from the matching GitHub release.",
   "bin": {
     "tan": "bin/tan.js"

@@ -471,6 +471,18 @@ fn discover_sdk_root(workspace_root: &Path) -> Option<PathBuf> {
     let parent = workspace_root.parent().map(Path::to_path_buf);
     let candidates = [
         workspace_root.to_path_buf(),
+        // CHILD, before the siblings (#218). `tan init` runs from the directory
+        // the new project is about to be created IN, so at that moment the
+        // checkout is a child of the cwd -- it only becomes the documented
+        // "sibling `../alp-sdk`" once the project directory exists and the user
+        // has cd'd into it. Without this candidate the documented Quickstart
+        // breaks at step 3: `tan bootstrap` succeeds in `<ws>/alp-sdk`, and
+        // `tan init --from-example` run from `<ws>` reports "alp-sdk root is
+        // unresolved" with the checkout sitting right there. Proven by the
+        // first-blink CI job (#215), which had to pass `--sdk-root` to get past
+        // it. Ordered ahead of the siblings so a workspace that has both
+        // prefers the one bootstrap actually set up.
+        workspace_root.join("alp-sdk"),
         parent
             .as_ref()
             .map(|p| p.join("alp-sdk"))
@@ -548,10 +560,13 @@ pub fn resolve_sdk_tiered(
     )
 }
 
-/// Resolve the project context from the global args, mirroring the TS commands'
-/// `path.resolve(cwd, project) + resolveProjectContext` boilerplate. Shared by
-/// `validate`, `diff`, `presets`, and `doctor`.
-pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
+/// The resolution shared by [`resolve_cli_project_context`] and
+/// [`resolve_cli_project_context_no_sdk_report`] — everything except whether
+/// to also tell [`crate::sdk_report`] what was resolved. Split out so a
+/// command that wants `board_yaml_path`/`workspace_root` for REPORTING only
+/// can reuse the identical resolution without duplicating it, rather than
+/// re-deriving a narrower version by hand (tan-cli#111 follow-up).
+fn resolve_cli_project_context_inner(g: &GlobalArgs) -> (ProjectContext, Option<SdkSourceTier>) {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let project_arg = g.project.clone().unwrap_or_else(|| ".".to_string());
     let workspace_root = normalize_path(&cwd.join(&project_arg))
@@ -579,6 +594,15 @@ pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
         },
         |p| Path::new(p).exists(),
     );
+    (context, sdk_tier_hint)
+}
+
+/// Resolve the project context from the global args, mirroring the TS commands'
+/// `path.resolve(cwd, project) + resolveProjectContext` boilerplate. Shared by
+/// `validate`, `diff`, `presets`, `doctor`, and every command that actually
+/// drives the resolved SDK.
+pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
+    let (context, sdk_tier_hint) = resolve_cli_project_context_inner(g);
 
     // Report to `sdk_report` what THIS call actually resolved — never a
     // fresh resolution. `sdk_tier_hint` is only a hint from `effective_sdk_path`'s
@@ -593,6 +617,18 @@ pub fn resolve_cli_project_context(g: &GlobalArgs) -> ProjectContext {
     }
 
     context
+}
+
+/// Same resolution as [`resolve_cli_project_context`], but never calls
+/// [`crate::sdk_report::record`] — for a command that only wants
+/// `board_yaml_path`/`workspace_root` off the shared resolver and does not
+/// itself resolve-and-use an SDK in the sense `envelope.rs`'s `sdk` field
+/// documents. `debug-config` calls this: it reads only `board/system-manifest.yaml`
+/// under the workspace, never the SDK checkout, so recording one would add an
+/// undeclared `sdk` envelope key as a side effect of a field it merely
+/// reports (tan-cli#111 follow-up).
+pub fn resolve_cli_project_context_no_sdk_report(g: &GlobalArgs) -> ProjectContext {
+    resolve_cli_project_context_inner(g).0
 }
 
 #[cfg(test)]
@@ -839,6 +875,53 @@ mod tests {
             effective_sdk_path_with(None, "/work", "/home/.alp", &|_| false, &exists, &read);
         assert_eq!(got, "");
         assert_eq!(tier, None);
+    }
+
+    /// tan-cli#218, the documented Quickstart at step 3. `tan bootstrap`
+    /// succeeds in `<ws>/alp-sdk`; `tan init` then runs from `<ws>`, where the
+    /// checkout is a CHILD -- it only becomes the documented "sibling
+    /// `../alp-sdk`" after the project exists and the user has cd'd in. Before
+    /// the child candidate, discovery checked the root, its siblings and its
+    /// ancestors, so this returned None and init refused with "alp-sdk root is
+    /// unresolved" while the checkout sat one level down.
+    #[test]
+    fn discovery_finds_a_checkout_that_is_a_child_of_the_workspace_root() {
+        let ws = tmp("218-child-checkout");
+        let sdk = ws.join("alp-sdk");
+        std::fs::create_dir_all(sdk.join("scripts")).unwrap();
+        std::fs::write(sdk.join("scripts").join("alp_project.py"), b"# stub").unwrap();
+
+        assert_eq!(
+            discover_sdk_root(&ws),
+            Some(sdk),
+            "a child alp-sdk/ must resolve: it is what `tan init` sees before the project exists"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// The child must not outrank an explicit sibling that ALSO has the loader
+    /// script by accident of ordering alone -- but when both exist, the child is
+    /// the one `tan bootstrap` just set up, so it is the intended winner. Pinned
+    /// so a later reorder is a deliberate decision rather than a silent one.
+    #[test]
+    fn a_child_checkout_wins_over_a_sibling_when_both_exist() {
+        let root = tmp("218-child-vs-sibling");
+        let ws = root.join("ws");
+        let child = ws.join("alp-sdk");
+        let sibling = root.join("alp-sdk");
+        for p in [&child, &sibling] {
+            std::fs::create_dir_all(p.join("scripts")).unwrap();
+            std::fs::write(p.join("scripts").join("alp_project.py"), b"# stub").unwrap();
+        }
+
+        assert_eq!(
+            discover_sdk_root(&ws),
+            Some(child),
+            "the child is the checkout bootstrap set up under this workspace root"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

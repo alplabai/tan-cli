@@ -546,6 +546,12 @@ pub struct BootstrapArgs {
     /// Only print the environment-variable lines and exit.
     #[arg(long = "print-env")]
     pub print_env: bool,
+    /// Report success even when a dependency install failed and the workspace
+    /// cannot build (tan-cli#220). The failures are still printed and still
+    /// reported as issues — this only changes the verdict, for the case where
+    /// the missing packages are ones you know you do not need.
+    #[arg(long = "allow-partial")]
+    pub allow_partial: bool,
     /// Build the west workspace under this directory instead of the
     /// checkout's parent, moving the checkout there first if it isn't
     /// already (tan-cli#185). Answers the workspace-parent guard outright —
@@ -664,6 +670,19 @@ pub struct DebugConfigArgs {
     /// name your own `tasks.json` or `TaskProvider` registers.
     #[arg(long = "pre-launch-task", value_name = "TASK")]
     pub pre_launch_task: Option<String>,
+    /// Point cortex-debug's Cortex Peripherals (register) view at an SVD file
+    /// you supply. This is the ONLY source of one: the SDK ships no SVD
+    /// (alp-sdk#948, whose blocker is an open vendor-redistribution licence
+    /// question), so without this flag `svdFile`/`svdPath` are always dropped
+    /// and the peripheral view is simply absent. Point it at the vendor's own
+    /// SVD, which you are entitled to download.
+    ///
+    /// A relative path resolves against the CURRENT DIRECTORY. A path that
+    /// does not name a readable file fails the command — it never falls back
+    /// to "no SVD", because a typo would otherwise be indistinguishable from
+    /// not passing the flag at all.
+    #[arg(long, value_name = "PATH")]
+    pub svd: Option<String>,
     /// Print the launch configuration without writing launch.json.
     #[arg(long)]
     pub preview: bool,

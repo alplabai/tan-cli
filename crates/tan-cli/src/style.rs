@@ -155,7 +155,9 @@ pub fn render_report(
     next_steps: &[String],
 ) -> Vec<String> {
     let theme = Theme::from_args(g);
-    let (quiet, verbose) = (g.quiet, g.verbose);
+    // `verbose` is no longer read here: the "Next steps" block it used to gate
+    // now renders at default verbosity (#208).
+    let quiet = g.quiet;
     let mut lines = vec![String::new()];
 
     let heading = if subtitle.is_empty() {
@@ -213,7 +215,14 @@ pub fn render_report(
     };
     lines.push(format!("  {summary_line}"));
 
-    if verbose && !next_steps.is_empty() {
+    // `verbose &&` until #208. Every remedy `doctor` computes lives in this
+    // block, and hiding it behind a flag meant the person who ran `tan doctor`
+    // BECAUSE something broke saw the failures and none of the commands that
+    // repair them -- they had to already know to re-run with `--verbose`, which
+    // is the one thing a stuck customer does not know. `quiet` still suppresses
+    // it (that flag means "summary line only"), and a clean report has no
+    // `nextSteps` to print, so nothing changes for a host with nothing wrong.
+    if !quiet && !next_steps.is_empty() {
         lines.push(String::new());
         lines.push(format!("  {}", theme.bold("Next steps")));
         for step in next_steps {
@@ -389,17 +398,48 @@ mod tests {
         }
     }
 
+    /// #208 inverted this. It used to assert the opposite -- that a default-verbosity
+    /// report hid its remedies -- which is precisely the defect: the person who
+    /// runs `tan doctor` because something is broken is the one person who does
+    /// not know to re-run it with `--verbose`.
     #[test]
-    fn next_steps_only_when_verbose() {
+    fn next_steps_render_at_default_verbosity_and_are_suppressed_only_by_quiet() {
         let summary = DoctorSummary {
             pass: 0,
             warn: 1,
             fail: 0,
         };
         let steps = vec!["install west".to_string()];
-        let quiet = render_report(&args(false, false), "t", "sub", &[], &summary, &steps);
-        assert!(quiet.iter().all(|l| !l.contains("install west")));
+
+        let plain = render_report(&args(false, false), "t", "sub", &[], &summary, &steps);
+        assert!(
+            plain.iter().any(|l| l.contains("install west")),
+            "the remedy must print without --verbose: {plain:?}"
+        );
+
         let loud = render_report(&args(false, true), "t", "sub", &[], &summary, &steps);
         assert!(loud.iter().any(|l| l.contains("install west")));
+
+        // `--quiet` means "summary line only" and still wins.
+        let quiet = render_report(&args(true, false), "t", "sub", &[], &summary, &steps);
+        assert!(
+            quiet.iter().all(|l| !l.contains("install west")),
+            "--quiet must still suppress the block: {quiet:?}"
+        );
+    }
+
+    /// A clean report has no `nextSteps`, so nothing renders and the change
+    /// above is invisible on a healthy host -- pinned so a future "always show a
+    /// Next steps heading" refactor cannot quietly add an empty section to every
+    /// passing run.
+    #[test]
+    fn a_report_with_no_steps_prints_no_next_steps_heading() {
+        let summary = DoctorSummary {
+            pass: 3,
+            warn: 0,
+            fail: 0,
+        };
+        let lines = render_report(&args(false, false), "t", "sub", &[], &summary, &[]);
+        assert!(lines.iter().all(|l| !l.contains("Next steps")), "{lines:?}");
     }
 }

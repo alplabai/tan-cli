@@ -22,7 +22,7 @@ use super::CommandRun;
 use crate::cli::{DebugConfigArgs, GlobalArgs};
 use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
-use crate::util::{generated_at_iso, normalize_path};
+use crate::util::{generated_at_iso, normalize_path, resolve_cli_project_context_no_sdk_report};
 
 /// `data` payload of the `debug-config` envelope (serialized as camelCase JSON).
 #[derive(serde::Serialize)]
@@ -91,13 +91,57 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         .to_string_lossy()
         .to_string();
 
+    // tan-cli#170: every other command's `Project.root`/`Project.board_yaml`
+    // come from this SAME shared resolver (`bootstrap`, `doctor`, `presets`,
+    // `validate`, …); `debug-config` was the one holdout still hardcoding
+    // `board_yaml: None` on every path, even a success with a valid
+    // `board.yaml` sitting in the resolved root. Bound once (not just for
+    // `board_yaml_path`) so the reported `project.root` is this SAME
+    // `context.workspace_root` — already posix-normalized, like every other
+    // command's golden — instead of the locally-computed `workspace_root:
+    // PathBuf` below's native `to_string_lossy()`, which put a
+    // native-backslash `root` next to a forward-slash `boardYaml` in the same
+    // envelope object on Windows (#170 follow-up). Reporting-only — no
+    // consumer binds either field yet. The `_no_sdk_report` variant: unlike
+    // every other caller of this resolver, `debug-config` never drives the
+    // SDK it might resolve here as a side detail, so it must not add an
+    // undeclared `sdk` envelope key as a side effect of a field it merely
+    // reports (tan-cli#111 follow-up).
+    let context = resolve_cli_project_context_no_sdk_report(g);
+    let board_yaml = context.board_yaml_path.clone();
+    let project_root = context.workspace_root.clone().unwrap_or_default();
+
     // Fill the `<resolved-…>` placeholders from what this project's own build
     // recorded (#66). Nothing here fails the command: pre-build, or against a
     // Zephyr that reshaped `runners.yaml`, the draft keeps its placeholders.
-    let (resolution, registered_runners) =
+    let (mut resolution, registered_runners) =
         resolve_from_build(&workspace_root, target, server, args.core.as_deref());
+
+    // `--svd` is the ONLY producer of `resolution.svd` (tan-cli#197): the SDK
+    // ships no SVD, so without the flag the field is structurally always
+    // `None` and `apply_launch_resolution` drops both svd keys.
+    if let Some(svd_arg) = args.svd.as_deref() {
+        match resolve_user_svd(&cwd, &workspace_root, svd_arg) {
+            Ok(svd) => resolution.svd = Some(svd),
+            Err(message) => {
+                return internal_failure(g, &generated_at, message, launch_json_path);
+            }
+        }
+    }
+
     apply_launch_resolution(&mut draft, &resolution);
-    let notes = preview_notes_for(&draft, &registered_runners, server);
+    let mut notes = preview_notes_for(&draft, &registered_runners, server);
+    // A non-MCU draft carries no `svdFile` key at all, and
+    // `apply_launch_resolution` only replaces keys that already exist — so a
+    // `--svd` here is a no-op. Say so rather than accepting the flag in
+    // silence and leaving the user to wonder why no peripheral view appeared.
+    if args.svd.is_some() && draft.get("svdFile").is_none() {
+        notes.push(format!(
+            "--svd was given, but target kind '{}' emits no svdFile field, so it had no effect: \
+             the Cortex Peripherals view is a cortex-debug (MCU) feature.",
+            args.target_kind.as_deref().unwrap_or("zephyr-mcu"),
+        ));
+    }
 
     if args.preview {
         return success(
@@ -110,7 +154,8 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
             false,
             &notes,
             &draft,
-            &workspace_root,
+            &project_root,
+            board_yaml,
             Vec::new(),
         );
     }
@@ -183,6 +228,12 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
             draft["name"].as_str().unwrap_or_default(),
         ));
     }
+    // tan-cli#179: the ordinary same-name merge left a DIFFERENT leftover
+    // legacy entry silently untouched — say so, even though (unlike a
+    // migration) nothing about the file's shape changed because of it.
+    if let Some(legacy) = &plan.legacy_entry_present {
+        issues.push(legacy_entry_untouched_issue(legacy));
+    }
     // #182 review finding #2: a splice or fallback write that dropped a
     // comment (or trailing comma) the customer's file held must say so —
     // #182 named unqualified success on a write that destroys user-authored
@@ -200,8 +251,13 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         false,
         plan.replaced,
         &notes,
-        &draft,
-        &workspace_root,
+        // tan-cli#180: report what this write actually put in the file — the
+        // merged/migrated result — never the fresh `draft`, which still
+        // carries its own `<resolved-…>` placeholders even after a merge
+        // resolved them from the customer's real, hand-filled values.
+        &plan.written_configuration,
+        &project_root,
+        board_yaml,
         issues,
     )
 }
@@ -222,6 +278,30 @@ fn legacy_entry_migrated_issue(from: &str, to: &str) -> Issue {
              placeholder field (device, miDebuggerServerAddress, configFiles, …) \
              carried across; every other field tan owns was refreshed to this run's \
              values, same as an ordinary re-run. The old entry is gone."
+        ),
+    }
+}
+
+/// tan-cli#179: emitted when the ORDINARY same-name merge ran (an exact hit
+/// against the current `"Alp: ..."` name) and a legacy `"ALP: ..."`
+/// counterpart of the SAME draft ALSO still sits in the file. Distinct from
+/// [`legacy_entry_migrated_issue`], which fires on the MISS path where the
+/// legacy entry is the one adopted — here NEITHER entry was touched beyond
+/// the ordinary merge, so the customer's real hand-filled values may still be
+/// stranded on the leftover entry with nothing pointing at it. Severity
+/// `info`, same reasoning as the migration notice: nothing failed and there
+/// is no forced action, but silence here is exactly the #133 symptom the
+/// customer hits next.
+fn legacy_entry_untouched_issue(legacy_name: &str) -> Issue {
+    Issue {
+        code: "debug-config.legacy-entry-untouched".to_string(),
+        severity: "info".to_string(),
+        message: format!(
+            "A leftover legacy launch-configuration entry \"{legacy_name}\" still sits in \
+             .vscode/launch.json alongside the entry this run updated. It was left \
+             untouched — nothing decides which of the two you may have hand-edited is \
+             authoritative — so if you filled in real values on the legacy entry, copy \
+             them onto the maintained one and remove the legacy entry yourself."
         ),
     }
 }
@@ -248,6 +328,15 @@ fn comments_dropped_issue() -> Issue {
 
 /// Build a success `CommandRun`: emit the JSON envelope (or text lines) for a
 /// completed preview or write at `ExitCode::Success`.
+///
+/// `configuration` is the launch configuration to REPORT — the caller decides
+/// which one that is. `--preview` never merges anything (it returns before
+/// the customer's file is even read), so it passes the fresh draft, which is
+/// also all there is. A write passes the write plan's own
+/// `written_configuration` instead (tan-cli#180): the merged/migrated result
+/// that actually landed on disk, not the draft's stale `<resolved-…>`
+/// placeholders a merge may have already overwritten with the customer's
+/// real values.
 #[allow(clippy::too_many_arguments)]
 fn success(
     g: &GlobalArgs,
@@ -258,8 +347,9 @@ fn success(
     preview: bool,
     replaced: bool,
     notes: &[String],
-    draft: &Value,
-    workspace_root: &Path,
+    configuration: &Value,
+    project_root: &str,
+    board_yaml: Option<String>,
     issues: Vec<Issue>,
 ) -> CommandRun {
     let data = DebugConfigData {
@@ -271,7 +361,7 @@ fn success(
         launch_json_path: launch_json_path.to_string(),
         replaced,
         notes: notes.to_vec(),
-        configuration: draft.clone(),
+        configuration: configuration.clone(),
     };
     let text = if g.is_json() {
         Vec::new()
@@ -283,14 +373,19 @@ fn success(
             replaced,
             preview,
             notes,
-            draft,
+            configuration,
             g,
             &issues,
         )
     };
+    // tan-cli#170: same resolver every other command's envelope already uses
+    // for both fields; `debug-config` was the one holdout hardcoding
+    // `board_yaml: None`, and (follow-up) the one reporting `root` from its
+    // own native-separator `PathBuf` instead of this already posix-normalized
+    // string.
     let project = Project {
-        root: Some(workspace_root.to_string_lossy().to_string()),
-        board_yaml: None,
+        root: Some(project_root.to_string()),
+        board_yaml,
     };
     let json = g.is_json().then(|| {
         Envelope::new(
@@ -457,6 +552,15 @@ fn debug_config_text(
                 lines.push(format!("debug-config: {}", issue.message));
             }
         }
+        // tan-cli#179: same treatment — a leftover legacy entry sitting
+        // untouched next to the one this run just updated is exactly the
+        // kind of fact that must survive --quiet, not routine resolution
+        // noise.
+        for issue in issues {
+            if issue.code == "debug-config.legacy-entry-untouched" {
+                lines.push(format!("debug-config: {}", issue.message));
+            }
+        }
         // Same treatment for a dropped comment/trailing comma (#182 review
         // finding #2): a notice about content this run destroyed is never
         // routine noise, so it survives --quiet too.
@@ -535,6 +639,51 @@ fn workspace_relative(workspace_root: &Path, path: &str) -> String {
         .ok()
         .map(|rel| format!("${{workspaceFolder}}/{}", rel.to_string_lossy()))
         .unwrap_or_else(|| path.to_string())
+}
+
+/// Resolve `--svd` into the value the launch configuration should carry.
+///
+/// **Anchor: the current directory, not the project root.** `--svd` is a
+/// per-invocation flag typed at a shell prompt, so a relative path means what
+/// the shell means by it. (A board-level `debug.svd` key, should one ever be
+/// added, travels with the project and must anchor on the project root
+/// instead — the two have different lifetimes, so they get different anchors
+/// deliberately rather than by omission.) The emitted string then goes through
+/// the same [`workspace_relative`] rewrite as `executable`: inside the project
+/// it becomes `${workspaceFolder}/…` so a committed launch.json stays
+/// portable, outside it stays absolute — which is the normal case here, since
+/// a vendor SVD lives in the vendor SDK the user installed.
+///
+/// **A bad path is a HARD ERROR, never a silent drop back to "no SVD".**
+/// tan-cli#67 established that cortex-debug fails the whole session on an
+/// `svdFile` it cannot read, which is why the *unresolved* case drops the key.
+/// But the user explicitly named this file: falling back would make a typo
+/// indistinguishable from not passing the flag, and the failure would surface
+/// as an unexplained empty peripheral view. Fail here, where the message can
+/// name the path.
+fn resolve_user_svd(cwd: &Path, workspace_root: &Path, arg: &str) -> Result<String, String> {
+    if arg.trim().is_empty() {
+        return Err("Alp: --svd was given an empty path.".to_string());
+    }
+    // `join` on an absolute `arg` replaces the base, so this handles both.
+    let candidate = normalize_path(&cwd.join(arg));
+    let meta = std::fs::metadata(&candidate).map_err(|e| {
+        format!(
+            "Alp: --svd path cannot be read: {} ({e}). \
+             Pass the path to the vendor's own .svd file; the SDK ships none (alp-sdk#948).",
+            candidate.display(),
+        )
+    })?;
+    if !meta.is_file() {
+        return Err(format!(
+            "Alp: --svd path is not a file: {}",
+            candidate.display(),
+        ));
+    }
+    Ok(workspace_relative(
+        workspace_root,
+        &candidate.to_string_lossy(),
+    ))
 }
 
 /// Everything this project's own build knows about how to debug it: the
@@ -707,6 +856,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -928,6 +1078,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: true,
         };
 
@@ -988,6 +1139,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -995,15 +1147,20 @@ mod tests {
 
         let envelope: Value =
             serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
-        // `data.configuration` is always the freshly generated draft (with its
-        // own `<resolved-device>` placeholder) — never the post-merge result —
-        // in every mode, migration included; that is pre-existing and
-        // unrelated to #133. `data.replaced: true` is this envelope's signal
-        // that an existing entry was folded into; the FILE ON DISK (checked
-        // below) is what actually carries the merged, hand-filled value.
+        // tan-cli#180: `data.configuration` now reports the MERGED result —
+        // the customer's real, hand-filled `device` — not the fresh draft's
+        // own `<resolved-device>` placeholder. Before the fix this read
+        // `"<resolved-device>"` here even though the file on disk (checked
+        // below) already carried the real value, so the envelope told a
+        // consumer the write had NOT resolved something it plainly had.
         assert_eq!(
             envelope["data"]["configuration"]["name"],
             "Alp: Zephyr Debug (J-Link)"
+        );
+        assert_eq!(
+            envelope["data"]["configuration"]["device"], "AE822F4M55_HP",
+            "the envelope must report what was actually written, not the \
+             draft's stale placeholder: {envelope}"
         );
         assert_eq!(envelope["data"]["replaced"], true);
         let issues = envelope["issues"].as_array().unwrap();
@@ -1050,6 +1207,7 @@ mod tests {
             target_kind: Some("native-host".to_string()),
             server: None,
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1098,6 +1256,7 @@ mod tests {
             target_kind: Some("native-host".to_string()),
             server: None,
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1136,6 +1295,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1172,6 +1332,7 @@ mod tests {
             target_kind: Some("native-host".to_string()),
             server: None,
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1186,6 +1347,310 @@ mod tests {
                 .iter()
                 .all(|i| i["code"] != "debug-config.comments-dropped"),
             "a fresh write with nothing to drop must not report dropping anything: {envelope}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// tan-cli#180, the preview-side guard: `--preview` never reads or writes
+    /// the customer's file (it returns before the read), so it must keep
+    /// reporting the fresh draft even when a legacy entry that WOULD migrate
+    /// on a real write sits right there in `.vscode/launch.json`. This is
+    /// exactly the invariant the four `debug-config-preview-*` goldens pin —
+    /// a regression here would move all four for the wrong reason.
+    #[test]
+    fn preview_mode_reports_the_draft_even_when_a_legacy_entry_would_migrate() {
+        let dir = tmp("preview-ignores-legacy");
+        let vscode_dir = dir.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("launch.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": "0.2.0",
+                "configurations": [{
+                    "name": "ALP: Zephyr Debug (J-Link)",
+                    "type": "cortex-debug",
+                    "servertype": "jlink",
+                    "device": "AE822F4M55_HP",
+                }],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            svd: None,
+            preview: true,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert_eq!(
+            envelope["data"]["configuration"]["device"], "<resolved-device>",
+            "preview must report the draft's own placeholder, never a value \
+             implying a merge that never ran: {envelope}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every `--svd` test passes an ABSOLUTE path on purpose. `resolve_user_svd`
+    /// anchors a relative path on the process cwd, and cargo runs these tests
+    /// in threads that share one cwd — a `set_current_dir` here would race
+    /// every other test in the binary. The cwd anchoring is documented on the
+    /// flag and exercised by hand, not by a test that can flake.
+    fn args_with_svd(target_kind: &str, svd: Option<&str>, preview: bool) -> DebugConfigArgs {
+        DebugConfigArgs {
+            core: None,
+            target_kind: Some(target_kind.to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            svd: svd.map(str::to_string),
+            preview,
+        }
+    }
+
+    #[test]
+    fn a_user_supplied_svd_inside_the_project_is_emitted_workspace_relative() {
+        let dir = tmp("svd-in-project");
+        let svd = dir.join("E8.svd");
+        std::fs::write(&svd, "<device/>").unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = args_with_svd("zephyr-mcu", Some(&svd.to_string_lossy()), true);
+        let run_result = run(&g, &args);
+
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        let config = &envelope["data"]["configuration"];
+        // Both keys, because cortex-debug has spelled it both ways across
+        // versions and the draft carries both.
+        assert_eq!(config["svdFile"], "${workspaceFolder}/E8.svd");
+        assert_eq!(config["svdPath"], "${workspaceFolder}/E8.svd");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_user_supplied_svd_outside_the_project_stays_absolute() {
+        let dir = tmp("svd-outside-project");
+        let vendor = tmp("svd-vendor-sdk");
+        let svd = vendor.join("AE722F80F55D5AS.svd");
+        std::fs::write(&svd, "<device/>").unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = args_with_svd("zephyr-mcu", Some(&svd.to_string_lossy()), true);
+        let run_result = run(&g, &args);
+
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        // The normal case: a vendor SVD lives in the vendor SDK, not the
+        // project, so it must NOT be mangled into a ${workspaceFolder} path.
+        assert_eq!(
+            envelope["data"]["configuration"]["svdFile"],
+            Value::String(normalize_path(&svd).to_string_lossy().into_owned())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&vendor);
+    }
+
+    #[test]
+    fn a_missing_svd_path_fails_instead_of_silently_dropping_the_key() {
+        let dir = tmp("svd-missing");
+        let missing = dir.join("nope.svd");
+
+        let g = global(&dir);
+        let args = args_with_svd("zephyr-mcu", Some(&missing.to_string_lossy()), false);
+        let run_result = run(&g, &args);
+
+        // Falling back to "no SVD" would make a typo indistinguishable from
+        // not passing the flag — the user explicitly named this file.
+        assert_eq!(run_result.exit, ExitCode::InternalFailure);
+        assert!(
+            !dir.join(".vscode").join("launch.json").exists(),
+            "a refused --svd must not have written launch.json"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// tan-cli#179, driven end-to-end through `run()`: the "dangerous branch"
+    /// repro (a maintained `"Alp: ..."` entry AND a leftover
+    /// `"ALP: ..."` one, both present) must surface a
+    /// `debug-config.legacy-entry-untouched` issue naming the leftover entry.
+    #[test]
+    fn run_reports_a_leftover_legacy_entry_left_untouched_by_the_ordinary_merge() {
+        let dir = tmp("legacy-untouched");
+        let vscode_dir = dir.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("launch.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (J-Link)",
+                        "type": "cortex-debug",
+                        "servertype": "jlink",
+                        "device": "<resolved-device>",
+                    },
+                    {
+                        "name": "ALP: Zephyr Debug (J-Link)",
+                        "type": "cortex-debug",
+                        "servertype": "jlink",
+                        "device": "AE822F4M55_HP",
+                    },
+                ],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            svd: None,
+            preview: false,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        let issues = envelope["issues"].as_array().unwrap();
+        let found = issues
+            .iter()
+            .find(|i| i["code"] == "debug-config.legacy-entry-untouched")
+            .unwrap_or_else(|| panic!("no legacy-entry-untouched issue: {envelope}"));
+        assert_eq!(found["severity"], "info");
+        assert!(
+            found["message"]
+                .as_str()
+                .unwrap()
+                .contains("ALP: Zephyr Debug (J-Link)"),
+            "{envelope}"
+        );
+        // No migration happened -- the maintained entry merged ordinarily.
+        assert!(
+            issues
+                .iter()
+                .all(|i| i["code"] != "debug-config.legacy-entry-migrated"),
+            "{envelope}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// tan-cli#170: `project.boardYaml` must report a resolvable `board.yaml`
+    /// instead of hardcoding `null` on a success — same resolver every other
+    /// command (`bootstrap`, `doctor`, `presets`, …) already uses.
+    #[test]
+    fn envelope_reports_the_projects_board_yaml_when_one_exists() {
+        let dir = tmp("board-yaml-reported");
+        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN801\n").unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            svd: None,
+            preview: true,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        let board_yaml = envelope["project"]["boardYaml"]
+            .as_str()
+            .unwrap_or_else(|| panic!("project.boardYaml must be populated: {envelope}"));
+        assert!(
+            board_yaml.ends_with("board.yaml"),
+            "expected a path ending in board.yaml, got {board_yaml}"
+        );
+        // #170's own rationale, applied: `project.root` and `project.boardYaml`
+        // must not ship with different separators in the same object.
+        let root = envelope["project"]["root"].as_str().unwrap_or_default();
+        assert_eq!(
+            board_yaml.contains('\\'),
+            root.contains('\\'),
+            "root and boardYaml disagree on separator: {envelope}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_svd_path_that_is_a_directory_is_refused() {
+        let dir = tmp("svd-is-a-dir");
+        let not_a_file = dir.join("svd-dir");
+        std::fs::create_dir_all(&not_a_file).unwrap();
+
+        let g = global(&dir);
+        let args = args_with_svd("zephyr-mcu", Some(&not_a_file.to_string_lossy()), true);
+
+        assert_eq!(run(&g, &args).exit, ExitCode::InternalFailure);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_svd_path_is_refused_rather_than_treated_as_absent() {
+        let dir = tmp("svd-empty");
+        let g = global(&dir);
+        let args = args_with_svd("zephyr-mcu", Some("   "), true);
+
+        assert_eq!(run(&g, &args).exit, ExitCode::InternalFailure);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn svd_on_a_target_kind_without_the_field_is_reported_not_silently_ignored() {
+        let dir = tmp("svd-non-mcu");
+        let svd = dir.join("E8.svd");
+        std::fs::write(&svd, "<device/>").unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let mut args = args_with_svd("native-host", Some(&svd.to_string_lossy()), true);
+        args.server = None;
+        let run_result = run(&g, &args);
+
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert!(
+            envelope["data"]["configuration"].get("svdFile").is_none(),
+            "a native-host draft has no svdFile field to fill"
+        );
+        let notes = envelope["data"]["notes"].as_array().unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str().unwrap_or_default().contains("--svd was given")),
+            "accepting --svd here and saying nothing is the silent no-op this note exists to \
+             prevent: {notes:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
