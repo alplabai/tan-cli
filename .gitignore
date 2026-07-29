@@ -7,3 +7,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+# PyInstaller output + the clean build venv (python/scripts/build_binary.sh)
+/python/dist/
+/python/.build/
+/python/.venv-build/
