@@ -57,6 +57,46 @@ pub const YOCTO_HOST_DETAIL: &str =
 /// a docs URL — tan does not run it itself (`west sdk install` is a real
 /// download+extract, `west`'s job once a workspace exists, not a doctor-time
 /// side effect), only names it precisely enough to act on.
+/// The exact `west sdk install` invocation the `zephyrSdk` check names — the
+/// ONE place it is assembled.
+///
+/// It used to be formatted three times over
+/// [`crate::ZEPHYR_SDK_INSTALL_VERSION`] (in `detail`, in `fix`, twice inside
+/// `fix` alone), and #210 adds a fourth reader: `missingPrerequisites[].command`,
+/// which the extension renders as a Fix BUTTON. Four literals of one command,
+/// one of them runnable with a click, is exactly the drift that ends with a
+/// button running a different version than the prose beside it recommends.
+pub fn zephyr_sdk_install_command() -> String {
+    format!(
+        "west sdk install --version {} -t arm-zephyr-eabi",
+        crate::ZEPHYR_SDK_INSTALL_VERSION,
+    )
+}
+
+/// The 7-Zip install one-liner for native Windows (#204).
+///
+/// COMPILED IN rather than read from the manifest's `prerequisites.install`,
+/// because 7-Zip is not in any `prerequisites.<os>` list — it is a prerequisite
+/// of `west sdk install`, which bootstrap deliberately does not run, so it never
+/// gated bootstrap and was never added. That makes this the one install command
+/// in this file the SDK does not own, and it is written down here rather than
+/// invented at the call site so the follow-up that moves it into
+/// `metadata/bootstrap.json` (alp-sdk#1036) has a single thing to delete.
+///
+/// Verified resolvable before being written down (`winget show 7zip.7zip` ->
+/// `Found 7-Zip [7zip.7zip]`, publisher Igor Pavlov), and shaped like the
+/// manifest's own Windows entries (`winget install -e --id Kitware.CMake`). The
+/// rule this file states everywhere else still holds — an INVENTED command
+/// behind a Fix button is worse than `null` — so this one is checked, not
+/// guessed.
+pub const SEVEN_ZIP_INSTALL_COMMAND: &str = "winget install -e --id 7zip.7zip";
+
+/// The PATH names west's `.7z` extraction will accept. west delegates to
+/// `patoolib`, which shells out to any ONE of these and has no pure-Python
+/// fallback — so finding any single one of them is enough, and probing only
+/// `7z` would report a false negative on a host that has `7zz` or `unar`.
+pub const SEVEN_ZIP_PROGRAMS: [&str; 6] = ["7z", "7za", "7zr", "7zz", "7zzs", "unar"];
+
 pub fn zephyr_sdk_toolchain_check(detected: bool) -> DoctorCheck {
     DoctorCheck {
         name: "zephyrSdk".to_string(),
@@ -79,9 +119,8 @@ pub fn zephyr_sdk_toolchain_check(detected: bool) -> DoctorCheck {
             // be the exception.
             format!(
                 "Zephyr SDK toolchain not detected (ZEPHYR_SDK_INSTALL_DIR unset) — from an \
-                 initialised west workspace, run `west sdk install --version {} -t \
-                 arm-zephyr-eabi`.",
-                crate::ZEPHYR_SDK_INSTALL_VERSION,
+                 initialised west workspace, run `{}`.",
+                zephyr_sdk_install_command(),
             )
         },
         fix: if detected {
@@ -89,11 +128,10 @@ pub fn zephyr_sdk_toolchain_check(detected: bool) -> DoctorCheck {
         } else {
             Some(format!(
                 "Install the Zephyr SDK toolchain (arm-zephyr-eabi, version {}): from an \
-                 initialised west workspace, run `west sdk install --version {} -t \
-                 arm-zephyr-eabi`. Details: \
+                 initialised west workspace, run `{}`. Details: \
                  https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
                 crate::ZEPHYR_SDK_INSTALL_VERSION,
-                crate::ZEPHYR_SDK_INSTALL_VERSION,
+                zephyr_sdk_install_command(),
             ))
         },
     }
@@ -179,6 +217,13 @@ pub struct BuildToolProbe {
     pub dd: bool,
     /// Host is Linux (gates Yocto builds, which are Linux-only).
     pub is_linux: bool,
+    /// Host is native Windows (gates the `sevenZip` check, which is a
+    /// native-Windows-only prerequisite). NOT `!is_linux` — macOS is neither,
+    /// and `west sdk install` needs no external extractor there.
+    pub is_windows: bool,
+    /// Any one of [`SEVEN_ZIP_PROGRAMS`] is on PATH — west's `.7z` extractor
+    /// for `west sdk install` on native Windows (#204).
+    pub seven_zip: bool,
     /// `git` is on PATH (tan-cli#120) — every backend's build-plan emission
     /// runs `alp_project.py` against a git checkout, so this is checked
     /// unconditionally rather than gated on the declared `os_set`.
@@ -454,7 +499,84 @@ pub fn build_readiness_report(
         // Zephyr SDK is detected (env / install dir), not a PATH binary. See
         // [`zephyr_sdk_toolchain_check`] for the FAIL-not-warn argument and the
         // alp-sdk#855 measurement behind it.
+        //
+        // It cannot go through `push_tool` -- that function's whole shape is a
+        // PATH probe keyed into the manifest's `prerequisites.install` map, and
+        // `zephyrSdk` is neither. But `push_tool` was ALSO the only writer of
+        // `missing`, so bypassing it silently cost this check its
+        // `missingPrerequisites` row (#203, #210): the extension reads that list
+        // to decide a check is actionable, so the one build-blocking `Fail` a
+        // first-install customer hits was the only row in the table with no Fix
+        // button. Recording it here keeps "absent from the list" meaning "tan did
+        // not consider this" rather than "structurally invisible".
+        //
+        // The command is real and runnable, not `null`: `west sdk install` is
+        // what alp-sdk#855's reporter used to get past this. tan still does not
+        // RUN it (a download+extract is west's job once a workspace exists, not a
+        // read-only doctor's side effect) -- it names it precisely enough that
+        // the consumer can.
+        if !probe.zephyr_sdk {
+            missing.push(MissingPrerequisite {
+                tool: "zephyrSdk".to_string(),
+                command: Some(zephyr_sdk_install_command()),
+            });
+        }
         checks.push(zephyr_sdk_toolchain_check(probe.zephyr_sdk));
+
+        // 7-Zip (#204): a hard prerequisite of the `west sdk install` the check
+        // directly above tells the customer to run, on native Windows only --
+        // west delegates `.7z` extraction to `patoolib`, which shells out to an
+        // external extractor and has no pure-Python fallback. Without it that
+        // command dies inside patoolib with an error naming no Alp surface and
+        // no mention of 7-Zip, and until now the fact existed in exactly one
+        // place: a prose line in `tan bootstrap`'s TEXT output
+        // (`manualInstallHints.windows.note[1]`), reaching no JSON consumer.
+        //
+        // Gated on `!probe.zephyr_sdk` deliberately. 7-Zip matters only for
+        // INSTALLING the toolchain; once the SDK is present the extractor is
+        // irrelevant, and a permanent warn row for a tool nothing will use again
+        // is noise on every subsequent run. So it appears exactly when it is
+        // actionable -- beside the `zephyrSdk` Fail it unblocks -- and vanishes
+        // with it.
+        //
+        // `Warn`, not `Fail`: a host that already has the SDK is not reached at
+        // all, and among hosts that do not, this blocks the REMEDY rather than
+        // the build. `zephyrSdk` is the `Fail` that stops things.
+        if probe.is_windows && !probe.zephyr_sdk {
+            if !probe.seven_zip {
+                missing.push(MissingPrerequisite {
+                    tool: "sevenZip".to_string(),
+                    command: Some(SEVEN_ZIP_INSTALL_COMMAND.to_string()),
+                });
+            }
+            checks.push(DoctorCheck {
+                name: "sevenZip".to_string(),
+                status: if probe.seven_zip {
+                    DoctorStatus::Pass
+                } else {
+                    DoctorStatus::Warn
+                },
+                detail: if probe.seven_zip {
+                    "7-Zip is available — `west sdk install` can extract the toolchain.".to_string()
+                } else {
+                    format!(
+                        "No 7-Zip on PATH (looked for {}) — `west sdk install` extracts the \
+                         toolchain with patoolib, which shells out to one of these and has no \
+                         pure-Python fallback, so it will fail on native Windows. Install it \
+                         with `{SEVEN_ZIP_INSTALL_COMMAND}`.",
+                        SEVEN_ZIP_PROGRAMS.join(", "),
+                    )
+                },
+                fix: if probe.seven_zip {
+                    None
+                } else {
+                    Some(format!(
+                        "Install 7-Zip before running `west sdk install`: \
+                         `{SEVEN_ZIP_INSTALL_COMMAND}`."
+                    ))
+                },
+            });
+        }
     }
 
     if os_set.contains(&BuildOs::Yocto) {
@@ -858,6 +980,8 @@ mod tests {
             bmaptool: true,
             dd: true,
             is_linux: true,
+            is_windows: false,
+            seven_zip: true,
             git: true,
             git_version: Some("2.43.0".to_string()),
             python_version: Some((3, 12)),
@@ -921,6 +1045,12 @@ mod tests {
             bmaptool: false,
             dd: false,
             is_linux: true,
+            // Linux, so the `sevenZip` check does not fire for the many tests
+            // built on this helper -- a Windows-only prerequisite must not
+            // appear on every "nothing installed" report. The tests that DO
+            // exercise it set `is_windows` explicitly.
+            is_windows: false,
+            seven_zip: false,
             git: false,
             git_version: None,
             python_version: None,
@@ -1184,8 +1314,118 @@ mod tests {
                     tool: "gperf".to_string(),
                     command: None,
                 },
+                // #203/#210: the one build-blocking Fail, and until now the only
+                // row the extension could not put a Fix button on, because it
+                // bypassed `push_tool` and so never reached this list at all.
+                MissingPrerequisite {
+                    tool: "zephyrSdk".to_string(),
+                    command: Some(
+                        "west sdk install --version 1.0.1 -t arm-zephyr-eabi".to_string(),
+                    ),
+                },
             ])
         );
+    }
+
+    /// #204. `sevenZip` is native-Windows-only AND only while the SDK is still
+    /// missing, so it must be absent from the list above (`is_windows: false`)
+    /// and present here.
+    #[test]
+    fn seven_zip_is_reported_only_on_windows_and_only_while_the_sdk_is_absent() {
+        let tools = |probe: &BuildToolProbe| {
+            build_readiness_report(
+                "t".to_string(),
+                vec![BuildOs::Zephyr],
+                probe,
+                &install(HostOs::Windows),
+                FLOOR,
+            )
+        };
+
+        let windows_no_sdk = tools(&BuildToolProbe {
+            is_linux: false,
+            is_windows: true,
+            ..probe_none_present()
+        });
+        let seven_zip = windows_no_sdk
+            .checks
+            .iter()
+            .find(|c| c.name == "sevenZip")
+            .expect("native Windows without an SDK must carry the sevenZip check");
+        assert_eq!(seven_zip.status, DoctorStatus::Warn);
+        assert!(
+            seven_zip.detail.contains("7z, 7za, 7zr, 7zz, 7zzs, unar"),
+            "the detail must name every extractor patoolib accepts: {}",
+            seven_zip.detail
+        );
+        assert!(
+            windows_no_sdk
+                .missing_prerequisites
+                .as_ref()
+                .unwrap()
+                .contains(&MissingPrerequisite {
+                    tool: "sevenZip".to_string(),
+                    command: Some(SEVEN_ZIP_INSTALL_COMMAND.to_string()),
+                }),
+            "it must be actionable, not prose-only -- that was the whole defect"
+        );
+
+        // Same host, SDK already installed: the extractor is never used again,
+        // so the row does not linger.
+        let windows_with_sdk = tools(&BuildToolProbe {
+            is_linux: false,
+            is_windows: true,
+            zephyr_sdk: true,
+            ..probe_none_present()
+        });
+        assert!(
+            !windows_with_sdk.checks.iter().any(|c| c.name == "sevenZip"),
+            "a host that already has the SDK needs no extractor row"
+        );
+
+        // POSIX never sees it at all -- west needs no external extractor there.
+        let posix = tools(&BuildToolProbe {
+            seven_zip: false,
+            ..probe_none_present()
+        });
+        assert!(!posix.checks.iter().any(|c| c.name == "sevenZip"));
+        assert!(
+            !posix
+                .missing_prerequisites
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|m| m.tool == "sevenZip")
+        );
+    }
+
+    /// The `zephyrSdk` command is assembled once and read four ways. Pin that
+    /// they agree, so a version bump cannot leave the Fix button running a
+    /// different toolchain than the prose beside it names.
+    #[test]
+    fn the_zephyr_sdk_command_is_one_string_in_every_place_it_appears() {
+        let command = zephyr_sdk_install_command();
+        assert!(command.contains(crate::ZEPHYR_SDK_INSTALL_VERSION));
+
+        let check = zephyr_sdk_toolchain_check(false);
+        assert!(check.detail.contains(&command), "{}", check.detail);
+        let fix = check.fix.expect("an absent SDK must carry a fix");
+        assert!(fix.contains(&command), "{fix}");
+
+        let report = build_readiness_report(
+            "t".to_string(),
+            vec![BuildOs::Zephyr],
+            &probe_none_present(),
+            &install(HostOs::Linux),
+            FLOOR,
+        );
+        let entry = report
+            .missing_prerequisites
+            .unwrap()
+            .into_iter()
+            .find(|m| m.tool == "zephyrSdk")
+            .expect("zephyrSdk must reach missingPrerequisites (#203, #210)");
+        assert_eq!(entry.command, Some(command));
     }
 
     #[test]
@@ -1245,7 +1485,19 @@ mod tests {
             let tools: Vec<&str> = missing.iter().map(|m| m.tool.as_str()).collect();
             assert_eq!(
                 tools,
-                ["git", python_tool, "west", "cmake", "ninja", "dtc", "gperf"],
+                [
+                    "git",
+                    python_tool,
+                    "west",
+                    "cmake",
+                    "ninja",
+                    "dtc",
+                    "gperf",
+                    // #203/#210. Its command is tan's own (`west sdk install`),
+                    // not the manifest's, so it is the one entry here that is
+                    // identical on all three hosts.
+                    "zephyrSdk",
+                ],
                 "{host:?}"
             );
             let command_for = |tool: &str| {
@@ -1256,6 +1508,15 @@ mod tests {
             };
             assert_eq!(command_for("cmake"), cmake_command, "{host:?}");
             assert_eq!(command_for("git"), git_command, "{host:?}");
+            // The one entry here whose command is tan's own (`west sdk install`)
+            // rather than the manifest's, so it is identical on all three hosts
+            // -- including `HostOs::Other`, where every manifest-sourced command
+            // is `null`.
+            assert_eq!(
+                command_for("zephyrSdk"),
+                Some(zephyr_sdk_install_command().as_str()),
+                "{host:?}"
+            );
             // `python`'s `tool` self-resolves back into the SAME per-host
             // `install` map -- `python3` on a served POSIX host, matching
             // `tan bootstrap`'s own `posix_refusal` naming for the identical
@@ -1319,11 +1580,18 @@ mod tests {
     #[test]
     fn missing_prerequisites_covers_only_path_tools_and_respects_the_os_gate() {
         // Two rules in one: a Zephyr-only project must never be told to install
-        // `bitbake` (the check is not even emitted), and the non-PATH checks --
-        // `zephyrSdk` (env-var detection; `fix` is a runnable `west sdk install`
-        // one-liner, not a `{tool, command}` pair), `bmaptool` (two tools, one
-        // advisory, `dd` fallback), `vendorToolchain` (no tool name at all) --
-        // must stay out, since no `{tool, command}` pair can carry them.
+        // `bitbake` (the check is not even emitted), and the non-PATH checks
+        // that genuinely cannot be expressed as a `{tool, command}` pair --
+        // `bmaptool` (two tools, one advisory, `dd` fallback) and
+        // `vendorToolchain` (no tool name at all) -- must stay out.
+        //
+        // `zephyrSdk` used to be listed here as a third such check. It is not
+        // one: it has exactly one name and exactly one runnable command, and
+        // excluding it cost the only build-blocking `Fail` its Fix button
+        // (#203, #210). It is now reported like every other absent prerequisite,
+        // and the Yocto half below still proves the OS gate holds -- a
+        // Yocto-only project never reaches the Zephyr branch, so it sees no
+        // `zephyrSdk` row at all.
         let zephyr_only = build_readiness_report(
             "t".to_string(),
             vec![BuildOs::Zephyr],
@@ -1342,7 +1610,16 @@ mod tests {
             // POSIX map, so `tool` self-resolves into it (see
             // `a_posix_host_gets_its_own_package_manager_and_never_winget`).
             tools,
-            ["git", "python3", "west", "cmake", "ninja", "dtc", "gperf"]
+            [
+                "git",
+                "python3",
+                "west",
+                "cmake",
+                "ninja",
+                "dtc",
+                "gperf",
+                "zephyrSdk"
+            ]
         );
 
         // Yocto declared AND a Linux host -> `bitbake` is checked, so it is
