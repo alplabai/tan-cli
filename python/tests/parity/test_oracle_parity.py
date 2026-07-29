@@ -39,10 +39,10 @@ CASES = [
     # the extension parses stdout whole, so one stray byte breaks it. clap and
     # Typer agree here today; this case exists to keep them agreeing.
     (["bogus-command"], ENVELOPE, None),
-    # Bare invocation. Runs for real and is RED today: Rust prints help and
-    # exits 2, the port's `invoke_without_command=True` callback exits 0 having
-    # printed nothing -- a silent success where the shipped CLI refuses.
-    ([], ENVELOPE, "the port's root callback exits 0 silently; Rust exits 2 with help"),
+    # Bare invocation. Promoted (tan.cli's root callback now rejects a
+    # missing subcommand via ctx.fail, exit 2, stdout empty -- see
+    # tests/test_cli_skeleton.py::test_bare_invocation_exits_2_with_help_on_stderr).
+    ([], ENVELOPE, None),
     (["validate", "--format", "json"], ENVELOPE, "validate lands in a later sub-project"),
     (
         ["build", "--plan", "--format", "json"],
