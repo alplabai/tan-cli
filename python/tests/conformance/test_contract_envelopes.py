@@ -79,9 +79,14 @@ CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit"})
 #: explicitly "NOT COVERED" there because reaching it needs a resolvable alp-sdk
 #: checkout and a Python spawn). So every case here is pending a later
 #: sub-project, and each is listed BY NAME: an unported command must show up as
-#: a known gap, never as a skipped suite or a weakened assertion. Delete an
-#: entry the moment its command lands -- ``strict=False`` means an early pass
-#: reports XPASS rather than failing the run.
+#: a known gap, never as a skipped suite or a weakened assertion.
+#:
+#: ``strict=True``: this dict is the port's BACKLOG, so a stale entry is a lost
+#: signal. Under ``strict=False`` a fixture that starts genuinely passing reports
+#: XPASS and the run stays green -- the command lands, its fixture stays
+#: mis-classified as "not ported", and nothing ever forces the correction. Strict
+#: turns that XPASS into a FAILURE, so landing a command forces the one-line
+#: promotion: delete its entry here. Costs nothing while a case genuinely fails.
 NOT_PORTED = {
     "debug-config-preview-baremetal-mcu": "debug-config lands in a later sub-project",
     "debug-config-preview-native-host": "debug-config lands in a later sub-project",
@@ -154,7 +159,7 @@ def copy_fixture_inputs(case_dir, work_dir):
             f,
             id=f.name,
             marks=(
-                [pytest.mark.xfail(reason=NOT_PORTED[f.name], strict=False)]
+                [pytest.mark.xfail(reason=NOT_PORTED[f.name], strict=True)]
                 if f.name in NOT_PORTED
                 else []
             ),
@@ -187,6 +192,13 @@ def test_envelope_matches_expected(fixture):
             [sys.executable, "-m", "tan", *argv],
             capture_output=True,
             text=True,
+            # Match the Rust harness's `String::from_utf8_lossy`. Bare
+            # `text=True` decodes with the platform locale encoding, so Click's
+            # stderr on a non-UTF-8-locale Windows runner could raise
+            # UnicodeDecodeError -- a harness CRASH masquerading as a contract
+            # failure, instead of a clean assertion diff.
+            encoding="utf-8",
+            errors="replace",
             cwd=work_dir,
             env=env,
         )
