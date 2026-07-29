@@ -262,7 +262,10 @@ pub fn next_steps_block(
         // raw forward-slash `${SDK_ROOT}` would print mixed. See `print_env_block`.
         let repo_root = tokens.sdk_root.replace('/', "\\");
         lines.extend([
-            "  # Or jump straight into building an example for real silicon:".to_string(),
+            "  # Or jump straight into building an example for real silicon".to_string(),
+            "  # (needs the Zephyr SDK toolchain, which bootstrap does NOT install --".to_string(),
+            "  #  the `tan doctor` above reports it, and names the exact install command):"
+                .to_string(),
             "  west build -b alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he `".to_string(),
             format!(
                 "      examples\\peripheral-io\\uart-echo -- -DEXTRA_ZEPHYR_MODULES={repo_root}"
@@ -300,7 +303,10 @@ pub fn next_steps_block(
             "  # Run the local test suite:".to_string(),
             "  bash scripts/test-all.sh".to_string(),
             String::new(),
-            "  # Or jump straight into building an example for real silicon:".to_string(),
+            "  # Or jump straight into building an example for real silicon".to_string(),
+            "  # (needs the Zephyr SDK toolchain, which bootstrap does NOT install --".to_string(),
+            "  #  the `tan doctor` above reports it, and names the exact install command):"
+                .to_string(),
             format!("  tan build --sdk-root \"{}\" \\", tokens.sdk_root),
             format!(
                 "      --project \"{}/examples/peripheral-io/uart-echo\"",
