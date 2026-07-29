@@ -334,6 +334,83 @@ def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     return files
 
 
+def vendored_library_names_for(template_id: str) -> list[str] | None:
+    """The library names `tan explain --template <id>` reports for `template_id`.
+
+    `None` for `minimal-app` -- the one template with no vendored tree, whose
+    caller keeps reading the registry's own (empty) `libs` field. A list
+    otherwise, read straight from that template's Alif-Ensemble-family
+    `board.yaml`: `Some(vec![])` in Rust terms, so an EMPTY list means "this
+    scaffold genuinely ships no libraries", never "unknown".
+
+    Mirrors `crates/tan-core/src/wizard/service/vendored.rs`'s
+    `vendored_library_names_for`, including its choice of family tree: the
+    `libraries:` block is identical across the AEN/V2N pair of every
+    family-split template (Rust asserts that in
+    `vendored_library_names_matches_across_families`) and `tan explain` has no
+    `--som` to pick one with, so the AEN tree stands in for both.
+
+    Fixes tan-cli#124 by construction: the summary derives from the scaffold
+    bytes `tan init` actually writes, not from a second hand-synced registry
+    field that went stale (`edge-ai-starter` reported no libraries while its
+    vendored board.yaml declares `tflite-micro`).
+
+    Raises `TemplateDataError` when the tree will not read, so `tan explain`
+    can report a coded issue instead of letting an `OSError` escape as a
+    traceback -- the Rust `expect()`s here and panics.
+    """
+    tree = _VENDORED_TEMPLATE_DIR.get(template_id)
+    if tree is None:
+        return None
+    path = VENDORED_ROOT / tree / _FAMILY_TREES[0] / "board.yaml"
+    try:
+        text = _read_verbatim(path)
+    except OSError as err:
+        raise TemplateDataError(
+            f"tan's vendored board.yaml for '{template_id}' could not be read at "
+            f"'{path}': {err}. This is a broken tan installation, not a project "
+            f"problem -- reinstall tan, or rebuild the binary with the template "
+            f"data (scripts/build_binary.sh)."
+        ) from err
+    return _library_names(text)
+
+
+def _library_names(board_yaml: str) -> list[str]:
+    """Every name in a board.yaml's top-level `libraries:` block, in file order.
+
+    A line scan, where Rust parses the whole document through `BoardModel`. The
+    input is not a customer's file -- it is tan's own vendored capture, LF, with
+    a shape `tests/core/test_scaffold.py` byte-diffs against the Rust trees --
+    so a YAML parser would only buy generality this never needs, and PyYAML is
+    an OPTIONAL runtime import in this package (see `validate_cmd`): depending
+    on it here would make `tan explain --template edge-ai-starter` answer
+    differently depending on whether a wheel happened to be installed.
+
+    Both `LibraryEntry` spellings Rust's model accepts are covered, not just the
+    scoped one every vendored tree uses today: the bare shorthand
+    (`- tflite-micro`) and the scoped object (`- name: tflite-micro`, whose
+    sibling keys like `cores: [m55_hp]` are skipped as they are not list items).
+    Comments and blank lines inside the block are skipped; the first column-0
+    line ends it, exactly as Rust's own `vendored_core_ids` line scan does.
+    """
+    names: list[str] = []
+    in_block = False
+    for line in board_yaml.splitlines():
+        if not in_block:
+            in_block = line.rstrip() == "libraries:"
+            continue
+        if line and not line[0].isspace():
+            break  # The next top-level key ends the libraries: block.
+        entry = line.strip()
+        if not entry.startswith("- "):
+            continue  # Blank line, comment, or a scoped entry's sibling key.
+        entry = entry[2:].strip()
+        key, sep, value = entry.partition(":")
+        raw = value.strip() if sep and key.strip() == "name" else entry
+        names.append(raw.strip("\"'"))
+    return names
+
+
 # ---------------------------------------------------------------------------
 # `minimal-app`: the one hand-generated template
 # ---------------------------------------------------------------------------
