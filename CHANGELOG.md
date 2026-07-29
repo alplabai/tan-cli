@@ -39,6 +39,76 @@
   contract, not with a per-invocation flag.
 
 ### Fixed
+- **`baremetal-mcu` × OpenOCD shipped a resolved `serverpath`/`searchDir` with
+  NO `configFiles` to load, and `baremetal-mcu` × pyOCD had no target to
+  select** (#139). `create_launch_draft`'s `BaremetalMcu` arm was ONE
+  un-branched object for every server, unlike `ZephyrMcu` right above it,
+  which already branches. `resolve_from_build` computed `config_files` and
+  `target_id` for every target, but `apply_launch_resolution` only replaces a
+  key the draft already carries — and the `baremetal-mcu` draft carried
+  neither — so both values were silently discarded while OpenOCD's
+  `serverpath`/`searchDir` extras (written unconditionally) still landed.
+  `jlink` was unaffected, which is exactly why this shipped: a jlink-only
+  bench pass proved nothing about the other two servers. `BaremetalMcu` now
+  branches per server the same way `ZephyrMcu` does — OpenOCD gets
+  `configFiles`, pyOCD gets `targetId` — so `apply_launch_resolution`'s
+  existing `contains_key` guards finally have something to fill. Reachable
+  hermetically: the `debug-config-preview-baremetal-mcu` golden (server
+  `openocd`) now pins `configFiles` in the emitted `configuration`.
+- **`tan debug-config`'s envelope reported the pre-merge draft's own
+  `<resolved-…>` placeholders even after a write merged in the customer's
+  real, hand-filled values — so a file a merge or legacy migration genuinely
+  FIXED was reported back as still broken** (#180). `debug_config.rs`'s
+  `success()` set `data.configuration` to `draft.clone()` unconditionally, in
+  every mode; the merged document `create_launch_json_write_plan` computes
+  internally was never put anywhere the caller could read it. Concretely: seed
+  a legacy `"ALP: Zephyr Debug (J-Link)"` entry with a hand-filled
+  `"device": "AE822F4M55_HP"`, run `tan debug-config`; the file on disk ends
+  up with the real device, but the envelope's `data.configuration.device` read
+  `"<resolved-device>"`. alp-sdk-vscode#342 folds exactly this field
+  (`written.configuration`) into its debug-readiness report, so the customer
+  was told placeholders remained on a file that no longer had any.
+  `LaunchJsonWritePlan` now carries its own `written_configuration` — the
+  entry actually written, merged or appended — and `debug-config.rs` reports
+  THAT for a write, never the stale draft. `--preview` is unaffected by
+  construction: it returns before the customer's file is ever read, so the
+  draft IS the only configuration there is to report — proven by a new test
+  and unmoved by the four `debug-config-preview-*` goldens (which never merge
+  and therefore never had this bug).
+- **A leftover legacy `"ALP: ..."` launch-configuration entry sitting
+  alongside the maintained `"Alp: ..."` one was left completely silent, even
+  for the customer whose real hand-filled values are still stranded on it**
+  (#179). When BOTH a current-named and a legacy-named entry exist at once (a
+  workspace that ran a pre-#155 `tan` and then a post-#155 one), the ordinary
+  same-name merge runs on the `Alp:` entry and — correctly, per #133's own
+  data-safety call — never touches the `ALP:` one, since nothing decides
+  which of two possibly-hand-edited entries is authoritative. That
+  correctness was undocumented at runtime: no `issues[]` entry, no text-mode
+  line, `migrated_from: None`. A customer in exactly this shape gets `F5`
+  aimed at the entry with the unresolved placeholder while their real values
+  sit one entry down, and `tan` reports bare success. `create_launch_json_write_plan`
+  now reports a new `legacy_entry_present` alongside `migrated_from`, and
+  `debug-config` surfaces it as a new `debug-config.legacy-entry-untouched`
+  issue (severity `info`, registered `reserved` in `contract/issue-codes.json`
+  — no consumer yet), shown in text mode even under `--quiet` like the
+  migration notice beside it. Still silent on the common cases that must stay
+  silent: an ordinary re-run with no legacy entry anywhere, and the MISS/
+  migration path itself (which already reports the same fact via
+  `migrated_from` and must not double-report it).
+- **`tan debug-config` hardcoded `project.boardYaml: null` on every
+  invocation, even a success with a valid `board.yaml` sitting in the
+  resolved project root** (#170). Every other command that reports a
+  `Project` (`bootstrap`, `doctor`, `presets`, `validate`, …) populates
+  `board_yaml` from the shared `resolve_cli_project_context` resolver;
+  `debug-config` was the one holdout still hardcoding it `None`. It now uses
+  the same resolver. Reporting-only — no consumer binds `project.boardYaml`
+  yet, so nothing downstream changes behaviour — but a consumer that DID trust
+  it to mean "no board.yaml was found" would have drawn the wrong conclusion.
+  The four `debug-config-preview-*` goldens move as a direct, intended
+  consequence: they run in a directory with no `board.yaml` on disk, and this
+  resolver reports the CANDIDATE path unconditionally rather than only when
+  the file exists — matching every other command's own pinned goldens
+  (`presets-no-sdk`, `presets-heterogeneous-som`), not a new inconsistency.
 - **The npm shim (`@alplabai/tan`) was pinned six releases behind — `npm i -g
   @alplabai/tan` would have fetched `v0.1.1`'s binaries under the current
   release tag.** `npm-shim/postinstall.js` resolves its download tag from
@@ -87,6 +157,45 @@
   predicate is now the pure, unit-tested `interactive_mode()`.
 
 ### Changed
+- **`contract/issue-codes.json` was a strict subset of what `tan` actually
+  emits — sixteen real codes were reachable with no registry entry at all, so
+  `frozen_issue_codes` gated nothing about them and a rename would have been
+  invisible in both this repo's CI and alp-sdk-vscode's simultaneously**
+  (#111). An initial pass here registered only five of those (below); a
+  follow-up audit of every `Issue { code: ... }` / `Log::warn` / `failure()`
+  call site under `crates/tan-cli/src/commands/bootstrap/` and
+  `debug_config.rs` found eleven more still unregistered and reaching the
+  wire — `bootstrap.zephyr-base-stale`, `zephyr-base-incompatible`,
+  `west-config-reconciled`, `west-config-reconcile-failed`, `pip-upgrade`,
+  `zephyr-requirements`, `sdk-extras`, `editable-install`, `failed`, and
+  `debug-config.internal-failure`, `write-failure`. All eleven are now
+  registered `reserved` too, so the registry actually covers every code these
+  two command families emit, not just the ones a prior pass happened to name.
+  `contract/README.md`'s frozen-codes table now states its own selection
+  criterion (`frozen`/`retired` only; `reserved` codes are enumerated by name
+  in prose instead, since there are too many to table usefully) rather than
+  silently including some reserved codes and omitting others with no stated
+  reason.
+  Registers `bootstrap.manifest` (fires at the FIRST
+  `load_facts(&sdk_root)` call, strictly BEFORE `select_workspace`, the
+  workspace-parent guard (#185), and any venv/west/pip phase — a doubled run
+  costs seconds and leaves nothing on disk), `bootstrap.sdk-root-unresolved`
+  (the one refusal that predates project resolution) and
+  `bootstrap.zephyr-base-manifest-mismatch` (a `warning`, fired from
+  `select_workspace`) as `reserved` — no consumer binds any of the three yet.
+  Also **promotes `bootstrap.python-not-runnable` and `bootstrap.python-too-old`
+  from undocumented to `frozen`**: verified in the read-only alp-sdk-vscode
+  checkout that `PREREQ_CODES` (`src/alpCli/service.ts`,
+  `prerequisitesMissingIssue`) already matches both by exact string alongside
+  `bootstrap.prerequisites-missing`, so they were a real, already-bound
+  contract this registry simply never recorded — `contract/README.md`
+  documented the gap as a workaround ("a consumer that wants those two must
+  match them by name") instead of the fix. Renaming either today is now a
+  breaking-wire change like every other frozen code, not a silent one.
+  Registers one more `reserved` code, `debug-config.legacy-entry-untouched`,
+  for the new signal described under Fixed (#179) — folded into this same
+  registry edit rather than a second PR, since both changes touch
+  `contract/issue-codes.json`.
 - **Re-vendored the scaffold fixtures and the toolchain lock against alp-sdk
   `cdfe1368` (alp-sdk#1016), and bumped `PINNED_SDK_TAG` to match.** #1016
   rewrote the `Customer workflow:` header in every example `board.yaml` from
