@@ -41,7 +41,7 @@ class Slice:
     core_id: str
     backend: str
     build_dir: str
-    app_dir: str
+    app_dir: str | None
     config_artefacts: list[dict[str, Any]]
     toolchain: Any
     artifacts: dict[str, Any]
@@ -81,7 +81,28 @@ def _policy(raw: dict[str, Any] | None) -> ExecutionPolicy | None:
     )
 
 
-def _slice(raw: dict[str, Any]) -> Slice:
+def _artefacts(raw: Any, context: str) -> list[dict[str, Any]]:
+    """Validate a `configArtefacts`/`sharedArtefacts` list at parse time
+    (Rust's serde rejects a malformed `GeneratedFile` here too) so a
+    malformed or null-valued entry fails as a coded `PlanParseError` instead
+    of an uncaught `KeyError`/`AttributeError` reaching `plan_tokens`, which
+    indexes `path`/`contents` unguarded."""
+    if not isinstance(raw, list):
+        raise PlanParseError("build.plan-invalid", f"`{context}` must be a list")
+    for i, art in enumerate(raw):
+        if (
+            not isinstance(art, dict)
+            or not isinstance(art.get("path"), str)
+            or not isinstance(art.get("contents"), str)
+        ):
+            raise PlanParseError(
+                "build.plan-invalid",
+                f"`{context}[{i}]` must be an object with string `path` and `contents` fields",
+            )
+    return raw
+
+
+def _slice(raw: dict[str, Any], i: int) -> Slice:
     missing = [k for k in _REQUIRED_SLICE if k not in raw]
     if missing:
         raise PlanParseError(
@@ -91,7 +112,8 @@ def _slice(raw: dict[str, Any]) -> Slice:
     cmd = raw["command"]
     return Slice(
         core_id=raw["coreId"], backend=raw["backend"], build_dir=raw["buildDir"],
-        app_dir=raw["appDir"], config_artefacts=raw["configArtefacts"],
+        app_dir=raw["appDir"],
+        config_artefacts=_artefacts(raw["configArtefacts"], f"slices[{i}].configArtefacts"),
         toolchain=raw["toolchain"], artifacts=raw["artifacts"], debug=raw["debug"],
         command=None if cmd is None else SliceCommand(
             tool=cmd["tool"], args=list(cmd.get("args", [])), cwd=cmd.get("cwd")
@@ -134,8 +156,9 @@ def parse_build_plan(text: str) -> BuildPlan:
     return BuildPlan(
         schema_version=version, generated_by=raw["generatedBy"], board_yaml=raw["boardYaml"],
         sku=raw["sku"], build_root=raw["buildRoot"],
-        slices=[_slice(s) for s in raw["slices"]],
-        shared_artefacts=raw["sharedArtefacts"], warnings=raw["warnings"],
+        slices=[_slice(s, i) for i, s in enumerate(raw["slices"])],
+        shared_artefacts=_artefacts(raw["sharedArtefacts"], "sharedArtefacts"),
+        warnings=raw["warnings"],
         sdk_version=raw.get("sdkVersion"), sdk_commit=raw.get("sdkCommit"),
         plan_path_mode=raw.get("planPathMode"), execution_policy=_policy(raw.get("executionPolicy")),
     )

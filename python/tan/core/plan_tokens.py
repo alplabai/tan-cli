@@ -41,7 +41,9 @@ Rust `BuildSlice` does not carry: `slices[].appDir`, which the Python
 `Slice` (`tan.core.build_plan`) does have. It is substituted immediately
 after `buildDir` -- the other slice-level bare path field -- and, like every
 other slice field, participates in TOOLCHAIN_ROOT demotion / LeftoverToken
-the same as its siblings.
+the same as its siblings. `appDir` is nullable per the SDK schema (a Yocto
+slice built from the stock-image token has none) -- `None` passes through
+untouched, the same as `command.cwd`.
 """
 import sys
 from dataclasses import dataclass, replace
@@ -327,9 +329,14 @@ def _substitute_slice(i: int, sl: Slice, values: TokenValues) -> tuple[Slice, st
     build_dir, unresolved = _sub_field_lenient(build_dir_field, sl.build_dir, values)
     demoted_field = _record_first(build_dir_field, unresolved, demoted_field)
 
-    app_dir_field = f"slices[{i}].appDir"
-    app_dir, unresolved = _sub_field_lenient(app_dir_field, sl.app_dir, values)
-    demoted_field = _record_first(app_dir_field, unresolved, demoted_field)
+    # appDir is nullable (a Yocto slice built from the stock-image token has
+    # none) -- guarded the same shape as command.cwd below, not substituted
+    # when absent.
+    app_dir = sl.app_dir
+    if app_dir is not None:
+        app_dir_field = f"slices[{i}].appDir"
+        app_dir, unresolved = _sub_field_lenient(app_dir_field, app_dir, values)
+        demoted_field = _record_first(app_dir_field, unresolved, demoted_field)
 
     new_artefacts: list[dict[str, Any]] = []
     for j, art in enumerate(sl.config_artefacts):
@@ -397,7 +404,10 @@ def substitute_plan_tokens(
     -- and stripped on demotion -- WITH it), then `sharedArtefacts` last
     (hard site, cross-slice)."""
     if plan.plan_path_mode is None:
-        return plan, []
+        # A fresh top-level object, matching Rust's `plan.clone()` -- returning
+        # `plan` itself would let a downstream mutation of the "output" plan
+        # silently alias back into the caller's input.
+        return replace(plan), []
     if plan.plan_path_mode != PLAN_PATH_MODE_TOKENED:
         raise UnknownPlanPathMode(plan.plan_path_mode)
 

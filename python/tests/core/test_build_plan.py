@@ -94,3 +94,45 @@ def test_rejects_non_object_json_null():
         parse_build_plan("null")
     assert e.value.code == "build.plan-invalid"
     assert "not a JSON object" in e.value.message
+
+
+def test_rejects_a_malformed_shared_artefact():
+    """A malformed artefact entry (missing `contents`, non-string `path`, or
+    not an object at all) must raise a coded PlanParseError, never a bare
+    KeyError/AttributeError escaping later out of token substitution, which
+    indexes `path`/`contents` unguarded."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(MINIMAL.replace('"sharedArtefacts": []', '"sharedArtefacts": [{"path": "x"}]'))
+    assert e.value.code == "build.plan-invalid"
+    assert "sharedArtefacts[0]" in e.value.message
+
+
+def test_rejects_a_malformed_config_artefact():
+    plan_json = """{
+      "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml",
+      "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
+      "slices": [{
+        "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1", "appDir": "app",
+        "configArtefacts": [{"path": "x", "contents": null}], "toolchain": null, "artifacts": {},
+        "debug": {}, "command": null, "env": {}, "envAppendPath": {}
+      }]
+    }"""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(plan_json)
+    assert e.value.code == "build.plan-invalid"
+    assert "slices[0].configArtefacts[0]" in e.value.message
+
+
+def test_app_dir_null_parses_as_none():
+    """appDir is nullable per the schema (a Yocto stock-image slice has
+    none)."""
+    plan = parse_build_plan("""{
+      "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml",
+      "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
+      "slices": [{
+        "coreId": "a55", "backend": "yocto", "buildDir": "build/a55", "appDir": null,
+        "configArtefacts": [], "toolchain": null, "artifacts": {}, "debug": {},
+        "command": null, "env": {}, "envAppendPath": {}
+      }]
+    }""")
+    assert plan.slices[0].app_dir is None

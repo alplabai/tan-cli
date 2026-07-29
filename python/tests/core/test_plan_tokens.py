@@ -33,15 +33,16 @@ def _tokened(board_yaml: str, slices: str, shared: str = "[]") -> str:
 def _slice(
     env: str = "{}",
     core_id: str = "c1",
-    app_dir: str = "app",
+    app_dir: str | None = "app",
     build_dir: str = "build/c1",
     env_append_path: str = "{}",
     cmd_args: str = '["build"]',
     cmd_cwd: str = "build/c1",
     config_artefacts: str = "[]",
 ) -> str:
+    app_dir_json = "null" if app_dir is None else f'"{app_dir}"'
     return f"""{{
-      "coreId": "{core_id}", "backend": "zephyr", "buildDir": "{build_dir}", "appDir": "{app_dir}",
+      "coreId": "{core_id}", "backend": "zephyr", "buildDir": "{build_dir}", "appDir": {app_dir_json},
       "configArtefacts": {config_artefacts}, "toolchain": null, "artifacts": {{}}, "debug": {{}},
       "command": {{"tool": "west", "args": {cmd_args}, "cwd": "{cmd_cwd}"}},
       "env": {env}, "envAppendPath": {env_append_path}
@@ -63,6 +64,9 @@ def test_legacy_plan_without_plan_path_mode_is_untouched():
     plan = parse_build_plan(LEGACY)
     out, demoted = substitute_plan_tokens(plan, values())
     assert out == plan
+    # A fresh top-level object -- matches Rust's plan.clone() -- so a
+    # downstream mutation of `out` can never alias back into `plan`.
+    assert out is not plan
     assert demoted == []
 
 
@@ -100,6 +104,16 @@ def test_slice_app_dir_substitutes():
     plan = parse_build_plan(_tokened("/w/board.yaml", _slice(app_dir="${PROJECT_ROOT}/app")))
     out, demoted = substitute_plan_tokens(plan, values())
     assert out.slices[0].app_dir == "/w/app"
+    assert demoted == []
+
+
+def test_slice_app_dir_null_survives_untouched():
+    """appDir is nullable per the SDK schema -- a Yocto slice built from the
+    stock-image token emits `appDir: null`. Must pass through as None, never
+    raise (regression: `.replace()` on None)."""
+    plan = parse_build_plan(_tokened("/w/board.yaml", _slice(app_dir=None)))
+    out, demoted = substitute_plan_tokens(plan, values())
+    assert out.slices[0].app_dir is None
     assert demoted == []
 
 
