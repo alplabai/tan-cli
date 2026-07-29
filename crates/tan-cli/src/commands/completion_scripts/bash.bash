@@ -30,7 +30,7 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags --offline" -- "$cur") )
       ;;
     generate)
-      COMPREPLY=( $(compgen -W "$global_flags --force" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --force --core" -- "$cur") )
       ;;
     explain)
       COMPREPLY=( $(compgen -W "$global_flags --template" -- "$cur") )
@@ -41,8 +41,11 @@ _tan_complete() {
     scaffold)
       COMPREPLY=( $(compgen -W "$global_flags --template --name --destination --preview --force" -- "$cur") )
       ;;
-    diff|presets|examples)
+    diff|presets)
       COMPREPLY=( $(compgen -W "$global_flags" -- "$cur") )
+      ;;
+    examples)
+      COMPREPLY=( $(compgen -W "$global_flags --filter" -- "$cur") )
       ;;
     completion)
       COMPREPLY=( $(compgen -W "$global_flags --shell" -- "$cur") )
@@ -69,10 +72,10 @@ _tan_complete() {
       COMPREPLY=( $(compgen -W "$global_flags list install current switch --destination --global" -- "$cur") )
       ;;
     bootstrap)
-      COMPREPLY=( $(compgen -W "$global_flags --no-pip --no-west --print-env" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --no-pip --no-west --print-env --workspace" -- "$cur") )
       ;;
     build)
-      COMPREPLY=( $(compgen -W "$global_flags --plan --plan-from --materialise --native --manifest --manifest-from --no-auto-bootstrap" -- "$cur") )
+      COMPREPLY=( $(compgen -W "$global_flags --plan --plan-from --materialise --native --manifest --manifest-from --no-auto-bootstrap --pristine" -- "$cur") )
       ;;
     kconfig)
       COMPREPLY=( $(compgen -W "$global_flags --core" -- "$cur") )

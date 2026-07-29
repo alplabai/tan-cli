@@ -123,6 +123,7 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
                 no_pip: false,
                 no_west: false,
                 print_env: false,
+                workspace: None,
             },
         );
         bootstrap_fix_check = Some(bootstrap_fix_doctor_check(&bootstrap_run));
@@ -342,6 +343,7 @@ fn assemble_doctor_report(
     );
     append_host_prerequisites(&mut report, context.sdk_root.as_deref());
     append_host_environment(&mut report);
+    append_zephyr_sdk_toolchain(&mut report);
     append_sdk_provenance(
         &mut report.summary,
         &mut report.checks,
@@ -349,6 +351,35 @@ fn assemble_doctor_report(
         context.sdk_root.as_deref(),
     );
     report
+}
+
+/// Append the `zephyrSdk` check to PLAIN `tan doctor` (tan-cli#160). It
+/// already exists under `--build`, gated on the active `board.yaml` declaring
+/// a Zephyr core; here it is unconditional, for the same reason
+/// `append_host_environment`'s checks are — this is a HOST fact (env var /
+/// scanned install dir, `crate::toolchain::zephyr_sdk_detected`), needing no
+/// `board.yaml`, no workspace and no SDK, and ADR 0021 Lane 1 P0a runs `tan
+/// doctor` before anything project-shaped exists. Most boards this SDK
+/// targets pair a Zephyr-on-M core with Yocto-on-A (`project_v05...` /
+/// H2-2026 scope), so a Yocto-only project seeing this check too is the
+/// uncommon case, and a `Fail` on it is still true regardless: this host
+/// genuinely has no Zephyr SDK.
+///
+/// This is the check the alp-sdk#855 fresh-host run needed and never got: on
+/// that run `tan doctor` (plain) never mentioned the word "toolchain" at all,
+/// and `tan doctor --build`'s equivalent check was reached only after
+/// `tan init` — a full project creation — stood between the user and the
+/// first sign of trouble. Surfacing it at the FIRST command a customer runs
+/// closes that gap directly rather than relying on `zephyrSdkAvailableForHost`
+/// (which answers "can one be provisioned here", not "is one installed") to
+/// be read as a substitute for it.
+fn append_zephyr_sdk_toolchain(report: &mut DoctorReport) {
+    append_doctor_check(
+        &mut report.summary,
+        &mut report.checks,
+        &mut report.next_steps,
+        tan_core::zephyr_sdk_toolchain_check(crate::toolchain::zephyr_sdk_detected()),
+    );
 }
 
 /// Append the `hostPrerequisites` check: run `bootstrap`'s own prerequisite
@@ -432,8 +463,8 @@ fn resolve_bootstrap_facts(sdk_root: Option<&str>) -> (BootstrapFacts, Option<St
     }
 }
 
-/// Append the host-environment checks — `zephyrSdkHost`, `longPaths`
-/// (Windows only) and `homePath` (alp-sdk ADR 0021, "Cross-cutting
+/// Append the host-environment checks — `zephyrSdkAvailableForHost`,
+/// `longPaths` (Windows only) and `homePath` (alp-sdk ADR 0021, "Cross-cutting
 /// requirements").
 ///
 /// This function is the IO half and nothing else: three probes, then one call
@@ -448,10 +479,14 @@ fn resolve_bootstrap_facts(sdk_root: Option<&str>) -> (BootstrapFacts, Option<St
 /// [`append_host_prerequisites`] is: these need no `board.yaml`, no workspace
 /// and no SDK, and ADR 0021 Lane 1 P0a runs `tan doctor` before anything
 /// project-shaped exists. `--build` deliberately does NOT get them.
-/// `zephyrSdkHost` looks adjacent to `--build`'s `zephyrSdk` probe but answers
-/// the opposite question — "can an SDK be installed on this host at all" versus
-/// "is one installed here" — and reporting the SDK story twice under two names
-/// is exactly the trap #81 documents.
+/// `zephyrSdkAvailableForHost` looks adjacent to `--build`'s `zephyrSdk` probe
+/// but answers the opposite question — "can an SDK be installed on this host
+/// at all" versus "is one installed here" — and reporting the SDK story twice
+/// under two names that could be confused for each other is exactly the trap
+/// #81 documents (renamed from `zephyrSdkHost` in tan-cli#160 to make the two
+/// impossible to conflate at a glance, after #159/#166 turned the SECOND check
+/// into a hard `Fail` — a `[+]` here beside a hard-failing `zephyrSdk` was
+/// worse than either alone).
 ///
 /// `pub(crate)`: `commands::support_bundle` builds the same report and must
 /// carry the same facts. A bundle from a `windows-arm64` or Intel-Mac host that
@@ -738,25 +773,16 @@ fn git_behind_upstream(root: &str) -> Option<u32> {
 
 /// Read a version from `<root>/metadata/sdk_version.yaml`: a `version: X` line
 /// if present, else the first bare scalar. `None` when the file is absent.
+///
+/// The parse itself is `tan_core::parse_sdk_version_yaml` — shared with
+/// `check_sdk_readiness`'s fallback (tan-cli#162), so `tan sdk
+/// install`/`current`/`switch` and this `sdkProvenance` check read the SAME
+/// version out of the SAME file rather than two copies of the scan able to
+/// disagree.
 fn read_sdk_version(root: &str) -> Option<String> {
     let path = Path::new(root).join("metadata").join("sdk_version.yaml");
     let text = std::fs::read_to_string(path).ok()?;
-    let mut bare: Option<String> = None;
-    for raw in text.lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(rest) = line.strip_prefix("version:") {
-            let value = rest.trim().trim_matches('"').trim_matches('\'');
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
-        } else if bare.is_none() && !line.contains(':') {
-            bare = Some(line.trim_matches('"').trim_matches('\'').to_string());
-        }
-    }
-    bare
+    tan_core::parse_sdk_version_yaml(&text)
 }
 
 /// Read + parse the active `board.yaml`, returning `None` when it is absent or
@@ -861,22 +887,21 @@ pub(crate) fn project_selected(g: &GlobalArgs) -> bool {
 
 /// The `DebuggerExtensionsState` for the standalone `tan` binary.
 ///
-/// The five flags are NOT MEANINGFUL here and nothing may read them as facts:
+/// The three flags are NOT MEANINGFUL here and nothing may read them as facts:
 /// only a VS Code extension host can enumerate its own marketplace extensions,
 /// so these are an inherited assumption from the TS `resolveCliDebugContext`
 /// (where `true` is correct, because that code CAN introspect its host). They
-/// are kept so the port stays faithful, and `observable: false` is what stops
-/// them being reported — every derived check renders `unknown` instead of
-/// printing "vadimcn.vscode-lldb is installed." on a headless container and
-/// counting itself among the passes (#102).
+/// are kept so the port stays faithful to `createExtensionCheck`'s three real
+/// TS counterparts, and `observable: false` is what stops them being reported
+/// — every derived check renders `unknown` instead of printing "vadimcn.
+/// vscode-lldb is installed." on a headless container and counting itself
+/// among the passes (#102).
 ///
 /// `pub(crate)`: `inspect` and `support-bundle` build the same context and must
 /// carry the same disclaimer, not a third copy of the literal.
 pub(crate) fn standalone_debugger_extensions() -> DebuggerExtensionsState {
     DebuggerExtensionsState {
         cortex_debug: true,
-        peripheral_viewer: true,
-        memory_view: true,
         cpp_tools: true,
         code_lldb: true,
         observable: false,
@@ -1423,12 +1448,60 @@ pub(crate) mod tests {
         // binary with none of the three checks and every other test still
         // green, because they drive the pure functions directly. The ENVELOPE
         // is what closes it. Names only -- the statuses are this host's.
-        assert!(names.iter().any(|n| n == "zephyrSdkHost"), "{names:?}");
+        assert!(
+            names.iter().any(|n| n == "zephyrSdkAvailableForHost"),
+            "{names:?}"
+        );
         assert!(names.iter().any(|n| n == "homePath"), "{names:?}");
         assert_eq!(
             names.iter().any(|n| n == "longPaths"),
             cfg!(windows),
             "longPaths is Windows-only: {names:?}"
+        );
+        // tan-cli#160: this used to appear ONLY under `--build`, reached only
+        // after a full project existed -- nothing before `tan build` itself
+        // ever said "toolchain" on the alp-sdk#855 fresh-host run. Dropping
+        // `append_zephyr_sdk_toolchain` from `assemble_doctor_report` would
+        // leave every OTHER test green (they drive the pure function
+        // directly); only the emitted envelope catches it.
+        assert!(names.iter().any(|n| n == "zephyrSdk"), "{names:?}");
+    }
+
+    #[test]
+    fn plain_doctor_and_build_zephyr_sdk_checks_never_disagree_in_status() {
+        // The exact contradiction tan-cli#160 named: `zephyrSdkAvailableForHost`
+        // (`[+]`) sitting beside a hard-failing `zephyrSdk` on the SAME run
+        // would be worse than either alone. Both checks are now driven by the
+        // identical `crate::toolchain::zephyr_sdk_detected()` probe under
+        // `--build`'s `zephyrSdk`, and plain doctor's `zephyrSdk` uses the SAME
+        // probe -- so the two run modes cannot report a different verdict for
+        // "is the Zephyr SDK installed here" no matter what this host's real
+        // state is.
+        let tree = TempTree::new("doctor-plain-vs-build-zephyrsdk-agree");
+        let g = json_global(Some(tree.path()));
+        let plain = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: false,
+                fix: false,
+            },
+        );
+        let build = run(
+            &g,
+            &DoctorArgs {
+                target_kind: None,
+                server: None,
+                build: true,
+                fix: false,
+            },
+        );
+        let plain_status = envelope_check_status(&plain.json.expect("json envelope"), "zephyrSdk");
+        let build_status = envelope_check_status(&build.json.expect("json envelope"), "zephyrSdk");
+        assert_eq!(
+            plain_status, build_status,
+            "plain vs --build zephyrSdk status disagree"
         );
     }
 
@@ -1441,6 +1514,20 @@ pub(crate) mod tests {
             .iter()
             .find(|c| c["name"] == name)
             .unwrap_or_else(|| panic!("no `{name}` check in {json}"))["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// One check's `status` out of a serialized doctor envelope.
+    fn envelope_check_status(json: &str, name: &str) -> String {
+        let value: serde_json::Value = serde_json::from_str(json).expect("envelope is JSON");
+        value["data"]["checks"]
+            .as_array()
+            .expect("data.checks is an array")
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap_or_else(|| panic!("no `{name}` check in {json}"))["status"]
             .as_str()
             .unwrap_or_default()
             .to_string()
@@ -1818,9 +1905,10 @@ pub(crate) mod tests {
     fn doctor_build_does_not_repeat_the_host_environment_checks() {
         // The deliberate NEGATIVE half of the placement decision (#81's "one
         // fact, one check" trap). `--build` already carries a `zephyrSdk` probe
-        // -- "is an SDK installed here" -- and `zephyrSdkHost` answers the
-        // opposite question. Adding these there later, by reflex, would report
-        // the SDK story twice under two names; this fails if someone does.
+        // -- "is an SDK installed here" -- and `zephyrSdkAvailableForHost`
+        // answers the opposite question. Adding these there later, by reflex,
+        // would report the SDK story twice under two names; this fails if
+        // someone does.
         let tree = TempTree::new("run-build-no-hostenv");
         let g = json_global(Some(tree.path()));
         let run = run(
@@ -1833,7 +1921,7 @@ pub(crate) mod tests {
             },
         );
         let names = envelope_check_names(&run.json.expect("json envelope"));
-        for name in ["zephyrSdkHost", "longPaths", "homePath"] {
+        for name in ["zephyrSdkAvailableForHost", "longPaths", "homePath"] {
             assert!(!names.contains(&name.to_string()), "{name} in {names:?}");
         }
     }

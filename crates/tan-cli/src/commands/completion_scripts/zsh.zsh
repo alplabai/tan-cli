@@ -78,10 +78,13 @@ _tan() {
           _arguments '--shell[Shell type]:shell:(bash zsh fish)' "${global_args[@]}"
           ;;
         generate)
-          _arguments '--force[Overwrite existing files]' "${global_args[@]}"
+          _arguments '--force[Overwrite existing files]' '--core[Core id (zephyr-board target)]' "${global_args[@]}"
           ;;
         explain)
           _arguments '--template[Template id]' "${global_args[@]}"
+          ;;
+        examples)
+          _arguments '--filter[Substring match on id/title]' "${global_args[@]}"
           ;;
         init)
           _arguments '--template[Template id]' '--from-example[Example source dir]' '--name[Name value]' '--destination[Output directory]:path:_files -/' '--som[SoM SKU]' '--cores[Cores list]' '--preview[Preview only]' '--force[Overwrite existing files]' "${global_args[@]}"
@@ -111,10 +114,10 @@ _tan() {
           _arguments '1:subcommand:(list install current switch)' '--destination[Cache root]:path:_files -/' '--global[Pin the machine-global default]' "${global_args[@]}"
           ;;
         bootstrap)
-          _arguments '--no-pip[Skip pip install]' '--no-west[Skip west init/update]' '--print-env[Print environment lines only]' "${global_args[@]}"
+          _arguments '--no-pip[Skip pip install]' '--no-west[Skip west init/update]' '--print-env[Print environment lines only]' '--workspace[Build the workspace at this path]:path:_files -/' "${global_args[@]}"
           ;;
         build)
-          _arguments '--plan[Show the build plan]' '--plan-from[Read build plan from file]:path:_files' '--materialise[Materialise plan files]' '--native[Build natively]' '--manifest[Show the system manifest]' '--manifest-from[Read manifest from file]:path:_files' '--no-auto-bootstrap[Never bootstrap implicitly]' "${global_args[@]}"
+          _arguments '--plan[Show the build plan]' '--plan-from[Read build plan from file]:path:_files' '--materialise[Materialise plan files]' '--native[Build natively]' '--manifest[Show the system manifest]' '--manifest-from[Read manifest from file]:path:_files' '--no-auto-bootstrap[Never bootstrap implicitly]' '--pristine[Force-wipe build dirs before dispatch]' "${global_args[@]}"
           ;;
         kconfig)
           _arguments '--core[Core id to scope the menu to]' "${global_args[@]}"

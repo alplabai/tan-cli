@@ -4,7 +4,7 @@
 
 use serde::Serialize;
 
-use super::context::{DebugRuntimeCapabilities, DebugWorkspaceContext, DebuggerExtensionsState};
+use super::context::{DebugRuntimeCapabilities, DebugWorkspaceContext};
 use super::target::{DebugServerKind, DebugTargetKind, is_server_supported_for_target};
 
 /// Outcome of a single doctor check.
@@ -109,36 +109,6 @@ pub struct DoctorReport {
     pub missing_prerequisites: Option<Vec<crate::bootstrap::MissingPrerequisite>>,
 }
 
-/// A companion viewer extension surfaced as an MCU debug-readiness check.
-/// Mirror of one TS `MCU_COMPANION_VIEWERS` entry.
-struct McuCompanionViewer {
-    /// Reads the installed flag for this viewer from the probed extensions state.
-    installed: fn(&DebuggerExtensionsState) -> bool,
-    /// Stable check name (e.g. `peripheralViewerExtension`).
-    name: &'static str,
-    /// Marketplace identifier, which is also the subject of every detail line.
-    id: &'static str,
-    /// Remediation shown when the viewer is missing.
-    fix: &'static str,
-}
-
-/// Mirror of TS `MCU_COMPANION_VIEWERS`: the SVD-backed debug companion viewers
-/// (`mcu-debug.peripheral-viewer`, `mcu-debug.memory-view`) checked for MCU targets.
-const MCU_COMPANION_VIEWERS: [McuCompanionViewer; 2] = [
-    McuCompanionViewer {
-        installed: |ext| ext.peripheral_viewer,
-        name: "peripheralViewerExtension",
-        id: "mcu-debug.peripheral-viewer",
-        fix: "Install mcu-debug.peripheral-viewer for SVD-backed peripheral/register views.",
-    },
-    McuCompanionViewer {
-        installed: |ext| ext.memory_view,
-        name: "memoryViewExtension",
-        id: "mcu-debug.memory-view",
-        fix: "Install mcu-debug.memory-view for low-level memory inspection.",
-    },
-];
-
 /// One VS Code extension-presence check.
 ///
 /// `observed` is `None` when the running binary cannot see VS Code at all — the
@@ -164,23 +134,6 @@ fn extension_check(
         ),
     };
     DoctorCheck::new(name, status, detail, fix_when(observed == Some(false), fix))
-}
-
-/// Mirror of TS `createMcuCompanionViewerDoctorChecks`: one check per MCU
-/// companion viewer, warning (never failing) when a viewer is observed missing.
-fn create_mcu_companion_viewer_checks(extensions: &DebuggerExtensionsState) -> Vec<DoctorCheck> {
-    MCU_COMPANION_VIEWERS
-        .iter()
-        .map(|viewer| {
-            extension_check(
-                viewer.name,
-                viewer.id,
-                extensions.observed((viewer.installed)(extensions)),
-                DoctorStatus::Warn,
-                viewer.fix,
-            )
-        })
-        .collect()
 }
 
 /// Mirror of TS `buildDoctorReport`.
@@ -212,10 +165,10 @@ pub fn build_doctor_report(
             context
                 .workspace_root
                 .clone()
-                .unwrap_or_else(|| "No workspace folder is open.".to_string()),
+                .unwrap_or_else(|| "No project directory resolved.".to_string()),
             fix_when(
                 !has_workspace,
-                "Open a workspace containing an ALP project.",
+                "Pass `--project <dir>` or run tan from inside a project directory.",
             ),
         ),
         DoctorCheck::new(
@@ -262,9 +215,6 @@ pub fn build_doctor_report(
                 DoctorStatus::Fail,
                 "Install marus25.cortex-debug.",
             ));
-            checks.extend(create_mcu_companion_viewer_checks(
-                &context.debugger_extensions,
-            ));
             checks.push(create_backend_check(server, runtime));
         }
         DebugTargetKind::YoctoUserspace => {
@@ -294,15 +244,23 @@ pub fn build_doctor_report(
                 DoctorStatus::Fail,
                 "Install vadimcn.vscode-lldb.",
             ));
-            let lldb = runtime.lldb_executable.clone();
+            // #131: `vadimcn.vscode-lldb` ships its own complete LLDB inside the
+            // extension directory and never consults PATH, so a bare PATH probe
+            // warning "No local LLDB executable was found" and telling the user
+            // to install one is a no-op remedy for a tool the product does not
+            // need. Always Pass, mirroring `alp-sdk-vscode`'s own fix for this
+            // exact class (`packages/alp-core/src/debug/service.ts`, #369) --
+            // informational only, no `fix`, so nothing lands in `nextSteps` and
+            // no `doctor.lldb` warning issue is raised. `runtime.lldb_executable`
+            // is still read and reported when present: that is real information,
+            // only the verdict and the advice were wrong.
             checks.push(DoctorCheck::new(
                 "lldb",
-                status_pass_warn(lldb.is_some()),
-                lldb.unwrap_or_else(|| "No local LLDB executable was found on PATH.".to_string()),
-                fix_when(
-                    runtime.lldb_executable.is_none(),
-                    "Install LLDB or lldb-dap for native-host debug flows.",
-                ),
+                DoctorStatus::Pass,
+                runtime.lldb_executable.clone().unwrap_or_else(|| {
+                    "vadimcn.vscode-lldb ships its own LLDB, so none is needed on PATH.".to_string()
+                }),
+                None,
             ));
         }
     }
@@ -532,6 +490,7 @@ fn fix_when_owned(unhealthy: bool, fix: String) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::context::DebuggerExtensionsState;
     use super::*;
 
     /// An EXTENSION host's state: it really did enumerate its own extensions,
@@ -540,8 +499,6 @@ mod tests {
     fn extensions_all_installed() -> DebuggerExtensionsState {
         DebuggerExtensionsState {
             cortex_debug: true,
-            peripheral_viewer: true,
-            memory_view: true,
             cpp_tools: true,
             code_lldb: true,
             observable: true,
@@ -640,6 +597,54 @@ mod tests {
     }
 
     #[test]
+    fn native_host_lldb_check_passes_even_with_none_on_path() {
+        // #131: `vadimcn.vscode-lldb` ships its own LLDB and never reads PATH,
+        // so a bare-PATH miss must not Warn or offer an "Install LLDB" fix that
+        // fixes nothing. Pre-fix this Warned and pushed a `doctor.lldb` issue.
+        let report = build_doctor_report(
+            &healthy_context(),
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime_none(),
+        );
+        let lldb = report
+            .checks
+            .iter()
+            .find(|c| c.name == "lldb")
+            .expect("lldb check present");
+        assert_eq!(lldb.status, DoctorStatus::Pass);
+        assert!(lldb.fix.is_none());
+        assert!(
+            lldb.detail
+                .contains("vadimcn.vscode-lldb ships its own LLDB"),
+            "{}",
+            lldb.detail
+        );
+        assert_eq!(report.summary.fail, 0);
+        assert_eq!(report.summary.warn, 0);
+        assert!(!report.next_steps.iter().any(|s| s.contains("LLDB")));
+    }
+
+    #[test]
+    fn native_host_lldb_check_still_reports_a_resolved_executable() {
+        // Keep `runtime.lldb_executable` visible when present -- real
+        // information, only the verdict/advice around a miss were wrong.
+        let report = build_doctor_report(
+            &healthy_context(),
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime_all_present(),
+        );
+        let lldb = report
+            .checks
+            .iter()
+            .find(|c| c.name == "lldb")
+            .expect("lldb check present");
+        assert_eq!(lldb.status, DoctorStatus::Pass);
+        assert_eq!(lldb.detail, "lldb");
+    }
+
+    #[test]
     fn missing_workspace_and_sdk_fail() {
         let mut ctx = healthy_context();
         ctx.workspace_root = None;
@@ -654,8 +659,41 @@ mod tests {
         assert_eq!(report.summary.fail, 3); // workspaceRoot, sdkRoot, boardYaml
         let workspace = &report.checks[0];
         assert_eq!(workspace.status, DoctorStatus::Fail);
-        assert_eq!(workspace.detail, "No workspace folder is open.");
+        assert_eq!(workspace.detail, "No project directory resolved.");
         assert!(workspace.fix.is_some());
+    }
+
+    #[test]
+    fn workspace_root_failure_names_a_terminal_remedy_not_a_vscode_one() {
+        // #134: "Open a workspace containing an ALP project." is a VS Code
+        // instruction with no terminal equivalent -- and misspelled the brand
+        // besides. A reader at a prompt needs a flag, not an editor action.
+        let mut ctx = healthy_context();
+        ctx.workspace_root = None;
+        let report = build_doctor_report(
+            &ctx,
+            DebugTargetKind::NativeHost,
+            DebugServerKind::None,
+            &runtime_all_present(),
+        );
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == "workspaceRoot")
+            .expect("workspaceRoot present");
+        assert!(
+            !check.detail.contains("workspace")
+                && !check
+                    .fix
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("workspace"),
+            "still names a VS Code workspace: {check:?}"
+        );
+        assert_eq!(
+            check.fix.as_deref(),
+            Some("Pass `--project <dir>` or run tan from inside a project directory.")
+        );
     }
 
     #[test]
@@ -692,26 +730,24 @@ mod tests {
         assert!(!json.contains("\"fix\""));
     }
 
-    fn extensions_missing_viewers() -> DebuggerExtensionsState {
-        DebuggerExtensionsState {
-            peripheral_viewer: false,
-            memory_view: false,
-            ..extensions_all_installed()
-        }
-    }
-
     #[test]
-    fn extensions_state_serializes_new_viewer_fields_as_camel_case() {
+    fn extensions_state_serializes_as_camel_case() {
         let json = serde_json::to_string(&extensions_all_installed()).unwrap();
         assert!(json.contains("\"cortexDebug\":true"));
-        assert!(json.contains("\"peripheralViewer\":true"));
-        assert!(json.contains("\"memoryView\":true"));
         assert!(json.contains("\"cppTools\":true"));
         assert!(json.contains("\"codeLLDB\":true"));
     }
 
+    /// #132: `peripheralViewerExtension`/`memoryViewExtension` mirrored a TS
+    /// `MCU_COMPANION_VIEWERS` that never shipped on any `alp-sdk-vscode`
+    /// branch, and `cortex-debug` force-installs both viewers as hard
+    /// `extensionDependencies` anyway -- `cortexDebugExtension` already covers
+    /// the same ground on the only host that can answer the question. Neither
+    /// check exists any more; this pins that a Zephyr/baremetal report emits
+    /// exactly `cortexDebugExtension` then the backend check, with nothing
+    /// between them.
     #[test]
-    fn zephyr_emits_companion_viewer_checks_between_cortex_and_backend() {
+    fn zephyr_emits_no_companion_viewer_checks_between_cortex_and_backend() {
         let report = build_doctor_report(
             &healthy_context(),
             DebugTargetKind::ZephyrMcu,
@@ -719,114 +755,25 @@ mod tests {
             &runtime_all_present(),
         );
         let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
-        // Ordering: cortexDebugExtension, then the two viewers, then the backend.
-        let cortex = names.iter().position(|n| *n == "cortexDebugExtension");
-        let peripheral = names.iter().position(|n| *n == "peripheralViewerExtension");
-        let memory = names.iter().position(|n| *n == "memoryViewExtension");
-        let backend = names.iter().position(|n| *n == "jlinkBackend");
-        assert!(cortex < peripheral);
-        assert!(peripheral < memory);
-        assert!(memory < backend);
-
-        let peripheral_check = &report.checks[peripheral.unwrap()];
-        assert_eq!(peripheral_check.status, DoctorStatus::Pass);
-        assert_eq!(
-            peripheral_check.detail,
-            "mcu-debug.peripheral-viewer is installed."
-        );
-        assert!(peripheral_check.fix.is_none());
-
-        let memory_check = &report.checks[memory.unwrap()];
-        assert_eq!(memory_check.status, DoctorStatus::Pass);
-        assert_eq!(memory_check.detail, "mcu-debug.memory-view is installed.");
-        assert!(memory_check.fix.is_none());
-    }
-
-    #[test]
-    fn baremetal_missing_companion_viewers_warn_with_fix() {
-        let mut ctx = healthy_context();
-        ctx.debugger_extensions = extensions_missing_viewers();
-        let report = build_doctor_report(
-            &ctx,
-            DebugTargetKind::BaremetalMcu,
-            DebugServerKind::Openocd,
-            &runtime_all_present(),
-        );
-        let peripheral = report
-            .checks
+        let cortex = names
             .iter()
-            .find(|c| c.name == "peripheralViewerExtension")
-            .expect("peripheral viewer check present");
-        assert_eq!(peripheral.status, DoctorStatus::Warn);
-        assert_eq!(
-            peripheral.detail,
-            "mcu-debug.peripheral-viewer is not installed."
-        );
-        assert_eq!(
-            peripheral.fix.as_deref(),
-            Some("Install mcu-debug.peripheral-viewer for SVD-backed peripheral/register views.")
-        );
-
-        let memory = report
-            .checks
+            .position(|n| *n == "cortexDebugExtension")
+            .expect("cortexDebugExtension present");
+        let backend = names
             .iter()
-            .find(|c| c.name == "memoryViewExtension")
-            .expect("memory view check present");
-        assert_eq!(memory.status, DoctorStatus::Warn);
-        assert_eq!(memory.detail, "mcu-debug.memory-view is not installed.");
-        assert_eq!(
-            memory.fix.as_deref(),
-            Some("Install mcu-debug.memory-view for low-level memory inspection.")
-        );
-
-        // Both missing-viewer fixes surface as deduplicated next steps.
-        assert!(
-            report
-                .next_steps
-                .iter()
-                .any(|s| s.contains("mcu-debug.peripheral-viewer"))
-        );
-        assert!(
-            report
-                .next_steps
-                .iter()
-                .any(|s| s.contains("mcu-debug.memory-view"))
-        );
-    }
-
-    #[test]
-    fn non_mcu_targets_omit_companion_viewer_checks() {
-        for (target, server) in [
-            (DebugTargetKind::YoctoUserspace, DebugServerKind::Gdbserver),
-            (DebugTargetKind::NativeHost, DebugServerKind::None),
-        ] {
-            let report =
-                build_doctor_report(&healthy_context(), target, server, &runtime_all_present());
-            assert!(
-                !report
-                    .checks
-                    .iter()
-                    .any(|c| c.name == "peripheralViewerExtension"),
-                "{} must not emit peripheralViewerExtension",
-                target.as_str()
-            );
-            assert!(
-                !report
-                    .checks
-                    .iter()
-                    .any(|c| c.name == "memoryViewExtension"),
-                "{} must not emit memoryViewExtension",
-                target.as_str()
-            );
-        }
+            .position(|n| *n == "jlinkBackend")
+            .expect("jlinkBackend present");
+        assert_eq!(backend, cortex + 1, "{names:?}");
+        assert!(!names.contains(&"peripheralViewerExtension"), "{names:?}");
+        assert!(!names.contains(&"memoryViewExtension"), "{names:?}");
     }
 
     #[test]
     fn an_unobservable_host_reports_every_extension_check_as_unknown() {
         // #102: the standalone binary cannot see VS Code, so a hardcoded `true`
         // must not print "is installed." as observed fact, must not join the
-        // pass total, and must raise no remediation. All four extension checks
-        // -- one per target branch -- go through `extension_check`, so all four
+        // pass total, and must raise no remediation. All three extension checks
+        // -- one per target branch -- go through `extension_check`, so all three
         // are driven here rather than only the `native-host` one the bug report
         // happened to capture.
         let mut ctx = healthy_context();
@@ -842,11 +789,6 @@ mod tests {
                 DebugTargetKind::ZephyrMcu,
                 DebugServerKind::Jlink,
                 "cortexDebugExtension",
-            ),
-            (
-                DebugTargetKind::ZephyrMcu,
-                DebugServerKind::Jlink,
-                "peripheralViewerExtension",
             ),
             (
                 DebugTargetKind::YoctoUserspace,

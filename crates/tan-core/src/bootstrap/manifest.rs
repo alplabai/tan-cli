@@ -399,6 +399,19 @@ pub fn parse_bootstrap_manifest(text: &str) -> Result<BootstrapFacts, BootstrapM
                 doc.prerequisites.python_min_version
             ))
         })?;
+    // `venv.dirName` joins straight onto `workspace_dir` and the join's result
+    // is later handed to `remove_dir_all` when a stale venv is recreated
+    // (tan-cli#161) — an unvalidated `..`-bearing or absolute value would let
+    // the manifest name an arbitrary removal/write target outside the
+    // workspace. Reject the shape here, the one seam every consumer of
+    // `venv_dir_name` reads through, rather than re-deriving the check at each
+    // call site (see `tan_core::path_guard`'s own module doc).
+    if !crate::path_guard::is_plain_relative(std::path::Path::new(&doc.venv.dir_name)) {
+        return Err(BootstrapManifestError::Malformed(format!(
+            "venv.dirName `{}` is not a plain relative path",
+            doc.venv.dir_name
+        )));
+    }
     Ok(BootstrapFacts {
         zephyr_version: doc.zephyr.version,
         zephyr_requirements_path: doc.zephyr.requirements_path,
@@ -935,6 +948,28 @@ mod tests {
         let err = parse_bootstrap_manifest(&doc).unwrap_err();
         assert_eq!(err, BootstrapManifestError::UnsupportedSchemaVersion(2));
         assert!(err.to_string().contains("schemaVersion 2"), "{err}");
+    }
+
+    #[test]
+    fn a_venv_dir_name_that_escapes_the_workspace_is_rejected() {
+        // tan-cli#161 review: `venv.dirName` joins onto `workspace_dir` and,
+        // when a stale venv is found, the join's result is later fed to
+        // `remove_dir_all`. A manifest value of `".."` would make that target
+        // the west topdir's PARENT -- reject the shape before it ever reaches
+        // a caller, rather than letting the removal decide.
+        for bad in ["..", "../elsewhere", "/etc", "."] {
+            let doc = REAL_MANIFEST.replace("\".venv\"", &format!("\"{bad}\""));
+            let err = parse_bootstrap_manifest(&doc).unwrap_err();
+            assert!(
+                matches!(err, BootstrapManifestError::Malformed(ref m) if m.contains("venv.dirName")),
+                "{bad}: {err}"
+            );
+        }
+        // A nested-but-plain value stays accepted (dirName is not required to
+        // be a single segment).
+        let doc = REAL_MANIFEST.replace("\".venv\"", "\"tools/.venv\"");
+        let facts = parse_bootstrap_manifest(&doc).expect("plain relative dirName must parse");
+        assert_eq!(facts.venv_dir_name, "tools/.venv");
     }
 
     #[test]

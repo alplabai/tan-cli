@@ -50,7 +50,7 @@ pub fn create_launch_draft(
 
     let draft = match target {
         DebugTargetKind::ZephyrMcu => {
-            let name = format!("ALP: Zephyr Debug ({})", server_label(server));
+            let name = format!("Alp: Zephyr Debug ({})", server_label(server));
             match server {
                 DebugServerKind::Openocd => json!({
                     "name": name,
@@ -95,7 +95,7 @@ pub fn create_launch_draft(
             }
         }
         DebugTargetKind::BaremetalMcu => json!({
-            "name": format!("ALP: Baremetal Debug ({})", server_label(server)),
+            "name": format!("Alp: Baremetal Debug ({})", server_label(server)),
             "type": "cortex-debug",
             "request": "launch",
             "servertype": server.as_str(),
@@ -108,7 +108,7 @@ pub fn create_launch_draft(
             "svdPath": "<resolved-svd>",
         }),
         DebugTargetKind::YoctoUserspace => json!({
-            "name": "ALP: Yocto Remote Debug",
+            "name": "Alp: Yocto Remote Debug",
             "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/yocto/app",
@@ -120,7 +120,7 @@ pub fn create_launch_draft(
             "preLaunchTask": pre_launch_task,
         }),
         DebugTargetKind::NativeHost => json!({
-            "name": "ALP: Native Sim Debug",
+            "name": "Alp: Native Sim Debug",
             // `lldb`, not `codelldb`, because CodeLLDB's own manifest says so:
             // `vadimcn.vscode-lldb` v1.12.2 declares
             // `contributes.debuggers[0].type = "lldb"`. `codelldb` is the
@@ -293,6 +293,37 @@ pub struct LaunchJsonWritePlan {
     pub content: String,
     /// `true` if an existing same-named configuration was replaced; `false` if appended.
     pub replaced: bool,
+    /// The legacy `"ALP: ..."` name of an entry that was adopted onto the
+    /// current `"Alp: ..."` name this run (see [`legacy_name`]). `None` on
+    /// every other path, including when a current-named entry already existed
+    /// (that case never looks for a legacy counterpart at all — see
+    /// [`create_launch_json_write_plan`]).
+    pub migrated_from: Option<String>,
+    /// `true` when this write discarded a comment (or trailing comma) that
+    /// sat inside the byte span actually rewritten — either the one
+    /// maintained entry the splice replaced, or, on the whole-document
+    /// fallback, anywhere in the original file. `false` on a fresh file, an
+    /// append (nothing existing is ever touched), and the [`create_launch_json_write_plan`]
+    /// no-op path where the merge produced no semantic change and `content`
+    /// is `original` verbatim. The caller surfaces this as an `issues[]`
+    /// entry (tan-cli#182 review finding #2) instead of the prior silent
+    /// unqualified success.
+    pub comments_dropped: bool,
+}
+
+/// The pre-#155 spelling of a current launch-configuration name, or `None` if
+/// `next_name` does not use the current `"Alp: "` prefix (defensive: every
+/// name [`create_launch_draft`] emits does).
+///
+/// Deliberately narrow: this computes the ONE legacy string that corresponds
+/// to `next_name` — one of the four names this crate ever emits — rather than
+/// matching any configuration whose name happens to start with `"ALP: "`. A
+/// customer's own unrelated entry that happens to start with those letters
+/// (`"ALP: My Custom Config"`) is not one of the four and is never touched.
+fn legacy_name(next_name: &str) -> Option<String> {
+    next_name
+        .strip_prefix("Alp: ")
+        .map(|rest| format!("ALP: {rest}"))
 }
 
 /// Whether a string is one of OUR "nobody filled this in yet" markers.
@@ -396,6 +427,29 @@ fn merge_configuration(existing: &Value, next: &Value) -> Value {
 /// Merge `draft` into an existing `launch.json` (or a fresh document), merging
 /// key-by-key over any configuration with the same `name`. Mirrors TS
 /// `createLaunchJsonWritePlan`.
+///
+/// #133 (reopened): the #155 rename to `"Alp: ..."` left any entry still
+/// spelled `"ALP: ..."` orphaned — nothing matched it by exact name any more,
+/// so it silently stopped receiving merges. That is not cosmetic: the
+/// orphaned entry is exactly where a customer's own hand-resolved fields
+/// (`device`, …) already lived, and the maintained entry kept its
+/// placeholder. So a MISS on the current name now falls through to a search
+/// for that one legacy counterpart ([`legacy_name`]) before giving up and
+/// appending fresh, and a hit there is folded in via the SAME
+/// [`merge_configuration`] a same-named update already uses — the customer's
+/// hand-filled values survive onto the correctly-named entry exactly the way
+/// they survive a normal re-run, and the entry is renamed in place rather than
+/// duplicated.
+///
+/// This only ever fires on a MISS against the current name. When a
+/// current-named entry already exists — whether or not a legacy one *also*
+/// still sits in the file (a workspace that ran a pre-#155 `tan` and then a
+/// post-#155 one) — this function takes the ordinary same-name-replace path
+/// and never looks for a legacy counterpart at all. The legacy entry is left
+/// exactly as it is: nothing decides which of two possibly-hand-edited
+/// entries is authoritative, so nothing is merged or deleted on this run's
+/// say-so. That is not an oversight; see `crates/tan-core/src/debug_launch.rs`
+/// test `both_a_current_and_a_legacy_entry_leaves_the_legacy_one_untouched`.
 pub fn create_launch_json_write_plan(
     existing_content: Option<&str>,
     draft: &Value,
@@ -412,22 +466,134 @@ pub fn create_launch_json_write_plan(
         .iter()
         .position(|c| c.get("name").and_then(Value::as_str) == Some(next_name));
 
-    let replaced = match existing_index {
+    // `splice_index` mirrors, into the ORIGINAL raw text, exactly which
+    // element `entry` is replacing (`None` means append) — see
+    // `write_content` below. It is an index into the SAME filtered,
+    // object-only ordering `parse_launch_json_or_default` already applied, so
+    // it lines up with `jsonc_splice`'s own object-only element count without
+    // either side re-deriving the other's filter.
+    let (replaced, migrated_from, splice_index, entry, unchanged) = match existing_index {
         Some(index) => {
-            configs[index] = merge_configuration(&configs[index], draft);
-            true
+            let pre_merge = configs[index].clone();
+            let merged = merge_configuration(&configs[index], draft);
+            let unchanged = merged == pre_merge;
+            configs[index] = merged.clone();
+            (true, None, Some(index), merged, unchanged)
         }
         None => {
-            configs.push(draft.clone());
-            false
+            let legacy_index = legacy_name(next_name).and_then(|legacy| {
+                configs
+                    .iter()
+                    .position(|c| c.get("name").and_then(Value::as_str) == Some(legacy.as_str()))
+            });
+            match legacy_index {
+                Some(index) => {
+                    let from = configs[index]
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let pre_merge = configs[index].clone();
+                    let merged = merge_configuration(&configs[index], draft);
+                    let unchanged = merged == pre_merge;
+                    configs[index] = merged.clone();
+                    (true, from, Some(index), merged, unchanged)
+                }
+                None => {
+                    configs.push(draft.clone());
+                    (false, None, None, draft.clone(), false)
+                }
+            }
         }
     };
 
-    let content = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&document).expect("launch document is serializable")
-    );
-    Ok(LaunchJsonWritePlan { content, replaced })
+    // tan-cli#182 review finding #1: a semantically no-op re-run (the merged
+    // entry is byte-identical, ignoring formatting, to what was already
+    // there) still spliced the maintained entry back into itself, which
+    // reformats it and discards any comment sitting inside — on a file the
+    // extension re-runs `debug-config` against on every session, "nothing
+    // changed" is the COMMON case, not an edge case. The splice only ever
+    // touches the one entry that changed (the rest of `document` is
+    // discarded either way), so an unchanged entry means an unchanged
+    // document: skip the write entirely and hand back `original`'s own bytes.
+    let (content, comments_dropped) = if unchanged {
+        (
+            existing_content
+                .expect("an unchanged merge only happens against an existing entry")
+                .to_string(),
+            false,
+        )
+    } else {
+        write_content(existing_content, &document, splice_index, &entry)
+    };
+    Ok(LaunchJsonWritePlan {
+        content,
+        replaced,
+        migrated_from,
+        comments_dropped,
+    })
+}
+
+/// Render the write plan's final bytes.
+///
+/// tan-cli#182: this used to be `serde_json::to_string_pretty(&document)`
+/// unconditionally — re-serializing the WHOLE document destroyed every
+/// comment, trailing comma, and leading BOM in a customer's hand-edited
+/// launch.json on every single run, not just the one entry actually being
+/// changed. Now the write is a targeted splice into `existing_content`'s own
+/// bytes whenever `jsonc_splice::locate_configuration_edit` can confidently
+/// place it: everything outside the edited entry is copied through
+/// unconditionally, because there is no re-serialization pass over it to lose
+/// anything. Only the entry actually being written is reformatted — that
+/// entry's own prior comments (if it had any) are the one unavoidable
+/// casualty, the same way any tool that edits one JSON object's fields must
+/// discard stray comments sitting BETWEEN those fields; a comment ABOVE the
+/// entry (outside its `{...}` byte span) survives along with everything else.
+///
+/// Falls back to the old whole-document re-serialize when there is no
+/// original text to splice into (a fresh file) or the locator can't
+/// confidently place the edit (no top-level `"configurations"` array in the
+/// raw text — possible only when the LOGICAL parse filled one in by default,
+/// e.g. an existing file with no `configurations` key at all). That fallback
+/// path is lossy of comments exactly as before, but never malformed: it is
+/// the documented safety net, not a second bug.
+///
+/// Returns the content alongside whether the write dropped a comment (or
+/// trailing comma) the customer's file held — tan-cli#182 review finding #2:
+/// disclosing that is the non-negotiable floor #182 itself named, not an
+/// optional nicety. On the splice path this is exactly the entry's own
+/// span being reformatted (a comment BETWEEN two of its keys is the one
+/// documented, unavoidable casualty); on the fallback it is the whole
+/// original document, since none of its original bytes survive the
+/// re-serialize.
+fn write_content(
+    existing_content: Option<&str>,
+    document: &Value,
+    splice_index: Option<usize>,
+    entry: &Value,
+) -> (String, bool) {
+    if let Some(original) = existing_content {
+        if let Some(edit) = crate::jsonc_splice::locate_configuration_edit(original, splice_index) {
+            let dropped = match &edit {
+                crate::jsonc_splice::SpliceEdit::Replace { start, end, .. } => {
+                    strip_jsonc(&original[*start..*end]) != original[*start..*end]
+                }
+                // An append never rewrites any existing byte span.
+                crate::jsonc_splice::SpliceEdit::Append { .. } => false,
+            };
+            return (
+                crate::jsonc_splice::apply_edit(original, &edit, entry),
+                dropped,
+            );
+        }
+    }
+    let dropped = existing_content.is_some_and(|original| strip_jsonc(original) != original);
+    (
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(document).expect("launch document is serializable")
+        ),
+        dropped,
+    )
 }
 
 /// Strip a leading UTF-8 BOM plus `//` / `/* */` comments from JSONC text,
@@ -693,7 +859,7 @@ mod tests {
         let json = serde_json::to_string(&draft).unwrap();
         // Keys must stay in insertion order (preserve_order), not sorted.
         assert!(json.starts_with(
-            "{\"name\":\"ALP: Zephyr Debug (J-Link)\",\"type\":\"cortex-debug\",\"request\":\"launch\""
+            "{\"name\":\"Alp: Zephyr Debug (J-Link)\",\"type\":\"cortex-debug\",\"request\":\"launch\""
         ));
         assert!(json.ends_with(
             "\"servertype\":\"jlink\",\"device\":\"<resolved-device>\",\"interface\":\"swd\"}"
@@ -876,6 +1042,271 @@ mod tests {
         assert_eq!(doc["configurations"].as_array().unwrap().len(), 1);
     }
 
+    /// #133: tan used to spell every launch-configuration `name` `"ALP: …"`
+    /// while `alp-sdk-vscode` spells the same four `"Alp: …"`. Both sides merge
+    /// by exact `name`, so the two spellings never matched and a workspace that
+    /// had seen both tools ended up with two of every debug configuration. This
+    /// simulates a `launch.json` the extension already wrote (its own draft,
+    /// `Alp:`-spelled, never anything tan produced) and asserts tan's own write
+    /// merges into it rather than appending a duplicate. Pre-fix, when
+    /// `create_launch_draft` still emitted `"ALP: Native Sim Debug"`, this name
+    /// mismatch would have made `plan.replaced` false and left two entries.
+    #[test]
+    fn an_existing_extension_written_configuration_is_merged_not_duplicated() {
+        let existing = existing_with(json!({
+            "name": "Alp: Native Sim Debug",
+            "type": "lldb",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
+            "cwd": "${workspaceFolder}",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        assert_eq!(draft["name"], "Alp: Native Sim Debug");
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(
+            plan.replaced,
+            "an existing Alp:-named configuration must be merged, not duplicated"
+        );
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        assert_eq!(
+            doc["configurations"].as_array().unwrap().len(),
+            1,
+            "duplicated instead of merging: {}",
+            plan.content
+        );
+    }
+
+    /// #133 reopened: the vscode drive that reopened this issue, reproduced.
+    /// Only the legacy `"ALP: Zephyr Debug (J-Link)"` entry exists, carrying
+    /// the customer's own hand-filled `"device": "AE822F4M55_HP"`. A test that
+    /// only checked the name changed would pass while still stranding that
+    /// value — so this asserts BOTH: the file ends with one, correctly-named
+    /// entry, AND the hand-filled device is the one that survives onto it
+    /// (not the fresh `"<resolved-device>"` placeholder the draft carries).
+    #[test]
+    fn only_a_legacy_alp_entry_migrates_and_keeps_the_hand_filled_device() {
+        let existing = existing_with(json!({
+            "name": "ALP: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+            "servertype": "jlink",
+            "device": "AE822F4M55_HP",
+            "interface": "swd",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        assert_eq!(draft["name"], "Alp: Zephyr Debug (J-Link)");
+        assert_eq!(draft["device"], "<resolved-device>");
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(
+            plan.migrated_from.as_deref(),
+            Some("ALP: Zephyr Debug (J-Link)")
+        );
+        assert!(plan.replaced);
+
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(
+            configs.len(),
+            1,
+            "the legacy entry must be adopted in place, not left behind \
+             alongside a new one: {}",
+            plan.content
+        );
+        assert_eq!(configs[0]["name"], "Alp: Zephyr Debug (J-Link)");
+        assert_eq!(
+            configs[0]["device"], "AE822F4M55_HP",
+            "the customer's hand-filled device must survive the migration, \
+             not be reset to the fresh placeholder: {}",
+            plan.content
+        );
+    }
+
+    /// #177 review finding #2: every migration test above pins only `device`
+    /// -- an unresolved-placeholder-backed field, which is the ONE thing the
+    /// merge protects. None pins the other side of the same trade-off: a
+    /// hand-tuned field the draft does NOT leave as a `<resolved-…>`
+    /// placeholder (`cwd`, `executable`, `runToEntryPoint`) is refreshed to
+    /// this run's fresh value on migration, exactly like an ordinary
+    /// same-name re-run -- migration is not a "preserve everything" mode.
+    /// Reproduces the exact #177 review transcript (hand-tuned `cwd`,
+    /// `executable`, `runToEntryPoint` on the legacy entry) so both
+    /// directions are asserted on the SAME input rather than assumed from
+    /// `merge_configuration`'s ordinary-re-run behaviour.
+    #[test]
+    fn legacy_migration_refreshes_tan_owned_fields_while_keeping_the_hand_filled_placeholder_backed_ones()
+     {
+        let existing = existing_with(json!({
+            "name": "ALP: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}/app",
+            "executable": "${workspaceFolder}/build/m55_hp/zephyr/zephyr.elf",
+            "runToEntryPoint": "app_main",
+            "servertype": "jlink",
+            "device": "AE822F4M55_HP",
+            "interface": "swd",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(
+            plan.migrated_from.as_deref(),
+            Some("ALP: Zephyr Debug (J-Link)")
+        );
+        let merged = merged_config(&plan);
+
+        // Placeholder-backed field: the hand-filled value survives.
+        assert_eq!(merged["device"], "AE822F4M55_HP");
+        // tan-owned fields, none of them placeholder-backed in the draft:
+        // refreshed to this run's fresh values, same as any ordinary re-run.
+        assert_eq!(merged["cwd"], "${workspaceFolder}");
+        assert_eq!(
+            merged["executable"],
+            "${workspaceFolder}/build/app/zephyr/zephyr.elf"
+        );
+        assert_eq!(merged["runToEntryPoint"], "main");
+    }
+
+    /// #133 reopened, "the dangerous branch": both a maintained `"Alp: ..."`
+    /// entry (placeholder device, per the reported transcript) AND the legacy
+    /// `"ALP: ..."` entry (the customer's real hand-filled device) exist at
+    /// once — a workspace that ran a pre-#155 `tan` and then a post-#155 one.
+    /// The decision here is to touch neither entry beyond the ordinary
+    /// same-name merge of the maintained one: nothing decides which of two
+    /// possibly-hand-edited entries is authoritative, so migrating or deleting
+    /// either would risk destroying user data on a guess. This asserts BOTH
+    /// entries still exist afterwards and the legacy one is BYTE-IDENTICAL to
+    /// what the customer had — proving it truly was not touched, not merely
+    /// that its `device` field looks unchanged.
+    #[test]
+    fn both_a_current_and_a_legacy_entry_leaves_the_legacy_one_untouched() {
+        let legacy = json!({
+            "name": "ALP: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "device": "AE822F4M55_HP",
+            "servertype": "jlink",
+        });
+        let existing = serde_json::to_string_pretty(&json!({
+            "version": "0.2.0",
+            "configurations": [
+                json!({
+                    "name": "Alp: Zephyr Debug (J-Link)",
+                    "type": "cortex-debug",
+                    "request": "launch",
+                    "cwd": "${workspaceFolder}",
+                    "executable": "${workspaceFolder}/build/app/zephyr/zephyr.elf",
+                    "servertype": "jlink",
+                    "device": "<resolved-device>",
+                    "interface": "swd",
+                }),
+                legacy.clone(),
+            ],
+        }))
+        .unwrap();
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(
+            plan.replaced,
+            "the exact-name match on the maintained entry must still fire"
+        );
+        assert_eq!(
+            plan.migrated_from, None,
+            "a current-named entry already existed, so no legacy search must \
+             have run at all"
+        );
+
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(
+            configs.len(),
+            2,
+            "both entries must still exist -- deleting either is a data-loss \
+             decision this run must not make on a guess: {}",
+            plan.content
+        );
+        let found_legacy = configs
+            .iter()
+            .find(|c| c["name"] == "ALP: Zephyr Debug (J-Link)")
+            .expect("the legacy entry must still be present");
+        assert_eq!(
+            found_legacy, &legacy,
+            "the legacy entry must be byte-identical to what the customer had \
+             -- not merely 'device unchanged' -- proving it was not touched: {}",
+            plan.content
+        );
+    }
+
+    /// A legacy entry for a DIFFERENT target/server than the one being
+    /// written this run must not be mistaken for this draft's counterpart:
+    /// `"ALP: Zephyr Debug (J-Link)"` sits in the file while this run writes
+    /// `"Alp: Native Sim Debug"`. Per-draft scoping means the legacy entry is
+    /// left alone and the new draft is appended fresh, same as if the legacy
+    /// entry were not there at all.
+    #[test]
+    fn a_legacy_entry_for_a_different_target_is_left_alone() {
+        let existing = existing_with(json!({
+            "name": "ALP: Zephyr Debug (J-Link)",
+            "type": "cortex-debug",
+            "device": "AE822F4M55_HP",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        assert_eq!(draft["name"], "Alp: Native Sim Debug");
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(plan.migrated_from, None);
+        assert!(!plan.replaced);
+
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 2, "{}", plan.content);
+        let untouched = configs
+            .iter()
+            .find(|c| c["name"] == "ALP: Zephyr Debug (J-Link)")
+            .expect("the unrelated legacy entry must still be present");
+        assert_eq!(untouched["device"], "AE822F4M55_HP");
+    }
+
+    /// The narrow-match-rule guard: a customer's OWN config that happens to
+    /// start with `"ALP: "` but is not one of the four names this crate ever
+    /// emitted (`"ALP: My Custom Config"`) must never be mistaken for a legacy
+    /// counterpart of anything tan writes, even though a naive `starts_with("ALP:
+    /// ")` scan would match it. Proves the rule is "the one legacy spelling of
+    /// THIS draft's name", not "anything ALP-prefixed".
+    #[test]
+    fn an_unrelated_alp_prefixed_user_config_is_never_mistaken_for_the_legacy_name() {
+        let existing = existing_with(json!({
+            "name": "ALP: My Custom Config",
+            "type": "cortex-debug",
+            "device": "hand-picked-value",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert_eq!(plan.migrated_from, None);
+        assert!(!plan.replaced);
+
+        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 2, "{}", plan.content);
+        let untouched = configs
+            .iter()
+            .find(|c| c["name"] == "ALP: My Custom Config")
+            .expect("the unrelated user config must still be present");
+        assert_eq!(untouched["device"], "hand-picked-value");
+    }
+
     /// Serialize `{version, configurations:[config]}` as an existing file.
     fn existing_with(config: Value) -> String {
         serde_json::to_string_pretty(&json!({
@@ -898,7 +1329,7 @@ mod tests {
         // The #105 report: the customer is told to fill in `device`, does, and
         // the next F5 writes `<resolved-device>` back over it.
         let existing = existing_with(json!({
-            "name": "ALP: Zephyr Debug (J-Link)",
+            "name": "Alp: Zephyr Debug (J-Link)",
             "type": "cortex-debug",
             "request": "launch",
             "cwd": "${workspaceFolder}",
@@ -938,7 +1369,7 @@ mod tests {
         // `codelldb` → `lldb` repair (#104) has to land on an entry that
         // already exists, which is every entry after the first write.
         let existing = existing_with(json!({
-            "name": "ALP: Native Sim Debug",
+            "name": "Alp: Native Sim Debug",
             "type": "codelldb",
             "request": "launch",
             "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
@@ -969,7 +1400,7 @@ mod tests {
         // extension found. A prefix-only predicate calls it a real address and
         // overwrites the one the customer typed.
         let existing = existing_with(json!({
-            "name": "ALP: Yocto Remote Debug",
+            "name": "Alp: Yocto Remote Debug",
             "type": "cppdbg",
             "miDebuggerServerAddress": "192.168.10.42:3333",
             "miDebuggerPath": "/opt/gdb/bin/aarch64-poky-linux-gdb",
@@ -996,7 +1427,7 @@ mod tests {
         // A per-index merge against the one-element draft would drop the
         // customer's hand-added second `.cfg` entirely.
         let existing = existing_with(json!({
-            "name": "ALP: Zephyr Debug (OpenOCD)",
+            "name": "Alp: Zephyr Debug (OpenOCD)",
             "type": "cortex-debug",
             "servertype": "openocd",
             "configFiles": ["/boards/alp/board.cfg", "/boards/alp/extra.cfg"],
@@ -1033,7 +1464,7 @@ mod tests {
     #[test]
     fn keys_the_customer_added_that_tan_never_writes_are_untouched() {
         let existing = existing_with(json!({
-            "name": "ALP: Native Sim Debug",
+            "name": "Alp: Native Sim Debug",
             "type": "lldb",
             "preLaunchTask": "my own build task",
             "initCommands": ["settings set target.x86-disassembly-flavor intel"],
@@ -1079,9 +1510,13 @@ mod tests {
         let draft =
             create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
         let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
-        // `inputs` is preserved; version kept as the (valid) existing value.
+        // `inputs` is preserved; version kept as the (valid) existing value —
+        // AND in its original compact byte form (tan-cli#182: the write is a
+        // targeted splice of the `configurations` array now, not a whole-
+        // document re-serialize, so untouched keys keep their original
+        // formatting rather than being reformatted to serde's pretty style).
         assert!(plan.content.contains("\"inputs\""));
-        assert!(plan.content.contains("\"version\": \"0.1.0\""));
+        assert!(plan.content.contains("\"version\":\"0.1.0\""));
     }
 
     #[test]
@@ -1101,8 +1536,77 @@ mod tests {
             create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
         let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
         assert!(!plan.replaced);
-        let doc: Value = serde_json::from_str(&plan.content).unwrap();
+        // tan-cli#182: the write no longer strips the BOM/comment it just
+        // read — `plan.content` is legitimately JSONC now, not strict JSON,
+        // whenever the input was. Read it back with the SAME tolerant parser
+        // the write path itself used to decide what to merge, not raw
+        // `serde_json::from_str` (which would reject its own BOM here).
+        assert!(plan.content.starts_with('\u{feff}'), "the BOM must survive");
+        assert!(
+            plan.content.contains("// Use IntelliSense"),
+            "the stock template comment must survive: {}",
+            plan.content
+        );
+        let doc = parse_launch_json_or_default(Some(&plan.content)).unwrap();
         assert_eq!(doc["configurations"].as_array().unwrap().len(), 1);
+    }
+
+    /// tan-cli#182, the reported bug: a comment sitting on an UNTOUCHED
+    /// sibling entry used to be destroyed by every write, because the whole
+    /// document was re-serialized regardless of which one entry actually
+    /// changed. This drives an update to `"Alp: Zephyr Debug (J-Link)"` and
+    /// asserts the completely unrelated `"Alp: Native Sim Debug"` entry comes
+    /// back BYTE-FOR-BYTE identical, comments included — not merely "a
+    /// comment survives somewhere", but that entry's exact bytes, unmoved.
+    #[test]
+    fn a_comment_on_an_untouched_sibling_entry_survives_the_write() {
+        let native_sim_entry = "{\n      \"name\": \"Alp: Native Sim Debug\",\n      \"type\": \"lldb\",\n      \"request\": \"launch\",\n      \"program\": \"${workspaceFolder}/build/native_sim/zephyr/zephyr.exe\", // no probe needed\n      \"cwd\": \"${workspaceFolder}\"\n    }";
+        let existing = format!(
+            "{{\n  \"version\": \"0.2.0\",\n  \"configurations\": [\n    {{\n      \"name\": \"Alp: Zephyr Debug (J-Link)\",\n      \"type\": \"cortex-debug\",\n      \"request\": \"launch\",\n      \"cwd\": \"${{workspaceFolder}}\",\n      \"executable\": \"${{workspaceFolder}}/build/app/zephyr/zephyr.elf\",\n      \"servertype\": \"jlink\",\n      \"device\": \"AE822F4M55_HP\",\n      \"interface\": \"swd\"\n    }},\n    {native_sim_entry}\n  ]\n}}\n"
+        );
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(plan.replaced);
+        assert!(
+            plan.content.contains(native_sim_entry),
+            "the untouched sibling entry, comment included, must appear byte-for-byte: {}",
+            plan.content
+        );
+        // And the field this run WAS asked to preserve on the entry it DID
+        // touch still survives the merge, same as every other migration test.
+        // `plan.content` now legitimately carries the sibling's `//` comment,
+        // so it is read back with the tolerant parser, not raw serde_json.
+        let doc = parse_launch_json_or_default(Some(&plan.content)).unwrap();
+        let configs = doc["configurations"].as_array().unwrap();
+        assert_eq!(configs.len(), 2);
+        let touched = configs
+            .iter()
+            .find(|c| c["name"] == "Alp: Zephyr Debug (J-Link)")
+            .unwrap();
+        assert_eq!(touched["device"], "AE822F4M55_HP");
+    }
+
+    /// The companion case: appending a brand-new entry must not disturb an
+    /// existing entry's comments either, including a UTF-8 BOM at the very
+    /// start of the file and a trailing comma before `]`.
+    #[test]
+    fn appending_a_new_entry_leaves_an_existing_commented_entry_untouched() {
+        let existing = "\u{feff}{\n  // do not commit board-specific probe settings\n  \"version\": \"0.2.0\",\n  \"configurations\": [\n    {\n      \"name\": \"Alp: Native Sim Debug\",\n      \"type\": \"lldb\",\n      \"program\": \"${workspaceFolder}/build/native_sim/zephyr/zephyr.exe\" // native only\n    },\n  ],\n}\n";
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
+        assert!(!plan.replaced);
+        assert!(plan.content.starts_with('\u{feff}'));
+        assert!(
+            plan.content
+                .contains("// do not commit board-specific probe settings")
+        );
+        assert!(plan.content.contains("// native only"));
+        let doc = parse_launch_json_or_default(Some(&plan.content)).unwrap();
+        assert_eq!(doc["configurations"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -1112,5 +1616,149 @@ mod tests {
         let configs = doc["configurations"].as_array().unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0]["name"], "has // slashes /* not a comment */");
+    }
+
+    /// tan-cli#182 review finding #1, the repro exactly as run against the
+    /// real binary: generate the entry once, hand-add a comment INSIDE it
+    /// that changes nothing else, then re-run with the identical target/
+    /// server. The merge is semantically a no-op (every field the second
+    /// draft produces is already present with the same value), so the second
+    /// write must return `existing` byte-for-byte -- comment included -- not
+    /// re-splice the unchanged entry and destroy it.
+    #[test]
+    fn a_semantic_no_op_rerun_returns_the_original_bytes_verbatim_comment_included() {
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        let first = create_launch_json_write_plan(None, &draft).unwrap();
+        assert!(!first.replaced);
+
+        let with_comment = first.content.replacen(
+            "\"request\": \"launch\",",
+            "\"request\": \"launch\",\n      // DO NOT DELETE: probe serial 000123456789",
+            1,
+        );
+        assert!(
+            with_comment.contains("000123456789"),
+            "fixture is malformed"
+        );
+
+        let second = create_launch_json_write_plan(Some(&with_comment), &draft).unwrap();
+        assert_eq!(
+            second.content, with_comment,
+            "a semantically no-op re-run must return the original bytes verbatim"
+        );
+        assert!(
+            second.content.contains("000123456789"),
+            "the hand-added comment must survive a no-op re-run: {}",
+            second.content
+        );
+        assert!(!second.comments_dropped);
+    }
+
+    /// The inverse: when the re-run genuinely changes the entry (a build
+    /// resolved a placeholder), the no-op guard must NOT suppress the write —
+    /// only byte-identical merges take the verbatim path.
+    #[test]
+    fn a_genuinely_changed_rerun_still_writes() {
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        let first = create_launch_json_write_plan(None, &draft).unwrap();
+
+        let mut resolved_draft = draft.clone();
+        apply_launch_resolution(
+            &mut resolved_draft,
+            &LaunchResolution {
+                device: Some("AE822F4M55_HP".into()),
+                ..Default::default()
+            },
+        );
+        let second = create_launch_json_write_plan(Some(&first.content), &resolved_draft).unwrap();
+        assert_ne!(second.content, first.content);
+        assert!(second.content.contains("AE822F4M55_HP"));
+    }
+
+    /// tan-cli#182 review finding #2: a comment sitting BETWEEN two keys of
+    /// the entry actually being replaced is the one documented, unavoidable
+    /// casualty of a splice — but it must be DISCLOSED via
+    /// `comments_dropped`, not silently eaten. Distinct from the previous
+    /// no-op test: here the entry genuinely changes (a new `device`), so the
+    /// no-op short-circuit does not apply and the splice really does run.
+    #[test]
+    fn a_genuine_write_that_drops_an_inline_comment_reports_it() {
+        let existing = "{\n  \"version\": \"0.2.0\",\n  \"configurations\": [\n    {\n      \"name\": \"Alp: Zephyr Debug (J-Link)\",\n      \"type\": \"cortex-debug\",\n      \"request\": \"launch\",\n      // hand-picked after bring-up, do not overwrite\n      \"cwd\": \"${workspaceFolder}\",\n      \"executable\": \"${workspaceFolder}/build/app/zephyr/zephyr.elf\",\n      \"servertype\": \"jlink\",\n      \"device\": \"AE822F4M55_HP\",\n      \"interface\": \"swd\"\n    }\n  ]\n}\n";
+        let mut draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+        apply_launch_resolution(
+            &mut draft,
+            &LaunchResolution {
+                device: Some("AE822F4M55_NEW".into()),
+                ..Default::default()
+            },
+        );
+
+        let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
+        assert!(plan.replaced);
+        assert!(
+            !plan
+                .content
+                .contains("hand-picked after bring-up, do not overwrite"),
+            "the comment inside the replaced entry is expected to be lost: {}",
+            plan.content
+        );
+        assert!(
+            plan.comments_dropped,
+            "a write that drops a comment must report it: {}",
+            plan.content
+        );
+    }
+
+    /// The fallback path's own comments-dropped signal: a file with no
+    /// top-level `configurations` key (the locator can't confidently place
+    /// the edit) goes through the whole-document re-serialize, which drops
+    /// every comment in the original file — that must also be reported.
+    #[test]
+    fn the_whole_document_fallback_reports_dropped_comments_too() {
+        let existing = "{\n  // compounds-only launch.json, no configurations key\n  \"version\": \"0.2.0\",\n  \"compounds\": [{\"name\": \"x\", \"configurations\": []}]\n}\n";
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(existing), &draft).unwrap();
+        assert!(
+            !plan.content.contains("compounds-only launch.json"),
+            "the fallback re-serialize is expected to drop the comment: {}",
+            plan.content
+        );
+        assert!(plan.comments_dropped);
+    }
+
+    /// A brand-new file (no existing content at all) has nothing to drop.
+    #[test]
+    fn a_fresh_file_never_reports_dropped_comments() {
+        let draft =
+            create_launch_draft(DebugTargetKind::NativeHost, DebugServerKind::None, None).unwrap();
+        let plan = create_launch_json_write_plan(None, &draft).unwrap();
+        assert!(!plan.comments_dropped);
+    }
+
+    /// The append path's own negative case: appending a brand-new entry into
+    /// an EXISTING, comment-free file must not report `comments_dropped` —
+    /// an append never rewrites any of the file's existing bytes, so there is
+    /// nothing for it to have dropped.
+    #[test]
+    fn appending_into_an_existing_comment_free_file_reports_no_dropped_comments() {
+        let existing = existing_with(json!({
+            "name": "Alp: Native Sim Debug",
+            "type": "lldb",
+            "program": "${workspaceFolder}/build/native_sim/zephyr/zephyr.exe",
+        }));
+        let draft =
+            create_launch_draft(DebugTargetKind::ZephyrMcu, DebugServerKind::Jlink, None).unwrap();
+
+        let plan = create_launch_json_write_plan(Some(&existing), &draft).unwrap();
+        assert!(
+            !plan.replaced,
+            "a different-named draft must append, not replace"
+        );
+        assert!(!plan.comments_dropped);
     }
 }

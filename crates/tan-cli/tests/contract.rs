@@ -383,7 +383,7 @@ fn code_lines(source: &str) -> String {
 /// The frozen `issues[].code` strings alp-sdk-vscode matches with `===`
 /// (tan-cli#106), gated against `contract/issue-codes.json`.
 ///
-/// WHY a source-literal assertion and not a golden envelope: of the four
+/// WHY a source-literal assertion and not a golden envelope: of the five
 /// codes, only `presets.sdk-root-unresolved` is reachable from a hermetic,
 /// host-independent subprocess (it has a golden — `presets-no-sdk` — and
 /// that golden is the stronger gate). The `bootstrap.*` codes are not:
@@ -452,6 +452,37 @@ fn frozen_issue_codes() {
                      to a prefix match."
                 );
             }
+            "reserved" => {
+                // Pre-consumer: the spelling exists at the emission site (kept
+                // honest against source, same as `frozen`) but nothing matches
+                // it with `===` yet, so unlike `frozen` a rename here costs
+                // nothing on the wire -- enforced by requiring `consumer`
+                // stays "none" while the status does.
+                let consumer = entry["consumer"].as_str().unwrap_or_default();
+                assert!(
+                    consumer == "none" || consumer.starts_with("none "),
+                    "{code}: status `reserved` requires `consumer: \"none\"` -- a code \
+                     with a real consumer must be `frozen` instead, or it can be \
+                     silently renamed out from under that consumer"
+                );
+                let rel = entry["emittedBy"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{code}: a reserved code needs `emittedBy`"));
+                let literal = entry["literal"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{code}: a reserved code needs `literal`"));
+                let path = repo_root().join(rel);
+                let source = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("{code}: cannot read {rel}: {e}"));
+                assert!(
+                    code_lines(&source).contains(literal),
+                    "RESERVED ISSUE CODE `{code}` is gone: {rel} no longer contains \
+                     {literal:?} outside comments. No consumer matches it yet, so \
+                     dropping or renaming it is not a breaking wire change -- but the \
+                     registry entry is now stale. Update contract/issue-codes.json to \
+                     match, or restore the emission."
+                );
+            }
             "retired" => {
                 // A retired code is not emitted any more, but the consumer branch
                 // that matches it is permanent back-compat for old pinned binaries.
@@ -472,7 +503,7 @@ fn frozen_issue_codes() {
                     );
                 }
             }
-            other => panic!("{code}: unknown status {other:?} (expected frozen|retired)"),
+            other => panic!("{code}: unknown status {other:?} (expected frozen|reserved|retired)"),
         }
     }
 }
@@ -593,4 +624,69 @@ fn doctor_build_data_keys_the_extension_reads() {
          exact name to decide whether `--fix` can bootstrap a Zephyr workspace; \
          renamed, the offer silently disappears.\n---\n{stdout}"
     );
+}
+
+/// tan-cli#112: `--build` and `--build --fix` must stay ACCEPTED CLI
+/// arguments, permanently -- both alp-sdk-vscode call sites
+/// (`toolchain.ts`'s Toolchain Doctor panel and its "Bootstrap now" fix)
+/// hardcode literal `["doctor", "--build"]` / `["doctor", "--build", "--fix"]`
+/// argv with no fallback if the flag stops parsing.
+///
+/// The FAILING case this guards: if `--build` is removed from `DoctorArgs` (or
+/// renamed), clap refuses the argv before `doctor::run` ever executes, and
+/// `tan` itself catches that as a `cli.parse-error` issue with `command:
+/// "cli"` (verified: `tan doctor --unknown-flag` on this build answers
+/// `{"command":"cli","exitCode":2,...}`, not a doctor envelope at all). So
+/// `command == "doctor"` is the one assertion that can only pass if the flag
+/// was accepted and dispatch actually reached the doctor handler -- unlike an
+/// exit-code check, it does not depend on which build tools happen to be on
+/// this host (a never-bootstrapped project legitimately answers exitCode 4,
+/// not 0, on every host tested).
+#[test]
+fn doctor_build_and_build_fix_stay_accepted_cli_arguments() {
+    let work_dir = fresh_dir("doctor-build-shim");
+    let home_dir = fresh_dir("doctor-build-shim-home");
+
+    for argv in [
+        vec!["doctor", "--build", "--format", "json"],
+        vec!["doctor", "--build", "--fix", "--format", "json"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_tan"))
+            .args(&argv)
+            .current_dir(&work_dir)
+            .env("SOURCE_DATE_EPOCH", "0")
+            .env("HOME", &home_dir)
+            .env("USERPROFILE", &home_dir)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn tan {}: {e}", argv.join(" ")));
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let envelope: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|e| {
+            panic!(
+                "tan {}: stdout is not JSON -- the flag was likely rejected before \
+                 reaching doctor::run: {e}\n---stdout---\n{stdout}\n---stderr---\n{}",
+                argv.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert_eq!(
+            envelope["command"],
+            "doctor",
+            "tan {}: envelope.command must be \"doctor\" (a rejected/unknown \
+             \"--build\" answers \"cli\" with a cli.parse-error issue instead) \
+             ---\n{stdout}",
+            argv.join(" ")
+        );
+        assert_ne!(
+            envelope["exitCode"].as_i64(),
+            Some(2),
+            "tan {}: exitCode 2 is the parse-error/usage-error code (see exit.rs); \
+             doctor's own paths never return it, so seeing it here means the \
+             argv was refused before dispatch ---\n{stdout}",
+            argv.join(" ")
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(work_dir.parent().unwrap_or(&work_dir));
+    let _ = std::fs::remove_dir_all(home_dir.parent().unwrap_or(&home_dir));
 }

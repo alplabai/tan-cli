@@ -193,8 +193,8 @@ pub fn python_too_old(binary: &str) -> Option<String> {
     match python_version(binary) {
         Some(found) if found < MIN_PYTHON => Some(format!(
             "Python {}.{} found at `{}`, but alp-sdk requires Python {}.{}+. \
-             Put a newer `python` on PATH (or set alpSdk.pythonPath in the \
-             VS Code extension).",
+             Put a newer `python` first on PATH (VS Code users can instead set \
+             alpSdk.pythonPath).",
             found.0, found.1, binary, MIN_PYTHON.0, MIN_PYTHON.1
         )),
         _ => None,
@@ -222,6 +222,29 @@ impl HostPython {
     pub fn display(&self) -> String {
         self.argv.join(" ")
     }
+}
+
+/// Whether `python`'s `venv` module can actually create a usable virtual
+/// environment (tan-cli#161). `python -m venv --help` cannot tell — argparse
+/// answers it before `ensurepip` is ever touched — so this probes the real
+/// dependency: `import ensurepip`, which fails fast (no venv directory
+/// created) on the Debian/Ubuntu split where `python3-venv` is a separate,
+/// unmet package. Verified against a real Ubuntu 24.04 host missing it:
+/// `python3 -m venv --help` exits 0 while `python3 -c "import ensurepip"`
+/// exits 1 with `ModuleNotFoundError: No module named 'ensurepip'` — the exact
+/// shape `python3 -m venv` itself fails with a moment later.
+///
+/// `true` when the probe cannot be run at all (spawn failure) — this is not
+/// the check that should block a host on an inconclusive answer; the real
+/// `python -m venv` a moment later surfaces its own error if something is
+/// genuinely wrong.
+pub fn python_venv_capable(python: &HostPython) -> bool {
+    python
+        .command()
+        .args(["-c", "import ensurepip"])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(true)
 }
 
 /// Find the host interpreter `tan bootstrap` creates the workspace venv with:
@@ -585,6 +608,38 @@ mod tests {
         assert_eq!(parse_python_version("noise\n3.12\n"), Some((3, 12)));
         assert_eq!(parse_python_version(""), None);
         assert_eq!(parse_python_version("python 3"), None);
+    }
+
+    /// Real `/bin/true` and `/bin/false` stand in for a working vs. broken
+    /// `ensurepip` import without needing an actual Python on the test host —
+    /// both ignore whatever args `python_venv_capable` appends and exit
+    /// 0/1 respectively, which is all the function reads.
+    #[cfg(unix)]
+    #[test]
+    fn venv_capable_reads_the_probe_exit_status() {
+        let ok = HostPython {
+            argv: vec!["true".to_string()],
+            version: (3, 12),
+        };
+        assert!(python_venv_capable(&ok));
+
+        let broken = HostPython {
+            argv: vec!["false".to_string()],
+            version: (3, 12),
+        };
+        assert!(!python_venv_capable(&broken));
+    }
+
+    /// A python that cannot even be spawned (bogus argv) must NOT block —
+    /// that verdict belongs to the real `python -m venv` call a moment later,
+    /// not to this probe guessing at a launch failure.
+    #[test]
+    fn venv_capable_fails_open_when_the_probe_cannot_launch() {
+        let unlaunchable = HostPython {
+            argv: vec!["tan-cli-no-such-interpreter-xyz".to_string()],
+            version: (3, 12),
+        };
+        assert!(python_venv_capable(&unlaunchable));
     }
 
     #[test]

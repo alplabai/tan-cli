@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use tan_core::{
-    ALL_EMIT_MODES, DebugGenerationTraceDecision, DebugServerKind, DebugTargetKind,
+    BUILD_CONFIG_EMIT_MODES, DebugGenerationTraceDecision, DebugServerKind, DebugTargetKind,
     DebugTraceOutcome, DebugWorkspaceContext, DoctorCheck, DoctorReport, DoctorStatus,
     ProjectContext, build_doctor_report, collect_resolved_values,
     collect_runtime_capabilities_from_commands, create_debug_workspace_context, create_loader_plan,
@@ -297,16 +297,24 @@ fn create_bundle_trace_decisions(
     Ok(decisions)
 }
 
-/// Resolves the emit targets to trace: all of `ALL_EMIT_MODES` when `raw` is
-/// `None`, a single validated mode when given, or an error for an unknown mode.
+/// Resolves the emit targets to trace: all of `BUILD_CONFIG_EMIT_MODES` when
+/// `raw` is `None`, a single validated mode when given, or an error for an
+/// unknown mode. Deliberately the narrower build-config set, not the full
+/// `generate` surface -- tan-cli#165 review finding 1: the bundled trace
+/// section reports the generation decisions a build would make, and a build
+/// only ever materialises these four.
 fn resolve_targets(raw: Option<&str>) -> Result<Vec<&'static str>, String> {
     match raw {
-        None => Ok(ALL_EMIT_MODES.to_vec()),
-        Some(target) => match ALL_EMIT_MODES.iter().copied().find(|m| *m == target) {
+        None => Ok(BUILD_CONFIG_EMIT_MODES.to_vec()),
+        Some(target) => match BUILD_CONFIG_EMIT_MODES
+            .iter()
+            .copied()
+            .find(|m| *m == target)
+        {
             Some(m) => Ok(vec![m]),
             None => Err(format!(
                 "Unsupported trace target '{target}'. Allowed values: {}.",
-                ALL_EMIT_MODES.join(", ")
+                BUILD_CONFIG_EMIT_MODES.join(", ")
             )),
         },
     }
@@ -481,6 +489,34 @@ mod tests {
     use super::*;
     use crate::commands::doctor::tests::TempTree;
 
+    /// tan-cli#165 review finding 1: `tan support-bundle`'s bundled trace
+    /// section must keep enumerating only the four per-core build-config
+    /// targets, not the full `generate` surface -- the FAILING case this
+    /// guards is exactly what shipped: an earlier revision pointed this at
+    /// `tan_core::ALL_EMIT_MODES` (nine targets) instead, so a bundle's
+    /// trace section claimed a build runs project-level exports
+    /// (`carrier-netlist`, `os-topology`, ...) it never does.
+    #[test]
+    fn default_trace_targets_are_exactly_the_build_config_set() {
+        assert_eq!(
+            resolve_targets(None).unwrap(),
+            vec!["zephyr-conf", "dts-overlay", "cmake-args", "yocto-conf"]
+        );
+    }
+
+    #[test]
+    fn a_generate_only_target_is_not_a_valid_trace_target() {
+        // carrier-netlist is a real `tan generate --target`, but not a
+        // build-config target -- the bundle's trace section must still
+        // refuse it.
+        let err = resolve_targets(Some("carrier-netlist")).unwrap_err();
+        assert_eq!(
+            err,
+            "Unsupported trace target 'carrier-netlist'. Allowed values: zephyr-conf, \
+             dts-overlay, cmake-args, yocto-conf."
+        );
+    }
+
     fn context() -> DebugWorkspaceContext {
         DebugWorkspaceContext {
             generated_at: "1970-01-01T00:00:00.000Z".to_string(),
@@ -566,7 +602,7 @@ mod tests {
             &runtime(),
         );
         let names: Vec<&str> = doctor.checks.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"zephyrSdkHost"), "{names:?}");
+        assert!(names.contains(&"zephyrSdkAvailableForHost"), "{names:?}");
         assert!(names.contains(&"homePath"), "{names:?}");
         assert_eq!(
             names.contains(&"longPaths"),

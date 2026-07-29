@@ -129,13 +129,27 @@ board's only diffs (if any) are the allowed `debug.probe` delta.
 
 ## CI wiring
 
-`.github/workflows/parity.yml` runs `seam1-plan-shape` on every pull request
-(against a pinned alp-sdk ref — see the workflow's `PINNED_SDK_TAG` comment)
-and on a `repository_dispatch` of type `alp-sdk-planner-change` (the
-cross-repo trigger ADR-0020's Amendment requires: alp-sdk CI fires this on
-every planner change so a drifting emit surfaces on the *alp-sdk* PR, not
-discovered later against a stale checkout). The dispatch payload's
-`client_payload.sdk_ref` picks the exact SDK ref under test.
+`.github/workflows/parity.yml` runs **both** `seam1-plan-shape` and `seam2` on
+every pull request (against a pinned alp-sdk ref — see the workflow's
+`PINNED_SDK_TAG` comment) and on a `repository_dispatch` of type
+`alp-sdk-planner-change` — the cross-repo trigger ADR-0020's Amendment
+requires. alp-sdk fires it on every push touching its contract surface, and
+`client_payload.sdk_ref` picks the exact SDK ref under test, overriding the pin
+for that run.
+
+Both jobs run on a dispatch, not just seam 1, and seam 2 is the reason the
+trigger is worth having: alp-sdk's own `parity-seam1.yml` diffs alp-sdk's emit
+against alp-sdk's OWN frozen oracle and never runs tan, so "alp-sdk changed and
+tan can no longer EXECUTE its plan" is invisible on that side. A pinned PR run
+here cannot see it either, until someone bumps the pin by hand.
+
+**The result surfaces in tan's Actions, not on the alp-sdk PR.** Posting a
+commit status back to alp-sdk would need a credential for alp-sdk inside this
+repo, and the only one available is the same GitHub App whose private key would
+then have to live in a second place; that widening is not worth it today.
+`parity.yml`'s own pin-freshness warning covers the other direction — it says
+when `PINNED_SDK_TAG` has rotted behind alp-sdk's contract surface — and is
+skipped on dispatch runs, which deliberately ignore the pin.
 
 ## Scaffold byte-parity (alp-sdk#864)
 
@@ -217,4 +231,35 @@ for real; the NOTICE-and-pass branch only fires for an older ref used locally
 
 ```
 python3 tests/parity/bootstrap_manifest_parity.py --sdk /path/to/an/alp-sdk/checkout
+```
+
+## Toolchain lock byte-parity (tan-cli#172)
+
+`toolchain_lock_parity.py` guards the same class of drift for the Zephyr SDK
+version `tan doctor`'s `zephyrSdk` check names in its `west sdk install
+--version <..>` remedy (tan-cli#160). alp-sdk's `metadata/toolchains.json`
+(issue #949 item 3) is the single source of truth for that pin, policed on
+the alp-sdk side by `scripts/check_toolchain_lock.py` — but that gate's scope
+is CI *workflows* (`.github/workflows/*.yml`); it cannot see a tan-cli
+checkout, so nothing upstream caught
+`crates/tan-core/src/host_env.rs`'s `ZEPHYR_SDK_INSTALL_VERSION` holding a
+hand-ported copy of the same fact on the side that gate cannot reach. This
+script byte-diffs the vendored copy at
+`contract/fixtures/toolchains/toolchains.json` (which `host_env.rs`
+`include_str!`s) against the pinned checkout's `metadata/toolchains.json`.
+
+Paired with `cargo test`, a failure here has a follow-on:
+`host_env.rs`'s `zephyr_sdk_install_version_matches_the_real_toolchain_lock`
+asserts `ZEPHYR_SDK_INSTALL_VERSION` equals this fixture's `zephyrSdk.version`
+field, so re-vendoring a bumped lock fails that test until the constant is
+updated too.
+
+Self-skips with no reachable alp-sdk checkout, like the gates above. Unlike
+the bootstrap/kconfig gates, there is no "predates the feature" branch:
+`metadata/toolchains.json` already exists at every ref this repo's
+`PINNED_SDK_TAG` has pointed at, so an upstream file missing at the pinned
+ref is a real regression, not a legitimate skip.
+
+```
+python3 tests/parity/toolchain_lock_parity.py --sdk /path/to/an/alp-sdk/checkout
 ```

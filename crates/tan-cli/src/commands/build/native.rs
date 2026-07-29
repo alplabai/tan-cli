@@ -180,5 +180,5 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
         };
     }
 
-    execute_slices_outcome(g, &context, project, &plan, &base, &demoted)
+    execute_slices_outcome(g, &context, project, &plan, &base, &demoted, args.pristine)
 }

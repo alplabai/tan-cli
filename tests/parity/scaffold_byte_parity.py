@@ -23,7 +23,9 @@ vendored tree is internally consistent without an SDK checkout, so a local
 `cargo test`/dev-loop run of this script with no reachable alp-sdk checkout
 is a clean no-op, not a failure. Reachability is checked in this order:
 `--sdk`, then `$ALP_SDK_ROOT`, then an `alp-sdk` checkout next to this
-tan-cli checkout.
+tan-cli checkout -- but an explicit `--sdk` that does not resolve is a hard
+FAIL, not a fall-through to the other two (tan-cli#172 review, tan-cli#175;
+see `_sdk_checkout.sdk_root_or_exit_code`).
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ import subprocess
 import sys
 from collections.abc import Iterable
 from pathlib import Path
+
+from _sdk_checkout import sdk_root_or_exit_code
 
 VENDORED_ROOT = Path(__file__).resolve().parent.parent.parent / (
     "crates/tan-core/src/wizard/vendored"
@@ -50,29 +54,6 @@ NON_ENVELOPE_EXTRAS = ("testcase.yaml",)
 
 class ScaffoldEmitError(RuntimeError):
     """Raised for a live SDK emit failure (not a byte diff -- diffs are reported)."""
-
-
-def _looks_like_sdk_checkout(path: Path) -> bool:
-    return (path / "scripts" / "alp_project.py").is_file()
-
-
-def resolve_sdk_root(explicit: Path | None) -> Path | None:
-    """Find a reachable alp-sdk checkout: `--sdk`, then `$ALP_SDK_ROOT`, then a
-    `../alp-sdk` sibling of this tan-cli checkout. `None` if none resolves --
-    the caller treats that as a clean skip, not a failure."""
-    candidates = []
-    if explicit is not None:
-        candidates.append(explicit)
-    env_root = os.environ.get("ALP_SDK_ROOT")
-    if env_root:
-        candidates.append(Path(env_root))
-    candidates.append(Path(__file__).resolve().parent.parent.parent.parent / "alp-sdk")
-
-    for candidate in candidates:
-        candidate = candidate.resolve()
-        if _looks_like_sdk_checkout(candidate):
-            return candidate
-    return None
 
 
 def discover_vendored_matrix(vendored_root: Path) -> list[tuple[str, str]]:
@@ -200,12 +181,16 @@ def main(argv: list[str] | None = None) -> int:
                               "wizard/vendored/ next to this script).")
     args = parser.parse_args(argv)
 
-    sdk_root = resolve_sdk_root(args.sdk)
-    if sdk_root is None:
-        print("SKIP: no alp-sdk checkout reachable (--sdk / $ALP_SDK_ROOT / "
-              "a sibling alp-sdk checkout); scaffold byte-parity not checked "
-              "this run.")
-        return 0
+    sdk_root, exit_code = sdk_root_or_exit_code(
+        args.sdk,
+        self_skip_message=(
+            "SKIP: no alp-sdk checkout reachable (--sdk / $ALP_SDK_ROOT / "
+            "a sibling alp-sdk checkout); scaffold byte-parity not checked "
+            "this run."
+        ),
+    )
+    if exit_code is not None:
+        return exit_code
 
     vendored_root = args.vendored.resolve()
     pairs = discover_vendored_matrix(vendored_root)

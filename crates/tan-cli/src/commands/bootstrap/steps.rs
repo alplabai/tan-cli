@@ -18,12 +18,13 @@ use std::process::Command;
 
 use tan_core::bootstrap::{
     BootstrapFacts, HostOs, PrereqFailure, Tokens, posix_python_not_runnable, posix_refusal,
-    python_too_old, venv_exe_names, windows_python_not_runnable, windows_refusal,
+    posix_venv_unusable, python_too_old, venv_exe_names, windows_python_not_runnable,
+    windows_refusal,
 };
 
 use super::capture_tail;
 use crate::envelope::Issue;
-use crate::util::{HostPython, command_on_path, probe_host_python};
+use crate::util::{HostPython, command_on_path, probe_host_python, python_venv_capable};
 
 /// Progress reporter. Text mode streams live to stderr (pip/west take minutes,
 /// so a summary at the end would look like a hang); JSON mode stays silent so
@@ -231,7 +232,20 @@ pub(crate) fn check_prerequisites(
     // never refuses), so this branch cannot fail on version. The only extra
     // failure this adds over bootstrap.sh is an interpreter on PATH that cannot
     // run, which the script would have hit one step later at `python3 -m venv`.
-    probe_host_python(facts.python_min_version).ok_or_else(posix_python_not_runnable)
+    let python =
+        probe_host_python(facts.python_min_version).ok_or_else(posix_python_not_runnable)?;
+    // tan-cli#161: python3 ran and cleared every check above, and bootstrap
+    // still died at `python3 -m venv` on a fresh Debian/Ubuntu host --
+    // `python3-venv` is a package Debian splits OUT of base `python3`, so
+    // presence + a working interpreter both say nothing about it. Linux-only:
+    // every install command this gate can name is apt's (see `manifest.rs`'s
+    // `linux` map, which is apt-get-only project-wide), and this is genuinely
+    // a Debian/Ubuntu packaging split, not a general POSIX one -- macOS/BSD
+    // pythons ship `ensurepip` in the base install.
+    if host == HostOs::Linux && !python_venv_capable(&python) {
+        return Err(posix_venv_unusable());
+    }
+    Ok(python)
 }
 
 /// The resolved workspace paths every step works against.
@@ -250,6 +264,7 @@ pub(super) struct Workspace<'a> {
 
 /// The venv executables, resolved against the bin directory that actually
 /// exists on disk.
+#[derive(Debug)]
 pub(super) struct VenvBin {
     /// The venv's interpreter.
     pub python: PathBuf,
@@ -322,7 +337,15 @@ impl Workspace<'_> {
 /// this workspace-local venv, never the system interpreter / `--user` /
 /// `--break-system-packages` (alp-sdk#93: a half-removed system `packaging`
 /// once broke `west init`, and a global west couples the build to the host
-/// interpreter's state). Idempotent: an existing venv is reused.
+/// interpreter's state). Idempotent: an existing venv is reused -- but only a
+/// USABLE one (tan-cli#161). A venv from a bootstrap that died between
+/// `python -m venv` and the pip installs (the Debian/Ubuntu `ensurepip`-missing
+/// case a moment before this in the flow, and any other partial failure) has a
+/// real `bin/python` -- so [`Workspace::venv_present`] alone accepts it -- but
+/// no `pip` module at all. Left alone, every later step here dies the exact
+/// same way it did the first time, and the reporter's only way out was
+/// `rm -rf` the directory by hand: a retry must either reuse a KNOWN-GOOD venv
+/// or start clean, never silently inherit the wreckage.
 pub(super) fn ensure_venv(
     ws: &Workspace,
     log: &mut Log,
@@ -331,23 +354,28 @@ pub(super) fn ensure_venv(
 ) -> Result<VenvBin, String> {
     let _ = std::fs::create_dir_all(ws.workspace_dir);
     if ws.venv_present() {
-        log.line(&format!(
-            "Workspace venv already present at {}",
-            native(ws.venv_dir)
-        ));
+        let existing = ws.venv_bin();
+        if venv_has_usable_pip(&existing) {
+            log.line(&format!(
+                "Workspace venv already present at {}",
+                native(ws.venv_dir)
+            ));
+        } else {
+            log.line(&format!(
+                "Workspace venv at {} has no usable pip (a previous bootstrap likely failed \
+                 partway) -- removing and recreating it",
+                native(ws.venv_dir)
+            ));
+            std::fs::remove_dir_all(ws.venv_dir).map_err(|e| {
+                format!(
+                    "failed to remove the broken venv at {}: {e}",
+                    native(ws.venv_dir)
+                )
+            })?;
+            create_venv(ws, log, runner, host)?;
+        }
     } else {
-        log.line(&format!(
-            "Creating workspace venv at {}",
-            native(ws.venv_dir)
-        ));
-        let mut create = host.command();
-        create.arg("-m").arg("venv").arg(ws.venv_dir);
-        runner.run(&mut create).map_err(|detail| {
-            die(
-                &format!("{} -m venv {} failed", host.display(), native(ws.venv_dir)),
-                detail,
-            )
-        })?;
+        create_venv(ws, log, runner, host)?;
     }
     let venv = ws.venv_bin();
     let mut upgrade = Command::new(&venv.python);
@@ -358,6 +386,48 @@ pub(super) fn ensure_venv(
         log.warn("pip-upgrade", "pip/wheel upgrade reported a problem");
     }
     Ok(venv)
+}
+
+/// `python -m venv ws.venv_dir` with `host`'s interpreter, reporting progress
+/// first. Split out of [`ensure_venv`] so both the fresh-venv path and the
+/// broken-venv recreate path (tan-cli#161) run the exact same creation step —
+/// a second, slightly different copy of it is how the two would end up
+/// disagreeing about what "created" means.
+fn create_venv(
+    ws: &Workspace,
+    log: &mut Log,
+    runner: &Runner,
+    host: &HostPython,
+) -> Result<(), String> {
+    log.line(&format!(
+        "Creating workspace venv at {}",
+        native(ws.venv_dir)
+    ));
+    let mut create = host.command();
+    create.arg("-m").arg("venv").arg(ws.venv_dir);
+    runner.run(&mut create).map_err(|detail| {
+        die(
+            &format!("{} -m venv {} failed", host.display(), native(ws.venv_dir)),
+            detail,
+        )
+    })
+}
+
+/// Whether an existing venv's own interpreter can actually run `pip` — the
+/// probe [`ensure_venv`] uses to tell a healthy venv from the corpse of a
+/// bootstrap that died partway (tan-cli#161: `bin/python` exists and IS the
+/// real interpreter, since Debian's ensurepip failure still leaves that file
+/// behind; what is missing is `pip` itself). `false` on a spawn failure too —
+/// unlike [`crate::util::python_venv_capable`]'s fail-OPEN (an inconclusive
+/// answer about a host interpreter must not block a clean host), an existing
+/// venv that cannot even be spawned is itself the evidence of brokenness this
+/// check exists to catch, so it fails CLOSED (triggers a recreate).
+fn venv_has_usable_pip(venv: &VenvBin) -> bool {
+    Command::new(&venv.python)
+        .args(["-m", "pip", "--version"])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 /// Install west into the venv, then `west init -l` / `west update` /
@@ -545,6 +615,178 @@ mod tests {
             ),
             "west update failed: fatal: not a git repository"
         );
+    }
+
+    /// An executable `#!/bin/sh` stand-in that ignores its arguments and exits
+    /// with `code`. Deliberately NOT `/bin/true` / `/bin/false`: macOS ships
+    /// neither under `/bin` (they live in `/usr/bin`), so hardcoding the Linux
+    /// path passed ubuntu and windows and failed only the macos-latest leg
+    /// with `failed to launch /bin/true: No such file or directory (os error
+    /// 2)`. A script written into the test's own temp dir depends on no host
+    /// layout at all.
+    #[cfg(unix)]
+    fn exit_code_shim(dir: &std::path::Path, name: &str, code: i32) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Stand-ins for a venv whose `pip` works vs. one whose `-m pip --version`
+    /// fails, without needing a real Python venv on the test host (both ignore
+    /// whatever args are appended and exit 0/1 respectively).
+    #[cfg(unix)]
+    #[test]
+    fn venv_has_usable_pip_reads_the_probe_exit_status() {
+        let root = tmp("venv-usable-probe");
+        let ok = exit_code_shim(&root, "python-ok", 0);
+        let healthy = VenvBin {
+            python: ok.clone(),
+            west: ok,
+            bin_dir: "bin".to_string(),
+        };
+        assert!(venv_has_usable_pip(&healthy));
+
+        let bad = exit_code_shim(&root, "python-bad", 1);
+        let broken = VenvBin {
+            python: bad.clone(),
+            west: bad,
+            bin_dir: "bin".to_string(),
+        };
+        assert!(!venv_has_usable_pip(&broken));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A venv interpreter that cannot even be spawned (missing entirely) fails
+    /// CLOSED -- the opposite default from `python_venv_capable`'s fail-open,
+    /// and deliberately so: an unusable EXISTING venv is exactly the state
+    /// this probe exists to catch, not an inconclusive read on a host
+    /// interpreter that has not been touched yet.
+    #[test]
+    fn venv_has_usable_pip_fails_closed_when_it_cannot_even_launch() {
+        let root = tmp("venv-usable-missing");
+        let ghost = VenvBin {
+            python: root.join("bin").join("does-not-exist"),
+            west: root.join("bin").join("does-not-exist-west"),
+            bin_dir: "bin".to_string(),
+        };
+        assert!(!venv_has_usable_pip(&ghost));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// tan-cli#161's second bug, driven end to end: a `.venv` left behind by a
+    /// bootstrap that died between `python -m venv` and the pip installs (real
+    /// `bin/python`, no working pip) must be REMOVED and recreated, not
+    /// silently reused -- reuse is exactly what made the reporter's second
+    /// `tan bootstrap` fail identically to the first, with nothing new to act
+    /// on. `host` is an always-succeeding `#!/bin/sh` stand-in here so
+    /// `create_venv`'s spawn "succeeds" without needing a real Python on the
+    /// test host; it does not write real venv files, which is fine -- what
+    /// this test proves is that the WRECKAGE is gone, i.e. a recreate was
+    /// actually attempted rather than the existing corpse being kept.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_venv_recreates_a_venv_with_no_usable_pip() {
+        let root = tmp("ensure-venv-broken");
+        let venv_dir = root.join(".venv");
+        let python_path = venv_dir.join("bin").join("python");
+        std::fs::create_dir_all(python_path.parent().unwrap()).unwrap();
+        // A real, executable script that runs (unlike Debian's actual failure
+        // mode, whose `bin/python` runs fine and only `-m pip` fails) but
+        // fails EVERY invocation -- sufficient to make `venv_has_usable_pip`
+        // read it as broken, which is all `ensure_venv` consults.
+        std::fs::write(&python_path, "#!/bin/sh\nexit 1\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&python_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert!(
+            python_path.is_file(),
+            "the broken interpreter must exist first"
+        );
+
+        let facts = fallback_facts((3, 10));
+        let ws = Workspace {
+            is_windows: false,
+            facts: &facts,
+            repo_root: &root,
+            workspace_dir: &root,
+            venv_dir: &venv_dir,
+        };
+        let mut log = Log::new(true);
+        let runner = Runner {
+            json: true,
+            clear_zephyr_base: false,
+        };
+        let host = HostPython {
+            argv: vec![
+                exit_code_shim(&root, "host-python", 0)
+                    .to_string_lossy()
+                    .into_owned(),
+            ],
+            version: (3, 10),
+        };
+
+        let result = ensure_venv(&ws, &mut log, &runner, &host);
+        assert!(result.is_ok(), "{result:?}");
+        // The broken interpreter must be GONE -- the always-succeeding host
+        // stand-in writes nothing, so its continued presence would mean the
+        // corpse was reused rather than removed.
+        assert!(
+            !python_path.exists(),
+            "the broken venv should have been removed, not reused"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The mirror case: a venv whose pip DOES work is reused untouched, never
+    /// removed -- `ensure_venv` must not recreate a perfectly good venv on
+    /// every single bootstrap run.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_venv_reuses_a_venv_with_usable_pip() {
+        let root = tmp("ensure-venv-healthy");
+        let venv_dir = root.join(".venv");
+        let python_path = venv_dir.join("bin").join("python");
+        std::fs::create_dir_all(python_path.parent().unwrap()).unwrap();
+        let marker = "#!/bin/sh\nexit 0\n";
+        std::fs::write(&python_path, marker).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&python_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let facts = fallback_facts((3, 10));
+        let ws = Workspace {
+            is_windows: false,
+            facts: &facts,
+            repo_root: &root,
+            workspace_dir: &root,
+            venv_dir: &venv_dir,
+        };
+        let mut log = Log::new(true);
+        let runner = Runner {
+            json: true,
+            clear_zephyr_base: false,
+        };
+        let host = HostPython {
+            argv: vec!["/bin/false".to_string()],
+            version: (3, 10),
+        };
+
+        let result = ensure_venv(&ws, &mut log, &runner, &host);
+        assert!(result.is_ok(), "{result:?}");
+        // Untouched: same bytes as written above. If `ensure_venv` had wrongly
+        // recreated it, `create_venv` would have run `/bin/false -m venv` --
+        // which fails, so this call would have returned `Err` instead of
+        // `Ok`, AND the file (if a `remove_dir_all` ran first) would be gone.
+        assert_eq!(std::fs::read_to_string(&python_path).unwrap(), marker);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

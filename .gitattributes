@@ -17,6 +17,12 @@ tests/fixtures/kconfig-contract/** text eol=lf
 # it and fail that byte-diff against the LF original.
 contract/fixtures/bootstrap/** text eol=lf
 
+# Vendored copy of alp-sdk's `metadata/toolchains.json` (tan-cli#172), byte-
+# diffed against the live checkout by tests/parity/toolchain_lock_parity.py.
+# Same reason again: a Windows checkout with autocrlf=true would CRLF-convert
+# it and fail that byte-diff against the LF original.
+contract/fixtures/toolchains/** text eol=lf
+
 # The shipped shell completion scripts, baked in via include_str!. Two
 # independent reasons, either one sufficient: a CRLF bash/zsh script is
 # broken ON the target shell (a trailing `\r` rides into every command), and
@@ -26,3 +32,12 @@ contract/fixtures/bootstrap/** text eol=lf
 # the windows-latest leg only, since ubuntu/macos and a `core.autocrlf=false`
 # dev box never see it.
 crates/tan-cli/src/commands/completion_scripts/** text eol=lf
+
+# The installers are fetched and executed on a customer's machine. A CRLF
+# `install.sh` fails on every POSIX host with `bad interpreter: /usr/bin/env
+# sh^M` -- a first-contact failure with a cause that reads like nothing to do
+# with line endings. `core.autocrlf=true` (the Windows default, and this
+# machine's setting) CRLF-converts it on checkout, so the only thing keeping
+# LF in the blob is git's normalise-on-commit; pin it rather than rely on
+# every future contributor's config matching.
+install.sh text eol=lf

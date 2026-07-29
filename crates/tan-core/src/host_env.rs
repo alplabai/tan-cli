@@ -56,6 +56,23 @@ pub const ZEPHYR_SDK_HOSTS: [&str; 4] = [
     "windows-x86_64",
 ];
 
+/// The Zephyr SDK release `west sdk install --version` needs, for the SAME
+/// pin [`ZEPHYR_SDK_HOSTS`]'s doc comment verifies (`1.0.1`, current for both
+/// of alp-sdk's `main`/`dev` Zephyr pins). One constant so a fix string naming
+/// the version (tan-cli#160) and this doc's own claim about it cannot drift
+/// apart silently.
+///
+/// The full command this feeds — `west sdk install --version 1.0.1 -t
+/// arm-zephyr-eabi` — is what got the alp-sdk#855 fresh-host run past tan-cli#160
+/// (its own words: *"I got past it with `west sdk install --version 1.0.1 -t
+/// arm-zephyr-eabi` — knowledge tan never provided"*), and it is the same
+/// command this repo's own "Live state" notes already record as e2e-verified
+/// against a real west workspace. tan does not run it — `west sdk install`
+/// downloads and extracts a toolchain, which is squarely `west`'s job once a
+/// workspace exists, not a hidden side effect of a read-only `doctor` report —
+/// it only prints the exact, pinned command precisely enough to act on.
+pub const ZEPHYR_SDK_INSTALL_VERSION: &str = "1.0.1";
+
 /// The already-probed host facts the checks below decide on. One struct rather
 /// than four arguments, mirroring [`BuildToolProbe`](crate::BuildToolProbe):
 /// the caller does the IO, this module does the judging.
@@ -185,8 +202,17 @@ pub fn host_environment_checks(probe: &HostEnvProbe) -> Vec<DoctorCheck> {
     checks
 }
 
-/// `zephyrSdkHost` — does the pinned Zephyr SDK publish a host build for this
-/// machine?
+/// `zephyrSdkAvailableForHost` — does the pinned Zephyr SDK publish a host
+/// build for this machine at all?
+///
+/// Named (tan-cli#160; was `zephyrSdkHost` through v0.4.0) so a `[+]` here
+/// cannot be misread as "the toolchain is installed" — it answers a narrower
+/// question, "COULD one be provisioned on this machine". The check that means
+/// "IS one installed" is `--build`'s `zephyrSdk`, which is a hard `Fail` when
+/// absent (#159/#166); the two must never share a name, or a `[+]` beside a
+/// hard-failing `zephyrSdk` on the SAME report reads as a contradiction about
+/// the very thing that cost the fresh-host run in alp-sdk#855 73 of its ~80
+/// minutes.
 ///
 /// **`Fail`, not `Warn`**, on every unserved host. This is the one check in the
 /// group that means "the toolchain cannot run here", full stop: there is no
@@ -198,7 +224,7 @@ pub fn zephyr_sdk_host_check(os: &str, arch: &str) -> DoctorCheck {
     let tag = zephyr_sdk_host_tag(os, arch);
     if ZEPHYR_SDK_HOSTS.contains(&tag.as_str()) {
         return DoctorCheck {
-            name: "zephyrSdkHost".to_string(),
+            name: "zephyrSdkAvailableForHost".to_string(),
             status: DoctorStatus::Pass,
             detail: format!("The Zephyr SDK publishes a host build for {tag}."),
             fix: None,
@@ -233,10 +259,12 @@ pub fn zephyr_sdk_host_check(os: &str, arch: &str) -> DoctorCheck {
                  substitute — Rosetta translates x86_64 for Apple silicon, not the reverse — and \
                  macOS has no WSL2 equivalent to fall back to."
             ),
-            "Build on a Linux host: a linux-x86_64 VM or container on this Mac, or a remote Linux \
-             builder. Pinning an older Zephyr SDK is not an option — the pinned Zephyr requires \
-             1.0.1, which is past the release that dropped macos-x86_64."
-                .to_string(),
+            format!(
+                "Build on a Linux host: a linux-x86_64 VM or container on this Mac, or a remote \
+                 Linux builder. Pinning an older Zephyr SDK is not an option — the pinned Zephyr \
+                 requires {ZEPHYR_SDK_INSTALL_VERSION}, which is past the release that dropped \
+                 macos-x86_64."
+            ),
         ),
         _ => (
             format!("The Zephyr SDK publishes no host build for {tag}. Served hosts are {served}."),
@@ -245,7 +273,7 @@ pub fn zephyr_sdk_host_check(os: &str, arch: &str) -> DoctorCheck {
     };
 
     DoctorCheck {
-        name: "zephyrSdkHost".to_string(),
+        name: "zephyrSdkAvailableForHost".to_string(),
         status: DoctorStatus::Fail,
         detail,
         fix: Some(fix),
@@ -382,6 +410,40 @@ pub fn home_path_check(home: Option<&str>) -> DoctorCheck {
 mod tests {
     use super::*;
 
+    /// The real `alp-sdk/metadata/toolchains.json` (alp-sdk#949 item 3),
+    /// vendored so [`ZEPHYR_SDK_INSTALL_VERSION`] is tested against the actual
+    /// producer output rather than trusted by construction — the same shape
+    /// [`crate::bootstrap::manifest`]'s `REAL_MANIFEST` uses for
+    /// `metadata/bootstrap.json`. `tests/parity/toolchain_lock_parity.py`
+    /// byte-diffs this copy against the pinned alp-sdk checkout in CI; this
+    /// test is the follow-on that makes a re-vendor here fail loudly if
+    /// [`ZEPHYR_SDK_INSTALL_VERSION`] was not updated to match (tan-cli#172).
+    const REAL_TOOLCHAIN_LOCK: &str =
+        include_str!("../../../contract/fixtures/toolchains/toolchains.json");
+
+    /// tan-cli#172: `ZEPHYR_SDK_INSTALL_VERSION` is a hand-ported copy of a
+    /// fact alp-sdk owns and guards with `scripts/check_toolchain_lock.py` —
+    /// a gate that cannot see this repo. This is the tan-side half: the
+    /// constant must equal the vendored fixture's `zephyrSdk.version`
+    /// field, so a re-vendor (parity script above) that lands a bumped
+    /// version fails HERE until the constant is updated too, instead of
+    /// `tan doctor` silently naming a stale `west sdk install --version`.
+    #[test]
+    fn zephyr_sdk_install_version_matches_the_real_toolchain_lock() {
+        let doc: serde_json::Value =
+            serde_json::from_str(REAL_TOOLCHAIN_LOCK).expect("vendored toolchains.json parses");
+        let real_version = doc["zephyrSdk"]["version"]
+            .as_str()
+            .expect("zephyrSdk.version is a string in the real manifest");
+        assert_eq!(
+            ZEPHYR_SDK_INSTALL_VERSION, real_version,
+            "ZEPHYR_SDK_INSTALL_VERSION has drifted from the vendored \
+             contract/fixtures/toolchains/toolchains.json's zephyrSdk.version -- re-vendor the \
+             fixture (tests/parity/toolchain_lock_parity.py) if alp-sdk bumped the pin, then \
+             update this constant to match"
+        );
+    }
+
     /// A probe for a clean `linux-x86_64` host — the shape CI runs on, and
     /// therefore the ONE shape these tests must not be limited to.
     fn clean() -> HostEnvProbe<'static> {
@@ -422,7 +484,7 @@ mod tests {
             let check = zephyr_sdk_host_check(os, arch);
             assert_eq!(check.status, DoctorStatus::Fail, "{os}-{arch}");
             assert!(check.fix.is_some(), "{os}-{arch}");
-            assert_eq!(check.name, "zephyrSdkHost");
+            assert_eq!(check.name, "zephyrSdkAvailableForHost");
         }
     }
 
@@ -555,7 +617,7 @@ mod tests {
             ..clean()
         };
         let names = check_names(&unserved);
-        assert_eq!(names, ["zephyrSdkHost", "homePath"]);
+        assert_eq!(names, ["zephyrSdkAvailableForHost", "homePath"]);
 
         // `longPaths` on Windows only: the registry value does not exist
         // elsewhere, so emitting it on Linux would be an invented verdict.
@@ -576,7 +638,7 @@ mod tests {
         };
         assert_eq!(
             check_names(&windows),
-            ["zephyrSdkHost", "longPaths", "homePath"]
+            ["zephyrSdkAvailableForHost", "longPaths", "homePath"]
         );
     }
 

@@ -60,7 +60,10 @@ pub fn run(g: &GlobalArgs, args: &ScaffoldArgs) -> CommandRun {
     // caller with no `--name`/`--template` block forever on an inquire prompt
     // rendered to stderr, or — if stdin was already closed — cancel it and
     // exit 1 with zero bytes on stdout (mirrors the identical fix in `init`).
-    let is_interactive = !g.non_interactive && !g.ci && !g.is_json();
+    // `can_prompt` also carries #187's stdin-is-a-terminal half, so a
+    // redirected-stdin `tan scaffold` fails with `scaffold.name-required`
+    // instead of blocking on a prompt nobody can answer.
+    let is_interactive = g.can_prompt();
 
     // 1. Resolve module name (required).
     let module_name = match resolve_module_name(args.name.as_deref(), is_interactive) {
