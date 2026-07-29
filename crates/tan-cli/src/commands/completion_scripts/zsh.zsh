@@ -114,7 +114,7 @@ _tan() {
           _arguments '1:subcommand:(list install current switch)' '--destination[Cache root]:path:_files -/' '--global[Pin the machine-global default]' "${global_args[@]}"
           ;;
         bootstrap)
-          _arguments '--no-pip[Skip pip install]' '--no-west[Skip west init/update]' '--print-env[Print environment lines only]' '--workspace[Build the workspace at this path]:path:_files -/' "${global_args[@]}"
+          _arguments '--no-pip[Skip pip install]' '--no-west[Skip west init/update]' '--print-env[Print environment lines only]' '--allow-partial[Report success despite a failed dependency install]' '--workspace[Build the workspace at this path]:path:_files -/' "${global_args[@]}"
           ;;
         build)
           _arguments '--plan[Show the build plan]' '--plan-from[Read build plan from file]:path:_files' '--materialise[Materialise plan files]' '--native[Build natively]' '--manifest[Show the system manifest]' '--manifest-from[Read manifest from file]:path:_files' '--no-auto-bootstrap[Never bootstrap implicitly]' '--pristine[Force-wipe build dirs before dispatch]' "${global_args[@]}"

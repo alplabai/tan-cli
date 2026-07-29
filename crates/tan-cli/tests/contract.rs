@@ -11,6 +11,7 @@
 //! calling command handlers in-process — that also exercises the exact
 //! argv-parsing + stdout-framing path the extension actually shells out to.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -506,6 +507,118 @@ fn frozen_issue_codes() {
             other => panic!("{code}: unknown status {other:?} (expected frozen|reserved|retired)"),
         }
     }
+}
+
+/// The OTHER direction, and the one that did not exist (tan-cli#219).
+///
+/// [`frozen_issue_codes`] walks the REGISTRY and checks each entry still exists
+/// in source. Nothing walked SOURCE and checked each emitted code exists in the
+/// registry — so a code that was never registered was ungated on BOTH sides at
+/// once: `frozen_issue_codes` iterates only the registry, so it never saw it,
+/// and alp-sdk-vscode's own gate keys off the published artefact, which is
+/// built from that same registry. A rename of an unregistered code was
+/// invisible to both repos simultaneously. Measured when this landed: 41
+/// literal emit sites with no entry at any status.
+///
+/// The fix is NOT to freeze all 41 — the registry's own policy is promote-on-
+/// binding (see its `_comment`), and freezing codes nothing consumes
+/// over-commits, turning every future internal rename into a contract break for
+/// no consumer's benefit. They are registered `reserved` instead: declared, so
+/// this gate can see them, explicitly uncommitted, so renaming one costs
+/// nothing. This test is what makes "declared" mandatory rather than optional.
+///
+/// KNOWN CEILING, stated rather than papered over: this scans the LITERAL
+/// `code: "family.name"` shape only. Codes assembled by a prefixing helper —
+/// `commands/bootstrap/mod.rs`'s `format!("bootstrap.{code}")` and
+/// `debug_config.rs`'s `failure_envelope` — never appear as a whole literal and
+/// are invisible here. Today that leaves no hole: every one of them is already
+/// registered, and `frozen_issue_codes` back-checks each against its own
+/// `emittedBy`/`literal`, so the two directions together cover the current set
+/// completely. A NEW code added to one of those two helpers would still escape.
+/// Tracked as tan-cli#224.
+#[test]
+fn every_emitted_issue_code_is_registered() {
+    let registry: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(contract_root().join("issue-codes.json"))
+            .expect("read contract/issue-codes.json"),
+    )
+    .expect("contract/issue-codes.json is not valid JSON");
+    let registered: BTreeSet<String> = registry["issueCodes"]
+        .as_array()
+        .expect("issueCodes must be an array")
+        .iter()
+        .filter_map(|e| e["code"].as_str().map(str::to_string))
+        .collect();
+
+    let mut sources: Vec<(PathBuf, String)> = Vec::new();
+    collect_rust_sources(&repo_root().join("crates"), &mut sources);
+
+    // (code, file) so the failure names where to look, not just what is missing.
+    let mut emitted: BTreeSet<(String, String)> = BTreeSet::new();
+    for (path, source) in &sources {
+        for code in emitted_code_literals(&code_lines(source)) {
+            emitted.insert((code, path.display().to_string()));
+        }
+    }
+
+    // Non-vacuity, the same guard the walk above carries: a scanner that
+    // silently matches nothing passes this test while gating nothing at all,
+    // which is the exact failure mode #219 is about.
+    assert!(
+        emitted.len() > 30,
+        "found only {} emitted issue codes — the scan is broken, and a broken \
+         scan makes this gate vacuous",
+        emitted.len()
+    );
+
+    let unregistered: Vec<&(String, String)> = emitted
+        .iter()
+        .filter(|(code, _)| !registered.contains(code))
+        .collect();
+    assert!(
+        unregistered.is_empty(),
+        "{} issue code(s) are emitted but appear in contract/issue-codes.json at \
+         NO status:\n{}\n\n\
+         An unregistered code is ungated on both sides of the seam at once: this \
+         repo's registry-driven checks never see it, and the published \
+         envelope-contract.json is built from that same registry, so \
+         alp-sdk-vscode cannot see it either. Add each one with \
+         `\"status\": \"reserved\"` and `\"consumer\": \"none\"` — that is the \
+         declared-but-uncommitted state and costs nothing, since a reserved code \
+         may still be renamed freely. Use `frozen` ONLY once a consumer actually \
+         matches it.",
+        unregistered.len(),
+        unregistered
+            .iter()
+            .map(|(code, file)| format!("  {code}  ({file})"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// Every `code: "family.name"` string literal in `source`. Deliberately narrow:
+/// it matches the one shape an `Issue`/`FailCtx` literal takes, so prose and
+/// unrelated `code:` fields cannot widen it into false demands for registration.
+fn emitted_code_literals(source: &str) -> Vec<String> {
+    const NEEDLE: &str = "code: \"";
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find(NEEDLE) {
+        rest = &rest[start + NEEDLE.len()..];
+        let Some(end) = rest.find('"') else { break };
+        let candidate = &rest[..end];
+        // A real code is `family.name`, lowercase/dash/dot only. Anything else
+        // is a format string or an interpolation and is not a literal emit.
+        if candidate.contains('.')
+            && candidate
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+        {
+            out.push(candidate.to_string());
+        }
+        rest = &rest[end..];
+    }
+    out
 }
 
 /// Recursively collects `(path, contents)` for every `.rs` file under `dir`,

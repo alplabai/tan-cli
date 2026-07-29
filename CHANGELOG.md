@@ -104,7 +104,71 @@
   would anchor on the project root) and belongs with the alp-sdk metadata
   contract, not with a per-invocation flag.
 
+### Changed
+- **`tan bootstrap` no longer reports success after failing to install the
+  dependencies its own next step needs** (#220). Measured end to end in one
+  `first blink` run: the Zephyr requirements install died on `libudev.h`,
+  bootstrap printed `bootstrap: complete.`, and the build that followed died
+  with `ModuleNotFoundError: No module named 'elftools'` — three commands from
+  the cause, with nothing linking back. That is a false success, not a warning.
+
+  The fix is to the **verdict, not the phase**. Each install stays non-fatal:
+  the run continues, the workspace is left on disk, and nothing downstream is
+  blocked — a venv missing `hidapi` still builds `native_sim` perfectly well, so
+  refusing outright would cost more customers than it saves. What changes is
+  that a run which cannot do what it was bootstrapped for now says
+  `bootstrap: INCOMPLETE`, names which installs failed, and exits 1.
+
+  Three of the four pip phases count: `zephyr-requirements`, `sdk-extras`
+  (`jsonschema`, which the loader imports) and `editable-install`.
+  `pip-upgrade` is deliberately excluded — the pip already present still
+  installs packages. **`--allow-partial`** reports success anyway, for the case
+  where the missing packages are ones you know you do not need; it still prints
+  what is missing, so it is an informed choice rather than a mute override. The
+  blocking issues are raised at `error` severity only when they actually blocked
+  the verdict — under `--allow-partial` they stay `warning`, because an `error`
+  on a run that exits 0 is its own kind of lie.
+
+  This BREAKS PARITY with alp-sdk's `bootstrap.sh` / `bootstrap.ps1`, which
+  still warn and report success. `pip_phase`'s doc comment claimed the phases
+  were non-fatal "matching both scripts"; that claim is now false and has been
+  replaced with the divergence and its reason, rather than left to rot. Moving
+  the scripts is alp-sdk#1038's decision.
+
 ### Fixed
+- **41 emitted issue codes were in the registry at no status, which left them
+  ungated on BOTH sides of the seam at once** (#219). `frozen_issue_codes` only
+  ever walked registry → source, checking each entry still exists. Nothing
+  walked source → registry. An unregistered code was therefore invisible to
+  this repo's checks (they iterate the registry) *and* to alp-sdk-vscode's
+  (their gate reads the published artefact, which is built from that same
+  registry) — so renaming one was silent in both repos simultaneously.
+  `every_emitted_issue_code_is_registered` now walks the other way and fails
+  when an emitted code has no entry, naming the code and the file.
+
+  They are registered **`reserved`, not `frozen`**. The registry's own policy is
+  promote-on-binding; freezing codes no consumer reads would over-commit and
+  turn every future internal rename into a contract break for nobody's benefit.
+  `reserved` is the declared-but-uncommitted state that already existed for
+  exactly this — the file explicitly says not to invent a third status — so a
+  reserved code may still be renamed freely, while the gate can finally see it.
+  No new status was added.
+
+  One consequence worth stating: the published `envelope-contract.json` carries
+  the registry whole, so it grew from 4 issue codes to 68 (5 frozen, 62
+  reserved, 1 retired) and from 20081 to 73091 bytes. That is the point — the
+  asset presented itself as the contract while covering a fraction of what tan
+  emits, and a silently-partial artefact is worse than either honest option. A
+  consumer reads `status` to decide what a code promises; alp-sdk-vscode's
+  reader is already status-aware and looks its own codes up in that map, so the
+  extra entries change nothing for it.
+
+  KNOWN CEILING, recorded rather than papered over: the scan matches the literal
+  `code: "x.y"` shape, so codes assembled by a prefixing helper
+  (`format!("bootstrap.{code}")`, `debug_config.rs`'s `failure_envelope`) are
+  invisible to it. Today that is no hole — all of them are registered and
+  `frozen_issue_codes` back-checks each — but a NEW code in one of those two
+  files would still escape. Tracked as #224.
 - **The Zephyr SDK — the one build-blocking `Fail` a first-install customer
   hits — was the only prerequisite that could never carry a Fix button**
   (#203, #210). `missingPrerequisites` was written in exactly one place,

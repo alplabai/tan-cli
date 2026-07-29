@@ -18,8 +18,10 @@
 #                Download URL is therefore deterministic:
 #                   https://github.com/alplabai/tan-cli/releases/download/<tag>/<asset>
 #                Plus `checksums.txt` (sha256 of every binary),
-#                `envelope-contract.json` (the frozen issue codes + one golden
-#                envelope per command family — see contract/README.md), and a
+#                `envelope-contract.json` (the WHOLE issue-code registry, all
+#                three statuses and not a frozen-only subset — a consumer reads
+#                `status` to decide what each code promises — plus one golden
+#                envelope per command family; see contract/README.md), and a
 #                GitHub build-provenance attestation covering all of the above —
 #                verify with `gh attestation verify <file> --repo alplabai/tan-cli`.
 #

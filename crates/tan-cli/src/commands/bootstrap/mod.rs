@@ -397,7 +397,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
                 return failure(g, exit, code, vec![message], data, project);
             }
             relocate::Resolution::MoveFailed(message) => {
-                let issues = log.take_issues();
+                let issues = log.take_issues(false);
                 let data = data_for(args, &sdk_root, &paths, &facts, &pin);
                 return fatal(g, project, data, issues, message);
             }
@@ -498,7 +498,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
             Ok(venv) => Some(venv),
             Err(message) => {
                 let mut issues = issues;
-                issues.extend(log.take_issues());
+                issues.extend(log.take_issues(false));
                 let data = data_for(args, &sdk_root, &paths, &facts, &pin);
                 return fatal(g, project, data, issues, message);
             }
@@ -558,7 +558,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         }
         if let Err(message) = west_phase(&workspace, venv, &mut log, &runner, plan.reuse) {
             let mut issues = issues;
-            issues.extend(log.take_issues());
+            issues.extend(log.take_issues(false));
             let data = data_for(args, &sdk_root, &paths, &facts, &pin);
             return fatal(g, project, data, issues, message);
         }
@@ -605,11 +605,28 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     };
     let mut text = optional_libs_block(&facts, host);
     text.push(String::new());
-    // Deliberately NOT the oracles' "Bootstrap complete." — `doctor`'s
-    // `bootstrap_fix_doctor_check` folds this exact line into its `bootstrapFix`
-    // check detail, and `tan`'s own house prefix is what reads correctly there
-    // ("bootstrap: complete."). The only line in the port that is reworded.
-    text.push("bootstrap: complete.".to_string());
+
+    // tan-cli#220: the VERDICT, not the phase.
+    //
+    // Each pip phase stays non-fatal on its own — the run continues, the
+    // workspace is left on disk, and a venv missing `hidapi` still builds
+    // `native_sim` perfectly well, so refusing outright would cost more
+    // customers than it saves. What is NOT acceptable is printing
+    // `bootstrap: complete.` after failing to install the dependencies the very
+    // next command needs. The first-blink job measured that whole chain in one
+    // run: the install died on `libudev.h`, bootstrap said `complete.`, and the
+    // build that followed died with `ModuleNotFoundError: No module named
+    // 'elftools'` — three commands and one green verdict away from the cause.
+    //
+    // So the failure lands on the verdict alone. Nothing downstream is blocked;
+    // the run just stops claiming it produced a working environment.
+    let (verdict_lines, exit) = verdict(&log.blocking(), args.allow_partial);
+    let refused = exit != ExitCode::Success;
+    text.extend(verdict_lines);
+
+    // The next steps still print either way. They are how the customer gets to
+    // `tan doctor`, which is what diagnoses the very failure above — withholding
+    // them on the refusal path would take away the tool for fixing it.
     text.extend(next_steps_block(
         &facts,
         tokens,
@@ -617,9 +634,9 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         &venv_bin_dir,
         is_windows,
     ));
-    issues.extend(log.take_issues());
+    issues.extend(log.take_issues(refused));
     let data = data_for(args, &sdk_root, &paths, &facts, &pin);
-    finish(g, ExitCode::Success, project, data, issues, text)
+    finish(g, exit, project, data, issues, text)
 }
 
 /// Load `<sdkRoot>/metadata/bootstrap.json`, or fall back to the hand-ported
@@ -912,6 +929,54 @@ fn os_label(host: HostOs) -> &'static str {
 
 /// Assemble the `CommandRun`: one envelope on stdout in JSON mode, the text
 /// lines otherwise.
+/// The closing verdict for a run that got all the way through its phases:
+/// the lines to print, and whether success was REFUSED (tan-cli#220).
+///
+/// Pure, and separate from [`run`], because `run` spawns real processes and
+/// cannot be driven from a unit test — which is exactly how a verdict rule can
+/// look correct, be unreachable, and never be noticed.
+///
+/// `blocking` is [`Log::blocking`]'s output: the recorded warnings after which
+/// the workspace cannot do what it was bootstrapped for. Empty (the normal
+/// case) reports success unchanged.
+fn verdict(blocking: &[&str], allow_partial: bool) -> (Vec<String>, ExitCode) {
+    if blocking.is_empty() {
+        // Deliberately NOT the oracles' "Bootstrap complete." — `doctor`'s
+        // `bootstrap_fix_doctor_check` folds this exact line into its
+        // `bootstrapFix` check detail, and `tan`'s own house prefix is what
+        // reads correctly there ("bootstrap: complete."). The only line in the
+        // port that is reworded.
+        return (vec!["bootstrap: complete.".to_string()], ExitCode::Success);
+    }
+    let named = blocking.join(", ");
+    if allow_partial {
+        return (
+            vec![
+                "bootstrap: complete.".to_string(),
+                format!(
+                    "  (--allow-partial: {named} did not install; commands that need \
+                     them will fail.)"
+                ),
+            ],
+            ExitCode::Success,
+        );
+    }
+    (
+        vec![
+            format!(
+                "bootstrap: INCOMPLETE -- {named} did not install, so this workspace \
+                 cannot build yet."
+            ),
+            "  The messages above name the remedy for each. Fix them and re-run \
+             `tan bootstrap`, or pass --allow-partial to accept this workspace as-is \
+             (the west workspace and venv are already on disk, and a build that needs \
+             none of the missing packages will still work)."
+                .to_string(),
+        ],
+        ExitCode::RuntimeFailure,
+    )
+}
+
 fn finish(
     g: &GlobalArgs,
     exit: ExitCode,
@@ -1122,6 +1187,59 @@ mod tests {
         }
     }
 
+    /// #220. A run that failed to install what the next command needs must not
+    /// call itself complete. Measured in one first-blink run: the requirements
+    /// install died on `libudev.h`, bootstrap printed `complete.`, and the build
+    /// after it died with `ModuleNotFoundError: No module named 'elftools'`.
+    #[test]
+    fn a_blocked_run_refuses_the_success_line_and_names_what_is_missing() {
+        let (lines, exit) = verdict(&["zephyr-requirements"], false);
+        assert_eq!(exit, ExitCode::RuntimeFailure);
+        assert!(
+            !lines.iter().any(|l| l.contains("bootstrap: complete.")),
+            "a workspace that cannot build must not report completion: {lines:?}"
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("INCOMPLETE"), "{joined}");
+        assert!(
+            joined.contains("zephyr-requirements"),
+            "the verdict must name WHICH install failed: {joined}"
+        );
+        assert!(
+            joined.contains("--allow-partial"),
+            "a refusal that does not name its escape is a dead end: {joined}"
+        );
+    }
+
+    /// Every blocking warning is named, not just the first — a customer fixing
+    /// one and re-running should not discover the next one at a time.
+    #[test]
+    fn a_blocked_run_names_every_missing_install() {
+        let (lines, _) = verdict(&["zephyr-requirements", "sdk-extras"], false);
+        let joined = lines.join("\n");
+        assert!(joined.contains("zephyr-requirements") && joined.contains("sdk-extras"));
+    }
+
+    /// The escape reports success — and still says what is missing, so
+    /// `--allow-partial` is an informed choice rather than a mute override.
+    #[test]
+    fn allow_partial_reports_success_but_still_names_the_gap() {
+        let (lines, exit) = verdict(&["sdk-extras"], true);
+        assert_eq!(exit, ExitCode::Success);
+        let joined = lines.join("\n");
+        assert!(joined.contains("bootstrap: complete."), "{joined}");
+        assert!(joined.contains("sdk-extras"), "{joined}");
+    }
+
+    /// The overwhelmingly common path: nothing blocked, so the output is
+    /// byte-identical to before #220 — one line, no note.
+    #[test]
+    fn a_clean_run_is_unchanged() {
+        let clean = (vec!["bootstrap: complete.".to_string()], ExitCode::Success);
+        assert_eq!(verdict(&[], false), clean);
+        assert_eq!(verdict(&[], true), clean);
+    }
+
     /// No flags set.
     fn bootstrap_args() -> BootstrapArgs {
         BootstrapArgs {
@@ -1129,6 +1247,7 @@ mod tests {
             no_west: false,
             print_env: false,
             workspace: None,
+            allow_partial: false,
         }
     }
 

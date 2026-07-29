@@ -24,7 +24,25 @@
     "nobody matches it with `===` yet, so renaming or dropping it costs",
     "nothing on the wire. Promote a `reserved` code to `frozen` the moment a",
     "consumer binds to it (fill in `consumer`/`consumerEffect` for real); do",
-    "not invent a third status for that transition."
+    "not invent a third status for that transition.",
+    "",
+    "EVERY literal emit site must appear here at some status (tan-cli#219).",
+    "`frozen_issue_codes` only ever walked registry -> source, so a code that",
+    "was never registered was ungated on BOTH sides at once: this repo's",
+    "checks iterate the registry and never saw it, and alp-sdk-vscode's gate",
+    "keys off the published artefact, which is built from this same registry.",
+    "A rename of an unregistered code was invisible to both repos",
+    "simultaneously. `every_emitted_issue_code_is_registered` walks the other",
+    "way and fails when an emitted code has no entry. 41 codes were in that",
+    "state when it landed; they are `reserved`, NOT `frozen` -- freezing what",
+    "no consumer reads would over-commit and make every future internal",
+    "rename a contract break for nobody's benefit.",
+    "",
+    "The published `envelope-contract.json` carries this array WHOLE, all",
+    "three statuses, not a frozen-only subset -- so the artefact's code list",
+    "is everything tan emits, and a consumer reads `status` to decide what a",
+    "code promises. Keep it that way: a silently-partial artefact that",
+    "presents itself as the contract is worse than either honest option."
   ],
   "issueCodes": [
     {
@@ -294,6 +312,375 @@
       "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
       "literal": "\"write-failure\"",
       "note": "tan-cli#111 registry audit: same shared `failure_envelope` path as `internal-failure`; the two are distinguished only by which exit code and text lines `debug_config.rs` passes in, matching the write-vs-internal split `crates/tan-cli/src/exit.rs` documents."
+    },
+    {
+      "code": "build.manifest-write-failed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/build/execute/mod.rs",
+      "literal": "code: \"build.manifest-write-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.sdk-switch-pristine",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/build/execute/mod.rs",
+      "literal": "code: \"build.sdk-switch-pristine\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.sdk-switch-pristine-failed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/build/execute/mod.rs",
+      "literal": "code: \"build.sdk-switch-pristine-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.slice-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/build/execute/mod.rs",
+      "literal": "code: \"build.slice-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.toolchain-root-unresolved",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/build/plan_modes.rs",
+      "literal": "code: \"build.toolchain-root-unresolved\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.unknown-backend",
+      "status": "reserved",
+      "severity": "error or warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/build/execute/mod.rs",
+      "literal": "code: \"build.unknown-backend\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it. Severity is per-slice and policy-driven: error under executionPolicy.unknownBackend=fail, warning under skip."
+    },
+    {
+      "code": "cli.parse-error",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/main.rs",
+      "literal": "code: \"cli.parse-error\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "completion.shell-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/completion.rs",
+      "literal": "code: \"completion.shell-unsupported\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/doctor.rs",
+      "literal": "code: \"doctor.internal-failure\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.server-compatibility",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/doctor.rs",
+      "literal": "code: \"doctor.server-compatibility\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "envelope.serialize-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/envelope.rs",
+      "literal": "code: \"envelope.serialize-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.boot-order-unknown-core",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/flash/mod.rs",
+      "literal": "code: \"flash.boot-order-unknown-core\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.confirm-required",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/flash/mod.rs",
+      "literal": "code: \"flash.confirm-required\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.entry-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/flash/mod.rs",
+      "literal": "code: \"flash.entry-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.nothing-matched",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/flash/mod.rs",
+      "literal": "code: \"flash.nothing-matched\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.slice-not-built",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/flash/mod.rs",
+      "literal": "code: \"flash.slice-not-built\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.emit-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/generate.rs",
+      "literal": "code: \"generate.emit-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "image.bundle-write-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/image.rs",
+      "literal": "code: \"image.bundle-write-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "image.helper-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/image.rs",
+      "literal": "code: \"image.helper-missing\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "image.helper-skipped",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/image.rs",
+      "literal": "code: \"image.helper-skipped\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "image.slice-skipped",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/image.rs",
+      "literal": "code: \"image.slice-skipped\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "image.slice-unsafe-name",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/image.rs",
+      "literal": "code: \"image.slice-unsafe-name\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.would-overwrite",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/init/from_example.rs",
+      "literal": "code: \"init.would-overwrite\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.write-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/init/response.rs",
+      "literal": "code: \"init.write-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "inspect.board-yaml-missing",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/inspect.rs",
+      "literal": "code: \"inspect.board-yaml-missing\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "inspect.path-not-found",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/inspect.rs",
+      "literal": "code: \"inspect.path-not-found\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "pinmux.no-target",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/pinmux.rs",
+      "literal": "code: \"pinmux.no-target\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "pinmux.schema-version-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/pinmux.rs",
+      "literal": "code: \"pinmux.schema-version-unsupported\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "pinmux.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/pinmux.rs",
+      "literal": "code: \"pinmux.sdk-root-unresolved\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "pinmux.table-empty",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/pinmux.rs",
+      "literal": "code: \"pinmux.table-empty\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "pinmux.table-not-found",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/pinmux.rs",
+      "literal": "code: \"pinmux.table-not-found\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "pinmux.unknown-sku",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/pinmux.rs",
+      "literal": "code: \"pinmux.unknown-sku\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "scaffold.would-overwrite",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/scaffold.rs",
+      "literal": "code: \"scaffold.would-overwrite\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "scaffold.write-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/scaffold.rs",
+      "literal": "code: \"scaffold.write-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.bootstrap-recommended",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/sdk.rs",
+      "literal": "code: \"sdk.bootstrap-recommended\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.install-not-ready",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/sdk.rs",
+      "literal": "code: \"sdk.install-not-ready\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.west-config-not-reconciled",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/sdk.rs",
+      "literal": "code: \"sdk.west-config-not-reconciled\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.west-config-reconcile-failed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/sdk.rs",
+      "literal": "code: \"sdk.west-config-reconcile-failed\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.west-config-reconciled",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/sdk.rs",
+      "literal": "code: \"sdk.west-config-reconciled\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "support-bundle.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/support_bundle.rs",
+      "literal": "code: \"support-bundle.internal-failure\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "support-bundle.server-compatibility",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/support_bundle.rs",
+      "literal": "code: \"support-bundle.server-compatibility\"",
+      "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     }
   ]
 }

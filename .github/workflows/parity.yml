@@ -617,14 +617,31 @@ jobs:
         working-directory: ws/alp-sdk
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/target/debug/tan" bootstrap --non-interactive
+          "$GITHUB_WORKSPACE/target/debug/tan" bootstrap --non-interactive \
+              2>&1 | tee /tmp/first-blink-bootstrap.log
           for p in ../.west/config ../.venv ../zephyr ../modules; do
             if [ ! -e "$p" ]; then
               echo "::error::tan bootstrap exited 0 but did not create $p"
               exit 1
             fi
           done
-          echo "bootstrap created .west/, .venv/, zephyr/ and modules/ in the workspace parent."
+          # tan-cli#220's verdict, end to end. The rule itself is unit-tested
+          # (`verdict`), but `run` spawns real processes and cannot be driven
+          # from a unit test, so nothing else proves `run` USES it -- proven by
+          # mutation: replacing the call with a hardcoded success left the whole
+          # suite green. This step is what covers that wiring. A runner with the
+          # native headers installed is the clean path, so `complete.` is the
+          # correct verdict here and its ABSENCE would mean the rule fired when
+          # it should not have.
+          if ! grep -qF 'bootstrap: complete.' /tmp/first-blink-bootstrap.log; then
+            echo "::error::a clean bootstrap did not report 'bootstrap: complete.' (#220 verdict inverted?)"
+            exit 1
+          fi
+          if grep -qF 'bootstrap: INCOMPLETE' /tmp/first-blink-bootstrap.log; then
+            echo "::error::a clean bootstrap reported INCOMPLETE -- a dependency install failed on a runner that has the headers"
+            exit 1
+          fi
+          echo "bootstrap created .west/, .venv/, zephyr/ and modules/, and reported complete."
 
       # BEFORE the toolchain exists, doctor must FAIL and must say why. This is
       # the half a customer hits first: bootstrap has just succeeded, and the
@@ -742,6 +759,7 @@ jobs:
         with:
           name: first-blink-logs
           path: |
+            /tmp/first-blink-bootstrap.log
             /tmp/first-blink-doctor-before.json
             /tmp/first-blink-doctor-after.json
             /tmp/first-blink-build.log
