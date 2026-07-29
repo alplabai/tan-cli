@@ -105,6 +105,39 @@
   contract, not with a per-invocation flag.
 
 ### Fixed
+- **41 emitted issue codes were in the registry at no status, which left them
+  ungated on BOTH sides of the seam at once** (#219). `frozen_issue_codes` only
+  ever walked registry → source, checking each entry still exists. Nothing
+  walked source → registry. An unregistered code was therefore invisible to
+  this repo's checks (they iterate the registry) *and* to alp-sdk-vscode's
+  (their gate reads the published artefact, which is built from that same
+  registry) — so renaming one was silent in both repos simultaneously.
+  `every_emitted_issue_code_is_registered` now walks the other way and fails
+  when an emitted code has no entry, naming the code and the file.
+
+  They are registered **`reserved`, not `frozen`**. The registry's own policy is
+  promote-on-binding; freezing codes no consumer reads would over-commit and
+  turn every future internal rename into a contract break for nobody's benefit.
+  `reserved` is the declared-but-uncommitted state that already existed for
+  exactly this — the file explicitly says not to invent a third status — so a
+  reserved code may still be renamed freely, while the gate can finally see it.
+  No new status was added.
+
+  One consequence worth stating: the published `envelope-contract.json` carries
+  the registry whole, so it grew from 4 issue codes to 68 (5 frozen, 62
+  reserved, 1 retired) and from 20081 to 73091 bytes. That is the point — the
+  asset presented itself as the contract while covering a fraction of what tan
+  emits, and a silently-partial artefact is worse than either honest option. A
+  consumer reads `status` to decide what a code promises; alp-sdk-vscode's
+  reader is already status-aware and looks its own codes up in that map, so the
+  extra entries change nothing for it.
+
+  KNOWN CEILING, recorded rather than papered over: the scan matches the literal
+  `code: "x.y"` shape, so codes assembled by a prefixing helper
+  (`format!("bootstrap.{code}")`, `debug_config.rs`'s `failure_envelope`) are
+  invisible to it. Today that is no hole — all of them are registered and
+  `frozen_issue_codes` back-checks each — but a NEW code in one of those two
+  files would still escape. Tracked as #224.
 - **The Zephyr SDK — the one build-blocking `Fail` a first-install customer
   hits — was the only prerequisite that could never carry a Fix button**
   (#203, #210). `missingPrerequisites` was written in exactly one place,
