@@ -105,10 +105,26 @@ fn a_relative_sdk_root_flag_still_reports_absolute_paths() {
         );
     }
 
+    // Compared with separators normalized, NOT byte-for-byte: the two fields
+    // deliberately differ in separator style on Windows, and an equality
+    // assertion here fails there for a reason that has nothing to do with
+    // #217 (it did, on this test's first CI run).
+    //
+    // - `sdk.root` is posix-normalized by `sdk_report`, which exists so the
+    //   emitted value is platform-identical whichever resolver recorded it --
+    //   the same rule `tan_core::project::to_posix` enforces for
+    //   `project.root`.
+    // - `data.sdkRoot` goes through `native()` with its three siblings,
+    //   because a consumer comparing `sdkRoot` against `workspaceDir` by
+    //   prefix or dirname needs one separator among THOSE four.
+    //
+    // What #217 is about is that they name the same directory, which is what
+    // this checks. Separator style is a separate, already-settled decision.
+    let posix = |s: &str| s.replace('\\', "/");
     assert_eq!(
-        envelope["sdk"]["root"].as_str(),
-        data["sdkRoot"].as_str(),
-        "sdk.root and data.sdkRoot must be the same spelling of the same checkout"
+        envelope["sdk"]["root"].as_str().map(posix),
+        data["sdkRoot"].as_str().map(posix),
+        "sdk.root and data.sdkRoot must name the same checkout"
     );
 
     // The block a customer is told to paste into a shell profile. A profile is
