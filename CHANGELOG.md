@@ -56,6 +56,21 @@
   contract, not with a per-invocation flag.
 
 ### Fixed
+- **`tan init` could not find the SDK `tan bootstrap` had just set up, breaking
+  the documented Quickstart at step 3** (#218). SDK discovery checked the
+  workspace root itself, its siblings (`../alp-sdk`, `../alp-sdk-upstream`) and
+  then its nearest ancestor -- never a CHILD. That misses the exact moment the
+  documented flow puts the user in: bootstrap runs with the checkout at
+  `<ws>/alp-sdk`, and `tan init` is then typed from `<ws>`, because the project
+  directory it is about to create does not exist yet. The checkout only becomes
+  the documented "sibling `../alp-sdk`" one step later, once the user has cd'd
+  into the new project -- which is why `tan build` worked while the `tan init`
+  immediately before it failed with "alp-sdk root is unresolved" and no hint
+  that the answer was one directory down. Discovery now also considers
+  `<root>/alp-sdk`, ordered ahead of the siblings so a workspace holding both
+  prefers the one bootstrap actually set up. Found by the new `first blink` CI
+  job, which had to pass `--sdk-root alp-sdk` to get past it; that flag is now
+  removed, so the job is the regression test.
 - **`baremetal-mcu` × OpenOCD shipped a resolved `serverpath`/`searchDir` with
   NO `configFiles` to load, and `baremetal-mcu` × pyOCD had no target to
   select** (#139). `create_launch_draft`'s `BaremetalMcu` arm was ONE

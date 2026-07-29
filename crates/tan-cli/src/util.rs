@@ -471,6 +471,18 @@ fn discover_sdk_root(workspace_root: &Path) -> Option<PathBuf> {
     let parent = workspace_root.parent().map(Path::to_path_buf);
     let candidates = [
         workspace_root.to_path_buf(),
+        // CHILD, before the siblings (#218). `tan init` runs from the directory
+        // the new project is about to be created IN, so at that moment the
+        // checkout is a child of the cwd -- it only becomes the documented
+        // "sibling `../alp-sdk`" once the project directory exists and the user
+        // has cd'd into it. Without this candidate the documented Quickstart
+        // breaks at step 3: `tan bootstrap` succeeds in `<ws>/alp-sdk`, and
+        // `tan init --from-example` run from `<ws>` reports "alp-sdk root is
+        // unresolved" with the checkout sitting right there. Proven by the
+        // first-blink CI job (#215), which had to pass `--sdk-root` to get past
+        // it. Ordered ahead of the siblings so a workspace that has both
+        // prefers the one bootstrap actually set up.
+        workspace_root.join("alp-sdk"),
         parent
             .as_ref()
             .map(|p| p.join("alp-sdk"))
@@ -863,6 +875,53 @@ mod tests {
             effective_sdk_path_with(None, "/work", "/home/.alp", &|_| false, &exists, &read);
         assert_eq!(got, "");
         assert_eq!(tier, None);
+    }
+
+    /// tan-cli#218, the documented Quickstart at step 3. `tan bootstrap`
+    /// succeeds in `<ws>/alp-sdk`; `tan init` then runs from `<ws>`, where the
+    /// checkout is a CHILD -- it only becomes the documented "sibling
+    /// `../alp-sdk`" after the project exists and the user has cd'd in. Before
+    /// the child candidate, discovery checked the root, its siblings and its
+    /// ancestors, so this returned None and init refused with "alp-sdk root is
+    /// unresolved" while the checkout sat one level down.
+    #[test]
+    fn discovery_finds_a_checkout_that_is_a_child_of_the_workspace_root() {
+        let ws = tmp("218-child-checkout");
+        let sdk = ws.join("alp-sdk");
+        std::fs::create_dir_all(sdk.join("scripts")).unwrap();
+        std::fs::write(sdk.join("scripts").join("alp_project.py"), b"# stub").unwrap();
+
+        assert_eq!(
+            discover_sdk_root(&ws),
+            Some(sdk),
+            "a child alp-sdk/ must resolve: it is what `tan init` sees before the project exists"
+        );
+
+        let _ = std::fs::remove_dir_all(&ws);
+    }
+
+    /// The child must not outrank an explicit sibling that ALSO has the loader
+    /// script by accident of ordering alone -- but when both exist, the child is
+    /// the one `tan bootstrap` just set up, so it is the intended winner. Pinned
+    /// so a later reorder is a deliberate decision rather than a silent one.
+    #[test]
+    fn a_child_checkout_wins_over_a_sibling_when_both_exist() {
+        let root = tmp("218-child-vs-sibling");
+        let ws = root.join("ws");
+        let child = ws.join("alp-sdk");
+        let sibling = root.join("alp-sdk");
+        for p in [&child, &sibling] {
+            std::fs::create_dir_all(p.join("scripts")).unwrap();
+            std::fs::write(p.join("scripts").join("alp_project.py"), b"# stub").unwrap();
+        }
+
+        assert_eq!(
+            discover_sdk_root(&ws),
+            Some(child),
+            "the child is the checkout bootstrap set up under this workspace root"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
