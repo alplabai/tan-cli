@@ -161,6 +161,36 @@ All notable changes to `tan` are documented here. Format follows
   the scripts is alp-sdk#1038's decision.
 
 ### Fixed
+- **`tan bootstrap --print-env` wrote to stderr, so the one thing it exists to
+  produce could not be captured** (#227). Both obvious ways of consuming it
+  produced nothing, and neither errored:
+  ```sh
+  eval "$(tan bootstrap --print-env)"                  # evaluated ""
+  tan bootstrap --print-env > env.sh && . ./env.sh     # sourced ""
+  ```
+  `sh -n` on the empty file passed too — an empty file is a valid shell script
+  — so even a check that the emitted block *parses* could report green having
+  read nothing. That is exactly what `getting-started.yml`'s own `--print-env`
+  step (#216) did: it passed while asserting nothing at all, and its uploaded
+  `gs-print-env.sh` artefact was empty.
+  The block now goes to **stdout**, and it is the only text output in tan that
+  does. Sending text to stderr so `--format json` owns stdout outright is the
+  right rule and every other command keeps it — but `--print-env` is not a
+  report *about* a run, it is the run's product: a shell fragment whose whole
+  purpose is to be consumed, in a CLI whose every other machine-readable
+  surface is `--format json`. `--print-env`'s help text now says so.
+  JSON mode is unchanged: the envelope remains the only thing on stdout there,
+  and it already carries every path the block renders (`data.zephyrBase`,
+  `data.venvDir`), so a JSON consumer never needed the shell spelling.
+  Printed at the `--print-env` short-circuit rather than through `emit`,
+  because `emit`'s two channels *are* the two streams (`json` → stdout, `text`
+  → stderr) and threading a third through `CommandRun` would touch all 174 of
+  its construction sites to serve one flag; `text` is returned empty so the
+  block is never also written to stderr. Verified: stdout 480 bytes, stderr 0.
+  Two permanent gates, in the places that were fooled: the #217 regression
+  suite now reads the block off stdout and asserts stderr is empty in both
+  modes, and `getting-started.yml`'s step uses a plain pipe again (no `2>&1`),
+  so a return to stderr empties the capture and fails the size check.
 - **`tan bootstrap` reported cwd-relative paths in `data.*` and `--print-env`
   while `project.root` in the same envelope was absolute** (#217). Every path
   the command reports is derived from `--sdk-root`, and the flag's spelling

@@ -332,9 +332,43 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
             sdk_root: &sdk,
             workspace_dir: &ws,
         };
-        let text = print_env_block(&facts, tokens, facts.venv_bin_dir(is_windows), is_windows);
+        let block = print_env_block(&facts, tokens, facts.venv_bin_dir(is_windows), is_windows);
+
+        // tan-cli#227: STDOUT, and this is the ONE text output in tan that goes
+        // there.
+        //
+        // `CommandRun::text` is stderr-bound by definition, so `--format json`
+        // owns stdout outright -- a good rule, and every other command keeps it.
+        // But `--print-env` is not a report ABOUT a run, it IS the run's
+        // product: a shell fragment whose whole purpose is to be consumed. On
+        // stderr, both obvious ways of consuming it silently produced nothing,
+        // and neither errored:
+        //
+        //     eval "$(tan bootstrap --print-env)"               # evaluated ""
+        //     tan bootstrap --print-env > env.sh && . ./env.sh  # sourced ""
+        //
+        // `sh -n` on the empty file passed too -- an empty file is a valid shell
+        // script -- which is how `getting-started.yml`'s own `--print-env` step
+        // (#216) reported green while asserting nothing at all.
+        //
+        // Printed here rather than through `emit` because `emit`'s two channels
+        // ARE the two streams (`json` -> stdout, `text` -> stderr), and
+        // threading a third through `CommandRun` would touch all 174 of its
+        // construction sites to serve one flag. `text` is returned EMPTY below
+        // so the block is never also written to stderr.
+        //
+        // JSON mode is unchanged: the envelope is the only thing on stdout
+        // there, and it already carries every path this block renders
+        // (`data.zephyrBase`, `data.venvDir`), so a JSON consumer never needed
+        // the shell spelling.
+        if !g.is_json() {
+            for line in &block {
+                println!("{line}");
+            }
+        }
+
         let data = data_for(args, &sdk_root, &paths, &facts, &pin);
-        return finish(g, ExitCode::Success, project, data, Vec::new(), text);
+        return finish(g, ExitCode::Success, project, data, Vec::new(), Vec::new());
     }
 
     // Workspace-parent guard (tan-cli#185): `west init -l` forces the topdir
