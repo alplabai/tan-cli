@@ -136,6 +136,19 @@
   the scripts is alp-sdk#1038's decision.
 
 ### Fixed
+- **A tag whose CHANGELOG section was never written published a release whose
+  entire body was one stub sentence, and nothing said so** (#212). The notes
+  step fell back to `print(body if body else f"See CHANGELOG.md for {version}.")`
+  and exited 0. The failure mode is not hypothetical: the version bump is what
+  renames `## [Unreleased]` to `## [X.Y.Z]`, so a bump that edits the version
+  files and forgets the CHANGELOG header lands exactly here — measured against
+  `dev` before the fix, a `v0.4.1` tag found no section and would have shipped
+  the stub. A release with no notes is not degraded but broken (they are the
+  only human-readable record of what changed, and a tag is immutable once
+  pushed), so the step now fails before publishing, naming the header it
+  expected. An empty section fails the same way. Driven against the real
+  CHANGELOG in all three states: missing → exit 1, empty → exit 1, present →
+  exit 0 with the section extracted.
 - **41 emitted issue codes were in the registry at no status, which left them
   ungated on BOTH sides of the seam at once** (#219). `frozen_issue_codes` only
   ever walked registry → source, checking each entry still exists. Nothing
