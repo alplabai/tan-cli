@@ -16,6 +16,7 @@ from tan.commands.build_cmd import build
 from tan.commands.debug_config_cmd import debug_config
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
+from tan.commands.explain_cmd import explain
 from tan.commands.generate_cmd import generate
 from tan.commands.init_cmd import init
 from tan.commands.sdk_cmd import sdk
@@ -36,6 +37,7 @@ app.command("build")(build)
 app.command("debug-config")(debug_config)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
+app.command("explain")(explain)
 app.command("generate")(generate)
 app.command("init")(init)
 app.command("sdk")(sdk)

@@ -88,7 +88,6 @@ CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit"})
 #: turns that XPASS into a FAILURE, so landing a command forces the one-line
 #: promotion: delete its entry here. Costs nothing while a case genuinely fails.
 NOT_PORTED = {
-    "explain-overview": "explain lands in a later sub-project",
     "presets-heterogeneous-som": "presets lands in a later sub-project",
     "presets-no-sdk": "presets lands in a later sub-project",
 }
