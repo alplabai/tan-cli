@@ -59,21 +59,26 @@ pub fn record(root: &str, tier: SdkSourceTier) {
     });
 }
 
-/// Force-overwrite the recorded SDK root after `tan bootstrap`'s
-/// workspace-parent guard (tan-cli#185, review finding 6) relocates the
-/// checkout AFTER the ordinary [`record`] already ran during project
-/// resolution: the checkout's own root just moved, so the root that resolver
-/// call recorded now names a location that no longer exists. Unlike
-/// [`record`], this always wins — first-writer-wins is the right rule for two
-/// resolvers racing over the SAME checkout, but a relocation is a fact about
-/// the root the first call recorded being stale, not a second, competing
-/// resolution.
+/// Force-overwrite the recorded SDK root when the value the ordinary
+/// [`record`] captured during project resolution is no longer a usable
+/// description of the SAME checkout. Unlike [`record`], this always wins —
+/// first-writer-wins is the right rule for two resolvers racing over one
+/// checkout, and neither caller below is a second, competing resolution.
+///
+/// Two callers, both in `tan bootstrap`:
+/// - The workspace-parent guard (tan-cli#185, review finding 6) MOVED the
+///   checkout, so the recorded root names a location that no longer exists.
+/// - `--sdk-root ./alp-sdk` was absolutized (tan-cli#217), so the recorded
+///   root is the relative spelling while `data.sdkRoot` is the absolute one.
+///   Leaving it would put two spellings of one directory in one envelope,
+///   which is the defect #217 exists to remove.
 ///
 /// The tier is left as whatever was already recorded (or `Discovery` if
-/// nothing was — bootstrap always resolves an SDK root before it can reach a
-/// relocation, so this fallback is defensive, not a real path): a relocation
-/// changes WHERE the checkout is, not by what precedence tan found it.
-pub fn override_after_relocation(root: &str) {
+/// nothing was — bootstrap always resolves an SDK root before it can reach
+/// either caller, so this fallback is defensive, not a real path): neither a
+/// relocation nor an absolutization changes by what precedence tan found the
+/// checkout, only how its location is spelled.
+pub fn override_root(root: &str) {
     RESOLVED.with(|cell| {
         let mut slot = cell.borrow_mut();
         let tier = slot
@@ -129,10 +134,10 @@ mod tests {
     }
 
     #[test]
-    fn override_after_relocation_wins_over_an_earlier_record_and_keeps_its_tier() {
+    fn override_root_wins_over_an_earlier_record_and_keeps_its_tier() {
         reset();
         record("/old/alp-sdk", SdkSourceTier::SdkRootFlag);
-        override_after_relocation(r"E:\new\parent\alp-sdk");
+        override_root(r"E:\new\parent\alp-sdk");
         // The tier is preserved -- only WHERE the checkout is changed.
         assert_eq!(
             take(),
@@ -144,9 +149,9 @@ mod tests {
     }
 
     #[test]
-    fn override_after_relocation_with_nothing_recorded_yet_falls_back_to_discovery() {
+    fn override_root_with_nothing_recorded_yet_falls_back_to_discovery() {
         reset();
-        override_after_relocation("/new/alp-sdk");
+        override_root("/new/alp-sdk");
         assert_eq!(
             take(),
             Some(("/new/alp-sdk".to_string(), SdkSourceTier::Discovery))
