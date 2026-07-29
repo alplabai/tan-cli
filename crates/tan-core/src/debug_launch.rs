@@ -211,8 +211,10 @@ pub struct LaunchResolution {
     pub config_files: Vec<String>,
     /// pyOCD target id (`args.pyocd --target`).
     pub target_id: Option<String>,
-    /// SVD path, when one is ever resolvable. Nothing produces this yet —
-    /// alp-sdk#948 has to ship the files first.
+    /// SVD path. Produced ONLY by `tan debug-config --svd` (tan-cli#197):
+    /// the SDK ships no SVD file, and alp-sdk#948's vendor-redistribution
+    /// licence question may mean it never does — so a user-supplied path is
+    /// the only source, and this is `None` unless the caller passed one.
     pub svd: Option<String>,
 }
 
@@ -234,7 +236,9 @@ impl LaunchResolution {
 /// The `svdFile`/`svdPath` placeholders are REMOVED when no SVD resolved. A
 /// missing key costs the peripheral view; a path that doesn't exist makes
 /// cortex-debug fail on start, which is strictly worse than not offering the
-/// view — and no SVD is resolvable today (alp-sdk#948).
+/// view. Since tan-cli#197 the resolved case is reachable — `tan debug-config
+/// --svd` supplies it — and that command refuses an unreadable path outright
+/// rather than letting it reach this function.
 pub fn apply_launch_resolution(draft: &mut Value, resolution: &LaunchResolution) {
     let Some(map) = draft.as_object_mut() else {
         return;

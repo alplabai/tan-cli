@@ -3,6 +3,41 @@
 
 ## [Unreleased]
 
+### Added
+- **`tan debug-config --svd <PATH>` — a user-supplied SVD, the first and only
+  producer of `LaunchResolution.svd`** (#197). The resolution path for
+  `svdFile`/`svdPath` was complete and tested, and structurally dead: the field
+  is read at `debug_launch.rs:245` and was assigned nowhere in the workspace
+  outside tests, so it was always `None`, both keys were always dropped, and
+  cortex-debug's Cortex Peripherals (register) view was unreachable on every
+  target tan supports. A green test suite said nothing about whether the
+  feature could work, because the drop path's input could never be anything
+  else.
+  The SDK ships no SVD and may never ship one — alp-sdk#948's blocker is an
+  unresolved Alif/Renesas redistribution-licence question on a public repo. A
+  user-supplied path is the only route that survives that question going either
+  way: a customer who downloaded the vendor's own SVD, which they are entitled
+  to do, can point tan at it today.
+  Two behaviours decided explicitly rather than by omission, since #67
+  established what a bad `svdFile` costs:
+  1. **A path that does not name a readable file FAILS the command** (no
+     launch.json written) — it never falls back to dropping the key. That
+     fallback would make a typo indistinguishable from not passing the flag,
+     and the user explicitly named the file. A directory and an empty string
+     are refused the same way.
+  2. **A relative `--svd` anchors on the CURRENT DIRECTORY**, not the project
+     root, because a flag typed at a shell prompt means what the shell means by
+     it. The emitted value then goes through the same `workspace_relative`
+     rewrite as `executable`: `${workspaceFolder}/…` inside the project,
+     absolute outside it — and outside is the normal case, since a vendor SVD
+     lives in the vendor SDK.
+  A `--svd` on a target kind whose draft carries no `svdFile` field
+  (`native-host`, `yocto-userspace`) is reported as a note rather than accepted
+  in silence. A `debug.svd` key in `board.yaml` is deliberately NOT part of
+  this change: it has a different lifetime (it travels with the project, so it
+  would anchor on the project root) and belongs with the alp-sdk metadata
+  contract, not with a per-invocation flag.
+
 ### Fixed
 - **`baremetal-mcu` × OpenOCD shipped a resolved `serverpath`/`searchDir` with
   NO `configFiles` to load, and `baremetal-mcu` × pyOCD had no target to
@@ -74,6 +109,41 @@
   resolver reports the CANDIDATE path unconditionally rather than only when
   the file exists — matching every other command's own pinned goldens
   (`presets-no-sdk`, `presets-heterogeneous-som`), not a new inconsistency.
+- **The npm shim (`@alplabai/tan`) was pinned six releases behind — `npm i -g
+  @alplabai/tan` would have fetched `v0.1.1`'s binaries under the current
+  release tag.** `npm-shim/postinstall.js` resolves its download tag from
+  `npm-shim/package.json`'s own `version` field, not the workspace version,
+  and nothing enforced the two staying in sync — `npm-shim/README.md` only
+  *documented* bumping both by hand. Measured on this machine: `Cargo.toml`
+  `0.4.1-dev` vs. `npm-shim/package.json` `0.1.1`. Bumped the shim's version to
+  match the workspace, and `release.yml`'s `verify-version` job now fails a
+  tag outright if the two disagree again (same grep-based style as its
+  existing tag-vs-`Cargo.toml` check, not a `cargo metadata`/JSON parse).
+- **`tan bootstrap`'s POSIX "Next steps" told the customer to run a raw `west
+  build -b native_sim/native/64 examples/peripheral-io/uart-echo --
+  -DEXTRA_ZEPHYR_MODULES=$PWD`** — wrong twice over. `$PWD` resolves to the
+  alp-sdk checkout only when the reader's shell happens to be sitting in it,
+  which is never true right after the workspace-parent guard has relocated
+  the checkout (the Windows arm already used the correct `tokens.sdk_root`
+  instead; POSIX did not). And `west build` bypasses `tan` itself, contradicting
+  README.md's own claim that tan is "the single executor and the user command
+  surface." Now prints `tan build --sdk-root "<sdk_root>" --project
+  "<sdk_root>/examples/peripheral-io/uart-echo"`. `tan build` has no
+  board-override flag yet, so it cannot select `native_sim`; POSIX now suggests
+  the same real-silicon target the Windows arm already does (verified live:
+  `tan build --plan` against the pinned example resolves that exact slice).
+- **A relocated alp-sdk checkout broke README.md's own next documented step.**
+  `tan bootstrap`'s workspace-parent guard can move the checkout into a
+  sibling `alp-workspace/` directory (#185); afterward, `tan init --name
+  my-app` — run in the same shell, or a fresh one tomorrow — had no sibling
+  `../alp-sdk` left to auto-discover, and `tan build` in the new project
+  failed with "alp-sdk root is unresolved." The relocation now also repoints
+  the machine-global default-SDK pointer (`~/.alp/sdk-default`) at the
+  checkout's new location — which `tan init` already pins into every new
+  project's own `.alp/sdk-path`, so closing the gap needed no change to
+  `init` itself. Chosen over printing a corrected next command: a pointer
+  file survives a closed terminal and a new shell tomorrow; printed text does
+  not.
 - **`tan init` no longer blocks forever when stdin is not a terminal** (#187).
   It rendered an inquire prompt (`Destination directory:`, ANSI escapes and all)
   to a terminal that was not there, then blocked on a stdin already at EOF --

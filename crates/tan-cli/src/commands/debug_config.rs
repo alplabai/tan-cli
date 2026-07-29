@@ -114,10 +114,34 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
     // Fill the `<resolved-…>` placeholders from what this project's own build
     // recorded (#66). Nothing here fails the command: pre-build, or against a
     // Zephyr that reshaped `runners.yaml`, the draft keeps its placeholders.
-    let (resolution, registered_runners) =
+    let (mut resolution, registered_runners) =
         resolve_from_build(&workspace_root, target, server, args.core.as_deref());
+
+    // `--svd` is the ONLY producer of `resolution.svd` (tan-cli#197): the SDK
+    // ships no SVD, so without the flag the field is structurally always
+    // `None` and `apply_launch_resolution` drops both svd keys.
+    if let Some(svd_arg) = args.svd.as_deref() {
+        match resolve_user_svd(&cwd, &workspace_root, svd_arg) {
+            Ok(svd) => resolution.svd = Some(svd),
+            Err(message) => {
+                return internal_failure(g, &generated_at, message, launch_json_path);
+            }
+        }
+    }
+
     apply_launch_resolution(&mut draft, &resolution);
-    let notes = preview_notes_for(&draft, &registered_runners, server);
+    let mut notes = preview_notes_for(&draft, &registered_runners, server);
+    // A non-MCU draft carries no `svdFile` key at all, and
+    // `apply_launch_resolution` only replaces keys that already exist — so a
+    // `--svd` here is a no-op. Say so rather than accepting the flag in
+    // silence and leaving the user to wonder why no peripheral view appeared.
+    if args.svd.is_some() && draft.get("svdFile").is_none() {
+        notes.push(format!(
+            "--svd was given, but target kind '{}' emits no svdFile field, so it had no effect: \
+             the Cortex Peripherals view is a cortex-debug (MCU) feature.",
+            args.target_kind.as_deref().unwrap_or("zephyr-mcu"),
+        ));
+    }
 
     if args.preview {
         return success(
@@ -617,6 +641,51 @@ fn workspace_relative(workspace_root: &Path, path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+/// Resolve `--svd` into the value the launch configuration should carry.
+///
+/// **Anchor: the current directory, not the project root.** `--svd` is a
+/// per-invocation flag typed at a shell prompt, so a relative path means what
+/// the shell means by it. (A board-level `debug.svd` key, should one ever be
+/// added, travels with the project and must anchor on the project root
+/// instead — the two have different lifetimes, so they get different anchors
+/// deliberately rather than by omission.) The emitted string then goes through
+/// the same [`workspace_relative`] rewrite as `executable`: inside the project
+/// it becomes `${workspaceFolder}/…` so a committed launch.json stays
+/// portable, outside it stays absolute — which is the normal case here, since
+/// a vendor SVD lives in the vendor SDK the user installed.
+///
+/// **A bad path is a HARD ERROR, never a silent drop back to "no SVD".**
+/// tan-cli#67 established that cortex-debug fails the whole session on an
+/// `svdFile` it cannot read, which is why the *unresolved* case drops the key.
+/// But the user explicitly named this file: falling back would make a typo
+/// indistinguishable from not passing the flag, and the failure would surface
+/// as an unexplained empty peripheral view. Fail here, where the message can
+/// name the path.
+fn resolve_user_svd(cwd: &Path, workspace_root: &Path, arg: &str) -> Result<String, String> {
+    if arg.trim().is_empty() {
+        return Err("Alp: --svd was given an empty path.".to_string());
+    }
+    // `join` on an absolute `arg` replaces the base, so this handles both.
+    let candidate = normalize_path(&cwd.join(arg));
+    let meta = std::fs::metadata(&candidate).map_err(|e| {
+        format!(
+            "Alp: --svd path cannot be read: {} ({e}). \
+             Pass the path to the vendor's own .svd file; the SDK ships none (alp-sdk#948).",
+            candidate.display(),
+        )
+    })?;
+    if !meta.is_file() {
+        return Err(format!(
+            "Alp: --svd path is not a file: {}",
+            candidate.display(),
+        ));
+    }
+    Ok(workspace_relative(
+        workspace_root,
+        &candidate.to_string_lossy(),
+    ))
+}
+
 /// Everything this project's own build knows about how to debug it: the
 /// per-core ELF from `system-manifest.yaml`, and the probe/tool paths from that
 /// slice's `runners.yaml` — the same file `west flash` reads.
@@ -787,6 +856,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1008,6 +1078,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: true,
         };
 
@@ -1068,6 +1139,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1135,6 +1207,7 @@ mod tests {
             target_kind: Some("native-host".to_string()),
             server: None,
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1183,6 +1256,7 @@ mod tests {
             target_kind: Some("native-host".to_string()),
             server: None,
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1221,6 +1295,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1257,6 +1332,7 @@ mod tests {
             target_kind: Some("native-host".to_string()),
             server: None,
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1309,6 +1385,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: true,
         };
         let run_result = run(&g, &args);
@@ -1320,6 +1397,91 @@ mod tests {
             envelope["data"]["configuration"]["device"], "<resolved-device>",
             "preview must report the draft's own placeholder, never a value \
              implying a merge that never ran: {envelope}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every `--svd` test passes an ABSOLUTE path on purpose. `resolve_user_svd`
+    /// anchors a relative path on the process cwd, and cargo runs these tests
+    /// in threads that share one cwd — a `set_current_dir` here would race
+    /// every other test in the binary. The cwd anchoring is documented on the
+    /// flag and exercised by hand, not by a test that can flake.
+    fn args_with_svd(target_kind: &str, svd: Option<&str>, preview: bool) -> DebugConfigArgs {
+        DebugConfigArgs {
+            core: None,
+            target_kind: Some(target_kind.to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            svd: svd.map(str::to_string),
+            preview,
+        }
+    }
+
+    #[test]
+    fn a_user_supplied_svd_inside_the_project_is_emitted_workspace_relative() {
+        let dir = tmp("svd-in-project");
+        let svd = dir.join("E8.svd");
+        std::fs::write(&svd, "<device/>").unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = args_with_svd("zephyr-mcu", Some(&svd.to_string_lossy()), true);
+        let run_result = run(&g, &args);
+
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        let config = &envelope["data"]["configuration"];
+        // Both keys, because cortex-debug has spelled it both ways across
+        // versions and the draft carries both.
+        assert_eq!(config["svdFile"], "${workspaceFolder}/E8.svd");
+        assert_eq!(config["svdPath"], "${workspaceFolder}/E8.svd");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_user_supplied_svd_outside_the_project_stays_absolute() {
+        let dir = tmp("svd-outside-project");
+        let vendor = tmp("svd-vendor-sdk");
+        let svd = vendor.join("AE722F80F55D5AS.svd");
+        std::fs::write(&svd, "<device/>").unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = args_with_svd("zephyr-mcu", Some(&svd.to_string_lossy()), true);
+        let run_result = run(&g, &args);
+
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        // The normal case: a vendor SVD lives in the vendor SDK, not the
+        // project, so it must NOT be mangled into a ${workspaceFolder} path.
+        assert_eq!(
+            envelope["data"]["configuration"]["svdFile"],
+            Value::String(normalize_path(&svd).to_string_lossy().into_owned())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&vendor);
+    }
+
+    #[test]
+    fn a_missing_svd_path_fails_instead_of_silently_dropping_the_key() {
+        let dir = tmp("svd-missing");
+        let missing = dir.join("nope.svd");
+
+        let g = global(&dir);
+        let args = args_with_svd("zephyr-mcu", Some(&missing.to_string_lossy()), false);
+        let run_result = run(&g, &args);
+
+        // Falling back to "no SVD" would make a typo indistinguishable from
+        // not passing the flag — the user explicitly named this file.
+        assert_eq!(run_result.exit, ExitCode::InternalFailure);
+        assert!(
+            !dir.join(".vscode").join("launch.json").exists(),
+            "a refused --svd must not have written launch.json"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1364,6 +1526,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: false,
         };
         let run_result = run(&g, &args);
@@ -1410,6 +1573,7 @@ mod tests {
             target_kind: Some("zephyr-mcu".to_string()),
             server: Some("jlink".to_string()),
             pre_launch_task: None,
+            svd: None,
             preview: true,
         };
         let run_result = run(&g, &args);
@@ -1423,6 +1587,70 @@ mod tests {
         assert!(
             board_yaml.ends_with("board.yaml"),
             "expected a path ending in board.yaml, got {board_yaml}"
+        );
+        // #170's own rationale, applied: `project.root` and `project.boardYaml`
+        // must not ship with different separators in the same object.
+        let root = envelope["project"]["root"].as_str().unwrap_or_default();
+        assert_eq!(
+            board_yaml.contains('\\'),
+            root.contains('\\'),
+            "root and boardYaml disagree on separator: {envelope}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_svd_path_that_is_a_directory_is_refused() {
+        let dir = tmp("svd-is-a-dir");
+        let not_a_file = dir.join("svd-dir");
+        std::fs::create_dir_all(&not_a_file).unwrap();
+
+        let g = global(&dir);
+        let args = args_with_svd("zephyr-mcu", Some(&not_a_file.to_string_lossy()), true);
+
+        assert_eq!(run(&g, &args).exit, ExitCode::InternalFailure);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_empty_svd_path_is_refused_rather_than_treated_as_absent() {
+        let dir = tmp("svd-empty");
+        let g = global(&dir);
+        let args = args_with_svd("zephyr-mcu", Some("   "), true);
+
+        assert_eq!(run(&g, &args).exit, ExitCode::InternalFailure);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn svd_on_a_target_kind_without_the_field_is_reported_not_silently_ignored() {
+        let dir = tmp("svd-non-mcu");
+        let svd = dir.join("E8.svd");
+        std::fs::write(&svd, "<device/>").unwrap();
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let mut args = args_with_svd("native-host", Some(&svd.to_string_lossy()), true);
+        args.server = None;
+        let run_result = run(&g, &args);
+
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert!(
+            envelope["data"]["configuration"].get("svdFile").is_none(),
+            "a native-host draft has no svdFile field to fill"
+        );
+        let notes = envelope["data"]["notes"].as_array().unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.as_str().unwrap_or_default().contains("--svd was given")),
+            "accepting --svd here and saying nothing is the silent no-op this note exists to \
+             prevent: {notes:?}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -1002,7 +1002,9 @@ fn cached_sdk_versions_in(cache_root: &str) -> Vec<String> {
 
 /// Machine-global default-SDK pointer file, written by `tan sdk switch
 /// --global` and read by every command's `globalDefault` resolution tier.
-fn global_default_pointer_path() -> PathBuf {
+/// `pub(crate)`: also written by `bootstrap::relocate` after moving the
+/// checkout, so the pointer follows it (see that module's doc comment).
+pub(crate) fn global_default_pointer_path() -> PathBuf {
     crate::util::home_alp_dir().join("sdk-default")
 }
 

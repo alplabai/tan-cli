@@ -32,6 +32,12 @@ on:
   # bumps the pin by hand. alp-sdk's own `parity-seam1.yml` cannot see it either:
   # that job diffs alp-sdk's emit against alp-sdk's own frozen oracle and never
   # runs tan at all.
+  #
+  # THIS BLOCK MUST EXIST ON THE DEFAULT BRANCH (#194). GitHub triggers
+  # `repository_dispatch` from the DEFAULT branch's copy of a workflow and
+  # nowhere else, so while this lived only on `dev`, alp-sdk dispatched
+  # successfully and nothing ever ran -- lifetime run count 0, with a 204 and no
+  # body on every send. Do not "tidy" it onto a feature branch only.
   repository_dispatch:
     types: [alp-sdk-planner-change]
 
@@ -69,6 +75,23 @@ jobs:
     steps:
       - name: checkout tan-cli
         uses: actions/checkout@v4
+        with:
+          # On a `repository_dispatch` the workflow FILE has to come from the
+          # DEFAULT branch -- that is GitHub's rule and why #195 put the trigger
+          # on `main`. But what we CHECK OUT and test is a separate choice, and
+          # the default (`main`) is the wrong one here.
+          #
+          # Everything that tracks alp-sdk lands on `dev`: the vendored scaffold
+          # fixtures, PINNED_SDK_TAG, the comparator. `main` only receives them
+          # at a release. So testing `main` against the newest alp-sdk is red for
+          # the entire interval between releases, and its redness says nothing
+          # actionable -- it reports "the last release predates this SDK change",
+          # which is true by construction and not a defect.
+          #
+          # The question worth asking on a dispatch is "can tan's integration
+          # branch consume this alp-sdk change?", so test `dev`. A `pull_request`
+          # run keeps checkout's default (the PR head) by passing an empty ref.
+          ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
       - name: resolve alp-sdk ref
         id: sdk_ref
@@ -219,6 +242,23 @@ jobs:
     steps:
       - name: checkout tan-cli
         uses: actions/checkout@v4
+        with:
+          # On a `repository_dispatch` the workflow FILE has to come from the
+          # DEFAULT branch -- that is GitHub's rule and why #195 put the trigger
+          # on `main`. But what we CHECK OUT and test is a separate choice, and
+          # the default (`main`) is the wrong one here.
+          #
+          # Everything that tracks alp-sdk lands on `dev`: the vendored scaffold
+          # fixtures, PINNED_SDK_TAG, the comparator. `main` only receives them
+          # at a release. So testing `main` against the newest alp-sdk is red for
+          # the entire interval between releases, and its redness says nothing
+          # actionable -- it reports "the last release predates this SDK change",
+          # which is true by construction and not a defect.
+          #
+          # The question worth asking on a dispatch is "can tan's integration
+          # branch consume this alp-sdk change?", so test `dev`. A `pull_request`
+          # run keeps checkout's default (the PR head) by passing an empty ref.
+          ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
 
       - name: resolve alp-sdk ref
         id: sdk_ref

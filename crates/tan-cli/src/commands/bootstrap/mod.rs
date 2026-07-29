@@ -352,6 +352,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
             workspace_override.as_deref(),
             is_interactive,
             &facts.venv_dir_name,
+            &crate::commands::sdk::global_default_pointer_path(),
         ) {
             relocate::Resolution::Unchanged => {}
             relocate::Resolution::Relocated {

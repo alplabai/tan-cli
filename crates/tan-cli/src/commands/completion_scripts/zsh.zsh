@@ -105,7 +105,7 @@ _tan() {
           _arguments '--path[Field path]' "${global_args[@]}"
           ;;
         debug-config)
-          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--core[Build slice core id]' '--pre-launch-task[VS Code task to run before launching]' '--preview[Preview only]' "${global_args[@]}"
+          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--core[Build slice core id]' '--pre-launch-task[VS Code task to run before launching]' '--svd[Path to a user-supplied SVD for the peripheral view]:svd:_files -g "*.svd"' '--preview[Preview only]' "${global_args[@]}"
           ;;
         support-bundle)
           _arguments '--destination[Output directory]:path:_files -/' '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--path[Field path]' "${global_args[@]}"
