@@ -4,6 +4,23 @@
 ## [Unreleased]
 
 ### Added
+- **A CI job that actually runs the commands a customer types.** Until now NO
+  workflow in either repo ran `tan bootstrap`, `tan init` or `tan build` --
+  grepping `.github` for them returned three comment lines and no `run:` step.
+  `parity.yml`'s `seam2` hand-assembles the workspace itself (`west init -l` /
+  `west update` / `west zephyr-export`) and then builds an example that already
+  exists, so it exercises the loader seam but never the customer path. Every
+  regression in the venv phase, the west phase, the prerequisite gate or the
+  workspace guard could reach customers with a green board. The new
+  `first blink` job runs bootstrap -> doctor -> init -> build in that order on
+  a runner that starts with none of it, and asserts the workspace artefacts
+  (`.west/config`, `.venv`, `zephyr/`, `modules/`) actually exist rather than
+  trusting exit 0. It clones alp-sdk into a DEDICATED parent (`ws/alp-sdk`),
+  which is both what #185's workspace guard requires and the layout README
+  tells customers to use -- a flat checkout beside the tan-cli tree would make
+  `tan bootstrap --non-interactive` exit 2 by design.
+
+### Added
 - **`tan debug-config --svd <PATH>` — a user-supplied SVD, the first and only
   producer of `LaunchResolution.svd`** (#197). The resolution path for
   `svdFile`/`svdPath` was complete and tested, and structurally dead: the field
