@@ -102,6 +102,61 @@ def _artefacts(raw: Any, context: str) -> list[dict[str, Any]]:
     return raw
 
 
+def _is_legal_env_name(name: str) -> bool:
+    """`os.environ`/`subprocess` reject an empty name or one containing `=`
+    with `ValueError: illegal environment variable name` -- catch that shape
+    here, at parse time, instead of at spawn time deep inside `execute.py`."""
+    return name != "" and "=" not in name
+
+
+def _command(raw: Any, context: str) -> SliceCommand | None:
+    """Validate a slice's `command` (or `null`) at parse time. Rust's serde
+    rejects a malformed `ToolStep` the same way -- an unguarded `cmd["tool"]`
+    let a missing key escape as a bare `KeyError`, and a non-string
+    `tool`/`args` element/`cwd` reached `subprocess.Popen` as an uncaught
+    `TypeError`."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise PlanParseError("build.plan-invalid", f"`{context}` must be an object or null")
+    tool = raw.get("tool")
+    if not isinstance(tool, str):
+        raise PlanParseError("build.plan-invalid", f"`{context}.tool` must be a string")
+    args = raw.get("args", [])
+    if not isinstance(args, list) or not all(isinstance(a, str) for a in args):
+        raise PlanParseError("build.plan-invalid", f"`{context}.args` must be a list of strings")
+    cwd = raw.get("cwd")
+    if cwd is not None and not isinstance(cwd, str):
+        raise PlanParseError("build.plan-invalid", f"`{context}.cwd` must be a string or null")
+    return SliceCommand(tool=tool, args=list(args), cwd=cwd)
+
+
+def _env(raw: Any, context: str) -> dict[str, str]:
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str) and _is_legal_env_name(k) and isinstance(v, str) for k, v in raw.items()
+    ):
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`{context}` must be an object mapping a legal env-var name to a string value",
+        )
+    return dict(raw)
+
+
+def _env_append_path(raw: Any, context: str) -> dict[str, list[str]]:
+    if not isinstance(raw, dict) or not all(
+        isinstance(k, str)
+        and _is_legal_env_name(k)
+        and isinstance(v, list)
+        and all(isinstance(x, str) for x in v)
+        for k, v in raw.items()
+    ):
+        raise PlanParseError(
+            "build.plan-invalid",
+            f"`{context}` must be an object mapping a legal env-var name to a list of strings",
+        )
+    return {k: list(v) for k, v in raw.items()}
+
+
 def _slice(raw: dict[str, Any], i: int) -> Slice:
     missing = [k for k in _REQUIRED_SLICE if k not in raw]
     if missing:
@@ -109,16 +164,14 @@ def _slice(raw: dict[str, Any], i: int) -> Slice:
             "build.plan-invalid",
             f"slice is missing required key(s): {', '.join(missing)}",
         )
-    cmd = raw["command"]
     return Slice(
         core_id=raw["coreId"], backend=raw["backend"], build_dir=raw["buildDir"],
         app_dir=raw["appDir"],
         config_artefacts=_artefacts(raw["configArtefacts"], f"slices[{i}].configArtefacts"),
         toolchain=raw["toolchain"], artifacts=raw["artifacts"], debug=raw["debug"],
-        command=None if cmd is None else SliceCommand(
-            tool=cmd["tool"], args=list(cmd.get("args", [])), cwd=cmd.get("cwd")
-        ),
-        env=dict(raw["env"]), env_append_path={k: list(v) for k, v in raw["envAppendPath"].items()},
+        command=_command(raw["command"], f"slices[{i}].command"),
+        env=_env(raw["env"], f"slices[{i}].env"),
+        env_append_path=_env_append_path(raw["envAppendPath"], f"slices[{i}].envAppendPath"),
     )
 
 

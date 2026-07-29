@@ -4,10 +4,13 @@ skip-vs-fail dispositions, spawn the tool, stream its output, and report a
 per-slice outcome -- never an escaping exception. Mirrors the dispatch loop
 in `tan-cli/src/commands/build/execute/mod.rs`, trimmed to this port's
 current scope: no post-build system-manifest.yaml write, no
-sdk-switch-pristine wipe (see the task report for why), no
-Zephyr-boilerplate-loaded guard. What IS ported: the unknown-backend /
-null-command / missing-tool skip-vs-fail policy, the unsafe-cwd refusal, and
-the build-dir-must-exist-before-the-tool-runs precondition."""
+sdk-switch-pristine wipe (genuinely unreachable here -- tracked separately,
+not a gap in this file), no Zephyr-boilerplate-loaded guard, and no
+`tool == "west"` rewrite to the venv's west (`with_venv_on_path` in the Rust
+oracle -- no Python venv-resolution module exists yet). What IS ported: the
+unknown-backend / null-command / unsafe-cwd / missing-tool skip-vs-fail
+policy and dispatch order, and the build-dir-must-exist-before-the-tool-runs
+precondition."""
 import os
 import queue
 import shutil
@@ -20,10 +23,18 @@ from pathlib import Path
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.core.plan_exec import PolicyAction, assemble_slice_env, resolve_action
 
-KNOWN_BACKENDS = frozenset({"zephyr", "baremetal", "yocto", "native"})
+if os.name != "nt":
+    import signal
 
-# How often the output-draining loop checks `cancelled()` while no output
-# line is pending -- bounds cancellation latency without spinning the CPU.
+# metadata/schemas/build-plan-v1.schema.json: slices[].backend enum. Rust's
+# `Backend` (tan-core/src/build_plan.rs) matches this exactly, plus a catch-all
+# `Unknown(String)` for anything else -- "native" is NOT a legal backend; a
+# slice naming it must be refused by `executionPolicy.unknownBackend`
+# (default fail), never dispatched.
+KNOWN_BACKENDS = frozenset({"zephyr", "yocto", "baremetal"})
+
+# How often the output-draining loop checks `cancelled()` -- bounds
+# cancellation latency without spinning the CPU.
 _POLL_INTERVAL_S = 0.05
 # How long to give a terminated process to exit on its own before escalating
 # to a forceful kill.
@@ -47,15 +58,23 @@ def _drain_output(
     proc: subprocess.Popen, on_output: Callable[[str], None], cancelled: Callable[[], bool]
 ) -> bool:
     """Stream `proc`'s stdout to `on_output` line by line, polling
-    `cancelled()` at least every `_POLL_INTERVAL_S` while waiting for the
-    next line. Returns True iff cancellation was observed.
+    `cancelled()` every iteration -- BEFORE waiting on the next line, not
+    only when none is pending. Returns True iff cancellation was observed.
 
-    A plain `for line in proc.stdout:` blocks on the next `readline()` with
-    no way to interleave a check -- a slice that produces no output at all
-    (e.g. `time.sleep(60)`) would never yield control back, so `cancelled()`
-    would never be polled until the process exits on its own. Reading on a
-    background thread and polling a queue with a timeout is the portable fix
-    (Windows anonymous pipes don't support `select`)."""
+    Two separate problems, both live here:
+
+    1. A plain `for line in proc.stdout:` blocks on the next `readline()`
+       with no way to interleave a check -- a slice that produces no output
+       at all (e.g. `time.sleep(60)`) would never yield control back. Fixed
+       by reading on a background thread and polling a queue with a timeout
+       (Windows anonymous pipes don't support `select`).
+    2. Polling `cancelled()` only in the `except queue.Empty:` arm (the
+       first cut of this fix) is not enough: a CHATTY child -- `west build`
+       driving cmake/ninja is chatty by construction -- keeps the queue
+       non-empty forever, so that arm never runs and cancellation is never
+       observed. `cancelled()` must be checked unconditionally at the top of
+       every iteration, before the queue is touched at all.
+    """
     lines: queue.Queue[str | None] = queue.Queue()
 
     def reader() -> None:
@@ -69,11 +88,11 @@ def _drain_output(
     threading.Thread(target=reader, daemon=True).start()
 
     while True:
+        if cancelled():
+            return True
         try:
             line = lines.get(timeout=_POLL_INTERVAL_S)
         except queue.Empty:
-            if cancelled():
-                return True
             continue
         if line is None:
             return False
@@ -81,16 +100,70 @@ def _drain_output(
 
 
 def _terminate(proc: subprocess.Popen) -> None:
-    """Actually stop a running process -- not wait it out. `terminate()`
-    first (SIGTERM on POSIX; Windows has no distinct signal so this already
-    calls TerminateProcess), a short grace period, then `kill()` for a
-    process that ignored (or, on POSIX, blocked) the polite request."""
-    proc.terminate()
-    try:
-        proc.wait(timeout=_TERMINATE_GRACE_S)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
+    """Kill the whole process TREE, not just the direct child.
+
+    `west build` spawns cmake, which spawns ninja/make -- each inherits the
+    parent's stdout handle (Python's own `close_fds` default only closes fds
+    above 2). Killing just `proc` leaves a grandchild holding the pipe's
+    write end open: the reader thread's `for line in proc.stdout` never sees
+    EOF and blocks forever, and `Popen.__exit__` (which closes stdout) then
+    deadlocks on that same block. `start_new_session=True` at spawn (see
+    `execute_slices`) puts the child in its own POSIX process group so
+    `killpg` reaches every descendant; Windows has no process groups, so
+    `taskkill /T` walks the OS-tracked parent-PID tree instead."""
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+            capture_output=True,
+            check=False,
+        )
+    else:
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, signal.SIGTERM)
+            try:
+                proc.wait(timeout=_TERMINATE_GRACE_S)
+            except subprocess.TimeoutExpired:
+                os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # already exited between the cancellation check and here
+    proc.wait()
+
+
+def _command_on_path(tool: str) -> bool:
+    """PATH-only lookup for a bare/relative tool name -- never the current
+    directory. `shutil.which` is correct for this on POSIX (no CWD
+    special-case there), but on Windows its stdlib implementation inserts
+    `os.curdir` ahead of every PATH entry ("the current directory takes
+    precedence on Windows" -- its own source comment), reproducing
+    `CreateProcess`'s native search order. Rust's `command_on_path`
+    (crates/tan-cli/src/util.rs) deliberately walks `%PATH%` by hand instead,
+    precisely so a project checked out with its own `west.exe`/`openocd.exe`
+    at its root can never get spawned in place of the real tool -- mirrored
+    here rather than left as a Windows-only hole `shutil.which` doesn't
+    close."""
+    if os.name != "nt":
+        return shutil.which(tool) is not None
+    path = os.environ.get("PATH")
+    if not path:
+        return False
+    pathext = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep) if e]
+    names = [tool] if Path(tool).suffix else [tool + ext for ext in pathext]
+    for directory in path.split(os.pathsep):
+        if not directory:
+            continue
+        if any((Path(directory) / name).is_file() for name in names):
+            return True
+    return False
+
+
+def _tool_is_available(tool: str) -> bool:
+    """Rust's `tool_available` (crates/tan-cli/src/util.rs): an absolute
+    path must exist; anything else must resolve on PATH -- never merely
+    exist relative to the process's current working directory."""
+    if Path(tool).is_absolute():
+        return Path(tool).exists()
+    return _command_on_path(tool)
 
 
 def execute_slices(
@@ -126,16 +199,11 @@ def execute_slices(
             )
             continue
 
-        tool = sl.command.tool
-        if shutil.which(tool) is None and not Path(tool).exists():
-            outcomes.append(
-                _skip_or_fail(
-                    sl.core_id,
-                    resolve_action(policy, "missing_tool", PolicyAction.SKIP),
-                    f"tool `{tool}` not found",
-                )
-            )
-            continue
+        # Dispatch order below matches the Rust oracle (execute/mod.rs):
+        # unsafe-cwd, then create_dir_all, THEN the missing-tool skip/fail --
+        # an escaping cwd is a plan defect and must stay loud even when the
+        # tool also happens to be missing, not get silently absorbed into
+        # missingTool's default-skip.
 
         # Plans are trusted input, but writes (and here, the working
         # directory the tool runs in) stay confined under `build_root` --
@@ -160,6 +228,17 @@ def execute_slices(
             )
             continue
 
+        tool = sl.command.tool
+        if not _tool_is_available(tool):
+            outcomes.append(
+                _skip_or_fail(
+                    sl.core_id,
+                    resolve_action(policy, "missing_tool", PolicyAction.SKIP),
+                    f"tool `{tool}` not found",
+                )
+            )
+            continue
+
         env = dict(os.environ)
         env.update(dict(assemble_slice_env(sl.env, sl.env_append_path, env_lookup, gap_fillers)))
 
@@ -169,6 +248,12 @@ def execute_slices(
             # here leaked the pipe's file object (a `ResourceWarning` under
             # `-W error::ResourceWarning`, and a real fd leak across a long
             # multi-slice run).
+            #
+            # start_new_session=True (POSIX: setsid) puts the child in its
+            # own process group so `_terminate` can `killpg` the whole tree
+            # instead of only the direct child; a documented no-op on
+            # Windows (subprocess.py's Windows `_execute_child` takes and
+            # ignores it), where `_terminate` uses `taskkill /T` instead.
             with subprocess.Popen(
                 [tool, *sl.command.args],
                 cwd=str(cwd),
@@ -179,6 +264,7 @@ def execute_slices(
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                start_new_session=True,
             ) as proc:
                 if _drain_output(proc, on_output, cancelled):
                     _terminate(proc)
@@ -193,7 +279,8 @@ def execute_slices(
             # The tool vanished between the availability check above and
             # here, is a directory, lacks the executable bit, or is not a
             # valid executable format -- any of these raise here rather than
-            # at the `shutil.which` precheck. A failed slice, never a crash.
+            # at the `_tool_is_available` precheck. A failed slice, never a
+            # crash.
             outcomes.append(
                 SliceOutcome(sl.core_id, "failed", None, f"failed to launch `{tool}`: {err}")
             )
@@ -203,7 +290,11 @@ def execute_slices(
             SliceOutcome(
                 sl.core_id,
                 "succeeded" if code == 0 else "failed",
-                code,
+                # A negative POSIX return code means the process died from a
+                # signal -- Rust's `ExitStatus::code()` returns `None` for
+                # that case (it has no single-integer exit code), so the
+                # envelope's `rc` must be null too, not the raw `-N`.
+                None if code < 0 else code,
                 None if code == 0 else f"slice `{sl.core_id}` terminated with exit code: {code}",
             )
         )

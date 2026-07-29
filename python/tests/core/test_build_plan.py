@@ -136,3 +136,99 @@ def test_app_dir_null_parses_as_none():
       }]
     }""")
     assert plan.slices[0].app_dir is None
+
+
+def _plan_with_command(command_json: str) -> str:
+    return f"""{{
+      "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml",
+      "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
+      "slices": [{{
+        "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1", "appDir": "app",
+        "configArtefacts": [], "toolchain": null, "artifacts": {{}}, "debug": {{}},
+        "command": {command_json}, "env": {{}}, "envAppendPath": {{}}
+      }}]
+    }}"""
+
+
+@pytest.mark.parametrize(
+    "command_json,fragment",
+    [
+        ('{"args": [], "cwd": null}', "command.tool"),  # I1: missing "tool" key -> was KeyError
+        ('{"tool": null, "args": [], "cwd": null}', "command.tool"),  # I1: tool is null -> was TypeError
+        ('{"tool": 5, "args": [], "cwd": null}', "command.tool"),  # I1: tool is an int -> was TypeError
+        ('{"tool": "west", "args": [5], "cwd": null}', "command.args"),  # I1: args element is an int
+        ('{"tool": "west", "args": [], "cwd": 5}', "command.cwd"),  # I1: cwd is an int -> was TypeError
+        ('5', "command"),  # command itself is not an object or null
+    ],
+)
+def test_rejects_a_malformed_command(command_json, fragment):
+    """I1: Rust's serde rejects a malformed `ToolStep` at parse time; an
+    unguarded `cmd["tool"]`/non-string field let each of these escape
+    `execute.py` as a bare KeyError/TypeError instead of a coded
+    PlanParseError."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(_plan_with_command(command_json))
+    assert e.value.code == "build.plan-invalid"
+    assert fragment in e.value.message
+
+
+def _plan_with_env(env_json: str) -> str:
+    return f"""{{
+      "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml",
+      "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
+      "slices": [{{
+        "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1", "appDir": "app",
+        "configArtefacts": [], "toolchain": null, "artifacts": {{}}, "debug": {{}},
+        "command": null, "env": {env_json}, "envAppendPath": {{}}
+      }}]
+    }}"""
+
+
+@pytest.mark.parametrize(
+    "env_json,fragment",
+    [
+        ('{"X": 5}', "slices[0].env"),  # I1: env value is an int -> was TypeError at spawn
+        ('{"BAD=NAME": "x"}', "slices[0].env"),  # I1: env key contains "=" -> was ValueError at spawn
+        ('{"": "x"}', "slices[0].env"),  # empty env name -> same "illegal environment variable name"
+    ],
+)
+def test_rejects_a_malformed_env(env_json, fragment):
+    """I1: an env value that isn't a string, or a key that isn't a legal
+    env-var name, used to reach `subprocess.Popen` unguarded and raise
+    TypeError/ValueError there instead of failing at parse time."""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(_plan_with_env(env_json))
+    assert e.value.code == "build.plan-invalid"
+    assert fragment in e.value.message
+
+
+def test_rejects_a_malformed_env_append_path():
+    """Same validation class as `env`, applied to `envAppendPath` -- its
+    values feed the same eventual `subprocess` env dict via
+    `assemble_slice_env`/`apply_env_append`."""
+    plan_json = """{
+      "schemaVersion": 1, "generatedBy": "g", "boardYaml": "/w/board.yaml",
+      "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
+      "slices": [{
+        "coreId": "c1", "backend": "zephyr", "buildDir": "build/c1", "appDir": "app",
+        "configArtefacts": [], "toolchain": null, "artifacts": {}, "debug": {},
+        "command": null, "env": {}, "envAppendPath": {"PYTHONPATH": [5]}
+      }]
+    }"""
+    with pytest.raises(PlanParseError) as e:
+        parse_build_plan(plan_json)
+    assert e.value.code == "build.plan-invalid"
+    assert "slices[0].envAppendPath" in e.value.message
+
+
+def test_valid_command_and_env_still_parse():
+    """Guard against the validators above being too strict -- a well-formed
+    command/env/envAppendPath (the shape every other test in this file
+    already relies on) must still parse cleanly."""
+    plan = parse_build_plan(_plan_with_command(
+        '{"tool": "west", "args": ["build", "-b", "e1m_aen801"], "cwd": "build/c1"}'
+    ))
+    cmd = plan.slices[0].command
+    assert cmd.tool == "west"
+    assert cmd.args == ["build", "-b", "e1m_aen801"]
+    assert cmd.cwd == "build/c1"
