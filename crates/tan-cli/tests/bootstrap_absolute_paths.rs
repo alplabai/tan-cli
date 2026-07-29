@@ -128,10 +128,21 @@ fn a_relative_sdk_root_flag_still_reports_absolute_paths() {
     );
 
     // The block a customer is told to paste into a shell profile. A profile is
-    // sourced from $HOME, so a relative export in it is silently wrong.
+    // sourced from $HOME (or dot-sourced from a PowerShell profile), so a
+    // relative value in it is silently wrong.
+    //
+    // BOTH spellings, because `render_env_lines` emits shell on POSIX and
+    // PowerShell on Windows -- matching only `export ` made this loop iterate
+    // zero times on windows-latest, which is what the vacuity guard below
+    // caught on the first CI run:
+    //   POSIX:   export ZEPHYR_BASE="/abs/workspace/zephyr"
+    //   Windows: $env:ZEPHYR_BASE = "C:\abs\workspace\zephyr"
     let mut checked_an_export = false;
     for line in text.lines() {
-        let Some(rest) = line.strip_prefix("export ZEPHYR_BASE=") else {
+        let Some(rest) = line
+            .strip_prefix("export ZEPHYR_BASE=")
+            .or_else(|| line.strip_prefix("$env:ZEPHYR_BASE = "))
+        else {
             continue;
         };
         checked_an_export = true;
@@ -139,13 +150,14 @@ fn a_relative_sdk_root_flag_still_reports_absolute_paths() {
         assert!(
             Path::new(value).is_absolute(),
             "--print-env emitted {line:?} -- relative, so pasting it into a shell profile \
-             exports a path that does not exist from $HOME"
+             exports a path that does not exist from the profile's own directory"
         );
     }
     assert!(
         checked_an_export,
-        "--print-env printed no `export ZEPHYR_BASE=` line, so the assertion above checked \
-         nothing -- a silently vacuous test is worse than a missing one. Block was:\n{text}"
+        "--print-env printed no ZEPHYR_BASE line in either the POSIX or the PowerShell \
+         spelling, so the assertion above checked nothing -- a silently vacuous test is worse \
+         than a missing one. Block was:\n{text}"
     );
 }
 
