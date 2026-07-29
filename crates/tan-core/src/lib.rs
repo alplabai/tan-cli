@@ -55,8 +55,8 @@ pub use build_plan::{
     GeneratedFile, PlanWarning, PolicyAction, ToolStep, parse_build_plan, summarize_plan,
 };
 pub use build_readiness::{
-    BuildOs, BuildReadinessReport, BuildToolProbe, board_os_set, build_readiness_report,
-    zephyr_sdk_toolchain_check,
+    BuildOs, BuildReadinessReport, BuildToolProbe, SEVEN_ZIP_INSTALL_COMMAND, SEVEN_ZIP_PROGRAMS,
+    board_os_set, build_readiness_report, zephyr_sdk_install_command, zephyr_sdk_toolchain_check,
 };
 pub use clean::{
     CleanAction, CleanPlan, RejectedTarget, TargetOrigin, classify as clean_classify,

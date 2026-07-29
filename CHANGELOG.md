@@ -56,6 +56,55 @@
   contract, not with a per-invocation flag.
 
 ### Fixed
+- **The Zephyr SDK — the one build-blocking `Fail` a first-install customer
+  hits — was the only prerequisite that could never carry a Fix button**
+  (#203, #210). `missingPrerequisites` was written in exactly one place,
+  `push_tool`, whose shape is "PATH binary, keyed into the manifest's
+  `prerequisites.install` map". `zephyrSdk` is neither — it is an env/install-dir
+  detection with a command the SDK does not own — so it was pushed straight to
+  `checks` and silently never reached the list. The extension reads that list to
+  decide a check is actionable, so CMake, Ninja, git and Python all rendered
+  with a Fix button and the one row that stops the build rendered without one.
+  It is now recorded like every other absent prerequisite, carrying the real
+  `west sdk install --version 1.0.1 -t arm-zephyr-eabi` rather than `null` — the
+  exact command alp-sdk#855's fresh-host reporter needed and could not find. tan
+  still does not run it; a download-and-extract is west's job once a workspace
+  exists, not a read-only doctor's side effect. That command is also now
+  assembled in ONE function instead of formatted at four call sites, so a
+  version bump cannot leave the button running a different toolchain than the
+  prose beside it recommends.
+- **7-Zip is a hard prerequisite of `west sdk install` on native Windows and had
+  no check anywhere** (#204). west delegates `.7z` extraction to `patoolib`,
+  which shells out to an external `7z`/`7za`/`7zr`/`7zz`/`7zzs`/`unar` and has no
+  pure-Python fallback, so without one the install dies inside patoolib with an
+  error naming no Alp surface and no mention of 7-Zip. The fact existed in
+  exactly one place — a prose line in `tan bootstrap`'s TEXT output
+  (`manualInstallHints.windows.note[1]`) — reaching no JSON consumer, so the IDE
+  could not surface it either. `doctor --build` now emits a `sevenZip` check
+  with a runnable `winget install -e --id 7zip.7zip` (verified resolvable before
+  being written down, not guessed). Native Windows only, and only while the SDK
+  is still absent: the extractor is irrelevant once the toolchain is installed,
+  so the row appears beside the `zephyrSdk` Fail it unblocks and vanishes with
+  it rather than lingering as noise on every later run.
+- **Every remedy `tan doctor` computed was hidden unless you already knew to
+  pass `--verbose`** (#208). The "Next steps" block was gated on that flag, so
+  the person who runs `doctor` *because* something broke — the one person who
+  does not know to re-run it louder — saw the failures and none of the commands
+  that repair them. It renders at default verbosity now. `--quiet` still
+  suppresses it, and a clean report has no steps to print, so nothing changes on
+  a host with nothing wrong.
+- **Plain `tan doctor` reported debug readiness for `native-host` / `none` no
+  matter what board the project declared** (#208). An absent `--target-kind`
+  parsed to `native-host` and an absent `--server` to `none`, so a Zephyr project
+  got a CodeLLDB verdict and not one word about a probe or a GDB server — every
+  debug row was answering a question about a different target. The default is
+  now derived from the project's own `board.yaml` (`zephyr` → `zephyr-mcu`,
+  `baremetal` → `baremetal-mcu`, `yocto` → `yocto-userspace`; MCU-class first on
+  a multicore board), with the server taken from that target's own supported
+  list rather than a second hardcoded default that would have disagreed with it.
+  No `board.yaml` still means `native-host` — the one case it is right, and the
+  directory alp-sdk's bootstrap tells a customer to run `tan doctor` from. An
+  explicit `--target-kind` / `--server` still wins outright.
 - **`baremetal-mcu` × OpenOCD shipped a resolved `serverpath`/`searchDir` with
   NO `configFiles` to load, and `baremetal-mcu` × pyOCD had no target to
   select** (#139). `create_launch_draft`'s `BaremetalMcu` arm was ONE
