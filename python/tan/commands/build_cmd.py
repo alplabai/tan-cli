@@ -85,6 +85,22 @@ def _stream(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
+def _abs_posix(path: str) -> str:
+    """Rust's `normalize_path(cwd.join(p))` + `to_posix`: cwd-anchored,
+    lexically normalised, forward slashes.
+
+    `os.path.abspath`, NOT `Path.resolve()` -- abspath is purely lexical, so a
+    project reached through a symlink keeps the name the user typed, and a path
+    that does not exist yet still resolves. `resolve()` would rewrite both, and
+    the divergence guard compares STRINGS: rewriting one side's symlink but not
+    the other's is exactly how that guard starts firing on a healthy project.
+
+    Forward slashes because the result is substituted into `${PROJECT_ROOT}`
+    and lands in a CMake `-D` argument, where a Windows backslash is an escape.
+    """
+    return os.path.abspath(path).replace("\\", "/")
+
+
 def _is_sdk_root(path: Path) -> bool:
     return path.joinpath(*SDK_MARKER).is_file()
 
@@ -462,15 +478,33 @@ def build(
         )
     json_mode = output_format == "json"
 
-    # Resolution, in one place, before anything can fail. `--board-yaml` and
-    # `--build-root` are kept in their as-passed form (never resolved to
-    # absolute): the divergence guard in `apply_plan_token_substitution`
-    # compares them lexically, exactly as the Rust oracle does, and resolving
-    # only one side is how that guard starts firing on a project it should not.
+    # Resolution, in one place, before anything can fail -- and to ABSOLUTE,
+    # BOTH sides, from the same anchor.
+    #
+    # The divergence guard in `apply_plan_token_substitution` compares these
+    # two lexically (as the Rust oracle does), so they must move together: this
+    # resolves both or neither, never one. But they must also both be absolute,
+    # because `${PROJECT_ROOT}` is substituted from `board_yaml` and then
+    # CONSUMED from a different directory -- each slice runs its command in its
+    # own `command.cwd` (`<root>/build/<slice>`), and Zephyr resolves
+    # `-DEXTRA_CONF_FILE` against the APPLICATION source dir, which for the
+    # stock-shim slice is inside the SDK checkout entirely. Left relative, the
+    # default `cd <project> && tan build` resolves `${PROJECT_ROOT}` to `"."`
+    # and every zephyr slice dies -- `<sdk>/firmware/alp-stock-shim/./build/
+    # <slice>/alp.conf: File not found`, and `ERROR: . doesn't contain a
+    # CMakeLists.txt` -- which is the whole documented happy path. Rust never
+    # hits this because it anchors first: `resolve_cli_project_context_inner`
+    # builds `workspace_root = normalize_path(cwd.join(--project))` and derives
+    # `board_yaml_path` by joining onto THAT, so both are absolute before the
+    # guard ever runs (`crates/tan-cli/src/util.rs`, `crates/tan-core/src/
+    # project.rs::resolve_board_yaml_path`).
     if board_yaml is None and (Path.cwd() / "board.yaml").is_file():
-        board_yaml = "./board.yaml"
+        board_yaml = "board.yaml"
     if build_root is None:
         build_root = str(Path(board_yaml).parent) if board_yaml else "."
+    build_root = _abs_posix(build_root)
+    if board_yaml is not None:
+        board_yaml = _abs_posix(board_yaml)
 
     explicit_sdk = sdk_root is not None
     if sdk_root is None:

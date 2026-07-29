@@ -464,6 +464,52 @@ def test_a_tokened_plan_with_no_sdk_refuses_and_writes_nothing(project):
     assert not (project / "build" / "generated" / "alp" / "system_ipc.h").exists()
 
 
+def test_the_default_invocation_substitutes_an_absolute_project_root(project, tmp_path):
+    """`cd <project> && tan build` -- the documented happy path, with no
+    `--board-yaml` and no `--build-root`.
+
+    ${PROJECT_ROOT} must come out ABSOLUTE. It is substituted here but CONSUMED
+    somewhere else entirely: a slice runs its command in `<root>/build/<slice>`,
+    and Zephyr resolves `-DEXTRA_CONF_FILE` against the APPLICATION source dir,
+    which for a stock-shim slice is inside the SDK checkout. While these
+    defaults were kept in their as-passed form, ${PROJECT_ROOT} resolved to the
+    literal `"."` and a real `tan build` in exactly this shape produced
+    `<sdk>/firmware/alp-stock-shim/./build/<slice>/alp.conf: File not found`
+    and `ERROR: . doesn't contain a CMakeLists.txt` -- every zephyr slice dead,
+    on the one invocation a customer actually types.
+    """
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (project / "board.yaml").write_text("som:\n  sku: E1M-TEST\n", encoding="utf-8")
+
+    doc = two_slice_plan(())
+    doc["planPathMode"] = "tokened"
+    doc["sharedArtefacts"] = []
+    # Only the `command: null` slice, so this case spawns nothing at all; its
+    # config artefact is the readout of what ${PROJECT_ROOT} became.
+    doc["slices"] = [doc["slices"][1]]
+    doc["slices"][0]["configArtefacts"] = [
+        {"path": "build/zzz_nocmd-zephyr/alp.conf", "contents": "ROOT=${PROJECT_ROOT}\n"}
+    ]
+    plan = write_plan(project, doc)
+
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--sdk-root", str(sdk), "--format", "json",
+        cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    written = (project / "build" / "zzz_nocmd-zephyr" / "alp.conf").read_text(encoding="utf-8")
+    root = written.split("=", 1)[1].strip()
+    assert Path(root).is_absolute(), f"${{PROJECT_ROOT}} must be absolute, got {root!r}"
+    # Both sides of the divergence guard resolve together, so they stay
+    # lexically equal -- resolving only one is how that guard starts firing on
+    # a project that is perfectly fine.
+    assert env["project"]["root"] == root
+
+
 def test_an_unwritable_build_root_is_a_write_failure(project):
     doc = two_slice_plan(ALL_ARTEFACTS)
     # A shared artefact whose parent directory is an existing FILE: mkdir of
