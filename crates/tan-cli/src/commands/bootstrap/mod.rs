@@ -196,6 +196,33 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
         );
     };
 
+    // tan-cli#217: absolutize ONCE, here, before anything is derived from it.
+    //
+    // Every path this command reports -- `data.sdkRoot`/`workspaceDir`/
+    // `venvDir`/`zephyrBase`, and the `export`/`source` lines `--print-env`
+    // emits -- is derived from `sdk_root`. `--sdk-root ./alp-sdk`, which is
+    // exactly how the README Quickstart writes it, carried that relative
+    // spelling all the way out: `data.workspaceDir` came back `"."` and
+    // `--print-env` printed `export ZEPHYR_BASE="./zephyr"` under a heading
+    // that reads "Add to your shell profile" -- a profile is sourced from
+    // `$HOME`, where `./zephyr` is nothing. `project.root`, resolved a few
+    // lines above in the same run, was already absolute, so one envelope
+    // described one directory two ways and a consumer had no way to tell which
+    // fields it still had to resolve itself.
+    //
+    // `std::path::absolute`, NOT `canonicalize`: canonicalize requires the path
+    // to exist (this runs before any phase has created anything) and resolves
+    // symlinks, which would rewrite the customer's own spelling of their
+    // checkout -- macOS `/tmp/...` reported back as `/private/tmp/...` -- into
+    // a path they never typed. Absolute-and-unsurprising beats canonical here.
+    sdk_root =
+        native(&std::path::absolute(&sdk_root).unwrap_or_else(|_| PathBuf::from(sdk_root.clone())));
+    // The envelope's own `sdk.root` was recorded by `resolve_cli_project_context`
+    // above, from the pre-absolute string. Overwrite it, or `sdk.root` and
+    // `data.sdkRoot` disagree inside a single envelope -- the exact
+    // inconsistency this change exists to remove.
+    crate::sdk_report::override_root(&sdk_root);
+
     // `west init -l <alp-sdk>` always makes the topdir the checkout's PARENT and
     // alp-sdk itself the manifest repo, which is what registers the `alp-*`
     // extension commands (#769). Zephyr + HALs land as its siblings.
@@ -386,7 +413,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
                     root: context.workspace_root.clone(),
                     board_yaml: context.board_yaml_path.clone(),
                 };
-                crate::sdk_report::override_after_relocation(&sdk_root);
+                crate::sdk_report::override_root(&sdk_root);
             }
             relocate::Resolution::Refuse {
                 exit,

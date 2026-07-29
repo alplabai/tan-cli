@@ -258,21 +258,28 @@ jobs:
                         "directory exists.")
                   sys.exit(1)
 
-          # `data.venvDir`/`zephyrBase` come back CWD-RELATIVE (`./.venv`,
-          # `./zephyr`) while `project.root` in the same envelope is absolute --
-          # tan-cli#217. Resolve them here rather than exporting a relative PATH
-          # entry that happens to work in this step's cwd and silently resolves
-          # to nothing from `alp-workspace/my-app` two steps later.
-          resolve = lambda p: os.path.abspath(p)
+          # tan-cli#217: these came back CWD-RELATIVE (`.`, `./.venv`,
+          # `./zephyr`) while `project.root` in the same envelope was absolute.
+          # This step used to call os.path.abspath on them, which papered over
+          # the defect; now that #217 is fixed it ASSERTS instead, so a
+          # regression fails here rather than exporting a relative PATH entry
+          # that works in this step's cwd and silently resolves to nothing from
+          # `alp-workspace/my-app` two steps later.
+          for key in ("sdkRoot", "workspaceDir", "venvDir", "zephyrBase"):
+              if not os.path.isabs(d[key]):
+                  print(f"::error::tan bootstrap reported a RELATIVE data.{key}={d[key]} "
+                        "-- the tan-cli#217 regression. A consumer reading it from any "
+                        "other directory resolves nothing.")
+                  sys.exit(1)
           with open(os.environ["GITHUB_ENV"], "a") as fh:
-              fh.write("ZEPHYR_BASE=%s\n" % resolve(d["zephyrBase"]))
+              fh.write("ZEPHYR_BASE=%s\n" % d["zephyrBase"])
           # The workflow equivalent of the `source <venv>/bin/activate` line
           # `tan bootstrap --print-env` prints -- a customer runs it, so this job
           # runs it. It is not here to cover for tan's own venv discovery; that
           # has its own tests (crates/tan-cli/src/venv.rs), and the subject of
           # THIS job is the documented customer path.
           with open(os.environ["GITHUB_PATH"], "a") as fh:
-              fh.write(resolve(os.path.join(d["venvDir"], "bin")) + "\n")
+              fh.write(os.path.join(d["venvDir"], "bin") + "\n")
           print("bootstrap ok -- workspace", d["workspaceDir"])
           PY
 
@@ -285,8 +292,25 @@ jobs:
         working-directory: alp-workspace
         run: |
           set -euo pipefail
-          tan bootstrap --sdk-root ./alp-sdk --print-env | tee /tmp/gs-print-env.sh
+          # `2>&1` is load-bearing: the block goes to STDERR (tan-cli#227), so
+          # the plain pipe this step used to have captured zero bytes -- and
+          # `sh -n` on an empty file PASSES, because an empty file is a valid
+          # shell script. The step reported green having read nothing. Hence
+          # the size check below: never assert on a file without first proving
+          # something reached it.
+          tan bootstrap --sdk-root ./alp-sdk --print-env 2>&1 | tee /tmp/gs-print-env.sh
+          if [ ! -s /tmp/gs-print-env.sh ]; then
+            echo "::error::tan bootstrap --print-env produced no output at all."
+            exit 1
+          fi
           sh -n /tmp/gs-print-env.sh
+          # tan-cli#217: these exports are what a customer pastes into a shell
+          # profile, which is sourced from $HOME -- a relative path there is
+          # silently wrong. Every value must be absolute.
+          if grep -E '^export [A-Z_]+="\.' /tmp/gs-print-env.sh; then
+            echo "::error::--print-env emitted a relative export (lines above). A shell profile is sourced from \$HOME, where a './...' path resolves to nothing -- this is the tan-cli#217 regression."
+            exit 1
+          fi
 
       # ---- 7. the Zephyr SDK, via tan's own printed remedy ------------------
 
