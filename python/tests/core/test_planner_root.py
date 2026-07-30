@@ -39,39 +39,52 @@ def test_an_unbound_root_raises_instead_of_guessing():
     assert "bind_sdk_root" in str(err.value)
 
 
-def test_binding_resolves_the_root_and_exposes_the_sdk_scripts_dir(tmp_path):
-    # `<sdk>/scripts` on sys.path used to be how the fact readers that had stayed
-    # in alp-sdk (`alp_project`, `alp_registries`, `alp_cli.validator`) were
-    # imported. They have since relocated, so no `tan` module resolves through
-    # this entry any more; it is pinned because the rebind guard below depends on
-    # it and because a same-process caller may still reach for an SDK module by
-    # name (the parity harness's oracle does).
+def test_binding_resolves_the_root_and_touches_sys_path_not_at_all(tmp_path):
+    # `<sdk>/scripts` used to go on sys.path here, back when the fact readers
+    # (`alp_project`, `alp_registries`, `alp_cli.validator`) still lived in
+    # alp-sdk. They have relocated into `tan.planner`, so nothing in tan's own
+    # execution resolves through that entry -- and NOT adding it is what makes
+    # the zero import closure structural instead of merely measured: a
+    # re-introduced `from alp_project import ...` now fails at the moment it is
+    # written, rather than working silently until someone re-runs
+    # `test_the_in_process_path_loads_none_of_the_sdks_python`.
     root = tmp_path / "sdk"
     (root / "scripts").mkdir(parents=True)
+    before = list(sys.path)
     assert planner_root.bind_sdk_root(root) == root.resolve()
     assert planner_root.sdk_root() == root.resolve()
-    assert str(root.resolve() / "scripts") in sys.path
+    assert sys.path == before
 
 
 def test_rebinding_the_same_root_is_idempotent(tmp_path):
     root = tmp_path / "sdk"
     (root / "scripts").mkdir(parents=True)
+    before = list(sys.path)
     planner_root.bind_sdk_root(root)
     planner_root.bind_sdk_root(root)
-    assert sys.path.count(str(root.resolve() / "scripts")) == 1
+    assert planner_root.sdk_root() == root.resolve()
+    assert sys.path == before
 
 
-def test_rebinding_before_import_swaps_the_scripts_path(tmp_path, monkeypatch):
-    # Legal: nothing has frozen a constant yet. The OLD scripts dir must leave
-    # sys.path, or an `alp_project` from the first SDK shadows the second's.
+def test_rebinding_before_import_swaps_the_root_and_leaves_no_first_root_route(
+        tmp_path, monkeypatch):
+    # Legal: nothing has frozen a constant yet, so the second root must win
+    # outright. The hazard this covers is SHADOWING -- the first SDK's `scripts`
+    # staying importable so an `alp_project` from checkout A answers a build
+    # against checkout B. Binding adds no import route for either root, so the
+    # shadow has nowhere to live; asserting that is what keeps a future
+    # convenience `sys.path.insert` from reintroducing it.
     monkeypatch.delitem(sys.modules, "tan.planner", raising=False)
     first, second = tmp_path / "a", tmp_path / "b"
     for r in (first, second):
         (r / "scripts").mkdir(parents=True)
+    before = list(sys.path)
     planner_root.bind_sdk_root(first)
     planner_root.bind_sdk_root(second)
-    assert str(first.resolve() / "scripts") not in sys.path
-    assert str(second.resolve() / "scripts") in sys.path
+    assert planner_root.sdk_root() == second.resolve()
+    assert sys.path == before
+    for r in (first, second):
+        assert str(r.resolve() / "scripts") not in sys.path
 
 
 def test_rebinding_a_different_root_after_import_is_refused(tmp_path, monkeypatch):
@@ -80,8 +93,6 @@ def test_rebinding_a_different_root_after_import_is_refused(tmp_path, monkeypatc
     # against an SDK checkout the caller never named.
     monkeypatch.setitem(sys.modules, "tan.planner", object())
     first, second = tmp_path / "a", tmp_path / "b"
-    for r in (first, second):
-        (r / "scripts").mkdir(parents=True)
     planner_root.bind_sdk_root(first)
     with pytest.raises(planner_root.PlannerRootError) as err:
         planner_root.bind_sdk_root(second)

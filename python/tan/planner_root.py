@@ -28,17 +28,27 @@ of alp-sdk's Python
 (`tests/parity/test_planner_emit_parity.py::test_the_in_process_path_loads_none_of_the_sdks_python`
 is the measurement, per mode across all eleven).
 
-Binding still puts `<sdk_root>/scripts` on `sys.path`, and nothing in `tan`'s own
-execution needs it: every `tan generate` target renders in-process, `tan build`
-plans in-process, and the two remaining SDK scripts -- `alp_project.py` under
-`TAN_GENERATE_EXECUTOR=subprocess`, and `alp_kconfig_dump.py` through Zephyr's
-`EXTRA_KCONFIG_TARGET` hook -- are SPAWNED, and a spawned interpreter gets its own
-script directory regardless. What the entry still buys is the rebind guard below
-(a second SDK's `scripts/` must not sit behind the first's on the path) and any
-caller that reaches for an SDK module by name in tan's own process -- the parity
-harness's oracle does exactly that, and it is the last such caller. Keeping it is
-not what holds the closure open, since the closure is measured at zero WITH it
-present.
+**Binding does NOT put `<sdk_root>/scripts` on `sys.path`, deliberately.** Nothing
+in `tan`'s own execution needs it: every `tan generate` target renders
+in-process, `tan build` plans in-process, and the two remaining SDK scripts --
+`alp_project.py` under `TAN_GENERATE_EXECUTOR=subprocess`, and
+`alp_kconfig_dump.py` through Zephyr's `EXTRA_KCONFIG_TARGET` hook -- are
+SPAWNED, and a spawned interpreter gets its own script directory regardless of
+this process's `sys.path`.
+
+Removing the entry is what turns the zero closure from **measured** into
+**structural**. With `<sdk_root>/scripts` importable, a re-introduced
+`from alp_project import ...` would silently work and only a closure measurement
+would catch it; without it, that import fails loudly at the moment it is written.
+The measurement
+(`tests/parity/test_planner_emit_parity.py::test_the_in_process_path_loads_none_of_the_sdks_python`)
+stays as the belt to this braces.
+
+A caller that genuinely needs an SDK module by name in tan's own process must put
+the path there itself and own it. Exactly one does: the parity harness's oracle,
+whose `planners` fixture inserts `<sdk>/scripts` explicitly so it can import
+`alp_project` and diff the relocated planner against the original. That is a test
+comparing two implementations, not `tan` depending on one.
 """
 
 from __future__ import annotations
@@ -64,19 +74,21 @@ def bind_sdk_root(root: Path | str) -> Path:
     keep reading the first root's `metadata/**` while callers believed the
     second -- a silent wrong-SDK build, which is precisely the split-brain the
     plan's `sdkCommit` guard exists to catch.
+
+    Binding touches `sys.path` not at all -- see the module docstring. The root is
+    a value the relocated planner reads, not an import route.
     """
     global _BOUND
     resolved = Path(root).resolve()
-    if _BOUND is not None and _BOUND != resolved:
-        if "tan.planner" in sys.modules:
-            raise PlannerRootError(
-                f"the planner is already bound to `{_BOUND}` and imported; "
-                f"cannot rebind to `{resolved}` in the same process.")
-        _drop_from_path(_BOUND / "scripts")
+    if (
+        _BOUND is not None
+        and _BOUND != resolved
+        and "tan.planner" in sys.modules
+    ):
+        raise PlannerRootError(
+            f"the planner is already bound to `{_BOUND}` and imported; "
+            f"cannot rebind to `{resolved}` in the same process.")
     _BOUND = resolved
-    scripts = str(resolved / "scripts")
-    if scripts not in sys.path:
-        sys.path.insert(0, scripts)
     return resolved
 
 
@@ -88,12 +100,6 @@ def sdk_root() -> Path:
             "its metadata paths freeze at import time, so an unbound import "
             "cannot be repaired -- bind first, then import.")
     return _BOUND
-
-
-def _drop_from_path(scripts: Path) -> None:
-    text = str(scripts)
-    while text in sys.path:
-        sys.path.remove(text)
 
 
 def emit(mode: str, *, root: Path | str, board_yaml: Path,
