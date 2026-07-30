@@ -24,6 +24,12 @@ is frozen, and what needs those modes is a gate, not a customer: alp-sdk's
 `scripts/check_emit_snapshots.py` and `scripts/check_zephyr_conf_parity.py`
 spawn an emitter and diff its stdout. `tan generate` serves the same modes for
 customers, but writes a FILE and prints an envelope, so it cannot stand in.
+
+`--emit scaffold` (`tan.planner.cli.TEMPLATE_MODES`) is here for that same
+reason, and it has no `tan generate` counterpart at all: it renders a whole
+PROJECT from the SDK's live template catalog, and the customer path to a new
+project is `tan init`, which scaffolds from tan's OWN vendored capture with no
+SDK checkout in sight (I-32). Two paths, deliberately.
 """
 
 from __future__ import annotations

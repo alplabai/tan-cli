@@ -291,10 +291,13 @@ def test_the_subprocess_entry_points_agree_too():
 #: the SDK's Python. Run UNSCOPED, because that is the shape the gate runs: its
 #: `_emit()` passes `--input` and `--emit` and nothing else.
 #:
-#: `scaffold` is absent, and that is a FINDING rather than an omission:
-#: `alp_project.py --emit scaffold` renders through `scripts/alp_template.py`,
-#: which has NOT relocated, so `tan.planner_cli` refuses it (argparse: invalid
-#: choice) and those four snapshot cases cannot repoint yet.
+#: `scaffold` is absent because it does not fit this parametrisation -- it takes
+#: `--template`/`--sku` and reads no board.yaml at all, so
+#: `test_the_scaffold_mode_agrees_on_stdout_through_argv` covers its four cases
+#: instead. It used to be absent as a FINDING (the mode rendered through
+#: `scripts/alp_template.py`, which had not relocated, so `tan.planner_cli`
+#: refused it outright); that file's `render_to_envelope` path is now
+#: `tan.planner.template`.
 _SNAPSHOT_PROJECT_MODES = (
     "zephyr-conf", "dts-overlay", "native-sim-overlay", "hw-info-h",
     "west-libraries", "os-topology", "composed-route-table", "carrier-netlist",
@@ -336,6 +339,72 @@ def test_the_project_modes_agree_on_stdout_through_argv(mode):
     assert got_rc == want_rc, f"alp_project rc={want_rc}, tan rc={got_rc}"
     assert got == want, _first_diff(want.decode("utf-8", "replace"),
                                     got.decode("utf-8", "replace"))
+
+
+#: `--emit scaffold`'s four cases, lifted from `check_emit_snapshots.py`'s own
+#: CASES rows: `(board.yaml, template id, SoM SKU)`. The board is UNUSED by the
+#: render -- a scaffold is a pure function of `--template`/`--sku`, and
+#: `alp_project.main()` dispatches the mode before `--input` is ever read -- and
+#: is passed anyway so this runs the gate's exact invocation shape.
+_SCAFFOLD_CASES = (
+    ("examples/peripheral-io/hello-world/board.yaml", "minimal", "E1M-V2N101"),
+    ("examples/peripheral-io/gpio-button-led/board.yaml", "peripheral", "E1M-V2N101"),
+    ("examples/peripheral-io/i2c-master/board.yaml", "sensor", "E1M-V2N101"),
+    ("examples/ai/cold-chain-monitor/board.yaml", "edge-ai", "E1M-V2N101"),
+)
+
+
+@pytest.mark.parametrize("board_rel,template,sku", _SCAFFOLD_CASES,
+                         ids=[c[1] for c in _SCAFFOLD_CASES])
+def test_the_scaffold_mode_agrees_on_stdout_through_argv(board_rel, template, sku):
+    """`--emit scaffold --template <id> --sku <SKU>`, both front doors, as bytes.
+
+    The last four `check_emit_snapshots.py` cases that could not repoint at
+    `tan`. Each renders a WHOLE project -- a `board.yaml` retargeted onto `sku`
+    (som.sku, preset, `cores:` key, every `pins:` pad/macro/doc re-derived
+    through the two boards' shared `board_alias:` join), a scaffold-hardened
+    `CMakeLists.txt`, a README with its SDK-tree-relative links rewritten -- so a
+    single wrong substitution anywhere in `tan.planner.template` shows up here,
+    and the JSON envelope's `indent=2` + one trailing newline are pinned along
+    with it.
+
+    STDOUT, not a file: that is what the gate diffs, and `sys.stdout.write` is
+    where a `\\n` would become `\\r\\n` on Windows if one side wrote through a
+    different stream than the other.
+    """
+    assert SDK is not None
+    board = SDK / board_rel
+    if not board.is_file():
+        pytest.skip(f"{board} not in this checkout")
+    common = ["--input", str(board), "--emit", "scaffold",
+              "--template", template, "--sku", sku]
+    want_rc, want = _argv_stdout(
+        [sys.executable, str(SDK / "scripts" / "alp_project.py"), *common],
+        cwd=SDK, pythonpath=SDK / "scripts")
+    got_rc, got = _argv_stdout(
+        [sys.executable, "-m", "tan.planner_cli", "--sdk-root", str(SDK), *common],
+        cwd=PYTHON_ROOT, pythonpath=PYTHON_ROOT)
+    assert want_rc == 0, f"the alp-sdk oracle refused this case (rc={want_rc})"
+    assert got_rc == want_rc, f"alp_project rc={want_rc}, tan rc={got_rc}"
+    assert got == want, _first_diff(want.decode("utf-8", "replace"),
+                                    got.decode("utf-8", "replace"))
+
+
+def test_a_scaffold_without_its_flags_refuses_like_alp_project_does():
+    """Both required flags, refused one at a time and on STDERR.
+
+    `argparse` cannot express "required only for this `--emit`", so both sides
+    hand-check -- and a refusal that reached STDOUT would corrupt the very byte
+    stream the gate diffs, which is what this pins beside the exit code.
+    """
+    assert SDK is not None
+    for extra in ([], ["--template", "minimal"]):
+        rc, out = _argv_stdout(
+            [sys.executable, "-m", "tan.planner_cli", "--sdk-root", str(SDK),
+             "--emit", "scaffold", *extra],
+            cwd=PYTHON_ROOT, pythonpath=PYTHON_ROOT)
+        assert rc == 1, f"--emit scaffold {extra} exited {rc}"
+        assert out == b"", f"--emit scaffold {extra} put {len(out)} bytes on stdout"
 
 
 def test_the_tree_mode_refuses_on_stdout_exactly_as_alp_project_does():
