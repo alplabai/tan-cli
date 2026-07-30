@@ -27,7 +27,10 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
+
+import pytest
 
 from tan.commands import doctor_cmd
 
@@ -36,7 +39,7 @@ from tan.commands import doctor_cmd
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 
-def run_tan(*argv, cwd, scrub_path=False):
+def run_tan(*argv, cwd, scrub_path=False, env_extra=None):
     """Spawn the port. ``scrub_path`` empties ``PATH`` so not one probe can
     resolve -- the hostile environment doctor is supposed to survive."""
     env = {
@@ -44,6 +47,7 @@ def run_tan(*argv, cwd, scrub_path=False):
         "PYTHONPATH": os.pathsep.join(
             [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
         ),
+        **(env_extra or {}),
     }
     if scrub_path:
         env["PATH"] = ""
@@ -368,6 +372,36 @@ def test_a_scrubbed_host_exits_4_with_exactly_one_envelope_and_no_traceback(tmp_
     if host_python["status"] == "fail":
         assert codes & {"bootstrap.python-not-runnable", "bootstrap.python-too-old"}
     assert {"summary", "checks", "generatedAt", "nextSteps"} <= set(envelope["data"])
+
+
+@pytest.mark.parametrize(
+    "epoch", ["1700000000000", "99999999999", "-99999999999", "253402300799"]
+)
+def test_an_out_of_range_source_date_epoch_still_reports_the_host(epoch, tmp_path):
+    """`data.generatedAt` is rendered INSIDE doctor's own try/except, so a
+    timestamp helper that throws does not produce a traceback here -- it produces
+    a WRONG VERDICT: `doctor.internal-failure` at exit 5, `data: null`, on a host
+    that was diagnosed fine. The quiet half of the same defect
+    `test_debug_config_command.py` covers loudly.
+
+    Milliseconds is the realistic trigger (1700000000000 -> year 55838), and CI
+    and reproducible-build environments are what set this variable. `PATH` is
+    scrubbed so the exit code is the deterministic 4 of the case above rather
+    than whatever this developer machine happens to have installed.
+    """
+    proc = run_tan(
+        "doctor", "--format", "json", cwd=tmp_path, scrub_path=True,
+        env_extra={"SOURCE_DATE_EPOCH": epoch},
+    )
+    assert "Traceback" not in proc.stderr, proc.stderr
+    envelope = json.loads(proc.stdout)
+
+    codes = {i["code"] for i in envelope["issues"]}
+    assert "doctor.internal-failure" not in codes, envelope["issues"]
+    assert proc.returncode == 4, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert envelope["data"] is not None
+    # Shape, not value: an out-of-range epoch falls back to the wall clock.
+    time.strptime(envelope["data"]["generatedAt"], "%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_text_mode_writes_nothing_to_stdout(tmp_path):

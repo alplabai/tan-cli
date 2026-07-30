@@ -42,6 +42,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
+from tan.core.timestamp import generated_at_iso
 from tan.templates import VENDORED_ROOT
 
 #: Template ids, in registry order (`WizardTemplateId::as_str`). Wire contract:
@@ -685,22 +686,16 @@ def sdk_pointer_json(sdk_path: str) -> str:
     caller resolved it.
 
     `SOURCE_DATE_EPOCH` wins over the clock, so a captured pointer is
-    reproducible -- `tan.commands.doctor_cmd._generated_at` carries the same
-    four lines for `data.generatedAt`. Two small twins, deliberately: hoisting
-    them into a shared util is a cross-command refactor, not part of `tan init`.
+    reproducible -- through `tan.core.timestamp`, which NEVER raises. This runs
+    AFTER the customer's project files already landed, and an out-of-range epoch
+    (the MILLISECONDS case) used to kill `tan init` with a traceback here.
     """
     import json  # noqa: PLC0415 -- one call site, not worth a module-level import
-    import time  # noqa: PLC0415
 
-    raw = os.environ.get("SOURCE_DATE_EPOCH")
-    seconds = time.time()
-    if raw is not None:
-        try:
-            seconds = int(raw.strip())
-        except ValueError:
-            pass
-    updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
-    return json.dumps({"sdkPath": sdk_path, "updatedAt": updated_at}, indent=2) + "\n"
+    return (
+        json.dumps({"sdkPath": sdk_path, "updatedAt": generated_at_iso()}, indent=2)
+        + "\n"
+    )
 
 
 def posix(path: Path) -> str:

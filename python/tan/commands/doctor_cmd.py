@@ -59,13 +59,13 @@ import os
 import re
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 import typer
 
 from tan.commands.build_cmd import discover_sdk_root
+from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -781,15 +781,13 @@ def _has_module(name: str) -> bool:
 
 def _generated_at() -> str:
     """`SOURCE_DATE_EPOCH` when set, so a captured envelope is reproducible --
-    mirrors `crate::util::generated_at_iso`."""
-    raw = os.environ.get("SOURCE_DATE_EPOCH")
-    seconds = time.time()
-    if raw is not None:
-        try:
-            seconds = int(raw.strip())
-        except ValueError:
-            pass
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(seconds))
+    `tan.core.timestamp`, which NEVER raises.
+
+    An out-of-range epoch (the MILLISECONDS case) used to throw from here, and
+    the caller's own try/except then reported `doctor.internal-failure`: a
+    fabricated "tan is broken" verdict on a host that was diagnosed fine.
+    """
+    return generated_at_iso()
 
 
 def doctor(

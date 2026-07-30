@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import os
 import stat
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -64,6 +63,7 @@ from tan.core.debug_launch import (
     parse_target_kind,
 )
 from tan.core.jsonc_splice import pretty_json
+from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 
@@ -109,8 +109,10 @@ class _Outcome:
 
 
 def _generated_at() -> str:
-    """`SOURCE_DATE_EPOCH` when set, else now -- mirrors
-    `crate::util::generated_at_iso` + `tan_core::clock::format_iso8601_utc`.
+    """`SOURCE_DATE_EPOCH` when set, else now -- `tan.core.timestamp`, which
+    NEVER raises. That matters here specifically: this is also called from the
+    recovery path of the exception guard in `_emit_outcome`, so a throw
+    DOUBLE-FAULTS into a raw traceback with EMPTY stdout.
 
     Millisecond precision with a `Z` suffix, matching JavaScript's
     `toISOString()`, because the envelopes are byte-compared against the TS
@@ -118,35 +120,7 @@ def _generated_at() -> str:
     `1970-01-01T00:00:00.000Z`). A whole-second format would fail all four
     `debug-config` fixtures.
     """
-    raw = os.environ.get("SOURCE_DATE_EPOCH")
-    seconds = time.time()
-    if raw is not None:
-        try:
-            seconds = float(int(raw.strip()))
-        except ValueError:
-            pass
-    # NEVER raise. This helper is also called from the recovery path of the
-    # exception guard in `_emit_outcome`, so a throw here DOUBLE-FAULTS: the
-    # first failure is caught, the recovery re-raises, and the process dies with
-    # a raw traceback and EMPTY stdout -- precisely the break that guard exists
-    # to prevent, and the only path in the port that could still do it.
-    #
-    # The realistic trigger is `SOURCE_DATE_EPOCH` in MILLISECONDS
-    # (1700000000000 -> year 55838), and CI / reproducible-build environments are
-    # exactly what set this variable. `time.gmtime` raises OverflowError or
-    # OSError (Errno 22 on Windows) once past the platform's `time_t` range, and
-    # that range differs per platform, so the value cannot be portably
-    # pre-validated -- catch rather than predict. Rust does not fail here either:
-    # `crates/tan-cli/src/util.rs` parses and falls back to the clock.
-    for candidate in (seconds, time.time()):
-        try:
-            stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(int(candidate)))
-        except (OverflowError, OSError, ValueError):
-            continue
-        millis = int((candidate - int(candidate)) * 1000)
-        return f"{stamp}.{millis:03d}Z"
-    # Supplied stamp AND wall clock both unusable: still no throw.
-    return "1970-01-01T00:00:00.000Z"
+    return generated_at_iso(millis=True)
 
 
 def _normalise(path: str) -> str:

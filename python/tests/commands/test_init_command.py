@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -374,6 +375,53 @@ def test_from_example_copies_the_tree_and_retargets_the_som(tmp_path):
     assert env["data"]["sdkPinned"] == "./sdk"
     pointer = json.loads((tmp_path / "copy" / ".alp" / "sdk-path").read_text(encoding="utf-8"))
     assert pointer["sdkPath"] == "./sdk"
+
+
+@pytest.mark.parametrize(
+    "epoch", ["1700000000000", "99999999999", "-99999999999", "253402300799"]
+)
+def test_an_out_of_range_source_date_epoch_still_pins_the_sdk(epoch, tmp_path):
+    """`.alp/sdk-path` carries an `updatedAt`, rendered AFTER the customer's
+    project files already landed -- so a timestamp helper that throws breaks
+    `tan init` at the last step of a run that otherwise succeeded.
+
+    Milliseconds is the realistic trigger (1700000000000 -> year 55838), and CI
+    and reproducible-build environments are what set this variable. The POINTER
+    is asserted, not just the exit code, because the two failure modes differ by
+    platform and only one is loud: `time.gmtime` raises OSError (Errno 22) on
+    Windows, which `_pin_sdk`'s `except OSError` SWALLOWS into a silent
+    `sdkPinned: null`, while OverflowError/ValueError elsewhere escapes as a raw
+    traceback with EMPTY stdout.
+
+    Mirrors `test_an_out_of_range_source_date_epoch_still_emits_one_envelope` in
+    `test_debug_config_command.py`. The helper is now shared
+    (`tan.core.timestamp`); this is what keeps `tan init`'s caller honest.
+    """
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    proc = run_tan(
+        "init",
+        "--template",
+        "minimal-app",
+        "--sdk-root",
+        "./sdk",
+        "--name",
+        "app",
+        "--format",
+        "json",
+        cwd=tmp_path,
+        env_extra={"SOURCE_DATE_EPOCH": epoch},
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    assert env["data"]["sdkPinned"] == "./sdk"
+    pointer = json.loads((tmp_path / "app" / ".alp" / "sdk-path").read_text(encoding="utf-8"))
+    assert pointer["sdkPath"] == "./sdk"
+    # Shape, not value: an out-of-range epoch falls back to the wall clock.
+    time.strptime(pointer["updatedAt"], "%Y-%m-%dT%H:%M:%SZ")
 
 
 def test_from_example_traversal_is_refused(tmp_path):
