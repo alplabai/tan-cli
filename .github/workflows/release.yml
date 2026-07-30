@@ -105,6 +105,13 @@ jobs:
     # So turning it on today would make every tag red for a defect a tag cannot
     # fix. Flip it to `sdk_parity: true` once that divergence is closed -- a gate
     # that cannot go green is not a gate, and one that is on-but-ignored is worse.
+    #
+    # Re-checked against alp-sdk `design/tan-python-port` (ac903335, post
+    # main-merge, 0 behind): `25 failed, 1715 passed, 209 skipped` -- the same 25,
+    # so this is not the relocated planner reading a stale oracle. That worktree's
+    # `scripts/alp_orchestrate/manifest.py:92-94` keeps the write-only-when-set
+    # rule, and `tan/planner/manifest.py:93,118` still writes the key
+    # unconditionally.
     with:
       sdk_parity: false
     # A called workflow inherits the caller's permissions; the gates compile

@@ -32,7 +32,7 @@ failed**.
 | three remaining assets | **BLOCKED, not buildable yet** — GitHub refuses to dispatch a workflow absent from the default branch (§1.2) |
 | `tan monitor` without pyserial | works "no traceback", but reports the WRONG code — §0.2 |
 | npm-shim libc mismatch | **fixed and pinned** — §6c |
-| `sdk_parity` against `design/tan-python-port` | §3.4a |
+| `sdk_parity` against `design/tan-python-port` | **still red**, same 25 — §3.4a |
 
 ### 0.2 `tan monitor` on a no-extras build: no traceback, wrong verdict
 
@@ -431,6 +431,37 @@ smaller problem.
 diverges from the shipped 0.4.x Rust (`--output` does not exist there), so
 pinning Rust parity into the release gate would encode a comparison the port is
 meant to break.
+
+### 3.4a Re-run against `design/tan-python-port` — still not green
+
+Re-run with `ALP_SDK_ROOT=E:/GitHub/alp-sdk/.claude/worktrees/tan-python-port`
+(`ac903335`, "Merge origin/main into design/tan-python-port", 0 commits behind
+main): **`25 failed, 1715 passed, 209 skipped in 848.80s`** — the same 25 as
+against public main, all
+`test_planner_emit_parity.py::test_every_mode_is_byte_identical[...]`. The
+divergence reproduces byte for byte:
+
+```
+--emit system-manifest differs -- line 28:
+    sdk: '  flash_method: swd_probe'
+    tan: '  firmware_path: null'
++   firmware_path: null
+    flash_method: swd_probe
+```
+
+So the stale-oracle theory is not what is failing here. Both sides were checked
+directly:
+
+* the port worktree's oracle keeps the original rule —
+  `scripts/alp_orchestrate/manifest.py:92-94`, `firmware_path = entry.get(...)`
+  then `if firmware_path is not None:` before writing the key;
+* tan still writes it unconditionally — `tan/planner/manifest.py:93` and `:118`
+  in the merged tree (`93aa016`, i.e. including `9381fbc` + `729234a`).
+
+**Verdict: `sdk_parity` cannot go green yet, and pointing it at the post-merge
+worktree does not change that.** The fix has to land on the tan side; when it
+does, this is a one-word edit in `release.yml` (`sdk_parity: false` → `true`) and
+a re-run. Nothing was changed here to make it pass.
 
 The original finding, for the record:
 
