@@ -1,0 +1,312 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+# Can the Python `tan` ship as the eight release assets?
+
+**Yes, with three blockers first.** Five of the eight assets were built AND
+verified on this machine; the other three (ARM Windows, both macOS) need a host
+this machine does not have — PyInstaller cannot cross-compile — but their runner
+labels and their PyInstaller wheels both exist. One blocker (§3.1) breaks
+`pip install` too, so it is not a freezing problem, and one (§3.2) **already
+fails**: the aarch64 musl asset builds and works but the repo's own size gate
+rejects it.
+
+Nothing in this document was published: no tag, no release, no PR. It records
+what was actually run, with output.
+
+**Host used for every measurement below:** Windows 11 x86_64 (`AMD64`), Python
+3.12.10 (`py -3.12`), PyInstaller 6.21.0, clean venv holding only
+`typer rich pyyaml jsonschema click pyinstaller`; WSL2 `Ubuntu-22.04` (glibc
+2.35) with Docker Engine 29.1.3; QEMU arm64 via
+`docker run --privileged --rm tonistiigi/binfmt --install arm64`.
+
+## 1. Per-asset result
+
+| Asset | Buildable | How | Verified how | Open issue |
+|---|---|---|---|---|
+| `tan-x86_64-pc-windows-msvc.exe` | **PROVED here** | native Windows, `scripts/build_binary.sh`, 13517737 B | 4/4 proofs on the host | — |
+| `tan-x86_64-unknown-linux-gnu` | **PROVED here** | `docker python:3.12-slim-bullseye` (Debian 11, glibc 2.31) + `binutils`, 14042352 B | 4/4 in `debian:bullseye-slim` with **no Python installed** | floor is glibc **2.29**, not 2.31 — see §4.2 |
+| `tan-x86_64-unknown-linux-musl` | **PROVED here** | `docker python:3.12-alpine`, 14998816 B | 4/4 in `alpine:3.20` with **no Python installed** | 1184 B under the size gate — §3.2 |
+| `tan-aarch64-unknown-linux-gnu` | **PROVED here** | `docker --platform linux/arm64 python:3.12-slim-bullseye` under QEMU, 162.9 s, 13840528 B | 4/4 in arm64 `debian:bullseye-slim` under QEMU, **no Python** | CI should use `ubuntu-24.04-arm` natively, not QEMU |
+| `tan-aarch64-unknown-linux-musl` | **PROVED here**, but the build script **exits 1** | `docker --platform linux/arm64 python:3.12-alpine` under QEMU, 15277408 B | 4/4 in arm64 `alpine:3.20` under QEMU, **no Python** | **over the 15000000 size gate — §3.2** |
+| `tan-aarch64-pc-windows-msvc.exe` | **NOT built here** (no ARM Windows host) | `windows-11-arm` runner: image ships Python 3.13.14 and tool-cache **3.12.10**; PyInstaller publishes `pyinstaller-6.21.0-py3-none-win_arm64.whl`, so the bootloader is prebuilt | — | unproved: nobody has run PyInstaller on that image in this repo |
+| `tan-x86_64-apple-darwin` | **NOT built here** (no macOS host) | `macos-15-intel` (Intel, available to private repos); `pyinstaller-6.21.0-py3-none-macosx_10_13_universal2.whl` | — | **`macos-latest` is arm64** — using it silently produces an arm64 binary under the x86_64 name |
+| `tan-aarch64-apple-darwin` | **NOT built here** (no macOS host) | `macos-latest` (arm64), same universal2 wheel | — | unproved |
+
+Every asset name above is byte-identical to `release.yml`'s matrix
+(`.github/workflows/release.yml:107,111,118,123,128,133,138,142`) and to what
+`releaseAssetForTarget` builds at `alp-sdk-vscode/src/alpCli/service.ts:307`:
+`` `tan-${target}${platform === "win32" ? ".exe" : ""}` ``.
+
+The four proofs, run by `python/scripts/verify_binary.sh` (added here):
+`--version`; `generate --help` carries `--output`; `init --template zephyr-app`
+writes `board.yaml` + `src/main.c` (proves the vendored-template `--add-data`);
+`generate --target zephyr-conf --output ./out/alp.conf --sdk-root <sdk>` emits a
+file containing `CONFIG_` lines. A binary that starts but cannot emit fails.
+
+### 1.1 Why "eight from three runners" does not carry over
+
+`release.yml` gets 8 assets from 3 runner types because **cargo
+cross-compiles**: `windows-latest` builds both MSVC targets,
+`ubuntu-latest` + `cargo-zigbuild` builds all four Linux targets,
+`macos-latest` builds both Darwin targets. PyInstaller freezes *the interpreter
+it is running*, so it produces exactly one OS+arch per host. A Python release
+needs **eight native hosts**. All eight labels exist and are available to
+private repositories (GitHub docs, 2026-07): `windows-latest`,
+`windows-11-arm`, `ubuntu-latest`, `ubuntu-24.04-arm`, `macos-15-intel`,
+`macos-latest`. Private repos get 2 CPUs instead of 4 on the Linux/Windows
+runners, so build minutes roughly double against the public numbers.
+
+## 2. What the extension actually downloads
+
+Both Linux arches map to the **musl** assets, never `-gnu`
+(`alp-sdk-vscode/src/alpCli/service.ts:42-43`):
+
+```
+42:  "linux/x64": "x86_64-unknown-linux-musl",
+43:  "linux/arm64": "aarch64-unknown-linux-musl",
+```
+
+The binary is written raw to one cached path — `<globalStorageUri>/cli/tan`
+(`vscodeAdapter.ts:98-99,133`) — chmod 0o755 on non-Windows
+(`download.ts:124-128`, again at `adapterCore.ts:142-143`), and **nothing
+unpacks it**. `--onefile` is therefore mandatory, and `--onedir` is unusable.
+`SUPPORTED_CLI_VERSION = "0.4.0"` (`service.ts:27`).
+
+## 3. Blockers
+
+### 3.1 `click` is undeclared — this also breaks `pip install`
+
+`python/tan/cli.py:15` is `from click.testing import CliRunner`. typer 0.27.0
+no longer depends on click:
+
+```
+$ python -c "from importlib.metadata import requires; print(requires('typer'))"
+['shellingham>=1.3.0', 'rich>=13.8.0', 'annotated-doc>=0.0.2', 'colorama; platform_system == "Windows"']
+```
+
+`python/pyproject.toml:47` declares
+`dependencies = ["typer>=0.12", "rich>=13", "pyyaml>=6", "jsonschema>=4.18"]`.
+So a clean environment has no click, and the first frozen build died before
+printing a byte:
+
+```
+Traceback (most recent call last):
+  File "__main__.py", line 3, in <module>
+  File "pyimod02_importers.py", line 457, in exec_module
+  File "tan\cli.py", line 15, in <module>
+    from click.testing import CliRunner
+ModuleNotFoundError: No module named 'click'
+[PYI-47404:ERROR] Failed to execute script '__main__' due to unhandled exception!
+```
+
+This is not a freezing artefact: `pip install alp-tan` into a fresh venv fails
+the same way with a current typer. **Fix: declare `click` in
+`python/pyproject.toml`, or use `typer.testing.CliRunner`** (typer ships one —
+`typer.testing.CliRunner` resolves in the same venv). Everything below was
+built with `click` installed explicitly.
+
+### 3.2 The size gate already rejects a correct aarch64 musl build
+
+`python/scripts/build_binary.sh:73` sets `MAX_ARTIFACT_BYTES=15000000` as a
+dirty-interpreter guard, and `python/tests/conformance/test_packaged_binary.py:28`
+pins the same number with `assert size < MAX_ARTIFACT_BYTES`. Measured from
+clean venvs (only `typer rich pyyaml jsonschema click pyinstaller` installed):
+
+| asset | bytes | headroom |
+|---|---|---|
+| `tan-x86_64-pc-windows-msvc.exe` | 13517737 | 1482263 |
+| `tan-aarch64-unknown-linux-gnu` | 13840528 | 1159472 |
+| `tan-x86_64-unknown-linux-gnu` | 14042352 | 957648 |
+| `tan-x86_64-unknown-linux-musl` | 14998816 | **1184** |
+| `tan-aarch64-unknown-linux-musl` | **15277408** | **−277408 (FAILS)** |
+
+```
+ERROR: dist/tan is 15277408 B (ceiling 15000000).
+       Built from a dirty interpreter -- PyInstaller bundled modules
+       tan never imports. Rebuild from a clean venv (see header).
+```
+
+That build is not dirty — the same binary then passed all four proofs in a
+Python-free arm64 `alpine:3.20`. musl links statically, so both musl assets are
+larger than their glibc twins by ~1 MB (x86_64) to ~1.4 MB (aarch64), and the
+x86_64 one clears the gate by 1184 bytes purely by luck. **Raise the ceiling
+(both places move together; one is under `python/tests/`, which this branch does
+not touch) or make it per-libc.** Note also that the ceiling exists to catch a
+dirty interpreter, and at these margins it can no longer tell the two apart.
+
+One CI trap found while measuring: the failure is invisible if the script is
+piped. `bash scripts/build_binary.sh 2>&1 | tail -3` returns `tail`'s status, so
+`set -e` did not fire and the oversized artifact was copied out anyway. Any job
+that runs the script must not pipe it (`python-binaries.yml` does not).
+
+### 3.3 `verify-version` compares the tag to `Cargo.toml`
+
+```
+67:          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+```
+
+Four version sources exist today and three disagree:
+
+| file:line | value |
+|---|---|
+| `Cargo.toml:7` | `0.4.1-dev` |
+| `npm-shim/package.json:3` | `0.4.1-dev` |
+| `python/tan/version.py:12` | `0.5.0-dev` |
+| `python/pyproject.toml:13` | `0.5.0.dev0` |
+
+A `v0.5.0` tag fails `verify-version` today, on the Rust version, before any
+asset is built. **What should change:** the job must read the version the
+released artifact actually reports — `TAN_VERSION` in `python/tan/version.py`,
+which is what `tan --version` prints — and must additionally reconcile
+`python/pyproject.toml`, whose PEP 440 spelling differs from the SemVer tag
+(`0.5.0.dev0` vs `0.5.0-dev`; a release tag `v0.5.0` needs `version = "0.5.0"`
+in both). Keep the `npm-shim` check exactly as it is: `postinstall.js` derives
+the asset tag as `` TAG = v${pkg.version} ``, so the shim must be bumped in the
+same commit or `npm i` downloads a tag that does not exist.
+
+Suggested replacement for the first step, same grep-one-line style as the
+existing checks:
+
+```bash
+tag="${GITHUB_REF_NAME#v}"
+py_version="$(grep -m1 '^TAN_VERSION = ' python/tan/version.py | sed -E 's/.*"([^"]+)".*/\1/')"
+proj_version="$(grep -m1 '^version = ' python/pyproject.toml | sed -E 's/version = "([^"]+)"/\1/')"
+echo "tag=$tag  tan/version.py=$py_version  pyproject=$proj_version"
+[ "$tag" = "$py_version" ] || { echo "::error::tag v$tag != TAN_VERSION $py_version"; exit 1; }
+[ "$tag" = "$proj_version" ] || { echo "::error::tag v$tag != pyproject version $proj_version"; exit 1; }
+```
+
+### 3.4 (not a blocker, but the release would ship untested)
+
+`release.yml:92-93`'s `gates` job calls `ci.yml`, and `ci.yml` runs **only**
+Rust steps: `fmt`, `clippy`, `build`, `test`, MSRV `check`. There is no
+`pytest` anywhere in it. The Python suite (1063 passed, 25 skipped, 4 xfailed
+locally) runs in no CI job, so `gates` proves nothing about the artifact a
+Python release publishes. Add a `python` job to `ci.yml` (setup-python 3.12 →
+`pip install -e python` → `python -m pytest python/tests`) before shipping.
+
+## 4. Measurements
+
+### 4.1 Startup: `--onefile` unpacks on every invocation
+
+`tan --version`, wall-clock ms, one process per row-entry:
+
+| path | runs (ms) | min |
+|---|---|---|
+| Windows frozen `tan.exe --version` | 966, 904, 985, 868, 869 | **868** |
+| Windows source `python -m tan --version` | 608, 418, 440, 361, 372 | **361** |
+| Linux frozen `-gnu --version` (in `python:3.12-slim-bullseye`) | 324, 304, 294, 316, 295, 290 | **290** |
+| Linux frozen `-musl --version` (in `python:3.12-alpine`) | 387, 366, 371, 391, 396, 382 | **366** |
+
+A real emit, `generate --target zephyr-conf --output ./out/alp.conf --sdk-root <sdk>`:
+
+| path | runs (ms) |
+|---|---|
+| Windows frozen | 929, 889, 957 |
+| Windows source | 626, 564, 581 |
+
+So on Windows the frozen binary costs **~+330 ms per invocation** against the
+source path for the same work (~+500 ms on the bare `--version`), and the work
+itself is only ~30-60 ms — nearly all of the frozen cost is unpack. It fits the
+extension's 3 s `--version` probe with ~2 s to spare. Linux is 3x cheaper than
+Windows (290-396 ms total).
+
+### 4.2 glibc floor: 2.29, and it is set by bundled CPython, not the bootloader
+
+`objdump -T` on the `-gnu` binary reports only the bootloader's own needs
+(highest `GLIBC_2.14`), which is misleading. The real floor comes from the
+bundled `libpython3.12.so.1.0`. Built on Debian 11, run on Debian 10:
+
+```
+ldd (Debian GLIBC 2.28-10+deb10u3) 2.28
+[PYI-10:ERROR] Failed to load Python shared library '/tmp/_MEIClcMag/libpython3.12.so.1.0': /lib/x86_64-linux-gnu/libm.so.6: version `GLIBC_2.29' not found (required by /tmp/_MEIClcMag/libpython3.12.so.1.0)
+```
+
+On glibc 2.31 (`debian:bullseye-slim`) the same binary passes all four proofs.
+`release.yml` pins the Rust floor with `zigbuild_target:
+x86_64-unknown-linux-gnu.2.31`, so **building in `python:3.12-slim-bullseye`
+holds that floor; building on the runner's own image would raise it to 2.39**
+(ubuntu-24.04) and break every older host silently. There is no PyInstaller
+equivalent of zigbuild's floor flag — the build image *is* the floor.
+
+### 4.3 The 96-example multiplier
+
+In alp-sdk (public `main` = `ef79eab`, and `dev`) the configure-time shell-out
+is still `alp_project.py`, not `tan`:
+
+```
+17:execute_process(
+18-    COMMAND ${Python3_EXECUTABLE} ${ALP_SDK_ROOT}/scripts/alp_project.py
+19-            --input ${CMAKE_CURRENT_SOURCE_DIR}/board.yaml
+20-            --emit zephyr-conf --core m55_hp
+```
+
+Counted across the checkout: **125** `CMakeLists.txt` shell it, for **105**
+`--emit` invocations (96 `--emit zephyr-conf`, 8 `--emit ipc-contract-h`, 1
+other). **No `cmake/alp.cmake` exists on public `main` or `dev`** — grep found
+`cmake/alp-sdk-config.cmake.in` and `cmake/alp-sdk-warnings.cmake` only — so the
+"shells `tan` on every configure" state is not in the public SDK yet. When it
+lands, at the numbers above: 105 x ~0.93 s ≈ **98 s** of frozen-`tan` startup
+per full sweep on Windows, against 105 x ~0.59 s ≈ 62 s from source (**+36 s**),
+and ≈32 s on Linux. Per single example the delta is a third of a second.
+
+## 5. Freeze hazards
+
+Audited across `python/tan/**` and then checked against the built binaries:
+
+| hazard | state |
+|---|---|
+| dynamic command registry | **absent by design.** All 15 commands are literal `from tan.commands.x import y` at `tan/cli.py:18-32`; `tan/commands/__init__.py:2-8` records why a `pkgutil`/`importlib` registry is a trap. No `pkgutil.iter_modules`/`walk_packages`/`__import__`/`entry_points` anywhere. |
+| `importlib.util.find_spec` | one use, `doctor_cmd.py:772-779`, called only as `_has_module("fdt")` — a literal-name presence probe, never an import. |
+| package data | `tan/templates/__init__.py:34` `VENDORED_ROOT = Path(__file__).resolve().parent / "vendored"`. Needs the `--add-data` at `build_binary.sh:64`; **empirically proved present** — frozen `tan init --template zephyr-app` wrote all 6 files on Windows, x86_64 gnu/musl and aarch64 gnu. Nothing else in the package reads its own `contract/` or `metadata/` (those paths hang off the external SDK root, `tan/planner_root.py`). |
+| `sys.executable` | **zero uses.** `build_cmd.py:147-169` deliberately returns the PATH name `"python"`/`"python3"` because frozen, `sys.executable` is `tan` itself and the value is baked into every Zephyr slice as `-DPython3_EXECUTABLE`. |
+| `sys._MEIPASS` baked into an outliving artefact | none found, and none observed: every file the frozen binary emitted (`alp.conf`, `cmake-args`) was grepped for `_MEI` — no hits. `kconfig_symbols.py:280-317` writes its generated dumper into `tempfile.mkdtemp()`, explicitly to avoid a `_MEIPASS` path landing in a CMake command that outlives the process. |
+| broken pipe | `tan generate --help | grep -q --` prints `OSError: [Errno 22] Invalid argument` from the cp1252 stdout wrapper on Windows *after* the pipe closes. Cosmetic (exit status is the consumer's), but it is a traceback on stderr; `verify_binary.sh` writes help to a file instead of piping. |
+| build-host requirement | PyInstaller needs `objdump`: `ERROR: On Linux, objdump is required.` — install `binutils` in both Linux images. No compiler needed: PyInstaller 6.21.0 publishes `musllinux_1_1_x86_64` and `musllinux_1_1_aarch64` wheels, so the musl bootloader is prebuilt too. |
+
+## 6. Concrete `release.yml` changes
+
+1. **`verify-version`** — replace the `Cargo.toml` grep with the Python
+   version sources (§3.3). Keep the `npm-shim` step.
+2. **`gates`** — `ci.yml` must gain a Python job, or the release ships an
+   artifact no CI job ever ran (§3.4).
+3. **`build`** — replace the 8-entry cargo matrix + `setup-rust-toolchain` +
+   `cargo-zigbuild` steps with the per-host PyInstaller jobs in
+   `.github/workflows/python-binaries.yml` (added here, `workflow_dispatch`
+   only, publishes nothing). Runner mapping: `windows-latest`,
+   `windows-11-arm`, `ubuntu-latest` x2 (in `python:3.12-slim-bullseye` /
+   `python:3.12-alpine`), `ubuntu-24.04-arm` x2 (same images),
+   `macos-15-intel`, `macos-latest`. Do **not** collapse the macOS pair onto
+   `macos-latest`: it is arm64, and the result would be a correctly named
+   x86_64 asset containing an arm64 binary — the extension selects by name and
+   cannot detect it.
+4. **`stage asset`** — `cp python/dist/tan{,.exe} <asset>` instead of
+   `cp target/<triple>/release/tan<ext>`.
+5. **`checksums.txt`** — unchanged. `sha256sum * > checksums.txt` inside
+   `assets/` (`release.yml:241-244`) still covers whatever landed; note it
+   globs **9** files today, because `envelope-contract.json` is staged into the
+   same directory at `release.yml:211` before it runs.
+6. **`publish_crates`** — a Python release cannot publish `tan-core`/`tan-cli`
+   at the tag version (`Cargo.toml` stays `0.4.x`); gate that job off, or keep
+   the Rust crate versions on their own cadence and never tag them from here.
+7. **CHANGELOG** — the body slice is `^## \[<version>\]` (`release.yml:260`), so
+   a `## [0.5.0]` section must exist or the release body is empty.
+
+## 7. Not proved, and the fallback
+
+- `tan-aarch64-pc-windows-msvc.exe`, `tan-x86_64-apple-darwin`,
+  `tan-aarch64-apple-darwin`: no ARM-Windows and no macOS host was available.
+  The runner labels and the PyInstaller wheels exist; running
+  `python-binaries.yml` once with `workflow_dispatch` is what turns that into
+  a fact. It builds and self-verifies all eight and uploads nothing to a
+  release.
+- The aarch64 Linux pair was proved under **QEMU**, not on native arm64
+  silicon. CI should use `ubuntu-24.04-arm`; QEMU is ~12x slower (162.9 s vs
+  13.7 s for the same PyInstaller run). Emulation is a build-host difference
+  only — the artefact is a real arm64 binary either way (`uname -m` = `aarch64`
+  in the build container, and it will not run on x86_64).
+- `pip install` needs none of this machinery. `alp-tan` is not on PyPI
+  (`https://pypi.org/pypi/alp-tan/json` → `404`), and once §3.1 is fixed
+  `pip install alp-tan` is a working distribution path for anyone with Python
+  3.12+, with no per-arch matrix, no size ceiling and no unpack cost. The eight
+  binaries exist for one consumer: the VS Code extension, which downloads a raw
+  binary and cannot `pip install`.
