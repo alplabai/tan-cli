@@ -658,3 +658,232 @@ def test_quiet_drops_the_summary_but_never_an_issue(tmp_path):
     assert "wrote 0/1" in loud.stderr
     assert "wrote 0/1" not in quiet.stderr
     assert "kaboom" in quiet.stderr
+
+
+# --------------------------------------------------------------------------
+# Which engine ran, and saying so
+#
+# `tan generate` now renders the five relocated modes with `tan.planner`
+# in-process and spawns alp-sdk only for the rest. The bytes are pinned by
+# `tests/parity/test_planner_emit_parity.py` against a real checkout; what these
+# cover is the CHOICE -- that it is reported, and that a fallback is never
+# silent. A silent one is how the relocation got believed before it happened.
+# --------------------------------------------------------------------------
+
+
+def _stub_in_process(monkeypatch, *, available=True, text="in-process\n"):
+    """Make the in-process engine usable without an alp-sdk checkout."""
+    monkeypatch.setattr(
+        generate_cmd.planner_emit, "unavailable",
+        lambda root: None if available else "no planner here",
+    )
+    monkeypatch.setattr(
+        generate_cmd.planner_emit, "render",
+        lambda mode, **kw: text,
+    )
+
+
+def test_the_engine_split_is_reported_per_target(tmp_path, monkeypatch, capsys):
+    """`data.engine` names the engine for every target, so a caller can tell a
+    relocated emit from a spawned one without guessing."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    _stub_in_process(monkeypatch)
+
+    assert _call_generate(sdk_root=str(sdk), all_targets=True,
+                          output_format="json") == 0
+    env = json.loads(capsys.readouterr().out.strip())
+    engine = env["data"]["engine"]
+    assert set(engine) == set(ALL_EMIT_MODES)
+    assert {m for m, e in engine.items() if e == "in-process"} == (
+        set(ALL_EMIT_MODES) & generate_cmd.planner_emit.IN_PROCESS_MODES)
+    # And the relocated ones really went through the in-process writer.
+    assert (project / "build" / "generated" / "alp.conf").read_bytes() == b"in-process\n"
+    assert (project / "build" / "generated" / "alp.overlay").read_bytes() == b"emitted\n"
+
+
+def test_the_relocated_modes_are_exactly_the_five_from_the_registry():
+    """The split is a claim about alp-sdk's emit registry (`owner.module` under
+    `scripts/alp_orchestrate/`), so pin it rather than let it drift."""
+    assert generate_cmd.planner_emit.IN_PROCESS_MODES == frozenset({
+        "zephyr-conf", "cmake-args", "yocto-conf", "os-topology",
+        "ipc-contract-h",
+    })
+    # Every one is a target `generate` can actually reach.
+    reachable = set(ALL_EMIT_MODES) | EXPLICIT_ONLY_TARGETS
+    assert generate_cmd.planner_emit.IN_PROCESS_MODES <= reachable
+
+
+def test_a_fallback_to_spawning_is_reported_not_silent(
+    tmp_path, monkeypatch, capsys
+):
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    _stub_in_process(monkeypatch, available=False)
+
+    assert _call_generate(target="zephyr-conf", core="m55_hp",
+                         sdk_root=str(sdk), output_format="json") == 0
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["engine"] == {"zephyr-conf": "subprocess"}
+    assert [i["code"] for i in env["issues"]] == ["generate.in-process-unavailable"]
+    assert env["issues"][0]["severity"] == "warning"
+    assert "no planner here" in env["issues"][0]["message"]
+
+
+def test_the_fallback_notice_never_displaces_a_target_failure(
+    tmp_path, monkeypatch, capsys
+):
+    """`issues[0]` stays the thing the user asked about. The notice is context
+    about HOW the run went, so it is appended, not prepended."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys\nsys.stderr.write('alp_project: kaboom\\n')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    _stub_in_process(monkeypatch, available=False)
+
+    assert _call_generate(target="cmake-args", sdk_root=str(sdk),
+                         output_format="json") == 3
+    env = json.loads(capsys.readouterr().out.strip())
+    assert [i["code"] for i in env["issues"]] == [
+        "generate.emit-failed", "generate.in-process-unavailable"]
+
+
+def test_pinning_the_subprocess_engine_is_a_choice_not_a_fallback(
+    tmp_path, monkeypatch, capsys
+):
+    """`TAN_GENERATE_EXECUTOR=subprocess` reports itself through `data.engine`
+    and nothing else -- warning about a path the caller asked for is noise."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    _stub_in_process(monkeypatch)  # available, and deliberately not used
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    assert _call_generate(target="zephyr-conf", core="m55_hp",
+                         sdk_root=str(sdk), output_format="json") == 0
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["engine"] == {"zephyr-conf": "subprocess"}
+    assert env["issues"] == []
+    assert (project / "build" / "generated" / "alp.conf").read_bytes() == b"emitted\n"
+
+
+def test_pinning_the_in_process_engine_refuses_instead_of_falling_back(
+    tmp_path, monkeypatch, capsys
+):
+    """The seam the parity suite needs: with `=in-process`, a run that could
+    only have been served by spawning fails loudly rather than measuring the
+    wrong engine and reporting it as proof."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    _stub_in_process(monkeypatch, available=False)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "in-process")
+
+    assert _call_generate(target="zephyr-conf", core="m55_hp",
+                         sdk_root=str(sdk), output_format="json") == 1
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["issues"][0]["code"] == "generate.in-process-unavailable"
+    assert "no planner here" in env["issues"][0]["message"]
+    assert "engine" not in env["data"]
+
+
+def test_an_unknown_executor_is_a_validation_failure(tmp_path, monkeypatch, capsys):
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "in_process")
+
+    assert _call_generate(target="zephyr-conf", core="m55_hp",
+                         sdk_root=str(sdk), output_format="json") == 2
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["issues"][0]["code"] == "generate.invalid-executor"
+
+
+def test_a_refusal_carries_no_engine_key(tmp_path):
+    """`contract/envelopes/generate-board-yaml-missing` freezes the refusal
+    payload shape for both harnesses; an `engine: {}` there would break it while
+    reporting nothing."""
+    proc = run_cli(["--format", "json"], cwd=tmp_path)
+    assert proc.returncode == 2
+    assert "engine" not in envelope_of(proc)["data"]
+
+
+def test_an_in_process_planner_exception_is_an_issue_not_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    """The widened defect surface: in a subprocess a planner blow-up arrived as
+    an exit code, and in-process it lands in THIS process."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    _stub_in_process(monkeypatch)
+
+    def boom(mode, **kwargs):
+        raise ValueError("the Ethos-U sizing path does this")
+
+    monkeypatch.setattr(generate_cmd.planner_emit, "render", boom)
+    assert _call_generate(target="os-topology", sdk_root=str(sdk),
+                         output_format="json") == 3
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["issues"][0]["code"] == "generate.emit-failed"
+    assert "ValueError" in env["issues"][0]["message"]
+    assert env["data"]["failed"] == ["os-topology"]
+
+
+def test_an_in_process_sys_exit_is_an_issue_not_a_dead_cli(
+    tmp_path, monkeypatch, capsys
+):
+    """`tan.planner.loader` calls `sys.exit()` on a missing PyYAML/jsonschema.
+    `SystemExit` is not an `Exception`, so a bare `except Exception` would let it
+    tear down the CLI past every envelope guarantee."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    _stub_in_process(monkeypatch)
+
+    def exits(mode, **kwargs):
+        raise SystemExit("alp_orchestrate: PyYAML is required.")
+
+    monkeypatch.setattr(generate_cmd.planner_emit, "render", exits)
+    assert _call_generate(target="os-topology", sdk_root=str(sdk),
+                         output_format="json") == 3
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["issues"][0]["code"] == "generate.emit-failed"
+    assert "exited early" in env["issues"][0]["message"]
+
+
+def test_a_fully_in_process_run_never_probes_the_path_interpreter(
+    tmp_path, monkeypatch, capsys
+):
+    """The in-process engine IS the interpreter, so refusing a run because the
+    PATH `python` is old -- at the cost of a subprocess to find out -- would be
+    both wrong and slow."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    _stub_in_process(monkeypatch)
+
+    def never(python):
+        raise AssertionError("the PATH interpreter was probed anyway")
+
+    monkeypatch.setattr(generate_cmd, "_python_too_old", never)
+    assert _call_generate(target="ipc-contract-h", sdk_root=str(sdk),
+                         output_format="json") == 0
+    assert json.loads(capsys.readouterr().out.strip())["data"]["engine"] == {
+        "ipc-contract-h": "in-process"}
+
+
+# --------------------------------------------------------------------------
+# `tan.planner_emit.write`: the newline trap
+# --------------------------------------------------------------------------
+
+
+def test_the_in_process_writer_keeps_lf_on_every_host(tmp_path):
+    """Windows text mode would CRLF every emit, and `alp_project.py`'s own
+    `_write_or_print` passes `newline=""` for exactly this reason. A CRLF
+    `alp.conf` flips every emit-snapshot golden in alp-sdk."""
+    from tan import planner_emit
+
+    destination = tmp_path / "deep" / "alp.conf"
+    planner_emit.write("CONFIG_A=y\nCONFIG_B=y\n", destination)
+    assert destination.read_bytes() == b"CONFIG_A=y\nCONFIG_B=y\n"

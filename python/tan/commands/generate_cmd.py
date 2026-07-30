@@ -1,28 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
-"""`tan generate` -- run the SDK's board-derived emitters and report what landed.
+"""`tan generate` -- run the board-derived emitters and report what landed.
 
-**tan generates nothing itself.** Mirroring
-`crates/tan-cli/src/commands/generate.rs`, every target is produced by spawning
-the SDK's own planner front door once per emit mode:
+**tan invents no output of its own**, but since the planner relocated into
+`tan/planner/` it no longer spawns alp-sdk for everything either. Each target
+runs on one of two engines, decided per mode before the first write and
+reported in `data.engine`:
 
-    <python> <sdk>/scripts/alp_project.py --input <board.yaml> \
-             --emit <mode> --output <path> [--core <id>]
+* **in-process** -- the five relocated modes (`tan.planner_emit.IN_PROCESS_MODES`:
+  `zephyr-conf`, `cmake-args`, `yocto-conf`, `os-topology`, `ipc-contract-h`),
+  rendered by `tan.planner` against the SDK's `metadata/**`. No interpreter on
+  PATH, no PYTHONPATH, no process.
+* **subprocess** -- everything whose renderer stayed in alp-sdk
+  (`dts-overlay`, `native-sim-overlay`, `hw-info-h`, `west-libraries`,
+  `carrier-netlist` under `scripts/alp_project_emit/`, and `zephyr-board` under
+  `scripts/gen_zephyr_board.py`), still spawned exactly as before:
 
-So this module owns exactly three decisions and no more: WHICH modes to run,
-WHERE each one's output goes, and how the outcome becomes an envelope. The
-emitted bytes, the schemas behind them, and every hardware fact they encode
-stay in alp-sdk (ADR-0017; I-26). There is no template here, no SKU list, no
-address, no pin name -- `som.sku` is read from the customer's own `board.yaml`
-purely to spell one directory name, exactly as the oracle does.
+      <python> <sdk>/scripts/alp_project.py --input <board.yaml> \
+               --emit <mode> --output <path> [--core <id>]
 
-Shelling the SDK is the CONTRACT for this command, not a shortcut: I-31 pins
-`scripts/alp_project.py` as tan's SDK-root marker and names `generate.rs:249`
-as one of the six places that hardcode it. The invariant that forbids shelling
-the SDK -- I-32, and anti-pattern 22 beside it -- is scoped to
-`tan init`/`tan scaffold`, which read a VENDORED `--emit scaffold` tree so they
-work with no checkout at all. `generate` has the opposite shape: without a
-resolvable SDK checkout it refuses (`generate.sdk-root-unresolved`), because
-there is nothing for it to delegate to.
+`tan.planner_emit` documents how `metadata/emit-registry-v1.json` decides that
+split. Either way the emitted bytes, the schemas behind them, and every hardware
+fact they encode stay in alp-sdk (ADR-0017; I-26). There is no template here, no
+SKU list, no address, no pin name -- `som.sku` is read from the customer's own
+`board.yaml` purely to spell one directory name, exactly as the oracle does.
+
+**A fall back to spawning is never silent.** When the in-process path cannot
+serve a checkout (not a usable checkout, unreadable emit registry, or a `tan`
+build without `PyYAML`/`jsonschema`), the run still succeeds via the subprocess
+-- but it says so, with a `generate.in-process-unavailable` warning naming the
+reason and a `data.engine` that reports `subprocess` for every target.
+`TAN_GENERATE_EXECUTOR=subprocess` pins the old path deliberately;
+`=in-process` refuses rather than falling back, which is what makes the parity
+suite able to assert the engine it thinks it measured.
+
+A resolvable SDK checkout is still REQUIRED on both engines -- `metadata/**`
+never relocated -- so without one this command refuses
+(`generate.sdk-root-unresolved`). I-31 pins `scripts/alp_project.py` as tan's
+SDK-root marker; the invariant that forbids shelling the SDK (I-32, and
+anti-pattern 22 beside it) is scoped to `tan init`/`tan scaffold`, which read a
+VENDORED `--emit scaffold` tree so they work with no checkout at all.
 
 **Every failure path is an envelope, never a traceback.** A missing or
 unreadable `board.yaml`, an unresolved SDK, a bad `--target`/`--core` pairing, a
@@ -31,6 +47,12 @@ SDK scripts, a spawn that dies or returns garbage -- each has a
 `generate.<code>` issue and an exit code below, and the command carries a
 catch-all backstop for anything unforeseen. The extension parses stdout whole:
 a traceback there renders as nothing at all, with no error.
+
+The in-process engine WIDENS that surface, which is why `_emit_one_in_process`
+catches as broadly as it does: a planner blow-up that used to die inside a
+subprocess and arrive as an exit code now propagates into this process, and
+`tan.planner.loader` reports a missing dependency by calling `sys.exit` -- a
+`SystemExit`, which no `except Exception` would stop.
 
 Exit codes, verbatim from the oracle: missing board / unresolved SDK / bad
 target / unresolvable SKU are ValidationFailure (2); the overlay guard is
@@ -65,6 +87,7 @@ import typer
 # where an alp-sdk checkout is (I-31's marker, spelled once in `build_cmd`), and
 # which interpreter name the SDK's own scripts run under -- a PATH name, never
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
+from tan import planner_emit
 from tan.commands.build_cmd import _planner_python, discover_sdk_root
 from tan.commands.doctor_cmd import probe
 from tan.envelope import Envelope, Issue, Project, emit
@@ -72,6 +95,17 @@ from tan.exit_codes import ExitCode
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
+
+#: Pin the engine instead of letting `auto` decide. An env var, not a flag:
+#: `cmake/alp.cmake` builds one argv that must stay accepted verbatim, and this
+#: is an escape hatch for a host where the in-process path misbehaves plus the
+#: seam the parity suite uses to compare both engines against the same oracle.
+#:
+#: `subprocess` spawns alp-sdk for every target (the pre-relocation behaviour).
+#: `in-process` refuses instead of falling back, so a run cannot quietly measure
+#: the engine it was not testing.
+EXECUTOR_ENV = "TAN_GENERATE_EXECUTOR"
+EXECUTORS = ("auto", "in-process", "subprocess")
 
 #: Every emit mode a bare `tan generate` / `--all` runs, in the order
 #: `data.targets` reports them, mapped to its output path relative to the
@@ -476,6 +510,92 @@ def _emit_one(
     return stderr or f"Generation failed for target '{emit}'."
 
 
+def _emit_one_in_process(
+    sdk_root: Path,
+    board_path: Path,
+    emit: str,
+    output: Path,
+    core: str | None,
+) -> str | None:
+    """Render one relocated emit with `tan.planner` and write it. `None` on
+    success, else the message for its `generate.emit-failed` issue.
+
+    The exception funnel this command's contract depends on. In a subprocess
+    every planner blow-up -- a malformed `board.yaml`, a missing SoM preset, an
+    unreadable `metadata/**`, an `OrchestratorError`, a bare `ValueError` from
+    the Ethos-U sizing path (I-48) -- arrived as a non-zero exit code and a
+    string. In-process it propagates into THIS process instead, and an escaped
+    traceback puts nothing parseable on stdout: the extension renders no error
+    at all. So the catch is broad on purpose.
+
+    `SystemExit` is caught separately because it is not an `Exception`:
+    `tan.planner.loader` and `kconfig_symbols` call `sys.exit()` on a missing
+    dependency, which in-process would tear down the CLI past every envelope
+    guarantee.
+    """
+    try:
+        text = planner_emit.render(
+            emit, sdk_root=sdk_root, board_yaml=board_path, core=core
+        )
+        planner_emit.write(text, output)
+    except SystemExit as err:
+        return (
+            f"Generation failed for target '{emit}': the planner exited early "
+            f"(code {err.code})."
+        )
+    except planner_emit.PlannerEmitError as err:
+        # Ours, and already phrased for a human.
+        return f"Generation failed for target '{emit}': {err}"
+    except KeyboardInterrupt:
+        raise
+    except BaseException as err:  # noqa: BLE001 -- see the docstring
+        return f"Generation failed for target '{emit}': {type(err).__name__}: {err}"
+    return None
+
+
+def _resolve_engine(
+    targets: tuple[str, ...], sdk_root: Path
+) -> tuple[dict[str, str], str | None]:
+    """`({mode: engine}, fallback_reason)` -- decided once, before any write.
+
+    Up front rather than per target so `data.engine` describes the whole run and
+    a half-in-process run cannot exist. `fallback_reason` is non-`None` only when
+    the in-process path was WANTED and refused; a deliberate
+    `TAN_GENERATE_EXECUTOR=subprocess` is a choice, not a fallback, and reports
+    itself through `data.engine` alone.
+    """
+    requested = os.environ.get(EXECUTOR_ENV, "auto").strip().lower() or "auto"
+    if requested not in EXECUTORS:
+        raise GenerateError(
+            "generate.invalid-executor",
+            f"{EXECUTOR_ENV}='{requested}' is not one of {', '.join(EXECUTORS)}.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+
+    eligible = [mode for mode in targets if mode in planner_emit.IN_PROCESS_MODES]
+    reason: str | None = None
+    if requested == "subprocess":
+        eligible = []
+    elif eligible:
+        reason = planner_emit.unavailable(sdk_root)
+        if reason is not None:
+            if requested == "in-process":
+                raise GenerateError(
+                    "generate.in-process-unavailable",
+                    f"{EXECUTOR_ENV}=in-process was requested but the in-process "
+                    f"planner cannot serve this run: {reason}",
+                    ExitCode.RUNTIME_FAILURE,
+                )
+            eligible = []
+    return (
+        {
+            mode: "in-process" if mode in eligible else "subprocess"
+            for mode in targets
+        },
+        reason,
+    )
+
+
 def _resolve_board_path(board_yaml: str | None, workspace_root: Path) -> Path:
     """`--board-yaml` (absolute, or workspace-relative), else
     `<workspace_root>/board.yaml`."""
@@ -506,6 +626,7 @@ def _finish(
     failed: list[str],
     issues: list[Issue],
     exit_code: ExitCode,
+    engine: dict[str, str] | None = None,
 ) -> None:
     data = {
         "schemaVersion": DATA_SCHEMA_VERSION,
@@ -513,6 +634,12 @@ def _finish(
         "written": written,
         "failed": failed,
     }
+    # Present only when there is a run to describe. Every refusal resolves zero
+    # targets, and `contract/envelopes/generate-board-yaml-missing` freezes that
+    # shape for the Rust and Python harnesses alike -- an empty `engine: {}`
+    # there would be a contract break reporting nothing.
+    if engine:
+        data["engine"] = engine
     if json_mode:
         emit(Envelope("generate", project, data, issues, exit_code))
     else:
@@ -537,7 +664,11 @@ def _finish(
             print(f"generate: {issue.message}", file=sys.stderr)
         if verbose:
             for target in targets:
-                print(f"target: {target}", file=sys.stderr)
+                where = (engine or {}).get(target)
+                print(
+                    f"target: {target}" + (f" ({where})" if where else ""),
+                    file=sys.stderr,
+                )
     raise typer.Exit(int(exit_code))
 
 
@@ -620,6 +751,8 @@ def generate(
         )
 
     def refuse(err: GenerateError) -> None:
+        # No `engine`: a refusal resolved no targets, so there is no run to
+        # describe (and the committed conformance golden pins that data shape).
         finish(
             targets=(),
             written=[],
@@ -628,6 +761,7 @@ def generate(
             exit_code=err.exit_code,
         )
 
+    engine: dict[str, str] = {}
     try:
         workspace_root = Path(os.path.abspath(project)) if project else Path.cwd()
         board_path = _resolve_board_path(board_yaml, workspace_root)
@@ -649,6 +783,10 @@ def generate(
             )
 
         targets = resolve_targets(target, all_targets, core)
+
+        # Which engine runs what -- before any guard that writes, so a bad
+        # `TAN_GENERATE_EXECUTOR` refuses without leaving a directory behind.
+        engine, fallback_reason = _resolve_engine(targets, resolved_sdk)
 
         # zephyr-board always resolves alone, so its directory name is derived
         # once here rather than inside the emit loop.
@@ -688,11 +826,17 @@ def generate(
         if output_override is not None:
             _ensure_writable(output_override, targets[0])
 
-        python = _planner_python()
-        if (too_old := _python_too_old(python)) is not None:
-            raise GenerateError(
-                "generate.python-too-old", too_old, ExitCode.RUNTIME_FAILURE
-            )
+        # Only the spawned engine cares which interpreter PATH offers -- the
+        # in-process one IS the interpreter. Probing regardless would refuse a
+        # fully in-process run on a host whose `python` is old and unused, and
+        # cost it a subprocess to find out.
+        python = ""
+        if "subprocess" in engine.values():
+            python = _planner_python()
+            if (too_old := _python_too_old(python)) is not None:
+                raise GenerateError(
+                    "generate.python-too-old", too_old, ExitCode.RUNTIME_FAILURE
+                )
 
         script = resolved_sdk / "scripts" / "alp_project.py"
         written: list[str] = []
@@ -702,14 +846,33 @@ def generate(
             target_output = output_override or _output_path(
                 workspace_root, mode, board_dir_name
             )
-            message = _emit_one(
-                python, script, board_path, mode, target_output, core
-            )
+            if engine[mode] == "in-process":
+                message = _emit_one_in_process(
+                    resolved_sdk, board_path, mode, target_output, core
+                )
+            else:
+                message = _emit_one(
+                    python, script, board_path, mode, target_output, core
+                )
             if message is None:
                 written.append(_relative_or_full(workspace_root, target_output))
             else:
                 failed.append(mode)
                 issues.append(Issue("generate.emit-failed", "error", message))
+
+        # APPENDED, after the per-target issues: what the user asked for comes
+        # first and this is context about how it ran. Never omitted, though --
+        # a fallback nobody can see is how the port got believed before it
+        # happened.
+        if fallback_reason is not None:
+            issues.append(
+                Issue(
+                    "generate.in-process-unavailable",
+                    "warning",
+                    "generated by spawning the SDK's own emitter instead of the "
+                    f"in-process planner: {fallback_reason}",
+                )
+            )
     except GenerateError as err:
         refuse(err)
         return
@@ -730,5 +893,6 @@ def generate(
         written=written,
         failed=failed,
         issues=issues,
+        engine=engine,
         exit_code=ExitCode.SUCCESS if not failed else ExitCode.WRITE_FAILURE,
     )

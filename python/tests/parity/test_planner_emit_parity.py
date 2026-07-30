@@ -19,12 +19,26 @@ workspace (I-34) -- so it cannot run here. The relocation touched its dumper
 path (`kconfig_symbols._DUMPER`, now anchored on the bound SDK root), which
 `test_the_kconfig_dumper_resolves_into_the_sdk` checks directly instead.
 
-A second layer sits below the library comparison: `tan generate --output <path>`
-spawned for real, once per `board.yaml`, with the FILE it writes compared byte
-for byte against the same artefact from the SDK's own front door. That is the
-shape `cmake/alp.cmake` drives on every Zephyr configure, and it covers what a
-library comparison cannot -- newline translation, a wrong destination, an
-artefact leaking onto stdout beside the envelope.
+Three further layers sit below that library comparison, because `tan generate`
+now renders the relocated modes IN-PROCESS instead of spawning
+`scripts/alp_project.py`, and a library-level match does not prove the command
+produces the same file:
+
+* `tan generate --output <path>` spawned for real, once per `board.yaml`, with
+  the FILE it writes compared byte for byte against the SDK's own front door.
+  That is the shape `cmake/alp.cmake` drives on every Zephyr configure, and it
+  covers what a library comparison cannot -- newline translation, a wrong
+  destination, an artefact leaking onto stdout beside the envelope. The engine
+  is PINNED via `TAN_GENERATE_EXECUTOR` and then asserted from `data.engine`,
+  so a fallback cannot let this layer measure the subprocess path and report it
+  as proof of the in-process one.
+* the breadth layer, driving both sides in-process so all 99 boards x all five
+  relocated modes x both `--core` forms is affordable. Its oracle is
+  `alp_project.py`'s OWN dispatch functions -- `--emit zephyr-conf` is not
+  `_slice_alp_conf`, it is that slice inside a per-core wrapper.
+* the error contract, because in-process execution widens it: every planner
+  exception that used to die inside a subprocess and arrive as an exit code now
+  propagates into the CLI, where an escaped traceback renders as nothing at all.
 
 Requires an alp-sdk checkout: set `ALP_SDK_ROOT` (or `ALP_SDK_PARITY_ROOT`).
 Skipped, loudly, without one -- a green run that compared nothing would be worse
@@ -255,12 +269,18 @@ def test_no_metadata_was_vendored_into_tan():
 PYTHON_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _tan_generate(args: list[str], destination: Path) -> bytes:
+def _tan_generate(args: list[str], destination: Path,
+                  engine: str = "in-process") -> bytes:
     """Run the real `tan generate` and return the bytes it wrote.
 
     The CLI is spawned, not called: `--output` is a promise about a FILE and
     about stdout carrying nothing but the envelope, and only a real process can
     show both. Any non-zero exit fails here with the envelope attached.
+
+    `engine` is PINNED through `TAN_GENERATE_EXECUTOR` rather than left to
+    `auto`, and `data.engine` is then asserted to agree. Without that this whole
+    layer could silently measure the subprocess path and report it as proof the
+    in-process one works -- which is the exact belief the port has to disprove.
     """
     proc = subprocess.run(
         [sys.executable, "-m", "tan", "generate",
@@ -268,7 +288,8 @@ def _tan_generate(args: list[str], destination: Path) -> bytes:
          "--format", "json", *args],
         capture_output=True, text=True, encoding="utf-8", errors="replace",
         cwd=str(PYTHON_ROOT),
-        env={**os.environ, "PYTHONPATH": str(PYTHON_ROOT)},
+        env={**os.environ, "PYTHONPATH": str(PYTHON_ROOT),
+             "TAN_GENERATE_EXECUTOR": engine},
         check=False,
     )
     assert proc.returncode == 0, f"tan generate {args} -> {proc.returncode}: {proc.stdout}{proc.stderr}"
@@ -277,6 +298,8 @@ def _tan_generate(args: list[str], destination: Path) -> bytes:
     assert envelope["issues"] == [], envelope["issues"]
     # `--output` writes a FILE; the artefact must never also be on stdout.
     assert envelope["data"]["written"] == [str(destination)]
+    assert set(envelope["data"]["engine"].values()) == {engine}, (
+        f"asked for {engine}, ran {envelope['data']['engine']}")
     return destination.read_bytes()
 
 
@@ -295,13 +318,22 @@ def _alp_project(board: Path, mode: str, core: str | None, destination: Path) ->
     return destination.read_bytes()
 
 
-def _first_zephyr_core(project) -> str | None:
-    """`--emit zephyr-conf --core <id>` is a hard error for a core whose `os` is
-    not `zephyr`, so the core has to be picked, not guessed."""
+def _first_core_with_os(project, *allowed: str) -> str | None:
+    """The first core this emit mode will accept, or `None`.
+
+    `--emit zephyr-conf --core <id>` is a hard error for a core whose `os` is not
+    `zephyr` (and `cmake-args` for one that is neither `zephyr` nor
+    `baremetal`), so the core has to be picked, not guessed. The accepted set
+    per mode is `compatible.os` in `metadata/emit-registry-v1.json`.
+    """
     for core_id in sorted(project.cores):
-        if project.cores[core_id].os == "zephyr":
+        if project.cores[core_id].os in allowed:
             return core_id
     return None
+
+
+def _first_zephyr_core(project) -> str | None:
+    return _first_core_with_os(project, "zephyr")
 
 
 @pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
@@ -353,6 +385,56 @@ def test_tan_generate_writes_the_zephyr_conf_fragment_byte_for_byte(
         want.decode("utf-8"), got.decode("utf-8", "replace"))
 
 
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_tan_generate_writes_the_cmake_args_fragment_byte_for_byte(
+    planners, board, tmp_path
+):
+    """`alp_sdk_cmake_args()`'s artefact. Distinct from `zephyr-conf` in a way
+    that has bitten: `cmake-args --core <id>` keeps the `# --- core: ... ---`
+    marker that `zephyr-conf --core <id>` drops."""
+    upstream, _ = planners
+    try:
+        core = _first_core_with_os(upstream.load_board_yaml(board),
+                                   "zephyr", "baremetal")
+    except Exception:  # noqa: BLE001
+        pytest.skip("board does not load; parity of the failure is asserted above")
+    if core is None:
+        pytest.skip("no zephyr/baremetal core -- `--emit cmake-args --core` refuses one")
+
+    want = _alp_project(board, "cmake-args", core, tmp_path / "oracle.txt")
+    got = _tan_generate(
+        ["--target", "cmake-args", "--core", core, "--board-yaml", str(board)],
+        tmp_path / "generated" / "alp-cmake-args.txt",
+    )
+    assert got == want, _first_diff(
+        want.decode("utf-8"), got.decode("utf-8", "replace"))
+
+
+def test_the_two_engines_produce_the_same_bytes(planners, tmp_path):
+    """The port's actual claim, pinned end to end: routing an emit through
+    `tan.planner` in-process instead of spawning `alp_project.py` changes NO
+    bytes. Run twice through the real CLI, once per engine, and diffed."""
+    upstream, _ = planners
+    assert SDK is not None
+    board = SDK / "examples" / "multicore" / "rpmsg-aen" / "board.yaml"
+    if not board.is_file():
+        pytest.skip(f"{board} not in this checkout")
+    core = _first_core_with_os(upstream.load_board_yaml(board), "zephyr")
+    assert core is not None
+
+    for mode, args in (
+        ("zephyr-conf", ["--core", core]),
+        ("cmake-args", ["--core", core]),
+        ("os-topology", []),
+        ("ipc-contract-h", []),
+    ):
+        common = ["--target", mode, "--board-yaml", str(board), *args]
+        spawned = _tan_generate(common, tmp_path / f"{mode}.sub", "subprocess")
+        native = _tan_generate(common, tmp_path / f"{mode}.native", "in-process")
+        assert native == spawned, f"{mode}: " + _first_diff(
+            spawned.decode("utf-8", "replace"), native.decode("utf-8", "replace"))
+
+
 def test_an_emit_reaching_disk_through_tan_stays_lf(planners, tmp_path):
     """The newline trap, pinned on its own so a CRLF regression names itself
     rather than showing up as 99 unrelated diffs.
@@ -369,3 +451,233 @@ def test_an_emit_reaching_disk_through_tan_stays_lf(planners, tmp_path):
         tmp_path / "system_ipc.h",
     )
     assert b"\r\n" not in got
+
+
+# ==========================================================================
+# `tan generate`'s in-process engine, over every board and every form
+#
+# The `tan generate --output` tests above spawn a real process per case, so they
+# can only afford a couple of modes. This block is the breadth layer: it drives
+# BOTH sides in-process, so all 99 boards x every relocated mode x both `--core`
+# forms costs seconds rather than an hour.
+#
+# The oracle is `scripts/alp_project.py`'s OWN dispatch functions, called
+# directly with the argparse Namespace `main()` would have built. Not a
+# reimplementation of them, and not the upstream planner's renderer either --
+# `--emit zephyr-conf` is not `_slice_alp_conf`: it is that slice wrapped in a
+# per-core loop with an OS-class gate, an `os: off` skip, a section marker whose
+# presence depends on `--core`, and a conditional trailing newline. Comparing
+# against the slice alone would pass while the wrapper diverged.
+#
+# Both directions of failure are covered: where the oracle REFUSES (rc != 0),
+# the in-process path must refuse too.
+# ==========================================================================
+
+#: `(mode, core_os_classes_or_None)`. `None` means the mode takes no `--core`;
+#: a tuple means the scoped form is exercised against the first core whose `os`
+#: the mode accepts (per `compatible.os` in the emit registry). The unscoped
+#: form -- the one a bare `tan generate` uses -- is exercised for all five.
+GENERATE_MODES = (
+    ("zephyr-conf", ("zephyr",)),
+    ("cmake-args", ("baremetal", "zephyr")),
+    ("yocto-conf", ("yocto",)),
+    ("os-topology", None),
+    ("ipc-contract-h", None),
+)
+
+
+def _first_rejected_core(project, allowed: tuple[str, ...]) -> str | None:
+    """The first core an OS-scoped mode must REFUSE, or `None`.
+
+    `os: off` is excluded: both sides SKIP an off core rather than refusing it,
+    which is a different (and already covered) branch.
+    """
+    for core_id in sorted(project.cores):
+        os_ = project.cores[core_id].os
+        if os_ != "off" and os_ not in allowed:
+            return core_id
+    return None
+
+
+def _oracle_emit(board: Path, mode: str, core: str | None,
+                 destination: Path) -> tuple[int, bytes]:
+    """`alp_project.py`'s own dispatch, in-process. `(rc, bytes_written)`."""
+    from types import SimpleNamespace
+
+    import alp_project  # off <sdk>/scripts, put there by the `planners` fixture
+
+    args = SimpleNamespace(input=board, emit=mode, core=core,
+                           output=destination,
+                           metadata_root=alp_project.METADATA_ROOT)
+    project_level = ("os-topology", "ipc-contract-h", "system-manifest",
+                     "dts-reservations")
+    runner = (alp_project._run_v2_emit if mode in project_level
+              else alp_project._run_v2_per_core_emit)
+    try:
+        rc = runner(args)
+    except SystemExit as err:  # a dependency gate in the SDK's own loader
+        return (int(err.code or 1), b"")
+    return (rc, destination.read_bytes() if rc == 0 else b"")
+
+
+def _tan_emit(board: Path, mode: str, core: str | None,
+              destination: Path) -> tuple[int, bytes]:
+    """`tan.planner_emit`, the in-process engine `tan generate` now uses."""
+    from tan import planner_emit
+
+    try:
+        text = planner_emit.render(mode, sdk_root=SDK, board_yaml=board,
+                                   core=core)
+        planner_emit.write(text, destination)
+    except SystemExit as err:
+        return (int(err.code or 1), b"")
+    except Exception:  # noqa: BLE001 -- a refusal is a RESULT here, compared below
+        return (1, b"")
+    return (0, destination.read_bytes())
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_the_in_process_engine_matches_alp_project_for_every_mode(
+    planners, board, tmp_path
+):
+    upstream, _ = planners
+    try:
+        project = upstream.load_board_yaml(board)
+    except Exception:  # noqa: BLE001 -- covered by test_every_mode_is_byte_identical
+        pytest.skip("board does not load; parity of the failure is asserted above")
+
+    compared = 0
+    for mode, core_classes in GENERATE_MODES:
+        forms: list[str | None] = [None]
+        if core_classes is not None:
+            scoped = _first_core_with_os(project, *core_classes)
+            if scoped is not None:
+                forms.append(scoped)
+            # And a core the mode REFUSES (#605 turned warn-and-emit-anyway
+            # into a hard error). Without this form the OS-class gate is never
+            # reached: every board's first matching core passes it by
+            # construction, so the refusal branch would go unmeasured.
+            rejected = _first_rejected_core(project, core_classes)
+            if rejected is not None:
+                forms.append(rejected)
+        for core in forms:
+            tag = f"{mode}-{core or 'unscoped'}"
+            want_rc, want = _oracle_emit(board, mode, core, tmp_path / f"o-{tag}")
+            got_rc, got = _tan_emit(board, mode, core, tmp_path / f"t-{tag}")
+            assert (got_rc == 0) == (want_rc == 0), (
+                f"{board} --emit {mode} --core {core}: alp_project rc={want_rc}, "
+                f"tan rc={got_rc}")
+            if want_rc != 0:
+                continue
+            assert got == want, (
+                f"{board} --emit {mode} --core {core} differs -- "
+                + _first_diff(want.decode("utf-8", "replace"),
+                              got.decode("utf-8", "replace")))
+            assert b"\r\n" not in got, f"{board} {tag}: CRLF reached disk"
+            compared += 1
+    assert compared, f"{board}: nothing was compared"
+
+
+# ==========================================================================
+# The error contract on the in-process path
+#
+# In a subprocess every planner blow-up arrived as a non-zero exit code. Running
+# in-process, each one now propagates into the CLI, where an escaped traceback
+# puts nothing parseable on stdout and the extension renders no error at all --
+# the defect class this port produced eight Criticals of. So each probe below
+# asserts a CODED ENVELOPE, not merely a non-zero exit.
+# ==========================================================================
+
+def _tan_generate_failing(args: list[str], destination: Path,
+                          engine: str = "in-process") -> dict:
+    """Run `tan generate` expecting a refusal; return the parsed envelope."""
+    proc = subprocess.run(
+        [sys.executable, "-m", "tan", "generate",
+         "--sdk-root", str(SDK), "--output", str(destination),
+         "--format", "json", *args],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(PYTHON_ROOT),
+        env={**os.environ, "PYTHONPATH": str(PYTHON_ROOT),
+             "TAN_GENERATE_EXECUTOR": engine},
+        check=False,
+    )
+    assert proc.returncode != 0, f"expected a refusal, got 0: {proc.stdout}"
+    assert proc.stderr.strip() == "", f"stderr must stay empty: {proc.stderr}"
+    envelope = json.loads(proc.stdout.strip())  # a traceback would not parse
+    assert envelope["issues"], "a refusal with no issue is unreportable"
+    return envelope
+
+
+@pytest.mark.parametrize(
+    "board_text,label",
+    [
+        ("som:\n  sku: E1M-AEN801\n  hw_rev: [unclosed\n", "malformed-yaml"),
+        ("som:\n  sku: NOT-A-REAL-SKU\n  hw_rev: a\ncores: {}\n", "missing-preset"),
+        ("", "empty"),
+        ("[]\n", "wrong-root-type"),
+    ],
+)
+def test_a_planner_refusal_is_a_coded_envelope_not_a_traceback(
+    tmp_path, board_text, label
+):
+    board = tmp_path / f"{label}.yaml"
+    board.write_text(board_text, encoding="utf-8")
+    envelope = _tan_generate_failing(
+        ["--target", "ipc-contract-h", "--board-yaml", str(board)],
+        tmp_path / "system_ipc.h",
+    )
+    assert envelope["exitCode"] in (2, 3), envelope
+    assert envelope["issues"][0]["code"].startswith("generate."), envelope["issues"]
+
+
+def test_an_unknown_core_id_is_a_coded_envelope(tmp_path):
+    """`--core` naming a core the board does not have. `alp_project.py` printed
+    `--core <id> not present in board.yaml` and exited 1; in-process the same
+    refusal has to become an issue rather than a KeyError traceback."""
+    assert SDK is not None
+    board = SDK / "examples" / "multicore" / "rpmsg-aen" / "board.yaml"
+    if not board.is_file():
+        pytest.skip(f"{board} not in this checkout")
+    envelope = _tan_generate_failing(
+        ["--target", "zephyr-conf", "--core", "no_such_core",
+         "--board-yaml", str(board)],
+        tmp_path / "alp.conf",
+    )
+    assert envelope["issues"][0]["code"] == "generate.emit-failed"
+    assert "no_such_core" in envelope["issues"][0]["message"]
+    assert envelope["data"]["failed"] == ["zephyr-conf"]
+    assert envelope["data"]["engine"] == {"zephyr-conf": "in-process"}
+
+
+def test_an_incomplete_checkout_is_a_coded_envelope(tmp_path):
+    """A checkout that passes the engine chooser's probe and then cannot serve
+    the emit: the planner's own loader raises mid-render, and the CLI must still
+    produce exactly one envelope."""
+    assert SDK is not None
+    board = SDK / "examples" / "blinky" / "board.yaml"
+    if not board.is_file():
+        pytest.skip(f"{board} not in this checkout")
+    broken = tmp_path / "half-a-checkout"
+    (broken / "scripts").mkdir(parents=True)
+    (broken / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    schemas = broken / "metadata" / "schemas"
+    schemas.mkdir(parents=True)
+    (schemas / "board.schema.json").write_text("{}", encoding="utf-8")
+    (broken / "metadata" / "emit-registry-v1.json").write_text(
+        json.dumps({"schemaVersion": 1, "modes": []}), encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "tan", "generate", "--sdk-root", str(broken),
+         "--target", "ipc-contract-h", "--board-yaml", str(board),
+         "--output", str(tmp_path / "system_ipc.h"), "--format", "json"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(PYTHON_ROOT),
+        env={**os.environ, "PYTHONPATH": str(PYTHON_ROOT),
+             "TAN_GENERATE_EXECUTOR": "auto"},
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert proc.stderr.strip() == "", proc.stderr
+    envelope = json.loads(proc.stdout.strip())
+    assert envelope["issues"], envelope
+    assert all(i["code"].startswith("generate.") for i in envelope["issues"]), envelope
