@@ -10,18 +10,17 @@ ResolvedCarveOut carrying the reason. Extracted from alp_orchestrate as the #285
 carve-out seam.
 
 Depends only downward -- models (dataclasses), paths (METADATA_ROOT), and
-alp_project.resolve_memory_map; nothing calls back into the package __init__.
+som_metadata.resolve_memory_map; nothing calls back into the package __init__.
 """
 
 from __future__ import annotations
 
 from typing import Any, Optional
 
-from alp_project import resolve_memory_map
-
 from .models import BoardProject, IpcEntry, ResolvedCarveOut
 from .memregion import _PAGE, _region_size_bytes
 from .paths import METADATA_ROOT
+from .som_metadata import resolve_memory_map
 
 
 

@@ -39,6 +39,14 @@ produces the same file:
 * the error contract, because in-process execution widens it: every planner
   exception that used to die inside a subprocess and arrive as an exit code now
   propagates into the CLI, where an escaped traceback renders as nothing at all.
+* the IMPORT CLOSURE, the one layer none of the others can see. Byte-identical
+  emit proves the planner renders from `tan`; it says nothing about what `tan`
+  LOADED to do it. Before the fact-readers were relocated, an in-process
+  `tan generate` still pulled 32 modules off `<sdk>/scripts` -- all 19 of
+  `alp_orchestrate` among them -- because six `tan/planner/*` modules imported
+  `alp_project` / `alp_registries` / `alp_cli.validator` at module scope. Every
+  emit passed while the dependency the port exists to remove was fully intact.
+  `test_the_in_process_path_loads_none_of_the_sdks_python` measures it.
 
 Requires an alp-sdk checkout: set `ALP_SDK_ROOT` (or `ALP_SDK_PARITY_ROOT`).
 Skipped, loudly, without one -- a green run that compared nothing would be worse
@@ -486,6 +494,14 @@ GENERATE_MODES = (
 )
 
 
+#: `{board dir name: artefacts compared byte for byte}`, filled in by the breadth
+#: test below. A per-board assertion cannot notice the LAYER shrinking -- drop a
+#: mode from `GENERATE_MODES` and every remaining board still passes -- so the
+#: total is checked once, at the end, by
+#: `test_the_breadth_layer_still_covers_every_board`.
+_ARTEFACTS_COMPARED: dict[str, int] = {}
+
+
 def _first_rejected_core(project, allowed: tuple[str, ...]) -> str | None:
     """The first core an OS-scoped mode must REFUSE, or `None`.
 
@@ -576,6 +592,28 @@ def test_the_in_process_engine_matches_alp_project_for_every_mode(
             assert b"\r\n" not in got, f"{board} {tag}: CRLF reached disk"
             compared += 1
     assert compared, f"{board}: nothing was compared"
+    _ARTEFACTS_COMPARED[board.parent.name] = compared
+
+
+def test_the_breadth_layer_still_covers_every_board():
+    """The layer's own size, so it cannot quietly stop measuring.
+
+    Every board that LOADS must have contributed at least the two `--core`-less
+    artefacts a project-scoped mode always yields; the floor on the total is what
+    catches a mode disappearing from `GENERATE_MODES` (each board would still
+    pass its own assertion).
+    """
+    if not _ARTEFACTS_COMPARED:
+        pytest.skip("the breadth test did not run in this session (-k selection)")
+    thin = {name: n for name, n in _ARTEFACTS_COMPARED.items() if n < 2}
+    assert not thin, f"boards that compared almost nothing: {thin}"
+    total = sum(_ARTEFACTS_COMPARED.values())
+    assert len(_ARTEFACTS_COMPARED) >= 90, (
+        f"only {len(_ARTEFACTS_COMPARED)} boards were measured")
+    # 99 boards / 738 artefacts as measured. The floor keeps room for boards
+    # coming and going while still tripping if a whole mode leaves
+    # `GENERATE_MODES` (the cheapest mode there is worth ~100 artefacts).
+    assert total >= 650, f"only {total} artefacts were compared byte for byte"
 
 
 # ==========================================================================
@@ -681,3 +719,184 @@ def test_an_incomplete_checkout_is_a_coded_envelope(tmp_path):
     envelope = json.loads(proc.stdout.strip())
     assert envelope["issues"], envelope
     assert all(i["code"].startswith("generate.") for i in envelope["issues"]), envelope
+
+
+def test_a_missing_som_preset_is_a_coded_envelope(tmp_path):
+    """A SKU the board schema ACCEPTS but `metadata/e1m_modules/` has no preset
+    for. `NOT-A-REAL-SKU` above never reaches the loader -- the schema pattern
+    rejects it first -- so the loader's own "no preset" refusal, which is what a
+    customer on a brand-new SKU actually hits, went unmeasured.
+    """
+    board = tmp_path / "board.yaml"
+    board.write_text(
+        "schemaVersion: 2\n"
+        "som:\n  sku: E1M-NX9999\n  hw_rev: a\n"
+        "cores:\n  m33:\n    os: zephyr\n",
+        encoding="utf-8",
+    )
+    envelope = _tan_generate_failing(
+        ["--target", "zephyr-conf", "--board-yaml", str(board)],
+        tmp_path / "alp.conf",
+    )
+    assert all(i["code"].startswith("generate.") for i in envelope["issues"]), envelope
+    assert "NX9999" in json.dumps(envelope["issues"]), envelope["issues"]
+
+
+def test_a_planner_orchestrator_error_is_a_coded_envelope(tmp_path):
+    """`OrchestratorError` raised mid-render, not at load.
+
+    An unknown `libraries:` entry passes the schema and passes the loader; it is
+    `tan.planner.libraries.resolve_selection` that refuses, from inside
+    `planner_emit._render_per_core`. That is the deepest point in the relocated
+    planner a refusal can come from, and in a subprocess it was an exit code.
+    """
+    assert SDK is not None
+    source = SDK / "examples" / "blinky" / "board.yaml"
+    if not source.is_file():
+        pytest.skip(f"{source} not in this checkout")
+    board = tmp_path / "board.yaml"
+    board.write_text(
+        source.read_text(encoding="utf-8").rstrip("\n")
+        + "\nlibraries: [no-such-curated-library]\n",
+        encoding="utf-8",
+    )
+    envelope = _tan_generate_failing(
+        ["--target", "zephyr-conf", "--board-yaml", str(board)],
+        tmp_path / "alp.conf",
+    )
+    assert envelope["issues"][0]["code"] == "generate.emit-failed", envelope["issues"]
+    assert "no-such-curated-library" in envelope["issues"][0]["message"]
+
+
+def test_an_unreadable_metadata_tree_is_a_coded_envelope(tmp_path):
+    """A checkout whose `metadata/**` is PRESENT but corrupt.
+
+    Newly load-bearing: the peripheral-Kconfig registry used to be parsed by
+    alp-sdk's `alp_registries` inside a spawned interpreter, where a JSON error
+    was that interpreter's problem. `tan.planner.slugs` parses it now, at import,
+    in tan's own process -- so a corrupt registry has to come back as an issue
+    rather than a `JSONDecodeError` traceback with no envelope at all.
+    """
+    assert SDK is not None
+    board = SDK / "examples" / "blinky" / "board.yaml"
+    if not board.is_file():
+        pytest.skip(f"{board} not in this checkout")
+    broken = tmp_path / "corrupt-registry"
+    (broken / "scripts").mkdir(parents=True)
+    (broken / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    metadata = broken / "metadata"
+    (metadata / "schemas").mkdir(parents=True)
+    for relpath in (("schemas", "board.schema.json"), ("emit-registry-v1.json",)):
+        source = SDK / "metadata"
+        target = metadata
+        for part in relpath:
+            source = source / part
+            target = target / part
+        target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+    (metadata / "registries").mkdir()
+    (metadata / "registries" / "peripheral-kconfig.json").write_text(
+        "{ this is not json", encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "tan", "generate", "--sdk-root", str(broken),
+         "--target", "zephyr-conf", "--board-yaml", str(board),
+         "--output", str(tmp_path / "alp.conf"), "--format", "json"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(PYTHON_ROOT),
+        env={**os.environ, "PYTHONPATH": str(PYTHON_ROOT),
+             "TAN_GENERATE_EXECUTOR": "in-process"},
+        check=False,
+    )
+    assert proc.returncode != 0, proc.stdout
+    assert proc.stderr.strip() == "", proc.stderr
+    envelope = json.loads(proc.stdout.strip())
+    assert envelope["issues"], envelope
+    assert all(i["code"].startswith("generate.") for i in envelope["issues"]), envelope
+
+
+# ==========================================================================
+# The import closure: what `tan` LOADS, not what it emits
+#
+# The measurement the rest of this file cannot make. Byte-identical emit is
+# satisfied by a planner that renders from `tan` and imports half of alp-sdk to
+# do it -- which is exactly what the relocation shipped the first time round.
+#
+# Run in a CHILD interpreter on purpose: this module's own `planners` fixture
+# imports `alp_orchestrate` to have something to compare against, so measuring
+# in this process would always find it.
+# ==========================================================================
+
+_CLOSURE_PROBE = '''
+import json, os, sys, tempfile
+from pathlib import Path
+
+SDK = Path(os.environ["ALP_SDK_ROOT"]).resolve()
+SCRIPTS = SDK / "scripts"
+BOARD = Path(sys.argv[1])
+
+from tan.planner_root import bind_sdk_root
+
+bind_sdk_root(SDK)
+import tan.planner
+from tan import planner_emit
+
+project = tan.planner.load_board_yaml(BOARD)
+zephyr = next((c for c in sorted(project.cores)
+               if project.cores[c].os == "zephyr"), None)
+tmp = Path(tempfile.mkdtemp())
+for mode, core in (("zephyr-conf", zephyr), ("cmake-args", zephyr),
+                   ("yocto-conf", None), ("os-topology", None),
+                   ("ipc-contract-h", None)):
+    planner_emit.write(planner_emit.render(mode, sdk_root=SDK, board_yaml=BOARD,
+                                           core=core), tmp / mode)
+
+loaded = []
+for name, mod in list(sys.modules.items()):
+    f = getattr(mod, "__file__", None)
+    if not f:
+        continue
+    try:
+        Path(f).resolve().relative_to(SCRIPTS)
+    except ValueError:
+        continue
+    loaded.append(name)
+print(json.dumps(sorted(loaded)))
+'''
+
+
+def test_the_in_process_path_loads_none_of_the_sdks_python(tmp_path):
+    """Rendering every relocated mode must load ZERO modules off `<sdk>/scripts`.
+
+    Not "fewer" -- zero. A single surviving edge keeps the whole graph alive: one
+    `from alp_project import resolve_memory_map` pulled in `alp_project_loader`,
+    whose `_load_yaml` lazily imported `alp_orchestrate.loader`, whose package
+    `__init__` imported all 19 of its siblings. That is how 6 import statements
+    measured as 32 loaded modules, and why the number to assert is 0 rather than
+    some smaller number.
+    """
+    assert SDK is not None
+    board = SDK / "examples" / "multicore" / "rpmsg-aen" / "board.yaml"
+    if not board.is_file():
+        pytest.skip(f"{board} not in this checkout")
+    probe = tmp_path / "closure_probe.py"
+    probe.write_text(_CLOSURE_PROBE, encoding="utf-8")
+
+    proc = subprocess.run(
+        [sys.executable, str(probe), str(board)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(PYTHON_ROOT),
+        env={**os.environ, "PYTHONPATH": str(PYTHON_ROOT),
+             "ALP_SDK_ROOT": str(SDK)},
+        check=False,
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    loaded = json.loads(proc.stdout.strip())
+
+    orchestrate = [n for n in loaded
+                   if n == "alp_orchestrate" or n.startswith("alp_orchestrate.")]
+    assert not orchestrate, (
+        "`alp_orchestrate` is STILL loaded on the in-process path -- the planner "
+        f"relocation is not finished: {orchestrate}")
+    assert loaded == [], (
+        "the relocated planner still loads alp-sdk Python; every one of these has "
+        f"to become a `tan` module or the SDK's Python cannot be deleted: {loaded}")

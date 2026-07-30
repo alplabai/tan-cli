@@ -40,10 +40,12 @@ def test_an_unbound_root_raises_instead_of_guessing():
 
 
 def test_binding_resolves_the_root_and_exposes_the_sdk_scripts_dir(tmp_path):
-    # `<sdk>/scripts` on sys.path is what the fact-reader modules that STAYED in
-    # alp-sdk (`alp_project`, `alp_registries`, `alp_cli.validator`) are imported
-    # through -- the in-process equivalent of the old
-    # `PYTHONPATH=<sdk>/scripts` subprocess environment.
+    # `<sdk>/scripts` on sys.path used to be how the fact readers that had stayed
+    # in alp-sdk (`alp_project`, `alp_registries`, `alp_cli.validator`) were
+    # imported. They have since relocated, so no `tan` module resolves through
+    # this entry any more; it is pinned because the rebind guard below depends on
+    # it and because a same-process caller may still reach for an SDK module by
+    # name (the parity harness's oracle does).
     root = tmp_path / "sdk"
     (root / "scripts").mkdir(parents=True)
     assert planner_root.bind_sdk_root(root) == root.resolve()

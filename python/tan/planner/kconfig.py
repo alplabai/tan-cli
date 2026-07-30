@@ -5,11 +5,14 @@
 `_slice_alp_conf` renders a Zephyr slice's Kconfig fragment off the parsed model
 + the resolved capabilities / chip-driver / library / peripheral enables;
 `_emit_extra_library_profile` renders an extra `libraries:` profile fragment.
-Extracted as the #285 kconfig emit seam. The slug / peripheral-Kconfig tables
-come from the slugs.py leaf; the `_CHIP_SUBSYSTEMS` table is lazy-imported from
-alp_project inside the function (the existing alp_project<->alp_orchestrate
-cycle-break), with the same in-body sys.path setup. Per-core `libraries:`
-Kconfig is read from each library's manifest via `_per_core_library_kconfig`.
+Extracted as the #285 kconfig emit seam. The slug / peripheral-Kconfig /
+chip-subsystem tables come from the slugs.py leaf and the per-library
+HW-accelerator matcher from the libraries.py layer -- both plain module-scope
+imports now. In alp-sdk they were lazy in-body imports of `alp_project` /
+`alp_project_emit` (a cycle-break there, since `alp_project` imported this
+module), and after the relocation they were the last thing making an emit from
+`tan` load alp-sdk's Python at all. Per-core `libraries:` Kconfig is read from
+each library's manifest via `_per_core_library_kconfig`.
 
 `_slice_alp_conf` itself is a thin composer over a set of `_emit_*` section
 helpers (console / SoM capability / chip driver / subsystem / library /
@@ -39,22 +42,22 @@ from typing import Any, Optional
 
 import yaml
 
-from alp_project import (
-    resolve_capabilities,
-    silicon_to_kconfig,
-    som_unpopulated_capabilities,
-)
-
 from . import libraries as _library_layer
 from .models import BoardProject, Slice
 from .paths import METADATA_ROOT, REPO
 from .partition import resolve_storage_partitions
 from .slugs import (
+    _CHIP_SUBSYSTEMS,
     _PERIPHERAL_KCONFIG,
     _board_define_slug,
     _slugs_from_helper_firmware,
     _slugs_from_on_module,
     _som_define_slug,
+)
+from .som_metadata import (
+    resolve_capabilities,
+    silicon_to_kconfig,
+    som_unpopulated_capabilities,
 )
 
 
@@ -93,7 +96,7 @@ def _emit_extra_library_profile(
         return [f"# extra_libraries[{name}] profile is not a mapping"]
 
     # Match keys come from the active SoM.  Mirror
-    # alp_project._SOC_FAMILY_TOKEN so extra_libraries entries can
+    # libraries._SOC_FAMILY_TOKEN so extra_libraries entries can
     # share existing curated-profile match keys when desired.
     silicon_ref = project.som_preset.get("silicon") or ""
     family = (project.som_preset.get("family") or "").lower()
@@ -1400,22 +1403,6 @@ def _slice_alp_conf(project: BoardProject, slice_: Slice) -> str:
     kconfig = silicon_to_kconfig(silicon)
     diagnostics = project.diagnostics
 
-    # Lazy-import alp_project tables — in alp-sdk alp_project imports us, so a
-    # top-level import would cycle.  Only paid when emitting Zephyr fragments.
-    # RELOCATED: the scripts/ dir used to be one parent up from this file; it is
-    # now the BOUND SDK checkout's scripts/, which `bind_sdk_root` already put on
-    # sys.path (this keeps the guard so the lazy path is self-sufficient).
-    import sys as _sys
-    _scripts = str(REPO / "scripts")
-    if _scripts not in _sys.path:
-        _sys.path.insert(0, _scripts)
-    from alp_project import (  # type: ignore
-        _CHIP_SUBSYSTEMS,
-    )
-    from alp_project_emit import (  # type: ignore
-        _emit_library_hw_backends,
-    )
-
     lines: list[str] = []
     lines.extend(_emit_baseline(slice_, diagnostics))
     lines.extend(_emit_console(diagnostics, slice_))
@@ -1438,7 +1425,8 @@ def _slice_alp_conf(project: BoardProject, slice_: Slice) -> str:
     # -- folded in here (2026-07-20) so the two paths cannot silently
     # diverge on a `libraries:` entry with a hw_backends matcher; see
     # docs/adr/0020-sdk-owns-build-execution.md addendum.
-    hw_backend_lines = _emit_library_hw_backends(slice_.libraries, project.sku)
+    hw_backend_lines = _library_layer._emit_library_hw_backends(
+        slice_.libraries, project.sku)
     if hw_backend_lines:
         lines.append("# §D.lib.loader -- per-library HW-accelerator "
                      "wiring (auto-emitted).")

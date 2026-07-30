@@ -2,11 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """board.yaml loader -- file IO, preset/silicon resolution, and load_board_yaml.
 
-Parses board.yaml into a BoardProject: YAML/JSON IO, schema validation (via the
-one shared alp_cli.validator), the `preset:` shared-board + inline-board
-resolution, silicon-ref -> SoC JSON path, per-core topology defaults, and the
-big `load_board_yaml` entry point (which finishes by running the cross-field
-validators). Extracted as the #285 loader seam.
+Parses board.yaml into a BoardProject: YAML/JSON IO, schema validation, the
+`preset:` shared-board + inline-board resolution, silicon-ref -> SoC JSON path,
+per-core topology defaults, and the big `load_board_yaml` entry point (which
+finishes by running the cross-field validators). Extracted as the #285 loader
+seam.
+
+`load_board_schema` / `iter_schema_errors` are RELOCATED from alp-sdk's
+`scripts/alp_cli/validator.py`, the last module-scope import this file made
+across the repo boundary. They stay one pair of functions rather than being
+inlined into `_validate_board` for the reason alp-sdk gave them their own
+names: the schema FILE, the draft dialect, and the error ORDERING are one
+decision, so every consumer reports identical violations in identical order.
+The schema itself is still read from the bound SDK checkout (`BOARD_SCHEMA`) --
+`metadata/**` did not move (ADR-0017).
 """
 
 from __future__ import annotations
@@ -22,22 +31,44 @@ except ImportError:
     sys.exit("alp_orchestrate: PyYAML is required.  Install via `pip install pyyaml`.")
 
 try:
-    import jsonschema  # type: ignore[import-untyped]  # noqa: F401  (dep gate)
+    import jsonschema  # type: ignore[import-untyped]
 except ImportError:
     sys.exit("alp_orchestrate: jsonschema is required.  Install via `pip install jsonschema`.")
-
-from alp_cli.validator import iter_schema_errors
-from alp_project import resolve_memory_map
 
 from .models import BoardProject, IpcEntry, OrchestratorError, Slice, StorageEntry
 from .partition import _known_flash_devices
 from .paths import BOARD_SCHEMA, METADATA_ROOT, REPO
+from .som_metadata import resolve_memory_map
 from .topology import _default_os_from_core_type
 from .validate import (
     _enforce_loader_rules,
     _enforce_os_matches_core_class,
     _validate_consistency,
 )
+
+
+def load_board_schema(schema_path: Path | None = None) -> dict[str, Any]:
+    """Load board.schema.json (the bound SDK's copy unless *schema_path* overrides).
+
+    The one place the schema file is resolved + parsed.
+    """
+    return json.loads((schema_path or BOARD_SCHEMA).read_text(encoding="utf-8"))
+
+
+def iter_schema_errors(
+    data: dict[str, Any], schema_path: Path | None = None
+) -> list[jsonschema.ValidationError]:
+    """Validate *data* against board.schema.json; errors sorted by path.
+
+    The shared JSON-Schema pass: one schema file, one draft dialect
+    (2020-12, matching the schema's own `$schema` declaration), one error
+    ordering -- so every consumer reports identical violations.
+    """
+    validator = jsonschema.Draft202012Validator(load_board_schema(schema_path))
+    # Stringify path parts: absolute_path mixes ints (array indices) and
+    # strs (keys); a raw list comparison would TypeError across siblings.
+    return sorted(validator.iter_errors(data),
+                  key=lambda e: [str(p) for p in e.absolute_path])
 
 
 def _silicon_to_soc_path(silicon: str, metadata_root: Path) -> Path:

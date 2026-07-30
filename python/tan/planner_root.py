@@ -15,12 +15,25 @@ the same refuse-don't-degrade posture the executor's token substitution takes
 (`tan/commands/build/token_substitution.py`).
 
 `metadata/**` stays in alp-sdk (ADR-0017): what relocated is the generators,
-never the facts. The fact READERS stay too -- `alp_project`,
-`alp_project_loader`, `alp_project_emit`, `alp_registries` and
-`alp_cli.validator` remain alp-sdk modules (`scripts/alp_project.py` is also
-tan's canonical SDK-root marker and cannot move), so binding additionally puts
-`<sdk_root>/scripts` on `sys.path` -- the in-process equivalent of the
-`PYTHONPATH=<sdk>/scripts` the subprocess path exported.
+never the facts. The fact READERS relocated with them -- `resolve_memory_map`,
+`resolve_capabilities`, `silicon_to_kconfig` and `som_unpopulated_capabilities`
+now live in `tan/planner/som_metadata.py`, `peripheral_kconfig` in
+`tan/planner/slugs.py`, `iter_schema_errors` in `tan/planner/loader.py` -- and
+they read the same files out of the bound checkout. **No `tan.planner` module
+imports anything under `<sdk_root>/scripts` any more**, which is what makes an
+in-process emit load zero of alp-sdk's Python
+(`tests/parity/test_planner_emit_parity.py::test_the_in_process_path_loads_none_of_the_sdks_python`
+is the measurement).
+
+Binding still puts `<sdk_root>/scripts` on `sys.path`, but NOTHING in `tan`
+needs it any more -- the six emit modes still served by `scripts/alp_project.py`
+and the `alp_kconfig_dump.py` Zephyr hook are SPAWNED, and a spawned
+interpreter gets its own script directory regardless. What the entry still buys
+is the rebind guard below (a second SDK's `scripts/` must not sit behind the
+first's on the path) and any caller that reaches for an SDK module by name in
+tan's own process -- the parity harness's oracle does exactly that. It is
+removable once nothing does; keeping it is not what holds the closure open,
+since the closure is now zero WITH it present.
 """
 
 from __future__ import annotations

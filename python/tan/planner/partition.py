@@ -9,7 +9,7 @@ device / no size) becomes a blocked ResolvedPartition. Extracted from
 alp_orchestrate as the #285 partition seam.
 
 Depends only downward -- models, paths (METADATA_ROOT), memregion (_PAGE /
-_region_size_bytes), and alp_project.resolve_memory_map; nothing calls back into
+_region_size_bytes), and som_metadata.resolve_memory_map; nothing calls back into
 the package __init__.
 """
 
@@ -18,11 +18,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
-from alp_project import resolve_memory_map
-
 from .memregion import _PAGE, _region_size_bytes
 from .models import BoardProject, ResolvedPartition, StorageEntry
 from .paths import METADATA_ROOT
+from .som_metadata import resolve_memory_map
 
 
 def _known_flash_devices(

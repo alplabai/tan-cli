@@ -22,23 +22,200 @@ Design invariants:
   ``OrchestratorError`` with the failing ``requires:`` constraint named, the
   same clear-error contract as schema validation, so ``alp doctor`` /
   alp-studio (which read the same manifests) can never disagree with emit.
+
+``_emit_library_hw_backends`` + ``_SOC_FAMILY_TOKEN`` are RELOCATED from
+alp-sdk's ``scripts/alp_project_emit/west_libs.py``. They land here because
+this is already the library layer and ``kconfig.py`` already imports it, so the
+lazy cross-repo import it used at ``_slice_alp_conf`` time is gone entirely --
+that import was the single edge keeping ``alp_project`` (and through its
+``_load_yaml``, the whole of ``alp_orchestrate``) loaded on the in-process path.
+``west_libs``' own ``--emit west-libraries`` half did NOT move: that mode is
+still owned and spawned by alp-sdk.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
 
-from alp_project import resolve_capabilities
-
 from .models import BoardProject, OrchestratorError, Slice
-from .paths import METADATA_ROOT
+from .paths import METADATA_ROOT, REPO
+from .som_metadata import _sku_family, resolve_capabilities
 
 
 def _libraries_dir(metadata_root: Path) -> Path:
     return metadata_root / "libraries"
+
+
+# §D.lib.loader: map _sku_family() return values to the soc_family
+# tokens used in the manifest's integration.zephyr.hw_backends model.
+_SOC_FAMILY_TOKEN: dict[str, str] = {
+    "aen":    "alif_ensemble",
+    "v2n":    "renesas_rzv2n",
+    "v2n-m1": "renesas_rzv2n",     # DEEPX add-on; HW-acc tokens still resolve via host family.
+    "imx93":  "nxp_imx9",
+}
+
+
+def _library_alias_table() -> dict[str, str]:
+    """Legacy per-core `libraries:` token -> canonical manifest name
+    (metadata/library-aliases-v1.json).  Empty dict if the table is
+    absent (keeps callers robust)."""
+    path = METADATA_ROOT / "library-aliases-v1.json"
+    if not path.is_file():
+        return {}
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    aliases = doc.get("aliases")
+    return dict(aliases) if isinstance(aliases, dict) else {}
+
+
+def _emit_library_hw_backends(libs: list[str], sku: str) -> list[str]:
+    """Per-library HW-accelerator binding loader.
+
+    For each enabled library whose canonical manifest (resolved via the
+    metadata/library-aliases-v1.json token table) carries an
+    `integration.zephyr.hw_backends` block, pick the highest-priority
+    implemented matching backend per accelerator class given the active
+    SoM SKU and emit the matching `CONFIG_*=y` line.
+
+    Match rules (per priority entry; checked in order, all specified
+    keys must match):
+      - `silicon:` key, if present, must equal the SKU's `silicon:`
+        ref exactly (e.g. `alif:ensemble:e4`).  Lets us pin a backend
+        to specific SoCs in a family -- Ethos-U85 on E4/E6/E8, but
+        not on E3/E5/E7 which carry only U55.
+      - `soc_family:` key, if present, must equal the SKU family
+        token (`alif_ensemble`, `renesas_rzv2n`, ...).  Selects every
+        SKU in that family.
+      - `requires_cap:` key, if present, must name a capability flag
+        in the SKU's `metadata/e1m_modules/<sku>.yaml` `capabilities:`
+        block that resolves to a truthy value (`true` or a non-zero
+        count).  Cleanest matcher when an accelerator is shared
+        across families.
+      - All three omitted = universal entry (e.g. plain FPU, generic
+        DMA), matches any SKU.
+      - `status: planned` / `status: stub` entries are retained as
+        metadata for the roadmap but are not emitted as active build
+        claims.
+
+    RELOCATED from `scripts/alp_project_emit/west_libs.py`. Two mechanical
+    changes, no behavioural one on the success path: the repo root is the BOUND
+    SDK checkout (`REPO`) rather than a `__file__` sibling walk, and a malformed
+    metadata YAML now raises `OrchestratorError` (the loader's own error) where
+    alp-sdk's delegating wrapper turned it into `sys.exit`. A refusal that
+    raises is reportable as a coded envelope; one that exits the interpreter is
+    not, and in-process that interpreter is `tan`'s.
+    """
+    # An unrecognised SKU pattern (a synthetic/test-only SKU, or a real SKU
+    # from a family this matcher doesn't know) resolves to "no HW backend
+    # applies" rather than raising -- this is an OPTIONAL accelerator-wiring
+    # enhancement layered on top of the required baseline Kconfig
+    # (`_slice_alp_conf` calls this unconditionally for every Zephyr slice,
+    # including test fixtures that intentionally use non-family SKUs), never a
+    # reason to fail the whole fragment emit.
+    try:
+        family = _sku_family(sku)
+    except ValueError:
+        return []
+    soc_token    = _SOC_FAMILY_TOKEN.get(family)
+    if soc_token is None:
+        return []
+
+    from .loader import _load_yaml  # noqa: PLC0415 -- see the module docstring
+
+    out: list[str] = []
+    repo_root = REPO
+
+    # Resolve the SKU's `silicon:` ref and merged capabilities (SoC JSON
+    # defaults + SoM-level overrides) via resolve_capabilities().  This
+    # replaces the former inline YAML text-parser so that silicon-determined
+    # capabilities removed from SoM YAMLs continue to resolve from the SoC JSON.
+    silicon_ref: str | None = None
+    sku_path = repo_root / "metadata" / "e1m_modules" / f"{sku}.yaml"
+    sku_preset: dict[str, Any] = {}
+    if sku_path.exists():
+        sku_preset = _load_yaml(sku_path) or {}
+        silicon_ref = sku_preset.get("silicon")
+
+    merged_caps: dict[str, Any] = resolve_capabilities(sku_preset, repo_root / "metadata")
+
+    def _cap_truthy(name: str) -> bool:
+        v = merged_caps.get(name)
+        if v is None:
+            return False
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, int):
+            return v > 0
+        # String value from a YAML-loaded dict (should not occur after
+        # resolve_capabilities, but guard for safety).
+        sv = str(v).lower()
+        if sv in ("true", "yes"):
+            return True
+        if sv in ("false", "no", "null", "none", "0"):
+            return False
+        try:
+            return int(sv) > 0
+        except ValueError:
+            return False
+
+    alias = _library_alias_table()
+    # Canonical -> legacy token, so the annotation comment names the library
+    # by its declared token regardless of whether the caller passed the legacy
+    # spelling (schemaVersion 1 per-core lists) or the canonical name (the
+    # schemaVersion 2 unified `libraries:` list resolves to canonical).  The
+    # annotation is cosmetic; keeping it stable makes the v1->v2 migration a
+    # byte-identical emit (WS6-c #610 §6).
+    to_token = {canon: legacy for legacy, canon in alias.items()}
+
+    for lib in libs:
+        # Resolve the legacy per-core token to its canonical manifest and
+        # read the folded integration.zephyr.hw_backends block (WS6-c #610
+        # §6 -- replaces the retired metadata/library-profiles/ tree).
+        canonical = alias.get(lib, lib)
+        label = to_token.get(lib, lib)
+        manifest_path = repo_root / "metadata" / "libraries" / f"{canonical}.yaml"
+        if not manifest_path.exists():
+            continue
+        manifest = _load_yaml(manifest_path) or {}
+        hw = ((manifest.get("integration") or {}).get("zephyr") or {}).get("hw_backends")
+        if not isinstance(hw, dict):
+            continue
+
+        # Per-class first-match, walking accelerator classes and their
+        # `priority:` lists in declaration order (identical to the retired
+        # hw-backends.yaml top-down walk).  `sw_fallback:` is NOT emitted
+        # here -- the SW floor rides the base library-enable line.
+        for cls in (hw.get("accelerators") or []):
+            if not isinstance(cls, dict):
+                continue
+            current_class = cls.get("class")
+            for entry in (cls.get("priority") or []):
+                if not isinstance(entry, dict):
+                    continue
+                kcv = entry.get("kconfig")
+                if not kcv:
+                    continue
+                status = str(entry.get("status", "implemented")).strip().lower()
+                if status in {"planned", "stub"}:
+                    continue
+                sili = entry.get("silicon")
+                sf   = entry.get("soc_family")
+                cap  = entry.get("requires_cap")
+                # All specified matchers must succeed.
+                if sili is not None and sili != silicon_ref:
+                    continue
+                if sf is not None and sf != soc_token:
+                    continue
+                if cap is not None and not _cap_truthy(str(cap)):
+                    continue
+                out.append(f"{kcv}  # {label} / {current_class}")
+                break  # per-class first-match
+
+    return out
 
 
 def available_libraries(metadata_root: Path = METADATA_ROOT) -> list[str]:
