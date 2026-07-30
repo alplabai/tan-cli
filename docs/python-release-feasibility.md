@@ -504,6 +504,39 @@ locally) runs in no CI job, so `gates` proves nothing about the artifact a
 Python release publishes. Add a `python` job to `ci.yml` (setup-python 3.12 →
 `pip install -e python` → `python -m pytest python/tests`) before shipping.
 
+## 3.5 The two acceptance gates already on `main`
+
+`main` carries two required checks that matter more to a Python release than
+anything added here, and neither is in `ci.yml`:
+
+| check | file | what it runs |
+|---|---|---|
+| `first blink -- tan bootstrap -> init -> build` | `.github/workflows/parity.yml`, job `first-blink` | `cargo build --locked --bin tan`, then `target/debug/tan bootstrap --non-interactive` → `doctor` → `init` → `build` against a pinned alp-sdk ref |
+| `first install -- install.sh -> bootstrap -> init -> build` | `.github/workflows/getting-started.yml`, job `first-install` | `shellcheck --shell=sh install.sh`, then `./install.sh` for real — "a genuine GitHub Releases download of the LATEST published release", verified against that release's `checksums.txt` — then the same customer path, ending in a real Zephyr build |
+
+They behave very differently once the Python `tan` is the shipped artifact:
+
+* **`first install` becomes the acceptance test for the published binary, by
+  itself.** It takes the LATEST release with no `--version` pin and `install.sh`
+  maps Linux to musl, so the day a Python release is published this gate starts
+  downloading `tan-x86_64-unknown-linux-musl`, verifying its sha256 against the
+  published `checksums.txt`, and driving bootstrap → init → build with it. That
+  is the build half of Target 1 proved on every PR, with no bench and nothing new
+  to write. Two consequences worth planning for: the gate is only as green as the
+  newest release, so a bad Python release turns a required check red repo-wide
+  until the next one; and it fails closed on a missing `checksums.txt` entry, so
+  the release must publish all eight assets plus checksums or this check reports
+  the release broken rather than the download.
+* **`first blink` does NOT follow.** It compiles `target/debug/tan` from the Rust
+  crates, so it keeps testing the Rust binary no matter what the release ships.
+  Repointing it at the Python `tan` (build the frozen binary, or
+  `pip install -e ./python` and use the console script) is a separate maintainer
+  decision — until then the two checks cover different binaries, which is worth
+  knowing before reading them as one signal.
+
+Neither needed a change here; both belong in the same picture as the
+`verify-version` rewrite (§3.3) and the `ci.yml` python job (§3.4).
+
 ## 4. Measurements
 
 ### 4.1 Startup: `--onefile` unpacks on every invocation

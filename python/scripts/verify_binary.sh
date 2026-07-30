@@ -50,17 +50,26 @@ trap 'rm -rf "$work"' EXIT
 # argument` from the cp1252 stdout wrapper, printed after the check already
 # passed. Harmless to the check, indistinguishable from a real crash in a log.
 #
-# The question is whether the FLAG EXISTS, not how rich chose to draw it, so the
-# text is reduced to letters/digits/hyphens before looking -- box borders, column
-# padding and line breaks all disappear, and an option name wrapped across two
-# lines rejoins. Grepping the rendered text made both macOS assets fail this
-# check while the same build shape passed on Windows and Linux: the binaries were
-# correct (`tan 0.5.0-dev`, all other proofs green) and the check was measuring
-# terminal width. On failure the raw help is dumped, because a proof that fails
-# without showing what it saw sends the next person to the wrong place.
+# The question is whether the FLAG EXISTS, not how rich chose to draw it. Both
+# macOS assets failed this check while the same build shape passed on Windows and
+# Linux, and the binaries were fine (`tan 0.5.0-dev`, every other proof green) --
+# the macOS runners give rich a colour-capable terminal, and rich styles a flag's
+# leading dash SEPARATELY from the rest:
+#
+#   ESC[1;36m-ESC[0mESC[1;36m-outputESC[0m
+#
+# so the literal string `--output` is not in the bytes at all. `NO_COLOR=1` asks
+# rich not to do that; the escapes are then stripped anyway, because a proof that
+# depends on a library honouring an environment variable is a proof with a
+# dependency. What survives is reduced to letters/digits/hyphens, which also
+# removes box borders, column padding and line breaks -- so an option name
+# wrapped across two lines rejoins as well. On failure the raw help is dumped:
+# a proof that fails without showing what it saw sends the next person to the
+# wrong place (this one sent me to terminal width).
 echo "== 2/4 generate --help carries --output"
-"$BIN" generate --help >"$work/help.txt" || fail "generate --help exited non-zero"
-if ! tr -cd 'A-Za-z0-9-' <"$work/help.txt" | grep -q -- "--output"; then
+NO_COLOR=1 "$BIN" generate --help >"$work/help.txt" || fail "generate --help exited non-zero"
+esc=$(printf '\033')
+if ! sed "s/${esc}\[[0-9;]*[a-zA-Z]//g" "$work/help.txt" | tr -cd 'A-Za-z0-9-' | grep -q -- "--output"; then
   echo "---- generate --help, as rendered ----" >&2
   cat "$work/help.txt" >&2
   echo "--------------------------------------" >&2
