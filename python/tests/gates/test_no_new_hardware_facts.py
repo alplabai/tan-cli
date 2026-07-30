@@ -1,0 +1,136 @@
+# SPDX-License-Identifier: Apache-2.0
+"""ADR-0017 / invariant I-26 gate: `tan` must not learn a hardware fact.
+
+Every hardware fact -- a SKU, a part number, a register or I2C address, a pin
+name, a vendor-specific Kconfig symbol -- lives ONCE under alp-sdk's
+`metadata/**`, and downstream files are generated from it. The moment `tan`
+carries one, there is a second source of truth and the unification that alp-sdk
+exists to provide is broken.
+
+This is an **allowlist** gate rather than a ban, because some of these literals
+are legitimate: `tan explain` is a teaching surface whose prose deliberately
+names real parts to the customer. What is unacceptable is a NEW one appearing
+unnoticed. So the gate pins the set that exists today, each with a reason, and
+fails on anything else -- the debt stays visible and capped, and the next one has
+to be argued for in this file rather than slipping in.
+
+Written because the planner relocation (`alp_orchestrate` -> `tan/planner`)
+carried literals across and nothing existed to catch the next one.
+"""
+
+from __future__ import annotations
+
+import pathlib
+import re
+
+#: A hardware fact, narrowly: SoM SKUs, Alif/GD32 part numbers, the 7-bit I2C
+#: address field, and vendor-specific Kconfig symbols. Deliberately NOT a generic
+#: hex match -- ordinary constants, sizes and masks are not hardware facts and
+#: would drown the signal.
+PATTERNS = (
+    re.compile(r"E1M-[A-Z0-9]+"),
+    re.compile(r"AE822[A-Z0-9]*"),
+    re.compile(r"GD32G[A-Z0-9]*"),
+    re.compile(r"addr_7bit"),
+    re.compile(r"CONFIG_ALP_SDK_WIFI_[A-Z0-9]+"),
+)
+
+#: file -> why its CODE literals are tolerated. Comments and docstrings are
+#: stripped before matching, so an entry here means real executable code.
+#: A file not listed here may contain no match at all.
+#:
+#: Every entry is DEBT unless marked OK. The value of this gate is that the list
+#: cannot grow silently.
+ALLOWED: dict[str, str] = {
+    "explain_cmd.py": "OK: customer-facing prose; naming real parts is the feature",
+    "bootstrap.py": "OK: guidance prose naming the bridge a customer may build",
+    "scaffold.py": (
+        "DEBT (largest): DEFAULT_SOM_SKU, IOT_STARTER_SUPPORTED_SKU, _FAMILY_TREES "
+        "and sku.startswith(('E1M-V2N','E1M-V2M')) branching -- tan picks a template "
+        "tree by SKU FAMILY, which is the vendor branching I-26 forbids. Retires when "
+        "the template catalogue declares its family mapping in metadata."
+    ),
+    "models.py": (
+        "DEBT: a literal 7-bit I2C address -- the clearest breach in the tree. Rode "
+        "along with the planner relocation; belongs in metadata."
+    ),
+    "kconfig.py": (
+        "DEBT: a hardcoded vendor Kconfig symbol. Emitting Kconfig is the planner's "
+        "job, but WHICH symbol a given part needs is a hardware fact."
+    ),
+    "doctor_cmd.py": (
+        "DEBT: JLINK_AEN_DEVICE hardcodes the AE822 profile. It exists in metadata at "
+        "socs/alif/ensemble/e8.json variants[1].debug.jlink_flash_device -- resolve it."
+    ),
+    "flash_plan.py": (
+        "DEBT: _DEFAULT_JLINK_DEVICE, inherited byte-identically from crates/tan-cli "
+        "builders.rs -- a pre-existing I-26 breach in the Rust, kept faithful by the "
+        "port rather than fixed silently."
+    ),
+}
+
+TAN = pathlib.Path(__file__).resolve().parents[2] / "tan"
+_FENCES = ('"' * 3, "'" * 3)
+
+
+def _code_only(text: str) -> str:
+    """Blank out comments and triple-quoted blocks.
+
+    Crude, but conservative in the safe direction: a docstring that survives
+    stripping yields a FALSE POSITIVE (a human looks), never a false negative
+    (something slipping through unseen).
+    """
+    out: list[str] = []
+    in_doc = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        fences = sum(stripped.count(f) for f in _FENCES)
+        if in_doc:
+            if fences:
+                in_doc = False
+            continue
+        if stripped.startswith("#"):
+            continue
+        if fences == 1:
+            in_doc = True
+            continue
+        if fences >= 2:
+            continue
+        out.append(line.split("  #")[0])
+    return "\n".join(out)
+
+
+def test_no_unallowlisted_hardware_fact_in_tan():
+    offenders: list[str] = []
+    for path in sorted(TAN.rglob("*.py")):
+        if path.name in ALLOWED:
+            continue
+        text = _code_only(path.read_text(encoding="utf-8", errors="replace"))
+        for pattern in PATTERNS:
+            for match in pattern.finditer(text):
+                line_no = text.count("\n", 0, match.start()) + 1
+                offenders.append(
+                    f"{path.relative_to(TAN.parent)} (stripped line {line_no}): "
+                    f"{match.group(0)}"
+                )
+    assert not offenders, (
+        "A hardware fact appeared in `tan`. Each one lives once under alp-sdk's\n"
+        "metadata/** and must be resolved at runtime -- ADR-0017, invariant I-26.\n"
+        "Resolve it from metadata, or if it is genuinely prose, add the file to\n"
+        "ALLOWED in this test WITH a reason:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_allowlist_has_no_stale_entries():
+    """An entry whose file no longer matches is debt that got paid -- delete it,
+    so the list stays an accurate picture of what actually remains."""
+    stale: list[str] = []
+    for name in ALLOWED:
+        hits = list(TAN.rglob(name))
+        if not hits:
+            stale.append(f"{name} (file gone)")
+            continue
+        text = _code_only(hits[0].read_text(encoding="utf-8", errors="replace"))
+        if not any(p.search(text) for p in PATTERNS):
+            stale.append(f"{name} (no longer contains a hardware fact in code)")
+    assert not stale, "Stale ALLOWED entries -- remove them: " + ", ".join(stale)
