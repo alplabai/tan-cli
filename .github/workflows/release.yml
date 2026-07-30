@@ -638,6 +638,32 @@ jobs:
           # is #151's silent success one level up, which is what this job exists to
           # remove.
           #
+          # STRUCTURAL PRECONDITION -- do not merge the publish jobs.
+          #
+          # "Empty means the wiring is broken" is only true because each channel is
+          # a SEPARATE JOB with its own `needs: release`. A failed `release` or a
+          # failed `publish_crates` cannot blank npm's self-report, because npm's
+          # job either ran and reported, or was skipped and is caught by the
+          # `NPM_RESULT` check above. So an empty `published` from a job that
+          # reports `success` really does mean the outputs wiring is broken, and
+          # nothing else.
+          #
+          # Collapse the channels into ordered STEPS of one job -- the obvious
+          # refactor, for speed or for a shared checkout -- and that stops holding:
+          # an earlier step failing aborts the job before the later channel's
+          # reporting step runs, its output comes back empty for a reason that has
+          # nothing to do with wiring, and this check fires a FALSE "wiring is
+          # broken" beside the true error.
+          #
+          # Not hypothetical. alp-sdk-vscode ported this gate, merged its four
+          # publish legs into one job's steps, and hit exactly that: a Marketplace
+          # failure aborted before the Open VSX steps, and their port reported a
+          # broken wiring next to the real failure -- misdiagnosing the one scenario
+          # the gate was built for.
+          #
+          # There is no test that catches this: the assertion still passes on every
+          # green tag, and only lies on a failing one. Hence the comment.
+          #
           # Kept in the SAME elif chain rather than a separate `case`, so a broken
           # wiring reports exactly one cause: a garbage value would otherwise also
           # trip a declaration comparison it has nothing to compare against.
