@@ -219,6 +219,93 @@ jobs:
       - name: scaffold byte-parity (vendored tree vs. pinned alp-sdk --emit scaffold)
         run: python3 tests/parity/scaffold_byte_parity.py --sdk alp-sdk
 
+      # `python/tests/gates/test_planner_relocation_freshness.py` pins its own
+      # audit ref (`PINNED_SDK_COMMIT`), separate from this job's `PINNED_SDK_TAG`.
+      # Binding ALP_SDK_ROOT to the job's `alp-sdk` checkout (pinned to
+      # PINNED_SDK_TAG) fed the gate whichever ref happens to be newer or OLDER
+      # than PINNED_SDK_COMMIT with no guarantee the two agree -- and for a
+      # stretch they did not: PINNED_SDK_TAG=cdfe1368 was an ANCESTOR of
+      # PINNED_SDK_COMMIT=ef79eab0, so the gate reddened on every run comparing
+      # an older planner against hashes audited from a newer one, telling the
+      # reader to port a BACKWARDS delta. Read the gate's own pin instead of
+      # duplicating it as a second hand-maintained SHA here (that duplication is
+      # the same drift, one layer up).
+      - name: resolve planner audit commit (from the gate's own pin)
+        id: planner_audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit=$(grep -oE 'PINNED_SDK_COMMIT = "[0-9a-f]{40}"' \
+              python/tests/gates/test_planner_relocation_freshness.py | grep -oE '[0-9a-f]{40}')
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "::notice::planner-relocation-freshness audited against alp-sdk ${commit}"
+
+      - name: clone alp-sdk at the planner audit commit
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.planner_audit.outputs.commit }}
+          path: alp-sdk-planner-audit
+
+      # `python/tests/gates/` (dependency-declaration, frozen issue-codes,
+      # hardware-facts allowlist, planner-relocation self-consistency) does not
+      # run in ANY CI workflow today. The freshness gate in particular
+      # `pytest.skip`s -- exit 0, invisible as a CI status -- whenever
+      # ALP_SDK_ROOT is unset, so it has never actually compared `tan/planner/`
+      # against an alp-sdk checkout in CI. This job already installs pytest
+      # above, so pointing ALP_SDK_ROOT at the audit-commit checkout resolved
+      # above arms all four gates for the cost of one step: no package install,
+      # no extra clone beyond the sparse one above, ~1s measured locally.
+      #
+      # Bound to the audit commit -- NOT this job's `alp-sdk` (pinned to
+      # PINNED_SDK_TAG, a different ref that can legitimately sit on either
+      # side of the audit commit) -- this step proves the narrower, always
+      # in-scope thing: PINNED_HASHES in the test file are actually what
+      # PINNED_SDK_COMMIT's tree contains, i.e. tan-cli and its own pin have
+      # not drifted apart. Live drift detection (has alp-sdk moved PAST that
+      # commit since the last audit) is a separate, warn-only step below --
+      # see its comment for why blocking on that question is the wrong shape.
+      #
+      # Deliberately NOT the full `python/tests` suite here (ports + parity,
+      # minutes not seconds, needs its own alp-sdk checkout) -- that suite runs
+      # in NO workflow today, full stop; this step only arms the
+      # always-must-run gates subset that was silently unwired everywhere.
+      - name: python/tests/gates (dependency, issue-code, hardware-fact, planner self-consistency)
+        working-directory: python
+        env:
+          ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk-planner-audit
+        run: python3 -m pytest tests/gates -q
+
+      # Companion to the blocking step above and THE actual staleness alarm:
+      # does live alp-sdk (this job's `alp-sdk` checkout -- PINNED_SDK_TAG on a
+      # `pull_request` run, or the SHA a dispatch just landed) still match the
+      # hashes tan/planner/ was last audited against, or has
+      # scripts/alp_orchestrate moved since? By its own docstring this gate
+      # fires exactly when alp-sdk lands a planner change tan has not
+      # re-absorbed yet -- and it fires hardest on a `repository_dispatch` run,
+      # whose entire premise is "alp-sdk just moved". Wiring that as a
+      # hard-failing check would red every such PR/dispatch for a move its
+      # author did not cause and cannot fix inside tan-cli -- exactly the
+      # failure mode the `pin freshness (warn only)` step above already
+      # legislates against for PINNED_SDK_TAG. Same shape here:
+      # `continue-on-error` plus an explicit `::warning::`, never a red X. Runs
+      # on a dispatch too (unlike the pin-freshness step above), because
+      # dispatch is when this alarm matters most.
+      - name: planner relocation freshness vs live alp-sdk (alarm, warn only)
+        continue-on-error: true
+        working-directory: python
+        env:
+          ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
+        run: |
+          set +e
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py -q
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::tan/planner/ has not been re-audited against alp-sdk ${{ steps.sdk_ref.outputs.ref }} -- scripts/alp_orchestrate moved past the pinned audit commit (see the pytest output above for which file(s)). Non-blocking by design: diff and port the delta, then re-pin PINNED_HASHES/PINNED_SDK_COMMIT in python/tests/gates/test_planner_relocation_freshness.py."
+          fi
+          exit 0
+
   # seam2 -- the half of ADR-0020's parity contract seam1 cannot reach.
   #
   # seam1 proves the PLAN's SHAPE is stable. It never runs tan and never
