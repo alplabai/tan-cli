@@ -18,9 +18,11 @@ from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain
 from tan.commands.generate_cmd import generate
+from tan.commands.image_cmd import image
 from tan.commands.init_cmd import init
 from tan.commands.presets_cmd import presets
 from tan.commands.sdk_cmd import sdk
+from tan.commands.size_cmd import size
 from tan.commands.validate_cmd import validate
 from tan.envelope import Envelope, Issue, Project, emit, envelope_emitted
 from tan.exit_codes import ExitCode
@@ -40,16 +42,18 @@ app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("explain")(explain)
 app.command("generate")(generate)
+app.command("image")(image)
 app.command("init")(init)
 app.command("presets")(presets)
 app.command("sdk")(sdk)
+app.command("size")(size)
 app.command("validate")(validate)
 
 #: Commands that read the root `--format` off `ctx.obj`, so the flag may precede
 #: the subcommand name for them (clap's `global = true`). Grow this as each
 #: command is taught to; see `root` for why an unlisted command must REFUSE the
 #: pre-subcommand position rather than silently ignore it.
-_HONOURS_ROOT_FORMAT = frozenset({"debug-config"})
+_HONOURS_ROOT_FORMAT = frozenset({"debug-config", "image", "size"})
 
 
 @app.callback(invoke_without_command=True)

@@ -1,0 +1,332 @@
+# SPDX-License-Identifier: Apache-2.0
+"""`tan.core.system_manifest`: the tolerant reader, the version guard, the
+additive-field passthrough, and the I-18 artefact resolution `tan image` and
+`tan size` share.
+
+Every message shape here was diffed against the Rust binary
+(`crates/tan-core/src/system_manifest.rs` + the two commands' `manifest-invalid`
+issues) -- see `tests/parity/test_image_size_oracle.py` for the live comparison.
+"""
+import os
+
+import pytest
+
+from tan.core.system_manifest import (
+    SYSTEM_MANIFEST_SCHEMA_VERSION,
+    SystemManifestError,
+    anchor_under,
+    parse_system_manifest,
+    raw_passthrough,
+    slice_build_dir,
+    slice_build_dir_or_default,
+    slice_elf_candidates,
+    slice_footprint_dirs,
+)
+
+# The real `--emit system-manifest` output for the heterogeneous AEN701 example:
+# an `off` A-core slice with no flash wiring, two Zephyr slices with it, and a
+# helper whose `flash_args` is the bare string "TBD" plus an undeclared `note` --
+# every tolerant-reader corner case at once.
+AEN701 = """
+schema_version: 1
+generated_by: scripts/alp_orchestrate.py
+hw_info:
+  sku: E1M-AEN701
+  som_hw_rev: r1
+  silicon: alif:ensemble:e7
+slices:
+- core_id: a32_cluster
+  os: 'off'
+  app: alp-image-edge
+  status: pending
+- core_id: m55_hp
+  os: zephyr
+  app: ./src
+  status: pending
+  flash_method: zephyr_west_flash
+ipc: []
+helper_mcus:
+- name: cc3501e_otp
+  chip: cc3501e
+  firmware_path: TBD
+  note: populated when the upstream firmware release lands
+boot_order: []
+"""
+
+
+def test_parses_the_real_aen701_manifest():
+    manifest = parse_system_manifest(AEN701)
+    assert manifest.schema_version == SYSTEM_MANIFEST_SCHEMA_VERSION
+    assert manifest.sku == "E1M-AEN701"
+    assert [s["core_id"] for s in manifest.slices] == ["a32_cluster", "m55_hp"]
+    # The `off` slice omits flash_method -- tolerated, not rejected.
+    assert "flash_method" not in manifest.slices[0]
+    assert manifest.helper_mcus[0]["chip"] == "cc3501e"
+
+
+def test_unknown_additive_fields_are_ignored_not_rejected():
+    # The v1 stability policy (alp-sdk#106): a newer SDK's additive block must not
+    # break an older tan. The helper's undeclared `note` above is the same rule.
+    manifest = parse_system_manifest(AEN701 + "future_block:\n  anything: 1\n")
+    assert len(manifest.slices) == 2
+
+
+def test_unsupported_schema_version_is_refused_with_the_oracle_message():
+    with pytest.raises(SystemManifestError) as err:
+        parse_system_manifest("schema_version: 2\nslices: []\n")
+    assert err.value.message == (
+        "unsupported system-manifest schema_version 2 (this CLI consumes v1); "
+        "upgrade the CLI or the SDK so the versions match"
+    )
+
+
+def test_schema_version_beyond_u32_is_refused_not_truncated():
+    # 2**32 + 1 is congruent to 1 mod 2**32, so a truncating guard accepts it.
+    with pytest.raises(SystemManifestError):
+        parse_system_manifest("schema_version: 4294967297\nslices: []\n")
+
+
+def test_missing_schema_version_is_a_parse_error():
+    with pytest.raises(SystemManifestError) as err:
+        parse_system_manifest("slices: []\n")
+    assert err.value.message == (
+        "system-manifest is not valid YAML: missing field `schema_version`"
+    )
+
+
+def test_scalar_root_document_names_the_struct():
+    with pytest.raises(SystemManifestError) as err:
+        parse_system_manifest("just-a-string\n")
+    assert err.value.message == (
+        'system-manifest is not valid YAML: invalid type: string "just-a-string", '
+        "expected struct SystemManifest"
+    )
+
+
+def test_slice_missing_core_id_fails_the_whole_document():
+    # serde does too: a partial read would make tan act on a manifest the shipped
+    # binary refuses outright.
+    with pytest.raises(SystemManifestError) as err:
+        parse_system_manifest("schema_version: 1\nslices:\n- os: zephyr\n")
+    assert "slices[0]: missing field `core_id`" in err.value.message
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "schema_version: 1\nslices: [\n",  # syntax error
+        "schema_version: 1\nslices: notalist\n",
+        "schema_version: 1\nslices:\n- notamapping\n",
+        "schema_version: 1\nhelper_mcus:\n- name: x\n",  # missing `chip`
+        "schema_version: 1\nipc:\n- name: x\n",  # missing `kind`
+        "schema_version: true\nslices: []\n",
+        "schema_version: '1'\nslices: []\n",
+        "",  # empty document -> None root
+        "[]\n",
+    ],
+)
+def test_every_malformed_shape_raises_the_typed_error_never_something_else(document):
+    with pytest.raises(SystemManifestError):
+        parse_system_manifest(document)
+
+
+# The two directions of serde_yaml's leniency around string fields and sequences.
+# Every one of these was determined by running the compiled binary, not inferred:
+# guessing gets both directions wrong, and each wrong guess is a document one
+# implementation accepts and the other refuses.
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        # `Vec<_>` fields: present-but-not-a-sequence, `~` INCLUDED.
+        "schema_version: 1\nslices: ~\n",
+        "schema_version: 1\nipc: nope\n",
+        "schema_version: 1\nhelper_mcus: nope\n",
+        "schema_version: 1\nboot_order: notalist\n",
+        "schema_version: 1\nboot_order: {a: 1}\n",
+        "schema_version: 1\nstorage: nope\n",
+        "schema_version: 1\nipc:\n- name: n\n  kind: k\n  endpoints: nope\n",
+        # `hw_info` is a struct: only a mapping (or absence) will do, and `~` is
+        # NOT accepted here even though it is for a string field.
+        "schema_version: 1\nhw_info: notamapping\n",
+        "schema_version: 1\nhw_info: [1]\n",
+        "schema_version: 1\nhw_info: ~\n",
+        # A string field given a sequence or a mapping.
+        "schema_version: 1\nhw_info:\n  sku: [1]\n",
+        "schema_version: 1\nslices:\n- core_id: {a: 1}\n  os: zephyr\n",
+        "schema_version: 1\nslices:\n- core_id: c\n  os: zephyr\n  build_dir: [1]\n",
+    ],
+)
+def test_a_sequence_or_struct_field_given_the_wrong_shape_is_refused(document):
+    with pytest.raises(SystemManifestError):
+        parse_system_manifest(document)
+
+
+def test_a_string_field_keeps_the_scalars_raw_text():
+    """serde resolves a scalar against its TARGET type, so a `String` field gets
+    the scalar's RAW TEXT -- not YAML's resolved value stringified.
+
+    `str(yaml.safe_load("0x10"))` is `"16"`, `str(None)` is `"None"`,
+    `str(1.50)` is `"1.5"`: three different values than the oracle for the same
+    document, and `build_dir`/`output_artefact`/`firmware_path` are PATHS.
+    """
+    manifest = parse_system_manifest(
+        "schema_version: 1\ngenerated_by: 7\nhw_info:\n  sku: 0x10\n  silicon: 1.50\n"
+        "slices:\n- core_id: 007\n  os: zephyr\n  build_dir: 0o17\n  status: yes\n"
+        "helper_mcus:\n- name: 1:30\n  chip: .inf\n"
+    )
+    assert manifest.sku == "0x10"
+    assert manifest.root["hw_info"]["silicon"] == "1.50"
+    assert manifest.root["generated_by"] == "7"
+    assert manifest.slices[0]["core_id"] == "007"
+    assert manifest.slices[0]["build_dir"] == "0o17"
+    assert manifest.slices[0]["status"] == "yes"
+    assert manifest.helper_mcus[0]["name"] == "1:30"
+    assert manifest.helper_mcus[0]["chip"] == ".inf"
+
+
+def test_a_null_is_the_raw_text_for_a_required_field_and_absent_for_an_optional_one():
+    """The split that makes `_SLICE_REQUIRED_STRINGS` vs `_SLICE_OPTIONAL_STRINGS`
+    load-bearing, both halves verified against the binary:
+
+    `os` is a plain `String`, so `os: ~` is the STRING `"~"`. `build_dir` is an
+    `Option<String>`, so `build_dir: ~` is ABSENT -- `deserialize_option` sees the
+    null first. Backwards, this puts a slice's build dir at the literal path `~`.
+    """
+    manifest = parse_system_manifest(
+        "schema_version: 1\nhw_info:\n  sku: ~\n  silicon: null\nslices:\n"
+        "- core_id: c\n  os: ~\n  build_dir: ~\n  output_artefact: null\n"
+    )
+    assert manifest.sku == "~"
+    assert manifest.slices[0]["os"] == "~"
+    assert "build_dir" not in manifest.slices[0]
+    assert "output_artefact" not in manifest.slices[0]
+    assert "silicon" not in manifest.root["hw_info"]
+
+
+def test_the_yaml_12_core_schema_governs_the_passthrough_not_pyyamls_yaml_11():
+    """`raw_passthrough` feeds `data.hw_info` verbatim, so it must resolve scalars
+    the way serde_yaml's `Value` does -- YAML 1.2 CORE, not PyYAML's YAML 1.1.
+
+    All five rows were diffed against the binary. The `date` row is not cosmetic:
+    PyYAML resolves it to a `datetime.date`, which is not JSON-serializable, so
+    `tan image` exited 3 on a document the oracle bundles at 0.
+    """
+    hw_info, _ = raw_passthrough(
+        "schema_version: 1\nhw_info:\n"
+        "  a: yes\n  b: 007\n  c: 1:30\n  d: 2024-01-01\n  e: 0o17\n  f: 0xA5\n"
+        "  g: 1.50\n  h: ~\n  i: 'off'\n"
+    )
+    assert hw_info == {
+        "a": "yes",           # 1.1 boolean -> 1.2 string
+        "b": "007",           # 1.1 int 7   -> 1.2 string
+        "c": "1:30",          # 1.1 int 90  -> 1.2 string
+        "d": "2024-01-01",    # 1.1 date    -> 1.2 string
+        "e": 15,              # 1.1 string  -> 1.2 int
+        "f": 165,             # int in both
+        "g": 1.5,
+        "h": None,
+        "i": "off",
+    }
+
+
+def test_an_integer_serde_yaml_cannot_hold_drops_the_whole_passthrough():
+    # `serde_yaml::Value` spans i64::MIN..=u64::MAX; outside it the Value parse
+    # fails and `raw_passthrough` yields its defaults, silently dropping BOTH
+    # fields. Reproduced rather than "improved": Python's unbounded int would put a
+    # number in bundle-manifest.json that no `JSON.parse` consumer can hold.
+    assert raw_passthrough(
+        "schema_version: 1\nhw_info:\n  v: 123456789012345678901234567890\n"
+        "boot_order: [a]\n"
+    ) == ({}, [])
+    # ...and one INSIDE the range passes through untouched.
+    assert raw_passthrough("schema_version: 1\nhw_info:\n  v: 18446744073709551615\n") == (
+        {"v": 2**64 - 1},
+        [],
+    )
+
+
+def test_unhashable_yaml_key_is_a_parse_error_not_a_traceback():
+    # A YAML sequence used as a mapping key. The oracle tolerates it on read and
+    # fails later at serialize; both ends emit a coded envelope, and the one thing
+    # neither may do is let the exception escape.
+    with pytest.raises(SystemManifestError):
+        parse_system_manifest("schema_version: 1\n? [1, 2]\n: value\n")
+
+
+def test_raw_passthrough_keeps_additive_fields():
+    hw_info, boot_order = raw_passthrough(
+        "schema_version: 1\nhw_info:\n  sku: E1M-AEN701\n  eeprom:\n    magic: 0xA5\n"
+        "  future_key: keep-me\nboot_order:\n- m55_hp\n- m55_he\n"
+    )
+    # `0xA5` is an int in serde_yaml's Value too -- verified against the binary.
+    assert hw_info["eeprom"] == {"magic": 165}
+    assert hw_info["future_key"] == "keep-me"
+    assert boot_order == ["m55_hp", "m55_he"]
+
+
+@pytest.mark.parametrize(
+    "document", ["", "schema_version: 1\nslices: []\n", "just-a-string\n", "{[\n"]
+)
+def test_raw_passthrough_never_raises_and_defaults_to_empty(document):
+    # It is called on the error path with an empty string, so a throw here would
+    # double-fault the envelope guard.
+    assert raw_passthrough(document) == ({}, [])
+
+
+# --------------------------------------------------------------------- paths
+
+
+def test_anchor_under_leaves_an_absolute_path_alone():
+    absolute = os.path.join(os.getcwd(), "x", "y.elf")
+    assert anchor_under(absolute, os.path.join("some", "root")) == absolute
+
+
+def test_anchor_under_joins_a_relative_path_onto_the_build_root():
+    assert anchor_under("a/b.elf", os.path.join("R", "br")) == os.path.join(
+        "R", "br", "a/b.elf"
+    )
+
+
+def test_join_does_not_re_render_a_posix_root_in_platform_separators():
+    # `Path("C:/a/b") / "c"` rewrites the whole path; Rust's `PathBuf::join` only
+    # appends. Both values reach `data.slices[].notes[]`, so the difference is
+    # part of the machine contract.
+    assert slice_build_dir_or_default(
+        {"core_id": "m55_hp", "os": "zephyr"}, "R/posix/root"
+    ) == os.path.join("R/posix/root", "m55_hp-zephyr")
+
+
+def test_slice_build_dir_is_none_without_a_usable_key():
+    for slice_ in ({}, {"build_dir": ""}, {"build_dir": None}, {"build_dir": 7}):
+        assert slice_build_dir(slice_, "R") is None
+
+
+def test_slice_build_dir_or_default_uses_the_canonical_name():
+    assert slice_build_dir_or_default(
+        {"core_id": "m55_he", "os": "zephyr"}, "R"
+    ) == os.path.join("R", "m55_he-zephyr")
+
+
+def test_recorded_output_artefact_is_used_alone_no_nesting_probe():
+    # `tan build` only ever writes it already-resolved, so second-guessing it
+    # would ignore a deliberate `-d`/`--build-dir` override.
+    assert slice_elf_candidates(
+        {"core_id": "m55_hp", "os": "zephyr", "output_artefact": "art/z.elf"}, "R"
+    ) == [os.path.join("R", "art/z.elf")]
+
+
+def test_i18_nesting_is_probed_after_the_plain_path_never_before():
+    # I-18: `west build` is emitted with no `-d`, so its tree lands in
+    # `<build_dir>/build/`. The un-nested path MUST come first -- that ordering is
+    # what makes every input the oracle measures measure identically here.
+    candidates = slice_elf_candidates({"core_id": "c", "os": "zephyr"}, "R")
+    assert candidates == [
+        os.path.join("R", "c-zephyr", "zephyr", "zephyr.elf"),
+        os.path.join("R", "c-zephyr", "build", "zephyr", "zephyr.elf"),
+    ]
+    assert slice_footprint_dirs({"core_id": "c", "os": "zephyr"}, "R") == [
+        os.path.join("R", "c-zephyr"),
+        os.path.join("R", "c-zephyr", "build"),
+    ]

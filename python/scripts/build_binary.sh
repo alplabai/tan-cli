@@ -19,7 +19,7 @@
 # inside (alp-sdk-vscode/src/alpCli/vscodeAdapter.ts:288-290).
 #
 #   python -m venv .venv-build
-#   .venv-build/bin/pip install typer rich "pyinstaller>=6.10"
+#   .venv-build/bin/pip install typer rich pyyaml "pyinstaller>=6.10"
 #   PYTHON=.venv-build/bin/python scripts/build_binary.sh
 #
 # The artifact is named `tan` / `tan.exe` here. Release assets carry the Rust

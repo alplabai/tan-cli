@@ -24,7 +24,14 @@ keywords = ["embedded", "firmware", "zephyr", "yocto", "som", "build"]
 # and the customer gets an error naming Zephyr rather than tan. Same effective
 # floor `tan doctor` enforces (`ZEPHYR_PYTHON_FLOOR`, tan/commands/doctor_cmd.py).
 requires-python = ">=3.12"
-dependencies = ["typer>=0.12", "rich>=13"]
+# `pyyaml` is load-bearing, not optional: `build/system-manifest.yaml` is the ONLY
+# input `tan image` and `tan size` have, and it is YAML. Without it declared here
+# the PyInstaller build -- which installs exactly this set into a clean venv, see
+# scripts/build_binary.sh -- ships a frozen `tan` whose `size`/`image` can never
+# read a manifest. Both still degrade to a coded `*.manifest-invalid` envelope
+# rather than a traceback if it is somehow absent (`tan.core.system_manifest.
+# load_yaml_document`), but that is a safety net, not the plan.
+dependencies = ["typer>=0.12", "rich>=13", "pyyaml>=6"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
