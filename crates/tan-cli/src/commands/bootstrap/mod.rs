@@ -173,10 +173,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
     let mut log = Log::new(g.is_json());
 
     let mut context = resolve_cli_project_context(g);
-    let mut project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let mut project = Project::from_context(&context);
     let Some(mut sdk_root) = context.sdk_root.clone() else {
         return failure(
             g,
@@ -443,10 +440,7 @@ pub fn run(g: &GlobalArgs, args: &BootstrapArgs) -> CommandRun {
                     &old_repo_root,
                     &sdk_root.replace('\\', "/"),
                 );
-                project = Project {
-                    root: context.workspace_root.clone(),
-                    board_yaml: context.board_yaml_path.clone(),
-                };
+                project = Project::from_context(&context);
                 crate::sdk_report::override_root(&sdk_root);
             }
             relocate::Resolution::Refuse {

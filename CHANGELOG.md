@@ -8,6 +8,41 @@ All notable changes to `tan` are documented here. Format follows
 ## [Unreleased]
 
 ### Fixed
+- **`project.boardYaml` now agrees with the filesystem in both directions**
+  (#236, #170). The field's own contract has always read "if found", and the
+  code returned a path either way: twenty commands each cloned
+  `context.board_yaml_path` straight into the envelope, and the resolver builds
+  `<root>/board.yaml` unconditionally — so a run in a directory with no
+  `board.yaml` reported one, and a consumer that opened it got ENOENT. #170 is
+  the same field failing the other way; its fix routed `debug-config` through
+  that shared resolver, which without this would have traded a hardcoded `null`
+  for a path to a file that need not exist.
+
+  Both ends are fixed at the reporting seam — a new `Project::from_context`
+  (plus `from_debug_context`, which reuses the `board_yaml_exists` flag
+  `doctor`/`inspect`/`support-bundle` already carry) that all twenty sites now
+  route through. Deliberately NOT in `resolve_project_context`:
+  `board_yaml_path` is the path commands ACT on, and several need it precisely
+  when the file is absent — `doctor`'s `read_board_model`, `validate`'s
+  "does not exist" refusal, and `create_debug_workspace_context`, which mirrors
+  the TypeScript side by carrying the path and a separate existence flag.
+  Emptying it there would have stripped the path out of every "no board.yaml at
+  `<path>`" message.
+
+  Two further sites build the block by hand and were the starkest instances:
+  `generate` and `validate --offline` each reported the path one line above the
+  refusal that says the file does not exist. Both now report `null` and keep
+  naming the path in the message.
+
+  **Wire change (reporting only).** Seven golden envelopes move
+  `project.boardYaml` from a path to `null` — the four `debug-config-preview-*`
+  cases, both `presets-*` cases, and `generate-board-yaml-missing`, every one of
+  which runs in a scratch directory that provably has no `board.yaml`. Nothing
+  in `alp-sdk-vscode` reads the field; its only declaration
+  (`src/alpCli/models.ts`) is already `string | null`. `project.root` is
+  untouched — #236 rules that question explicitly out of scope.
+
+### Fixed
 - **`tan build --pristine` now reports the slices it did not wipe** (#183).
   `--pristine` has three paths that correctly decline the wipe, and all three
   were silent: the slice carries an explicit `-d`/`--build-dir` (west wrote

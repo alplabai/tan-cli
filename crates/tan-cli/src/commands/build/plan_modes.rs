@@ -31,10 +31,7 @@ use super::workspace::invoke_sdk_emit;
 /// shelling python).
 pub(super) fn manifest_command(g: &GlobalArgs, args: &BuildArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     let yaml = match &args.manifest_from {
         Some(path) => match std::fs::read_to_string(path) {
@@ -123,10 +120,7 @@ fn plan_command_with_toolchain(
     toolchain: &crate::toolchain::ToolchainRoot,
 ) -> CommandRun {
     let context = resolve_cli_project_context(g);
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     let json = match acquire_plan_json(&context, args) {
         Ok(json) => json,

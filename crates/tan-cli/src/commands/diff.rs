@@ -43,10 +43,7 @@ struct DiffData {
 /// (even when there are no changes); read/parse problems are routed through `failure`.
 pub fn run(g: &GlobalArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     let board_path = match &context.board_yaml_path {
         Some(path) if Path::new(path).exists() => path.clone(),

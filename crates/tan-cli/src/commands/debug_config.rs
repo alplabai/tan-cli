@@ -115,8 +115,13 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
     // was, not a new reported dependency, so the choice not to record here
     // is unchanged.
     let context = resolve_cli_project_context_no_sdk_report(g);
-    let board_yaml = context.board_yaml_path.clone();
-    let project_root = context.workspace_root.clone().unwrap_or_default();
+    //
+    // tan-cli#236 completes it: built through the shared constructor, so
+    // `boardYaml` is null when nothing is actually at the resolved path.
+    // Routing `board_yaml` through the resolver (above) without this would have
+    // traded a hardcoded null for a path to a file that need not exist — the
+    // same field disagreeing with the filesystem, in the other direction.
+    let project = Project::from_context(&context);
 
     // Fill the `<resolved-…>` placeholders from what this project's own build
     // recorded (#66). Nothing here fails the command: pre-build, or against a
@@ -211,8 +216,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
             false,
             &notes,
             &draft,
-            &project_root,
-            board_yaml,
+            project,
             identity_issues,
         );
     }
@@ -332,8 +336,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         // carries its own `<resolved-…>` placeholders even after a merge
         // resolved them from the customer's real, hand-filled values.
         &plan.written_configuration,
-        &project_root,
-        board_yaml,
+        project,
         issues,
     )
 }
@@ -467,8 +470,7 @@ fn success(
     replaced: bool,
     notes: &[String],
     configuration: &Value,
-    project_root: &str,
-    board_yaml: Option<String>,
+    project: Project,
     issues: Vec<Issue>,
 ) -> CommandRun {
     let data = DebugConfigData {
@@ -496,15 +498,6 @@ fn success(
             g,
             &issues,
         )
-    };
-    // tan-cli#170: same resolver every other command's envelope already uses
-    // for both fields; `debug-config` was the one holdout hardcoding
-    // `board_yaml: None`, and (follow-up) the one reporting `root` from its
-    // own native-separator `PathBuf` instead of this already posix-normalized
-    // string.
-    let project = Project {
-        root: Some(project_root.to_string()),
-        board_yaml,
     };
     let json = g.is_json().then(|| {
         Envelope::new(
@@ -2231,6 +2224,46 @@ mod tests {
             board_yaml.contains('\\'),
             root.contains('\\'),
             "root and boardYaml disagree on separator: {envelope}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// tan-cli#236, the pair of the test above: #170's fix routed this field
+    /// through the shared resolver, which builds `<root>/board.yaml`
+    /// unconditionally — so without #236 it traded a hardcoded null for a path
+    /// to a file that need not exist. `debug-config` succeeds in a directory
+    /// with no `board.yaml` (the four golden previews all do), which makes it
+    /// the command where the wrong value is most reachable.
+    #[test]
+    fn envelope_reports_a_null_board_yaml_when_the_directory_has_none() {
+        let dir = tmp("board-yaml-absent");
+        assert!(!dir.join("board.yaml").exists());
+
+        let mut g = global(&dir);
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            svd: None,
+            preview: true,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+
+        let envelope: Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert!(
+            envelope["project"]["boardYaml"].is_null(),
+            "no board.yaml is there -- the field must not name one: {envelope}"
+        );
+        // `root` is deliberately untouched: #236 rules it out of scope, and a
+        // run still legitimately reports where it stood.
+        assert!(
+            envelope["project"]["root"].is_string(),
+            "root must still report the resolved directory: {envelope}"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
