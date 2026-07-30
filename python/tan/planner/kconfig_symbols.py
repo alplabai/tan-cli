@@ -13,20 +13,32 @@ symbols are user-promptable for a given board.
 
 Two independent halves:
 
-  * `_project_symbols` / `_envelope` -- pure JSON shaping, unit-tested from
-    a fake symbol list with NO Zephyr installed (see
-    tests/scripts/test_emit_kconfig.py).  Reused verbatim (imported, not
-    duplicated) by `scripts/kconfig/alp_kconfig_dump.py` -- see below.
+  * `_envelope` -- pure JSON shaping (the schemaVersion/board/core/symbols
+    wrap), unit-tested with NO Zephyr installed (see
+    tests/core/test_kconfig_symbols.py). The actual symbol projection
+    ("first prompt-bearing node, not nodes[0]" -- alp-sdk #893) lives ONLY
+    inside `_DUMPER_SOURCE` below, the rendered dumper script: it has to run
+    as a standalone subprocess inside Zephyr's own Kconfig env, importing
+    nothing from this package, so there is no separate copy here for it to
+    import -- `tests/core/test_kconfig_symbols.py` asserts the rendered
+    projection directly against a literal expected result (an independent
+    oracle) instead of hand-syncing a second copy.
   * `_load_board_symbols` -- Approach A: a stub `west build --cmake-only`
     registers Zephyr's `EXTRA_KCONFIG_TARGET` custom-target mechanism
     (`cmake/modules/kconfig.cmake` ~199-243 -- the same seam `west build -t
-    menuconfig` uses) pointed at `scripts/kconfig/alp_kconfig_dump.py`;
-    `west build -t alpkconfigjson` then runs it INSIDE the exact Kconfig
-    env Zephyr's own CMake computed for that board/toolchain/module set
-    (no env reconstruction needed -- Zephyr hands it over directly). This
-    is workspace-dependent and is skipped locally without a bootstrapped
-    ZEPHYR_BASE; it is verified by the pr-twister CI job instead (see
-    `scripts/check_emit_kconfig_contract.py`).
+    menuconfig` uses) pointed at a dumper script this module RENDERS fresh
+    onto disk for every run (`_DUMPER_SOURCE`, written under the run's own
+    scratch tree -- never a file living in alp-sdk, and never a PyInstaller
+    onefile extraction path, which is deleted at process exit and would
+    leave the baked-in CMake command pointing at nothing); `west build -t
+    alpkconfigjson` then runs it INSIDE the exact Kconfig env Zephyr's own
+    CMake computed for that board/toolchain/module set (no env
+    reconstruction needed -- Zephyr hands it over directly). This is
+    workspace-dependent and is skipped locally without a bootstrapped
+    ZEPHYR_BASE; alp-sdk's own dumper copy under `scripts/kconfig/
+    alp_kconfig_dump.py` is verified by the pr-twister CI job's
+    `scripts/check_emit_kconfig_contract.py` -- that gate covers alp-sdk's
+    copy only, not tan's rendered one above.
 
     An earlier version tried overriding `-DPYTHON_EXECUTABLE=<spy>` to
     capture kconfig.py's own env instead -- discarded: Zephyr's
@@ -45,10 +57,9 @@ import sys
 import tempfile
 import textwrap
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Optional
 
 from .models import BoardProject, OrchestratorError
-from .paths import REPO
 
 SCHEMA_VERSION = 1
 
@@ -71,11 +82,10 @@ def _require_workspace() -> Path:
     rest of the orchestrator's `OrchestratorError` -> exit(1) convention,
     marking "no workspace" as distinct from an ordinary usage error.
 
-    This process itself never imports kconfiglib (only
-    `scripts/kconfig/alp_kconfig_dump.py` does, in its own subprocess
-    running inside Zephyr's own env -- see `_load_board_symbols`); this
-    just probes `kconfiglib.py`'s presence as the "is this ZEPHYR_BASE
-    real" check.
+    This process itself never imports kconfiglib (only the rendered dumper
+    does -- see `_DUMPER_SOURCE` -- in its own subprocess running inside
+    Zephyr's own env; see `_load_board_symbols`); this just probes
+    `kconfiglib.py`'s presence as the "is this ZEPHYR_BASE real" check.
     """
     raw = os.environ.get("ZEPHYR_BASE")
     if raw:
@@ -94,62 +104,6 @@ def _require_workspace() -> Path:
 # Hermetic symbol projection + envelope (Task 2) -- no kconfiglib import
 # at module scope, so this half unit-tests with no Zephyr installed.
 # ---------------------------------------------------------------------
-
-
-def _project_symbols(
-    syms: Iterable[Any],
-    *,
-    type_to_str: dict[Any, str],
-    expr_str: Callable[[Any], str],
-) -> list[dict[str, Any]]:
-    """Project promptable symbols to `{name, type, prompt, depends,
-    default, help}`, sorted by name.
-
-    `type_to_str` / `expr_str` are dependency-injected rather than
-    imported from kconfiglib here: kconfiglib's own BOOL/TRISTATE/...
-    type constants are internal tokenizer values with NO guaranteed
-    numeric stability across releases (kconfiglib.py's own comment:
-    "Client code shouldn't rely on [the values] though") -- the real
-    call site (`_load_board_symbols`/`emit_kconfig`) passes kconfiglib's
-    own `TYPE_TO_STR` dict and `expr_str` function, so this stays correct
-    for whatever kconfiglib the bootstrapped ZEPHYR_BASE ships, and the
-    hermetic unit test passes its own small fakes with no kconfiglib
-    installed at all.
-
-    Only symbols with a prompt on ANY of their `MenuNode`s are kept --
-    a symbol can be declared in multiple locations (Zephyr's own
-    `scripts/kconfig/kconfig.py::promptless()` checks the same way, with
-    the same reasoning: "the symbol might be defined in multiple
-    locations, we need to check all locations"). This matters in
-    practice: many board/SoC `Kconfig.defconfig` fragments redeclare a
-    symbol with a promptless `default`-only override block, and
-    `Kconfig.zephyr` sources those BEFORE the canonical declaration
-    (`kernel/Kconfig`, `drivers/serial/Kconfig`, ...) -- so `nodes[0]`
-    alone silently dropped real, user-facing symbols like `LOG` /
-    `SERIAL` / `MAIN_STACK_SIZE` (caught by the CI contract, #893).
-    The scope is still a user-settable `prj.conf` menu, not the full
-    invisible symbol tree (~26k symbols) -- promptless-everywhere
-    symbols are still excluded.
-    """
-    projected: list[dict[str, Any]] = []
-    for sym in syms:
-        node = next((n for n in sym.nodes if n.prompt), None)
-        if node is None:
-            continue
-        default = None
-        if sym.orig_defaults:
-            default_expr, _cond = sym.orig_defaults[0]
-            default = expr_str(default_expr)
-        projected.append({
-            "name":    sym.name,
-            "type":    type_to_str.get(sym.type, "unknown"),
-            "prompt":  node.prompt[0],
-            "depends": expr_str(sym.direct_dep) or "",
-            "default": default,
-            "help":    getattr(node, "help", None) or "",
-        })
-    projected.sort(key=lambda entry: entry["name"])
-    return projected
 
 
 def _envelope(board: str, core: str, symbols: list[dict[str, Any]]) -> dict[str, Any]:
@@ -179,14 +133,138 @@ _STUB_CMAKELISTS = textwrap.dedent("""\
 
 _STUB_MAIN_C = "int main(void)\n{\n\treturn 0;\n}\n"
 
-# <sdk>/scripts/kconfig/alp_kconfig_dump.py -- an SDK-side script, not a
-# submodule of this package (it has to run as a standalone script inside
-# Zephyr's own Kconfig env, not import this package).
-# RELOCATED: was a `__file__`-relative sibling walk; now anchored on the bound
-# SDK checkout, because the dumper stayed in alp-sdk.
-_DUMPER = REPO / "scripts" / "kconfig" / "alp_kconfig_dump.py"
-
 _KCONFIG_TARGET = "alpkconfigjson"
+
+# The dumper Zephyr's `EXTRA_KCONFIG_TARGET` custom target runs, RENDERED onto
+# disk fresh for every `_load_board_symbols` call rather than read off a fixed
+# path -- see `_load_board_symbols`'s docstring for the PyInstaller-onefile /
+# stale-build-dir hazard a fixed path would reintroduce. This replaces the
+# earlier design: first a `__file__`-relative sibling walk, then a path
+# anchored on the bound alp-sdk checkout (`REPO / "scripts" / "kconfig" /
+# "alp_kconfig_dump.py"`) -- both coupled this module to a file living
+# outside `tan`.
+#
+# Deliberately self-contained: this text becomes a standalone .py file that
+# runs as a *subprocess*, inside Zephyr's own Kconfig environment, with its
+# own path baked into the generated build tree by CMake -- so it must import
+# NOTHING from `tan` or `alp_orchestrate` (neither package is guaranteed to
+# be importable from wherever this file ends up, and under a frozen
+# PyInstaller build there is no `tan` *source* on disk to import at all).
+# Only the stdlib plus `kconfiglib`, which Zephyr's own env injects via
+# ZEPHYR_BASE.
+#
+# `_project_symbols` therefore lives ONLY here, as plain literal source, not
+# imported and not mirrored elsewhere in this module;
+# `tests/core/test_kconfig_symbols.py` execs this constant in an isolated
+# namespace (with a fake `kconfiglib` module) and asserts its projection
+# output against a literal expected result -- an independent oracle, so a
+# regression here fails a fast, hermetic test instead of surfacing only in a
+# Zephyr-bootstrapped CI job.
+_DUMPER_SOURCE = '''\
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Dumps one board's promptable Kconfig symbols as JSON.
+
+RENDERED BY tan (tan.planner.kconfig_symbols._load_board_symbols) fresh for
+every `--emit kconfig` run, into that run's own scratch build tree -- this
+file is never checked in and never lives in alp-sdk.
+
+Runs INSIDE Zephyr's own Kconfig environment via the `EXTRA_KCONFIG_TARGET`
+mechanism (`cmake/modules/kconfig.cmake` ~199-243, the same seam
+`menuconfig`/`guiconfig`/`hardenconfig`/`traceconfig` use): a
+`west build --cmake-only -- -DEXTRA_KCONFIG_TARGETS=alpkconfigjson
+-DEXTRA_KCONFIG_TARGET_COMMAND_FOR_alpkconfigjson=<this>;--output;<path>`
+registers a custom target that (per kconfig.cmake:227-242) runs
+
+    ${CMAKE_COMMAND} -E env <COMMON_KCONFIG_ENV_SETTINGS...> \\\\
+        ${PYTHON_EXECUTABLE} <this> --output <path> ${KCONFIG_ROOT}
+
+i.e. Zephyr's CMake hands this script the *exact* env it computed for that
+board/toolchain/module set (srctree, ARCH, BOARD_DIR, module Kconfigs, ...)
+plus `KCONFIG_ROOT` as the trailing positional -- no env reconstruction
+needed. `west build -d <build> -t alpkconfigjson` (a second, separate
+invocation -- `add_custom_target` isn't built by `--cmake-only` alone) is
+what actually runs it. See `tan.planner.kconfig_symbols._load_board_symbols`
+for the caller.
+
+Deliberately self-contained (imports nothing from `tan` or
+`alp_orchestrate`): this file's own path is baked into the generated build
+tree by the CMake invocation above, so it has to keep working from wherever
+`tan` chose to write it -- see the caller for why that path is a fresh
+scratch directory rather than a fixed one.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+# kconfiglib is a plain module file under $ZEPHYR_BASE/scripts/kconfig, not
+# pip-installed -- ZEPHYR_BASE is guaranteed set in this script's env (see
+# module docstring: COMMON_KCONFIG_ENV_SETTINGS always sets it).
+sys.path.insert(0, os.path.join(os.environ["ZEPHYR_BASE"], "scripts", "kconfig"))
+import kconfiglib  # noqa: E402
+
+
+def _project_symbols(syms):
+    """Project promptable symbols to `{name, type, prompt, depends,
+    default, help}`, sorted by name.
+
+    Only symbols with a prompt on ANY of their `MenuNode`s are kept -- a
+    symbol can be declared in multiple locations (Zephyr's own
+    `scripts/kconfig/kconfig.py::promptless()` checks the same way, with the
+    same reasoning: "the symbol might be defined in multiple locations, we
+    need to check all locations"). This matters in practice: many board/SoC
+    `Kconfig.defconfig` fragments redeclare a symbol with a promptless
+    `default`-only override block, and `Kconfig.zephyr` sources those BEFORE
+    the canonical declaration -- so taking `nodes[0]` alone silently dropped
+    real, user-facing symbols like `LOG` / `SERIAL` / `MAIN_STACK_SIZE`
+    (alp-sdk #893). This is the only copy of this projection logic (see the
+    module docstring) -- verified against a literal expected result in
+    `tests/core/test_kconfig_symbols.py`, so the "first prompt-bearing node,
+    not nodes[0]" behavior is pinned on purpose.
+    """
+    projected = []
+    for sym in syms:
+        node = next((n for n in sym.nodes if n.prompt), None)
+        if node is None:
+            continue
+        default = None
+        if sym.orig_defaults:
+            default_expr, _cond = sym.orig_defaults[0]
+            default = kconfiglib.expr_str(default_expr)
+        projected.append({
+            "name":    sym.name,
+            "type":    kconfiglib.TYPE_TO_STR.get(sym.type, "unknown"),
+            "prompt":  node.prompt[0],
+            "depends": kconfiglib.expr_str(sym.direct_dep) or "",
+            "default": default,
+            "help":    getattr(node, "help", None) or "",
+        })
+    projected.sort(key=lambda entry: entry["name"])
+    return projected
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--output", required=True, type=Path)
+    ap.add_argument("kconfig_root")
+    args = ap.parse_args()
+
+    kconf = kconfiglib.Kconfig(args.kconfig_root, warn=True, warn_to_stderr=False)
+    symbols = _project_symbols(kconf.unique_defined_syms)
+    # write-text-newline-exempt: scratch build dir, read back only by
+    # tan.planner.kconfig_symbols._load_board_symbols
+    args.output.write_text(json.dumps(symbols), encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+'''
 
 
 def _write_stub_app(app_dir: Path) -> None:
@@ -199,12 +277,28 @@ def _write_stub_app(app_dir: Path) -> None:
     (app_dir / "src" / "main.c").write_text(_STUB_MAIN_C, encoding="utf-8")
 
 
+def _write_dumper(dumper_path: Path) -> None:
+    """Render `_DUMPER_SOURCE` onto disk at `dumper_path`.
+
+    Called once per `_load_board_symbols` run, into that run's own scratch
+    tree (never a fixed/cached path) -- see `_DUMPER_SOURCE`'s docstring for
+    why: a fixed path under a PyInstaller onefile extraction directory would
+    be deleted at process exit while the CMake command baked into the build
+    tree still names it, and a fixed path anywhere else would let a stale
+    render survive a project change instead of being regenerated.
+    """
+    dumper_path.parent.mkdir(parents=True, exist_ok=True)
+    # write-text-newline-exempt: rendered fresh into a scratch build dir
+    dumper_path.write_text(_DUMPER_SOURCE, encoding="utf-8")
+
+
 def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, Any]]:
-    """Approach A: configure a stub app for `board_triple`, then run
-    `alp_kconfig_dump.py` INSIDE Zephyr's own Kconfig env via the
-    `EXTRA_KCONFIG_TARGET` mechanism (the same seam `west build -t
-    menuconfig` uses -- see `alp_kconfig_dump.py`'s module docstring).
-    Returns the already-projected `list[dict]` the dumper wrote.
+    """Approach A: configure a stub app for `board_triple`, render the
+    dumper (`_DUMPER_SOURCE`) into this run's own scratch tree, then run it
+    INSIDE Zephyr's own Kconfig env via the `EXTRA_KCONFIG_TARGET` mechanism
+    (the same seam `west build -t menuconfig` uses -- see `_DUMPER_SOURCE`'s
+    own module docstring). Returns the already-projected `list[dict]` the
+    dumper wrote.
 
     `west build` is a west extension command -- it needs to run from
     inside a west workspace (a `.west/` upward from cwd), which
@@ -213,11 +307,20 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
     layout (Getting Started's `~/zephyrproject/{.west, zephyr,
     modules,...}`, and the same layout pr-twister.yml's own `west init
     -m .../zephyr .` step produces).
+
+    The dumper is rendered fresh into `tmp_dir` on every call and `tmp_dir`
+    is deleted in this function's own `finally` below -- well after both
+    `west build` invocations that read the rendered path have already run,
+    so the render neither survives to be reused stale by a later call nor
+    depends on anything outliving this process (see `_DUMPER_SOURCE`).
     """
     tmp_dir = Path(tempfile.mkdtemp(prefix="alp-emit-kconfig-"))
     try:
         app_dir = tmp_dir / "stub"
         _write_stub_app(app_dir)
+
+        dumper_path = tmp_dir / "alp_kconfig_dump.py"
+        _write_dumper(dumper_path)
 
         build_dir = tmp_dir / "build"
         output_json = build_dir / "alp_kconfig.json"
@@ -225,7 +328,7 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
         # custom target splits it into argv tokens): the dumper script,
         # then its own `--output <path>` -- Zephyr appends ${KCONFIG_ROOT}
         # as the final token itself (kconfig.cmake:238).
-        target_cmd = f"{_DUMPER};--output;{output_json}"
+        target_cmd = f"{dumper_path};--output;{output_json}"
 
         configure_cmd = [
             "west", "build", "--cmake-only",
@@ -258,7 +361,32 @@ def _load_board_symbols(zephyr_base: Path, board_triple: str) -> list[dict[str, 
                 f"completed but never wrote {output_json} -- never emit a "
                 f"partial/empty menu")
 
-        return json.loads(output_json.read_text(encoding="utf-8"))
+        raw = output_json.read_text(encoding="utf-8")
+        if not raw.strip():
+            # `west build -t <target>` can report success (rc 0) while the
+            # custom target's own command silently produced nothing -- a
+            # 0-byte `output_json` used to reach `json.loads` below and
+            # surface as a bare, uncoded `JSONDecodeError` rather than a
+            # loud refusal. Never emit a partial/empty menu from an empty
+            # artefact.
+            raise OrchestratorError(
+                f"--emit kconfig: `west build -t {_KCONFIG_TARGET}` "
+                f"reported success but wrote an empty {output_json} -- "
+                f"never emit a partial/empty menu")
+        try:
+            symbols = json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise OrchestratorError(
+                f"--emit kconfig: {output_json} is not valid JSON ({e}) -- "
+                f"the `{_KCONFIG_TARGET}` dumper wrote a corrupt artefact, "
+                f"not a partial/empty menu") from e
+        if not isinstance(symbols, list):
+            raise OrchestratorError(
+                f"--emit kconfig: {output_json} parsed as JSON but is not a "
+                f"list of symbols (got {type(symbols).__name__}) -- the "
+                f"`{_KCONFIG_TARGET}` dumper wrote a corrupt artefact, not "
+                f"a partial/empty menu")
+        return symbols
     finally:
         import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -295,9 +423,9 @@ def emit_kconfig(project: BoardProject, core: Optional[str]) -> str:
 
     zephyr_base = _require_workspace()
 
-    # `alp_kconfig_dump.py` (run inside Zephyr's own Kconfig env -- see
-    # `_load_board_symbols`) already projects with the real kconfiglib, so
-    # this is just the envelope wrap.
+    # The rendered dumper (`_DUMPER_SOURCE`, run inside Zephyr's own Kconfig
+    # env -- see `_load_board_symbols`) already projects with the real
+    # kconfiglib, so this is just the envelope wrap.
     symbols = _load_board_symbols(zephyr_base, slice_.board)
     envelope = _envelope(slice_.board, core, symbols)
     return json.dumps(envelope, indent=2) + "\n"

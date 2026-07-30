@@ -15,9 +15,12 @@ mismatch, not a skip).
 
 `--emit kconfig` is deliberately absent from the mode list. It is the one
 non-hermetic emit -- it shells `west build` inside a bootstrapped Zephyr
-workspace (I-34) -- so it cannot run here. The relocation touched its dumper
-path (`kconfig_symbols._DUMPER`, now anchored on the bound SDK root), which
-`test_the_kconfig_dumper_resolves_into_the_sdk` checks directly instead.
+workspace (I-34) -- so it cannot run here. Its dumper is rendered onto disk
+fresh per run rather than read off a fixed path (`kconfig_symbols
+._DUMPER_SOURCE`, replacing the earlier `_DUMPER` path anchored on the bound
+SDK root); `test_the_kconfig_dumper_no_longer_names_a_path_in_the_sdk`
+checks that directly, and `tests/core/test_kconfig_symbols.py` covers the
+render's own invariants hermetically.
 
 Further layers sit below that library comparison, because `tan generate` renders
 ALL ELEVEN of its targets IN-PROCESS instead of spawning
@@ -283,19 +286,23 @@ def test_the_subprocess_entry_points_agree_too():
     assert mine.stdout == up.stdout, _first_diff(up.stdout, mine.stdout)
 
 
-def test_the_kconfig_dumper_resolves_into_the_sdk(planners):
-    """`--emit kconfig`'s dumper stayed in alp-sdk; the path must follow it.
-
-    It used to be a `__file__`-relative sibling walk (`../kconfig/`), which
-    inside `tan` would resolve to a `tan/kconfig/` that does not exist -- and
-    only the one merge-BLOCKING gate in alp-sdk would have caught it.
+def test_the_kconfig_dumper_no_longer_names_a_path_in_the_sdk(planners):
+    """`--emit kconfig`'s dumper used to be a path into the bound alp-sdk
+    checkout -- first a `__file__`-relative sibling walk (`../kconfig/`,
+    which inside `tan` resolved to a `tan/kconfig/` that does not exist),
+    then `_DUMPER = REPO / "scripts" / "kconfig" / "alp_kconfig_dump.py"`.
+    Both coupled `--emit kconfig` to a file living outside `tan`; it is now
+    `_DUMPER_SOURCE`, rendered fresh onto disk by every
+    `_load_board_symbols` call (see `tests/core/test_kconfig_symbols.py`
+    for the render's own invariants).
     """
     _, relocated = planners
     from tan.planner import kconfig_symbols
     assert SDK is not None
-    assert kconfig_symbols._DUMPER == (
-        SDK / "scripts" / "kconfig" / "alp_kconfig_dump.py")
-    assert kconfig_symbols._DUMPER.is_file()
+    assert not hasattr(kconfig_symbols, "_DUMPER")
+    assert isinstance(kconfig_symbols._DUMPER_SOURCE, str)
+    assert kconfig_symbols._DUMPER_SOURCE.strip()
+    assert str(SDK) not in kconfig_symbols._DUMPER_SOURCE
 
 
 def test_no_metadata_was_vendored_into_tan():
@@ -1485,9 +1492,11 @@ def test_the_in_process_path_loads_none_of_the_sdks_python(tmp_path):
 #
 # Scope, stated honestly: this covers acquiring, substituting and materialising a
 # plan -- everything `tan` itself does. DISPATCH runs the customer's toolchain,
-# and `west build` legitimately spawns `<sdk>/scripts/kconfig/alp_kconfig_dump.py`
-# through Zephyr's own `EXTRA_KCONFIG_TARGET` hook. That hook is Zephyr's, not
-# tan's, and it is why that one file can never be deleted.
+# and `west build` spawns whatever Zephyr's own `EXTRA_KCONFIG_TARGET` hook is
+# pointed at -- but that is no longer an alp-sdk file: `--emit kconfig` renders
+# its own dumper (`tan.planner.kconfig_symbols._DUMPER_SOURCE`) into the run's
+# own scratch tree and points the hook at that instead (see
+# tests/core/test_kconfig_symbols.py).
 # ==========================================================================
 
 _BUILD_REACH_PROBE = '''

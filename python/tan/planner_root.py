@@ -30,11 +30,12 @@ is the measurement, per mode across all eleven).
 
 **Binding does NOT put `<sdk_root>/scripts` on `sys.path`, deliberately.** Nothing
 in `tan`'s own execution needs it: every `tan generate` target renders
-in-process, `tan build` plans in-process, and the two remaining SDK scripts --
-`alp_project.py` under `TAN_GENERATE_EXECUTOR=subprocess`, and
-`alp_kconfig_dump.py` through Zephyr's `EXTRA_KCONFIG_TARGET` hook -- are
-SPAWNED, and a spawned interpreter gets its own script directory regardless of
-this process's `sys.path`.
+in-process, `tan build` plans in-process, and the one remaining SDK script --
+`alp_project.py` under `TAN_GENERATE_EXECUTOR=subprocess` -- is SPAWNED, and a
+spawned interpreter gets its own script directory regardless of this
+process's `sys.path`. (The Kconfig dumper Zephyr's `EXTRA_KCONFIG_TARGET`
+hook spawns is no longer an SDK edge either: `tan.planner.kconfig_symbols`
+renders it into the run's own scratch tree.)
 
 Removing the entry is what turns the zero closure from **measured** into
 **structural**. With `<sdk_root>/scripts` importable, a re-introduced
