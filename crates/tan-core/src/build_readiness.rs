@@ -1547,7 +1547,7 @@ mod tests {
 
         let bootstrap_missing = crate::bootstrap::posix_refusal(
             &facts
-                .prerequisites(false)
+                .prerequisites(HostOs::Linux)
                 .iter()
                 .map(String::as_str)
                 .collect::<Vec<_>>(),

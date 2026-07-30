@@ -59,14 +59,25 @@ env:
   # `manualInstallHints.windows.note` from one sentence to five elements and
   # bumped `zephyr.version` to v4.4.1 -- the re-vendor that let tan-cli#82
   # delete `optional_libs_block`'s duplicate hardcoded Arm/Zephyr-SDK block.
-  # Bootstrap manifest is 5473 bytes at this SHA (was 3180) and its byte-parity
-  # step is verified PASS locally against it; the kconfig / scaffold / seam1
-  # steps were verified at the previous SHA and are NOT re-verified at this one
-  # (they need an emit-capable Linux runner), so this bump is the first CI run
-  # that proves them here. Re-bump (to a released tag once alp-sdk cuts one at
-  # or after this SHA, or straight to a later SHA) on every alp-sdk change this
-  # repo's parity gate should track.
-  PINNED_SDK_TAG: cdfe13684e362c75f6df2b190ec1c3e736c48731
+  # Now a RELEASED TAG, which is what this comment previously asked for ("to a
+  # released tag once alp-sdk cuts one at or after this SHA"). alp-sdk v0.14.0
+  # contains the old dev pin plus 19 commits (`compare` reports
+  # `status=ahead, behind_by=0`), so it is a clean forward move, and a tag
+  # reproduces where a dev tip does not -- the same reason
+  # `wizard/vendored/MANIFEST.md` gives for pinning its vendor point to one.
+  #
+  # All FOUR parity gates were re-verified locally against this tag before the
+  # bump, in WSL because the scaffold gate re-runs a live SDK emit and needs a
+  # Linux host: toolchain-lock PASS, bootstrap-manifest PASS, kconfig-fixture
+  # PASS, scaffold byte-parity PASS across all 9 (template, sku) pairs. The
+  # first three passed only after re-vendoring the bootstrap manifest fixture
+  # (5577 -> 7498 bytes) and the last only after re-vendoring 7 scaffold
+  # READMEs, so this bump is NOT a lone one-line edit -- see the release commit.
+  #
+  # Re-bump on every alp-sdk change this repo's parity gate should track, and
+  # re-run all four locally first: this pin drives all of them, and the scaffold
+  # one cannot be checked on Windows.
+  PINNED_SDK_TAG: v0.14.0
 
 jobs:
   seam1-plan-shape:
@@ -617,14 +628,31 @@ jobs:
         working-directory: ws/alp-sdk
         run: |
           set -euo pipefail
-          "$GITHUB_WORKSPACE/target/debug/tan" bootstrap --non-interactive
+          "$GITHUB_WORKSPACE/target/debug/tan" bootstrap --non-interactive \
+              2>&1 | tee /tmp/first-blink-bootstrap.log
           for p in ../.west/config ../.venv ../zephyr ../modules; do
             if [ ! -e "$p" ]; then
               echo "::error::tan bootstrap exited 0 but did not create $p"
               exit 1
             fi
           done
-          echo "bootstrap created .west/, .venv/, zephyr/ and modules/ in the workspace parent."
+          # tan-cli#220's verdict, end to end. The rule itself is unit-tested
+          # (`verdict`), but `run` spawns real processes and cannot be driven
+          # from a unit test, so nothing else proves `run` USES it -- proven by
+          # mutation: replacing the call with a hardcoded success left the whole
+          # suite green. This step is what covers that wiring. A runner with the
+          # native headers installed is the clean path, so `complete.` is the
+          # correct verdict here and its ABSENCE would mean the rule fired when
+          # it should not have.
+          if ! grep -qF 'bootstrap: complete.' /tmp/first-blink-bootstrap.log; then
+            echo "::error::a clean bootstrap did not report 'bootstrap: complete.' (#220 verdict inverted?)"
+            exit 1
+          fi
+          if grep -qF 'bootstrap: INCOMPLETE' /tmp/first-blink-bootstrap.log; then
+            echo "::error::a clean bootstrap reported INCOMPLETE -- a dependency install failed on a runner that has the headers"
+            exit 1
+          fi
+          echo "bootstrap created .west/, .venv/, zephyr/ and modules/, and reported complete."
 
       # BEFORE the toolchain exists, doctor must FAIL and must say why. This is
       # the half a customer hits first: bootstrap has just succeeded, and the
@@ -742,6 +770,7 @@ jobs:
         with:
           name: first-blink-logs
           path: |
+            /tmp/first-blink-bootstrap.log
             /tmp/first-blink-doctor-before.json
             /tmp/first-blink-doctor-after.json
             /tmp/first-blink-build.log

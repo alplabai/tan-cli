@@ -148,6 +148,7 @@ pub(super) fn maybe_auto_bootstrap(
             no_pip: false,
             no_west: false,
             print_env: false,
+            allow_partial: false,
             workspace: None,
         },
     );
