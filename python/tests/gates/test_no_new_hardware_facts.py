@@ -67,6 +67,22 @@ ALLOWED: dict[str, str] = {
         "builders.rs -- a pre-existing I-26 breach in the Rust, kept faithful by the "
         "port rather than fixed silently."
     ),
+    "new_som_cmd.py": (
+        "MIXED. `DEFAULT_BOARD = \"E1M-EVK\"` is DEBT: a UI default only, not a "
+        "value the file trusts -- every accepted --default-board (including this "
+        "unedited default) is cross-checked against metadata/boards/*.yaml's real "
+        "`name:` values before anything renders, so a stale literal here fails "
+        "LOUD (`default board 'E1M-EVK' does not match any name: in "
+        "metadata/boards/`) instead of silently shipping a wrong one -- unlike an "
+        "address or pin name, this one cannot drift into a silently-wrong "
+        "artifact. The remaining five hits (E1M-AEN801/E1M-V2N102/E1M-NX9101) are "
+        "OK: teaching prose embedded in the GENERATED skeleton's comments, "
+        "pointing a vendor at real committed example presets for 'the two core "
+        "shapes' / pad_routes / helper_firmware conventions -- inherited "
+        "byte-identical from the alp-sdk original (scripts/alp_cli/new_som.py) so "
+        "the generated output stays diffable against it; naming real examples is "
+        "the point, the same category explain_cmd.py and bootstrap.py are OK for."
+    ),
     "zephyr_board.py": (
         "DEBT: two `E1M-EVK` mentions inside EMITTED devicetree prose (the generated "
         "`-pinctrl.dtsi` and `.dts` say which carrier wires the console). Not a fact "
