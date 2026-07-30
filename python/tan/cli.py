@@ -2,11 +2,18 @@
 """The `tan` command-line surface: the Typer app, the root callback, and the
 `--format json` error path that wraps Click's own dispatch.
 
-Owns the process entrypoint (``main``) so ``__main__.py`` stays a one-line
-shim. Commands register here with a STATIC import in a later task -- see
-``tan.commands.__init__`` for why an importlib/pkgutil registry is a trap --
-which is why this module, not a package `__init__`, is where `app` lives:
-one obvious place to add each `app.command()` / `app.add_typer()` call.
+Defines ``main``, but no longer owns the PROCESS boundary: ``pyproject.toml``'s
+``[project.scripts]`` names ``tan.__main__:main``, and ``__main__.py`` wraps
+this ``main`` to swallow a closed stdout (``tan generate --help | head``) as a
+quiet success instead of a traceback. Anything that must happen for EVERY
+invocation regardless of subcommand belongs there, not here.
+
+Commands register here with a STATIC import -- see ``tan.commands.__init__``
+for why an importlib/pkgutil registry is a trap: it works from source and
+fails inside a PyInstaller ``--onefile`` binary, which is how tan actually
+ships. That is why this module, not a package ``__init__``, is where ``app``
+lives: one obvious place to add each ``app.command()`` call, and one list
+(``_SUBCOMMAND_NAMES``) that must track it.
 """
 import io
 import sys
@@ -27,10 +34,13 @@ from tan.commands.flash_cmd import flash
 from tan.commands.generate_cmd import generate
 from tan.commands.image_cmd import image
 from tan.commands.init_cmd import init
+from tan.commands.kconfig_cmd import kconfig
 from tan.commands.model_cmd import model
 from tan.commands.monitor_cmd import monitor
 from tan.commands.new_som_cmd import new_som
 from tan.commands.presets_cmd import presets
+from tan.commands.renode_cmd import renode
+from tan.commands.run_cmd import run
 from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
 from tan.commands.validate_cmd import validate
@@ -58,10 +68,13 @@ app.command("flash")(flash)
 app.command("generate")(generate)
 app.command("image")(image)
 app.command("init")(init)
+app.command("kconfig")(kconfig)
 app.command("model")(model)
 app.command("monitor")(monitor)
 app.command("new-som")(new_som)
 app.command("presets")(presets)
+app.command("renode")(renode)
+app.command("run")(run)
 app.command("sdk")(sdk)
 app.command("size")(size)
 app.command("validate")(validate)
@@ -73,7 +86,8 @@ _SUBCOMMAND_NAMES = frozenset(
     {
         "bootstrap", "build", "clean", "debug-config", "doctor", "examples",
         "explain", "faultdecode", "flash", "generate", "image", "init",
-        "model", "monitor", "new-som", "presets", "sdk", "size", "validate",
+        "kconfig", "model", "monitor", "new-som", "presets", "renode", "run",
+        "sdk", "size", "validate",
     }
 )
 

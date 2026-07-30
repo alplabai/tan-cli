@@ -175,6 +175,69 @@ def test_west_present_but_unparseable_version_is_a_warning_not_a_crash():
 
 
 # --------------------------------------------------------------------------
+# --build: zephyrWorkspace
+# --------------------------------------------------------------------------
+
+
+def test_zephyr_workspace_warns_with_no_zephyr_base():
+    check = doctor_cmd.zephyr_workspace_check(None, None, None)
+    assert check.status == "warn"
+    assert "ZEPHYR_BASE" in check.detail
+
+
+def test_zephyr_workspace_warns_when_the_dir_is_not_a_zephyr_checkout():
+    check = doctor_cmd.zephyr_workspace_check("/nope", None, None)
+    assert check.status == "warn"
+    assert "VERSION" in check.detail
+
+
+def test_zephyr_workspace_passes_with_no_sdk_pin_to_compare():
+    check = doctor_cmd.zephyr_workspace_check("/zephyrproject/zephyr", "4.4.0", None)
+    assert check.status == "pass"
+    assert "4.4.0" in check.detail
+
+
+def test_zephyr_workspace_warns_on_a_pin_mismatch():
+    check = doctor_cmd.zephyr_workspace_check("/zephyrproject/zephyr", "4.3.0", "4.4.1")
+    assert check.status == "warn"
+    assert "4.3.0" in check.detail and "4.4.1" in check.detail
+
+
+def test_zephyr_workspace_passes_on_a_matching_pin():
+    check = doctor_cmd.zephyr_workspace_check("/zephyrproject/zephyr", "4.4.1", "4.4.1")
+    assert check.status == "pass"
+
+
+def test_build_flag_adds_zephyr_workspace_to_the_check_list_plain_doctor_lacks(tmp_path):
+    plain = run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True)
+    built = run_tan("doctor", "--build", "--format", "json", cwd=tmp_path, scrub_path=True)
+    plain_env = json.loads(plain.stdout)
+    built_env = json.loads(built.stdout)
+
+    plain_names = {c["name"] for c in plain_env["data"]["checks"]}
+    built_names = {c["name"] for c in built_env["data"]["checks"]}
+    assert "zephyrWorkspace" not in plain_names
+    assert "zephyrWorkspace" in built_names
+    assert built_names - plain_names == {"zephyrWorkspace"}
+
+
+def test_build_flag_reads_a_real_zephyr_base(tmp_path):
+    zephyr = tmp_path / "zephyr"
+    zephyr.mkdir()
+    (zephyr / "VERSION").write_text(
+        "VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = 1\n", encoding="utf-8"
+    )
+    proc = run_tan(
+        "doctor", "--build", "--format", "json", cwd=tmp_path, scrub_path=True,
+        env_extra={"ZEPHYR_BASE": str(zephyr)},
+    )
+    env = json.loads(proc.stdout)
+    check = next(c for c in env["data"]["checks"] if c["name"] == "zephyrWorkspace")
+    assert check["status"] == "pass"
+    assert "4.4.1" in check["detail"]
+
+
+# --------------------------------------------------------------------------
 # SETOOLS -- the second silent gap
 # --------------------------------------------------------------------------
 

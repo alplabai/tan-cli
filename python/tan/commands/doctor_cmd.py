@@ -46,12 +46,35 @@ environment is worse than no doctor: it converts a fixable setup problem into a
 mystery inside somebody else's build system.
 
 Deliberately NOT ported from `crates/tan-cli/src/commands/doctor.rs`: the debug
-half (`--target-kind`/`--server`, the cortex-debug/CodeLLDB extension set) and
-`--build`'s Zephyr-SDK/workspace preflight. Both need context this port has no
-command to produce yet, and half a debug verdict is worse than none. The
-envelope keys that survive -- `data.summary.{pass,warn,fail}` and `data.checks[]`
--- are the ones `alp-sdk-vscode` actually reads (`src/debug.ts`,
-`src/toolchain.ts`).
+half (`--target-kind`/`--server`, the cortex-debug/CodeLLDB extension set).
+That needs context this port has no command to produce yet, and half a debug
+verdict is worse than none. The envelope keys that survive --
+`data.summary.{pass,warn,fail}` and `data.checks[]` -- are the ones
+`alp-sdk-vscode` actually reads (`src/debug.ts`, `src/toolchain.ts`).
+
+**`--build` is accepted, real, and additive -- not the Rust oracle's second,
+disjoint check vocabulary.** Measured against a real `tan.exe`, plain `tan
+doctor` and `tan doctor --build` run two almost entirely different check
+lists (debug-readiness vs. zephyr/yocto/baremetal build-readiness -- compare
+`tan doctor`'s `workspaceRoot`/`codeLLDBExtension`/`lldb` against `tan doctor
+--build`'s `git`/`cmake`/`ninja`/`dtc`/`gperf`/`vendorToolchain`/...). Byte-
+parity with BOTH of those lists is a second command's worth of new checks,
+not a flag gap -- and this port's own check list (`hostPython`/
+`hostPrerequisites`/`west`/`setools`/`jlink`) is ALREADY build/flash-oriented
+by design (see above), unlike the Rust oracle's PLAIN `doctor`. So `--build`
+here means what it says on this port's own terms: it turns on ONE extra,
+genuinely-probed check plain `tan doctor` does not run --
+`zephyrWorkspace`, whether `$ZEPHYR_BASE` resolves to a real Zephyr checkout
+matching alp-sdk's `west.yml` pin -- rather than either silently doing
+nothing (the anti-pattern this whole command exists to avoid) or
+re-deriving the oracle's second, disjoint vocabulary from scratch. Both
+`alp-sdk-vscode` call sites (`["doctor", "--build"]`,
+`["doctor", "--build", "--fix"]`) still run this port's normal checks PLUS
+`zephyrWorkspace`.
+
+`--fix` is a separate, NOT-yet-ported flag gap (it is not part of this one):
+the oracle's `--build --fix` auto-repairs a missing Zephyr workspace by
+running `tan bootstrap`, and nothing here does that yet.
 """
 import importlib.util
 import json
@@ -65,6 +88,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import _abs_posix, discover_sdk_root
+from tan.core.bootstrap import parse_west_zephyr_pin, parse_zephyr_version_file
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -424,6 +448,51 @@ def west_check(
     return Check("west", "pass", f"west {_fmt(version)} ({found}).")
 
 
+def zephyr_workspace_check(
+    zephyr_base: str | None, version_text: str | None, sdk_pin: str | None
+) -> Check:
+    """`zephyrWorkspace` -- `--build`-only: does `$ZEPHYR_BASE` actually
+    resolve to a Zephyr checkout, and does its version match what alp-sdk's
+    own `west.yml` pins?
+
+    Nothing else in this command asks. `hostPrerequisites`/`west` only check
+    that the TOOLS needed to build are on PATH -- neither confirms a Zephyr
+    tree is actually there to build against, or that it is the right one.
+    `--build` exists to dig one level deeper than plain `tan doctor` does
+    (see the module docstring); this is that extra level. WARN, never FAIL:
+    every other check already fails outright when a workspace is entirely
+    absent (`hostPrerequisites`/`west`), so this stays advisory -- a stale or
+    unresolved Zephyr pin is fixed by `tan bootstrap`, not a reason to refuse
+    the whole preflight.
+    """
+    if zephyr_base is None:
+        return Check(
+            "zephyrWorkspace",
+            "warn",
+            "no $ZEPHYR_BASE Zephyr workspace resolved.",
+            "Run `tan bootstrap` to create one.",
+        )
+    if version_text is None:
+        return Check(
+            "zephyrWorkspace",
+            "warn",
+            f"$ZEPHYR_BASE=`{zephyr_base}` does not look like a Zephyr checkout "
+            f"(no readable VERSION file).",
+            "Run `tan bootstrap`, or point $ZEPHYR_BASE at a real Zephyr checkout.",
+        )
+    if sdk_pin is not None and version_text != sdk_pin:
+        return Check(
+            "zephyrWorkspace",
+            "warn",
+            f"Zephyr {version_text} at $ZEPHYR_BASE=`{zephyr_base}` does not match "
+            f"alp-sdk's pinned {sdk_pin} (from west.yml).",
+            "Run `tan bootstrap` to reuse or refresh a matching workspace.",
+        )
+    return Check(
+        "zephyrWorkspace", "pass", f"Zephyr {version_text} at $ZEPHYR_BASE=`{zephyr_base}`."
+    )
+
+
 def setools_check(
     setools_dir: str | None, se_uart: str | None, has_fdt: bool, is_linux: bool
 ) -> Check:
@@ -687,10 +756,16 @@ def _load_manifest(sdk_root: str | None) -> tuple[dict, str, str | None]:
     return prerequisites, f"facts from alp-sdk {path}", None
 
 
-def _collect(sdk_root: str | None) -> list[Check]:
+def _collect(sdk_root: str | None, build: bool = False) -> list[Check]:
     """Every probe, in report order. Nothing here may raise -- see the module
     docstring; `probe`/`on_path`/`_read_text` are the only three ways this
-    module touches the outside world and none of them can."""
+    module touches the outside world and none of them can.
+
+    `build` (`--build`) appends `zephyrWorkspace` on top of the checks plain
+    `tan doctor` already runs -- see `zephyr_workspace_check`'s doc comment
+    for why that one check, and only that one, is gated on the flag rather
+    than always running.
+    """
     checks: list[Check] = []
 
     facts, source, manifest_error = _load_manifest(sdk_root)
@@ -748,6 +823,20 @@ def _collect(sdk_root: str | None) -> list[Check]:
     west_version = _parse_two(probe(["west", "--version"]) or "") if west_exe else None
     checks.append(west_check(west_exe, west_version, _parse_two(str(facts.get("_pipSpec") or ""))))
 
+    if build:
+        zephyr_base = os.environ.get("ZEPHYR_BASE")
+        version_text = None
+        if zephyr_base:
+            body = _read_text(Path(zephyr_base) / "VERSION")
+            if body is not None:
+                version_text = parse_zephyr_version_file(body)
+        sdk_pin = None
+        if sdk_root is not None:
+            west_yml = _read_text(Path(sdk_root) / "west.yml")
+            if west_yml is not None:
+                sdk_pin = parse_west_zephyr_pin(west_yml)
+        checks.append(zephyr_workspace_check(zephyr_base, version_text, sdk_pin))
+
     checks.append(
         setools_check(
             os.environ.get("SETOOLS_DIR"),
@@ -800,6 +889,11 @@ def doctor(
     board_yaml: str = typer.Option(
         None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
     ),
+    build: bool = typer.Option(
+        False,
+        "--build",
+        help="Also run the build-readiness check (zephyrWorkspace: is $ZEPHYR_BASE a real, SDK-matching Zephyr checkout).",
+    ),
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
@@ -846,7 +940,7 @@ def doctor(
     )
 
     try:
-        checks = _collect(sdk_root)
+        checks = _collect(sdk_root, build=build)
         exit_code = exit_code_for(checks)
         issues = checks_to_issues(checks)
         data = {

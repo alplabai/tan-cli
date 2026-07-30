@@ -291,6 +291,164 @@ def test_iot_starter_rejects_an_unsupported_som_before_planning(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+# ---------------------------------------------------------------------------
+# --cores: heterogeneous scaffolding
+# ---------------------------------------------------------------------------
+
+
+def test_cores_splices_a_companion_and_a_default_rpmsg_channel(tmp_path):
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "a55_cluster:yocto",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert "  a55_cluster:\n    os: yocto\n    image: alp-image-edge\n" in board
+    assert "endpoints: [m55_hp, a55_cluster]" in board
+
+
+def test_cores_infers_the_os_from_the_core_id_when_omitted(tmp_path):
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "a55_cluster",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert "  a55_cluster:\n    os: yocto\n" in board
+
+
+def test_cores_rejects_a_malformed_entry_without_writing_anything(tmp_path):
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "1bad", "--format", "json", cwd=tmp_path
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2
+    assert issue(env)["code"] == "init.invalid-cores"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_rejects_the_app_core_with_a_conflicting_os(tmp_path):
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--cores", "m55_hp:yocto",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2
+    assert issue(env)["code"] == "init.invalid-cores"
+    assert "app core" in issue(env)["message"]
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_rejects_a_core_id_already_declared_by_the_scaffold(tmp_path):
+    """`edge-ai-starter` pre-declares its own companion (`a32_cluster`,
+    `os: "off"`); colliding with it would emit a duplicate `cores:` mapping
+    key."""
+    proc = run_tan(
+        "init", "--template", "edge-ai-starter", "--cores", "a32_cluster:zephyr",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2
+    assert issue(env)["code"] == "init.invalid-cores"
+    assert "a32_cluster" in issue(env)["message"]
+    assert "os: off" in issue(env)["message"]  # de-quoted from the vendored `os: "off"`
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cores_is_ignored_on_the_from_example_path(tmp_path):
+    """`--som`/`--cores` are ignored for `--from-example`: the example ships
+    its own board.yaml."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "peripheral-io" / "hello-world"
+    example.mkdir(parents=True)
+    (example / "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n", encoding="utf-8"
+    )
+
+    proc = run_tan(
+        "init", "--from-example", "peripheral-io/hello-world", "--sdk-root", "./sdk",
+        "--cores", "a55_cluster:yocto", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    board = (tmp_path / "board.yaml").read_text(encoding="utf-8")
+    assert "a55_cluster" not in board
+
+
+# ---------------------------------------------------------------------------
+# --board-yaml
+# ---------------------------------------------------------------------------
+
+
+def test_board_yaml_renders_the_callers_file_verbatim(tmp_path):
+    custom = tmp_path / "custom.yaml"
+    custom.write_text("som:\n  sku: E1M-V2N101\ncores:\n  m33_sm:\n    app: ./src\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--board-yaml", "custom.yaml",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    assert (tmp_path / "board.yaml").read_text(encoding="utf-8") == custom.read_text(encoding="utf-8")
+
+
+def test_board_yaml_unreadable_path_is_a_coded_issue_not_a_traceback(tmp_path):
+    proc = run_tan(
+        "init", "--template", "zephyr-app", "--board-yaml", "does-not-exist.yaml",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 2
+    assert issue(env)["code"] == "init.board-yaml-unreadable"
+    assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# --all / --target / --verbose / --quiet / --no-color -- accepted, genuinely
+# ignored, matching the oracle (not a "silently tolerated" gap).
+# ---------------------------------------------------------------------------
+
+
+def test_global_flags_that_the_oracle_never_reads_for_init_are_accepted_and_are_true_no_ops(
+    tmp_path,
+):
+    """Measured against the real `tan`: none of these five are read by
+    `crates/tan-cli/src/commands/init/` (unlike `doctor`/`clean`, `init` calls
+    neither `style::render_report` nor `Theme::from_args`). Pinned here as a
+    byte-identical envelope, not merely "still exits 0" -- an envelope that
+    silently differs would mean one of them DID change something, which is
+    the exact "accepted but takes effect anyway" surprise this test guards
+    against in the other direction."""
+    baseline_dir, flagged_dir = tmp_path / "baseline", tmp_path / "flagged"
+    baseline_dir.mkdir()
+    flagged_dir.mkdir()
+
+    baseline = run_tan(
+        "init", "--template", "minimal-app", "--preview", "--format", "json", cwd=baseline_dir
+    )
+    flagged = run_tan(
+        "init", "--template", "minimal-app", "--preview", "--format", "json",
+        "--all", "--target", "zephyr-conf", "--verbose", "--quiet", "--no-color",
+        cwd=flagged_dir,
+    )
+
+    assert envelope(baseline) == envelope(flagged)
+    assert baseline.returncode == flagged.returncode == 0
+
+
 def test_unreadable_template_data_is_a_coded_internal_failure(tmp_path, monkeypatch):
     """tan's own vendored tree gone missing -- the shape a frozen binary built
     without the template `--add-data` has. A broken tan installation, so exit 5,
