@@ -7,6 +7,33 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **`tan build --pristine` now reports the slices it did not wipe** (#183).
+  `--pristine` has three paths that correctly decline the wipe, and all three
+  were silent: the slice carries an explicit `-d`/`--build-dir` (west wrote
+  somewhere tan cannot know), the plan cwd does not normalise under `build/`
+  (the wipe target could hold files the build never created), or the build dir
+  has no `CMakeCache.txt` (never configured, nothing to wipe). The run then
+  exited 0 having done an incremental build the user had explicitly asked not
+  to have — so a stale artefact sent them debugging the artefact, not the flag,
+  and the command had told them it handled it. Each suppressed slice now emits
+  `build.pristine-skipped` (severity `warning`, registered `reserved`) naming
+  the slice and which of the three reasons applied, plus a `note:` line in text
+  mode.
+
+  The decision is one pure function, `tan_core::plan_exec::pristine_suppression`,
+  with one emit site placed **outside** the two-guard block in
+  `crates/tan-cli/src/commands/build/execute/mod.rs` — a message written into
+  either guard could not have seen the other, and neither could have seen the
+  third path, which sits inside both. That third path is also the only one a
+  stock plan reaches: `write_sdk_stamp` itself `create_dir_all`s `<cwd>/build`
+  to write `.tan-sdk-root`, so after any prior slice the directory exists
+  holding nothing but tan's stamp, and every subsequent `--pristine` declined
+  silently. The two named in the issue require a hand-written plan.
+
+  No suppression changed. All three remain exactly as `#163` mutation-proved
+  them; only the silence is gone.
+
 ### Added
 - **Linux and macOS now see the manual-install hints the SDK provides for them**
   (#230). alp-sdk v0.14.0 added `manualInstallHints.posix.note` — the POSIX twin

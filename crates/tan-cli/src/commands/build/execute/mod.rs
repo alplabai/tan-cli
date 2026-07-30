@@ -535,6 +535,43 @@ pub(crate) fn execute_slices_outcome(
             .components()
             .next()
             .is_some_and(|c| c.as_os_str() == CONSUMER_BUILD_ROOT);
+        // tan-cli#183: an explicit `--pristine` must never complete without
+        // saying what it did or did not do.
+        //
+        // Resolved HERE, outside the two guards below, because two of the three
+        // suppression paths are the guards themselves — a message inside that
+        // block could not see them. `cmake_cache_configured` is probed only when
+        // `--pristine` was actually passed, so the non-pristine path keeps its
+        // existing IO exactly; the result is reused at the `action` decision so
+        // the probe happens once rather than twice.
+        let pristine_cache_configured =
+            force_pristine.then(|| manifest::cmake_cache_configured(&cwd));
+        if let Some(skipped) = tan_core::plan_exec::pristine_suppression(
+            force_pristine,
+            build_dir_overridden,
+            cwd_under_build_root,
+            pristine_cache_configured.unwrap_or(false),
+        ) {
+            let message = format!(
+                "{}: --pristine did NOT wipe the build dir — {}",
+                slice.core_id,
+                skipped.reason()
+            );
+            if text_mode {
+                eprintln!("note: {message}");
+            } else {
+                // `warning`, matching its `build.sdk-switch-pristine` sibling
+                // rather than a quieter severity: the user explicitly asked for
+                // a clean build and did not get one, and the extension filters
+                // by severity. An `info` here would be silence with extra steps
+                // — the exact defect #183 is about.
+                sdk_switch_issues.push(Issue {
+                    code: "build.pristine-skipped".to_string(),
+                    severity: "warning".to_string(),
+                    message,
+                });
+            }
+        }
         if !build_dir_overridden && cwd_under_build_root {
             let cached_sdk_root = manifest::read_sdk_stamp(&cwd);
             // `--pristine` (tan-cli#163) forces the SAME decision the
@@ -551,9 +588,12 @@ pub(crate) fn execute_slices_outcome(
             // stamp. The bare `.exists()` check then reported wiping it as a
             // real pristine on every subsequent `--pristine` run, for a slice
             // that was never actually configured there.
-            let action = if force_pristine && manifest::cmake_cache_configured(&cwd) {
+            let action = if force_pristine && pristine_cache_configured.unwrap_or(false) {
                 SdkStampAction::Pristine
             } else if force_pristine {
+                // Reached when the dir was never configured — reported above by
+                // `pristine_suppression`'s `NeverConfigured`, which is why this
+                // arm no longer needs one of its own.
                 SdkStampAction::Keep
             } else {
                 sdk_stamp_action(
@@ -2005,6 +2045,20 @@ mod tests {
         std::fs::remove_dir_all(&sdk_a).ok();
     }
 
+    /// The `message` of every issue carrying `code`, for the tan-cli#183
+    /// assertions — the code alone proves an issue was raised, not that it
+    /// names the right reason out of three.
+    fn issue_messages_for(json: &str, code: &str) -> Vec<String> {
+        let env: serde_json::Value = serde_json::from_str(json).unwrap();
+        env["issues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["code"].as_str() == Some(code))
+            .map(|i| i["message"].as_str().unwrap().to_string())
+            .collect()
+    }
+
     #[test]
     fn execute_slices_outcome_force_pristine_wipes_even_a_matching_stamp() {
         // tan-cli#163's manual case: `tan build --pristine` must force the
@@ -2049,6 +2103,13 @@ mod tests {
         assert!(
             codes.contains(&"build.sdk-switch-pristine".to_string()),
             "{codes:?}"
+        );
+        // tan-cli#183's negative control: the wipe HAPPENED here, so the
+        // skipped-report must stay absent. Without this, an emit site that
+        // fired unconditionally would still pass every positive assertion below.
+        assert!(
+            !codes.contains(&"build.pristine-skipped".to_string()),
+            "the wipe ran -- nothing was skipped: {codes:?}"
         );
 
         std::fs::remove_dir_all(&base).ok();
@@ -2121,10 +2182,29 @@ mod tests {
             outside_nested.join("user-data.marker").exists(),
             "--pristine must not wipe a cwd outside CONSUMER_BUILD_ROOT"
         );
-        let codes = sdk_switch_issue_codes(outcome.run.json.as_deref().unwrap());
+        let json = outcome.run.json.as_deref().unwrap();
+        let codes = sdk_switch_issue_codes(json);
         assert!(
             !codes.contains(&"build.sdk-switch-pristine".to_string()),
             "{codes:?}"
+        );
+        // tan-cli#183: declining the wipe is right; declining it SILENTLY is
+        // the defect. Both guards must report, and each must name its own
+        // reason -- a single generic "pristine skipped" would leave the user
+        // guessing which of the two applied and therefore what to change.
+        let messages = issue_messages_for(json, "build.pristine-skipped");
+        assert_eq!(messages.len(), 2, "one per suppressed slice: {messages:?}");
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.starts_with("c1:") && m.contains("`-d`/`--build-dir`")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.starts_with("c2:") && m.contains("not under `build/`")),
+            "{messages:?}"
         );
 
         std::fs::remove_dir_all(&base).ok();
@@ -2156,7 +2236,8 @@ mod tests {
             true, // force_pristine
         );
 
-        let codes = sdk_switch_issue_codes(outcome.run.json.as_deref().unwrap());
+        let json = outcome.run.json.as_deref().unwrap();
+        let codes = sdk_switch_issue_codes(json);
         assert!(
             !codes.contains(&"build.sdk-switch-pristine".to_string()),
             "nothing existed to wipe -- no pristine issue expected: {codes:?}"
@@ -2164,6 +2245,15 @@ mod tests {
         assert!(
             !codes.contains(&"build.sdk-switch-pristine-failed".to_string()),
             "a never-configured dir must not report a failed wipe: {codes:?}"
+        );
+        // tan-cli#183's third path -- the one the issue does not name and the
+        // only one a stock plan reaches. It sits INSIDE both guards, so a fix
+        // written into either guard would have left exactly this case silent.
+        let messages = issue_messages_for(json, "build.pristine-skipped");
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].starts_with("c1:") && messages[0].contains("no CMakeCache.txt"),
+            "{messages:?}"
         );
 
         std::fs::remove_dir_all(&base).ok();
@@ -2204,12 +2294,20 @@ mod tests {
             true, // force_pristine
         );
 
-        let codes = sdk_switch_issue_codes(outcome.run.json.as_deref().unwrap());
+        let json = outcome.run.json.as_deref().unwrap();
+        let codes = sdk_switch_issue_codes(json);
         assert!(
             !codes.contains(&"build.sdk-switch-pristine".to_string()),
             "a dir holding only tan's own stamp was never really configured -- \
              must not be reported as wiped: {codes:?}"
         );
+        // The reachable-in-production shape of tan-cli#183: a second
+        // `--pristine` run after ANY prior slice. The dir exists, so the user
+        // has every reason to believe it was wiped; it was not, and before
+        // this the run said nothing either way.
+        let messages = issue_messages_for(json, "build.pristine-skipped");
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(messages[0].contains("no CMakeCache.txt"), "{messages:?}");
 
         std::fs::remove_dir_all(&base).ok();
     }
