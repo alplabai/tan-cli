@@ -7,15 +7,21 @@ Two of them exist because the answer used to be a confident, wrong "Pass".
 **The Python floor is not what the manifest says it is.**
 `metadata/bootstrap.json` declares `prerequisites.pythonMinVersion: "3.10"`.
 Zephyr's `cmake/modules/python.cmake` sets `PYTHON_MINIMUM_REQUIRED 3.12`. And
-tan's own POSIX bootstrap branch is explicit that it "cannot fail on version"
-(`crates/tan-cli/src/commands/bootstrap/steps.rs`, the comment above
-`probe_host_python`). Ubuntu 22.04 ships `python3` = 3.10. Compose the three and
-a fresh customer gets: `tan bootstrap` succeeds, `tan doctor` reports Pass, and
-the FIRST build dies inside Zephyr's CMake configure with an error naming
-Zephyr, not us. So the floor this command enforces is the EFFECTIVE one -- the
-higher of the manifest's and Zephyr's -- and where the two disagree that
-disagreement is itself reported (`pythonFloor`), naming which is which, so the
-fix lands in the manifest instead of in the customer.
+the Rust oracle's POSIX bootstrap branch was explicit that it "cannot fail on
+version" (`crates/tan-cli/src/commands/bootstrap/steps.rs:230-234`). Ubuntu 22.04
+ships `python3` = 3.10. Compose the three and a fresh customer got: `tan
+bootstrap` succeeds, `tan doctor` reports Pass, and the FIRST build dies inside
+Zephyr's CMake configure with an error naming Zephyr, not us. So the floor this
+command enforces is the EFFECTIVE one -- the higher of the manifest's and
+Zephyr's -- and where the two disagree that disagreement is itself reported
+(`pythonFloor`), naming which is which, so the fix lands in the manifest instead
+of in the customer.
+
+`tan bootstrap` now enforces the same effective floor on BOTH platforms, by
+calling `zephyr_python_floor` below rather than re-deriving it -- see
+`tan.commands.bootstrap_cmd.resolve_python_floor`. Keep that the ONE reader: a
+second floor rule is how the two commands come to disagree about the same host,
+which is worse than either verdict alone.
 
 **SETOOLS was never mentioned by any doctor.** Neither `alp doctor`
 (`scripts/alp_cli/doctor.py` -- it has `_check_python`, `_check_west`,
@@ -322,10 +328,18 @@ def python_floor_skew_check(
     """`pythonFloor` -- the two declared floors disagree.
 
     Reported rather than silently reconciled. A host that satisfies the higher
-    floor is fine TODAY, but the manifest is what `tan bootstrap` enforces, so
-    while the skew stands bootstrap keeps accepting hosts the build then
-    rejects. Saying which number came from which file is the whole value: the
-    fix belongs in `metadata/bootstrap.json`, not on the customer's machine.
+    floor is fine TODAY, but the manifest is the number a customer will read and
+    trust, so while the skew stands the two sources disagree about which hosts
+    are supported. Saying which number came from which file is the whole value:
+    the fix belongs in `metadata/bootstrap.json`, not on the customer's machine.
+
+    `tan bootstrap` enforces the SAME effective floor this reports -- it calls
+    `zephyr_python_floor` below with the same argument (see
+    `tan.commands.bootstrap_cmd.resolve_python_floor`) and raises
+    `bootstrap.python-floor-skew` with the same two numbers. Before that, the
+    Rust oracle's POSIX branch enforced only the manifest's, which is how a
+    3.10 host passed both commands and then died inside Zephyr's CMake
+    configure.
     """
     if manifest_floor >= effective_floor:
         return None
@@ -334,10 +348,10 @@ def python_floor_skew_check(
         "warn",
         f"alp-sdk's metadata/bootstrap.json declares pythonMinVersion "
         f"{_fmt(manifest_floor)}, but the build's effective floor is "
-        f"{_fmt(effective_floor)} (from {effective_source}). `tan bootstrap` "
-        f"enforces the manifest's {_fmt(manifest_floor)}, so it accepts hosts "
-        f"whose first build then fails at Zephyr's CMake configure. `tan doctor` "
-        f"enforces the higher, effective floor.",
+        f"{_fmt(effective_floor)} (from {effective_source}). Both `tan doctor` and "
+        f"`tan bootstrap` enforce the higher, effective floor, so a host this "
+        f"manifest would have accepted is refused up front rather than failing "
+        f"later at Zephyr's CMake configure.",
         f"Raise `prerequisites.pythonMinVersion` to {_fmt(effective_floor)} in "
         f"alp-sdk's metadata/bootstrap.json (and re-run its "
         f"scripts/check_bootstrap_manifest.py drift gate).",

@@ -12,6 +12,7 @@ import sys
 
 import typer
 
+from tan.commands.bootstrap_cmd import bootstrap
 from tan.commands.build_cmd import build
 from tan.commands.clean_cmd import clean
 from tan.commands.debug_config_cmd import debug_config
@@ -37,6 +38,7 @@ app = typer.Typer(add_completion=False)
 # `tan.commands.__init__`). Registering here rather than with a decorator in
 # the command module keeps `tan.commands.*` free of any `tan.cli` import,
 # which would otherwise be a cycle.
+app.command("bootstrap")(bootstrap)
 app.command("build")(build)
 app.command("clean")(clean)
 app.command("debug-config")(debug_config)
