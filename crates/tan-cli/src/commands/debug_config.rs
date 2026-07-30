@@ -11,11 +11,13 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use tan_core::run::{native_sim_exe_beside, native_sim_slice};
 use tan_core::runners::{parse_runners_config, runner_arg_value, runner_arg_values};
+use tan_core::size::{SocVariant, resolve_variant};
 use tan_core::system_manifest::{Slice, SystemManifest, parse_system_manifest};
 use tan_core::{
-    DebugServerKind, DebugTargetKind, LaunchResolution, apply_launch_resolution,
-    create_launch_draft, create_launch_json_write_plan, is_unresolved_placeholder,
-    launch_preview_document, launch_preview_notes, parse_server_kind, parse_target_kind,
+    DebugServerKind, DebugTargetKind, LaunchResolution, ProjectContext, apply_launch_resolution,
+    create_launch_draft, create_launch_json_write_plan, fill_debug_probe_identity_gaps,
+    is_unresolved_placeholder, launch_preview_document, launch_preview_notes, parse_board_model,
+    parse_server_kind, parse_som_preset, parse_target_kind,
 };
 
 use super::CommandRun;
@@ -103,10 +105,15 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
     // native-backslash `root` next to a forward-slash `boardYaml` in the same
     // envelope object on Windows (#170 follow-up). Reporting-only — no
     // consumer binds either field yet. The `_no_sdk_report` variant: unlike
-    // every other caller of this resolver, `debug-config` never drives the
-    // SDK it might resolve here as a side detail, so it must not add an
+    // every other caller of this resolver, `debug-config` does not DRIVE the
+    // SDK the way `build`/`size`/`validate` do, so it must not add an
     // undeclared `sdk` envelope key as a side effect of a field it merely
-    // reports (tan-cli#111 follow-up).
+    // reports (tan-cli#111 follow-up). alp-sdk#1026's metadata fallback below
+    // (`fill_debug_probe_identity_from_sdk`) does now best-effort READ under
+    // `context.sdk_root` when one resolves — that stays a silent, optional
+    // enrichment exactly like the `board/system-manifest.yaml` read already
+    // was, not a new reported dependency, so the choice not to record here
+    // is unchanged.
     let context = resolve_cli_project_context_no_sdk_report(g);
     let board_yaml = context.board_yaml_path.clone();
     let project_root = context.workspace_root.clone().unwrap_or_default();
@@ -114,8 +121,17 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
     // Fill the `<resolved-…>` placeholders from what this project's own build
     // recorded (#66). Nothing here fails the command: pre-build, or against a
     // Zephyr that reshaped `runners.yaml`, the draft keeps its placeholders.
-    let (mut resolution, registered_runners) =
+    let (mut resolution, registered_runners, build_core_id) =
         resolve_from_build(&workspace_root, target, server, args.core.as_deref());
+
+    // alp-sdk#1026: whatever the build did NOT already resolve, try the SDK's
+    // published per-variant debug-probe identity next — `--core` if given,
+    // else the core id the build itself just resolved (a single-core project
+    // needs neither flag nor a build to fill `device`/`targetId` once this
+    // fires, but a core id from either source lets `jlink_device` resolve
+    // deterministically rather than guessing which entry to use).
+    let identity_core = args.core.clone().or(build_core_id);
+    fill_debug_probe_identity_from_sdk(&mut resolution, &context, identity_core.as_deref());
 
     // `--svd` is the ONLY producer of `resolution.svd` (tan-cli#197): the SDK
     // ships no SVD, so without the flag the field is structurally always
@@ -694,23 +710,32 @@ fn resolve_user_svd(cwd: &Path, workspace_root: &Path, arg: &str) -> Result<Stri
 /// unreadable or reshaped `runners.yaml` each leave the corresponding field
 /// unresolved instead of failing the command: `debug-config` must still emit
 /// its draft before the first build.
+///
+/// The third return value is the `core_id` of the slice this run actually
+/// selected (`None` before a matching slice is found) — the SAME id `--core`
+/// would have named explicitly. alp-sdk#1026's SDK-metadata fallback (see
+/// `fill_debug_probe_identity_from_sdk`) needs it to index `jlink_device`
+/// (keyed per core) even when the caller passed no `--core` of its own, so a
+/// single-core project's ALREADY-built slice still resolves without forcing
+/// the user to repeat a core id `tan` already knows.
 fn resolve_from_build(
     workspace_root: &Path,
     target: DebugTargetKind,
     server: DebugServerKind,
     core: Option<&str>,
-) -> (LaunchResolution, Vec<String>) {
+) -> (LaunchResolution, Vec<String>, Option<String>) {
     let mut resolution = LaunchResolution::default();
     let manifest_path = workspace_root.join("build").join("system-manifest.yaml");
     let Ok(yaml) = std::fs::read_to_string(&manifest_path) else {
-        return (resolution, Vec::new());
+        return (resolution, Vec::new(), None);
     };
     let Ok(manifest) = parse_system_manifest(&yaml) else {
-        return (resolution, Vec::new());
+        return (resolution, Vec::new(), None);
     };
     let Some(slice) = select_slice(&manifest, target, core) else {
-        return (resolution, Vec::new());
+        return (resolution, Vec::new(), None);
     };
+    let core_id = Some(slice.core_id.clone());
 
     if let Some(artefact) = slice.output_artefact.as_deref().filter(|a| !a.is_empty()) {
         // A manifest records the ELF for EVERY zephyr slice, native_sim
@@ -731,14 +756,14 @@ fn resolve_from_build(
     }
 
     let Some(build_dir) = slice.build_dir.as_deref().filter(|b| !b.is_empty()) else {
-        return (resolution, Vec::new());
+        return (resolution, Vec::new(), core_id);
     };
     let runners_path = Path::new(build_dir).join("zephyr").join("runners.yaml");
     let Ok(text) = std::fs::read_to_string(&runners_path) else {
-        return (resolution, Vec::new());
+        return (resolution, Vec::new(), core_id);
     };
     let Ok(runners) = parse_runners_config(&text) else {
-        return (resolution, Vec::new());
+        return (resolution, Vec::new(), core_id);
     };
 
     resolution.gdb_path = runners.gdb.clone();
@@ -758,7 +783,98 @@ fn resolve_from_build(
             DebugServerKind::Gdbserver | DebugServerKind::None => {}
         }
     }
-    (resolution, runners.runners.clone())
+    (resolution, runners.runners.clone(), core_id)
+}
+
+/// alp-sdk#1026: fill `resolution`'s remaining `device`/`target_id`/
+/// `config_files` gaps from the SDK's published per-variant debug-probe
+/// identity (`variants[].debug`, alp-sdk#987), so `tan debug-config` resolves
+/// a real J-Link device / pyOCD target before the project has ever been
+/// built — the case `resolve_from_build`'s `runners.yaml` read structurally
+/// cannot cover.
+///
+/// Reuses the SAME SoM-preset → SoC-JSON `variants[]` reader `tan size`
+/// already drives (`SocVariant` + `resolve_variant`, `tan_core::size`)
+/// instead of a second walk of `metadata/socs/**` — the exact drift #1026
+/// itself is about (a schema with no reader, then two readers that could
+/// disagree). Pure fill-the-gap logic is `fill_debug_probe_identity_gaps`
+/// (`tan_core::debug_launch`); everything here is the IO side: locating and
+/// reading `board.yaml`, the SoM preset, and the SoC-JSON file.
+///
+/// Best-effort throughout, exactly like `resolve_from_build`: a missing
+/// `board.yaml`/`som.sku`, no resolved SDK root, a missing/unreadable SoM
+/// preset or SoC-JSON file, or a SoC variant that resolves but declares no
+/// `debug` block each leave `resolution` exactly as it was — the caller's
+/// existing placeholder note still applies, and nothing here can fail the
+/// command.
+fn fill_debug_probe_identity_from_sdk(
+    resolution: &mut LaunchResolution,
+    context: &ProjectContext,
+    core_id: Option<&str>,
+) {
+    let Some(board_yaml_path) = context.board_yaml_path.as_deref() else {
+        return;
+    };
+    let Ok(board_text) = std::fs::read_to_string(board_yaml_path) else {
+        return;
+    };
+    let Ok(model) = parse_board_model(&board_text) else {
+        return;
+    };
+    let Some(sku) = model.som.and_then(|som| som.sku) else {
+        return;
+    };
+    let Some(sdk_root) = context.sdk_root.as_deref() else {
+        return;
+    };
+    let metadata_root = Path::new(sdk_root).join("metadata");
+
+    let preset_path = metadata_root
+        .join("e1m_modules")
+        .join(format!("{sku}.yaml"));
+    let Ok(preset_text) = std::fs::read_to_string(&preset_path) else {
+        return;
+    };
+    let Ok(preset) = parse_som_preset(&preset_text) else {
+        return;
+    };
+    if preset.silicon.is_empty() {
+        return;
+    }
+    let parts: Vec<&str> = preset.silicon.split(':').collect();
+    if parts.len() != 3 {
+        return;
+    }
+    let soc_path = metadata_root
+        .join("socs")
+        .join(parts[0])
+        .join(parts[1])
+        .join(format!("{}.json", parts[2]));
+    let Ok(soc_text) = std::fs::read_to_string(&soc_path) else {
+        return;
+    };
+    let Ok(soc) = serde_json::from_str::<Value>(&soc_text) else {
+        return;
+    };
+    let variants: Vec<SocVariant> = soc
+        .get("variants")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let Some(variant) = resolve_variant(preset.silicon_variant.as_deref(), Some(&sku), &variants)
+    else {
+        return;
+    };
+    let Some(debug) = variant.debug.as_ref() else {
+        return;
+    };
+    fill_debug_probe_identity_gaps(
+        resolution,
+        core_id,
+        &debug.jlink_device,
+        debug.pyocd_target.as_deref(),
+        debug.openocd_config.as_deref(),
+    );
 }
 
 /// Whether any `<…>` placeholder survived resolution, anywhere in the draft —
@@ -871,6 +987,223 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// alp-sdk#1026 end-to-end: with NO build at all (no `system-manifest.yaml`,
+    /// no `runners.yaml`), a `board.yaml` naming a SoM and an SDK checkout
+    /// publishing that SoM's variant `debug` block, `device`/`targetId` must
+    /// resolve from the SDK metadata rather than staying the placeholder --
+    /// the exact gap #1026 reports as inert.
+    #[test]
+    fn debug_config_resolves_device_and_target_id_from_sdk_metadata_pre_build() {
+        let dir = tmp("sdk-metadata-fallback");
+        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN701\n").unwrap();
+
+        let sdk = dir.join("sdk");
+        std::fs::create_dir_all(sdk.join("scripts")).unwrap();
+        std::fs::write(sdk.join("scripts").join("alp_project.py"), "").unwrap();
+        let som_dir = sdk.join("metadata").join("e1m_modules");
+        std::fs::create_dir_all(&som_dir).unwrap();
+        std::fs::write(
+            som_dir.join("E1M-AEN701.yaml"),
+            "schema_version: 1\nsku: E1M-AEN701\nsilicon: alif:ensemble:e8\n\
+             silicon_variant: AE822FA0E5597LS0\n",
+        )
+        .unwrap();
+        let soc_dir = sdk
+            .join("metadata")
+            .join("socs")
+            .join("alif")
+            .join("ensemble");
+        std::fs::create_dir_all(&soc_dir).unwrap();
+        std::fs::write(
+            soc_dir.join("e8.json"),
+            r#"{
+                "soc_spec_version": 1,
+                "ref": "alif:ensemble:e8",
+                "vendor": "Alif Semiconductor",
+                "family": "Ensemble",
+                "part": "E8",
+                "variants": [
+                    {
+                        "order_code": "AE822FA0E5597LS0",
+                        "debug": {
+                            "pyocd_target": "AE822FA0E5597LS0",
+                            "jlink_device": {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut g = global(&dir);
+        g.sdk_root = Some(sdk.to_string_lossy().into_owned());
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: Some("m55_hp".to_string()),
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            svd: None,
+            preview: true,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let json: serde_json::Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert_eq!(json["data"]["configuration"]["device"], "Cortex-M55");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The `--server pyocd` sibling of the test above: `targetId` resolves
+    /// from `pyocd_target`, and needs no `--core` at all (`jlink_device` is
+    /// the only per-core field; `pyocd_target` is a scalar per variant).
+    #[test]
+    fn debug_config_resolves_pyocd_target_id_from_sdk_metadata_pre_build() {
+        let dir = tmp("sdk-metadata-fallback-pyocd");
+        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN701\n").unwrap();
+
+        let sdk = dir.join("sdk");
+        std::fs::create_dir_all(sdk.join("scripts")).unwrap();
+        std::fs::write(sdk.join("scripts").join("alp_project.py"), "").unwrap();
+        let som_dir = sdk.join("metadata").join("e1m_modules");
+        std::fs::create_dir_all(&som_dir).unwrap();
+        std::fs::write(
+            som_dir.join("E1M-AEN701.yaml"),
+            "schema_version: 1\nsku: E1M-AEN701\nsilicon: alif:ensemble:e8\n\
+             silicon_variant: AE822FA0E5597LS0\n",
+        )
+        .unwrap();
+        let soc_dir = sdk
+            .join("metadata")
+            .join("socs")
+            .join("alif")
+            .join("ensemble");
+        std::fs::create_dir_all(&soc_dir).unwrap();
+        std::fs::write(
+            soc_dir.join("e8.json"),
+            r#"{
+                "soc_spec_version": 1,
+                "ref": "alif:ensemble:e8",
+                "vendor": "Alif Semiconductor",
+                "family": "Ensemble",
+                "part": "E8",
+                "variants": [
+                    {
+                        "order_code": "AE822FA0E5597LS0",
+                        "debug": {
+                            "pyocd_target": "AE822FA0E5597LS0",
+                            "jlink_device": {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut g = global(&dir);
+        g.sdk_root = Some(sdk.to_string_lossy().into_owned());
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None,
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("pyocd".to_string()),
+            pre_launch_task: None,
+            svd: None,
+            preview: true,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let json: serde_json::Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert_eq!(
+            json["data"]["configuration"]["targetId"],
+            "AE822FA0E5597LS0"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// alp-sdk#987's own stance: `openocd_config` is absent from every SoC
+    /// family today, and that absence must stay the published "unknown" --
+    /// the OpenOCD draft's `configFiles` keeps its placeholder rather than
+    /// inventing a config path, and the preview note says so.
+    #[test]
+    fn debug_config_openocd_config_files_stays_the_placeholder_when_the_sdk_publishes_none() {
+        let dir = tmp("sdk-metadata-fallback-openocd");
+        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN701\n").unwrap();
+
+        let sdk = dir.join("sdk");
+        std::fs::create_dir_all(sdk.join("scripts")).unwrap();
+        std::fs::write(sdk.join("scripts").join("alp_project.py"), "").unwrap();
+        let som_dir = sdk.join("metadata").join("e1m_modules");
+        std::fs::create_dir_all(&som_dir).unwrap();
+        std::fs::write(
+            som_dir.join("E1M-AEN701.yaml"),
+            "schema_version: 1\nsku: E1M-AEN701\nsilicon: alif:ensemble:e8\n\
+             silicon_variant: AE822FA0E5597LS0\n",
+        )
+        .unwrap();
+        let soc_dir = sdk
+            .join("metadata")
+            .join("socs")
+            .join("alif")
+            .join("ensemble");
+        std::fs::create_dir_all(&soc_dir).unwrap();
+        // No openocd_config key -- exactly every real Alif variant today.
+        std::fs::write(
+            soc_dir.join("e8.json"),
+            r#"{
+                "soc_spec_version": 1,
+                "ref": "alif:ensemble:e8",
+                "vendor": "Alif Semiconductor",
+                "family": "Ensemble",
+                "part": "E8",
+                "variants": [
+                    {
+                        "order_code": "AE822FA0E5597LS0",
+                        "debug": {
+                            "pyocd_target": "AE822FA0E5597LS0",
+                            "jlink_device": {"m55_hp": "Cortex-M55"}
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut g = global(&dir);
+        g.sdk_root = Some(sdk.to_string_lossy().into_owned());
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: Some("m55_hp".to_string()),
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("openocd".to_string()),
+            pre_launch_task: None,
+            svd: None,
+            preview: true,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let json: serde_json::Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert_eq!(
+            json["data"]["configuration"]["configFiles"],
+            serde_json::json!(["<resolved-openocd-board-cfg>"]),
+            "an absent openocd_config must stay the placeholder, never a guess"
+        );
+        assert!(
+            json["data"]["notes"].as_array().unwrap().iter().any(|n| n
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("Placeholder fields")),
+            "the placeholder note must still be present: {}",
+            json["data"]["notes"]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // The `<host>:<port>` hole in the note logic: a yocto draft whose
     // `<resolved-gdb>` DID resolve has no `<resolved-` string left, so the
     // prefix-only predicate dropped the "still needs resolution" note while
@@ -955,7 +1288,7 @@ mod tests {
         let dir = tmp("native-host-mixed");
         write_manifest(&dir, &manifest_mcu_then_native_sim(&dir));
 
-        let (resolution, _) = resolve_from_build(
+        let (resolution, _, _) = resolve_from_build(
             &dir,
             DebugTargetKind::NativeHost,
             DebugServerKind::None,
@@ -985,7 +1318,7 @@ mod tests {
         );
         write_manifest(&dir, &manifest);
 
-        let (resolution, _) = resolve_from_build(
+        let (resolution, _, _) = resolve_from_build(
             &dir,
             DebugTargetKind::NativeHost,
             DebugServerKind::None,
@@ -1006,7 +1339,7 @@ mod tests {
         let dir = tmp("zephyr-mcu-unchanged");
         write_manifest(&dir, &manifest_mcu_then_native_sim(&dir));
 
-        let (bare, _) = resolve_from_build(
+        let (bare, _, _) = resolve_from_build(
             &dir,
             DebugTargetKind::ZephyrMcu,
             DebugServerKind::Jlink,
@@ -1017,7 +1350,7 @@ mod tests {
             Some("${workspaceFolder}/build/m55_hp-zephyr/build/zephyr/zephyr.elf")
         );
 
-        let (pinned, _) = resolve_from_build(
+        let (pinned, _, _) = resolve_from_build(
             &dir,
             DebugTargetKind::ZephyrMcu,
             DebugServerKind::Jlink,
@@ -1047,7 +1380,7 @@ mod tests {
         );
         write_manifest(&dir, &manifest);
 
-        let (resolution, _) = resolve_from_build(
+        let (resolution, _, _) = resolve_from_build(
             &dir,
             DebugTargetKind::NativeHost,
             DebugServerKind::None,

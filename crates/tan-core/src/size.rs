@@ -9,6 +9,8 @@
 //! (everything live at runtime) — the Berkeley `size` model, where binutils
 //! folds .rodata into text and .noinit (NOBITS) into bss.
 
+use std::collections::BTreeMap;
+
 use object::{BinaryFormat, Object, ObjectSection, SectionFlags, SectionKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -206,6 +208,35 @@ pub struct SocVariant {
     /// SRAM banks keyed by name (e.g. `SRAM3_M55_HP_DTCM`), in KiB.
     #[serde(default)]
     pub sram_banks_kb: serde_json::Map<String, Value>,
+    /// Debug-probe identity (`variants[].debug`), when the SDK publishes one
+    /// for this variant (alp-sdk#987, consumed by `tan debug-config` per
+    /// alp-sdk#1026). `None` for a variant/SoC family that publishes none.
+    #[serde(default)]
+    pub debug: Option<SocVariantDebug>,
+}
+
+/// One `variants[].debug` block: the debug-probe identity alp-sdk#987
+/// publishes and alp-sdk#1026 wants a reader for. Every field is optional and
+/// independently absent-capable, matching the schema's own stance
+/// (`soc-spec-v1.schema.json:359`) that an unpopulated key is a published
+/// "unknown", never a guess.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct SocVariantDebug {
+    /// pyOCD target id (cortex-debug `targetId` for `servertype: "pyocd"`).
+    #[serde(default)]
+    pub pyocd_target: Option<String>,
+    /// SEGGER J-Link **attach** device name (cortex-debug `device` for
+    /// `servertype: "jlink"`), keyed by `cores[].id`. Deliberately NOT
+    /// `jlink_flash_device`: that key names a separate, non-per-core
+    /// MRAM-unlock profile the schema documents as unable to attach to a
+    /// live core, so it has no place in a launch-config `device` field.
+    #[serde(default)]
+    pub jlink_device: BTreeMap<String, String>,
+    /// OpenOCD board/target config path (cortex-debug `configFiles[]` for
+    /// `servertype: "openocd"`). Absent for every SoC family today — schema-
+    /// only until a vendor config exists upstream.
+    #[serde(default)]
+    pub openocd_config: Option<String>,
 }
 
 impl SocVariant {
@@ -490,6 +521,45 @@ mod tests {
 
     fn variant(json_text: &str) -> SocVariant {
         serde_json::from_str(json_text).unwrap()
+    }
+
+    /// alp-sdk#1026: `SocVariant` must round-trip the real `variants[].debug`
+    /// shape (metadata/socs/alif/ensemble/e3.json) -- a per-core `jlink_device`
+    /// map, a scalar `pyocd_target`, and an absent `openocd_config` staying
+    /// `None` rather than empty-string.
+    #[test]
+    fn socvariant_deserializes_the_debug_probe_identity_block() {
+        let v = variant(
+            r#"{
+                "order_code": "AE302F80F55D5AE",
+                "debug": {
+                    "pyocd_target": "AE302F80F55D5AE",
+                    "jlink_device": {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+                }
+            }"#,
+        );
+        let debug = v.debug.expect("debug block must parse");
+        assert_eq!(debug.pyocd_target.as_deref(), Some("AE302F80F55D5AE"));
+        assert_eq!(
+            debug.jlink_device.get("m55_hp").map(String::as_str),
+            Some("Cortex-M55")
+        );
+        assert_eq!(
+            debug.jlink_device.get("m55_he").map(String::as_str),
+            Some("Cortex-M55")
+        );
+        assert_eq!(
+            debug.openocd_config, None,
+            "no SoC family publishes one yet"
+        );
+    }
+
+    /// A variant with no `debug` key at all (every non-Alif family today)
+    /// must parse to `None`, not fail — the block is wholly optional.
+    #[test]
+    fn socvariant_without_a_debug_block_parses_to_none() {
+        let v = variant(r#"{"order_code": "X"}"#);
+        assert!(v.debug.is_none());
     }
 
     #[test]

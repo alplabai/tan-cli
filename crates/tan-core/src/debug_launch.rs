@@ -6,6 +6,8 @@
 //! Relies on `serde_json`'s `preserve_order` feature so emitted JSON keeps the
 //! same key order as the TypeScript CLI.
 
+use std::collections::BTreeMap;
+
 use serde_json::{Value, json};
 
 use crate::debug::{DebugServerKind, DebugTargetKind, is_server_supported_for_target};
@@ -223,6 +225,46 @@ impl LaunchResolution {
     /// between keeping the "still needs resolution" note and dropping it.
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+}
+
+/// Fill `resolution`'s `device`/`target_id`/`config_files` gaps from the
+/// SDK's published per-variant debug-probe identity (`variants[].debug`,
+/// alp-sdk#987 / alp-sdk#1026) — the same three fields a real build's
+/// `runners.yaml` resolves, sourced instead from the SoC-JSON metadata that
+/// exists whether or not the project has been built yet.
+///
+/// **Fill-the-gap only, never override**: each field is written ONLY when
+/// `resolution` does not already carry a value for it. A real build's own
+/// resolution (Zephyr's own `runners.yaml`, generated for THIS board) is
+/// strictly more specific than the SDK's generic per-variant identity and
+/// always wins where both exist.
+///
+/// **No fabrication**: `jlink_device` is a map keyed by core id, so `device`
+/// resolves only when `core_id` is `Some` AND that exact key is present —
+/// there is no "the only entry" or "the first entry" guess. `target_id` and
+/// `config_files` resolve only when the corresponding SDK key is itself
+/// present; `openocd_config` is absent for every SoC family as of alp-sdk#987
+/// (no vendor OpenOCD config exists upstream), so `config_files` stays empty
+/// today for all of them — that is the correct published "unknown", not a
+/// bug in this function.
+pub fn fill_debug_probe_identity_gaps(
+    resolution: &mut LaunchResolution,
+    core_id: Option<&str>,
+    jlink_device: &BTreeMap<String, String>,
+    pyocd_target: Option<&str>,
+    openocd_config: Option<&str>,
+) {
+    if resolution.device.is_none() {
+        resolution.device = core_id.and_then(|id| jlink_device.get(id)).cloned();
+    }
+    if resolution.target_id.is_none() {
+        resolution.target_id = pyocd_target.map(str::to_string);
+    }
+    if resolution.config_files.is_empty() {
+        if let Some(cfg) = openocd_config {
+            resolution.config_files = vec![cfg.to_string()];
+        }
     }
 }
 
@@ -960,6 +1002,78 @@ mod resolution_tests {
         assert_eq!(
             draft["serverpath"],
             "/zephyr-sdk-1.0.1/hosttools/usr/bin/openocd"
+        );
+    }
+
+    /// The pre-build gap-fill this function exists for: no build has run
+    /// (`resolution` is fully unresolved), so metadata identity fills all
+    /// three fields.
+    #[test]
+    fn fill_debug_probe_identity_gaps_fills_an_unresolved_draft() {
+        let mut resolution = LaunchResolution::default();
+        let jlink_device: BTreeMap<String, String> = [
+            ("m55_hp".to_string(), "Cortex-M55".to_string()),
+            ("m55_he".to_string(), "Cortex-M55".to_string()),
+        ]
+        .into();
+        fill_debug_probe_identity_gaps(
+            &mut resolution,
+            Some("m55_hp"),
+            &jlink_device,
+            Some("AE302F80F55D5AE"),
+            None, // alp-sdk#987: no SoC family publishes openocd_config yet.
+        );
+        assert_eq!(resolution.device.as_deref(), Some("Cortex-M55"));
+        assert_eq!(resolution.target_id.as_deref(), Some("AE302F80F55D5AE"));
+        assert!(
+            resolution.config_files.is_empty(),
+            "an absent openocd_config must stay the published unknown, never a guess"
+        );
+    }
+
+    /// A real build's own resolution always wins: metadata must not overwrite
+    /// a `device` `runners.yaml` already resolved, even if it disagrees.
+    #[test]
+    fn fill_debug_probe_identity_gaps_never_overrides_an_already_resolved_field() {
+        let mut resolution = LaunchResolution {
+            device: Some("Cortex-M55".to_string()),
+            target_id: Some("already-resolved".to_string()),
+            config_files: vec!["already/resolved.cfg".to_string()],
+            ..Default::default()
+        };
+        let jlink_device: BTreeMap<String, String> =
+            [("m55_hp".to_string(), "SDK-DEVICE".to_string())].into();
+        fill_debug_probe_identity_gaps(
+            &mut resolution,
+            Some("m55_hp"),
+            &jlink_device,
+            Some("sdk-target"),
+            Some("sdk.cfg"),
+        );
+        assert_eq!(resolution.device.as_deref(), Some("Cortex-M55"));
+        assert_eq!(resolution.target_id.as_deref(), Some("already-resolved"));
+        assert_eq!(
+            resolution.config_files,
+            vec!["already/resolved.cfg".to_string()]
+        );
+    }
+
+    /// `jlink_device` is keyed by core id: no `core_id` (or a core id the map
+    /// doesn't carry) must resolve nothing rather than guess "the only entry".
+    #[test]
+    fn fill_debug_probe_identity_gaps_never_guesses_a_device_without_a_matching_core_id() {
+        let jlink_device: BTreeMap<String, String> =
+            [("m55_hp".to_string(), "Cortex-M55".to_string())].into();
+
+        let mut no_core = LaunchResolution::default();
+        fill_debug_probe_identity_gaps(&mut no_core, None, &jlink_device, None, None);
+        assert_eq!(no_core.device, None);
+
+        let mut wrong_core = LaunchResolution::default();
+        fill_debug_probe_identity_gaps(&mut wrong_core, Some("m55_he"), &jlink_device, None, None);
+        assert_eq!(
+            wrong_core.device, None,
+            "a core id absent from the map must not fall back to the only entry"
         );
     }
 
