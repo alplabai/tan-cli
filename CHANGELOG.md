@@ -5,6 +5,31 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Linux and macOS now see the manual-install hints the SDK provides for them**
+  (#230). alp-sdk v0.14.0 added `manualInstallHints.posix.note` — the POSIX twin
+  of the Windows key `tan bootstrap` already printed — and tan did not read it, so
+  the data existed and was inert. Three facts reached no POSIX customer: that the
+  Zephyr SDK is a separate, manual `west sdk install` (with the exact invocation),
+  that the Arm GNU Toolchain is a separate install needed by three opt-in paths,
+  and why `west sdk install` may print a `could not find a 'file' executable`
+  warning that is harmless. The same class as 7-Zip being prose-only before #204,
+  one file over.
+
+  Shape, heading and position come from the oracle rather than from tan:
+  `v0.14.0:scripts/bootstrap.sh` prints these under `NOT auto-installed (manual,
+  one-time):` for `linux|macos` only, after the optional-native-libs section. The
+  host gate is `Linux | MacOs` and deliberately **not** "anything that is not
+  Windows" — `HostOs::Other` is a host tan could not identify, and every sentence
+  in the note is Linux/macOS-specific.
+
+  An SDK that declares no `manualInstallHints.posix` (every release before
+  v0.14.0) renders exactly what it always did. The field is `Option` for that
+  reason: a required field would turn each of those SDKs into a hard
+  `ValidationFailure` that `tan build` inherits through auto-bootstrap.
+
 ## [0.4.1] — 2026-07-29
 
 ### Added
