@@ -75,7 +75,7 @@ pub use debug::{
 pub use debug_launch::{
     LaunchJsonWritePlan, LaunchResolution, apply_launch_resolution, create_launch_draft,
     create_launch_json_write_plan, fill_debug_probe_identity_gaps, is_unresolved_placeholder,
-    launch_preview_document, launch_preview_notes,
+    launch_preview_document, launch_preview_notes, sdk_identity_overwrites,
 };
 pub use diff::{DiffEntry, DiffKind, collect_diff_entries, prune_nulls};
 pub use flash::{

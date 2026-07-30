@@ -191,9 +191,11 @@ pub struct MemoryBudget {
     pub note: Option<String>,
 }
 
-/// One SoC-JSON `variants[]` entry — only the fields the budget needs. Ordering
-/// of `sram_banks_kb` is preserved (serde_json `preserve_order`) so the
-/// first-matching-bank rule is deterministic.
+/// One SoC-JSON `variants[]` entry — the fields `tan size`'s budget needs,
+/// plus `debug` (alp-sdk#987 / #1026), read by `tan debug-config`'s
+/// debug-probe-identity fallback via this SAME struct rather than a second
+/// one. Ordering of `sram_banks_kb` is preserved (serde_json `preserve_order`)
+/// so the first-matching-bank rule is deterministic.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct SocVariant {
     /// The variant's order code (matched against a preset's `silicon_variant`).

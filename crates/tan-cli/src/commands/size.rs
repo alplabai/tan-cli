@@ -23,7 +23,6 @@
 
 use std::path::{Path, PathBuf};
 
-use tan_core::parse_som_preset;
 use tan_core::size::{
     MemoryBudget, SliceSize, SocVariant, build_size_report, classify, footprint_total,
     over_budget_rows, parse_berkeley_size, render_table_lines, resolve_budget, resolve_variant,
@@ -37,7 +36,8 @@ use crate::envelope::{Envelope, Issue, Project};
 use crate::exit::ExitCode;
 use crate::style::Theme;
 use crate::util::{
-    cli_workspace_root, command_on_path, resolve_cli_project_context, resolve_sdk_root,
+    cli_workspace_root, command_on_path, read_sdk_som_and_soc, resolve_cli_project_context,
+    resolve_sdk_root,
 };
 
 /// Size tools probed on PATH, most-specific first. The Zephyr SDK ships
@@ -368,57 +368,42 @@ fn resolve_slice_budget(
     let Some(meta) = metadata_root else {
         return note_only(&format!("no SoM preset for {sku}"));
     };
-
     let preset_path = meta.join("e1m_modules").join(format!("{sku}.yaml"));
     if !preset_path.is_file() {
         return note_only(&format!("no SoM preset for {sku}"));
     }
-    // Reuse the shared SoM parser (drops `TBD` sentinels to None, exactly what
-    // variant resolution wants) instead of a second yaml reader in the CLI.
-    let preset = match std::fs::read_to_string(&preset_path) {
-        Ok(text) => match parse_som_preset(&text) {
-            Ok(p) => p,
-            Err(_) => return note_only(&format!("unreadable SoM preset for {sku}")),
-        },
-        Err(_) => return note_only(&format!("unreadable SoM preset for {sku}")),
+
+    // Shared metadata-layout walk (SoM preset -> `silicon` -> SoC JSON) —
+    // see `read_sdk_som_and_soc`'s doc comment for why `tan debug-config`
+    // uses the SAME reader rather than a second copy (alp-sdk#1026 review).
+    let Some((preset, soc)) = read_sdk_som_and_soc(meta, sku) else {
+        return note_only(&format!("unreadable SoM preset for {sku}"));
     };
 
-    let silicon_variant = preset.silicon_variant.as_deref();
+    let variants: Vec<SocVariant> = soc
+        .get("variants")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let soc_flash_mb = soc.get("soc_flash_mb").and_then(serde_json::Value::as_f64);
+    let soc_cores: Vec<(String, Option<f64>)> = soc
+        .get("cores")
+        .and_then(serde_json::Value::as_array)
+        .map(|cores| {
+            cores
+                .iter()
+                .filter_map(|c| {
+                    let id = c.get("id")?.as_str()?.to_string();
+                    let tcm = c.get("tcm_kb").and_then(serde_json::Value::as_f64);
+                    Some((id, tcm))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
-    let mut variants: Vec<SocVariant> = Vec::new();
-    let mut soc_flash_mb: Option<f64> = None;
-    let mut soc_cores: Vec<(String, Option<f64>)> = Vec::new();
-
-    if !preset.silicon.is_empty() {
-        let parts: Vec<&str> = preset.silicon.split(':').collect();
-        if parts.len() == 3 {
-            let soc_path = meta
-                .join("socs")
-                .join(parts[0])
-                .join(parts[1])
-                .join(format!("{}.json", parts[2]));
-            if let Ok(text) = std::fs::read_to_string(&soc_path) {
-                if let Ok(soc) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(vs) = soc.get("variants") {
-                        variants = serde_json::from_value(vs.clone()).unwrap_or_default();
-                    }
-                    soc_flash_mb = soc.get("soc_flash_mb").and_then(serde_json::Value::as_f64);
-                    if let Some(cores) = soc.get("cores").and_then(serde_json::Value::as_array) {
-                        soc_cores = cores
-                            .iter()
-                            .filter_map(|c| {
-                                let id = c.get("id")?.as_str()?.to_string();
-                                let tcm = c.get("tcm_kb").and_then(serde_json::Value::as_f64);
-                                Some((id, tcm))
-                            })
-                            .collect();
-                    }
-                }
-            }
-        }
-    }
-
-    let variant = resolve_variant(silicon_variant, Some(sku), &variants);
+    // `tan size` allows the sku reverse-fallback (a stale/`TBD`
+    // `silicon_variant` still gets *a* budget) — unlike `tan debug-config`,
+    // see `read_sdk_som_and_soc`.
+    let variant = resolve_variant(preset.silicon_variant.as_deref(), Some(sku), &variants);
     let mram_mb = variant.and_then(|v| v.mram_mb);
     let sram_banks = variant.map(SocVariant::sram_banks).unwrap_or_default();
     resolve_budget(core_id, mram_mb, soc_flash_mb, &sram_banks, &soc_cores)

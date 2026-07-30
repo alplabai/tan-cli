@@ -17,7 +17,7 @@ use tan_core::{
     DebugServerKind, DebugTargetKind, LaunchResolution, ProjectContext, apply_launch_resolution,
     create_launch_draft, create_launch_json_write_plan, fill_debug_probe_identity_gaps,
     is_unresolved_placeholder, launch_preview_document, launch_preview_notes, parse_board_model,
-    parse_server_kind, parse_som_preset, parse_target_kind,
+    parse_server_kind, parse_target_kind,
 };
 
 use super::CommandRun;
@@ -126,12 +126,36 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
 
     // alp-sdk#1026: whatever the build did NOT already resolve, try the SDK's
     // published per-variant debug-probe identity next — `--core` if given,
-    // else the core id the build itself just resolved (a single-core project
-    // needs neither flag nor a build to fill `device`/`targetId` once this
-    // fires, but a core id from either source lets `jlink_device` resolve
-    // deterministically rather than guessing which entry to use).
+    // else the core id the build itself just resolved. `targetId` (pyOCD)
+    // needs neither: `pyocd_target` is a scalar per variant, so it resolves
+    // pre-build with no `--core` and no prior build at all. `device` (J-Link)
+    // is the opposite: `jlink_device` is keyed BY core id, so on a
+    // never-built project with no `--core`, `identity_core` is `None` and
+    // `device` stays the placeholder — that combination is deliberately
+    // covered by a test (`fill_debug_probe_identity_gaps_never_guesses_a_device_without_a_matching_core_id`
+    // in `tan_core::debug_launch`, and `debug_config_jlink_device_stays_the_placeholder_with_no_core_and_no_build`
+    // here) rather than left silently unresolved with no coverage.
     let identity_core = args.core.clone().or(build_core_id);
-    fill_debug_probe_identity_from_sdk(&mut resolution, &context, identity_core.as_deref());
+    let before_identity_fill = resolution.clone();
+    let identity_debug_block_found =
+        fill_debug_probe_identity_from_sdk(&mut resolution, &context, identity_core.as_deref());
+    // Which launch-configuration JSON keys the SDK fallback (not a real
+    // build) just populated — the ONLY fields `sdk_identity_overwrites` below
+    // is allowed to flag (alp-sdk#1026 review finding #1). A field a real
+    // build already resolved is excluded here even though it may ALSO
+    // overwrite a customer's value: that overwrite is pre-existing, intended
+    // behaviour (`merge_configuration`'s own doc comment), not something this
+    // PR introduces or is scoped to disclose.
+    let mut sdk_filled_json_fields: Vec<&'static str> = Vec::new();
+    if before_identity_fill.device.is_none() && resolution.device.is_some() {
+        sdk_filled_json_fields.push("device");
+    }
+    if before_identity_fill.target_id.is_none() && resolution.target_id.is_some() {
+        sdk_filled_json_fields.push("targetId");
+    }
+    if before_identity_fill.config_files.is_empty() && !resolution.config_files.is_empty() {
+        sdk_filled_json_fields.push("configFiles");
+    }
 
     // `--svd` is the ONLY producer of `resolution.svd` (tan-cli#197): the SDK
     // ships no SVD, so without the flag the field is structurally always
@@ -159,6 +183,23 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         ));
     }
 
+    // alp-sdk#1026 review finding #4: the generic "Placeholder fields..."
+    // note is real but unspecific — running `--server openocd` today gives
+    // `issues: []` / `ok: true` with the only signal being a note that names
+    // `device`, a key an OpenOCD draft does not even carry. When the SDK DID
+    // resolve an identity for this variant but not the specific field THIS
+    // server needs (every Alif variant today, for `openocd_config`), say so
+    // explicitly — on preview too, not just a write, since this is advisory
+    // about resolution state, not about what a write changed on disk.
+    let mut identity_issues: Vec<Issue> = Vec::new();
+    if identity_debug_block_found {
+        if let Some(field) = server_identity_field(server) {
+            if draft.get(field).map(has_placeholder).unwrap_or(false) {
+                identity_issues.push(sdk_identity_key_absent_issue(field));
+            }
+        }
+    }
+
     if args.preview {
         return success(
             g,
@@ -172,7 +213,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
             &draft,
             &project_root,
             board_yaml,
-            Vec::new(),
+            identity_issues,
         );
     }
 
@@ -216,6 +257,13 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
         None
     };
 
+    // alp-sdk#1026 review finding #1: compute this BEFORE the write, against
+    // the file as it stood — `create_launch_json_write_plan` below already
+    // performs the same overwrite (that part of its behaviour is intentional,
+    // see its own doc comment), this only detects it so it can be disclosed.
+    let sdk_identity_overwrites =
+        tan_core::sdk_identity_overwrites(existing.as_deref(), &draft, &sdk_filled_json_fields);
+
     let plan = match create_launch_json_write_plan(existing.as_deref(), &draft) {
         Ok(p) => p,
         // A malformed existing launch.json surfaces as an internal failure in TS.
@@ -237,7 +285,7 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
     // WHY the file changed under them (their old `"ALP: ..."` entry is gone,
     // folded into the correctly-named one) rather than discovering it only by
     // diffing the file themselves.
-    let mut issues = Vec::new();
+    let mut issues = identity_issues;
     if let Some(from) = &plan.migrated_from {
         issues.push(legacy_entry_migrated_issue(
             from,
@@ -256,6 +304,18 @@ pub fn run(g: &GlobalArgs, args: &DebugConfigArgs) -> CommandRun {
     // content as the one thing that is never acceptable, not just "diffable".
     if plan.comments_dropped {
         issues.push(comments_dropped_issue());
+    }
+    // alp-sdk#1026 review finding #1: this write just replaced a concrete
+    // existing value with one resolved from the SDK's published debug-probe
+    // identity rather than a real build — say so, the same way a dropped
+    // comment is disclosed rather than left for the customer to notice by
+    // diffing the file themselves.
+    for (field, existing_value, incoming_value) in &sdk_identity_overwrites {
+        issues.push(sdk_identity_overwrite_issue(
+            field,
+            existing_value,
+            incoming_value,
+        ));
     }
 
     success(
@@ -339,6 +399,49 @@ fn comments_dropped_issue() -> Issue {
                    spliced, anywhere in the file. Everything outside that span is \
                    untouched."
             .to_string(),
+    }
+}
+
+/// alp-sdk#1026 review finding #1: emitted whenever the SDK's published
+/// debug-probe identity (not a real build) just replaced a concrete existing
+/// value on the entry this run wrote. Severity `info`, same reasoning as its
+/// three siblings above: the overwrite itself is not new or wrong (a value
+/// resolved from a real build already overwrote unconditionally, by design —
+/// see `tan_core::debug_launch::merge_configuration`'s doc comment) but a
+/// tool that replaces a customer's own value at `exit 0` with `issues: []`
+/// has told them nothing happened.
+fn sdk_identity_overwrite_issue(field: &str, existing_value: &str, incoming_value: &str) -> Issue {
+    Issue {
+        code: "debug-config.sdk-identity-overwrite".to_string(),
+        severity: "info".to_string(),
+        message: format!(
+            "This write replaced the existing `{field}` value \"{existing_value}\" with \
+             \"{incoming_value}\", resolved from the SDK's published debug-probe identity \
+             (alp-sdk#987) rather than from a real build. If \"{existing_value}\" was a value \
+             you filled in on purpose — e.g. a J-Link flash-unlock device profile more specific \
+             than the generic attach device the SDK publishes — restore it in \
+             .vscode/launch.json; a value tan itself resolves from a real build will overwrite \
+             it again the same way."
+        ),
+    }
+}
+
+/// alp-sdk#1026 review finding #4: emitted when the SDK DID publish a
+/// debug-probe identity for this project's SoC variant, but that identity
+/// does not (yet) include a value for `field` — distinct from, and more
+/// specific than, the generic "Placeholder fields..." note every unresolved
+/// field already gets regardless of why. Severity `info`: this is the
+/// schema's own documented stance (`soc-spec-v1.schema.json:379`) that an
+/// unpopulated key is a published "unknown", not an error and not a bug.
+fn sdk_identity_key_absent_issue(field: &str) -> Issue {
+    Issue {
+        code: "debug-config.sdk-identity-key-absent".to_string(),
+        severity: "info".to_string(),
+        message: format!(
+            "This SoM's SDK-published debug-probe identity (alp-sdk#987) does not include a \
+             value for `{field}` yet, so it stays the placeholder shown in `configuration` — an \
+             unpopulated key is the correct published \"unknown\" (alp-sdk#1026), never a guess."
+        ),
     }
 }
 
@@ -646,6 +749,19 @@ fn runner_id_for_server(server: DebugServerKind) -> Option<&'static str> {
     }
 }
 
+/// The launch-configuration JSON key the SDK's debug-probe identity
+/// (`variants[].debug`) resolves for a given server — `None` for a server the
+/// identity has no concept of at all (`gdbserver`/`none`, neither of which
+/// `create_launch_draft` ever pairs with a `variants[].debug` field).
+fn server_identity_field(server: DebugServerKind) -> Option<&'static str> {
+    match server {
+        DebugServerKind::Jlink => Some("device"),
+        DebugServerKind::Openocd => Some("configFiles"),
+        DebugServerKind::Pyocd => Some("targetId"),
+        DebugServerKind::Gdbserver | DebugServerKind::None => None,
+    }
+}
+
 /// Rewrite a path under `workspace_root` as `${workspaceFolder}/<rel>`, so a
 /// committed `launch.json` stays portable; an artefact outside the project
 /// (an out-of-tree build root) is left absolute rather than mangled.
@@ -793,13 +909,14 @@ fn resolve_from_build(
 /// built — the case `resolve_from_build`'s `runners.yaml` read structurally
 /// cannot cover.
 ///
-/// Reuses the SAME SoM-preset → SoC-JSON `variants[]` reader `tan size`
-/// already drives (`SocVariant` + `resolve_variant`, `tan_core::size`)
-/// instead of a second walk of `metadata/socs/**` — the exact drift #1026
-/// itself is about (a schema with no reader, then two readers that could
-/// disagree). Pure fill-the-gap logic is `fill_debug_probe_identity_gaps`
-/// (`tan_core::debug_launch`); everything here is the IO side: locating and
-/// reading `board.yaml`, the SoM preset, and the SoC-JSON file.
+/// Reuses the SAME metadata-layout walk `tan size` drives
+/// (`crate::util::read_sdk_som_and_soc`) instead of a second walk of
+/// `metadata/socs/**` — the exact drift #1026 itself is about (a schema with
+/// no reader, then two readers that could disagree). Pure fill-the-gap logic
+/// is `fill_debug_probe_identity_gaps` (`tan_core::debug_launch`); everything
+/// here is the IO side: locating `board.yaml`, reading `som.sku` out of it,
+/// then the shared SoM-preset/SoC-JSON read and (unlike `tan size`) a
+/// forward-only `resolve_variant` match.
 ///
 /// Best-effort throughout, exactly like `resolve_from_build`: a missing
 /// `board.yaml`/`som.sku`, no resolved SDK root, a missing/unreadable SoM
@@ -807,66 +924,55 @@ fn resolve_from_build(
 /// `debug` block each leave `resolution` exactly as it was — the caller's
 /// existing placeholder note still applies, and nothing here can fail the
 /// command.
+///
+/// Returns whether a `variants[].debug` block was actually found for the
+/// resolved SoC variant — distinct from whether every field this run wanted
+/// got filled from it. `run` uses this (alp-sdk#1026 review finding #4) to
+/// tell "the SDK publishes an identity for this part, but not a value for
+/// the specific field this server needs yet" (e.g. every Alif variant today,
+/// for `openocd_config`) apart from "no identity was resolvable at all" —
+/// only the former is worth a dedicated notice; the latter is already the
+/// generic "still needs resolution" note every unresolved field gets.
 fn fill_debug_probe_identity_from_sdk(
     resolution: &mut LaunchResolution,
     context: &ProjectContext,
     core_id: Option<&str>,
-) {
+) -> bool {
     let Some(board_yaml_path) = context.board_yaml_path.as_deref() else {
-        return;
+        return false;
     };
     let Ok(board_text) = std::fs::read_to_string(board_yaml_path) else {
-        return;
+        return false;
     };
     let Ok(model) = parse_board_model(&board_text) else {
-        return;
+        return false;
     };
     let Some(sku) = model.som.and_then(|som| som.sku) else {
-        return;
+        return false;
     };
     let Some(sdk_root) = context.sdk_root.as_deref() else {
-        return;
+        return false;
     };
     let metadata_root = Path::new(sdk_root).join("metadata");
 
-    let preset_path = metadata_root
-        .join("e1m_modules")
-        .join(format!("{sku}.yaml"));
-    let Ok(preset_text) = std::fs::read_to_string(&preset_path) else {
-        return;
-    };
-    let Ok(preset) = parse_som_preset(&preset_text) else {
-        return;
-    };
-    if preset.silicon.is_empty() {
-        return;
-    }
-    let parts: Vec<&str> = preset.silicon.split(':').collect();
-    if parts.len() != 3 {
-        return;
-    }
-    let soc_path = metadata_root
-        .join("socs")
-        .join(parts[0])
-        .join(parts[1])
-        .join(format!("{}.json", parts[2]));
-    let Ok(soc_text) = std::fs::read_to_string(&soc_path) else {
-        return;
-    };
-    let Ok(soc) = serde_json::from_str::<Value>(&soc_text) else {
-        return;
+    // Shared metadata-layout walk with `tan size` — see `read_sdk_som_and_soc`'s
+    // doc comment. `sku: None` here (unlike `tan size`) deliberately disables
+    // `resolve_variant`'s sku reverse-fallback: a drifted/`TBD` preset must
+    // resolve NO identity rather than possibly a WRONG one that still
+    // connects a live debug session to the wrong part (alp-sdk#1026 review
+    // finding #7) — a missing budget is a lesser harm than a wrong device.
+    let Some((preset, soc)) = crate::util::read_sdk_som_and_soc(&metadata_root, &sku) else {
+        return false;
     };
     let variants: Vec<SocVariant> = soc
         .get("variants")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-
-    let Some(variant) = resolve_variant(preset.silicon_variant.as_deref(), Some(&sku), &variants)
-    else {
-        return;
+    let Some(variant) = resolve_variant(preset.silicon_variant.as_deref(), None, &variants) else {
+        return false;
     };
     let Some(debug) = variant.debug.as_ref() else {
-        return;
+        return false;
     };
     fill_debug_probe_identity_gaps(
         resolution,
@@ -875,6 +981,7 @@ fn fill_debug_probe_identity_from_sdk(
         debug.pyocd_target.as_deref(),
         debug.openocd_config.as_deref(),
     );
+    true
 }
 
 /// Whether any `<…>` placeholder survived resolution, anywhere in the draft —
@@ -995,7 +1102,7 @@ mod tests {
     #[test]
     fn debug_config_resolves_device_and_target_id_from_sdk_metadata_pre_build() {
         let dir = tmp("sdk-metadata-fallback");
-        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN701\n").unwrap();
+        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN801\n").unwrap();
 
         let sdk = dir.join("sdk");
         std::fs::create_dir_all(sdk.join("scripts")).unwrap();
@@ -1003,8 +1110,8 @@ mod tests {
         let som_dir = sdk.join("metadata").join("e1m_modules");
         std::fs::create_dir_all(&som_dir).unwrap();
         std::fs::write(
-            som_dir.join("E1M-AEN701.yaml"),
-            "schema_version: 1\nsku: E1M-AEN701\nsilicon: alif:ensemble:e8\n\
+            som_dir.join("E1M-AEN801.yaml"),
+            "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n\
              silicon_variant: AE822FA0E5597LS0\n",
         )
         .unwrap();
@@ -1061,7 +1168,7 @@ mod tests {
     #[test]
     fn debug_config_resolves_pyocd_target_id_from_sdk_metadata_pre_build() {
         let dir = tmp("sdk-metadata-fallback-pyocd");
-        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN701\n").unwrap();
+        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN801\n").unwrap();
 
         let sdk = dir.join("sdk");
         std::fs::create_dir_all(sdk.join("scripts")).unwrap();
@@ -1069,8 +1176,8 @@ mod tests {
         let som_dir = sdk.join("metadata").join("e1m_modules");
         std::fs::create_dir_all(&som_dir).unwrap();
         std::fs::write(
-            som_dir.join("E1M-AEN701.yaml"),
-            "schema_version: 1\nsku: E1M-AEN701\nsilicon: alif:ensemble:e8\n\
+            som_dir.join("E1M-AEN801.yaml"),
+            "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n\
              silicon_variant: AE822FA0E5597LS0\n",
         )
         .unwrap();
@@ -1131,7 +1238,7 @@ mod tests {
     #[test]
     fn debug_config_openocd_config_files_stays_the_placeholder_when_the_sdk_publishes_none() {
         let dir = tmp("sdk-metadata-fallback-openocd");
-        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN701\n").unwrap();
+        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN801\n").unwrap();
 
         let sdk = dir.join("sdk");
         std::fs::create_dir_all(sdk.join("scripts")).unwrap();
@@ -1139,8 +1246,8 @@ mod tests {
         let som_dir = sdk.join("metadata").join("e1m_modules");
         std::fs::create_dir_all(&som_dir).unwrap();
         std::fs::write(
-            som_dir.join("E1M-AEN701.yaml"),
-            "schema_version: 1\nsku: E1M-AEN701\nsilicon: alif:ensemble:e8\n\
+            som_dir.join("E1M-AEN801.yaml"),
+            "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n\
              silicon_variant: AE822FA0E5597LS0\n",
         )
         .unwrap();
@@ -1200,6 +1307,202 @@ mod tests {
             "the placeholder note must still be present: {}",
             json["data"]["notes"]
         );
+        // alp-sdk#1026 review finding #4: the generic note above names
+        // `device`, which this OpenOCD draft does not even carry -- the
+        // specific, correctly-worded signal is this issue, present even on
+        // `--preview` since it is advisory about resolution state, not about
+        // a write.
+        let issues = json["issues"].as_array().expect("issues array");
+        assert!(
+            issues
+                .iter()
+                .any(|i| i["code"] == "debug-config.sdk-identity-key-absent"
+                    && i["message"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("configFiles")),
+            "expected a sdk-identity-key-absent issue naming configFiles: {issues:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// alp-sdk#1026 review finding #1 (data loss): a WRITE, not a preview —
+    /// every one of the three tests above only ever exercised `--preview`,
+    /// so the write path with this fallback had zero coverage. A customer's
+    /// `.vscode/launch.json` already holds a concrete, hand-filled `device`
+    /// (here, the more-specific `jlink_flash_device`-style profile a
+    /// customer might reasonably have copied in); the SDK's generic
+    /// `jlink_device` identity resolves and REPLACES it, same as a real
+    /// build's resolution always has — but this run must disclose that in
+    /// `issues[]`, not report `ok: true` / `issues: []` as if nothing
+    /// happened.
+    #[test]
+    fn debug_config_write_discloses_when_sdk_identity_overwrites_a_hand_filled_device() {
+        let dir = tmp("sdk-metadata-overwrite-disclosure");
+        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN801\n").unwrap();
+
+        let vscode_dir = dir.join(".vscode");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("launch.json"),
+            r#"{
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Zephyr Debug (J-Link)",
+                        "type": "cortex-debug",
+                        "request": "launch",
+                        "servertype": "jlink",
+                        "device": "AE822FA0E5597LS0_M55_HE"
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let sdk = dir.join("sdk");
+        std::fs::create_dir_all(sdk.join("scripts")).unwrap();
+        std::fs::write(sdk.join("scripts").join("alp_project.py"), "").unwrap();
+        let som_dir = sdk.join("metadata").join("e1m_modules");
+        std::fs::create_dir_all(&som_dir).unwrap();
+        std::fs::write(
+            som_dir.join("E1M-AEN801.yaml"),
+            "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n\
+             silicon_variant: AE822FA0E5597LS0\n",
+        )
+        .unwrap();
+        let soc_dir = sdk
+            .join("metadata")
+            .join("socs")
+            .join("alif")
+            .join("ensemble");
+        std::fs::create_dir_all(&soc_dir).unwrap();
+        std::fs::write(
+            soc_dir.join("e8.json"),
+            r#"{
+                "soc_spec_version": 1,
+                "ref": "alif:ensemble:e8",
+                "vendor": "Alif Semiconductor",
+                "family": "Ensemble",
+                "part": "E8",
+                "variants": [
+                    {
+                        "order_code": "AE822FA0E5597LS0",
+                        "debug": {
+                            "pyocd_target": "AE822FA0E5597LS0",
+                            "jlink_device": {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut g = global(&dir);
+        g.sdk_root = Some(sdk.to_string_lossy().into_owned());
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: Some("m55_hp".to_string()),
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            svd: None,
+            preview: false,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let json: serde_json::Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+
+        // The overwrite happened (matches a real build's own resolution
+        // behaviour — unchanged by this PR).
+        assert_eq!(json["data"]["configuration"]["device"], "Cortex-M55");
+        let on_disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(vscode_dir.join("launch.json")).unwrap())
+                .unwrap();
+        assert_eq!(on_disk["configurations"][0]["device"], "Cortex-M55");
+
+        // …and it was DISCLOSED, not silent.
+        let issues = json["issues"].as_array().expect("issues array");
+        let overwrite_issue = issues
+            .iter()
+            .find(|i| i["code"] == "debug-config.sdk-identity-overwrite")
+            .unwrap_or_else(|| panic!("no overwrite issue in {issues:?}"));
+        assert_eq!(overwrite_issue["severity"], "info");
+        let message = overwrite_issue["message"].as_str().unwrap();
+        assert!(message.contains("AE822FA0E5597LS0_M55_HE"), "{message}");
+        assert!(message.contains("Cortex-M55"), "{message}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// alp-sdk#1026 review finding #3: `jlink_device` is keyed BY core id, so
+    /// on a project that has never been built AND passes no `--core`,
+    /// `identity_core` is `None` and `device` must stay the placeholder —
+    /// there is no core to index the map with, and no "only entry" guess.
+    /// `targetId` (pyOCD) is the opposite case, already covered by
+    /// `debug_config_resolves_pyocd_target_id_from_sdk_metadata_pre_build`
+    /// above (a scalar, needs no core at all).
+    #[test]
+    fn debug_config_jlink_device_stays_the_placeholder_with_no_core_and_no_build() {
+        let dir = tmp("sdk-metadata-fallback-no-core-jlink");
+        std::fs::write(dir.join("board.yaml"), "som:\n  sku: E1M-AEN801\n").unwrap();
+
+        let sdk = dir.join("sdk");
+        std::fs::create_dir_all(sdk.join("scripts")).unwrap();
+        std::fs::write(sdk.join("scripts").join("alp_project.py"), "").unwrap();
+        let som_dir = sdk.join("metadata").join("e1m_modules");
+        std::fs::create_dir_all(&som_dir).unwrap();
+        std::fs::write(
+            som_dir.join("E1M-AEN801.yaml"),
+            "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n\
+             silicon_variant: AE822FA0E5597LS0\n",
+        )
+        .unwrap();
+        let soc_dir = sdk
+            .join("metadata")
+            .join("socs")
+            .join("alif")
+            .join("ensemble");
+        std::fs::create_dir_all(&soc_dir).unwrap();
+        std::fs::write(
+            soc_dir.join("e8.json"),
+            r#"{
+                "soc_spec_version": 1,
+                "ref": "alif:ensemble:e8",
+                "vendor": "Alif Semiconductor",
+                "family": "Ensemble",
+                "part": "E8",
+                "variants": [
+                    {
+                        "order_code": "AE822FA0E5597LS0",
+                        "debug": {
+                            "pyocd_target": "AE822FA0E5597LS0",
+                            "jlink_device": {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+                        }
+                    }
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut g = global(&dir);
+        g.sdk_root = Some(sdk.to_string_lossy().into_owned());
+        g.format = Format::Json;
+        let args = DebugConfigArgs {
+            core: None, // no --core, and no build ever ran either.
+            target_kind: Some("zephyr-mcu".to_string()),
+            server: Some("jlink".to_string()),
+            pre_launch_task: None,
+            svd: None,
+            preview: true,
+        };
+        let run_result = run(&g, &args);
+        assert_eq!(run_result.exit, ExitCode::Success);
+        let json: serde_json::Value =
+            serde_json::from_str(&run_result.json.expect("json envelope")).unwrap();
+        assert_eq!(json["data"]["configuration"]["device"], "<resolved-device>");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

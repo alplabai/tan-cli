@@ -351,6 +351,101 @@ pub fn apply_launch_resolution(draft: &mut Value, resolution: &LaunchResolution)
     }
 }
 
+/// Whether writing `draft` (already `apply_launch_resolution`d) over
+/// `existing_content` would REPLACE an already-concrete value on any of
+/// `filled_fields` — the exact launch-configuration JSON keys a caller's own
+/// resolution just populated from a source that is not a real build.
+///
+/// alp-sdk#1026 review finding #1: [`merge_value`]'s only protection against
+/// clobbering a customer's hand-filled value is that the INCOMING value is
+/// unresolved (a `<…>` placeholder) — by design, since a value resolved from
+/// a real build is supposed to overwrite unconditionally (see
+/// [`merge_configuration`]'s doc comment). The SDK's published debug-probe
+/// identity (alp-sdk#987) resolves a device/target id/config PRE-build, so
+/// its values are never placeholders either — reaching that same
+/// unconditional-overwrite branch for a source with materially less
+/// confidence than an actual build, silently. This function does not change
+/// that overwrite (a customer's real, in-repo launch.json is still allowed to
+/// go stale the same way it always could against a real build), it only lets
+/// the caller SAY so, the same way [`LaunchJsonWritePlan::comments_dropped`]
+/// discloses a lossy write instead of hiding it behind `ok: true`.
+///
+/// Returns `(field, existing, incoming)` for each field this write is about
+/// to change from a concrete existing value to a DIFFERENT concrete one;
+/// empty when nothing concrete would be lost (no matching entry, the existing
+/// field is itself unresolved/absent, or the two values already agree).
+/// Matches the SAME entry [`create_launch_json_write_plan`] would merge into
+/// (current name, else its legacy counterpart) so this can never flag a field
+/// on an unrelated configuration.
+pub fn sdk_identity_overwrites(
+    existing_content: Option<&str>,
+    draft: &Value,
+    filled_fields: &[&str],
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    if filled_fields.is_empty() {
+        return out;
+    }
+    let Ok(name) = configuration_name(draft) else {
+        return out;
+    };
+    let Ok(document) = parse_launch_json_or_default(existing_content) else {
+        return out;
+    };
+    let Some(configs) = document.get("configurations").and_then(Value::as_array) else {
+        return out;
+    };
+    let existing_entry = configs
+        .iter()
+        .find(|c| c.get("name").and_then(Value::as_str) == Some(name))
+        .or_else(|| {
+            legacy_name(name).and_then(|legacy| {
+                configs
+                    .iter()
+                    .find(|c| c.get("name").and_then(Value::as_str) == Some(legacy.as_str()))
+            })
+        });
+    let Some(existing_entry) = existing_entry else {
+        return out;
+    };
+    for &field in filled_fields {
+        let (Some(existing_val), Some(incoming_val)) =
+            (existing_entry.get(field), draft.get(field))
+        else {
+            continue;
+        };
+        if value_is_concrete(existing_val) && existing_val != incoming_val {
+            out.push((
+                field.to_string(),
+                display_value(existing_val),
+                display_value(incoming_val),
+            ));
+        }
+    }
+    out
+}
+
+/// Whether `value` is a real, non-placeholder value a customer could have
+/// hand-filled — mirrors the exact condition [`merge_value`] treats as worth
+/// protecting (a string that isn't a `<…>` token; an array that isn't empty
+/// and isn't entirely placeholders).
+fn value_is_concrete(value: &Value) -> bool {
+    match value {
+        Value::String(s) => !is_unresolved_placeholder(s),
+        Value::Array(items) => !items.is_empty() && !items.iter().all(is_unresolved),
+        _ => false,
+    }
+}
+
+/// Render a JSON value for an issue message: a string unquoted, anything else
+/// (an array, for `configFiles`) via its normal JSON rendering.
+fn display_value(value: &Value) -> String {
+    match value {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
 /// The static advisory notes attached to a launch preview (TS `createLaunchPreview`).
 pub fn launch_preview_notes() -> Vec<String> {
     vec![
