@@ -3,6 +3,40 @@
 
 ## [Unreleased]
 
+### Changed
+- **The planner relocated into `tan`, so `tan` now plans AND executes.**
+  alp-sdk's `scripts/alp_orchestrate/` (20 modules, ~6.2k lines) is now
+  `python/tan/planner/`, and `tan build` renders the build plan **in-process**
+  instead of shelling
+  `PYTHONPATH=<sdk>/scripts python -m alp_orchestrate --emit build-plan`. That
+  drops the requirement for an interpreter named `python`/`python3` on PATH
+  carrying PyYAML and jsonschema — the frozen binary's single most likely
+  first-run failure. The subprocess call survives as a fallback for exactly one
+  case: a build of `tan` that cannot import its own planner (no `jsonschema`),
+  against an SDK that still ships `alp_orchestrate`.
+
+  This is a MOVE, not a rewrite — the accumulated silicon behaviour (carve-out
+  top-down allocation, FNV-1a endpoint ids, partition bottom-up allocation,
+  per-core OS derivation from Cortex class, Kconfig section order) is precisely
+  what must not be re-derived. `tests/parity/test_planner_emit_parity.py`
+  imports both planners into one process and asserts byte-identical output for
+  every mode over every `board.yaml` in the SDK's `examples/`; it skips, loudly,
+  without an `ALP_SDK_ROOT` naming a checkout that still carries the original.
+
+  **`metadata/**` did not move and must not** (ADR-0017): the generators
+  relocated, the facts did not. The fact readers stayed too —
+  `alp_project_loader`, `alp_project_emit`, `alp_registries` and
+  `alp_cli.validator` are still imported from `<sdk_root>/scripts`, and
+  `scripts/alp_project.py` remains tan's canonical SDK-root marker. What
+  replaced `paths.py`'s walk-up-from-`__file__` derivation is an explicit
+  binding (`tan/planner_root.py`): every `metadata/**` path is a function of the
+  resolved `sdk_root`, and importing the planner before a root is bound raises
+  instead of silently reading the wrong tree.
+- `jsonschema` is now the fourth runtime dependency. It arrived with the
+  planner, which validates every `board.yaml` against
+  `metadata/schemas/board.schema.json` before it plans anything. The frozen
+  one-file binary measures 12377580 B against the 15000000 B ceiling.
+
 ### Added
 - **A CI job that actually runs the commands a customer types.** Until now NO
   workflow in either repo ran `tan bootstrap`, `tan init` or `tan build` --

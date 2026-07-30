@@ -1033,11 +1033,11 @@ def select_flash_method(target: FlashTarget) -> str | None:
     those arriving at all IS metadata's statement that this silicon has a J-Link
     MRAM loader.
 
-    Consequence, stated plainly: with today's alp-sdk emit
-    (`alp_orchestrate/orchestrator.py::_slice_flash_recipe` returns
+    Consequence, stated plainly: with today's emit
+    (`tan/planner/orchestrator.py::_slice_flash_recipe` returns
     `("zephyr_west_flash", {})` for every Zephyr slice) NO entry carries those
-    keys, so every AEN slice still takes Flow A. Arming Flow D is a one-function
-    change on the alp-sdk side; it is deliberately NOT emulated here by
+    keys, so every AEN slice still takes Flow A. Arming Flow D is now a
+    one-function change in THIS repo; it is deliberately NOT emulated here by
     sniffing the SKU.
     """
     method = target.flash_method or None

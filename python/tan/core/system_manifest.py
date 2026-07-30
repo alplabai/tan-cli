@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The ALP **system manifest** (`build/system-manifest.yaml`) -- the derived
-projection of a `board.yaml` that alp-sdk's `alp_orchestrate --emit
-system-manifest` writes, and the tool CONTRACT for a (possibly multi-image)
-project. `tan image` and `tan size` both read THIS instead of re-deriving
+projection of a `board.yaml` that `--emit system-manifest` writes
+(`tan/planner/manifest.py`, relocated from alp-sdk's `alp_orchestrate`), and the
+tool CONTRACT for a (possibly multi-image) project. `tan image` and `tan size` both read THIS instead of re-deriving
 anything from `board.yaml` + the SoM presets.
 
 Port of `crates/tan-core/src/system_manifest.rs` (read half) plus the two

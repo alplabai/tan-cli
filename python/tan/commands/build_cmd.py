@@ -2,7 +2,7 @@
 """`tan build` -- the one command that turns a build plan into firmware.
 
 Composition, not logic: this module resolves the project, ACQUIRES a plan
-(from `--plan-from`, else by invoking the SDK planner), then hands it in turn
+(from `--plan-from`, else by running the planner in-process), then hands it in turn
 to the four sub-project-1 libraries -- `parse_build_plan`,
 `apply_plan_token_substitution`, `materialise_plan`, `execute_slices` -- and
 folds the result into one envelope. Every decision those modules own stays
@@ -27,7 +27,7 @@ stray byte and it renders nothing, with no error on either side.
 
 **The OS is not an option (I-01/I-02).** There is deliberately no `--os` and
 no `--backend` flag. A core's runtime is derived from its Cortex class by the
-planner (`scripts/alp_orchestrate/topology.py`), and `slices[].backend`
+planner (`tan/planner/topology.py`), and `slices[].backend`
 arrives already resolved. Nor does this command filter the plan's slices: a
 one-core `board.yaml` legitimately plans three (I-04), and "helpfully"
 dropping the ones the customer did not name is how a Yocto slice silently
@@ -166,22 +166,25 @@ def _planner_python() -> str:
 
 
 def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
-    """Ask the SDK for the plan: `<python> -m alp_orchestrate --input
-    <board.yaml> --emit build-plan`, with `<sdk>/scripts` prepended to
-    PYTHONPATH.
+    """Plan `board_yaml` against the SDK at `sdk_root`.
 
-    Module invocation (`-m alp_orchestrate`), not a script path: that resolves
-    both the package layout (`scripts/alp_orchestrate/`) and the legacy flat
-    `scripts/alp_orchestrate.py`, so the CLI works against any SDK release.
-    And the planner's own flag is `--input`; `--board-yaml` is tan's spelling
-    of the same fact and is not accepted there.
+    IN-PROCESS since the planner relocated here (`tan.planner`, was alp-sdk's
+    `scripts/alp_orchestrate/`): no interpreter on PATH, no PYTHONPATH, no
+    process. `tan.planner_root.emit` binds the SDK root -- which is where
+    `metadata/**` and the fact-reader modules still live (ADR-0017) -- and
+    renders through the same `emit_artefact` dispatch `python -m tan.planner`
+    uses.
+
+    The old `<python> -m alp_orchestrate --emit build-plan` subprocess survives
+    as the fallback for exactly one case: this build of `tan` cannot import the
+    planner (a source checkout without `jsonschema`, or a frozen binary built
+    without it). An SDK that still ships `alp_orchestrate` then plans as before.
     """
     if sdk_root is None:
         raise BuildError(
             "build.plan-unavailable",
             "no alp-sdk checkout found -- pass `--sdk-root <PATH>` or run from a project "
-            "beside one. The build-plan comes from the SDK's `alp_orchestrate --emit "
-            "build-plan`.",
+            "beside one. Planning reads the SDK's `metadata/**`.",
             ExitCode.RUNTIME_FAILURE,
         )
     if board_yaml is None:
@@ -190,6 +193,67 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
             "no board.yaml found -- pass `--board-yaml <PATH>` or run from a project.",
             ExitCode.RUNTIME_FAILURE,
         )
+    # `--sdk-root` is terminal and returned as-is even when wrong (I-31), so the
+    # first thing planning reads is checked here rather than surfacing as a
+    # loader stack trace. The board schema, not the planner: the planner is ours
+    # now, and requiring the SDK to still carry `alp_orchestrate` would refuse
+    # precisely the releases this relocation exists to enable.
+    if not (Path(sdk_root) / "metadata" / "schemas" / "board.schema.json").is_file():
+        raise BuildError(
+            "build.plan-unavailable",
+            f"the SDK at `{sdk_root}` has no `metadata/schemas/board.schema.json` -- "
+            f"that path is not an alp-sdk checkout, or the checkout is incomplete.",
+            ExitCode.RUNTIME_FAILURE,
+        )
+
+    try:
+        from tan.planner_root import emit as _plan_emit
+    except ImportError:  # pragma: no cover -- planner absent from this build
+        return _emit_plan_subprocess(sdk_root, board_yaml)
+    try:
+        return _plan_emit("build-plan", root=sdk_root, board_yaml=Path(board_yaml))
+    except ImportError as err:
+        # A planner dependency (`jsonschema`, `PyYAML`) is missing from THIS
+        # build. The SDK may still ship its own planner; try that before failing.
+        try:
+            return _emit_plan_subprocess(sdk_root, board_yaml)
+        except BuildError:
+            raise BuildError(
+                "build.plan-unavailable",
+                f"the planner could not be imported ({err}) and the SDK at "
+                f"`{sdk_root}` has no `alp_orchestrate` fallback under scripts/.",
+                ExitCode.RUNTIME_FAILURE,
+            ) from err
+    except SystemExit as err:
+        # `tan.planner.loader` / `kconfig_symbols` call `sys.exit()` on a missing
+        # dependency or an unbootstrapped Zephyr workspace. In a subprocess that
+        # was a non-zero rc; in-process it would tear down the whole CLI past
+        # every envelope guarantee.
+        raise BuildError(
+            "build.plan-unavailable",
+            f"the build-plan emit exited early (code {err.code}).",
+            ExitCode.RUNTIME_FAILURE,
+        ) from err
+    except Exception as err:
+        # Every planner failure is an envelope, never a traceback -- the same
+        # thing the subprocess boundary used to buy for free. Includes the bare
+        # `ValueError`s the Ethos-U sizing path still raises (I-48).
+        raise BuildError(
+            "build.plan-unavailable",
+            f"the build-plan emit failed: {type(err).__name__}: {err}",
+            ExitCode.RUNTIME_FAILURE,
+        ) from err
+
+
+def _emit_plan_subprocess(sdk_root: str, board_yaml: str) -> str:
+    """Fallback: `<python> -m alp_orchestrate --emit build-plan` in the SDK.
+
+    Module invocation (`-m alp_orchestrate`), not a script path: that resolves
+    both the package layout (`scripts/alp_orchestrate/`) and the legacy flat
+    `scripts/alp_orchestrate.py`, so it works against any SDK release that has
+    one. And the planner's own flag is `--input`; `--board-yaml` is tan's
+    spelling of the same fact and is not accepted there.
+    """
     scripts = Path(sdk_root) / "scripts"
     if not (
         (scripts / "alp_orchestrate.py").is_file()

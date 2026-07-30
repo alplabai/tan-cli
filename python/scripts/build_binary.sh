@@ -19,8 +19,16 @@
 # inside (alp-sdk-vscode/src/alpCli/vscodeAdapter.ts:288-290).
 #
 #   python -m venv .venv-build
-#   .venv-build/bin/pip install typer rich pyyaml "pyinstaller>=6.10"
+#   .venv-build/bin/pip install typer rich pyyaml jsonschema "pyinstaller>=6.10"
 #   PYTHON=.venv-build/bin/python scripts/build_binary.sh
+#
+# `jsonschema` is in that list because the PLANNER relocated in (`tan/planner/`,
+# was alp-sdk `scripts/alp_orchestrate/`) and validates every board.yaml against
+# `metadata/schemas/board.schema.json`. It costs ~2.1 MB frozen: measured
+# 12377580 B against the 15000000 B ceiling below, so the headroom is now ~2.6 MB
+# where it was ~4.8 MB. A frozen build that omits it still runs -- `tan build`
+# falls back to the SDK's own `-m alp_orchestrate` subprocess and, failing that,
+# reports a coded `build.plan-unavailable` -- but no release should ship so.
 #
 # The artifact is named `tan` / `tan.exe` here. Release assets carry the Rust
 # target triple the extension already hardcodes (service.ts:34-46) -- rename on
