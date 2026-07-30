@@ -11,6 +11,18 @@ on:
   # Called by release.yml so a tag cannot publish binaries the gates never ran
   # against. Keep this the single definition of the gate set.
   workflow_call:
+    inputs:
+      sdk_parity:
+        description: >
+          Also run the python tests that need an alp-sdk checkout (planner
+          byte-parity and the planner-binding suite). They SKIP without one --
+          282 of 1163 tests, measured -- so a bare run is green while the
+          port's most valuable comparison never executes. Off for PRs because
+          the parity family shells the SDK orchestrator per example and takes
+          minutes; release.yml passes true, where a tag is rare and the minutes
+          are the cheapest insurance in the pipeline.
+        type: boolean
+        default: false
 
 # A newer push to a PR supersedes the run in flight. Never cancel a push-to-main
 # run: a rapid second merge would leave the first commit with no CI status.
@@ -58,6 +70,60 @@ jobs:
         run: cargo build --all-targets --locked
       - name: test
         run: cargo test --locked
+
+  # The PYTHON package is what the 0.5.0 release assets are frozen from, and
+  # until this job existed NOTHING in CI ran it: release.yml's `gates` job calls
+  # this workflow, so a tag published a PyInstaller freeze of code no CI step had
+  # ever imported, let alone tested. The cargo jobs above cannot see it -- they
+  # compile a different language in a different directory.
+  #
+  # Zero failures is the gate, not a count. The suite is still growing as ports
+  # land (~1149 passed / 81 skipped / 4 xfailed at the time of writing), and
+  # pytest's exit status already means exactly "nothing failed" -- skips and
+  # xfails are green. Pinning a number would turn every landed port into a red
+  # build.
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # pyproject's requires-python floor
+      # `pip install -e ./python` and NOT a hand-listed dependency set: this job
+      # must fail when the DECLARED dependencies are wrong, which is the defect
+      # that shipped (`tan/cli.py` imports `click.testing`, typer stopped
+      # depending on click, and a clean install therefore died at import while
+      # every developer machine passed). Installing the package resolves exactly
+      # what a customer's `pip install alp-tan` resolves. Extras stay out: the
+      # `monitor` extra is optional at runtime by definition, and installing it
+      # here would hide a module-scope `import serial` from the gate below.
+      - name: install the declared package
+        run: pip install -e ./python
+      - name: install the test runner
+        run: pip install pytest
+      # Public repo, so the default token is enough. Only on the release path:
+      # see the `sdk_parity` input for why PRs skip it.
+      - uses: actions/checkout@v4
+        if: ${{ inputs.sdk_parity }}
+        with:
+          repository: alplabai/alp-sdk
+          path: alp-sdk
+      - name: enable the SDK-dependent tests
+        if: ${{ inputs.sdk_parity }}
+        run: echo "ALP_SDK_ROOT=$PWD/alp-sdk" >> "$GITHUB_ENV"
+      # The three files that carry a version must agree BEFORE a tag exists,
+      # not at tag time -- a mismatch found by release.yml costs a re-tag.
+      - name: versions agree
+        run: python python/scripts/version_check.py --selftest --self
+      # `tests/gates/test_declared_dependencies.py` is the one that makes a
+      # broken `pip install` fail CI instead of failing a customer, and
+      # `tests/conformance/test_packaged_binary.py` mirrors the frozen
+      # artifact's size ceiling. Both are inside `python/tests`, so the whole
+      # suite is the selection -- named here so a future narrowing cannot drop
+      # them silently.
+      - name: pytest
+        working-directory: python
+        run: python -m pytest tests -q
 
   # `rust-version` in Cargo.toml is a promise to anyone building from source;
   # a dependency bump can silently break it. Check, don't hope.

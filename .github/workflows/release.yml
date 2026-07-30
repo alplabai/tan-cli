@@ -60,37 +60,53 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: tag == Cargo version
+      # THE SOURCE OF TRUTH IS `python/tan/version.py`'s `TAN_VERSION` — the
+      # string the shipped binary PRINTS, and the one alp-sdk-vscode compares
+      # against its SUPPORTED_CLI_VERSION. This step used to gate the tag on
+      # `grep -m1 '^version = ' Cargo.toml`, which versions the RUST crates: with
+      # the release assets now frozen from the Python package, that made a
+      # correct `v0.5.0` tag fail before a single asset was built (Cargo.toml
+      # said 0.4.1-dev while tan/version.py and pyproject.toml both said 0.5.0).
+      #
+      # A python script, not a grep, because two of the three files spell the
+      # same version differently: SemVer `0.5.0-dev` vs PEP 440 `0.5.0.dev0`. A
+      # string compare across that boundary is either a false failure or, worse,
+      # a false pass on a version nobody agreed to. The mapping is explicit and
+      # has its own `--selftest`. It keeps the npm-shim check the old step
+      # carried, because postinstall.js derives the asset tag as
+      # `TAG = v${pkg.version}` (npm-shim/postinstall.js:25) and the shim was six
+      # releases stale before that check existed.
+      #
+      # No `pip install` before it: the script imports only the stdlib, so this
+      # gate cannot fail for a reason unrelated to versions.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: tag == TAN_VERSION == pyproject == npm-shim
         shell: bash
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
-          echo "tag=$tag  cargo=$cargo_version"
-          if [ "$tag" != "$cargo_version" ]; then
-            echo "::error::tag v$tag does not match [workspace.package] version $cargo_version in Cargo.toml"
-            exit 1
-          fi
-      # #A1: npm-shim/package.json's version drives the ASSET TAG postinstall.js
-      # downloads (`TAG = v${pkg.version}`) — independently of everything above,
-      # so it can drift behind Cargo.toml/the release tag with nothing here
-      # catching it (npm-shim was six releases stale before this check existed).
-      # Same style as the check above deliberately: grep the one version line
-      # rather than parse the JSON with a tool this job doesn't otherwise need.
-      - name: npm-shim version == Cargo version
-        shell: bash
-        run: |
-          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
-          shim_version="$(grep -m1 '"version":' npm-shim/package.json | sed -E 's/.*"version": *"([^"]+)".*/\1/')"
-          echo "cargo=$cargo_version  npm-shim=$shim_version"
-          if [ "$shim_version" != "$cargo_version" ]; then
-            echo "::error::npm-shim/package.json version $shim_version does not match [workspace.package] version $cargo_version in Cargo.toml"
-            exit 1
-          fi
+        run: python python/scripts/version_check.py --selftest --tag "$GITHUB_REF_NAME"
 
   # The tagged commit must pass the same gates a PR does — a tag can be cut from
   # any commit, so "it was green on main" is an assumption, not a fact.
   gates:
     uses: ./.github/workflows/ci.yml
+    # `sdk_parity: true` is what SHOULD be here, and is deliberately not, yet.
+    #
+    # Off, the python suite is green having skipped 282 of 1163 tests -- every
+    # planner byte-parity case among them, which is the comparison that says the
+    # port still emits what the SDK does. On, measured against public alp-sdk
+    # main (v0.14.0, ef79eab): `25 failed, 1622 passed, 209 skipped`. The failures
+    # are one real divergence, not a flake or a line-ending artefact:
+    # `--emit system-manifest` from `tan/planner/manifest.py:93,118` writes
+    # `firmware_path: null` unconditionally, while alp-sdk's
+    # `scripts/alp_orchestrate/manifest.py:92-93` emits the key only when it is
+    # not None (its own comment: "`firmware_path` is entirely ABSENT from ...").
+    #
+    # So turning it on today would make every tag red for a defect a tag cannot
+    # fix. Flip it to `sdk_parity: true` once that divergence is closed -- a gate
+    # that cannot go green is not a gate, and one that is on-but-ignored is worse.
+    with:
+      sdk_parity: false
     # A called workflow inherits the caller's permissions; the gates compile
     # third-party deps and need no write on the release.
     permissions:
@@ -340,6 +356,35 @@ jobs:
           toolchain: stable
           rustflags: "" # keep parity with the local gates (see ci.yml's lint job)
 
+      # `verify-version` no longer gates the tag on Cargo.toml -- the release
+      # assets are frozen from the Python package and `TAN_VERSION` is the source
+      # of truth -- so a v0.5.0 tag now REACHES this job with Cargo.toml still on
+      # its own 0.4.x cadence. Publishing then would put `alp-tan-cli@0.4.1-dev`
+      # on crates.io while the summary below claimed `alp-tan-cli@0.5.0`, and a
+      # crates.io publish is unretractable (yank hides it from resolution; it
+      # never disappears). So: a tag is a RUST release only when Cargo.toml says
+      # it is.
+      #
+      # Skipping is announced in the run summary, not just as an annotation --
+      # #151 is the proof that an annotation alone reads as a publish.
+      - name: Is this tag a Rust release?
+        id: rust
+        shell: bash
+        run: |
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          tag="${GITHUB_REF_NAME#v}"
+          echo "cargo=$cargo_version  tag=$tag"
+          if [ "$cargo_version" = "$tag" ]; then
+            echo "match=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "match=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### crates.io: NOT PUBLISHED — this tag is not a Rust release"
+              echo "\`Cargo.toml\` is \`$cargo_version\`, the tag is \`v$tag\`, and the release assets are PyInstaller freezes of \`python/\`. There is no crate at \`$tag\` to publish; \`pip install alp-tan\` is the source-install path for this release. Bump \`Cargo.toml\` and re-tag if a Rust release was intended."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::skipping crates.io: Cargo.toml $cargo_version != tag $tag (python-sourced release)"
+          fi
+
       # This job ONLY runs on a final tag -- the `if:` above excludes every
       # pre-release -- so a missing token here is not "an optional channel we
       # skipped", it is a release advertising `cargo install alp-tan-cli` when
@@ -347,7 +392,7 @@ jobs:
       # reported `success`, the `::warning::` went unread, and crates.io
       # answered `crate 'alp-tan-cli' does not exist` (#151).
       - name: Refuse to "publish" with no token
-        if: ${{ env.CARGO_REGISTRY_TOKEN == '' }}
+        if: ${{ steps.rust.outputs.match == 'true' && env.CARGO_REGISTRY_TOKEN == '' }}
         run: |
           echo "### crates.io: NOT PUBLISHED" >> "$GITHUB_STEP_SUMMARY"
           echo "\`CARGO_REGISTRY_TOKEN\` is not set, so \`cargo install alp-tan-cli\` will not resolve for this release." >> "$GITHUB_STEP_SUMMARY"
@@ -355,6 +400,7 @@ jobs:
           exit 1
 
       - name: Publish tan-core then alp-tan-cli
+        if: ${{ steps.rust.outputs.match == 'true' }}
         # tan-core first; cargo publish waits for it to hit the index before
         # alp-tan-cli (which depends on it) is published.
         run: |
@@ -365,6 +411,7 @@ jobs:
       # signal GitHub has and #151 is the proof: the skip warning was emitted
       # correctly on v0.4.0 and still read as a publish.
       - name: Record the crates.io outcome
+        if: ${{ steps.rust.outputs.match == 'true' }}
         run: |
           echo "### crates.io: published \`alp-tan-cli@${GITHUB_REF_NAME#v}\`" >> "$GITHUB_STEP_SUMMARY"
 

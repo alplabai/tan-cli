@@ -42,7 +42,12 @@ function resolveTarget() {
   if (!target) {
     throw new Error(
       `@alplabai/tan: no prebuilt binary for ${key}. Supported: ${Object.keys(targets).join(", ")}. ` +
-        `Build from source: cargo install alp-tan-cli --locked (see https://github.com/${REPO}).`,
+        // `pip install alp-tan`, NOT `cargo install`: from 0.5.0 the released
+        // binaries are PyInstaller freezes of the Python package (`alp-tan` on
+        // PyPI), so there is no crate at this version to build from source. The
+        // pip path needs no prebuilt asset for this platform at all -- it is the
+        // real answer for a host the eight-asset matrix does not cover.
+        `Install from PyPI instead: pip install alp-tan (needs Python 3.12+; see https://github.com/${REPO}).`,
     );
   }
   return target;

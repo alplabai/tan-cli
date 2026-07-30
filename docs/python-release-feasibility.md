@@ -1,13 +1,58 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Can the Python `tan` ship as the eight release assets?
 
-**Yes, with three blockers first.** Five of the eight assets were built AND
-verified on this machine; the other three (ARM Windows, both macOS) need a host
-this machine does not have — PyInstaller cannot cross-compile — but their runner
-labels and their PyInstaller wheels both exist. One blocker (§3.1) breaks
-`pip install` too, so it is not a freezing problem, and one (§3.2) **already
-fails**: the aarch64 musl asset builds and works but the repo's own size gate
-rejects it.
+**Yes.** Five of the eight assets were built AND verified on this machine; the
+other three (ARM Windows, both macOS) need a host this machine does not have —
+PyInstaller cannot cross-compile — but their runner labels and their PyInstaller
+wheels both exist, so each needs one CI run. All four blockers below are closed;
+§0 records how, and what still has to come from the maintainer.
+
+## 0. Blocker status
+
+| # | Blocker | State | Proof |
+|---|---|---|---|
+| 1 | `click` undeclared | **closed** by `f55c9b8` (declares `click>=8.1`, moves `pyserial` to a `monitor` extra, adds `tests/gates/test_declared_dependencies.py`) | rebuilt from the declared set: 13517584 B, 4/4 proofs, no `ModuleNotFoundError` |
+| 1b | `[project.optional-dependencies]` was inserted **above** `classifiers` in `python/pyproject.toml`, so `classifiers` became an extras group | **OPEN — maintainer's file.** Breaks every install, including the `pip install -e .` that blocker 1 exists to protect | `configuration error: 'project.optional-dependencies.classifiers[0]' must be pep508` |
+| 2 | size gate rejected a correct build, and a pipe defeated it | **closed** | ceilings now live once in `python/scripts/artifact_ceilings.env`; over-ceiling artifacts are quarantined so `cp` fails even when the pipe swallows the status |
+| 3 | four version sources disagreed | **closed** | `python/scripts/version_check.py` + `release.yml`'s rewritten `verify-version` + `npm-shim` bumped to `0.5.0-dev`; `--tag v0.5.0` correctly fails a `-dev` tree |
+| 4 | no `pytest` on the release gate path | **closed** | `ci.yml` gains a `python` job (`881 passed, 282 skipped, 0 failed`); the `sdk_parity` input exists to un-skip the parity family but `release.yml` passes **false** — see §3.4, it is 25 red against alp-sdk main for a reason a tag cannot fix |
+
+### What I still need from you
+
+1. **`python/pyproject.toml`: move `[project.optional-dependencies]` below the
+   `classifiers` array** (or move `classifiers` above line 72). One table
+   placement, no value changes. Until then `pip install ./python` cannot run at
+   all, which also means the new `ci.yml` python job and
+   `scripts/build_binary.sh`'s `pip install -e .` recipe are red for a reason
+   unrelated to either.
+2. **At release time only, two lines:** `python/tan/version.py`'s
+   `TAN_VERSION = "0.5.0-dev"` → `"0.5.0"`, and `python/pyproject.toml`'s
+   `version = "0.5.0.dev0"` → `"0.5.0"`. Nothing else: the two files already
+   agree under the SemVer↔PEP 440 mapping, so no change is needed today, and
+   `npm-shim/package.json` is bumped here already. `version_check.py --tag
+   v0.5.0` is what enforces it.
+3. **`python/tan/commands/monitor_cmd.py` is still uncommitted**, so `tan
+   monitor` does not exist in any commit (`No such command 'monitor'. Did you
+   mean 'doctor'?`). The pyserial-extra degradation therefore could not be
+   exercised here — see §0.1.
+4. **`tan/planner/manifest.py` emits `firmware_path: null` where alp-sdk omits
+   the key**, which fails 25 planner byte-parity tests against alp-sdk main and
+   is the one thing keeping `sdk_parity` off the release gate (§3.4). Also your
+   file — `python/tan/planner/**`.
+
+### 0.1 What "pyserial absent" could and could not be shown
+
+The default build installs no extras, so pyserial is absent from the artifact,
+and that costs nothing measurable: `tan --version` → `tan 0.5.0-dev`, and
+`generate --target zephyr-conf --output` emitted a real `alp.conf`
+(`"ok":true`). What could not be shown is `tan monitor` degrading, because the
+command is not in the tree — `monitor_cmd.py` and its test are untracked in the
+python-executor worktree. Once committed, the frozen binary will still not carry
+pyserial (deliberate: an extra is optional at runtime by definition), so if a
+release ever wants `monitor` to work from the binary, build with
+`pip install -e .[monitor]` and raise the ceilings — that changes the artifact
+being gated. Both facts are recorded at the pin in
+`.github/workflows/python-binaries.yml`.
 
 Nothing in this document was published: no tag, no release, no PR. It records
 what was actually run, with output.
@@ -26,7 +71,7 @@ what was actually run, with output.
 | `tan-x86_64-unknown-linux-gnu` | **PROVED here** | `docker python:3.12-slim-bullseye` (Debian 11, glibc 2.31) + `binutils`, 14042352 B | 4/4 in `debian:bullseye-slim` with **no Python installed** | floor is glibc **2.29**, not 2.31 — see §4.2 |
 | `tan-x86_64-unknown-linux-musl` | **PROVED here** | `docker python:3.12-alpine`, 14998816 B | 4/4 in `alpine:3.20` with **no Python installed** | 1184 B under the size gate — §3.2 |
 | `tan-aarch64-unknown-linux-gnu` | **PROVED here** | `docker --platform linux/arm64 python:3.12-slim-bullseye` under QEMU, 162.9 s, 13840528 B | 4/4 in arm64 `debian:bullseye-slim` under QEMU, **no Python** | CI should use `ubuntu-24.04-arm` natively, not QEMU |
-| `tan-aarch64-unknown-linux-musl` | **PROVED here**, but the build script **exits 1** | `docker --platform linux/arm64 python:3.12-alpine` under QEMU, 15277408 B | 4/4 in arm64 `alpine:3.20` under QEMU, **no Python** | **over the 15000000 size gate — §3.2** |
+| `tan-aarch64-unknown-linux-musl` | **PROVED here** | `docker --platform linux/arm64 python:3.12-alpine` under QEMU, 15276264 B, `OK: dist/tan is 15276264 B (ceiling 18000000, libc=musl)` | 4/4 in arm64 `alpine:3.20` under QEMU, **no Python** | was rejected by the old single ceiling; §3.2 closed |
 | `tan-aarch64-pc-windows-msvc.exe` | **NOT built here** (no ARM Windows host) | `windows-11-arm` runner: image ships Python 3.13.14 and tool-cache **3.12.10**; PyInstaller publishes `pyinstaller-6.21.0-py3-none-win_arm64.whl`, so the bootloader is prebuilt | — | unproved: nobody has run PyInstaller on that image in this repo |
 | `tan-x86_64-apple-darwin` | **NOT built here** (no macOS host) | `macos-15-intel` (Intel, available to private repos); `pyinstaller-6.21.0-py3-none-macosx_10_13_universal2.whl` | — | **`macos-latest` is arm64** — using it silently produces an arm64 binary under the x86_64 name |
 | `tan-aarch64-apple-darwin` | **NOT built here** (no macOS host) | `macos-latest` (arm64), same universal2 wheel | — | unproved |
@@ -104,7 +149,37 @@ the same way with a current typer. **Fix: declare `click` in
 `typer.testing.CliRunner` resolves in the same venv). Everything below was
 built with `click` installed explicitly.
 
-### 3.2 The size gate already rejects a correct aarch64 musl build
+### 3.2 The size gate already rejects a correct aarch64 musl build — CLOSED
+
+**Closed as follows.** Both ceilings now live once, in
+`python/scripts/artifact_ceilings.env`, which `build_binary.sh` SOURCES and
+`test_packaged_binary.py` PARSES — the drift is structurally impossible rather
+than commented against. `TAN_MAX_ARTIFACT_BYTES_DEFAULT=16500000` and
+`TAN_MAX_ARTIFACT_BYTES_MUSL=18000000`, each ≥1.2 MB above the largest measured
+clean build of its class and each under 52% of the 34349423 B dirty measurement.
+The script now detects the libc it is building against (`ldd --version`, with an
+`ld-musl-*` fallback) and prints which ceiling it applied:
+`OK: dist/tan is 15276264 B (ceiling 18000000, libc=musl)`.
+
+The pipe defeat is closed differently, because it cannot be closed by an exit
+status: `bash scripts/build_binary.sh | tail -3` returns `tail`'s status no
+matter what the script does. So an over-ceiling artifact is **quarantined** —
+moved to `dist/tan.oversized` — and the name every consumer copies from stops
+existing. Proved with the real script and the real pipe, ceiling forced to 1000:
+
+```
+ERROR: dist/tan.exe was 13517882 B (ceiling 1000, libc=default).
+       Quarantined as dist/tan.exe.oversized; nothing is left to ship.
+pipeline exit status = 0  <-- tail's status, the original defect
+cp: cannot stat 'dist/tan.exe': No such file or directory
+cp exit = 1
+```
+
+A quarantined artifact also fails the conformance suite loudly instead of
+skipping it (`dist/` is gitignored, so "gate tripped" and "not built yet" used to
+look identical), and a clean rebuild clears the quarantine.
+
+The historical measurements that motivated all of this:
 
 `python/scripts/build_binary.sh:73` sets `MAX_ARTIFACT_BYTES=15000000` as a
 dirty-interpreter guard, and `python/tests/conformance/test_packaged_binary.py:28`
@@ -138,7 +213,41 @@ piped. `bash scripts/build_binary.sh 2>&1 | tail -3` returns `tail`'s status, so
 `set -e` did not fire and the oversized artifact was copied out anyway. Any job
 that runs the script must not pipe it (`python-binaries.yml` does not).
 
-### 3.3 `verify-version` compares the tag to `Cargo.toml`
+### 3.3 `verify-version` compares the tag to `Cargo.toml` — CLOSED
+
+**Decision: `python/tan/version.py`'s `TAN_VERSION` is the single source of
+truth.** It is the string the artifact PRINTS and the one alp-sdk-vscode compares
+against `SUPPORTED_CLI_VERSION`, and it is SemVer, which is what the tag is.
+`python/pyproject.toml` must carry its PEP 440 rendering; `npm-shim/package.json`
+must equal it exactly (postinstall derives `TAG = v${pkg.version}`);
+**`Cargo.toml` is no longer read as a release version** — it versions the Rust
+crates on their own cadence.
+
+`python/scripts/version_check.py` implements the reconciliation explicitly
+(`0.5.0-dev` ↔ `0.5.0.dev0`, `-rc.1` ↔ `rc1`, …) instead of string-comparing
+across the two spellings, refuses forms it cannot round-trip (`0.5.0+abc123`,
+`0.5.0-nightly`), carries a `--selftest`, and imports only the stdlib so the gate
+cannot fail for an unrelated reason. `release.yml`'s `verify-version` now runs
+`python python/scripts/version_check.py --selftest --tag "$GITHUB_REF_NAME"`, and
+`ci.yml` runs `--selftest --self` on every push so drift is caught before a tag
+exists. Observed:
+
+```
+selftest: OK
+TAN_VERSION (source of truth) : 0.5.0-dev
+python/pyproject.toml         : 0.5.0.dev0 (want 0.5.0.dev0)
+npm-shim/package.json         : 0.5.0-dev (want 0.5.0-dev)
+versions agree
+```
+
+One consequence had to be handled: with `verify-version` no longer gating on
+`Cargo.toml`, a `v0.5.0` tag now REACHES `publish_crates`, which would have put
+`alp-tan-cli@0.4.1-dev` on crates.io while its summary claimed `0.5.0` — and a
+crates.io publish is unretractable. That job now decides whether the tag is a
+Rust release by comparing `Cargo.toml` to the tag, and when it is not, skips with
+a step-summary line saying so (an annotation alone is what #151 proved unreadable).
+
+The four sources as they were:
 
 ```
 67:          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
@@ -175,7 +284,54 @@ echo "tag=$tag  tan/version.py=$py_version  pyproject=$proj_version"
 [ "$tag" = "$proj_version" ] || { echo "::error::tag v$tag != pyproject version $proj_version"; exit 1; }
 ```
 
-### 3.4 (not a blocker, but the release would ship untested)
+### 3.4 The release would ship untested — CLOSED
+
+`ci.yml` now has a `python` job: `setup-python 3.12` → `pip install -e ./python`
+(the DECLARED set, so a wrong declaration fails CI rather than a customer) →
+`version_check.py --selftest --self` → `python -m pytest tests -q`. Zero failures
+is the gate, never a count: skips and xfails are green and the suite grows as
+ports land. `release.yml`'s `gates` job already calls this workflow, so a tag
+cannot publish a freeze of code no CI step exercised.
+
+Measured while wiring it: a bare run is `881 passed, 282 skipped` — and the skips
+are not noise. 34 groups want `ALP_SDK_ROOT` (planner byte-parity, planner
+binding) and the rest want a Rust `tan` to diff against (`TAN_RUST_BINARY`). A
+gate that silently skips every parity case is most of a gate, so `ci.yml` takes a
+`sdk_parity` input which checks out `alplabai/alp-sdk` and exports
+`ALP_SDK_ROOT`.
+
+**But `release.yml` passes `sdk_parity: false`, on purpose.** With it on, against
+public alp-sdk main (v0.14.0, `ef79eab`):
+
+```
+FAILED tests/parity/test_planner_emit_parity.py::test_every_mode_is_byte_identical[v2n-temp-sensor]
+FAILED tests/parity/test_planner_emit_parity.py::test_every_mode_is_byte_identical[v2n-xspi-flash-readwrite]
+25 failed, 1622 passed, 209 skipped in 813.40s (0:13:33)
+```
+
+One real divergence, not a flake and not a line-ending artefact — the first diff
+is:
+
+```
+--emit system-manifest differs -- line 28:
+    sdk: '  flash_method: swd_probe'
+    tan: '  firmware_path: null'
+```
+
+`tan/planner/manifest.py:93,118` writes `firmware_path` unconditionally
+(`None` included); alp-sdk's `scripts/alp_orchestrate/manifest.py:92-93` emits it
+only when it is not None, and says so in its own docstring ("`firmware_path` is
+entirely ABSENT from …"). That is in `python/tan/planner/**`, which this branch
+does not touch. **Flip `sdk_parity` to `true` once it is closed** — a blocking
+gate that cannot go green is not a gate, and the 13.5-minute run time is the
+smaller problem.
+
+`TAN_RUST_BINARY` is deliberately NOT wired at all: the port intentionally
+diverges from the shipped 0.4.x Rust (`--output` does not exist there), so
+pinning Rust parity into the release gate would encode a comparison the port is
+meant to break.
+
+The original finding, for the record:
 
 `release.yml:92-93`'s `gates` job calls `ci.yml`, and `ci.yml` runs **only**
 Rust steps: `fmt`, `clippy`, `build`, `test`, MSRV `check`. There is no
@@ -290,6 +446,38 @@ Audited across `python/tan/**` and then checked against the built binaries:
    the Rust crate versions on their own cadence and never tag them from here.
 7. **CHANGELOG** — the body slice is `^## \[<version>\]` (`release.yml:260`), so
    a `## [0.5.0]` section must exist or the release body is empty.
+
+## 6b. Found while closing the four
+
+1. **`python/pyproject.toml` cannot be installed** (see §0). `[project.optional-dependencies]`
+   sits above the `classifiers` array, so `classifiers` parses as an extras group
+   and setuptools rejects the file:
+   `configuration error: 'project.optional-dependencies.classifiers[0]' must be pep508`.
+   `project.classifiers` is also simply gone from the metadata. Maintainer's file;
+   one table move.
+2. **The npm shim and the extension disagree about Linux.**
+   `npm-shim/postinstall.js:36-37` maps `linux/x64`/`linux/arm64` to
+   `x86_64-unknown-linux-gnu`/`aarch64-unknown-linux-gnu`, while `install.sh:42`
+   uses `unknown-linux-musl` and the extension's `TARGETS`
+   (`service.ts:42-43`) uses musl too. The shim's own comment claims it is "the
+   same platform -> triple table as install.sh/install.ps1 and the VS Code
+   extension's releaseAssetForTarget", which is false for Linux. Consequence: an
+   Alpine (musl) host installing via npm downloads a glibc binary that cannot
+   run, and every npm Linux user inherits the glibc 2.29 floor the musl asset
+   does not have. Left alone deliberately — changing what npm serves is a
+   behaviour decision, not a blocker fix.
+3. **The dirty-interpreter signal is weaker than the ceiling comment implied.**
+   A build venv carrying numpy 2.5.1 produced 13516327 B against 13517584 B
+   without it — no inflation, because PyInstaller bundles what the import graph
+   reaches and `tan` never imports numpy. The 34349423 B figure came from
+   pywin32/Pillow-class packages whose hooks collect data files regardless. Now
+   recorded in `artifact_ceilings.env`, and it is the second reason
+   `build_binary.sh` recommends `pip install -e .` rather than trusting size to
+   notice a rich environment.
+4. **`npm-shim/postinstall.js` advertised the wrong source-install path** for a
+   platform with no asset: `cargo install alp-tan-cli --locked`, which will not
+   resolve at 0.5.0 because the release is no longer built from the crates.
+   Changed to `pip install alp-tan`.
 
 ## 7. Not proved, and the fallback
 

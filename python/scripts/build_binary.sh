@@ -19,8 +19,18 @@
 # inside (alp-sdk-vscode/src/alpCli/vscodeAdapter.ts:288-290).
 #
 #   python -m venv .venv-build
-#   .venv-build/bin/pip install typer rich pyyaml jsonschema "pyinstaller>=6.10"
+#   .venv-build/bin/pip install -e . "pyinstaller>=6.10"
 #   PYTHON=.venv-build/bin/python scripts/build_binary.sh
+#
+# `-e .` rather than a hand-listed dependency set: the list drifts. It drifted --
+# `tan/cli.py` imports `click.testing`, typer stopped depending on click, and a
+# venv built from the hand-written list froze a binary that died at import with
+# `ModuleNotFoundError: No module named 'click'`. Installing the PACKAGE means
+# the runtime deps come from pyproject.toml, which is also what a customer's
+# `pip install alp-tan` resolves, so a build environment can no longer be
+# quietly richer than the declared one. Extras stay OUT (no `[monitor]`): an
+# extra is optional at runtime by definition, and freezing one in would make the
+# binary disagree with what the wheel promises.
 #
 # `jsonschema` is in that list because the PLANNER relocated in (`tan/planner/`,
 # was alp-sdk `scripts/alp_orchestrate/`) and validates every board.yaml against
@@ -70,14 +80,48 @@ case "${OS:-}" in Windows_NT) ADD_DATA_SEP=';' ;; esac
 # that what it points at is clean. Size is the actual invariant -- assert that.
 # The 3 s --version probe cannot stand in for this check: the dirty 34349423 B
 # build answered in ~1.00 s and passed every timing assertion.
-MAX_ARTIFACT_BYTES=15000000  # keep in step with tests/conformance/test_packaged_binary.py
+#
+# Both ceilings, their measurements and the reason there are two of them live in
+# artifact_ceilings.env -- sourced, not copied, because the copy in
+# tests/conformance/test_packaged_binary.py drifted from this one and the pair
+# then rejected a correct aarch64 musl build (15277408 B against a single
+# 15000000 ceiling).
+. "$(dirname "$0")/artifact_ceilings.env"
+
+# musl links libc statically and is legitimately ~1.0-1.4 MB larger than its
+# glibc twin, so the ceiling depends on which libc this host builds against --
+# not on the arch. `ldd --version` names it on both (busybox prints "musl libc
+# (aarch64)", glibc prints "ldd (Debian GLIBC 2.31-...)"); the ld-musl-* probe
+# is the fallback for a stripped image with no ldd at all. Windows and macOS
+# take DEFAULT.
+max_bytes=$TAN_MAX_ARTIFACT_BYTES_DEFAULT
+libc=default
+if ldd --version 2>&1 | head -1 | grep -qi musl || ls /lib/ld-musl-* >/dev/null 2>&1; then
+  max_bytes=$TAN_MAX_ARTIFACT_BYTES_MUSL
+  libc=musl
+fi
+
 artifact=dist/tan
 [ -f dist/tan.exe ] && artifact=dist/tan.exe
 size=$(wc -c <"$artifact")
-if [ "$size" -ge "$MAX_ARTIFACT_BYTES" ]; then
-  echo "ERROR: $artifact is $size B (ceiling $MAX_ARTIFACT_BYTES)." >&2
-  echo "       Built from a dirty interpreter -- PyInstaller bundled modules" >&2
-  echo "       tan never imports. Rebuild from a clean venv (see header)." >&2
+if [ "$size" -ge "$max_bytes" ]; then
+  # QUARANTINE, do not merely complain. `exit 1` alone is defeatable by a pipe:
+  # `bash scripts/build_binary.sh | tail -3` returns tail's status, so the
+  # caller's `set -e` never fires and the next line happily `cp`s an artifact
+  # this gate just rejected. (That is not hypothetical -- it is how the
+  # oversized aarch64 musl binary got copied out during the freeze
+  # investigation.) A gate that a pipe can defeat is not a gate, so the file
+  # itself has to stop existing under the name every consumer copies from.
+  mv -f "$artifact" "$artifact.oversized"
+  echo "ERROR: $artifact was $size B (ceiling $max_bytes, libc=$libc)." >&2
+  echo "       Quarantined as $artifact.oversized; nothing is left to ship." >&2
+  echo "       Usually a dirty interpreter -- PyInstaller bundled modules tan" >&2
+  echo "       never imports. Rebuild from a clean venv (see header). If the" >&2
+  echo "       venv IS clean, the ceiling is the question: measure it and edit" >&2
+  echo "       scripts/artifact_ceilings.env, which both readers share." >&2
   exit 1
 fi
-echo "OK: $artifact is $size B"
+# A stale quarantine from an earlier failed build would otherwise fail the
+# conformance suite forever after a green rebuild.
+rm -f "$artifact.oversized"
+echo "OK: $artifact is $size B (ceiling $max_bytes, libc=$libc)"
