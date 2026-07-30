@@ -51,11 +51,20 @@ env:
   #
   # Extras are deliberately NOT installed (no `[monitor]`): an extra is optional
   # at runtime by definition, so freezing pyserial in would make the binary
-  # promise more than the wheel does. Consequence to know: the frozen `tan
-  # monitor` degrades with its own message instead of opening a serial port. If a
-  # release ever wants monitor in the binary, install `-e ./python[monitor]` here
-  # AND raise the ceilings in python/scripts/artifact_ceilings.env, because that
-  # changes the artifact this workflow is size-gating.
+  # promise more than the wheel does.
+  #
+  # MEASURED, both on this host, clean venvs: no extras 13571067 B, with
+  # `[monitor]` 13648433 B -- a 77366 B (0.57%) delta against 2.85 MB of headroom
+  # under the DEFAULT ceiling, so the ceiling is NOT what decides this. What the
+  # delta buys: with pyserial bundled, `tan monitor` enumerates ports
+  # (`monitor.no-port`, exit 1); without it, the frozen binary answers
+  # `monitor.internal-failure` at exit 5 carrying a raw
+  # `ModuleNotFoundError: No module named 'serial'` -- because
+  # `tan/commands/monitor_cmd.py:108` skips its own pyserial precheck when
+  # `sys.frozen` is set, then `_available_ports()` imports `serial.tools`
+  # unguarded at line 76. So `monitor.pyserial-missing` cannot fire on a frozen
+  # build at all. To ship monitor in the binary: `-e .[monitor]` on all three
+  # install lines below. Recommended, but it is a release-content decision.
   BUILD_DEPS: pyinstaller>=6.10
   # Debian 11, i.e. glibc 2.31 -- NOT the runner's own image.
   #

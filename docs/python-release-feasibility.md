@@ -17,6 +17,75 @@ wheels both exist, so each needs one CI run. All four blockers below are closed;
 | 3 | four version sources disagreed | **closed** | `python/scripts/version_check.py` + `release.yml`'s rewritten `verify-version` + `npm-shim` bumped to `0.5.0-dev`; `--tag v0.5.0` correctly fails a `-dev` tree |
 | 4 | no `pytest` on the release gate path | **closed** | `ci.yml` gains a `python` job (`881 passed, 282 skipped, 0 failed`); the `sdk_parity` input exists to un-skip the parity family but `release.yml` passes **false** — see §3.4, it is 25 red against alp-sdk main for a reason a tag cannot fix |
 
+### 0.0 Round-2 status (after `9381fbc` + `729234a`)
+
+`python/pyproject.toml` is installable again — `pip install -e ./python` resolves
+`alp-tan 0.5.0.dev0` with `click 8.4.2` and **no** pyserial, and the metadata
+reads back `classifiers: 7`,
+`requires: [..., 'pyserial>=3.5; extra == "monitor"']`. The build recipe and the
+`ci.yml` python job both work on it: frozen from that install, 13571067 B, four
+proofs green. Full suite on the merged tree: **946 passed, 310 skipped, 0
+failed**.
+
+| Item | State |
+|---|---|
+| three remaining assets | **BLOCKED, not buildable yet** — GitHub refuses to dispatch a workflow absent from the default branch (§1.2) |
+| `tan monitor` without pyserial | works "no traceback", but reports the WRONG code — §0.2 |
+| npm-shim libc mismatch | **fixed and pinned** — §6c |
+| `sdk_parity` against `design/tan-python-port` | §3.4a |
+
+### 0.2 `tan monitor` on a no-extras build: no traceback, wrong verdict
+
+`monitor` exists in a commit now, and the degradation is not the intended one:
+
+```
+$ tan monitor --port COM7 --format json
+{"command":"monitor","ok":false,"exitCode":5,...,"issues":[{"code":"monitor.internal-failure",
+ "severity":"error","message":"monitor failed unexpectedly: ModuleNotFoundError: No module named 'serial'"}]}
+```
+
+Zero tracebacks, so the envelope guard holds. But `monitor.internal-failure` at
+exit 5 means "tan bug", and the actionable code the module already carries —
+`monitor.pyserial-missing`, "pyserial is required. Install via `pip install
+pyserial`." (`monitor_cmd.py:119-124`) — **cannot fire on a frozen binary at
+all**:
+
+- `monitor_cmd.py:108` sets `using_this_interpreter = not getattr(sys, "frozen",
+  False) and bool(sys.executable)`, so on a PyInstaller build it is `False` and
+  the guarded `import serial` at 111-124 is skipped by design (the child gets a
+  PATH `python`, which is meant to report its own missing pyserial).
+- But `_available_ports()` at line 76 does `from serial.tools import list_ports`
+  **unguarded**, and lines 126/128 call it in-process before any child is
+  spawned — for both `--port` given and omitted.
+
+So every frozen no-extras build misclassifies a missing optional dependency as an
+internal failure. Your file (`python/tan/commands/monitor_cmd.py`), reported not
+touched. Two fixes are possible and they are not equivalent: guard
+`_available_ports()` (then the message is right on every build), or ship the
+extra (then the path is never reached) — see §0.3.
+
+### 0.3 Should the release binary carry `monitor`? Yes, on the numbers
+
+| build | bytes | vs DEFAULT ceiling 16500000 |
+|---|---|---|
+| `pip install -e .` | 13571067 | 2928933 B headroom |
+| `pip install -e .[monitor]` | 13648433 | 2851567 B headroom |
+
+**+77366 B, 0.57%.** The ceiling does not decide this — there is 2.8 MB of room
+either way. What the 77 KB buys is a `monitor` that works:
+
+```
+$ tan monitor --format json        # [monitor] build
+{"command":"monitor","ok":false,"exitCode":1,...,"issues":[{"code":"monitor.no-port",
+ "message":"no --port given -- available serial ports: COM31  Standard Serial over Bluetooth link (COM31); ..."}]}
+```
+
+Recommendation: ship it (`-e .[monitor]` on the three install lines in
+`python-binaries.yml`; the comment there carries these numbers). It is release
+CONTENT, so the call is yours — and note it only hides §0.2 rather than fixing
+it: a source install still takes the guarded path, and a frozen build with the
+extra never reaches the unguarded one.
+
 ### What I still need from you
 
 1. **`python/pyproject.toml`: move `[project.optional-dependencies]` below the
@@ -86,6 +155,38 @@ The four proofs, run by `python/scripts/verify_binary.sh` (added here):
 writes `board.yaml` + `src/main.c` (proves the vendored-template `--add-data`);
 `generate --target zephyr-conf --output ./out/alp.conf --sdk-root <sdk>` emits a
 file containing `CONFIG_` lines. A binary that starts but cannot emit fails.
+
+### 1.2 The three remaining assets cannot be dispatched yet
+
+Branch pushed (`chore/python-freeze-release`), then:
+
+```
+$ gh workflow run python-binaries.yml --ref chore/python-freeze-release -f verify=true
+HTTP 404: workflow python-binaries.yml not found on the default branch
+(https://api.github.com/repos/alplabai/tan-cli/actions/workflows/python-binaries.yml)
+```
+
+The default branch is `main`, and
+`gh api repos/alplabai/tan-cli/contents/.github/workflows/python-binaries.yml?ref=main`
+is `404` too. GitHub registers `workflow_dispatch` workflows from the **default
+branch only**; a workflow that exists on a topic branch is not dispatchable from
+anywhere, on any ref.
+
+**What unblocks it:** `.github/workflows/python-binaries.yml` has to exist on
+`main` — a merge of this branch, or a cherry-pick of that one file. After that,
+`--ref chore/python-freeze-release` runs the version on THIS branch, so `main`
+only needs the file to exist, not to be current. No other route was taken: adding
+a `push:` trigger would make an 8-asset matrix run on every push and is the
+"somewhere it doesn't belong" this was told to avoid, and nothing else in the repo
+has a dispatchable workflow that could stand in.
+
+Consequences for the three assets, unchanged from the last round: the runner
+labels (`windows-11-arm`, `macos-15-intel`, `macos-latest`) and the PyInstaller
+wheels (`win_arm64`, `macosx_10_13_universal2`) all exist, so this is one CI run
+away — not a technical unknown. **macOS remains unmeasured against
+`TAN_MAX_ARTIFACT_BYTES_DEFAULT=16500000`**; if a macOS build lands between that
+and ~34 MB, `artifact_ceilings.env` says to give macOS its own line rather than
+raise DEFAULT for every platform, and that guidance stands untested.
 
 ### 1.1 Why "eight from three runners" does not carry over
 
@@ -455,7 +556,47 @@ Audited across `python/tan/**` and then checked against the built binaries:
    `configuration error: 'project.optional-dependencies.classifiers[0]' must be pep508`.
    `project.classifiers` is also simply gone from the metadata. Maintainer's file;
    one table move.
-2. **The npm shim and the extension disagree about Linux.**
+## 6c. The npm-shim libc mismatch — FIXED and PINNED
+
+`npm-shim/postinstall.js` now maps `linux/x64` → `x86_64-unknown-linux-musl` and
+`linux/arm64` → `aarch64-unknown-linux-musl`, matching `install.sh:42`, the VS
+Code extension, and `docs/release-contract.md`'s own "Targets published" table
+(which already said musl, and already records that it once said the opposite). The
+comment that claimed the three agreed now says what is true and why: the `-gnu`
+assets carry a glibc floor, so an Alpine `npm i -g @alplabai/tan` downloaded a
+binary that cannot execute.
+
+The pin is `npm-shim/test/libc-mapping.test.js`, four cases on node's built-in
+runner, no dependencies, wired into `ci.yml` as the `shim` job. It compares the
+shim against the CONTRACT DOC rather than against install.sh, because two
+consumers can agree and both be wrong about what the release publishes:
+
+```
+✔ the shim serves exactly the contract's platform -> triple mapping
+✔ both Linux arches resolve to musl, never gnu
+✔ install.sh maps Linux to the same musl target as the shim
+✔ every asset the shim can name is one the release actually publishes
+ℹ pass 4  ℹ fail 0
+```
+
+To prove the pin can actually fail, `linux/x64` was flipped back to
+`x86_64-unknown-linux-gnu` — all four cases went red — then reverted:
+
+```
+✖ the shim serves exactly the contract's platform -> triple mapping
+✖ both Linux arches resolve to musl, never gnu
+✖ install.sh maps Linux to the same musl target as the shim
+✖ every asset the shim can name is one the release actually publishes
+ℹ pass 0  ℹ fail 4
+```
+
+`postinstall.js` gained a `require.main === module` guard and a `module.exports`
+so the test imports the real table instead of re-parsing the file as text — a
+copy of the table is exactly what this test exists to prevent.
+
+## 6b (historical) Found while closing the four
+
+2. **The npm shim and the extension disagree about Linux.** — now §6c.
    `npm-shim/postinstall.js:36-37` maps `linux/x64`/`linux/arm64` to
    `x86_64-unknown-linux-gnu`/`aarch64-unknown-linux-gnu`, while `install.sh:42`
    uses `unknown-linux-musl` and the extension's `TARGETS`

@@ -25,19 +25,36 @@ const REPO = "alplabai/tan-cli";
 const TAG = `v${pkg.version}`;
 const BINARY_DIR = path.join(__dirname, "binary");
 
+// The platform -> triple table, and it must equal the one in
+// docs/release-contract.md's "Targets published" section, which install.sh and
+// the VS Code extension's releaseAssetForTarget also follow.
+//
+// LINUX IS musl, NOT gnu. This table said `-gnu` for both Linux arches while
+// install.sh (`Linux) os_part="unknown-linux-musl"`) and the extension
+// (`service.ts`'s TARGETS) said musl -- and the comment here claimed all three
+// agreed. They did not, and the cost was real: the `-gnu` assets carry a glibc
+// floor (measured `GLIBC_2.29 not found` on Debian 10; the frozen Python assets
+// have the same floor from their bundled CPython), so `npm i -g @alplabai/tan`
+// on Alpine or any other musl distro downloaded a binary that cannot execute at
+// all, and on older glibc distros one that fails on the floor. The musl asset is
+// statically linked and runs on any distro, which is exactly why the other two
+// consumers chose it.
+//
+// npm-shim/test/libc-mapping.test.js pins this table against the contract doc
+// and install.sh, because the drift -- not the wrong value -- was the bug.
+const TARGETS = {
+  "win32/x64": "x86_64-pc-windows-msvc",
+  "win32/arm64": "aarch64-pc-windows-msvc",
+  "linux/x64": "x86_64-unknown-linux-musl",
+  "linux/arm64": "aarch64-unknown-linux-musl",
+  "darwin/x64": "x86_64-apple-darwin",
+  "darwin/arm64": "aarch64-apple-darwin",
+};
+
 /** Map the host platform/arch to the release target triple. */
 function resolveTarget() {
   const key = `${process.platform}/${process.arch}`;
-  // Same platform -> triple table as install.sh/install.ps1 and the VS Code
-  // extension's releaseAssetForTarget (docs/release-contract.md, main repo).
-  const targets = {
-    "win32/x64": "x86_64-pc-windows-msvc",
-    "win32/arm64": "aarch64-pc-windows-msvc",
-    "linux/x64": "x86_64-unknown-linux-gnu",
-    "linux/arm64": "aarch64-unknown-linux-gnu",
-    "darwin/x64": "x86_64-apple-darwin",
-    "darwin/arm64": "aarch64-apple-darwin",
-  };
+  const targets = TARGETS;
   const target = targets[key];
   if (!target) {
     throw new Error(
@@ -127,7 +144,15 @@ function parseChecksum(text, asset) {
   return null;
 }
 
-main().catch((error) => {
-  console.error(error && error.message ? error.message : String(error));
-  process.exit(1);
-});
+// `require.main === module` so the mapping can be imported by
+// test/libc-mapping.test.js without DOWNLOADING a binary as a side effect of
+// being read. Without the guard the pin test would have to re-parse this file as
+// text, i.e. test a copy of the table rather than the table.
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error && error.message ? error.message : String(error));
+    process.exit(1);
+  });
+}
+
+module.exports = { TARGETS, resolveTarget, parseChecksum };
