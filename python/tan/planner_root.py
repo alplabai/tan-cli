@@ -18,22 +18,27 @@ the same refuse-don't-degrade posture the executor's token substitution takes
 never the facts. The fact READERS relocated with them -- `resolve_memory_map`,
 `resolve_capabilities`, `silicon_to_kconfig` and `som_unpopulated_capabilities`
 now live in `tan/planner/som_metadata.py`, `peripheral_kconfig` in
-`tan/planner/slugs.py`, `iter_schema_errors` in `tan/planner/loader.py` -- and
-they read the same files out of the bound checkout. **No `tan.planner` module
-imports anything under `<sdk_root>/scripts` any more**, which is what makes an
-in-process emit load zero of alp-sdk's Python
+`tan/planner/slugs.py`, `iter_schema_errors` in `tan/planner/loader.py`, the
+SKU/board/pad-route resolvers in `tan/planner/project_loader.py`, and the
+`alp_project.py`-owned emitters in `tan/planner/project_emit/` +
+`tan/planner/zephyr_board.py` -- and every one of them reads the same files out
+of the bound checkout. **No `tan.planner` module imports anything under
+`<sdk_root>/scripts` any more**, which is what makes an in-process emit load zero
+of alp-sdk's Python
 (`tests/parity/test_planner_emit_parity.py::test_the_in_process_path_loads_none_of_the_sdks_python`
-is the measurement).
+is the measurement, per mode across all eleven).
 
-Binding still puts `<sdk_root>/scripts` on `sys.path`, but NOTHING in `tan`
-needs it any more -- the six emit modes still served by `scripts/alp_project.py`
-and the `alp_kconfig_dump.py` Zephyr hook are SPAWNED, and a spawned
-interpreter gets its own script directory regardless. What the entry still buys
-is the rebind guard below (a second SDK's `scripts/` must not sit behind the
-first's on the path) and any caller that reaches for an SDK module by name in
-tan's own process -- the parity harness's oracle does exactly that. It is
-removable once nothing does; keeping it is not what holds the closure open,
-since the closure is now zero WITH it present.
+Binding still puts `<sdk_root>/scripts` on `sys.path`, and nothing in `tan`'s own
+execution needs it: every `tan generate` target renders in-process, `tan build`
+plans in-process, and the two remaining SDK scripts -- `alp_project.py` under
+`TAN_GENERATE_EXECUTOR=subprocess`, and `alp_kconfig_dump.py` through Zephyr's
+`EXTRA_KCONFIG_TARGET` hook -- are SPAWNED, and a spawned interpreter gets its own
+script directory regardless. What the entry still buys is the rebind guard below
+(a second SDK's `scripts/` must not sit behind the first's on the path) and any
+caller that reaches for an SDK module by name in tan's own process -- the parity
+harness's oracle does exactly that, and it is the last such caller. Keeping it is
+not what holds the closure open, since the closure is measured at zero WITH it
+present.
 """
 
 from __future__ import annotations

@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """`tan build` -- the one command that turns a build plan into firmware.
 
-Composition, not logic: this module resolves the project, ACQUIRES a plan
-(from `--plan-from`, else by running the planner in-process), then hands it in turn
-to the four sub-project-1 libraries -- `parse_build_plan`,
-`apply_plan_token_substitution`, `materialise_plan`, `execute_slices` -- and
+Composition, not logic: this module resolves the project, ACQUIRES a plan (from
+`--plan-from`, else by running the planner in-process -- there is no other way any
+more; see `_emit_plan`), then hands it in turn to the four sub-project-1
+libraries -- `parse_build_plan`, `apply_plan_token_substitution`,
+`materialise_plan`, `execute_slices` -- and
 folds the result into one envelope. Every decision those modules own stays
 theirs; what lives here is the ORDER they run in, the mapping from their
 `(code, message)` failures to an exit code, and the guarantee that not one of
@@ -34,7 +35,6 @@ dropping the ones the customer did not name is how a Yocto slice silently
 stops being built.
 """
 import os
-import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -145,16 +145,20 @@ def discover_sdk_root(workspace_root: Path) -> Path | None:
 
 
 def _planner_python() -> str:
-    """The interpreter the SDK planner runs under.
+    """The interpreter a SPAWNED build step runs under.
+
+    Two callers remain now that planning and every `generate` target run
+    in-process: `${PYTHON}` token substitution (below), and
+    `generate_cmd`'s `TAN_GENERATE_EXECUTOR=subprocess` escape hatch.
 
     A PATH name, mirroring `tan_core::project::resolve_python_binary`
     (`python3` off Windows, `python` on it) -- NOT `sys.executable`. Two
     reasons, and either alone is decisive: frozen by PyInstaller,
-    `sys.executable` is `tan` itself, so `-m alp_orchestrate` would just
-    re-enter this CLI; and this value is also the `${PYTHON}` substituted into
-    the plan, which the planner bakes into every Zephyr slice as
-    `-DPython3_EXECUTABLE` (alp-sdk#787) -- it has to name an interpreter the
-    slice can find, not this process.
+    `sys.executable` is `tan` itself, so spawning it would just re-enter this
+    CLI; and this value is also the `${PYTHON}` substituted into the plan, which
+    the planner bakes into every Zephyr slice as `-DPython3_EXECUTABLE`
+    (alp-sdk#787) -- it has to name an interpreter the slice can find, not this
+    process.
 
     NOT YET PORTED: Rust prefers the west-capable workspace venv's python
     (`venv_python`) and falls back to this only when no venv resolves. Without
@@ -168,17 +172,33 @@ def _planner_python() -> str:
 def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
     """Plan `board_yaml` against the SDK at `sdk_root`.
 
-    IN-PROCESS since the planner relocated here (`tan.planner`, was alp-sdk's
-    `scripts/alp_orchestrate/`): no interpreter on PATH, no PYTHONPATH, no
-    process. `tan.planner_root.emit` binds the SDK root -- which is where
-    `metadata/**` and the fact-reader modules still live (ADR-0017) -- and
+    IN-PROCESS, always. `tan.planner_root.emit` binds the SDK root -- which is
+    where `metadata/**` and the fact-reader modules still live (ADR-0017) -- and
     renders through the same `emit_artefact` dispatch `python -m tan.planner`
-    uses.
+    uses. No interpreter on PATH, no PYTHONPATH, no process, and nothing under
+    `<sdk>/scripts` imported or spawned.
 
-    The old `<python> -m alp_orchestrate --emit build-plan` subprocess survives
-    as the fallback for exactly one case: this build of `tan` cannot import the
-    planner (a source checkout without `jsonschema`, or a frozen binary built
-    without it). An SDK that still ships `alp_orchestrate` then plans as before.
+    **The `<python> -m alp_orchestrate --emit build-plan` fallback was RETIRED
+    here, deliberately.** It fired when this build of `tan` could not import the
+    planner and quietly planned through the SDK's own copy instead -- and it
+    reported nothing at all when it did. Three reasons it had to go, any one
+    sufficient:
+
+    * It was SILENT. A run that fell back looked exactly like a run that did
+      not, which is the same defect class that let the planner relocation be
+      believed before it happened.
+    * It could only fire on a broken install. `jsonschema` and `PyYAML` are
+      declared `dependencies` in `pyproject.toml` and installed into the clean
+      venv `scripts/build_binary.sh` freezes, so the trigger is not a supported
+      layout -- and a missing dependency deserves `pip install jsonschema`, not
+      a different planner.
+    * It kept alp-sdk's `scripts/alp_orchestrate/` load-bearing forever. As long
+      as any tan path can reach it, it can never be deleted, and deleting it is
+      the point.
+
+    What replaces it is a coded refusal naming the missing dependency -- which is
+    strictly more actionable than a silent success against a second planner whose
+    version nothing checks.
     """
     if sdk_root is None:
         raise BuildError(
@@ -208,22 +228,26 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
 
     try:
         from tan.planner_root import emit as _plan_emit
-    except ImportError:  # pragma: no cover -- planner absent from this build
-        return _emit_plan_subprocess(sdk_root, board_yaml)
+    except ImportError as err:  # pragma: no cover -- planner absent from this build
+        raise BuildError(
+            "build.plan-unavailable",
+            f"this build of `tan` cannot import its own planner ({err}). "
+            "Reinstall it, or install the planner's dependencies "
+            "(`pip install pyyaml jsonschema`).",
+            ExitCode.RUNTIME_FAILURE,
+        ) from err
     try:
         return _plan_emit("build-plan", root=sdk_root, board_yaml=Path(board_yaml))
     except ImportError as err:
         # A planner dependency (`jsonschema`, `PyYAML`) is missing from THIS
-        # build. The SDK may still ship its own planner; try that before failing.
-        try:
-            return _emit_plan_subprocess(sdk_root, board_yaml)
-        except BuildError:
-            raise BuildError(
-                "build.plan-unavailable",
-                f"the planner could not be imported ({err}) and the SDK at "
-                f"`{sdk_root}` has no `alp_orchestrate` fallback under scripts/.",
-                ExitCode.RUNTIME_FAILURE,
-            ) from err
+        # build. Named, not worked around: see the docstring on why the
+        # spawn-the-SDK's-planner fallback was retired.
+        raise BuildError(
+            "build.plan-unavailable",
+            f"the planner could not be imported ({err}) -- install its "
+            "dependencies (`pip install pyyaml jsonschema`) or reinstall `tan`.",
+            ExitCode.RUNTIME_FAILURE,
+        ) from err
     except SystemExit as err:
         # `tan.planner.loader` / `kconfig_symbols` call `sys.exit()` on a missing
         # dependency or an unbootstrapped Zephyr workspace. In a subprocess that
@@ -243,63 +267,6 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
             f"the build-plan emit failed: {type(err).__name__}: {err}",
             ExitCode.RUNTIME_FAILURE,
         ) from err
-
-
-def _emit_plan_subprocess(sdk_root: str, board_yaml: str) -> str:
-    """Fallback: `<python> -m alp_orchestrate --emit build-plan` in the SDK.
-
-    Module invocation (`-m alp_orchestrate`), not a script path: that resolves
-    both the package layout (`scripts/alp_orchestrate/`) and the legacy flat
-    `scripts/alp_orchestrate.py`, so it works against any SDK release that has
-    one. And the planner's own flag is `--input`; `--board-yaml` is tan's
-    spelling of the same fact and is not accepted there.
-    """
-    scripts = Path(sdk_root) / "scripts"
-    if not (
-        (scripts / "alp_orchestrate.py").is_file()
-        or (scripts / "alp_orchestrate" / "__init__.py").is_file()
-    ):
-        raise BuildError(
-            "build.plan-unavailable",
-            f"the SDK at `{sdk_root}` has no `alp_orchestrate` planner under scripts/ -- "
-            f"pin to an SDK release that ships `--emit build-plan`.",
-            ExitCode.RUNTIME_FAILURE,
-        )
-
-    inherited = os.environ.get("PYTHONPATH")
-    env = {
-        **os.environ,
-        "PYTHONPATH": os.pathsep.join([str(scripts), *([inherited] if inherited else [])]),
-    }
-    python = _planner_python()
-    argv = [python, "-m", "alp_orchestrate", "--input", board_yaml, "--emit", "build-plan"]
-    try:
-        out = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            env=env,
-            check=False,
-        )
-    except OSError as err:
-        # No interpreter of that name on PATH, or it is not executable. The
-        # single most likely first-run failure, and it must not be a traceback.
-        raise BuildError(
-            "build.plan-unavailable",
-            f"failed to run `{python} -m alp_orchestrate --emit build-plan`: {err}",
-            ExitCode.RUNTIME_FAILURE,
-        ) from err
-    if out.returncode != 0:
-        stderr = out.stderr.strip()
-        raise BuildError(
-            "build.plan-unavailable",
-            f"the SDK build-plan emit failed (rc {out.returncode})"
-            + (f": {stderr}" if stderr else ""),
-            ExitCode.RUNTIME_FAILURE,
-        )
-    return out.stdout
 
 
 def _acquire_plan(

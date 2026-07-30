@@ -1,28 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 """`tan generate` -- run the board-derived emitters and report what landed.
 
-**tan invents no output of its own**, but since the planner relocated into
-`tan/planner/` it no longer spawns alp-sdk for everything either. Each target
-runs on one of two engines, decided per mode before the first write and
-reported in `data.engine`:
+**tan invents no output of its own**, but it no longer spawns alp-sdk to produce
+it either. All ELEVEN targets render in-process from `tan.planner`
+(`tan.planner_emit.IN_PROCESS_MODES`) -- the five modes the planner relocation
+brought over first, plus the last six whose renderers moved with it:
+`dts-overlay`, `native-sim-overlay`, `hw-info-h`, `west-libraries`,
+`carrier-netlist` and `zephyr-board`. No interpreter on PATH, no PYTHONPATH, no
+process.
 
-* **in-process** -- the five relocated modes (`tan.planner_emit.IN_PROCESS_MODES`:
-  `zephyr-conf`, `cmake-args`, `yocto-conf`, `os-topology`, `ipc-contract-h`),
-  rendered by `tan.planner` against the SDK's `metadata/**`. No interpreter on
-  PATH, no PYTHONPATH, no process.
-* **subprocess** -- everything whose renderer stayed in alp-sdk
-  (`dts-overlay`, `native-sim-overlay`, `hw-info-h`, `west-libraries`,
-  `carrier-netlist` under `scripts/alp_project_emit/`, and `zephyr-board` under
-  `scripts/gen_zephyr_board.py`), still spawned exactly as before:
+The spawned engine survives as an ESCAPE HATCH, not a code path anything reaches
+by default:
 
       <python> <sdk>/scripts/alp_project.py --input <board.yaml> \
                --emit <mode> --output <path> [--core <id>]
 
-`tan.planner_emit` documents how `metadata/emit-registry-v1.json` decides that
-split. Either way the emitted bytes, the schemas behind them, and every hardware
-fact they encode stay in alp-sdk (ADR-0017; I-26). There is no template here, no
-SKU list, no address, no pin name -- `som.sku` is read from the customer's own
-`board.yaml` purely to spell one directory name, exactly as the oracle does.
+It runs only when `TAN_GENERATE_EXECUTOR=subprocess` pins it, or when the
+in-process path cannot serve the checkout at all. Keeping it is what lets the
+parity suite render the same target both ways and diff the bytes.
+
+`tan.planner_emit` documents how `metadata/emit-registry-v1.json` decides which
+renderer owns which mode. Either way the emitted bytes, the schemas behind them,
+and every hardware fact they encode stay in alp-sdk (ADR-0017; I-26). There is no
+template here, no SKU list, no address, no pin name -- `som.sku` is read from the
+customer's own `board.yaml` purely to spell one directory name, exactly as the
+oracle does.
 
 **A fall back to spawning is never silent.** When the in-process path cannot
 serve a checkout (not a usable checkout, unreadable emit registry, or a `tan`
@@ -532,12 +534,26 @@ def _emit_one_in_process(
     `tan.planner.loader` and `kconfig_symbols` call `sys.exit()` on a missing
     dependency, which in-process would tear down the CLI past every envelope
     guarantee.
+
+    `zephyr-board` splits off to `render_tree`/`write_tree`: it writes a
+    DIRECTORY of files named per SKU+core, and `output` for that target IS that
+    directory (the same contract `alp_project.py --emit zephyr-board --output
+    <dir>` had). One `if`, inside the same funnel, so its failures are coded
+    exactly like every other target's.
     """
     try:
-        text = planner_emit.render(
-            emit, sdk_root=sdk_root, board_yaml=board_path, core=core
-        )
-        planner_emit.write(text, output)
+        if emit in planner_emit.TREE_MODES:
+            planner_emit.write_tree(
+                planner_emit.render_tree(
+                    emit, sdk_root=sdk_root, board_yaml=board_path, core=core
+                ),
+                output,
+            )
+        else:
+            text = planner_emit.render(
+                emit, sdk_root=sdk_root, board_yaml=board_path, core=core
+            )
+            planner_emit.write(text, output)
     except SystemExit as err:
         return (
             f"Generation failed for target '{emit}': the planner exited early "

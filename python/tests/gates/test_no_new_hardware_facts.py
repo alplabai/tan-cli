@@ -67,6 +67,19 @@ ALLOWED: dict[str, str] = {
         "builders.rs -- a pre-existing I-26 breach in the Rust, kept faithful by the "
         "port rather than fixed silently."
     ),
+    "zephyr_board.py": (
+        "DEBT: two `E1M-EVK` mentions inside EMITTED devicetree prose (the generated "
+        "`-pinctrl.dtsi` and `.dts` say which carrier wires the console). Not a fact "
+        "tan decides anything from -- it is template text in a generator that "
+        "relocated from alp-sdk's scripts/gen_zephyr_board.py, and it is byte-pinned "
+        "against alp-sdk's committed zephyr/boards/alp/ tree by that repo's own "
+        "tests/scripts/test_gen_zephyr_board.py, so rewording it here would break a "
+        "merge-blocking gate over there. No metadata field can express it either: "
+        "`emit_zephyr_board(sku, core_id, metadata_root)` is never told which carrier "
+        "the SoM is mounted on. Retires when the carrier prose is promoted into a "
+        "metadata field -- the same condition that module's docstring already records "
+        "for the hand-authored `board.cmake` it deliberately does not generate."
+    ),
 }
 
 TAN = pathlib.Path(__file__).resolve().parents[2] / "tan"

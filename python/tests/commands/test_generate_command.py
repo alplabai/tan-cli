@@ -663,11 +663,13 @@ def test_quiet_drops_the_summary_but_never_an_issue(tmp_path):
 # --------------------------------------------------------------------------
 # Which engine ran, and saying so
 #
-# `tan generate` now renders the five relocated modes with `tan.planner`
-# in-process and spawns alp-sdk only for the rest. The bytes are pinned by
-# `tests/parity/test_planner_emit_parity.py` against a real checkout; what these
-# cover is the CHOICE -- that it is reported, and that a fallback is never
-# silent. A silent one is how the relocation got believed before it happened.
+# `tan generate` renders every one of its eleven targets with `tan.planner`
+# in-process; spawning alp-sdk is now only an escape hatch
+# (`TAN_GENERATE_EXECUTOR=subprocess`) or a reported fallback. The bytes are
+# pinned by `tests/parity/test_planner_emit_parity.py` against a real checkout;
+# what these cover is the CHOICE -- that it is reported, and that a fallback is
+# never silent. A silent one is how the relocation got believed before it
+# happened.
 # --------------------------------------------------------------------------
 
 
@@ -698,21 +700,30 @@ def test_the_engine_split_is_reported_per_target(tmp_path, monkeypatch, capsys):
     assert set(engine) == set(ALL_EMIT_MODES)
     assert {m for m, e in engine.items() if e == "in-process"} == (
         set(ALL_EMIT_MODES) & generate_cmd.planner_emit.IN_PROCESS_MODES)
-    # And the relocated ones really went through the in-process writer.
-    assert (project / "build" / "generated" / "alp.conf").read_bytes() == b"in-process\n"
-    assert (project / "build" / "generated" / "alp.overlay").read_bytes() == b"emitted\n"
+    # And they really went through the in-process writer, not the echo SDK the
+    # fixture puts on disk (which writes `emitted\n`).
+    for name in ("alp.conf", "alp.overlay", "alp_hw_info_build.h",
+                 "alp-west-libs.yml", "carrier-netlist.json"):
+        assert (project / "build" / "generated" / name).read_bytes() == b"in-process\n"
 
 
-def test_the_relocated_modes_are_exactly_the_five_from_the_registry():
-    """The split is a claim about alp-sdk's emit registry (`owner.module` under
-    `scripts/alp_orchestrate/`), so pin it rather than let it drift."""
-    assert generate_cmd.planner_emit.IN_PROCESS_MODES == frozenset({
-        "zephyr-conf", "cmake-args", "yocto-conf", "os-topology",
-        "ipc-contract-h",
-    })
-    # Every one is a target `generate` can actually reach.
+def test_every_reachable_target_renders_in_process():
+    """The claim this whole change exists to make: `tan generate` serves all
+    ELEVEN targets without alp-sdk's Python.
+
+    Pinned as an equality against the reachable set, not a subset check -- a
+    subset check passes just as happily when a mode quietly goes back to being
+    spawned, which is exactly the regression this guards. `test_planner_emit_
+    parity.py` measures the closure that proves the claim; this one keeps the
+    intent from drifting.
+    """
     reachable = set(ALL_EMIT_MODES) | EXPLICIT_ONLY_TARGETS
-    assert generate_cmd.planner_emit.IN_PROCESS_MODES <= reachable
+    assert len(reachable) == 11
+    assert generate_cmd.planner_emit.IN_PROCESS_MODES == reachable
+    # `zephyr-board` is the one that writes a DIRECTORY, so it must be the one
+    # (and only) member of TREE_MODES -- `render()` refuses it by design.
+    assert generate_cmd.planner_emit.TREE_MODES == frozenset({ZEPHYR_BOARD})
+    assert generate_cmd.planner_emit.TREE_MODES <= reachable
 
 
 def test_a_fallback_to_spawning_is_reported_not_silent(

@@ -1,39 +1,54 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Render `alp_project.py`'s relocated emit modes in-process, from `tan.planner`.
+"""Render `alp_project.py`'s emit modes in-process, from `tan.planner`.
 
 `tan.planner_root.emit` covers the eight modes alp-sdk's `alp_orchestrate` CLI
 exposed. This module covers the OTHER front door: the modes whose renderer moved
-into `tan/planner/` but whose `--emit` flag lives on `scripts/alp_project.py`.
-`tan generate` is the only caller, and until it routed through here `tan`
-shelled that script for every target -- so nothing had actually moved off
-alp-sdk's Python, whatever the relocation commit said.
+into `tan/planner/` but whose `--emit` flag lived on `scripts/alp_project.py`.
+`tan generate` is the only caller, and until it routed through here `tan` shelled
+that script -- so nothing had actually moved off alp-sdk's Python, whatever the
+relocation commit said.
 
-**The split is read off `metadata/emit-registry-v1.json`, not guessed.** A mode
-is renderable here when its `owner.module` is `scripts/alp_orchestrate/<x>.py`
--- that directory is exactly what relocated. Of the eleven modes `tan generate`
-can reach, five qualify:
+**All eleven modes `tan generate` can reach now render here.** The last six --
+`dts-overlay`, `native-sim-overlay`, `hw-info-h`, `west-libraries`,
+`carrier-netlist` and `zephyr-board` -- relocated in the same MOVE-not-rewrite
+shape as the first five, so `IN_PROCESS_MODES` is the whole reachable set and
+`tan generate` spawns nothing:
 
-    zephyr-conf     kconfig.py   _slice_alp_conf
-    cmake-args      kconfig.py   _slice_cmake_args
-    yocto-conf      kconfig.py   _slice_local_conf
-    os-topology     topology.py  emit_os_topology
-    ipc-contract-h  headers.py   emit_ipc_contract_h
+    zephyr-conf         kconfig.py                 _slice_alp_conf
+    cmake-args          kconfig.py                 _slice_cmake_args
+    yocto-conf          kconfig.py                 _slice_local_conf
+    os-topology         topology.py                emit_os_topology
+    ipc-contract-h      headers.py                 emit_ipc_contract_h
+    dts-overlay         project_emit/dts.py        _emit_dts_overlay
+    native-sim-overlay  project_emit/native_sim.py _emit_native_sim_overlay
+    hw-info-h           project_emit/hw_info.py    _emit_hw_info_h
+    west-libraries      project_emit/west_libs.py  _emit_west_libraries
+    carrier-netlist     project_emit/bom_netlist.py _emit_carrier_netlist
+    zephyr-board        zephyr_board.py            emit_zephyr_board
 
-The remaining six stay in alp-sdk and keep being spawned: `dts-overlay`,
-`native-sim-overlay`, `hw-info-h`, `west-libraries` and `carrier-netlist` are
-owned by `scripts/alp_project_emit/`, and `zephyr-board` by
-`scripts/gen_zephyr_board.py`. None of those relocated.
+The mapping is not guessed: `metadata/emit-registry-v1.json` names each mode's
+`owner.module`, and every module above is one of those owners, relocated.
 
-**Byte-identity is the whole contract**, so the per-core dispatch below mirrors
-`_run_v2_per_core_emit` in `scripts/alp_project.py` line for line -- including
-the three details a rewrite loses: `os: off` cores are skipped before the
-OS-class check, `zephyr-conf --core <id>` emits the slice with NO
-`# --- core: ... ---` marker while every other combination emits one, and the
-trailing newline is added only when the last part lacks it.
+**Byte-identity is the whole contract**, so the dispatch below mirrors
+`_run_v2_per_core_emit` and `main()` in `scripts/alp_project.py` line for line --
+including the details a rewrite loses:
+
+* `os: off` cores are skipped before the OS-class check;
+* `zephyr-conf --core <id>` emits the slice with NO `# --- core: ... ---` marker
+  while every other per-core combination emits one;
+* the trailing newline is added only when the last part lacks it;
+* `dts-overlay` and `west-libraries` union across ZEPHYR/BAREMETAL cores when
+  unscoped, while `hw-info-h` unions across ALL cores and picks a primary;
+* `dts-overlay` needs the Zephyr/baremetal core-id LIST, not just the union, so
+  the AEN i3c wiring can ask whether `m55_he` is in scope at all;
+* `native-sim-overlay` takes no `--core` scoping of any kind;
+* `carrier-netlist` never builds a per-core slice model -- it reads the raw
+  board.yaml dict, the SoM preset and the inline-or-preset board, exactly as
+  `main()` does before the per-core machinery is ever reached.
 
 **`write` uses `newline=""`, matching the SDK's own `_write_or_print`.** Windows
-text mode would translate every `\\n` to `\\r\\n`; the SDK's emits are LF on
-every host, and a CRLF `alp.conf` flips every emit-snapshot golden in alp-sdk.
+text mode would translate every `\\n` to `\\r\\n`; the SDK's emits are LF on every
+host, and a CRLF `alp.conf` flips every emit-snapshot golden in alp-sdk.
 
 **Which OS classes a per-core mode accepts is metadata, not a table here.**
 `compatible.os` in the emit registry carries it (`zephyr-conf` -> zephyr,
@@ -41,22 +56,51 @@ every host, and a CRLF `alp.conf` flips every emit-snapshot golden in alp-sdk.
 `scripts/check_emit_registry.py` keeps it honest against the real code. Copying
 it into `tan` would be a second source of truth for a fact tan must not learn
 (ADR-0017 / I-26).
+
+**`metadata/**` never relocated.** Every emitter here reads it out of the
+RESOLVED `sdk_root` via `tan.planner.paths`, which is why `bind_sdk_root` runs
+before the planner is imported at all.
 """
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from tan.planner_root import bind_sdk_root
 
-__all__ = ["IN_PROCESS_MODES", "PlannerEmitError", "render", "unavailable", "write"]
+__all__ = [
+    "IN_PROCESS_MODES",
+    "TREE_MODES",
+    "PlannerEmitError",
+    "render",
+    "render_tree",
+    "unavailable",
+    "write",
+    "write_tree",
+]
 
-#: The relocated modes reachable through `tan generate` (see the module
-#: docstring for how the registry decides this set).
-IN_PROCESS_MODES = frozenset(
-    {"zephyr-conf", "cmake-args", "yocto-conf", "os-topology", "ipc-contract-h"}
-)
+#: Every mode `tan generate` can reach, all of them served here (see the module
+#: docstring for how the registry decides the set).
+IN_PROCESS_MODES = frozenset({
+    "zephyr-conf",
+    "cmake-args",
+    "yocto-conf",
+    "os-topology",
+    "ipc-contract-h",
+    "dts-overlay",
+    "native-sim-overlay",
+    "hw-info-h",
+    "west-libraries",
+    "carrier-netlist",
+    "zephyr-board",
+})
+
+#: The modes that write a DIRECTORY of files rather than one stream, and so go
+#: through `render_tree`/`write_tree` instead of `render`/`write`. One today:
+#: `--emit zephyr-board` emits a whole Zephyr board tree named per SKU+core.
+TREE_MODES = frozenset({"zephyr-board"})
 
 #: The three per-core config slices, each mapped to the `tan.planner` renderer
 #: `alp_project.py` calls for it. Rendered by name via `getattr` so this table
@@ -148,9 +192,25 @@ def render(
     Every exception is the CALLER's to turn into an envelope: in a subprocess a
     planner blow-up arrived as a non-zero exit code, and in-process it lands
     here instead.
+
+    `TREE_MODES` are refused here rather than silently mis-served: they write a
+    directory, so a caller that asked for text would get a path it never wrote.
     """
+    if mode in TREE_MODES:
+        raise PlannerEmitError(
+            f"--emit {mode} writes a directory of files, not a stream; "
+            "render_tree() serves it.")
+
     bind_sdk_root(sdk_root)
     import tan.planner as planner  # noqa: PLC0415 -- must follow the bind
+
+    if mode == "carrier-netlist":
+        # NOT via `load_board_yaml`: `alp_project.main()` dispatches this mode
+        # before the per-core slice machinery is reached, off the raw board.yaml
+        # dict alone. Routing it through the v2 loader would resolve a topology
+        # the emitter never looks at -- and could refuse a board the SDK's own
+        # front door serves.
+        return _render_carrier_netlist(board_yaml)
 
     project = planner.load_board_yaml(Path(board_yaml))
     if mode in _SLICE_RENDERER:
@@ -159,12 +219,192 @@ def render(
         # Not in `emit_artefact`: alp-sdk's `alp_orchestrate` CLI never exposed
         # it, only `alp_project.py` did.
         return planner.emit_os_topology(project)
+    if mode in _V1_SHAPED_MODES:
+        return _render_v1_shaped(project, mode, core=core)
     # `ipc-contract-h` (and anything else relocated later that the planner CLI
     # already knows) goes through the ONE dispatch, so a mode cannot render
     # differently depending on which front door reached it.
     from tan.planner.cli import emit_artefact  # noqa: PLC0415
 
     return emit_artefact(project, mode, board_yaml=Path(board_yaml), core=core)
+
+
+def render_tree(
+    mode: str,
+    *,
+    sdk_root: Path,
+    board_yaml: Path,
+    core: str | None = None,
+) -> dict[str, str]:
+    """`{filename: content}` for a mode that writes a DIRECTORY.
+
+    Keys are the FILE names, with the generator's own `<board_dir>/` prefix
+    already stripped -- exactly the split `alp_project.py` does before joining
+    each name onto `--output`, because `--output` names the board directory
+    itself (`docs/porting-new-som.md`'s `--output build/boards/<board>/`, then
+    `west build --board-root build/boards`).
+    """
+    if mode not in TREE_MODES:
+        raise PlannerEmitError(
+            f"--emit {mode} writes a single stream, not a directory; "
+            "render() serves it.")
+
+    bind_sdk_root(sdk_root)
+    import tan.planner as planner  # noqa: PLC0415 -- must follow the bind
+
+    if core is None:
+        # `alp_project.py` refuses the same way: one board tree is one core's.
+        raise PlannerEmitError(
+            f"--emit {mode} requires --core (it generates one core's board tree)")
+
+    project = planner.load_board_yaml(Path(board_yaml))
+    if core not in project.cores:
+        raise PlannerEmitError(
+            f"--core {core} not present in board.yaml "
+            f"(known: {sorted(project.cores.keys())})")
+
+    from tan.planner.paths import METADATA_ROOT  # noqa: PLC0415
+    from tan.planner.zephyr_board import emit_zephyr_board  # noqa: PLC0415
+
+    files = emit_zephyr_board(project.sku, core, METADATA_ROOT)
+    return {relpath.split("/", 1)[1]: content for relpath, content in files.items()}
+
+
+def _render_carrier_netlist(board_yaml: Path) -> str:
+    """`--emit carrier-netlist`, mirroring `alp_project.main()`'s own branch."""
+    from tan.planner.loader import _load_yaml  # noqa: PLC0415
+    from tan.planner.project_emit.bom_netlist import (  # noqa: PLC0415
+        _emit_carrier_netlist,
+    )
+    from tan.planner.paths import METADATA_ROOT  # noqa: PLC0415
+    from tan.planner.project_loader import (  # noqa: PLC0415
+        _resolve_inline_or_preset_board,
+        _resolve_sku,
+    )
+
+    project = _load_yaml(Path(board_yaml))
+    # PHRASED, not a bare KeyError. alp-sdk reached this point only after its
+    # rich diagnostic validator had run; here the schema check happens in
+    # `load_board_yaml`, which this mode deliberately does not call, so the one
+    # field the emitter dereferences is checked by hand.
+    sku = (project.get("som") or {}).get("sku")
+    if not isinstance(sku, str) or not sku:
+        raise PlannerEmitError(
+            f"{board_yaml}: `som.sku` is missing or is not a string; "
+            "--emit carrier-netlist renders the SoM's pad routes against it.")
+    sku_preset = _resolve_sku(sku, METADATA_ROOT)
+    board_preset = _resolve_inline_or_preset_board(project, METADATA_ROOT)
+    return _emit_carrier_netlist(project, sku_preset, board_preset, METADATA_ROOT)
+
+
+#: The four modes `alp_project.py` re-fitted onto the v2 schema by projecting the
+#: resolved project back into the v1 `board:`-wrapper dict its emitters read.
+#: That projection is `_run_v2_per_core_emit`'s `project_v1_shaped`, reproduced
+#: verbatim in `_v1_shaped_project` -- these emitters take a plain dict, not a
+#: `BoardProject`, and changing that would be the rewrite this move is not.
+_V1_SHAPED_MODES = frozenset({
+    "dts-overlay", "native-sim-overlay", "hw-info-h", "west-libraries",
+})
+
+
+def _v1_shaped_project(project) -> dict[str, Any]:
+    """The legacy `board:`-wrapper dict the four relocated emitters consume.
+
+    Verbatim from `alp_project._run_v2_per_core_emit`. The public board.yaml
+    schema no longer uses this wrapper, but it is the shape those emitters read,
+    and reshaping them instead would be a rewrite.
+    """
+    return {
+        "som": {
+            "sku":    project.sku,
+            "hw_rev": project.hw_rev,
+        },
+        "pins": list(project.raw.get("pins") or []),
+        "board": ({
+            "name":   project.board_name,
+            "hw_rev": project.board_hw_rev,
+        } if project.board_name else None),
+    }
+
+
+def _render_v1_shaped(project, mode: str, *, core: str | None) -> str:
+    """`dts-overlay` / `native-sim-overlay` / `hw-info-h` / `west-libraries`,
+    mirroring `alp_project._run_v2_per_core_emit`'s project-wide section.
+
+    The `--core` validity check runs first for all four, as it does there: an
+    unknown core id is a refusal, never a `KeyError` from inside an emitter.
+    """
+    if core is not None and core not in project.cores:
+        raise PlannerEmitError(
+            f"--core {core} not present in board.yaml "
+            f"(known: {sorted(project.cores.keys())})")
+
+    from tan.planner.project_emit.dts import _emit_dts_overlay  # noqa: PLC0415
+    from tan.planner.project_emit.hw_info import _emit_hw_info_h  # noqa: PLC0415
+    from tan.planner.project_emit.native_sim import (  # noqa: PLC0415
+        _emit_native_sim_overlay,
+    )
+    from tan.planner.project_emit.west_libs import (  # noqa: PLC0415
+        _emit_west_libraries,
+    )
+
+    shaped = _v1_shaped_project(project)
+
+    if mode == "dts-overlay":
+        # The DTS overlay is shaped by the board header (bus aliases +
+        # alp,pin-array) which is a SoM-mounting fact, not a per-core fact.
+        # v2 contributes only the peripherals list: union across
+        # Zephyr/baremetal cores (or one core when --core is set).
+        if core is not None:
+            slice_ = project.cores[core]
+            return _emit_dts_overlay(
+                shaped, project.som_preset, project.board_preset,
+                v2_peripherals=sorted(set(slice_.peripherals)),
+                v2_core_id=core,
+                v2_core_os=slice_.os,
+                v2_core_ids=[core],
+            )
+        union: set[str] = set()
+        zephyr_core_ids: list[str] = []
+        for core_id, slice_ in project.cores.items():
+            if slice_.os in ("zephyr", "baremetal"):
+                union.update(slice_.peripherals)
+                zephyr_core_ids.append(core_id)
+        return _emit_dts_overlay(
+            shaped, project.som_preset, project.board_preset,
+            v2_peripherals=sorted(union),
+            v2_core_ids=zephyr_core_ids,
+        )
+
+    if mode == "native-sim-overlay":
+        # native_sim GPIO emulation -- board-agnostic (the E1M pad map is a
+        # SoM-mounting fact), so no --core / peripheral scoping applies.
+        return _emit_native_sim_overlay(shaped)
+
+    if mode == "hw-info-h":
+        # hw-info-h is a project-level emit even under v2 -- consumers
+        # `#include` it from any slice. --core picks which slice's OS lands in
+        # ALP_HW_BUILD_OS; absent --core, primary-core rules apply.
+        return _emit_hw_info_h(
+            shaped, project.som_preset, project.board_preset,
+            v2_cores={cid: s.os for cid, s in project.cores.items()},
+            v2_selected_core=core,
+        )
+
+    # west-libraries
+    if core is not None:
+        v2_libraries = sorted(set(project.cores[core].libraries))
+    else:
+        union_l: set[str] = set()
+        for slice_ in project.cores.values():
+            if slice_.os in ("zephyr", "baremetal"):
+                union_l.update(slice_.libraries)
+        v2_libraries = sorted(union_l)
+    return _emit_west_libraries(
+        shaped, project.som_preset, project.board_preset,
+        v2_libraries=v2_libraries,
+        v2_project_libraries=sorted(project.libraries),
+    )
 
 
 def _render_per_core(planner, project, mode: str, *, core: str | None,
@@ -222,3 +462,17 @@ def write(text: str, destination: Path) -> None:
     """
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(text, encoding="utf-8", newline="")
+
+
+def write_tree(files: dict[str, str], destination: Path) -> None:
+    """Write a `render_tree` result into `destination`, which IS the board
+    directory. Same `newline=""` contract as `write`, per file.
+
+    Sorted, so the order files appear on disk (and in any log that follows the
+    writes) does not depend on dict iteration order across interpreters.
+    """
+    destination.mkdir(parents=True, exist_ok=True)
+    for name in sorted(files):
+        target = destination / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(files[name], encoding="utf-8", newline="")
