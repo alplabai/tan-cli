@@ -35,6 +35,35 @@ All notable changes to `tan` are documented here. Format follows
   them; only the silence is gone.
 
 ### Added
+- **`tan debug-config` now resolves a real J-Link device / pyOCD target id
+  from the SDK's published debug-probe identity, before the project has ever
+  been built** (alp-sdk#1026). alp-sdk#987 shipped `variants[].debug.
+  {pyocd_target, jlink_device, jlink_flash_device, openocd_config}` across 13
+  Alif Ensemble variants with a schema, a gate and tests, and no reader
+  anywhere — every generated `launch.json` kept the literal `<resolved-
+  device>` / `<resolved-target-id>` placeholders #987 was filed to replace.
+  `device` resolves from `jlink_device[<core id>]` (the `--core` flag, or the
+  core a prior build already resolved); `targetId` resolves from the scalar
+  `pyocd_target` with no core or build needed at all. A real build's own
+  `runners.yaml` resolution still wins wherever it exists; this is a fallback
+  for the field(s) it did not already resolve. `openocd_config` is absent
+  from every published SoC family today, and stays the existing placeholder —
+  the schema's own stance that an unpopulated key is a published "unknown" is
+  never overridden with a guess. New `debug-config.sdk-identity-key-absent`
+  (reserved) issue names that case explicitly instead of relying only on the
+  generic "still needs resolution" note, which used to name `device` even for
+  a server whose draft carries no such key.
+
+### Fixed
+- **A write could silently replace a hand-filled `.vscode/launch.json` value**
+  with one resolved from the SDK's identity above, at `exit 0` with
+  `issues: []` (alp-sdk#1026 review). The overwrite itself is the same,
+  by-design behaviour a value resolved from a real build has always had; the
+  defect was that it was undisclosed for this new source. A write that
+  replaces a concrete existing `device`/`targetId`/`configFiles` value now
+  emits a new `debug-config.sdk-identity-overwrite` (reserved) issue naming
+  the old and new values.
+
 - **Linux and macOS now see the manual-install hints the SDK provides for them**
   (#230). alp-sdk v0.14.0 added `manualInstallHints.posix.note` — the POSIX twin
   of the Windows key `tan bootstrap` already printed — and tan did not read it, so

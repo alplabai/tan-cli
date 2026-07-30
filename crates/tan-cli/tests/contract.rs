@@ -292,6 +292,17 @@ contract_case!(
     debug_config_preview_native_host,
     "debug-config-preview-native-host"
 );
+// alp-sdk#1026 review finding #6: the other three goldens above ship no
+// `board.yaml`/`sdk/`, so `fill_debug_probe_identity_from_sdk` returns early
+// on every one of them and this PR's own work is invisible to this suite --
+// green here proves nothing broke, not that the new resolution reaches the
+// wire. This case ships a synthetic `sdk/` (`copy_fixture_inputs` copies
+// subtrees recursively for exactly this) so `configuration.device` pins the
+// real resolved `"Cortex-M55"`, not `"<resolved-device>"`.
+contract_case!(
+    debug_config_preview_zephyr_mcu_sdk_identity,
+    "debug-config-preview-zephyr-mcu-sdk-identity"
+);
 
 /// Not a golden-diff case: `tan --version`'s first stdout line is its own
 /// small contract (the vscode extension parses it to gate feature

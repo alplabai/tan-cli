@@ -1,0 +1,16 @@
+{
+  "soc_spec_version": 1,
+  "ref": "alif:ensemble:e8",
+  "vendor": "Alif Semiconductor",
+  "family": "Ensemble",
+  "part": "E8",
+  "variants": [
+    {
+      "order_code": "AE822FA0E5597LS0",
+      "debug": {
+        "pyocd_target": "AE822FA0E5597LS0",
+        "jlink_device": { "m55_hp": "Cortex-M55", "m55_he": "Cortex-M55" }
+      }
+    }
+  ]
+}
