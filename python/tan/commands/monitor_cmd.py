@@ -71,9 +71,43 @@ class MonitorError(Exception):
         self.data = data
 
 
+def _pyserial_missing() -> MonitorError:
+    """The one spelling of "pyserial is not installed".
+
+    The hint names the EXTRA rather than the bare distribution because that is
+    the supported way to get it: pyserial is declared in
+    `[project.optional-dependencies] monitor`, not in `dependencies`. A frozen
+    `--onefile` build resolves it at BUILD time, so a customer holding a binary
+    built without the extra cannot pip-install their way out -- hence the second
+    sentence, which is the only actionable thing to tell them.
+    """
+    return MonitorError(
+        "monitor.pyserial-missing",
+        "pyserial is required for `tan monitor`. Install it with "
+        '`pip install "alp-tan[monitor]"`. A frozen `tan` binary bundles it at '
+        "build time, so a binary built without that extra cannot gain it here.",
+        ExitCode.RUNTIME_FAILURE,
+        {"schemaVersion": DATA_SCHEMA_VERSION},
+    )
+
+
 def _available_ports() -> list[tuple[str, str]]:
-    """`[(device, description)]` for every serial port pyserial can see."""
-    from serial.tools import list_ports  # noqa: PLC0415 (optional at runtime)
+    """`[(device, description)]` for every serial port pyserial can see.
+
+    The import is guarded HERE, not only at the caller, because this is the one
+    choke point every port-listing path routes through -- and because
+    `_run_monitor`'s precheck is deliberately skipped on a FROZEN build (there
+    is no `sys.executable` worth validating there). On a `--onefile` binary
+    built without the `monitor` extra this line is therefore the FIRST place
+    pyserial is touched, and it is reached IN-PROCESS before any child is
+    spawned. Left unguarded the ImportError escaped as an unexpected exception
+    and surfaced as `monitor.internal-failure` at exit 5 -- "tan has a bug" --
+    for what is simply an optional dependency the customer never installed.
+    """
+    try:
+        from serial.tools import list_ports  # noqa: PLC0415 (optional at runtime)
+    except ImportError as err:
+        raise _pyserial_missing() from err
 
     return [(p.device, p.description or "") for p in list_ports.comports()]
 
@@ -116,12 +150,7 @@ def _run_monitor(port: str | None, baud: int) -> tuple[dict, list[Issue], ExitCo
         try:
             import serial  # noqa: F401, PLC0415 (validates pyserial is installed)
         except ImportError as err:
-            raise MonitorError(
-                "monitor.pyserial-missing",
-                "pyserial is required. Install via `pip install pyserial`.",
-                ExitCode.RUNTIME_FAILURE,
-                {"schemaVersion": DATA_SCHEMA_VERSION},
-            ) from err
+            raise _pyserial_missing() from err
 
     if port is None:
         raise _refuse_listing_ports("no --port given")
