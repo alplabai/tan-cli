@@ -1,11 +1,15 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # Can the Python `tan` ship as the eight release assets?
 
-**Yes.** Five of the eight assets were built AND verified on this machine; the
-other three (ARM Windows, both macOS) need a host this machine does not have —
-PyInstaller cannot cross-compile — but their runner labels and their PyInstaller
-wheels both exist, so each needs one CI run. All four blockers below are closed;
-§0 records how, and what still has to come from the maintainer.
+**Yes — all eight assets now exist, built and verified in CI.** Run
+[30555358227](https://github.com/alplabai/tan-cli/actions/runs/30555358227):
+8/8 green, each through `--version`, `generate --help` carrying `--output`,
+`init` writing the vendored tree, and a real `generate --output` emit, plus an
+architecture verdict on all four assets where a wrong runner label would ship a
+mislabelled binary, plus `checksums.txt` over exactly 8 files. Sizes and verdicts
+in §1.0. All four blockers are closed; §0 records how, and what remains is one
+in-flight fix of the maintainer's (`firmware_path`, §3.4a) plus release decisions
+that are theirs to make.
 
 ## 0. Blocker status
 
@@ -29,7 +33,7 @@ failed**.
 
 | Item | State |
 |---|---|
-| three remaining assets | **BLOCKED, not buildable yet** — GitHub refuses to dispatch a workflow absent from the default branch (§1.2) |
+| three remaining assets | **BUILT AND VERIFIED** in CI once the workflow reached `main` (§1.0) |
 | `tan monitor` without pyserial | **fixed** (`bd7079d`), confirmed on a frozen build — §0.2 |
 | `[monitor]` in the release binary | **shipping** — §0.3, +73392 B |
 | npm-shim libc mismatch | **fixed and pinned** — §6c |
@@ -188,7 +192,62 @@ writes `board.yaml` + `src/main.c` (proves the vendored-template `--add-data`);
 `generate --target zephyr-conf --output ./out/alp.conf --sdk-root <sdk>` emits a
 file containing `CONFIG_` lines. A binary that starts but cannot emit fails.
 
-### 1.2 The three remaining assets cannot be dispatched yet
+### 1.0 ALL EIGHT ASSETS BUILT AND VERIFIED IN CI
+
+`python-binaries.yml` landed on `main` (`4b39a86`, PR #247), and dispatching it
+with `--ref chore/python-freeze-release` ran this branch's version — `main` only
+had to carry the file, as predicted. Run
+[30555358227](https://github.com/alplabai/tan-cli/actions/runs/30555358227):
+**8/8 success plus the checksums job**, every asset built with
+`pip install -e ".[monitor]"`, every one through the same four proofs.
+
+| Asset | Runner | Bytes | Ceiling | Arch verdict |
+|---|---|---|---|---|
+| `tan-x86_64-pc-windows-msvc.exe` | `windows-latest` | 14638614 | 16500000 | `PE machine 0x8664 (want 0x8664)` |
+| `tan-aarch64-pc-windows-msvc.exe` | `windows-11-arm` | 14345471 | 16500000 | `PE machine 0xaa64 (want 0xaa64)` |
+| `tan-x86_64-unknown-linux-gnu` | `ubuntu-latest` + Debian 11 | 14172632 | 16500000 | — |
+| `tan-aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` + Debian 11 | 13971392 | 16500000 | — |
+| `tan-x86_64-unknown-linux-musl` | `ubuntu-latest` + Alpine | 15132432 | 18000000 | — |
+| `tan-aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` + Alpine | 15406288 | 18000000 | — |
+| `tan-x86_64-apple-darwin` | `macos-15-intel` | 14408848 | 16500000 | `Mach-O 64-bit executable x86_64` |
+| `tan-aarch64-apple-darwin` | `macos-latest` | 13739040 | 16500000 | `Mach-O 64-bit executable arm64` |
+
+The arch checks are the point of the exercise and they hold: the Intel asset came
+off `macos-15-intel` as `x86_64`, the Apple-silicon asset off `macos-latest` as
+`arm64`, and the ARM Windows asset off `windows-11-arm` with COFF machine
+`0xaa64`. A wrong runner label would have produced a correctly named asset of the
+wrong architecture, and only these two steps would have caught it.
+
+**macOS against `DEFAULT=16500000`: 14408848 and 13739040 — both UNDER, with
+2.09 MB and 2.76 MB of headroom.** So macOS does not need its own ceiling line;
+the recorded guidance (give macOS its own line rather than raise the shared
+ceiling) applies only above DEFAULT and was not triggered. Largest asset overall
+is still `aarch64-unknown-linux-musl` at 15406288 against its 18000000 musl
+ceiling.
+
+`checksums.txt` generated over exactly 8 files, `sha256sum` format:
+
+```
+ad147dc7fc8cc92b036ba9bfbf0c6b871b9d7c93d3ef066a0073559567d1f507  tan-aarch64-apple-darwin
+e18244ac891895dae99530858320c43a460fbd0b73f082e5fb1434b492f12ce5  tan-aarch64-pc-windows-msvc.exe
+9f1212207cd6c00d98525bf6d3840a74cec9cdabd415217c24ea581e4f2053fe  tan-aarch64-unknown-linux-gnu
+8308871dc692370130b5944f257e380909a21bdeb373bd5db734a542e57001fc  tan-aarch64-unknown-linux-musl
+ea500a763abb04401ba58179e61bd449f0c900fc756b7c7483440041dbe0c43a  tan-x86_64-apple-darwin
+717189a8a7cf0f04f046f02b86ebab5e3d1e3423f74a846883b12e36822466a2  tan-x86_64-pc-windows-msvc.exe
+1d1a63b7f072a6eb4c507fef64a0a12a0b82dc6f29df64b07a283f61f54e307c  tan-x86_64-unknown-linux-gnu
+e2350c519df91114c8210a4edbb7c9d1736ba5b00ded0452286d267111d980fd  tan-x86_64-unknown-linux-musl
+```
+
+Two runs were burned on one defect, and it was in the PROOF, not in any binary:
+`grep -- "--output"` on rendered help. macOS runners give rich a colour-capable
+terminal and rich styles a flag's leading dash separately
+(`ESC[1;36m-ESC[0mESC[1;36m-output`), so the literal string is not in the bytes;
+Windows and Linux passed only because neither emitted colour. Fixed by asking for
+`NO_COLOR=1`, stripping escapes anyway, and reducing to letters/digits/hyphens —
+verified against a byte-level reproduction of the macOS output, with a stub whose
+help carries only `--target` as the negative control.
+
+### 1.2 (historical) The three remaining assets could not be dispatched
 
 Branch pushed (`chore/python-freeze-release`), then:
 
@@ -718,17 +777,19 @@ copy of the table is exactly what this test exists to prevent.
 
 ## 7. Not proved, and the fallback
 
-- `tan-aarch64-pc-windows-msvc.exe`, `tan-x86_64-apple-darwin`,
-  `tan-aarch64-apple-darwin`: no ARM-Windows and no macOS host was available.
-  The runner labels and the PyInstaller wheels exist; running
-  `python-binaries.yml` once with `workflow_dispatch` is what turns that into
-  a fact. It builds and self-verifies all eight and uploads nothing to a
-  release.
-- The aarch64 Linux pair was proved under **QEMU**, not on native arm64
-  silicon. CI should use `ubuntu-24.04-arm`; QEMU is ~12x slower (162.9 s vs
-  13.7 s for the same PyInstaller run). Emulation is a build-host difference
-  only — the artefact is a real arm64 binary either way (`uname -m` = `aarch64`
-  in the build container, and it will not run on x86_64).
+- ~~`tan-aarch64-pc-windows-msvc.exe`, `tan-x86_64-apple-darwin`,
+  `tan-aarch64-apple-darwin`~~ — **now proved in CI** (§1.0), on
+  `windows-11-arm`, `macos-15-intel` and `macos-latest` respectively.
+- The aarch64 Linux pair was originally proved here under **QEMU**; CI has since
+  built both on native `ubuntu-24.04-arm` silicon, which is what the workflow
+  uses. For the record QEMU was ~12x slower (162.9 s vs 13.7 s for the same
+  PyInstaller run) and is a build-host difference only — the artefact is a real
+  arm64 binary either way.
+- Still not proved anywhere: that any of these eight actually RUN on a customer's
+  machine rather than a runner. The four proofs cover start, flag surface,
+  scaffold and emit; they do not cover `tan build` driving a real Zephyr
+  toolchain, which is what `first install` (§3.5) will cover automatically once a
+  Python release is the latest one.
 - `pip install` needs none of this machinery. `alp-tan` is not on PyPI
   (`https://pypi.org/pypi/alp-tan/json` → `404`), and once §3.1 is fixed
   `pip install alp-tan` is a working distribution path for anyone with Python
