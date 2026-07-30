@@ -30,11 +30,32 @@ failed**.
 | Item | State |
 |---|---|
 | three remaining assets | **BLOCKED, not buildable yet** — GitHub refuses to dispatch a workflow absent from the default branch (§1.2) |
-| `tan monitor` without pyserial | works "no traceback", but reports the WRONG code — §0.2 |
+| `tan monitor` without pyserial | **fixed** (`bd7079d`), confirmed on a frozen build — §0.2 |
+| `[monitor]` in the release binary | **shipping** — §0.3, +73392 B |
 | npm-shim libc mismatch | **fixed and pinned** — §6c |
 | `sdk_parity` against `design/tan-python-port` | **still red**, same 25 — §3.4a |
 
-### 0.2 `tan monitor` on a no-extras build: no traceback, wrong verdict
+### 0.2 `tan monitor` on a no-extras build — FIXED (`bd7079d`), confirmed frozen
+
+Rebuilt frozen from the declared deps only (pyserial absent from the build venv),
+both paths:
+
+```
+$ tan monitor --port COM7 --format json
+{"command":"monitor","ok":false,"exitCode":1,...,"issues":[{"code":"monitor.pyserial-missing",
+ "message":"pyserial is required for `tan monitor`. Install it with `pip install \"alp-tan[monitor]\"`.
+  A frozen `tan` binary bundles it at build time, so a binary built without that extra cannot gain it here."}]}
+exit = 1
+```
+
+Identical for `tan monitor --format json` with no `--port`, identical in text
+mode, zero tracebacks, and `--version` / `generate --output` / `init` still pass
+the four proofs. The guard sits at `_available_ports()` — the choke point — so
+the frozen path can no longer reach an unguarded `serial.tools` import, and the
+message is honest about the one thing a person holding a `--onefile` binary
+cannot do about it.
+
+The original finding, for the record:
 
 `monitor` exists in a commit now, and the degradation is not the intended one:
 
@@ -64,15 +85,26 @@ touched. Two fixes are possible and they are not equivalent: guard
 `_available_ports()` (then the message is right on every build), or ship the
 extra (then the path is never reached) — see §0.3.
 
-### 0.3 Should the release binary carry `monitor`? Yes, on the numbers
+### 0.3 The release binary carries `monitor` — DECIDED, and wired
+
+`python-binaries.yml` installs `-e ".[monitor]"` on all four build lines (the
+quotes matter: `[monitor]` is a bash glob character class). `ci.yml` deliberately
+does **not** — it must keep testing the extras-less shape a customer's
+`pip install alp-tan` produces, which is the only shape in which
+`test_declared_dependencies.py` can catch an extras-only import escaping to
+module scope. That asymmetry is intentional and is stated at both ends.
+
+Measured after `bd7079d`, one host, clean venvs:
 
 | build | bytes | vs DEFAULT ceiling 16500000 |
 |---|---|---|
-| `pip install -e .` | 13571067 | 2928933 B headroom |
-| `pip install -e .[monitor]` | 13648433 | 2851567 B headroom |
+| `pip install -e .` | 13574636 | 2925364 B headroom |
+| `pip install -e ".[monitor]"` | 13648028 | 2851972 B headroom |
 
-**+77366 B, 0.57%.** The ceiling does not decide this — there is 2.8 MB of room
-either way. What the 77 KB buys is a `monitor` that works:
+**+73392 B, 0.54%.** The ceiling does not decide this — there is 2.8 MB of room
+either way. What it buys is a `monitor` that works, and pyserial cannot be added
+to a `--onefile` binary afterwards, so a build without it ships a command that can
+never work on the machine holding it:
 
 ```
 $ tan monitor --format json        # [monitor] build

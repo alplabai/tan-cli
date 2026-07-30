@@ -97,6 +97,14 @@ jobs:
       # what a customer's `pip install alp-tan` resolves. Extras stay out: the
       # `monitor` extra is optional at runtime by definition, and installing it
       # here would hide a module-scope `import serial` from the gate below.
+      #
+      # Deliberately ASYMMETRIC with python-binaries.yml, which installs
+      # `-e ".[monitor]"`: the release artifact carries the extra because a frozen
+      # binary cannot gain pyserial later, while this job must keep testing the
+      # extras-LESS shape, which is what `pip install alp-tan` gives a customer
+      # and the only shape in which `test_declared_dependencies.py` can catch an
+      # extras-only import escaping to module scope. Do not "fix" one to match
+      # the other.
       - name: install the declared package
         run: pip install -e ./python
       - name: install the test runner
