@@ -35,6 +35,7 @@ from tan.core.flash_plan import (
     fa_str_checked,
     flow_d_available,
     is_rust_absolute,
+    parse_atoc_start_address,
     parse_system_manifest,
     plan_alif_mram_jlink,
     resolve_artefact_path,
@@ -742,6 +743,171 @@ boot_order: []
     # pid + nanosecond stamp; a placeholder is what reaches the envelope.
     assert "<generated.jlink>" in entry["message"]
     assert "tan-flash-" not in entry["message"]
+
+
+# ── Flow D: the ATOC address is a BUILD-TIME output, not metadata ──────────
+#
+# An earlier design assumed `atoc_address` lived under `metadata/**`. It does
+# not: `app-gen-toc` writes it fresh into `app-package-map.txt` at SIGNING
+# time and the runbook says outright it shifts per build/config. These pin the
+# parser (`flash_plan.parse_atoc_start_address`) against real bench-script
+# report text, and the IO glue (`flash_cmd._resolve_flow_d_atoc_address`) that
+# feeds a parsed value into the plan without requiring the manifest to bake
+# one in.
+
+
+def test_parse_atoc_start_address_takes_the_last_match():
+    """Mirrors every bench script's own
+    `awk '/APP Package Start Address:/{print $NF}' app-package-map.txt | tail
+    -1` -- a re-signed re-run APPENDS a fresh block, so the LAST line wins, not
+    the first."""
+    report = (
+        "Device Algorithm Package\n"
+        "APP Package Start Address: 0x8000F000\n"
+        "\n"
+        "Device Algorithm Package (re-signed)\n"
+        "APP Package Start Address: 0x8057F5B0\n"
+    )
+    assert parse_atoc_start_address(report) == "0x8057F5B0"
+
+
+def test_parse_atoc_start_address_is_none_when_the_marker_is_absent():
+    assert parse_atoc_start_address("") is None
+    assert parse_atoc_start_address("some other report entirely\n") is None
+
+
+def test_resolve_flow_d_atoc_address_prefers_an_explicit_manifest_value(tmp_path):
+    """An explicit `atoc_address` always wins over a parsed one -- and the map
+    file is never even opened, so a stale/missing report cannot break a
+    manifest that already carries the real value.
+
+    The map file here is REAL and carries a DIFFERENT address than the
+    explicit one, so a precedence bug that reads the map anyway is caught by
+    the value, not just by object identity (a bug that fell through to
+    `plan_alif_mram_jlink`'s generic refusal via the missing-file no-op would
+    pass an `is args` check too)."""
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    (tmp_path / "app-package-map.txt").write_text(
+        "APP Package Start Address: 0x8000F000\n", encoding="utf-8"
+    )
+    args = {"atoc_address": "0x8057F5B0", "atoc_map": "app-package-map.txt"}
+    resolved = _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path))
+    assert resolved is args
+    assert resolved["atoc_address"] == "0x8057F5B0"
+
+
+def test_resolve_flow_d_atoc_address_swallows_a_malformed_explicit_value(tmp_path):
+    """A malformed `atoc_address` (not a string/bare-number shape) makes
+    `fa_str_checked` raise; this helper must swallow that and return the dict
+    UNTOUCHED so `plan_alif_mram_jlink` raises the real, precise refusal --
+    not silently overwrite it with a value parsed from the map."""
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    (tmp_path / "app-package-map.txt").write_text(
+        "APP Package Start Address: 0x8000F000\n", encoding="utf-8"
+    )
+    args = {"atoc_address": True, "atoc_map": "app-package-map.txt"}
+    assert _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path)) is args
+
+
+def test_resolve_flow_d_atoc_address_parses_the_map_file(tmp_path):
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    (tmp_path / "app-package-map.txt").write_text(
+        "APP Package Start Address: 0x8057F5B0\n", encoding="utf-8"
+    )
+    args = {"atoc": "atoc.bin", "atoc_map": "app-package-map.txt"}
+    resolved = _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path))
+    assert resolved["atoc_address"] == "0x8057F5B0"
+    assert resolved is not args, "must not mutate the manifest's own flash_args dict"
+    assert "atoc_address" not in args
+
+
+def test_resolve_flow_d_atoc_address_is_a_no_op_without_atoc_map(tmp_path):
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    args = {"atoc": "atoc.bin"}
+    assert _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path)) is args
+
+
+def test_resolve_flow_d_atoc_address_is_a_no_op_when_the_map_is_missing(tmp_path):
+    """The map path resolves to nothing yet (signing has not run, or ran
+    somewhere else) -- graceful no-op, letting `plan_alif_mram_jlink` raise its
+    own precise refusal rather than this helper inventing a different one."""
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    args = {"atoc": "atoc.bin", "atoc_map": "app-package-map.txt"}
+    assert _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path)) is args
+
+
+def test_resolve_flow_d_atoc_address_refuses_loudly_when_the_marker_is_missing(tmp_path):
+    """The map file WAS found -- it is not "no map yet", it is "found your map
+    and could not get an address out of it". Falling through to
+    `plan_alif_mram_jlink`'s generic "both required" refusal here would tell
+    the user to do the thing (supply a map) they already did."""
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    (tmp_path / "app-package-map.txt").write_text("nothing useful here\n", encoding="utf-8")
+    args = {"atoc": "atoc.bin", "atoc_map": "app-package-map.txt"}
+    with pytest.raises(FlashPlanError) as raised:
+        _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path))
+    msg = str(raised.value)
+    assert "app-package-map.txt" in msg
+    assert "APP Package Start Address" in msg
+
+
+def test_flow_d_end_to_end_resolves_atoc_address_from_the_build_output(tmp_path):
+    """The real wiring, driven through the CLI: a manifest with `atoc_map`
+    instead of a baked-in `atoc_address` must still PLAN successfully under
+    `--dry-run` -- proving the address came from the build report, not from a
+    refusal that `--dry-run` happens to mask. `--dry-run` is the only safe way
+    to drive this end to end: it bypasses the J-Link tool gate entirely, so
+    nothing here can ever reach a real probe."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "app-package-map.txt").write_text(
+        "APP Package Start Address: 0x8057F5B0\n", encoding="utf-8"
+    )
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, mram_address: "0x80010000",
+                atoc: atoc.bin, atoc_map: app-package-map.txt}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0
+    entry = payload["data"]["entries"][0]
+    assert entry["method"] == "alif_mram_jlink"
+    assert entry["status"] == "ok"
+
+
+def test_flow_d_end_to_end_fails_when_the_map_file_never_materialised(tmp_path):
+    """No baked `atoc_address` and no report on disk yet: `plan_alif_mram_jlink`
+    must still refuse loudly rather than the entry silently vanishing."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, mram_address: "0x80010000",
+                atoc: atoc.bin, atoc_map: app-package-map.txt}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    # The distinguishing substring, not the `flash_args.atoc` prefix shared with
+    # `flash_args.atoc_address` -- a prefix match cannot tell which required
+    # field the refusal was actually about.
+    assert "flash_args.atoc_address" in entry["message"]
 
 
 # ── pure helpers with edge cases the oracle diff does not reach ─────────────

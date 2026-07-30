@@ -308,6 +308,103 @@ def test_jlink_present_with_an_unreadable_version_still_reports_the_requirements
     assert "AE822FA0E5597LS0_M55_HE" in f"{check.detail} {check.fix or ''}"
 
 
+def test_jlink_check_names_a_caller_supplied_device_not_only_the_fallback():
+    """`_collect` passes the metadata-resolved profile through; a stand-in value
+    proves the parameter is actually used, not shadowed by the constant."""
+    check = doctor_cmd.jlink_check(
+        found="/usr/bin/JLinkExe", version=(9, 50), device="SOME_OTHER_PROFILE"
+    )
+    assert "SOME_OTHER_PROFILE" in check.detail
+    assert "AE822FA0E5597LS0_M55_HE" not in check.detail
+
+
+# --------------------------------------------------------------------------
+# jlink_flash_device -- resolving the AE822 profile from metadata
+# --------------------------------------------------------------------------
+
+
+def _write_e8_json(root: Path, variants: list[dict]) -> None:
+    e8 = root / "metadata" / "socs" / "alif" / "ensemble"
+    e8.mkdir(parents=True)
+    (e8 / "e8.json").write_text(json.dumps({"variants": variants}), encoding="utf-8")
+
+
+def test_jlink_flash_device_is_read_from_e8_json_when_an_sdk_resolves(tmp_path):
+    """The real shape: two AE822 package variants, only the second carrying a
+    `jlink_flash_device` -- the one variant with an MRAM loader profile."""
+    _write_e8_json(
+        tmp_path,
+        [
+            {"debug": {"jlink_device": {"m55_he": "Cortex-M55"}}},
+            {"debug": {"jlink_device": {"m55_he": "Cortex-M55"},
+                       "jlink_flash_device": "AE822FA0E5597LS0_M55_HE"}},
+        ],
+    )
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == "AE822FA0E5597LS0_M55_HE"
+    assert "e8.json" in source
+
+
+def test_jlink_flash_device_falls_back_with_no_sdk_root():
+    device, source = doctor_cmd.jlink_flash_device(None)
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "built-in fallback" in source
+
+
+def test_jlink_flash_device_falls_back_when_no_variant_carries_the_key(tmp_path):
+    _write_e8_json(tmp_path, [{"debug": {"jlink_device": {"m55_he": "Cortex-M55"}}}])
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "built-in fallback" in source
+
+
+def test_jlink_flash_device_survives_a_missing_or_malformed_e8_json(tmp_path):
+    """No file, and a directory where a file is expected: both fall back rather
+    than raising -- doctor's whole job is to run on a host where things are
+    wrong."""
+    assert doctor_cmd.jlink_flash_device(str(tmp_path))[0] == doctor_cmd.JLINK_AEN_DEVICE
+
+    (tmp_path / "metadata" / "socs" / "alif" / "ensemble").mkdir(parents=True)
+    (tmp_path / "metadata" / "socs" / "alif" / "ensemble" / "e8.json").mkdir()
+    assert doctor_cmd.jlink_flash_device(str(tmp_path))[0] == doctor_cmd.JLINK_AEN_DEVICE
+
+
+def test_jlink_flash_device_falls_back_when_variants_disagree(tmp_path):
+    """Two variants carrying DIFFERENT `jlink_flash_device` values is
+    ambiguous, not resolved: picking whichever serialises first would silently
+    name the wrong part with nothing to catch it, so this must fall back and
+    say why -- not pick either one."""
+    _write_e8_json(
+        tmp_path,
+        [
+            {"debug": {"jlink_flash_device": "AE822FA0E5597LS0_M55_HE"}},
+            {"debug": {"jlink_flash_device": "SOME_OTHER_PART_M55_HE"}},
+        ],
+    )
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "ambiguous" in source
+
+
+# --------------------------------------------------------------------------
+# _collect -- the production call site, not just the helpers in isolation
+# --------------------------------------------------------------------------
+
+
+def test_collect_wires_the_resolved_jlink_device_and_its_source_into_the_check(tmp_path):
+    """Reverting `_collect` to the old hardcoded `jlink_check(jlink_exe,
+    jlink_version)` call must fail THIS test: it is the only coverage of the
+    production call site, not just `jlink_flash_device`/`jlink_check` in
+    isolation. Also proves the source travels into the envelope (Finding 5):
+    the check text must differ depending on where the profile came from."""
+    _write_e8_json(tmp_path, [{"debug": {"jlink_flash_device": "STAND-IN-PROFILE"}}])
+    checks = doctor_cmd._collect(str(tmp_path))
+    jlink = next(c for c in checks if c.name == "jlink")
+    assert "STAND-IN-PROFILE" in jlink.detail
+    assert doctor_cmd.JLINK_AEN_DEVICE not in jlink.detail
+    assert "e8.json" in jlink.detail
+
+
 # --------------------------------------------------------------------------
 # Aggregation and issue codes
 # --------------------------------------------------------------------------

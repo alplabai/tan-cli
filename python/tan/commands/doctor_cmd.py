@@ -274,6 +274,63 @@ def zephyr_python_floor(zephyr_base: str | None) -> tuple[tuple[int, int], str]:
     )
 
 
+def jlink_flash_device(sdk_root: str | None) -> tuple[str, str]:
+    """The Flow-D part-number J-Link device profile, and where it came from.
+
+    Read from `<sdk>/metadata/socs/alif/ensemble/e8.json`
+    `variants[].debug.jlink_flash_device` -- the ONE variant carrying that key
+    is the one with an MRAM loader profile at all; the other AE822 package
+    variant's `debug` has a `jlink_device` (attach) entry but no
+    `jlink_flash_device`, because it has no Flow D loader to unlock.
+    `JLINK_AEN_DEVICE` is only the FALLBACK for a host with no SDK checkout
+    resolved yet, mirroring `zephyr_python_floor`'s shape -- kept byte-identical
+    to today's metadata value so a doctor run with no `--sdk-root` still names
+    the right part instead of a stale one.
+
+    Every variant is checked, not just the first hit: if a future package
+    variant declares a DIFFERENT `jlink_flash_device`, picking whichever
+    serialises first would silently advise the wrong part with nothing to
+    catch it. More than one DISTINCT value is ambiguous, not resolved -- it
+    falls back to `JLINK_AEN_DEVICE` with a source that says so, rather than
+    guessing.
+
+    Never raises: a missing SDK, an unreadable or malformed `e8.json`, or no
+    variant carrying the key all fall back the same way -- doctor's whole job
+    is to run on a host where things are wrong.
+    """
+    if sdk_root:
+        path = Path(sdk_root) / "metadata" / "socs" / "alif" / "ensemble" / "e8.json"
+        text = _read_text(path)
+        if text is not None:
+            try:
+                doc = json.loads(text)
+            except ValueError:
+                doc = None
+            if isinstance(doc, dict):
+                found: set[str] = set()
+                for variant in doc.get("variants") or []:
+                    if not isinstance(variant, dict):
+                        continue
+                    debug = variant.get("debug")
+                    device = debug.get("jlink_flash_device") if isinstance(debug, dict) else None
+                    if isinstance(device, str) and device:
+                        found.add(device)
+                if len(found) == 1:
+                    return next(iter(found)), str(path)
+                if len(found) > 1:
+                    return JLINK_AEN_DEVICE, (
+                        f"tan's built-in fallback {JLINK_AEN_DEVICE} -- {path} "
+                        f"variants[].debug.jlink_flash_device carries {len(found)} "
+                        "DIFFERENT values across variants (ambiguous), refusing to "
+                        "pick one arbitrarily"
+                    )
+    return JLINK_AEN_DEVICE, (
+        f"tan's built-in fallback {JLINK_AEN_DEVICE} -- no alp-sdk checkout "
+        "resolved to read metadata/socs/alif/ensemble/e8.json "
+        "variants[].debug.jlink_flash_device from"
+    )
+
+
 def _fmt(version: tuple[int, int]) -> str:
     return f"{version[0]}.{version[1]}"
 
@@ -572,7 +629,12 @@ def setools_check(
     )
 
 
-def jlink_check(found: str | None, version: tuple[int, int] | None) -> Check:
+def jlink_check(
+    found: str | None,
+    version: tuple[int, int] | None,
+    device: str = JLINK_AEN_DEVICE,
+    device_source: str | None = None,
+) -> Check:
     """`jlink` -- Flow D, the day-to-day burn path (J-Link direct MRAM flash over
     SWD, ~0.16 s, no SE-UART).
 
@@ -584,12 +646,24 @@ def jlink_check(found: str | None, version: tuple[int, int] | None) -> Check:
     silently is not one -- and the probe needs matched V13 firmware or the
     part-number device will not connect. The last two are not host-probeable,
     which is exactly why they must be said.
+
+    `device` defaults to `JLINK_AEN_DEVICE` so every existing call site keeps
+    working; `_collect` passes the metadata-resolved value from
+    `jlink_flash_device` instead, when an SDK checkout resolved one.
+
+    `device_source` (also from `jlink_flash_device`) is surfaced into the
+    detail text when given, so the same `device` string is not byte-identical
+    whether it came from a resolved SDK checkout or tan's built-in fallback --
+    otherwise a user on a host where the SDK did not resolve has no way to
+    tell which one they are looking at.
     """
     requirements = (
-        f"Flow D needs the `{JLINK_AEN_DEVICE}` part-number device profile (NOT the "
+        f"Flow D needs the `{device}` part-number device profile (NOT the "
         f"generic `Cortex-M55`, which has no MRAM loader), a J-Link DLL "
         f"V{_fmt(JLINK_MIN_DLL)}+, and a probe on matched J-Link V13 firmware."
     )
+    if device_source is not None:
+        requirements += f" Device profile resolved from: {device_source}."
     if found is None:
         return Check(
             "jlink",
@@ -853,7 +927,8 @@ def _collect(sdk_root: str | None, build: bool = False) -> list[Check]:
     # `-?` prints the banner and exits; with stdin closed it cannot sit waiting
     # for a probe that is not plugged in, and the timeout bounds it regardless.
     jlink_version = _parse_two(probe([jlink_exe, "-?"]) or "") if jlink_exe else None
-    checks.append(jlink_check(jlink_exe, jlink_version))
+    resolved_device, device_source = jlink_flash_device(sdk_root)
+    checks.append(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
 
     return checks
 

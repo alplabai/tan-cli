@@ -1046,6 +1046,35 @@ def select_flash_method(target: FlashTarget) -> str | None:
     return method
 
 
+def parse_atoc_start_address(text: str) -> str | None:
+    """The ATOC package's MRAM placement out of an `app-gen-toc`
+    `app-package-map.txt` report -- the LAST `APP Package Start Address:`
+    line's last field, mirroring every bench script's own
+    ``awk '/APP Package Start Address:/{print $NF}' app-package-map.txt | tail
+    -1`` byte for byte (last match wins: a re-signed re-run APPENDS a fresh
+    block rather than truncating the file, per
+    `scripts/bench/aen/flash-jlink.sh`/`flash-jlink-mramxip.sh`/
+    `flash-update-log-dual.sh`). `None` when the marker never appears -- an
+    empty, foreign or not-yet-signed file, not a malformed one; the caller
+    decides what that means.
+
+    **This is a BUILD-TIME output, never plan-time metadata.** `app-gen-toc`
+    writes the address fresh at signing time and the runbook says outright it
+    SHIFTS per build/config -- no field under `metadata/**` can express it, so
+    parsing this report is the only correct source. See `plan_alif_mram_jlink`
+    for the required/optional split this feeds; the actual file read happens
+    in `tan.commands.flash_cmd` (IO), never here.
+    """
+    address: str | None = None
+    for line in text.splitlines():
+        if "APP Package Start Address:" not in line:
+            continue
+        fields = line.split()
+        if fields:
+            address = fields[-1]
+    return address
+
+
 def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
     """Flow D: burn the app blob + its signed ATOC into MRAM over SWD with
     J-Link's built-in Alif MRAM loader, verify both, then PIN-reset so the
@@ -1062,12 +1091,17 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     * `mram_address` -- where the app itself is linked, so the SE boots it in
       place rather than loading it.
     * `atoc` + `atoc_address` -- the signed ATOC blob and its MRAM placement.
-      The addresses SHIFT per build/config and the runbook says outright not to
-      hardcode them; they are read from the signing step's own report. tan does
-      NOT run `app-gen-toc`: signing is common to both flows and belongs to
-      whatever produced the ATOC, and a license-gated vendor tool whose output
-      map file tan would have to parse for an address is not a dependency the
-      transport step needs.
+      The address SHIFTS per build/config and the runbook says outright not to
+      hardcode it -- it is a BUILD-TIME output of the signing step, never a
+      metadata fact, so this function still requires it as a plain
+      `flash_args` value and REFUSES when it is absent. tan does NOT run
+      `app-gen-toc` here either way: signing is common to both flows and
+      belongs to whatever produced the ATOC. What changed is only WHO fills
+      `atoc_address` in before this function runs -- `tan.commands.flash_cmd`
+      resolves it from `flash_args.atoc_map` (an `app-package-map.txt` path)
+      via `parse_atoc_start_address` when the manifest supplies that instead
+      of a baked-in address, so a customer's manifest never has to hardcode a
+      value that changes every build.
 
     Absent any of them this REFUSES. There is no default to fall back to: a
     guessed MRAM address is a write to the wrong place on a part whose Secure

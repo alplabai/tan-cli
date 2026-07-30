@@ -62,8 +62,11 @@ from tan.core.flash_plan import (
     ManifestError,
     backend_for,
     display_argv,
+    fa_str,
+    fa_str_checked,
     flash_args_has_tbd,
     flow_d_preflight_script,
+    parse_atoc_start_address,
     parse_system_manifest,
     plan_flash_targets,
     registry_keys_debug,
@@ -528,6 +531,69 @@ class _Context:
     capture: bool
 
 
+def _resolve_flow_d_atoc_address(flash_args: Any, build_root: str, sdk_root: str) -> Any:
+    """Fill in `flash_args.atoc_address` from the `app-gen-toc` build report
+    (`flash_args.atoc_map`, an `app-package-map.txt` path) when the manifest
+    does not already carry one.
+
+    **The ATOC address is a BUILD-TIME output, not a plan-time metadata fact.**
+    `app-gen-toc` writes it fresh at signing time and the runbook says outright
+    it shifts per build/config, so nothing under `metadata/**` can express it
+    -- an earlier design here assumed it lived in metadata, which was wrong.
+    Every bench script reads it the same way
+    (`awk '/APP Package Start Address:/{print $NF}' app-package-map.txt |
+    tail -1`); see `flash_plan.parse_atoc_start_address` for the byte-identical
+    parse. This is the ONE place in `tan flash` that reads a file `plan_*`
+    itself never touches -- kept here, not in `flash_plan`, because the module
+    docstring is explicit that plan-building stays pure/no-IO.
+
+    Leaves `flash_args` UNCHANGED -- and therefore lets `plan_alif_mram_jlink`
+    raise its own, single required-field refusal -- whenever: `atoc_address` is
+    already present (an explicit manifest value always wins over a parsed one),
+    `atoc_map` is absent, or the map path does not resolve to a real file yet
+    (the ordinary "signing has not run" case -- there is nothing to read, so
+    `plan_alif_mram_jlink`'s own refusal is the right one).
+
+    Raises `FlashPlanError`, naming the resolved path, when `atoc_map` WAS
+    supplied and resolves to a real file but the file itself cannot be used --
+    unreadable, or missing the `APP Package Start Address:` marker. Those are
+    not "no map yet"; they are "found your map and could not get an address out
+    of it", and falling through to `plan_alif_mram_jlink`'s generic
+    "flash_args.atoc_address / flash_args.atoc are both required" refusal there
+    would tell the user to redo a step they already did.
+    """
+    try:
+        if fa_str_checked(flash_args, "atoc_address", True) is not None:
+            return flash_args
+    except FlashPlanError:
+        return flash_args  # let plan_alif_mram_jlink raise the real refusal
+    atoc_map = fa_str(flash_args, "atoc_map")
+    if atoc_map is None:
+        return flash_args
+    map_path = resolve_artefact_path(atoc_map, build_root, sdk_root, _is_file)
+    if not _is_file(map_path):
+        return flash_args
+    try:
+        text = _read(map_path)
+    except OSError as err:
+        raise FlashPlanError(
+            f"flash_args.atoc_map resolved to {map_path} but it could not be read "
+            f"({err}) -- pass a readable app-package-map.txt, or set "
+            "flash_args.atoc_address explicitly."
+        ) from err
+    address = parse_atoc_start_address(text)
+    if address is None:
+        raise FlashPlanError(
+            f"flash_args.atoc_map resolved to {map_path}, but no 'APP Package "
+            "Start Address:' line was found in it -- re-run the SETOOLS "
+            "app-gen-toc step so the report is current, or set "
+            "flash_args.atoc_address explicitly."
+        )
+    merged = dict(flash_args)
+    merged["atoc_address"] = address
+    return merged
+
+
 def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[str]]:
     """Dispatch + run one target. Returns `(rc, entry, text-lines)`."""
     kind, entry_id = target.kind, target.id
@@ -603,9 +669,25 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         lines.append(gate.message)
         return 1, entry(method, "failed", 1, gate.message), lines
 
+    flash_args = target.flash_args
+    if method == FLOW_D_METHOD:
+        # The one place `flash_args` is augmented before dispatch: the ATOC
+        # address is a build-time output, so it may need resolving from a
+        # build artefact rather than arriving on the manifest already. See
+        # `_resolve_flow_d_atoc_address`. A supplied-but-unusable `atoc_map`
+        # raises there rather than silently deferring to `plan_alif_mram_jlink`'s
+        # generic refusal -- caught here the same way `meta.build`'s is below.
+        try:
+            flash_args = _resolve_flow_d_atoc_address(flash_args, ctx.build_root, ctx.sdk_root)
+        except FlashPlanError as err:
+            msg = str(err)
+            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(f"  FAIL: {msg}")
+            return 1, entry(method, "failed", 1, msg), lines
+
     inputs = FlashInputs(
         artefact=artefact_path,
-        flash_args=target.flash_args,
+        flash_args=flash_args,
         core_id=entry_id,
         sku=ctx.sku,
         dry_run=ctx.dry_run,

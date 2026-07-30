@@ -59,8 +59,11 @@ ALLOWED: dict[str, str] = {
         "job, but WHICH symbol a given part needs is a hardware fact."
     ),
     "doctor_cmd.py": (
-        "DEBT: JLINK_AEN_DEVICE hardcodes the AE822 profile. It exists in metadata at "
-        "socs/alif/ensemble/e8.json variants[1].debug.jlink_flash_device -- resolve it."
+        "DEBT (partial): `jlink_flash_device()` now resolves the AE822 profile from "
+        "metadata/socs/alif/ensemble/e8.json variants[].debug.jlink_flash_device at "
+        "runtime when an SDK checkout resolves. JLINK_AEN_DEVICE remains as the "
+        "FALLBACK for a doctor run with no --sdk-root, kept byte-identical to today's "
+        "metadata value; retires once doctor refuses to run without a resolved SDK."
     ),
     "flash_plan.py": (
         "DEBT: _DEFAULT_JLINK_DEVICE, inherited byte-identically from crates/tan-cli "
