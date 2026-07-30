@@ -19,10 +19,14 @@ from tan.commands import generate_cmd
 from tan.commands.generate_cmd import (
     ALL_EMIT_MODES,
     CORE_SCOPABLE_TARGETS,
+    EXPLICIT_ONLY_TARGETS,
+    IPC_CONTRACT_H,
     ZEPHYR_BOARD,
     GenerateError,
+    _ensure_writable,
     _output_path,
     _overlay_would_overwrite,
+    _resolve_output_override,
     _scan_som_sku,
     generate,
     resolve_targets,
@@ -304,6 +308,9 @@ def _call_generate(**kwargs) -> int:
         project=None,
         board_yaml=None,
         sdk_root=None,
+        output=None,
+        quiet=False,
+        non_interactive=False,
         output_format="text",
         verbose=False,
     )
@@ -362,3 +369,292 @@ def test_a_successful_emit_reports_the_relative_written_path(tmp_path, monkeypat
     assert env["data"]["failed"] == []
     written = project / "build" / "generated" / "alp-cmake-args.txt"
     assert written.read_text(encoding="utf-8") == "generated\n"
+
+
+# --------------------------------------------------------------------------
+# `ipc-contract-h`: the second explicit-only target
+#
+# It exists so `alp_sdk_ipc_contract_header()` in alp-sdk's `cmake/alp.cmake`
+# has a `tan` front door at all -- four multicore examples consume the header
+# via `zephyr_include_directories`, and before this it had no `--target`.
+# --------------------------------------------------------------------------
+
+
+def test_ipc_contract_h_is_reachable_but_never_default():
+    """The FAILING case folding it into the default set produces: a bare `tan
+    generate` on any of the 95 single-core examples reports a failed target,
+    because there is no `ipc:` block to render."""
+    assert IPC_CONTRACT_H not in ALL_EMIT_MODES
+    assert IPC_CONTRACT_H in EXPLICIT_ONLY_TARGETS
+    assert resolve_targets(IPC_CONTRACT_H, False, None) == (IPC_CONTRACT_H,)
+
+
+def test_ipc_contract_h_lands_where_cmake_puts_it_on_the_include_path():
+    """`alp_sdk_ipc_contract_header()` writes
+    `${CMAKE_BINARY_DIR}/generated/alp/system_ipc.h` and then puts
+    `${CMAKE_BINARY_DIR}/generated` on the include path -- so the header has to
+    be one level down, under `alp/`, or `#include <alp/system_ipc.h>` misses."""
+    assert _output_path(Path("/ws"), IPC_CONTRACT_H, None).as_posix().endswith(
+        "build/generated/alp/system_ipc.h"
+    )
+
+
+def test_ipc_contract_h_refuses_a_core():
+    """The contract IS the cross-core agreement; scoping it to one core is
+    meaningless, so it is refused rather than silently ignored."""
+    with pytest.raises(GenerateError) as err:
+        resolve_targets(IPC_CONTRACT_H, False, "m55_hp")
+    assert "--core" in err.value.message
+    assert err.value.exit_code == ExitCode.VALIDATION_FAILURE
+
+
+# --------------------------------------------------------------------------
+# `--output`
+# --------------------------------------------------------------------------
+
+
+def test_output_requires_exactly_one_target():
+    """`--output` names ONE file. Against the default/--all set it would mean
+    "write this path eight times, last emit wins" -- a silent wrong answer, so
+    it is refused with a code and exit 2."""
+    for targets in (ALL_EMIT_MODES, ("zephyr-conf", "cmake-args")):
+        with pytest.raises(GenerateError) as err:
+            _resolve_output_override("out.conf", targets, Path("/ws"))
+        assert err.value.code == "generate.invalid-target"
+        assert err.value.exit_code == ExitCode.VALIDATION_FAILURE
+
+
+def test_output_is_resolved_against_the_workspace_when_relative():
+    ws = Path("/ws").resolve()
+    assert _resolve_output_override("sub/out.conf", ("zephyr-conf",), ws) == (
+        ws / "sub" / "out.conf"
+    )
+    absolute = (Path("/elsewhere") / "out.conf").resolve()
+    assert _resolve_output_override(str(absolute), ("zephyr-conf",), ws) == absolute
+
+
+def test_resolving_output_touches_nothing_on_disk(tmp_path):
+    """Path resolution has to stay side-effect-free: the overlay guard runs
+    AFTER it and asks whether the destination already exists. A resolve that
+    created the file would make that guard fire on its own handiwork."""
+    _resolve_output_override("out.conf", ("zephyr-conf",), tmp_path)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ensure_writable_creates_the_missing_parent(tmp_path):
+    """`alp_sdk_zephyr_conf()` asks for `<build>/generated/alp.conf` in a build
+    tree where `generated/` does not exist yet."""
+    target = tmp_path / "generated" / "alp.conf"
+    _ensure_writable(target, "zephyr-conf")
+    assert target.parent.is_dir()
+
+
+def test_ensure_writable_does_not_truncate_an_existing_file(tmp_path):
+    """The probe opens for APPEND, not write: a later guard can still refuse the
+    run, and a destroyed destination would be unrecoverable by then."""
+    target = tmp_path / "alp.conf"
+    target.write_text("previous\n", encoding="utf-8")
+    _ensure_writable(target, "zephyr-conf")
+    assert target.read_text(encoding="utf-8") == "previous\n"
+
+
+@pytest.mark.parametrize("kind", ["directory", "read-only", "embedded-nul"])
+def test_an_unwritable_output_is_write_failure_3_not_internal_5(tmp_path, kind):
+    """Every shape of unwritable destination is `generate.output-unwritable`
+    with exit 3. Exit 5 would be the bug: an InternalFailure says "tan broke",
+    and the recurring defect in this port has been exactly this -- an unforeseen
+    exception escaping into the catch-all instead of being coded.
+
+    `embedded-nul` is the one that raises `ValueError`, not `OSError`, which is
+    why `_ensure_writable` catches both."""
+    if kind == "directory":
+        target = tmp_path / "adir"
+        target.mkdir()
+    elif kind == "read-only":
+        target = tmp_path / "ro.conf"
+        target.write_text("x", encoding="utf-8")
+        target.chmod(0o444)
+    else:
+        target = Path(str(tmp_path / "bad\x00name.conf"))
+
+    with pytest.raises(GenerateError) as err:
+        _ensure_writable(target, "zephyr-conf")
+    assert err.value.code == "generate.output-unwritable"
+    assert err.value.exit_code == ExitCode.WRITE_FAILURE
+
+
+def test_the_overlay_guard_follows_an_output_override(tmp_path):
+    """The FAILING case a guard that only ever looked at the default path
+    produces: `--target native-sim-overlay --output <elsewhere>` refuses because
+    of an untouched `boards/native_sim_native_64.overlay`, and silently
+    truncates the file it was actually pointed at."""
+    (tmp_path / "boards").mkdir()
+    (tmp_path / "boards" / "native_sim_native_64.overlay").write_text(
+        "tuned", encoding="utf-8"
+    )
+    elsewhere = tmp_path / "build" / "elsewhere.overlay"
+    assert not _overlay_would_overwrite(
+        tmp_path, ("native-sim-overlay",), False, elsewhere
+    )
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text("also tuned", encoding="utf-8")
+    assert _overlay_would_overwrite(
+        tmp_path, ("native-sim-overlay",), False, elsewhere
+    )
+
+
+def _project_with_echo_sdk(tmp_path):
+    """A project plus a stand-in `alp_project.py` that writes whatever
+    `--output` names, so the plumbing can be tested without a real SDK."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_text('emitted\\n', encoding='utf-8', newline='')\n",
+        encoding="utf-8",
+    )
+    return project, sdk
+
+
+def test_output_redirects_the_emit_and_is_reported_verbatim(
+    tmp_path, monkeypatch, capsys
+):
+    """The whole point: CMake names the destination, the emit lands there, and
+    `written[]` reports that path rather than the default one."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+
+    code = _call_generate(
+        target="zephyr-conf",
+        core="m55_hp",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+    assert code == 0
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["written"] == [str(destination)]
+    assert destination.read_bytes() == b"emitted\n"
+    # And nothing landed at the default path it would have used without the flag.
+    assert not (project / "build" / "generated" / "alp.conf").exists()
+
+
+def test_output_writes_a_file_and_never_puts_its_contents_on_stdout(
+    tmp_path, monkeypatch, capsys
+):
+    """The hard constraint: stdout carries exactly one JSON envelope. A
+    `--output` that also echoed the artefact would give the extension two
+    documents to parse, and it renders nothing at all."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+
+    _call_generate(
+        target="zephyr-conf",
+        core="m55_hp",
+        sdk_root=str(sdk),
+        output=str(tmp_path / "out.conf"),
+        output_format="json",
+    )
+    stdout = capsys.readouterr().out
+    assert json.loads(stdout.strip())  # exactly one document, and it parses
+    assert "emitted" not in stdout
+
+
+def test_output_with_the_default_target_set_is_exit_2_end_to_end(tmp_path):
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    proc = run_cli(
+        ["--sdk-root", str(sdk), "--output", str(tmp_path / "x.conf"),
+         "--format", "json"],
+        cwd=project,
+    )
+    assert proc.returncode == 2
+    env = envelope_of(proc)
+    assert env["issues"][0]["code"] == "generate.invalid-target"
+    assert env["data"]["written"] == []
+
+
+def test_an_unwritable_output_is_exit_3_end_to_end(tmp_path):
+    """Through the real process, because that is where an escaping exception
+    would show up as a traceback on stdout instead of an envelope."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    a_directory = tmp_path / "adir"
+    a_directory.mkdir()
+    proc = run_cli(
+        ["--sdk-root", str(sdk), "--target", "zephyr-conf", "--core", "m55_hp",
+         "--output", str(a_directory), "--format", "json"],
+        cwd=project,
+    )
+    assert proc.returncode == 3
+    assert envelope_of(proc)["issues"][0]["code"] == "generate.output-unwritable"
+
+
+def test_a_board_yaml_that_fails_to_load_is_still_an_envelope(tmp_path):
+    """A board.yaml the SDK cannot parse: the SDK's own diagnostic becomes the
+    issue message, exit 3, and stdout stays a single envelope."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n\tsku: [unclosed\n", encoding="utf-8")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys\nsys.stderr.write('alp_project: failed to parse\\n')\n"
+        "sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    proc = run_cli(
+        ["--sdk-root", str(sdk), "--target", IPC_CONTRACT_H,
+         "--output", str(tmp_path / "system_ipc.h"), "--format", "json"],
+        cwd=project,
+    )
+    assert proc.returncode == 3
+    env = envelope_of(proc)
+    assert env["issues"][0]["code"] == "generate.emit-failed"
+    assert env["data"]["failed"] == [IPC_CONTRACT_H]
+
+
+# --------------------------------------------------------------------------
+# The flags `cmake/alp.cmake` passes alongside `--output`
+# --------------------------------------------------------------------------
+
+
+def test_the_cmake_invocation_shape_is_accepted_whole(tmp_path):
+    """`cmake/alp.cmake` builds ONE argv, and an unknown flag anywhere in it is a
+    Click usage error that fails the entire CMake configure -- so the shape is
+    pinned here verbatim, `--non-interactive` and `--quiet` included."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+    proc = run_cli(
+        ["--target", "zephyr-conf",
+         "--board-yaml", str(project / "board.yaml"),
+         "--sdk-root", str(sdk),
+         "--output", str(destination),
+         "--core", "m55_hp",
+         "--non-interactive", "--quiet"],
+        cwd=project,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert destination.read_bytes() == b"emitted\n"
+
+
+def test_quiet_drops_the_summary_but_never_an_issue(tmp_path):
+    """A `--quiet` that swallowed the reason would put CMake back where
+    `cmake/alp.cmake` found it: a bare `rv=1` with the diagnostic thrown away."""
+    project, sdk = _project_with_echo_sdk(tmp_path)
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys\nsys.stderr.write('alp_project: kaboom\\n')\nsys.exit(1)\n",
+        encoding="utf-8",
+    )
+    loud = run_cli(["--sdk-root", str(sdk), "--target", "cmake-args"], cwd=project)
+    quiet = run_cli(
+        ["--sdk-root", str(sdk), "--target", "cmake-args", "--quiet"], cwd=project
+    )
+    assert loud.returncode == quiet.returncode == 3
+    assert "wrote 0/1" in loud.stderr
+    assert "wrote 0/1" not in quiet.stderr
+    assert "kaboom" in quiet.stderr

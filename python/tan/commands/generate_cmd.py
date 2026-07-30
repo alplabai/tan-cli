@@ -36,6 +36,20 @@ Exit codes, verbatim from the oracle: missing board / unresolved SDK / bad
 target / unresolvable SKU are ValidationFailure (2); the overlay guard is
 WriteFailure (3), as is any target whose emit failed; a too-old interpreter is
 RuntimeFailure (1).
+
+**`--output` exists because CMake, not tan, decides where a Zephyr build reads
+from.** alp-sdk's `cmake/alp.cmake` -- the one helper all 96 Zephyr examples
+call at configure time -- writes to `${CMAKE_BINARY_DIR}/generated/alp.conf`,
+and `CMAKE_BINARY_DIR` is NOT the project directory (an in-tree `west build
+examples/<...>` puts it under the repo root). Without `--output`, `tan` would
+emit into `<project>/build/generated/` and that build would read nothing; the
+helper accordingly PROBES `generate --help` for `--output` and falls back to
+shelling `scripts/alp_project.py` when it is absent. So the flag is what makes
+`tan` the emitter for every example, and its default is exactly the previous
+hardcoded path -- nothing that already worked changes.
+
+`--output` writes a FILE. It never puts the file's contents on stdout: stdout
+carries the envelope and nothing else, in both formats.
 """
 
 from __future__ import annotations
@@ -85,16 +99,36 @@ _OUTPUT_RELATIVE_PATH = {
     "west-libraries": "build/generated/alp-west-libs.yml",
     "hw-info-h": "build/generated/alp_hw_info_build.h",
     "os-topology": "build/generated/os-topology.json",
+    # Explicit-only (see EXPLICIT_ONLY_TARGETS) -- still in this table because
+    # it has one canonical path, and `alp_sdk_ipc_contract_header()` in
+    # alp-sdk's `cmake/alp.cmake` names exactly this one:
+    # `${CMAKE_BINARY_DIR}/generated/alp/system_ipc.h`.
+    "ipc-contract-h": "build/generated/alp/system_ipc.h",
 }
-
-#: The default/`--all` target set. Derived, so it cannot disagree with the path
-#: table above.
-ALL_EMIT_MODES = tuple(_OUTPUT_RELATIVE_PATH)
 
 #: The one target that is NOT defaultable: it hard-requires `--core` and writes
 #: a DIRECTORY of files named per SKU+core, so a bare `tan generate` has no path
 #: to give it. Reachable only via an explicit `--target zephyr-board --core <id>`.
 ZEPHYR_BOARD = "zephyr-board"
+
+#: The cross-core IPC contract header (`<alp/system_ipc.h>`), the second target
+#: reachable only by an explicit `--target`. Not core-scoped -- the contract IS
+#: the agreement between cores -- and not defaultable either: it renders a
+#: board.yaml `ipc:` block, which four multicore examples have and the other 95
+#: do not, so folding it into the default set would make a bare `tan generate`
+#: report a failed target on almost every project.
+IPC_CONTRACT_H = "ipc-contract-h"
+
+#: Targets an explicit `--target` can reach but the default/`--all` set never
+#: does. `zephyr-board` is absent from `_OUTPUT_RELATIVE_PATH` (it writes a
+#: directory, named per SKU+core); `ipc-contract-h` is in it.
+EXPLICIT_ONLY_TARGETS = frozenset({ZEPHYR_BOARD, IPC_CONTRACT_H})
+
+#: The default/`--all` target set. Derived, so it cannot disagree with the path
+#: table above.
+ALL_EMIT_MODES = tuple(
+    mode for mode in _OUTPUT_RELATIVE_PATH if mode not in EXPLICIT_ONLY_TARGETS
+)
 
 #: Targets `--core` optionally SCOPES, beyond `zephyr-board` which requires it.
 #: Verbatim from `alp_project.py`'s own `--core` help. `carrier-netlist` and
@@ -279,8 +313,65 @@ def _output_path(
     return path
 
 
+def _resolve_output_override(
+    output: str, targets: tuple[str, ...], workspace_root: Path
+) -> Path:
+    """`--output` as an absolute path. Touches nothing on disk.
+
+    `--output` names ONE destination, so it needs exactly one target: paired
+    with the default set (or `--all`) it would silently mean "overwrite this
+    file eight times", the last emit winning. That is a usage mistake, so it is
+    ValidationFailure with the same `generate.invalid-target` code the other
+    argument-shape refusals carry.
+    """
+    if len(targets) != 1:
+        raise GenerateError(
+            "generate.invalid-target",
+            "`--output` names a single destination, so it requires exactly one "
+            "`--target <mode>`; it cannot serve the default/--all target set.",
+            ExitCode.VALIDATION_FAILURE,
+        )
+    candidate = Path(output)
+    return candidate if candidate.is_absolute() else workspace_root / candidate
+
+
+def _ensure_writable(output: Path, target: str) -> None:
+    """Create `output`'s parent and prove the destination is writable.
+
+    Done HERE rather than discovered when the spawned emitter trips over it, for
+    two reasons: a `PermissionError` traceback on the SDK's stderr is a terrible
+    issue message, and the parent directory has to be created either way --
+    `alp_sdk_zephyr_conf()` asks for `${CMAKE_BINARY_DIR}/generated/alp.conf` in
+    a build tree where `generated/` does not exist yet.
+
+    `ValueError` is caught beside `OSError` deliberately: a path carrying a
+    surrogate or an embedded NUL raises `UnicodeEncodeError`/`ValueError`, not
+    `OSError`, and letting one reach the command's catch-all backstop would
+    report an unwritable path as InternalFailure (5) instead of WriteFailure (3).
+    """
+    try:
+        if target == ZEPHYR_BOARD:
+            # `--emit zephyr-board`'s `--output` IS the board directory.
+            output.mkdir(parents=True, exist_ok=True)
+        else:
+            output.parent.mkdir(parents=True, exist_ok=True)
+            # Append mode, not write: proving writability must not truncate a
+            # file whose emit could still be refused further down.
+            with output.open("ab"):
+                pass
+    except (OSError, ValueError) as err:
+        raise GenerateError(
+            "generate.output-unwritable",
+            f"--output path `{output}` cannot be written: {err}",
+            ExitCode.WRITE_FAILURE,
+        ) from err
+
+
 def _overlay_would_overwrite(
-    workspace_root: Path, targets: tuple[str, ...], force: bool
+    workspace_root: Path,
+    targets: tuple[str, ...],
+    force: bool,
+    output_override: Path | None = None,
 ) -> bool:
     """True when this run would truncate an existing hand-edited
     `boards/native_sim_native_64.overlay`.
@@ -289,12 +380,17 @@ def _overlay_would_overwrite(
     tree. Every other writer into a user tree (`init`, `scaffold`) diffs against
     disk and refuses without `--force`; a bare `tan generate` used to truncate a
     developer's tuned overlay with no check at all.
+
+    `output_override` is checked in place of the default path when `--output`
+    redirected the emit: the guard has to name the file this run would actually
+    truncate, not the one it would have without the flag.
     """
-    return (
-        not force
-        and "native-sim-overlay" in targets
-        and _output_path(workspace_root, "native-sim-overlay", None).exists()
+    if force or "native-sim-overlay" not in targets:
+        return False
+    destination = output_override or _output_path(
+        workspace_root, "native-sim-overlay", None
     )
+    return destination.exists()
 
 
 def _python_too_old(python: str) -> str | None:
@@ -403,6 +499,7 @@ def _finish(
     *,
     json_mode: bool,
     verbose: bool,
+    quiet: bool,
     project: Project,
     targets: tuple[str, ...],
     written: list[str],
@@ -424,7 +521,13 @@ def _finish(
         #
         # No summary line on a refusal (`targets` empty): "wrote 0/0 targets"
         # above a refusal message reads like a successful no-op run.
-        if targets:
+        #
+        # `--quiet` silences the summary only -- never the issues. A CMake
+        # `execute_process` shows this stderr verbatim when the emit fails, and
+        # a quiet flag that swallowed the reason would leave the caller with a
+        # bare `rv=1` again, which is the exact defect `cmake/alp.cmake` was
+        # written to fix.
+        if targets and not quiet:
             tail = f"; failed: {', '.join(failed)}" if failed else " targets"
             print(
                 f"generate: wrote {len(written)}/{len(targets)}{tail}",
@@ -466,6 +569,19 @@ def generate(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
+    output: str = typer.Option(
+        None,
+        "--output",
+        metavar="PATH",
+        help="Destination for a single --target (default: the SDK's own layout "
+             "under the project root).",
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", help="Suppress the non-essential summary line."
+    ),
+    non_interactive: bool = typer.Option(
+        False, "--non-interactive", hidden=True
+    ),
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
@@ -474,6 +590,11 @@ def generate(
     ),
 ) -> None:
     """Generate board-derived output files via the SDK's emitters."""
+    # `generate` never prompts, so `--non-interactive` is accepted and ignored:
+    # it exists because alp-sdk's `cmake/alp.cmake` passes it on every configure
+    # (as it does to every `tan` invocation), and an unknown flag there is a
+    # Click usage error that fails the whole CMake configure.
+    del non_interactive
     if output_format not in ("text", "json"):
         raise typer.BadParameter(
             f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
@@ -490,7 +611,13 @@ def generate(
     )
 
     def finish(**kwargs) -> None:
-        _finish(json_mode=json_mode, verbose=verbose, project=reported, **kwargs)
+        _finish(
+            json_mode=json_mode,
+            verbose=verbose,
+            quiet=quiet,
+            project=reported,
+            **kwargs,
+        )
 
     def refuse(err: GenerateError) -> None:
         finish(
@@ -540,13 +667,26 @@ def generate(
                     ExitCode.VALIDATION_FAILURE,
                 )
 
-        if _overlay_would_overwrite(workspace_root, targets, force):
+        output_override = (
+            _resolve_output_override(output, targets, workspace_root)
+            if output
+            else None
+        )
+
+        if _overlay_would_overwrite(workspace_root, targets, force, output_override):
             raise GenerateError(
                 "generate.would-overwrite",
                 "boards/native_sim_native_64.overlay already exists. Use --force to "
                 "overwrite.",
                 ExitCode.WRITE_FAILURE,
             )
+
+        # LAST of the guards, because it is the only one that WRITES: it creates
+        # the parent directory (and, for `zephyr-board`, the output directory
+        # itself). Running it earlier would leave strays behind for a run the
+        # `som.sku` or overlay guard above was about to refuse.
+        if output_override is not None:
+            _ensure_writable(output_override, targets[0])
 
         python = _planner_python()
         if (too_old := _python_too_old(python)) is not None:
@@ -559,10 +699,14 @@ def generate(
         failed: list[str] = []
         issues: list[Issue] = []
         for mode in targets:
-            output = _output_path(workspace_root, mode, board_dir_name)
-            message = _emit_one(python, script, board_path, mode, output, core)
+            target_output = output_override or _output_path(
+                workspace_root, mode, board_dir_name
+            )
+            message = _emit_one(
+                python, script, board_path, mode, target_output, core
+            )
             if message is None:
-                written.append(_relative_or_full(workspace_root, output))
+                written.append(_relative_or_full(workspace_root, target_output))
             else:
                 failed.append(mode)
                 issues.append(Issue("generate.emit-failed", "error", message))

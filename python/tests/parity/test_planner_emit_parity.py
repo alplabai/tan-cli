@@ -19,6 +19,13 @@ workspace (I-34) -- so it cannot run here. The relocation touched its dumper
 path (`kconfig_symbols._DUMPER`, now anchored on the bound SDK root), which
 `test_the_kconfig_dumper_resolves_into_the_sdk` checks directly instead.
 
+A second layer sits below the library comparison: `tan generate --output <path>`
+spawned for real, once per `board.yaml`, with the FILE it writes compared byte
+for byte against the same artefact from the SDK's own front door. That is the
+shape `cmake/alp.cmake` drives on every Zephyr configure, and it covers what a
+library comparison cannot -- newline translation, a wrong destination, an
+artefact leaking onto stdout beside the envelope.
+
 Requires an alp-sdk checkout: set `ALP_SDK_ROOT` (or `ALP_SDK_PARITY_ROOT`).
 Skipped, loudly, without one -- a green run that compared nothing would be worse
 than a red one.
@@ -26,6 +33,7 @@ than a red one.
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -225,3 +233,139 @@ def test_no_metadata_was_vendored_into_tan():
     strays = [p for p in tan_pkg.rglob("*")
               if p.is_dir() and p.name == "metadata"]
     assert not strays, f"metadata/ must stay in alp-sdk; found {strays}"
+
+
+# ==========================================================================
+# `tan generate --output <path>`: the FILE it writes, byte for byte
+#
+# The tests above compare the two planners as libraries. These compare the
+# artefact a customer actually ends up with -- the bytes on disk after
+# `cmake/alp.cmake` has driven `tan generate --output`, against the same
+# artefact from the SDK's own front door.
+#
+# This is a distinct failure surface, not a duplicate: everything between the
+# renderer and the file can corrupt the result. The one that bites hardest is
+# newline translation -- the SDK writes `newline=""` so an emit stays LF on
+# every host, and `python -m alp_orchestrate > file` on Windows already produces
+# CRLF for exactly that reason (its stdout is a text stream). A `--output` that
+# reached the disk through any text-mode write would silently CRLF the whole
+# tree, and every emit-snapshot golden in alp-sdk would flip.
+# ==========================================================================
+
+PYTHON_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _tan_generate(args: list[str], destination: Path) -> bytes:
+    """Run the real `tan generate` and return the bytes it wrote.
+
+    The CLI is spawned, not called: `--output` is a promise about a FILE and
+    about stdout carrying nothing but the envelope, and only a real process can
+    show both. Any non-zero exit fails here with the envelope attached.
+    """
+    proc = subprocess.run(
+        [sys.executable, "-m", "tan", "generate",
+         "--sdk-root", str(SDK), "--output", str(destination),
+         "--format", "json", *args],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(PYTHON_ROOT),
+        env={**os.environ, "PYTHONPATH": str(PYTHON_ROOT)},
+        check=False,
+    )
+    assert proc.returncode == 0, f"tan generate {args} -> {proc.returncode}: {proc.stdout}{proc.stderr}"
+    assert proc.stderr.strip() == "", f"stderr must stay empty under --format json: {proc.stderr}"
+    envelope = json.loads(proc.stdout.strip())  # exactly one document
+    assert envelope["issues"] == [], envelope["issues"]
+    # `--output` writes a FILE; the artefact must never also be on stdout.
+    assert envelope["data"]["written"] == [str(destination)]
+    return destination.read_bytes()
+
+
+def _alp_project(board: Path, mode: str, core: str | None, destination: Path) -> bytes:
+    """The SDK's own front door, writing a file. The oracle for the modes
+    `scripts/alp_project.py` owns (`zephyr-conf` among them) -- comparing against
+    its stdout instead would compare against a CRLF-translated stream."""
+    assert SDK is not None
+    argv = [sys.executable, str(SDK / "scripts" / "alp_project.py"),
+            "--input", str(board), "--emit", mode, "--output", str(destination)]
+    if core is not None:
+        argv += ["--core", core]
+    proc = subprocess.run(argv, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", check=False)
+    assert proc.returncode == 0, f"oracle {mode} -> {proc.returncode}: {proc.stderr}"
+    return destination.read_bytes()
+
+
+def _first_zephyr_core(project) -> str | None:
+    """`--emit zephyr-conf --core <id>` is a hard error for a core whose `os` is
+    not `zephyr`, so the core has to be picked, not guessed."""
+    for core_id in sorted(project.cores):
+        if project.cores[core_id].os == "zephyr":
+            return core_id
+    return None
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_tan_generate_writes_the_ipc_contract_header_byte_for_byte(
+    planners, board, tmp_path
+):
+    """`alp_sdk_ipc_contract_header()`'s artefact, end to end.
+
+    The oracle is the upstream planner's own return value, in-process: it is the
+    string every other consumer of this mode gets, so any difference on disk is
+    tan's plumbing and nothing else.
+    """
+    upstream, _ = planners
+    try:
+        want = upstream.emit_ipc_contract_h(
+            upstream.load_board_yaml(board)).encode("utf-8")
+    except Exception:  # noqa: BLE001 -- parity of the failure is asserted above
+        pytest.skip("board does not render this mode; covered by the emit-parity test")
+
+    got = _tan_generate(
+        ["--target", "ipc-contract-h", "--board-yaml", str(board)],
+        tmp_path / "generated" / "alp" / "system_ipc.h",
+    )
+    assert got == want, _first_diff(
+        want.decode("utf-8"), got.decode("utf-8", "replace"))
+
+
+@pytest.mark.parametrize("board", _boards(), ids=lambda p: p.parent.name)
+def test_tan_generate_writes_the_zephyr_conf_fragment_byte_for_byte(
+    planners, board, tmp_path
+):
+    """`alp_sdk_zephyr_conf()`'s artefact, end to end -- the one the other 96
+    examples depend on, and the one `scripts/check_zephyr_conf_parity.py` pins
+    against the build plan's `configArtefacts`."""
+    upstream, _ = planners
+    try:
+        core = _first_zephyr_core(upstream.load_board_yaml(board))
+    except Exception:  # noqa: BLE001
+        pytest.skip("board does not load; parity of the failure is asserted above")
+    if core is None:
+        pytest.skip("no zephyr core -- `--emit zephyr-conf --core` refuses one")
+
+    want = _alp_project(board, "zephyr-conf", core, tmp_path / "oracle.conf")
+    got = _tan_generate(
+        ["--target", "zephyr-conf", "--core", core, "--board-yaml", str(board)],
+        tmp_path / "generated" / "alp.conf",
+    )
+    assert got == want, _first_diff(
+        want.decode("utf-8"), got.decode("utf-8", "replace"))
+
+
+def test_an_emit_reaching_disk_through_tan_stays_lf(planners, tmp_path):
+    """The newline trap, pinned on its own so a CRLF regression names itself
+    rather than showing up as 99 unrelated diffs.
+
+    `python -m alp_orchestrate --emit ipc-contract-h > file` on Windows produces
+    CRLF -- that is the shape this must NOT have.
+    """
+    assert SDK is not None
+    board = SDK / "examples" / "multicore" / "rpmsg-aen" / "board.yaml"
+    if not board.is_file():
+        pytest.skip(f"{board} not in this checkout")
+    got = _tan_generate(
+        ["--target", "ipc-contract-h", "--board-yaml", str(board)],
+        tmp_path / "system_ipc.h",
+    )
+    assert b"\r\n" not in got

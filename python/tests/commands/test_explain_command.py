@@ -161,6 +161,21 @@ def test_available_generation_targets_lists_all_ten():
     ]
 
 
+#: Targets `generate` can emit that `explain` deliberately does NOT catalogue.
+#:
+#: `ipc-contract-h` is driven by `alp_sdk_ipc_contract_header()` in alp-sdk's
+#: `cmake/alp.cmake`, not chosen by a human: `explain`'s catalogue feeds
+#: `data.available.generationTargets`, which is the extension's target PICKER,
+#: and a build-internal front door has no place in a menu. That list is also a
+#: frozen conformance golden (`contract/envelopes/explain-overview`), so adding
+#: it would be a UI change dressed up as a plumbing fix.
+#:
+#: Named here rather than left to a set-difference so the exclusion is a
+#: decision on the record: anything else that appears in `generate`'s table
+#: without a catalogue entry still fails the drift check below.
+UNCATALOGUED_GENERATE_TARGETS = frozenset({"ipc-contract-h"})
+
+
 def test_catalogue_cannot_drift_from_what_generate_actually_emits():
     """The #165 failure was two structures disagreeing in silence: the emit
     list `generate` runs, and the catalogue `explain` describes. Nothing else
@@ -168,9 +183,22 @@ def test_catalogue_cannot_drift_from_what_generate_actually_emits():
     from tan.commands.generate_cmd import _OUTPUT_RELATIVE_PATH, ZEPHYR_BOARD
 
     described = {t.emit: t.output_relative_path for t in GENERATION_TARGETS}
-    assert set(described) == set(_OUTPUT_RELATIVE_PATH) | {ZEPHYR_BOARD}
+    emitted = set(_OUTPUT_RELATIVE_PATH) | {ZEPHYR_BOARD}
+    assert set(described) == emitted - UNCATALOGUED_GENERATE_TARGETS
     for emit, path in _OUTPUT_RELATIVE_PATH.items():
+        if emit in UNCATALOGUED_GENERATE_TARGETS:
+            continue
         assert described[emit] == path, emit
+
+
+def test_an_uncatalogued_target_is_still_a_target_generate_can_emit():
+    """The other half of the exclusion above: an entry that named a target
+    `generate` cannot emit would be a stale exclusion silently masking drift in
+    the direction the #165 guard exists to catch."""
+    from tan.commands.generate_cmd import _OUTPUT_RELATIVE_PATH, ZEPHYR_BOARD
+
+    emitted = set(_OUTPUT_RELATIVE_PATH) | {ZEPHYR_BOARD}
+    assert UNCATALOGUED_GENERATE_TARGETS <= emitted
 
 
 def test_template_ids_match_the_scaffolder_registry():
