@@ -274,7 +274,20 @@ jobs:
         working-directory: python
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk-planner-audit
-        run: python3 -m pytest tests/gates -q
+        run: python3 -m pytest tests/gates -q --deselect tests/gates/test_jlink_aen_device_freshness.py
+
+      # test_jlink_aen_device_freshness asks a question the FROZEN audit checkout
+      # cannot answer: does tan's JLINK_AEN_DEVICE fallback still agree with the
+      # part number alp-sdk ships TODAY. Binding it to the audit commit like the
+      # step above would pin it to the very snapshot it exists to detect drift
+      # from -- it would pass forever. So it runs against the live checkout, and
+      # it BLOCKS: unlike planner staleness, a stale part number here is tan's
+      # own constant, in tan's own file, fixable in this PR.
+      - name: jlink device freshness vs live alp-sdk (blocking)
+        working-directory: python
+        env:
+          ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
+        run: python3 -m pytest tests/gates/test_jlink_aen_device_freshness.py -q
 
       # Companion to the blocking step above and THE actual staleness alarm:
       # does live alp-sdk (this job's `alp-sdk` checkout -- PINNED_SDK_TAG on a
@@ -291,7 +304,15 @@ jobs:
       # `continue-on-error` plus an explicit `::warning::`, never a red X. Runs
       # on a dispatch too (unlike the pin-freshness step above), because
       # dispatch is when this alarm matters most.
+      # Dispatch ONLY. On a `pull_request` run the `alp-sdk` checkout is
+      # PINNED_SDK_TAG -- a deliberately frozen parity pin that may legitimately
+      # sit BEHIND the audit commit (it does today), so comparing the two there
+      # answers nothing and fires on every PR. An alarm that cries wolf on every
+      # run trains everyone to ignore it, which is worse than not having it.
+      # `repository_dispatch` is the case this exists for: alp-sdk just moved,
+      # and `sdk_ref` is the SHA it moved to.
       - name: planner relocation freshness vs live alp-sdk (alarm, warn only)
+        if: github.event_name == 'repository_dispatch'
         continue-on-error: true
         working-directory: python
         env:
@@ -302,7 +323,7 @@ jobs:
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then
-            echo "::warning::tan/planner/ has not been re-audited against alp-sdk ${{ steps.sdk_ref.outputs.ref }} -- scripts/alp_orchestrate moved past the pinned audit commit (see the pytest output above for which file(s)). Non-blocking by design: diff and port the delta, then re-pin PINNED_HASHES/PINNED_SDK_COMMIT in python/tests/gates/test_planner_relocation_freshness.py."
+            echo "::warning::tan/planner/ has not been re-audited against alp-sdk ${{ steps.sdk_ref.outputs.ref }} -- scripts/alp_orchestrate DIFFERS from the pinned audit commit (see the pytest output above for which file(s)) -- the gate compares hashes, not history, so it does not tell you which side moved. Non-blocking by design: diff and port the delta, then re-pin PINNED_HASHES/PINNED_SDK_COMMIT in python/tests/gates/test_planner_relocation_freshness.py."
           fi
           exit 0
 

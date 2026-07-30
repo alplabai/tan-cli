@@ -17,6 +17,7 @@ SKIPS -- visibly, naming the missing env var, never a silent pass.
 from __future__ import annotations
 
 import os
+import pathlib
 
 import pytest
 
@@ -45,4 +46,20 @@ def test_jlink_aen_device_fallback_matches_the_bound_sdk_metadata():
         f"-- otherwise every `tan doctor` run with no --sdk-root silently "
         "advises a stale part number."
     )
-    assert "e8.json" in source, f"expected a resolved-from-metadata source, got {source!r}"
+    # NOT `"e8.json" in source` -- that is tautological. All three return paths
+    # of jlink_flash_device mention the file: the resolved branch returns
+    # `str(path)`, and BOTH fallback branches name the same path in their prose.
+    # So the loose check passes even when the value came from the hardcoded
+    # constant, which is exactly the case this gate exists to catch: `resolved`
+    # would then equal JLINK_AEN_DEVICE trivially, because it IS
+    # JLINK_AEN_DEVICE, and the assertion above would pass while proving
+    # nothing. Pin the resolved branch by its exact return value instead -- the
+    # bare path, which no fallback branch can produce.
+    expected_source = str(
+        pathlib.Path(_sdk_root()) / "metadata" / "socs" / "alif" / "ensemble" / "e8.json"
+    )
+    assert source == expected_source, (
+        f"expected the metadata-resolved source {expected_source!r}, got {source!r} "
+        "-- a fallback branch answered, so `resolved` above is the hardcoded "
+        "constant compared against itself and proves nothing"
+    )
