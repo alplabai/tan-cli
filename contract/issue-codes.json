@@ -332,6 +332,15 @@
       "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "build.pristine-skipped",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/build/execute/mod.rs",
+      "literal": "code: \"build.pristine-skipped\"",
+      "note": "Added by tan-cli#183: `tan build --pristine` has three paths that correctly decline to wipe (an overridden `-d`/`--build-dir`, a cwd outside `build/`, and a dir that was never configured) and all three used to be silent, so a customer who asked for a clean build got an incremental one and was told nothing. Registered `reserved` per tan-cli#219's rule that every literal issue code under crates/ appears in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "build.sdk-switch-pristine-failed",
       "status": "reserved",
       "severity": "warning",
