@@ -1,0 +1,1930 @@
+# SPDX-License-Identifier: Apache-2.0
+"""`tan bootstrap` -- set up the SDK's build environment, natively.
+
+The FIRST command a customer runs, on a machine with nothing set up, so its
+failure modes are the first impression of the whole product. Create the
+workspace venv, install west into it, `west init -l` / `west update` the Zephyr
+workspace beside the alp-sdk checkout, install the Python deps.
+
+**No `bash`, and no shelling the SDK's scripts.** Native Windows is a
+first-class host, so `scripts/bootstrap.sh` + `scripts/bootstrap.ps1` are the
+parity oracle for CONTROL FLOW and message strings, not a runtime dependency --
+the same rule invariant **I-32** and anti-pattern **22** of
+`docs/superpowers/specs/2026-07-29-tan-port-invariants.md` record for
+`tan init`'s vendored scaffold tree: a command that shells the SDK acquires a
+checkout dependency it deliberately does not have, invisibly to every parity
+gate. The FACTS come from `<sdkRoot>/metadata/bootstrap.json`, which invariant
+**I-64** names a live tan consumer contract. Decision logic lives in
+`tan.core.bootstrap`; this file is probes, subprocesses and the envelope.
+
+**The Python floor is FIXED here, not ported.** Three verified facts compose
+into a silent, customer-facing failure:
+
+1. `metadata/bootstrap.json:16` -- `"pythonMinVersion": "3.10"`.
+2. Zephyr's `cmake/modules/python.cmake:14` -- `set(PYTHON_MINIMUM_REQUIRED
+   3.12)` (verified on the pinned v4.4 tree; `find_package(Python3
+   ${PYTHON_MINIMUM_REQUIRED} REQUIRED)` on line 41 is what aborts).
+3. `crates/tan-cli/src/commands/bootstrap/steps.rs:230-234` -- the POSIX branch
+   states outright *"this branch cannot fail on version"*. The Windows branch,
+   `:217-223`, DOES refuse.
+
+Ubuntu 22.04 ships `python3` = 3.10. So on the oracle today: `tan bootstrap`
+succeeds, `tan doctor` reports Pass on the manifest floor, and the customer's
+FIRST build dies inside Zephyr's CMake configure with an error naming Zephyr
+rather than us. This port enforces the EFFECTIVE floor -- the higher of the two
+-- on BOTH platforms, computed by calling `tan doctor`'s own
+`zephyr_python_floor` with the same argument, so the two commands cannot
+disagree by construction, and reports the skew as
+`bootstrap.python-floor-skew` so the fix lands in the manifest instead of on the
+customer.
+
+**Nothing here may raise.** Seven Criticals in this port were uncaught
+exceptions escaping the error contract: a raw traceback, an EMPTY stdout, and an
+extension that renders nothing with no error on either side. Every filesystem
+read, every subprocess and every env-var read below is guarded, and `run()`
+wraps the whole command in a last-resort envelope. Every subprocess has a
+timeout.
+
+**Text mode writes to stderr only.** stdout is the envelope channel; a single
+stray byte there breaks the extension silently.
+"""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import typer
+
+from tan.commands.doctor_cmd import (
+    FALLBACK_PYTHON_FLOOR,
+    _read_text,
+    on_path,
+    probe,
+    zephyr_python_floor,
+)
+from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
+from tan.commands.sdk_cmd import SDK_MARKER, _home_alp_dir, resolve_sdk_tiered
+from tan.core.bootstrap import (
+    BOOTSTRAP_MANIFEST_REL_PATH,
+    DEFAULT_WORKSPACE_DIR_NAME,
+    GATE_REFUSE,
+    GATE_WARN,
+    LINUX,
+    MANIFEST_MISMATCH,
+    REUSE,
+    STALE,
+    WINDOWS,
+    BootstrapFacts,
+    BootstrapManifestError,
+    PrereqFailure,
+    Tokens,
+    capture_tail,
+    decide_workspace_reuse,
+    detect_host_os,
+    die,
+    fallback_facts,
+    get_manifest_path,
+    in_play_runtimes,
+    next_steps_block,
+    optional_libs_block,
+    os_label,
+    parent_needs_workspace_guard,
+    parse_bootstrap_manifest,
+    posix_python_not_runnable,
+    posix_refusal,
+    posix_venv_unusable,
+    print_env_block,
+    python_candidates,
+    python_floor_skew_warning,
+    python_too_old,
+    reported_missing,
+    resolve_workspace_target,
+    resolve_zephyr_pin,
+    set_manifest_path,
+    venv_exe_names,
+    windows_python_not_runnable,
+    windows_refusal,
+    yocto_gate,
+    yocto_mixed_warning,
+    yocto_only_refusal,
+)
+from tan.core.scaffold import sdk_pointer_json
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
+from tan.exit_codes import ExitCode
+
+#: `data.schemaVersion`. `"2"`, a STRING: v1's `scriptPath` named
+#: `<sdkRoot>/scripts/bootstrap.sh`, which this command does not run.
+DATA_SCHEMA_VERSION = "2"
+
+#: Seconds a short probe (an interpreter version, `west help`, `pip --version`)
+#: may take. Generous for a cold `west` import, short enough that a hung tool
+#: cannot wedge the command.
+PROBE_TIMEOUT_S = 120
+
+#: Seconds an INSTALL step may take. `west update` clones Zephyr + every HAL on
+#: a cold cache and pip builds wheels from source, so this is minutes, not
+#: seconds -- but it is bounded, because an unbounded child is how a CI job dies
+#: at the runner's own timeout with no diagnostic.
+INSTALL_TIMEOUT_S = 3600
+
+
+# ---------------------------------------------------------------------------
+# Guarded IO
+# ---------------------------------------------------------------------------
+
+
+def _is_dir(path: Path) -> bool:
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
+def _is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _native(path: Path | str) -> str:
+    """`path` with this platform's separator. The resolved project paths are
+    forward-slash on every OS, which would print as `C:/dev/ws\\zephyr` in the
+    Windows copy-paste blocks."""
+    rendered = str(path)
+    return rendered.replace("/", "\\") if os.name == "nt" else rendered
+
+
+def _same_directory(a: Path, b: Path) -> bool:
+    """True when `a` and `b` name the same directory. `realpath` when both exist
+    (the reliable answer); a lexical `normpath`+`normcase` comparison when either
+    does not -- e.g. a stale config's target SDK version since pruned."""
+    try:
+        if a.exists() and b.exists():
+            return os.path.realpath(a) == os.path.realpath(b)
+    except OSError:
+        pass
+    return os.path.normcase(os.path.normpath(str(a))) == os.path.normcase(
+        os.path.normpath(str(b))
+    )
+
+
+# ---------------------------------------------------------------------------
+# Progress reporting
+# ---------------------------------------------------------------------------
+
+
+class Log:
+    """Progress reporter. Text mode streams live to stderr (pip/west take
+    minutes, so a summary at the end would look like a hang); JSON mode stays
+    silent so the single stdout envelope is the only output.
+
+    Warnings are RECORDED as well as printed. Print-only meant a JSON run where
+    the Zephyr requirements, the SDK extras AND the editable install all failed
+    still emitted `ok:true, exitCode:0, issues:[]` -- every non-fatal failure
+    silently swallowed.
+    """
+
+    def __init__(self, json_mode: bool) -> None:
+        self.json = json_mode
+        self.warnings: list[tuple[str, str]] = []
+
+    def line(self, message: str) -> None:
+        """One progress line (the scripts' `info`/`ok`)."""
+        if not self.json:
+            _eprint(f"bootstrap: {message}")
+
+    def warn(self, code: str, message: str) -> None:
+        """Emit AND record a non-fatal warning. `code` becomes the envelope
+        issue code `bootstrap.<code>`."""
+        self.line(message)
+        self.warnings.append((code, message))
+
+    def take_issues(self) -> list[Issue]:
+        """Drain the recorded warnings as `warning`-severity issues. Draining is
+        idempotent -- no double-reporting on a second call."""
+        issues = [Issue(f"bootstrap.{code}", "warning", msg) for code, msg in self.warnings]
+        self.warnings = []
+        return issues
+
+
+def _eprint(line: str) -> None:
+    """stderr, never stdout, and never raising.
+
+    A `UnicodeEncodeError` is a real possibility: the POSIX next-steps block
+    carries `⏳ / 🟡 / ✅` verbatim from the oracle, and a console on a legacy
+    code page cannot encode them. Losing a progress line is acceptable; killing
+    the command over one is not.
+    """
+    try:
+        print(line, file=sys.stderr)
+    except (UnicodeEncodeError, OSError):
+        try:
+            print(line.encode("ascii", "replace").decode("ascii"), file=sys.stderr)
+        except OSError:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# The host interpreter
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class HostPython:
+    """A host interpreter that was probed and actually RAN."""
+
+    argv: tuple[str, ...]
+    version: tuple[int, int]
+
+    def display(self) -> str:
+        """How to spell it in a message (`py -3`, `python3`, ...)."""
+        return " ".join(self.argv)
+
+
+def probe_host_python(minimum: tuple[int, int]) -> HostPython | None:
+    """Walk `python_candidates` and take the first that RUNS and is at least
+    `minimum`, falling back to the first that merely ran -- so a too-old message
+    can name a real version rather than "did not run". `None` when none runs.
+
+    "Actually runs" is the whole point on Windows: the Microsoft Store
+    `python.exe` alias sits on PATH and satisfies any presence check, but
+    executing it prints nothing and opens the Store. Requiring parseable output
+    rejects it, and the `py -3` candidate ahead of it means a launcher-only
+    machine still bootstraps.
+
+    The version PREFERENCE is what keeps that ordering safe: `py -3` resolves to
+    the launcher's default, routinely an older install than the bare `python` on
+    PATH.
+    """
+    first_that_ran: HostPython | None = None
+    for candidate in python_candidates(os.name == "nt"):
+        out = probe(
+            [*candidate, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+            timeout=PROBE_TIMEOUT_S,
+        )
+        if out is None:
+            continue
+        version = _parse_two_dotted(out)
+        if version is None:
+            continue
+        entry = HostPython(tuple(candidate), version)
+        if version >= minimum:
+            return entry
+        if first_that_ran is None:
+            first_that_ran = entry
+    return first_that_ran
+
+
+def _parse_two_dotted(raw: str) -> tuple[int, int] | None:
+    """`"3.10\\n"` / `"noise\\n3.12"` -> `(3, 10)` / `(3, 12)`. The LAST
+    non-empty line wins -- some interpreters print a banner first."""
+    lines = [line.strip() for line in raw.strip().splitlines() if line.strip()]
+    if not lines:
+        return None
+    major, sep, minor = lines[-1].partition(".")
+    if not sep:
+        return None
+    try:
+        return int(major.strip()), int(minor.strip())
+    except ValueError:
+        return None
+
+
+def python_venv_capable(python: HostPython) -> bool:
+    """Whether this interpreter's `venv` module can create a USABLE environment.
+
+    `python -m venv --help` cannot tell -- argparse answers before `ensurepip`
+    is touched -- so this probes the real dependency: `import ensurepip`, which
+    fails fast on the Debian/Ubuntu split where `python3-venv` is a separate,
+    unmet package (`python3 -m venv --help` exits 0 there while `python3 -c
+    "import ensurepip"` exits 1).
+
+    `True` when the probe cannot be run at all: this is not the check that
+    should block a host on an inconclusive answer -- the real `python -m venv` a
+    moment later surfaces its own error.
+    """
+    return probe([*python.argv, "-c", "import ensurepip"], timeout=PROBE_TIMEOUT_S) is not None
+
+
+def _prereq_present(tool: str, is_windows: bool) -> bool:
+    """PATH-only presence, with one deliberate widening on Windows: `python`
+    counts as present when the `py` launcher is installed, because
+    `python_candidates` leads with `py -3` and a launcher-only machine is a
+    perfectly good Windows Python host. The oracle script checks the bare name
+    only, so this can only make bootstrap SUCCEED where it would have
+    refused."""
+    if on_path(tool) is not None:
+        return True
+    return is_windows and tool == "python" and on_path("py") is not None
+
+
+@dataclass(frozen=True)
+class PythonFloor:
+    """The floor actually enforced, and the two claimants behind it."""
+
+    effective: tuple[int, int]
+    source: str
+    manifest: tuple[int, int]
+
+
+def resolve_python_floor(facts: BootstrapFacts) -> PythonFloor:
+    """The EFFECTIVE Python floor: the highest anything in the build chain
+    enforces.
+
+    `zephyr_python_floor` is imported from `tan.commands.doctor_cmd` and called
+    with the SAME argument doctor passes it (`$ZEPHYR_BASE`, else tan's built-in
+    `PYTHON_MINIMUM_REQUIRED` pin) -- not re-derived here. That is the whole
+    mechanism keeping the two commands' verdicts identical: a second reader with
+    its own rule is exactly the drift this port keeps hitting, and `doctor`
+    reporting Pass on a host `bootstrap` refuses (or the reverse) is worse than
+    either verdict alone.
+
+    Skipped: reading the workspace's OWN `zephyr/cmake/modules/python.cmake`
+    when one already exists. On the path that matters -- a fresh host, nothing
+    bootstrapped -- there is no workspace to read, and a second candidate doctor
+    does not consult is a way for the two to disagree. Add it when a
+    bootstrapped Zephyr is found to LOWER the floor below tan's pin.
+    """
+    manifest_floor = facts.python_min_version
+    zephyr_floor, zephyr_source = zephyr_python_floor(_env("ZEPHYR_BASE"))
+    effective = max(manifest_floor, zephyr_floor)
+    source = (
+        zephyr_source
+        if zephyr_floor >= manifest_floor
+        else f"alp-sdk {BOOTSTRAP_MANIFEST_REL_PATH} pythonMinVersion"
+    )
+    return PythonFloor(effective, source, manifest_floor)
+
+
+def check_prerequisites(
+    facts: BootstrapFacts, host: str, floor: PythonFloor
+) -> tuple[HostPython | None, PrereqFailure | None]:
+    """`(interpreter, refusal)` -- exactly one of the two is set.
+
+    The tool LISTS are keyed `posix`/`windows` while the install COMMANDS are
+    keyed `linux`/`macos`/`windows`, so the host is resolved once here and the
+    resolved map handed down: no branch can look a tool up in the wrong OS's
+    table and hand a macOS user Linux's `apt-get` line.
+
+    The version gate applies on BOTH platforms and against the EFFECTIVE floor
+    -- see the module docstring. The oracle applies it on Windows only, against
+    the manifest's, which is the live bug this port exists to fix.
+    """
+    is_windows = host == WINDOWS
+    install = facts.install_for_host(host)
+    missing = [
+        tool for tool in facts.prerequisites(is_windows) if not _prereq_present(tool, is_windows)
+    ]
+    if missing:
+        refuse = windows_refusal if is_windows else posix_refusal
+        return None, refuse(missing, install)
+
+    # Probe against the floor that will actually be ENFORCED. Probing to a lower
+    # bar would stop at the first candidate clearing 3.10 (`py -3`, often the
+    # launcher's older default) and then fail the host for it, while a newer
+    # `python` sat one candidate further down the list.
+    python = probe_host_python(floor.effective)
+    if python is None:
+        return None, (
+            windows_python_not_runnable(install) if is_windows else posix_python_not_runnable()
+        )
+    if python.version < floor.effective:
+        return None, python_too_old(
+            python.version,
+            floor.effective,
+            install,
+            floor_source=floor.source,
+            manifest_floor=floor.manifest,
+        )
+    # Linux-only: every install command this gate can name is apt's, and this is
+    # a Debian/Ubuntu packaging split, not a general POSIX one -- macOS/BSD
+    # pythons ship `ensurepip` in the base install.
+    if host == LINUX and not python_venv_capable(python):
+        return None, posix_venv_unusable()
+    return python, None
+
+
+# ---------------------------------------------------------------------------
+# The spawning steps
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Runner:
+    """Child-process launcher shared by every step."""
+
+    json: bool
+    #: Drop `$ZEPHYR_BASE` from every child. Set when workspace selection
+    #: REJECTED the ambient value -- both scripts unset it so a stale tree
+    #: cannot hijack `west init`.
+    clear_zephyr_base: bool = False
+    #: Set by `--dry-run`: log the argv and report success without spawning.
+    #: The hermetic path -- the tests run every step through it.
+    dry_run: bool = False
+    #: Every argv a dry run would have spawned, in order. `data.plannedCommands`.
+    planned: list[list[str]] = field(default_factory=list)
+
+    def _env(self) -> dict[str, str] | None:
+        if not self.clear_zephyr_base:
+            return None
+        env = dict(os.environ)
+        env.pop("ZEPHYR_BASE", None)
+        return env
+
+    def run(self, argv: list[str], cwd: Path | None = None) -> str | None:
+        """Run to completion. `None` on success; otherwise a string carrying
+        whatever detail is recoverable -- the captured tail in JSON mode, a
+        launch error in either mode, and `""` in text mode where the child's own
+        log already streamed to the terminal.
+
+        `""` is a FAILURE, not a success: callers must test `is not None`.
+        """
+        self.planned.append(list(argv))
+        if self.dry_run:
+            return None
+        try:
+            if self.json:
+                out = subprocess.run(
+                    argv,
+                    cwd=str(cwd) if cwd else None,
+                    capture_output=True,
+                    stdin=subprocess.DEVNULL,
+                    timeout=INSTALL_TIMEOUT_S,
+                    env=self._env(),
+                    check=False,
+                )
+                if out.returncode == 0:
+                    return None
+                return capture_tail(out.stdout, out.stderr)
+            out = subprocess.run(
+                argv,
+                cwd=str(cwd) if cwd else None,
+                stdin=subprocess.DEVNULL,
+                timeout=INSTALL_TIMEOUT_S,
+                env=self._env(),
+                check=False,
+            )
+            return None if out.returncode == 0 else ""
+        except subprocess.TimeoutExpired:
+            return f"{argv[0]} did not finish within {INSTALL_TIMEOUT_S}s and was killed"
+        except (OSError, ValueError) as err:
+            # A missing binary, a path that is a DIRECTORY, an empty argv: a
+            # launch failure names itself instead of escaping as a traceback.
+            return f"failed to launch {argv[0]}: {err}"
+
+    def capture(self, argv: list[str], cwd: Path | None = None) -> str:
+        """Run capturing output in BOTH modes -- for the `west help` legibility
+        probe, which READS the text rather than showing it. `""` for every way
+        that can fail."""
+        self.planned.append(list(argv))
+        if self.dry_run:
+            return ""
+        try:
+            out = subprocess.run(
+                argv,
+                cwd=str(cwd) if cwd else None,
+                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                timeout=PROBE_TIMEOUT_S,
+                env=self._env(),
+                check=False,
+            )
+        except (OSError, ValueError, subprocess.SubprocessError):
+            return ""
+        return out.stdout.decode("utf-8", "replace") + out.stderr.decode("utf-8", "replace")
+
+
+@dataclass(frozen=True)
+class VenvBin:
+    """The venv executables, resolved against the bin directory that actually
+    EXISTS on disk."""
+
+    python: Path
+    west: Path
+    #: The bin sub-directory that won (`bin` or `Scripts`) -- the closing
+    #: activation hint must name the real one.
+    bin_dir: str
+
+
+@dataclass(frozen=True)
+class Workspace:
+    """The resolved paths every step works against."""
+
+    is_windows: bool
+    facts: BootstrapFacts
+    #: The alp-sdk checkout -- `west init -l`'s argument.
+    repo_root: Path
+    #: The west topdir: the checkout's PARENT (`west init -l` forces that).
+    workspace_dir: Path
+    venv_dir: Path
+
+    def venv_bin(self) -> VenvBin:
+        """Resolve the venv's executables by which bin directory EXISTS, POSIX
+        name first -- `bootstrap.sh`'s `VBIN` assignment does exactly this.
+
+        The bug this fixes: the presence check accepts EITHER layout (so a
+        git-bash-created `Scripts/` venv is reused, not clobbered), but the
+        executables used to be derived from the HOST. On a POSIX host that meant
+        creation was skipped and then `bin/python` -- which does not exist -- was
+        spawned, turning a reusable venv into a FATAL `pip install west (venv)
+        failed`.
+        """
+        posix = self.facts.venv_posix_bin_dir
+        windows = self.facts.venv_windows_bin_dir
+        if _is_dir(self.venv_dir / posix):
+            bin_dir = posix
+        elif _is_dir(self.venv_dir / windows):
+            bin_dir = windows
+        else:
+            bin_dir = self.facts.venv_bin_dir(self.is_windows)
+        names = venv_exe_names(bin_dir, self.facts)
+        return VenvBin(
+            self.venv_dir / bin_dir / names.python,
+            self.venv_dir / bin_dir / names.west,
+            bin_dir,
+        )
+
+    def venv_present(self) -> bool:
+        """Whether a venv interpreter already exists under EITHER layout."""
+        for bin_dir in (self.facts.venv_posix_bin_dir, self.facts.venv_windows_bin_dir):
+            names = venv_exe_names(bin_dir, self.facts)
+            if _is_file(self.venv_dir / bin_dir / names.python):
+                return True
+        return False
+
+
+def _venv_has_usable_pip(venv: VenvBin, runner: Runner) -> bool:
+    """Whether an existing venv's own interpreter can run `pip`.
+
+    Tells a healthy venv from the corpse of a bootstrap that died partway:
+    Debian's `ensurepip` failure leaves a REAL `bin/python` behind, so
+    `venv_present` alone accepts it, while `pip` itself is absent. `False` on a
+    spawn failure too -- unlike `python_venv_capable`'s fail-OPEN, an existing
+    venv that cannot even be spawned IS the evidence of brokenness this check
+    exists to catch, so it fails CLOSED and triggers a recreate.
+    """
+    if runner.dry_run:
+        return True
+    return probe([str(venv.python), "-m", "pip", "--version"], timeout=PROBE_TIMEOUT_S) is not None
+
+
+def ensure_venv(
+    ws: Workspace, log: Log, runner: Runner, host: HostPython
+) -> tuple[VenvBin | None, str | None]:
+    """Create (or reuse) the workspace venv and refresh `pip.bootstrapUpgrade`.
+
+    Everything -- west, the Zephyr requirements, the SDK extras -- installs into
+    this workspace-local venv, never the system interpreter / `--user` /
+    `--break-system-packages`: a half-removed system `packaging` once broke
+    `west init`, and a global west couples the build to the host interpreter's
+    state.
+
+    Idempotent, but only over a USABLE venv. Left alone, a partial venv makes
+    every later step die exactly as it did the first time and the reporter's
+    only way out is `rm -rf` by hand: a retry must either reuse a KNOWN-GOOD
+    venv or start clean, never silently inherit the wreckage.
+    """
+    if not runner.dry_run:
+        try:
+            ws.workspace_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as err:
+            return None, f"could not create the workspace directory {_native(ws.workspace_dir)}: {err}"
+
+    if ws.venv_present():
+        if _venv_has_usable_pip(ws.venv_bin(), runner):
+            log.line(f"Workspace venv already present at {_native(ws.venv_dir)}")
+        else:
+            log.line(
+                f"Workspace venv at {_native(ws.venv_dir)} has no usable pip (a previous "
+                f"bootstrap likely failed partway) -- removing and recreating it"
+            )
+            if not runner.dry_run:
+                try:
+                    shutil.rmtree(ws.venv_dir)
+                except OSError as err:
+                    return None, (
+                        f"failed to remove the broken venv at {_native(ws.venv_dir)}: {err}"
+                    )
+            failure = _create_venv(ws, log, runner, host)
+            if failure is not None:
+                return None, failure
+    else:
+        failure = _create_venv(ws, log, runner, host)
+        if failure is not None:
+            return None, failure
+
+    venv = ws.venv_bin()
+    upgrade = [
+        str(venv.python),
+        "-m",
+        "pip",
+        "install",
+        "--upgrade",
+        "-q",
+        *ws.facts.pip_bootstrap_upgrade,
+    ]
+    if runner.run(upgrade) is not None:
+        log.warn("pip-upgrade", "pip/wheel upgrade reported a problem")
+    return venv, None
+
+
+def _create_venv(ws: Workspace, log: Log, runner: Runner, host: HostPython) -> str | None:
+    """`python -m venv <venv_dir>`. Split out so the fresh path and the
+    broken-venv recreate path run the EXACT same creation step -- a second,
+    slightly different copy is how the two end up disagreeing about what
+    "created" means."""
+    log.line(f"Creating workspace venv at {_native(ws.venv_dir)}")
+    detail = runner.run([*host.argv, "-m", "venv", str(ws.venv_dir)])
+    if detail is None:
+        return None
+    return die(f"{host.display()} -m venv {_native(ws.venv_dir)} failed", detail)
+
+
+def _west_argv(venv: VenvBin, args: list[str]) -> list[str]:
+    """A `west` invocation by ABSOLUTE path to the venv's launcher, so the
+    nested `west build`/`bitbake` spawns resolve the SAME west rather than
+    whatever a stale PATH entry names. The caller sets `cwd` to the topdir."""
+    return [str(venv.west), *args]
+
+
+def west_phase(
+    ws: Workspace, venv: VenvBin, log: Log, runner: Runner, reuse: bool
+) -> str | None:
+    """Install west into the venv, then `west init -l` / `west update` /
+    `west zephyr-export`, then the legibility guard. `reuse` short-circuits all
+    of it (the guard included), exactly as both scripts do for a workspace
+    adopted from `$ZEPHYR_BASE`. `None` on success, else the fatal message."""
+    # west into the venv (NOT global / --user) so the system interpreter cannot
+    # break it. `west.pipSpec` is a manifest FLOOR, not a hard pin.
+    #
+    # DOCUMENTED DIVERGENCE from the schema's own stance, which calls pipSpec
+    # "informational today". tan deliberately DOES feed it: a declared floor
+    # that nothing honours is not a floor, and it costs nothing today while
+    # starting to matter the day the floor moves ahead of a stale venv.
+    if not _is_file(venv.west):
+        log.line("Installing west into the workspace venv")
+        detail = runner.run(
+            [str(venv.python), "-m", "pip", "install", "--upgrade", "-q", ws.facts.west_pip_spec]
+        )
+        if detail is not None:
+            return die("pip install west (venv) failed", detail)
+
+    if reuse:
+        log.line(
+            "Existing workspace reused -- skipping 'west init' / 'west update' (left untouched)"
+        )
+        return None
+
+    workspace = _native(ws.workspace_dir)
+    if not _is_dir(ws.workspace_dir / ".west"):
+        log.line(
+            f"Creating alp-sdk workspace at {workspace} (alp-sdk's west.yml is the "
+            f"manifest; takes a few minutes)"
+        )
+        # `-l` makes alp-sdk the manifest repo and its parent the topdir. Zephyr
+        # + HALs + extras are fetched by `west update`; alp-sdk's own
+        # west-commands then expose the `alp-*` extension commands here.
+        detail = runner.run(
+            _west_argv(venv, [*ws.facts.west_init_args, str(ws.repo_root)]),
+            cwd=ws.workspace_dir,
+        )
+        if detail is not None:
+            return die("west init -l failed", detail)
+        # Only bootstrap.sh mentions the cold-cache size on the fresh path.
+        log.line(
+            "Running 'west update' (shallow + narrow)"
+            if ws.is_windows
+            else "Running 'west update' (shallow + narrow; ~30 MB on a cold cache)"
+        )
+    else:
+        log.line(f"alp-sdk workspace already initialised at {workspace}")
+        log.line("Running 'west update' (shallow + narrow)")
+
+    detail = runner.run(
+        _west_argv(venv, list(ws.facts.west_update_args)), cwd=ws.workspace_dir
+    )
+    if detail is not None:
+        return die("west update failed", detail)
+    # Failure deliberately IGNORED (`|| true` in bootstrap.sh, no rc check in
+    # bootstrap.ps1).
+    runner.run(_west_argv(venv, list(ws.facts.west_export_args)), cwd=ws.workspace_dir)
+
+    # Legibility guard: fail at bootstrap time -- not at first `tan build` -- if
+    # the workspace manifest does not register the `alp-*` extension commands.
+    # The searched-for command is a manifest fact; the scripts hardcode it a
+    # second time in their own die message, which is interpolated here instead
+    # so it cannot go stale.
+    guard = ws.facts.west_extension_guard
+    if not runner.dry_run:
+        if guard not in runner.capture(_west_argv(venv, ["help"]), cwd=ws.workspace_dir):
+            return (
+                f"workspace at {workspace} does not register 'west {guard}' -- its "
+                f"manifest is not alp-sdk's west.yml (#769). Check 'west -C {workspace} "
+                f"config manifest.path'."
+            )
+    log.line(f"alp-* extension commands registered ('west {guard}' resolves in {workspace})")
+    return None
+
+
+def pip_phase(ws: Workspace, venv: VenvBin, log: Log, runner: Runner) -> None:
+    """The Python dependency installs, all into the SAME venv and all NON-FATAL
+    (a recorded warn each), matching both scripts."""
+    requirements = ws.workspace_dir / ws.facts.zephyr_requirements_path
+    # Conditional on the file EXISTING, matching the oracle -- which also means a
+    # `--dry-run` over a workspace `west update` has not populated yet omits this
+    # step from `plannedCommands`. Listing a command the real run would skip
+    # would make the plan a lie, which is worse than an honest gap.
+    if _is_file(requirements):
+        log.line("Installing Zephyr Python requirements into the venv")
+        argv = [str(venv.python), "-m", "pip", "install", "-q", "-r", str(requirements)]
+        if runner.run(argv) is not None:
+            # Non-fatal, but "check manually" told the reader nothing. Measured
+            # on a stock ubuntu-24.04 runner the failure is `hidapi` building
+            # from source, needing pkg-config + the libusb-1.0 headers -- and
+            # the workspace still LOOKS complete afterwards, so it surfaces far
+            # from the cause.
+            log.warn(
+                "zephyr-requirements",
+                "Zephyr requirements install reported a problem -- the venv is "
+                "incomplete and a later `tan init`/`tan build` may fail. On Linux this "
+                "is usually `hidapi` needing native headers: `sudo apt-get install -y "
+                "pkg-config libusb-1.0-0-dev libudev-dev`, then re-run `tan bootstrap`.",
+            )
+
+    # SDK-side extras: alp_project.py needs jsonschema; the MCUboot dev-key
+    # script needs imgtool. bootstrap.sh space-joins the list in its info line;
+    # bootstrap.ps1 comma-joins it.
+    extras = list(ws.facts.pip_sdk_extras)
+    rendered = ", ".join(extras) if ws.is_windows else " ".join(extras)
+    log.line(f"Installing alp-sdk Python extras into the venv ({rendered})")
+    if runner.run([str(venv.python), "-m", "pip", "install", "-q", *extras]) is not None:
+        log.warn("sdk-extras", "alp-sdk extras install reported a problem -- check manually")
+
+    # tan's Python backend -- editable, so a `git pull` in the checkout updates
+    # the backend in place.
+    editable = Tokens(str(ws.repo_root), str(ws.workspace_dir)).apply(
+        ws.facts.pip_editable_install
+    )
+    log.line(
+        f"Installing the tan CLI's Python backend into the venv "
+        f"(pip install -e {_native(editable)})"
+    )
+    argv = [str(venv.python), "-m", "pip", "install", "-q", "-e", editable]
+    if runner.run(argv) is not None:
+        log.warn(
+            "editable-install", "alp_cli editable install reported a problem -- check manually"
+        )
+
+
+# ---------------------------------------------------------------------------
+# `.west/config` reconciliation + the workspace sync record
+# ---------------------------------------------------------------------------
+
+
+def reconcile_west_manifest_path(sdk_root: str) -> tuple[str, str | None, str | None]:
+    """Reconcile a stale `[manifest] path` in `<dirname(sdk_root)>/.west/config`
+    to `sdk_root`. Returns `(outcome, old_rel, detail)`.
+
+    `west init -l <sdk_root>` sets `topdir = dirname(sdk_root)` and writes
+    `path = <basename>`; the "already initialised" branch runs `west update`
+    WITHOUT re-running `west init -l`, so a config left behind by a DIFFERENT
+    SDK checkout sharing the topdir keeps pointing at the stale SDK's
+    `west.yml`.
+
+    Non-fatal but not SILENT: `"failed"` separates "nothing to do" from "a
+    rewrite was needed and did not happen", so the caller can say the workspace
+    is still broken instead of reporting clean success.
+    """
+    sdk_path = Path(sdk_root)
+    topdir = sdk_path.parent
+    if str(topdir) == str(sdk_path):
+        return "not-applicable", None, None
+    config_path = topdir / ".west" / "config"
+    # An ABSENT `.west/config` is the ordinary "no west workspace under this
+    # topdir" case and the one silent outcome. Anything that EXISTS falls
+    # through to the read below, which reports why it could not be used --
+    # calling an unreadable config "nothing to do" is exactly the
+    # silent-success bug this function exists to close.
+    if not _safe_exists(config_path):
+        return "not-applicable", None, None
+    contents = _read_text(config_path)
+    if contents is None:
+        return "failed", None, f"{config_path} could not be read"
+    current = get_manifest_path(contents)
+    if current is None:
+        # No `[manifest] path` line carries no pointer to reconcile; `west`
+        # itself is what complains about that.
+        return "not-applicable", None, None
+    if _same_directory(topdir / current.strip(), sdk_path):
+        return "already-matches", current, None
+    new_rel = sdk_path.name
+    if not new_rel:
+        return "not-applicable", current, None
+    rewritten = set_manifest_path(contents, new_rel)
+    if rewritten is None:
+        return "failed", current, "no [manifest] path line to rewrite"
+    # Atomic replace: write a sibling temp in the same `.west/`, then rename
+    # over `config`. That file is the topdir's ONLY manifest pointer, shared by
+    # every SDK version under it -- a crash mid-write must not leave it
+    # truncated, which would break `west` for all of them.
+    tmp_path = config_path.with_name(f"config.{os.getpid()}.tan-tmp")
+    try:
+        tmp_path.write_text(rewritten, encoding="utf-8", newline="")
+        os.replace(tmp_path, config_path)
+    except OSError as err:
+        # Worth naming on Windows: a `config` open in another process, or marked
+        # read-only, fails the replace even though writing the temp succeeded.
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return "failed", current, str(err)
+    return "rewrote", current, new_rel
+
+
+def _safe_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def record_workspace_sdk(topdir: Path, sdk_root: str) -> None:
+    """Record that `topdir`'s workspace is now synced to `sdk_root`, after a
+    `west update` that actually ran.
+
+    Nothing else on disk answers "which SDK's manifest were these trees checked
+    out from": `.west/config` names the manifest repo but is rewritten by the
+    reconcile above (and by `west init`) WITHOUT the trees changing, so it
+    cannot stand in for the update having happened. Best-effort -- a workspace
+    that cannot record it simply keeps getting the `tan bootstrap` advice.
+
+    Broadly guarded on purpose: `sdk_pointer_json` renders a timestamp and can
+    throw on an out-of-range `SOURCE_DATE_EPOCH` (the milliseconds case), and a
+    best-effort record must never be the thing that kills the command.
+    """
+    try:
+        record = topdir / ".west" / "tan-workspace-sdk"
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(sdk_pointer_json(sdk_root), encoding="utf-8")
+    except Exception:  # noqa: BLE001 -- best-effort by contract; see the docstring
+        pass
+
+
+# ---------------------------------------------------------------------------
+# The workspace-parent guard
+# ---------------------------------------------------------------------------
+
+
+def _list_entries(parent: Path) -> list[str] | None:
+    """`parent`'s direct entry names, or `None` when it cannot even be read.
+
+    `None`, not `[]`: an unreadable parent tells the guard nothing, and `[]`
+    would read as "confirmed empty", which is a claim we cannot make. The real
+    problem, if there is one, surfaces the first time a step tries to write
+    there.
+    """
+    try:
+        return [entry.name for entry in parent.iterdir()]
+    except OSError:
+        return None
+
+
+def default_relocation_target(
+    repo_root: Path, workspace_dir: Path, venv_dir_name: str
+) -> Path | None:
+    """`<workspace_dir>/alp-workspace` when the guard fires, else `None`.
+
+    `workspace_dir == repo_root` (the rootless fallback) has no real parent to
+    guard at all.
+    """
+    if str(workspace_dir) == str(repo_root):
+        return None
+    checkout_name = repo_root.name
+    if not checkout_name:
+        return None
+    entries = _list_entries(workspace_dir)
+    if entries is None:
+        return None
+    # A TYPED check, not a name match: `.west` is only "an existing west
+    # workspace" when `west init -l` actually wrote a readable config there. A
+    # plain file, or an empty directory, happening to be named `.west` is
+    # foreign content like anything else.
+    dot_west_is_workspace = _is_file(workspace_dir / ".west" / "config")
+    if parent_needs_workspace_guard(
+        entries, checkout_name, venv_dir_name, dot_west_is_workspace
+    ):
+        return workspace_dir / DEFAULT_WORKSPACE_DIR_NAME
+    return None
+
+
+def workspace_guard_refusal(workspace_dir: Path, target: Path) -> str:
+    """Names `tan bootstrap --workspace <path>` explicitly, not a bare
+    `--workspace <path>`: this same refusal is inherited by `tan build` and
+    `tan doctor --build --fix`, neither of which has a `--workspace` of its
+    own."""
+    return (
+        f"{_native(workspace_dir)} holds more than this checkout, and is not itself an "
+        f"existing west workspace; refusing to write the west workspace "
+        f"(zephyr/modules/.west/venv) there without asking. Re-run interactively to move "
+        f"the checkout into {_native(target)}, run `tan bootstrap --workspace <path>`, or "
+        f"clone alp-sdk into a dedicated directory."
+    )
+
+
+def relocate_checkout(repo_root: Path, target_parent: Path) -> tuple[Path | None, str | None]:
+    """Move `repo_root` to be a direct child of `target_parent`, preserving its
+    basename. Returns `(new_root, error)`.
+
+    This moves a customer's own git checkout, so it is built never to
+    half-complete: a no-op when already a direct child (covers a retry after
+    success and `--workspace <the-current-parent>`); an outright refusal when
+    the destination exists, so nothing is ever merged into or overwritten; and
+    exactly ONE `os.rename`, a single filesystem-level directory move that
+    carries `.git`, uncommitted changes and untracked files in one operation. A
+    cross-device target or a file locked open inside the tree fails the WHOLE
+    rename, leaving the checkout exactly where it was -- there is no
+    "moved half the files" state this can reach.
+    """
+    if _same_directory(repo_root.parent, target_parent):
+        return repo_root, None
+    checkout_name = repo_root.name
+    if not checkout_name:
+        return None, f"{_native(repo_root)} has no final path component to relocate"
+    destination = target_parent / checkout_name
+    if _safe_exists(destination):
+        return None, (
+            f"{_native(destination)} already exists; refusing to relocate the checkout "
+            f"there (nothing was moved)"
+        )
+    try:
+        target_parent.mkdir(parents=True, exist_ok=True)
+    except OSError as err:
+        return None, f"could not create the workspace directory {_native(target_parent)}: {err}"
+    try:
+        os.rename(repo_root, destination)
+    except OSError as err:
+        return None, (
+            f"could not move the checkout from {_native(repo_root)} to "
+            f"{_native(destination)}: {err}{_rename_hint(err)} (the checkout was left in "
+            f"place)"
+        )
+    return destination, None
+
+
+def _rename_hint(err: OSError) -> str:
+    """A one-line remedy for the two OS errors that have one; `""` for every
+    other cause (permissions, a full disk), rather than guessing.
+
+    Windows `ERROR_SHARING_VIOLATION` (32): something inside the checkout is
+    open, often the invoking shell's own cwd. A cross-device move: Windows
+    `ERROR_NOT_SAME_DEVICE` (17), POSIX `EXDEV` (18).
+    """
+    code = err.winerror if os.name == "nt" and getattr(err, "winerror", None) else err.errno
+    if os.name == "nt":
+        if code == 32:
+            return " -- re-run from outside the checkout (e.g. `cd ..` first)"
+        if code == 17:
+            return " -- pick a --workspace on the same drive as the checkout"
+    elif code == 18:
+        return " -- pick a --workspace on the same filesystem as the checkout"
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Reading the project's board.yaml + the SoM topology
+# ---------------------------------------------------------------------------
+
+
+def read_board_runtimes(board_yaml: str | None, sdk_root: str | None) -> list[str]:
+    """The runtimes this project puts in play. `[]` for every way that can fail,
+    which the Yocto gate treats as "unresolvable, proceed"."""
+    cores, board_os, sku = _read_board_slice(board_yaml)
+    topology = _read_som_topology(sku, sdk_root)
+    return in_play_runtimes(cores, board_os, topology)
+
+
+def _read_board_slice(
+    board_yaml: str | None,
+) -> tuple[dict[str, str | None] | None, str | None, str | None]:
+    """`(cores, top-level os, som.sku)` out of `board.yaml`.
+
+    PyYAML when importable, else a targeted scan -- the same bargain
+    `presets_cmd._load_som_yaml` and `generate_cmd._board_sku` strike, and the
+    frozen binary ships without PyYAML so the fallback is THE path there.
+
+    Read STRICTLY (no `errors="replace"`), unlike doctor's `_read_text`. This
+    file is a DECISION input, not a diagnostic: replacement characters turn a
+    non-decodable board.yaml into a half-read one whose `cores:` block still
+    parses, and a Yocto-looking core id then REFUSES the run on a non-Linux host
+    over a file nothing could actually read. `yocto_gate`'s own rule applies --
+    erring toward running is harmless, erring toward refusing bricks the command
+    -- so an undecodable file is "unresolvable, proceed", which is also what the
+    oracle's `read_to_string(..).ok()` produces.
+    """
+    if not board_yaml:
+        return None, None, None
+    try:
+        text = Path(board_yaml).read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None, None, None
+    try:
+        import yaml  # noqa: PLC0415  (optional at runtime, by design)
+    except ImportError:
+        return _scan_board_slice(text)
+    try:
+        doc = yaml.safe_load(text)
+    except Exception:  # noqa: BLE001 -- yaml.YAMLError and anything a loader raises
+        return None, None, None
+    if not isinstance(doc, dict):
+        return None, None, None
+    raw_cores = doc.get("cores")
+    cores: dict[str, str | None] | None = None
+    if isinstance(raw_cores, dict):
+        cores = {}
+        for core_id, entry in raw_cores.items():
+            if not isinstance(core_id, str):
+                continue
+            value = entry.get("os") if isinstance(entry, dict) else None
+            cores[core_id] = value if isinstance(value, str) else None
+    som = doc.get("som")
+    sku = som.get("sku") if isinstance(som, dict) else None
+    top_os = doc.get("os")
+    return (
+        cores or None,
+        top_os if isinstance(top_os, str) else None,
+        sku if isinstance(sku, str) else None,
+    )
+
+
+def _scan_board_slice(
+    text: str,
+) -> tuple[dict[str, str | None] | None, str | None, str | None]:
+    """The no-PyYAML reader: the top-level `os:`, `som: sku:`, and the `cores:`
+    block's ids plus each one's `os:`. Deliberately not a YAML parser -- it
+    answers only what the Yocto gate consumes."""
+    cores: dict[str, str | None] = {}
+    top_os: str | None = None
+    sku: str | None = None
+    section: str | None = None
+    current_core: str | None = None
+    core_indent = -1
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        key, sep, value = stripped.partition(":")
+        key = key.strip()
+        cleaned = value.strip().strip("'\"")
+        if indent == 0:
+            section = key
+            current_core = None
+            core_indent = -1
+            if key == "os" and sep:
+                top_os = cleaned or None
+            continue
+        if section == "som" and key == "sku" and sep:
+            sku = cleaned or None
+        elif section == "cores":
+            if core_indent < 0 or indent <= core_indent:
+                core_indent = indent
+                current_core = key
+                cores.setdefault(key, None)
+                # A flow mapping on the same line: `m33_sm: {os: "off"}`.
+                if "os" in cleaned:
+                    inline = cleaned.strip("{}").split(",")
+                    for item in inline:
+                        ikey, isep, ival = item.partition(":")
+                        if isep and ikey.strip() == "os":
+                            cores[key] = ival.strip().strip("'\"") or None
+            elif current_core is not None and key == "os" and sep:
+                cores[current_core] = cleaned or None
+    return cores or None, top_os, sku
+
+
+def _read_som_topology(sku: str | None, sdk_root: str | None) -> dict[str, str]:
+    """`{core id: runtime}` for `sku`, from the SDK metadata. Supports both
+    layouts the SDK has used -- a flat `<sku>.yaml` or an `<sku>/som.yaml`
+    directory. `{}` when anything is missing or unparseable, which the caller
+    must treat as "unresolvable, proceed".
+
+    Routed through `presets_cmd.parse_som_preset`, which owns the
+    `board:`->zephyr / `machine:`->yocto / core-id-heuristic mapping. A second
+    copy here is how `tan presets` and `tan bootstrap` would come to disagree
+    about which host can build a project.
+    """
+    cleaned = (sku or "").strip()
+    if not cleaned or not sdk_root:
+        return {}
+    directory = Path(sdk_root) / "metadata" / "e1m_modules"
+    for candidate in (directory / f"{cleaned}.yaml", directory / cleaned / "som.yaml"):
+        text = _read_text(candidate)
+        if text is None:
+            continue
+        try:
+            som = parse_som_preset(text)
+        except Exception:  # noqa: BLE001 -- one bad preset must not fail the whole run
+            continue
+        return {core.id: core.os for core in som.cores}
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Envelope assembly
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RunPaths:
+    """Mutable run state the envelope reports, threaded through the phases."""
+
+    repo_root: Path
+    workspace_dir: Path
+    venv_dir: Path
+
+    def tokens(self) -> Tokens:
+        """`${SDK_ROOT}` / `${WORKSPACE_DIR}` for the CURRENT paths, re-derived
+        at each use so a repointed workspace is reflected."""
+        return Tokens(str(self.repo_root), str(self.workspace_dir))
+
+
+def _data(
+    *,
+    args: dict[str, bool],
+    sdk_root: str,
+    paths: RunPaths | None,
+    facts: BootstrapFacts,
+    pin: str,
+    missing: list[dict[str, str | None]] | None = None,
+    planned: list[list[str]] | None = None,
+) -> dict[str, object]:
+    """The `data` payload.
+
+    `zephyrBase` is RENDERED FROM THE MANIFEST (`env.ZEPHYR_BASE`), never
+    re-derived as `<workspaceDir>/zephyr`: if alp-sdk repoints that key the
+    printed export line follows it, and a second derivation here would hand a
+    consumer a path nothing else in the run agrees with. Absent key -> `""`,
+    like every other unresolved path field.
+
+    `missingPrerequisites` is an explicit `null` on every run with no missing
+    tool to name -- NEVER `[]`, which would be a second spelling of the fact a
+    successful run already reports as `null`.
+    """
+    tokens = paths.tokens() if paths else Tokens("", "")
+    zephyr_base = ""
+    if paths is not None:
+        for key, raw in facts.env:
+            if key == "ZEPHYR_BASE":
+                zephyr_base = _native(tokens.apply(raw))
+                break
+    data: dict[str, object] = {
+        "schemaVersion": DATA_SCHEMA_VERSION,
+        # `_native` like the other three: a consumer comparing `sdkRoot` against
+        # `workspaceDir` (prefix / dirname) needs one separator.
+        "sdkRoot": _native(sdk_root) if sdk_root else "",
+        "workspaceDir": _native(paths.workspace_dir) if paths else "",
+        "venvDir": _native(paths.venv_dir) if paths else "",
+        "zephyrBase": zephyr_base,
+        "factsFromManifest": facts.from_manifest,
+        "zephyrPin": pin,
+        "noPip": args["no_pip"],
+        "noWest": args["no_west"],
+        "printEnv": args["print_env"],
+        "missingPrerequisites": missing,
+    }
+    if planned is not None:
+        # `--dry-run` only: the argv every step WOULD have spawned, in order. A
+        # key that appears only under the flag that produces it, so a normal run
+        # keeps the oracle's exact key set.
+        data["plannedCommands"] = [" ".join(argv) for argv in planned]
+    return data
+
+
+@dataclass
+class Outcome:
+    """What the command decided: the exit code, the payload, the issues, and the
+    stderr lines text mode prints."""
+
+    exit_code: ExitCode
+    data: dict[str, object] | None
+    issues: list[Issue]
+    text: list[str] = field(default_factory=list)
+
+
+def _refusal(
+    exit_code: ExitCode, code: str, lines: list[str], data: dict[str, object]
+) -> Outcome:
+    """A refusal before any step ran: ONE `bootstrap.<code>` issue whose message
+    is `" ".join(lines)`, and those same lines as the text output (which is what
+    `doctor --build --fix` and `build`'s auto-bootstrap surface).
+
+    The join is why `data.missingPrerequisites` has to exist: an install command
+    contains the same spaces the join used, so the split is not recoverable.
+    """
+    return Outcome(
+        exit_code,
+        data,
+        [Issue(f"bootstrap.{code}", "error", " ".join(lines))],
+        list(lines),
+    )
+
+
+def _fatal(message: str, data: dict[str, object], issues: list[Issue]) -> Outcome:
+    """A failing STEP: the fatal message as a `bootstrap.failed` error issue, on
+    top of whatever warnings the run had already recorded."""
+    return Outcome(
+        ExitCode.RUNTIME_FAILURE,
+        data,
+        [*issues, Issue("bootstrap.failed", "error", message)],
+        [message],
+    )
+
+
+def _env(name: str) -> str | None:
+    """An env var, or `None` when unset OR blank. Never raising: a decoding
+    failure on an exotic value must not kill the command."""
+    try:
+        raw = os.environ.get(name)
+    except Exception:  # noqa: BLE001 -- an environ that cannot be read is "unset"
+        return None
+    if raw is None or not raw.strip():
+        return None
+    return raw
+
+
+# ---------------------------------------------------------------------------
+# The run
+# ---------------------------------------------------------------------------
+
+
+def load_facts(sdk_root: str) -> BootstrapFacts:
+    """`<sdkRoot>/metadata/bootstrap.json`, or the fallback constants when the
+    SDK predates it. Raises `BootstrapManifestError`.
+
+    Version-skew guard: an ABSENT manifest is the legacy path and falls back; a
+    manifest present but unusable -- unreadable, non-UTF-8, unparseable, or
+    carrying an unsupported `schemaVersion` -- is a HARD error naming why.
+    Falling back there would silently re-introduce hand-ported behaviour against
+    an SDK that explicitly declared something else.
+
+    ABSENT is the ONLY case that falls back. A `chmod 000` manifest on a dev
+    tree used to produce an envelope identical in every verdict-bearing field
+    (`ok:true`, `exitCode:0`, `factsFromManifest:false`, `issues:[]`) to a
+    genuine legacy SDK's.
+    """
+    path = Path(sdk_root) / BOOTSTRAP_MANIFEST_REL_PATH
+    if not _safe_exists(path):
+        return fallback_facts(_manifest_absent_floor())
+    try:
+        # UTF-8 with NO replacement: non-UTF-8 bytes are a refusal, never
+        # mojibake silently parsed as facts. `doctor`'s `_read_text` uses
+        # `errors="replace"` deliberately -- it must degrade rather than refuse
+        # -- and this must not.
+        text = path.read_text(encoding="utf-8")
+    except (OSError, ValueError) as err:
+        # Same shape as the parse-failure message, so a consumer sees ONE
+        # wording for "this manifest is here and I cannot use it", whichever way
+        # it is unusable -- and the OS's own reason travels with it, because
+        # "Access is denied" and "invalid start byte" are different fixes.
+        raise BootstrapManifestError(
+            f"{BOOTSTRAP_MANIFEST_REL_PATH} could not be read: {err}"
+        ) from err
+    return parse_bootstrap_manifest(text)
+
+
+def _manifest_absent_floor() -> tuple[int, int]:
+    """The floor `fallback_facts` records for an SDK with no manifest -- doctor's
+    own `FALLBACK_PYTHON_FLOOR`, imported rather than re-spelled, which is the
+    same 3.10 as `crate::util::MIN_PYTHON`. The EFFECTIVE floor is still resolved
+    from this by `resolve_python_floor`, so a legacy SDK gets the same
+    Zephyr-aware verdict a current one does."""
+    return FALLBACK_PYTHON_FLOOR
+
+
+def _zephyr_base_will_adopt(pin: str, repo_root: Path) -> bool:
+    """Whether `$ZEPHYR_BASE`, if set, will be ADOPTED by `_select_workspace`
+    rather than ignored.
+
+    A read-only restatement of that same detection, used ONLY to decide whether
+    the workspace-parent guard applies at all: when adoption is about to repoint
+    the write target at the `$ZEPHYR_BASE` topdir, a dirty `<sdkRoot>/..` is not
+    a problem, because nothing is going to be written there. Both call
+    `decide_workspace_reuse`, so this is a few extra filesystem reads, never a
+    second source of truth for the DECISION.
+    """
+    facts = _existing_workspace_facts(repo_root)
+    if facts is None:
+        return False
+    choice, _ = decide_workspace_reuse(*facts, pin)
+    return choice in (REUSE, STALE)
+
+
+def _existing_workspace_facts(repo_root: Path) -> tuple[str, bool, bool] | None:
+    """`(VERSION body, topdir is a west workspace, manifest is this SDK)` for the
+    `$ZEPHYR_BASE` tree, or `None` when there is nothing to judge.
+
+    Reads the ENVIRONMENT VARIABLE only -- never a shell rc file -- so this
+    behaves identically under bash / zsh / fish / PowerShell / WSL.
+    """
+    zephyr_base = _env("ZEPHYR_BASE")
+    if zephyr_base is None:
+        return None
+    base = Path(zephyr_base)
+    version_file = _read_text(base / "VERSION")
+    if version_file is None:
+        return None
+    top = base.parent
+    return (
+        version_file,
+        _is_dir(top / ".west"),
+        _manifest_points_at(top, repo_root),
+    )
+
+
+def _manifest_points_at(topdir: Path, repo_root: Path) -> bool:
+    """Whether `<topdir>/.west/config`'s `[manifest] path` resolves to
+    `repo_root`. west and the venv are not set up yet at this point, so the
+    config is read directly rather than shelling `west config manifest.path`."""
+    config = _read_text(topdir / ".west" / "config")
+    if config is None:
+        return False
+    rel = get_manifest_path(config)
+    if rel is None:
+        return False
+    return _same_directory(topdir / rel.strip(), repo_root)
+
+
+@dataclass(frozen=True)
+class WorkspacePlan:
+    """What workspace selection decided about `$ZEPHYR_BASE`."""
+
+    #: Skip `west init`/`west update` entirely -- the adopted tree is already on
+    #: the pinned Zephyr, so bootstrap leaves it untouched.
+    reuse: bool = False
+    #: A `$ZEPHYR_BASE` topdir was taken over (reused untouched OR refreshed in
+    #: place), so the paths now name it rather than `<sdkRoot>/..`.
+    adopted: bool = False
+    #: Drop `$ZEPHYR_BASE` from every child -- set only when the ambient value
+    #: was REFUSED, so a foreign tree cannot hijack `west init`.
+    clear_zephyr_base: bool = False
+
+
+def _select_workspace(
+    log: Log, is_windows: bool, pin: str, facts: BootstrapFacts, paths: RunPaths
+) -> WorkspacePlan:
+    """Workspace selection over the `$ZEPHYR_BASE` tree; repoints
+    `paths.workspace_dir`/`venv_dir` at it when adopted.
+
+    Three outcomes for a tree whose manifest IS this checkout: on the pinned
+    Zephyr it is reused untouched; on a DIFFERENT one it is adopted and
+    refreshed by the ordinary `west update` rather than reused-and-skipped or
+    abandoned for a second clone elsewhere; and a foreign-manifest tree is
+    refused. Every non-reuse outcome is RECORDED as a warning, not just printed:
+    a JSON consumer otherwise could not tell that its `$ZEPHYR_BASE` was
+    refreshed, or refused and a second workspace built somewhere else entirely.
+    """
+    existing = _existing_workspace_facts(paths.repo_root)
+    if existing is None:
+        return WorkspacePlan()
+    zephyr_base = _env("ZEPHYR_BASE") or ""
+    top = Path(zephyr_base).parent
+    var = "$env:ZEPHYR_BASE" if is_windows else "$ZEPHYR_BASE"
+    choice, version = decide_workspace_reuse(*existing, pin)
+
+    if choice == REUSE:
+        # Never modify the user's tree: adopt it and skip init/update.
+        paths.workspace_dir = top
+        paths.venv_dir = top / facts.venv_dir_name
+        log.line(
+            f"Reusing compatible alp-sdk workspace from {var}: "
+            f"{_native(paths.workspace_dir)} (Zephyr {version})"
+        )
+        return WorkspacePlan(reuse=True, adopted=True)
+
+    if choice == STALE:
+        # This IS bootstrap's own workspace, just left behind by an SDK pin bump.
+        # `west update` over a diagnostic: a warning alone leaves the next build
+        # green against the wrong Zephyr, which IS the defect. It is not the
+        # aggressive option either -- it is byte-for-byte the command a bootstrap
+        # with no $ZEPHYR_BASE set would run over this same topdir, gated on a
+        # manifest that already proved the tree belongs to this SDK.
+        paths.workspace_dir = top
+        paths.venv_dir = top / facts.venv_dir_name
+        log.warn(
+            "zephyr-base-stale",
+            f"{var} workspace ({_native(paths.workspace_dir)}) is on Zephyr {version} "
+            f"but this alp-sdk pins {pin} -- refreshing it with 'west update' (this also "
+            f"moves the other west.yml projects to their pins)",
+        )
+        return WorkspacePlan(adopted=True)
+
+    if choice == MANIFEST_MISMATCH:
+        log.warn(
+            "zephyr-base-manifest-mismatch",
+            f"{var} workspace ({_native(top)}) is a Zephyr {pin} tree but its manifest "
+            f"is not alp-sdk's west.yml -- not reusing it (would leave 'west "
+            f"{facts.west_extension_guard}' unknown, #769); building an alp-sdk "
+            f"workspace at {_native(paths.workspace_dir)}",
+        )
+        return WorkspacePlan(clear_zephyr_base=True)
+
+    # INCOMPATIBLE: not a usable west workspace at all. bootstrap.sh's message
+    # carries a tail bootstrap.ps1's does not.
+    tail = "" if is_windows else " and building an isolated one"
+    log.warn(
+        "zephyr-base-incompatible",
+        f"{var} ({zephyr_base}) is not an alp-sdk Zephyr {pin} west workspace -- "
+        f"ignoring it{tail}",
+    )
+    return WorkspacePlan(clear_zephyr_base=True)
+
+
+def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see below
+    *,
+    project: str | None,
+    board_yaml: str | None,
+    sdk_root_flag: str | None,
+    no_pip: bool,
+    no_west: bool,
+    print_env: bool,
+    workspace: str | None,
+    dry_run: bool,
+    json_mode: bool,
+) -> tuple[Outcome, Project, SdkInfo | None]:
+    """The whole command, as a sequence of early refusals then the three phases.
+
+    Deliberately one long function rather than a pipeline of small ones: the
+    order of the gates is the contract (a refusal must leave NOTHING on disk, so
+    every validation precedes every write), and splitting it would hide that
+    order behind call sites. Mirrors the oracle's `bootstrap::run` one-to-one.
+    """
+    is_windows = os.name == "nt"
+    host = detect_host_os(sys.platform)
+    log = Log(json_mode)
+    flags = {"no_pip": no_pip, "no_west": no_west, "print_env": print_env}
+
+    root, board_path = resolve_project_paths(project, board_yaml)
+    reported_project = Project(root=root, board_yaml=board_path)
+
+    active = resolve_sdk_tiered(sdk_root_flag, Path(root))
+    resolved = active.path if active.path and Path(active.path).joinpath(*SDK_MARKER).exists() else None
+    if resolved is None:
+        return (
+            _refusal(
+                ExitCode.VALIDATION_FAILURE,
+                "sdk-root-unresolved",
+                [
+                    "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk "
+                    "switch <version|path>`, or run `tan sdk install <version>` first."
+                ],
+                _data(
+                    args=flags,
+                    sdk_root="",
+                    paths=None,
+                    facts=fallback_facts(_manifest_absent_floor()),
+                    pin="",
+                ),
+            ),
+            # The only refusal that predates project resolution in the oracle.
+            Project(root=None, board_yaml=None),
+            None,
+        )
+    sdk_root = resolved
+    sdk = SdkInfo(sdk_root, active.tier)
+
+    # `west init -l <alp-sdk>` always makes the topdir the checkout's PARENT and
+    # alp-sdk itself the manifest repo, which is what registers the `alp-*`
+    # extension commands. Zephyr + HALs land as its siblings.
+    repo_root = Path(sdk_root)
+    workspace_dir = repo_root.parent if str(repo_root.parent) != str(repo_root) else repo_root
+    paths = RunPaths(repo_root, workspace_dir, workspace_dir / ".venv")
+
+    try:
+        facts = load_facts(sdk_root)
+    except BootstrapManifestError as err:
+        return (
+            _refusal(
+                ExitCode.VALIDATION_FAILURE,
+                "manifest",
+                [str(err)],
+                _data(
+                    args=flags,
+                    sdk_root=sdk_root,
+                    paths=paths,
+                    facts=fallback_facts(_manifest_absent_floor()),
+                    pin="",
+                ),
+            ),
+            reported_project,
+            sdk,
+        )
+    # `venv.dirName` is a manifest fact, so the venv path is only final now.
+    paths.venv_dir = paths.workspace_dir / facts.venv_dir_name
+    # ONE pin authority, shared with `build`'s preflight zephyrVersion check.
+    pin = resolve_zephyr_pin(_read_text(paths.repo_root / "west.yml"), facts.zephyr_version)
+
+    def payload(**extra: object) -> dict[str, object]:
+        return _data(args=flags, sdk_root=sdk_root, paths=paths, facts=facts, pin=pin, **extra)
+
+    # `--workspace` is validated + absolutised HERE, before anything else
+    # touches it: this relocates a customer's checkout, so an empty value or an
+    # ambiguous drive-relative one must never resolve to a guess.
+    workspace_override: Path | None = None
+    if workspace is not None:
+        if print_env:
+            # Refused outright rather than rendering env lines for a directory
+            # nothing was ever moved into.
+            return (
+                _refusal(
+                    ExitCode.VALIDATION_FAILURE,
+                    "print-env-workspace-conflict",
+                    [
+                        "--print-env and --workspace cannot be combined: --print-env only "
+                        "prints what an already-resolved workspace exports and moves "
+                        "nothing, while --workspace's whole job is choosing where the "
+                        "workspace goes. Run `tan bootstrap --workspace <path>` first, "
+                        "then `tan bootstrap --print-env` against the workspace that "
+                        "produced."
+                    ],
+                    payload(),
+                ),
+                reported_project,
+                sdk,
+            )
+        try:
+            workspace_override = Path(resolve_workspace_target(workspace, os.getcwd()))
+        except (ValueError, OSError) as err:
+            return (
+                _refusal(
+                    ExitCode.VALIDATION_FAILURE, "workspace-invalid", [str(err)], payload()
+                ),
+                reported_project,
+                sdk,
+            )
+
+    # `--print-env` short-circuits before any prerequisite check or venv work, so
+    # it answers on a machine that is still missing cmake or ninja.
+    if print_env:
+        text = print_env_block(
+            facts, paths.tokens(), facts.venv_bin_dir(is_windows), is_windows
+        )
+        return Outcome(ExitCode.SUCCESS, payload(), [], text), reported_project, sdk
+
+    # Workspace-parent guard, BEFORE any write below, so a refusal leaves
+    # nothing on disk. A `$ZEPHYR_BASE` workspace about to be ADOPTED repoints
+    # the write target away from `repo_root`'s parent entirely -- a dirty parent
+    # is not a problem when nothing is going to be written there. An explicit
+    # `--workspace` answers the question outright regardless.
+    #
+    # NO PROMPT, ever, in this port: a prompt needs a human at a console, and
+    # every caller that reaches here without `--workspace` gets the
+    # non-interactive refusal. `--format json` says so explicitly; a piped or
+    # redirected stdin says so just as loudly, and the oracle hung forever on
+    # exactly that before the terminal term was added. Refusing names both
+    # remedies, so nothing is unreachable -- it only costs the interactive
+    # convenience of answering "yes" in place.
+    guard_applies = workspace_override is not None or not _zephyr_base_will_adopt(
+        pin, paths.repo_root
+    )
+    if guard_applies:
+        target = workspace_override
+        if target is None:
+            target = default_relocation_target(
+                paths.repo_root, paths.workspace_dir, facts.venv_dir_name
+            )
+            if target is not None:
+                return (
+                    _refusal(
+                        ExitCode.VALIDATION_FAILURE,
+                        "workspace-guard",
+                        [workspace_guard_refusal(paths.workspace_dir, target)],
+                        payload(),
+                    ),
+                    reported_project,
+                    sdk,
+                )
+        if target is not None:
+            new_root, error = relocate_checkout(paths.repo_root, target)
+            if error is not None:
+                return _fatal(error, payload(), []), reported_project, sdk
+            if new_root is not None and str(new_root) != str(paths.repo_root):
+                old_root = sdk_root
+                paths.repo_root = new_root
+                paths.workspace_dir = target
+                paths.venv_dir = target / facts.venv_dir_name
+                sdk_root = str(new_root)
+                sdk = SdkInfo(sdk_root, active.tier)
+                log.warn(
+                    "workspace-relocated",
+                    f"moved the alp-sdk checkout from {_native(old_root)} to "
+                    f"{_native(sdk_root)} so the west workspace "
+                    f"(zephyr/modules/.west/venv) stays out of "
+                    f"{_native(Path(old_root).parent)}, and set it as your default SDK "
+                    f"(`tan sdk switch --global` to change) (tan-cli#185)",
+                )
+                # The project may live INSIDE the checkout, so rebase any
+                # reported path under the OLD root onto the new one -- nothing
+                # downstream may keep naming a location the checkout vacated.
+                root = _rebase(root, old_root, sdk_root)
+                board_path = _rebase(board_path, old_root, sdk_root)
+                reported_project = Project(root=root, board_yaml=board_path)
+                _write_global_sdk_pointer(sdk_root)
+
+    # Host gate: refuse ONLY a project whose every in-play core is Yocto, on a
+    # non-Linux host. A mixed board still bootstraps -- nothing here is
+    # Yocto-specific (venv + west + Zephyr requirements) and its Zephyr cores
+    # need exactly this.
+    runtimes = read_board_runtimes(board_path, sdk_root)
+    gate = yocto_gate(runtimes, host)
+    if gate == GATE_REFUSE:
+        return (
+            _refusal(
+                ExitCode.VALIDATION_FAILURE, "yocto-host", [yocto_only_refusal()], payload()
+            ),
+            reported_project,
+            sdk,
+        )
+    if gate == GATE_WARN:
+        # Same spelling at severity `warning`, deliberately (I-73): promoting it
+        # would refuse a board that can bootstrap its Zephyr cores.
+        log.warn("yocto-host", yocto_mixed_warning())
+
+    floor = resolve_python_floor(facts)
+    skew = python_floor_skew_warning(floor.manifest, floor.effective, floor.source)
+    if skew is not None:
+        log.warn(*skew)
+
+    host_python, refusal = check_prerequisites(facts, host, floor)
+    if refusal is not None:
+        # The ONLY path that fills `missingPrerequisites`.
+        return (
+            Outcome(
+                ExitCode.RUNTIME_FAILURE,
+                payload(missing=reported_missing(refusal.missing)),
+                [
+                    *log.take_issues(),
+                    Issue(f"bootstrap.{refusal.code}", "error", " ".join(refusal.lines)),
+                ],
+                list(refusal.lines),
+            ),
+            reported_project,
+            sdk,
+        )
+    if host_python is None:
+        # Unreachable: `check_prerequisites` sets exactly one of the two. Stated
+        # as a refusal rather than an `assert` (stripped under `-O`) or a bare
+        # fall-through, because the alternative is spawning `None -m venv`.
+        return (
+            _refusal(
+                ExitCode.INTERNAL_FAILURE,
+                "internal-failure",
+                ["the prerequisite gate returned neither an interpreter nor a refusal"],
+                payload(),
+            ),
+            reported_project,
+            sdk,
+        )
+
+    log.line(f"Repo root:       {_native(paths.repo_root)}")
+    if is_windows:
+        log.line(
+            f"Workspace dir:   {_native(paths.workspace_dir)}  (west topdir; alp-sdk is "
+            f"the manifest)"
+        )
+        log.line(f"Python:          {host_python.version[0]}.{host_python.version[1]}")
+    else:
+        log.line(f"Workspace dir:   {_native(paths.workspace_dir)}")
+        log.line(f"Detected OS:     {os_label(host)}")
+    if not facts.from_manifest:
+        # A `line`, not a `warn`: on a released SDK this is the correct,
+        # expected path, not a defect. But a customer on the default text UI
+        # otherwise had no way to tell a run against a legacy SDK -- every pin,
+        # tool list and env line from tan's hand-ported constants -- from one
+        # driven by the SDK's own declared facts.
+        log.line(
+            f"Facts:           tan's built-in fallbacks ({BOOTSTRAP_MANIFEST_REL_PATH} "
+            f"absent -- this SDK predates alp-sdk#917)"
+        )
+    if dry_run:
+        log.line("Dry run (--dry-run): planning only, nothing will be installed or written")
+
+    plan = _select_workspace(log, is_windows, pin, facts, paths)
+    ws = Workspace(is_windows, facts, paths.repo_root, paths.workspace_dir, paths.venv_dir)
+    runner = Runner(json_mode, plan.clear_zephyr_base, dry_run)
+
+    def planned_payload(**extra: object) -> dict[str, object]:
+        return payload(planned=runner.planned if dry_run else None, **extra)
+
+    # The venv backs BOTH later phases, so it is created when either will run.
+    venv: VenvBin | None = None
+    if not (no_west and no_pip):
+        venv, error = ensure_venv(ws, log, runner, host_python)
+        if error is not None:
+            return (
+                _fatal(error, planned_payload(), log.take_issues()),
+                reported_project,
+                sdk,
+            )
+
+    if no_west:
+        log.line("Skipping west setup (--no-west)")
+    elif venv is not None:
+        # Reconcile a stale `.west/config` manifest.path BEFORE west
+        # init/update: the "already initialised" branch runs `west update`
+        # without re-running `west init -l`, so a config left over from a
+        # different SDK checkout under the same topdir would silently pull the
+        # WRONG SDK's west.yml. Gated on ADOPTION, not on reuse: an adopted
+        # `$ZEPHYR_BASE` topdir is not the one this derives, and needs no
+        # reconciling anyway since `manifest_is_sdk` already proved its pointer
+        # resolves here.
+        outcome, old_rel, detail = (
+            ("not-applicable", None, None)
+            if plan.adopted or dry_run
+            else reconcile_west_manifest_path(sdk_root)
+        )
+        if outcome == "rewrote":
+            log.warn(
+                "west-config-reconciled",
+                f"reconciled {paths.workspace_dir / '.west' / 'config'} manifest.path "
+                f"{old_rel} -> {detail} (it named a different SDK checkout under this "
+                f"topdir, #31)",
+            )
+        elif outcome == "failed":
+            # Silent here would be the worst of the three: `west update` is
+            # about to run against whatever that unrewritten pointer names --
+            # i.e. the WRONG SDK's west.yml, the exact failure this call exists
+            # to prevent.
+            log.warn(
+                "west-config-reconcile-failed",
+                f"could not reconcile {paths.workspace_dir / '.west' / 'config'} "
+                f"manifest.path (currently {old_rel}): {detail}; `west update` will "
+                f"resolve the manifest from whatever that pointer still names",
+            )
+        error = west_phase(ws, venv, log, runner, plan.reuse)
+        if error is not None:
+            return (
+                _fatal(error, planned_payload(), log.take_issues()),
+                reported_project,
+                sdk,
+            )
+        # `west update` just materialised this topdir's trees from THIS SDK's
+        # manifest. NOT after a failed reconcile, which is the subtle one: the
+        # update resolved its manifest from the STALE pointer, so `west_phase`
+        # returned success over trees belonging to the OTHER SDK, and recording
+        # a sync would assert the very thing that did not happen.
+        if outcome != "failed" and not plan.reuse and not dry_run:
+            record_workspace_sdk(paths.workspace_dir, sdk_root)
+
+    if no_pip:
+        log.line("Skipping pip installs (--no-pip)")
+    elif venv is not None:
+        pip_phase(ws, venv, log, runner)
+
+    # NOTE: this does NOT install the Zephyr SDK (the cross toolchains). Real
+    # silicon targets need it -- run `west sdk install` from the workspace once.
+    venv_bin_dir = venv.bin_dir if venv else facts.venv_bin_dir(is_windows)
+    text = optional_libs_block(facts, host)
+    text.append("")
+    # Deliberately NOT the oracles' "Bootstrap complete." -- `doctor`'s
+    # bootstrap-fix check folds this exact line into its detail, and tan's own
+    # house prefix is what reads correctly there. The only reworded line.
+    text.append("bootstrap: complete.")
+    text.extend(
+        next_steps_block(
+            facts, paths.tokens(), _native(paths.venv_dir), venv_bin_dir, is_windows
+        )
+    )
+    return (
+        Outcome(ExitCode.SUCCESS, planned_payload(), log.take_issues(), text),
+        reported_project,
+        sdk,
+    )
+
+
+def _rebase(value: str | None, old_root: str, new_root: str) -> str | None:
+    """Repoint a reported path that fell under `old_root` at `new_root`. A path
+    nowhere near the checkout is returned unchanged, never force-rebased."""
+    if value is None:
+        return None
+    old = old_root.replace("\\", "/")
+    new = new_root.replace("\\", "/")
+    normalised = value.replace("\\", "/")
+    if normalised == old:
+        return new
+    if normalised.startswith(old + "/"):
+        return new + normalised[len(old) :]
+    return value
+
+
+def _write_global_sdk_pointer(sdk_root: str) -> None:
+    """Repoint `~/.alp/sdk-default` at the checkout's new location after a
+    relocation.
+
+    Without it the Quickstart's very next documented step -- `tan init` from the
+    same shell, or a fresh one tomorrow -- has no sibling `../alp-sdk` left to
+    auto-discover and `tan build` fails with "alp-sdk root is unresolved". A
+    printed "next command" would not survive past the terminal it was printed
+    into; a written pointer does. Best-effort: every resolver already tolerates
+    a stale or missing pointer by falling through to the next tier.
+    """
+    try:
+        pointer = _home_alp_dir() / "sdk-default"
+        pointer.parent.mkdir(parents=True, exist_ok=True)
+        pointer.write_text(sdk_pointer_json(sdk_root), encoding="utf-8")
+    except Exception:  # noqa: BLE001 -- best-effort by contract
+        pass
+
+
+def bootstrap(
+    project: str = typer.Option(
+        None, "--project", metavar="PATH", help="Project root (defaults to '.')."
+    ),
+    board_yaml: str = typer.Option(
+        None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
+    ),
+    sdk_root: str = typer.Option(
+        None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
+    ),
+    no_pip: bool = typer.Option(False, "--no-pip", help="Skip the pip dependency installs."),
+    no_west: bool = typer.Option(False, "--no-west", help="Skip the west init/update step."),
+    print_env: bool = typer.Option(
+        False, "--print-env", help="Print the environment-variable lines and exit."
+    ),
+    workspace: str = typer.Option(
+        None,
+        "--workspace",
+        metavar="PATH",
+        help=(
+            "Build the west workspace under this directory instead of the checkout's "
+            "parent, moving the checkout there first if it is not already."
+        ),
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help=(
+            "Resolve everything and report the commands each step would run, without "
+            "installing, cloning or writing anything."
+        ),
+    ),
+    output_format: str = typer.Option(
+        "text", "--format", metavar="FORMAT", help="Output format: text or json."
+    ),
+) -> None:
+    """Set up the SDK's build environment: workspace venv, west, Python deps."""
+    if output_format not in ("text", "json"):
+        raise typer.BadParameter(
+            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
+        )
+    json_mode = output_format == "json"
+
+    reported = Project(root=None, board_yaml=None)
+    sdk: SdkInfo | None = None
+    try:
+        outcome, reported, sdk = _run(
+            project=project,
+            board_yaml=board_yaml,
+            sdk_root_flag=sdk_root,
+            no_pip=no_pip,
+            no_west=no_west,
+            print_env=print_env,
+            workspace=workspace,
+            dry_run=dry_run,
+            json_mode=json_mode,
+        )
+    except Exception as err:  # noqa: BLE001
+        # The port's most-repeated defect class: an uncaught exception escapes as
+        # a raw traceback, stdout stays EMPTY, and the extension renders nothing
+        # with no error on either side. Every probe and every read above is
+        # already guarded, so anything arriving here is a tan bug -- reported as
+        # one, with an envelope. Nothing in this handler may itself throw: it
+        # renders no timestamp and calls no helper that reads the filesystem.
+        outcome = Outcome(
+            ExitCode.INTERNAL_FAILURE,
+            None,
+            [
+                Issue(
+                    "bootstrap.internal-failure",
+                    "error",
+                    f"bootstrap failed unexpectedly: {type(err).__name__}: {err}",
+                )
+            ],
+            [f"bootstrap failed unexpectedly: {type(err).__name__}: {err}"],
+        )
+
+    if json_mode:
+        emit(
+            Envelope(
+                "bootstrap", reported, outcome.data, outcome.issues, outcome.exit_code, sdk=sdk
+            )
+        )
+    else:
+        for line in outcome.text:
+            _eprint(line)
+    raise typer.Exit(int(outcome.exit_code))
