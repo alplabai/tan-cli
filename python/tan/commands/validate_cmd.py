@@ -222,11 +222,24 @@ def validate(
     board_yaml: str = typer.Option(
         None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
     ),
+    sdk_root: str = typer.Option(  # accepted, not read; see below
+        None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
+    ),
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
 ) -> None:
-    """Validate a board.yaml."""
+    """Validate a board.yaml.
+
+    `--sdk-root` is declared, not consumed: clap makes it `global = true` in
+    Rust (`crates/tan-cli/src/cli.rs`), so `tan --sdk-root X validate` must not
+    be a parse error even though `validate`'s own checks never touch it
+    (verified against the oracle: an arbitrary `--sdk-root` value changes
+    nothing in the envelope). Without a same-named local option here,
+    `cli._reorder_global_flags` relocates the flag to right after `validate`
+    and Click rejects it there as unrecognised -- the pre-subcommand position
+    the extension actually uses (`alpCli/vscodeAdapter.ts`'s `withSdkRoot`).
+    """
     if output_format not in ("text", "json"):
         raise typer.BadParameter(
             f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"

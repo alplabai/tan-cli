@@ -8,9 +8,12 @@ shim. Commands register here with a STATIC import in a later task -- see
 which is why this module, not a package `__init__`, is where `app` lives:
 one obvious place to add each `app.command()` / `app.add_typer()` call.
 """
+import io
 import sys
 
 import typer
+from click.testing import CliRunner
+from typer.main import get_command
 
 from tan.commands.bootstrap_cmd import bootstrap
 from tan.commands.build_cmd import build
@@ -54,6 +57,172 @@ app.command("presets")(presets)
 app.command("sdk")(sdk)
 app.command("size")(size)
 app.command("validate")(validate)
+
+#: Every registered subcommand name -- must track the `app.command(...)` calls
+#: above. Used only to find the argv BOUNDARY `_reorder_global_flags` moves a
+#: leading global flag across; it is never itself treated as a flag.
+_SUBCOMMAND_NAMES = frozenset(
+    {
+        "bootstrap", "build", "clean", "debug-config", "doctor", "examples",
+        "explain", "flash", "generate", "image", "init", "presets", "sdk",
+        "size", "validate",
+    }
+)
+
+#: clap's `GlobalArgs` (`crates/tan-cli/src/cli.rs` lines 24-73) minus
+#: `--format`: every field there is `#[arg(long, global = true, ...)]`, so
+#: clap accepts it on EITHER side of the subcommand name. `--format` is
+#: deliberately excluded -- it already has its own root-level, per-command
+#: allowlisted mechanism below (`_HONOURS_ROOT_FORMAT`), rolled out command by
+#: command on purpose (see `root`'s refusal branch and
+#: `test_debug_config_command.py`'s `--format json validate` case, which
+#: pins `validate` to STILL be refused pre-subcommand until it is taught to
+#: read `ctx.obj` itself); folding `--format` into the blanket reorder below
+#: would silently skip that refusal for every not-yet-migrated command.
+#: `--version` is not here either -- it lives on `Cli` directly in clap, not
+#: `GlobalArgs`, and is root-only on both sides already.
+#: Value: the flag's arity (1 = takes a value, 0 = boolean).
+_GLOBAL_FLAG_ARITY: dict[str, int] = {
+    "--project": 1,
+    "--board-yaml": 1,
+    "--sdk-root": 1,
+    "--target": 1,
+    "--all": 0,
+    "--verbose": 0,
+    "--quiet": 0,
+    "--no-color": 0,
+    "--non-interactive": 0,
+    "--ci": 0,
+}
+
+
+def _reorder_global_flags(argv: list[str]) -> list[str]:
+    """Move a leading GLOBAL flag (`_GLOBAL_FLAG_ARITY`) from before the
+    subcommand name to immediately after it, where a command that implements
+    it already has its own local option declared (see e.g. `clean_cmd.clean`'s
+    trailing `--quiet`/`--ci`/`--target`/... parameters) -- Click only reads
+    options declared on the GROUP callback (`root`, below) for anything
+    appearing before the subcommand name, and `root` does not declare these,
+    so today they are a hard parse error there.
+    Concretely: `alp-sdk-vscode/src/west.ts`'s `alpBuild` invokes `tan
+    --project <app> build`, and `alpCli/vscodeAdapter.ts`'s `withSdkRoot`
+    prepends `--sdk-root <path>` ahead of the subcommand for nearly every
+    command the extension runs (`runAlpCommand`/`runAlpInTerminal`).
+
+    A pure `list[str] -> list[str]` argv rewrite, run before Typer/Click ever
+    sees it, so no per-command code has to change to gain the pre-subcommand
+    position -- only the POSITION moves. A command that does not implement a
+    given flag at all keeps failing exactly as it does in the (already
+    correct, already tested) post-subcommand position -- e.g. `tan build
+    --sdk-root x --bogus` and `tan --sdk-root x build --bogus` both still
+    fail on `--bogus`; this never invents support a command never had, and
+    never swallows an unrecognised flag silently.
+
+    `--format` is left in place rather than moved: it is skipped over (kept
+    ahead of the subcommand, exactly where it was typed) so scanning can
+    continue past it, because `root` (below) already declares its own
+    `--format` and reads pre-subcommand values off `ctx.obj` -- a LEADING
+    `--format json --sdk-root X doctor` must not abort the whole rewrite and
+    strand `--sdk-root` in the unrecognised pre-subcommand position. This is
+    NOT full parity with the oracle: the oracle's clap `--format` is `global =
+    true` and actually runs doctor at rc=4 (`tan --format json --sdk-root X
+    doctor`); this port only lets the argv survive the reorder and reach
+    `root`, which then refuses any command outside `_HONOURS_ROOT_FORMAT`
+    (below) with rc=2 and a `cli.parse-error` envelope -- `doctor` is not yet
+    in that set, so `python -m tan --format json --sdk-root X doctor` is
+    still rc=2 today. The worked, pinned example is `debug-config`, which
+    IS in `_HONOURS_ROOT_FORMAT`: `tan --format json debug-config ...`
+    reaches the command and emits the JSON envelope, per
+    `test_debug_config_command.py`'s `--format json validate` case. Each
+    command joins `_HONOURS_ROOT_FORMAT` -- and only then gains this rc=4-style
+    parity -- when it learns to read `ctx.obj["format"]`.
+
+    Deliberately conservative otherwise: any OTHER token before the first
+    subcommand name that is not a recognised global flag (or that flag's
+    value) — `--help`, `--version`, or a bare positional — aborts the rewrite
+    and returns `argv` untouched, so every existing argv shape (a normal `tan
+    build ...` with zero leading tokens is a no-op by construction; `--version`,
+    a bad command, a bare invocation, all of which have no subcommand token to
+    move anything after) sees the exact argv it always has.
+    """
+    moved: list[str] = []
+    kept: list[str] = []  # `--format` tokens, left before the subcommand
+    i = 0
+    n = len(argv)
+    while i < n:
+        token = argv[i]
+        if token in _SUBCOMMAND_NAMES:
+            return [*kept, token, *moved, *argv[i + 1 :]]
+        name = token.split("=", 1)[0]
+        if name == "--format":
+            if "=" in token:
+                kept.append(token)
+                i += 1
+                continue
+            if i + 1 >= n:
+                return argv  # "--format" with no value: let Click report it natively
+            kept.extend((token, argv[i + 1]))
+            i += 2
+            continue
+        arity = _GLOBAL_FLAG_ARITY.get(name)
+        if arity is None:
+            return argv  # not a recognised global flag and not the subcommand
+        if "=" in token or arity == 0:
+            moved.append(token)
+            i += 1
+            continue
+        if i + 1 >= n:
+            return argv  # "--sdk-root" with no value: let Click report it natively
+        moved.extend((token, argv[i + 1]))
+        i += 2
+    return argv  # no subcommand token ever found
+
+
+def _wants_help(argv: list[str]) -> bool:
+    """Whether `--help` appears anywhere in argv. Textual, like `_wants_json`
+    below: Click's own `--help` is an eager option that can short-circuit
+    parsing before anything else runs, so this only needs to know the token
+    is present, not where."""
+    return "--help" in argv
+
+
+def _emit_help_envelope(argv: list[str]) -> int:
+    """Under `--format json`, `--help` must still land as ONE JSON envelope on
+    stdout -- mirroring Rust's `emit_parse_error` path for clap's DisplayHelp
+    error kind (`main.rs`, `json_mode_help_yields_zero_exit_and_no_issue`:
+    exit 0, `issues: []`, the rendered help as `data.message`). Click's own
+    `--help` handling prints straight to stdout and calls `ctx.exit(0)` before
+    a command (or even `root`) ever runs, bypassing `emit()` entirely, so it
+    has to be intercepted here instead -- `CliRunner` drives the exact same
+    Click command and captures what it would have printed as a string,
+    without ever touching the real stdout.
+
+    Not help-specific in what it reads back: `result.exit_code`/`result.output`
+    cover the rare case where argv makes Click reject the invocation before
+    ever reaching the eager `--help` callback, the same way Rust's generic
+    `err.exit_code()`/`err.render()` do for ANY clap parse outcome, help
+    included.
+
+    Returns the exit code the ENVELOPE just printed reports, so the caller can
+    `sys.exit` it: `tan --format json badcmd --help` renders help for an
+    unknown command, which Click (and the oracle) both exit 2 for, and a
+    process exit of 0 there would contradict the very envelope on stdout.
+    """
+    result = CliRunner().invoke(get_command(app), argv, prog_name="tan")
+    message = result.output.strip()
+    code = result.exit_code
+    issues = [] if code == 0 else [Issue("cli.parse-error", "error", message)]
+    emit(
+        Envelope(
+            "cli",
+            Project(root=None, board_yaml=None),
+            {"message": message},
+            issues,
+            code,
+        )
+    )
+    return code
+
 
 #: Commands that read the root `--format` off `ctx.obj`, so the flag may precede
 #: the subcommand name for them (clap's `global = true`). Grow this as each
@@ -150,23 +319,28 @@ def _wants_json(argv: list[str]) -> bool:
     return False
 
 
-def _usage_error_envelope(exit_code: int) -> str:
+def _usage_error_envelope(exit_code: int, captured_stderr: str = "") -> str:
     """The JSON envelope for a Click-level usage error under `--format json`.
 
-    Deliberately generic: this fires from a bare ``except SystemExit``, after
-    Click has already rendered and printed its own (specific) message to
-    stderr -- by that point the original exception object, and the message
-    text it carried, are gone. Rust's ``emit_parse_error`` (main.rs) can
-    afford the specific clap message because it intercepts the error object
-    itself, before clap prints anything; recovering that here would mean
-    depending on Typer's private, vendored click-alike exception hierarchy
-    (`typer._click.exceptions`, NOT the public `click` package's classes --
-    confirmed empirically against typer==0.27.0/click==8.4.1: TyperGroup and
-    everything it raises descends from `typer._click.core`/`exceptions`, not
-    `click`'s own) purely to recover a string this contract's tests never
-    inspect. Catching the process exit instead is the version-stable seam.
+    `captured_stderr` is Click's own rendered message (usage line + the
+    specific complaint, e.g. "Error: No such option: --bogus") -- tee'd off
+    the real stderr stream by the caller as it printed, not recovered from the
+    exception object. Without it this function had exactly one message for
+    EVERY usage error ("invalid command line invocation"), so the actual
+    reason a caller's argv was rejected existed nowhere: not on stdout (this
+    generic string), and not on stderr either (the pre-fix caller discarded
+    the capture whenever no command-level envelope had been emitted, which is
+    precisely the case here). Rust's ``emit_parse_error`` (main.rs) affords
+    the specific clap message because it intercepts the error object itself,
+    before clap prints anything; recovering the equivalent object here would
+    mean depending on Typer's private, vendored click-alike exception
+    hierarchy (`typer._click.exceptions`, NOT the public `click` package's
+    classes -- confirmed empirically against typer==0.27.0/click==8.4.1:
+    TyperGroup and everything it raises descends from
+    `typer._click.core`/`exceptions`, not `click`'s own); tee-ing the text
+    Click already rendered is the version-stable seam instead.
     """
-    message = "invalid command line invocation"
+    message = captured_stderr.strip() or "invalid command line invocation"
     env = Envelope(
         "cli",
         Project(root=None, board_yaml=None),
@@ -175,6 +349,37 @@ def _usage_error_envelope(exit_code: int) -> str:
         exit_code,
     )
     return env.to_json()
+
+
+class _TeeStderr:
+    """Writes through to the REAL stderr immediately, while also keeping a
+    copy -- needed only to fold a Click-level usage error's message into the
+    JSON envelope (`_usage_error_envelope`, above).
+
+    Pre-fix, `--format json` wrapped the whole run in
+    `contextlib.redirect_stderr(io.StringIO())`: nothing reached the real
+    stderr until the process was about to exit, so a long-running `tan build
+    --format json` against a real Zephyr tree printed NOTHING for the whole
+    build, then dumped it all at once -- a customer watching the console sees
+    a hang, not a build. Every write goes to `_real` first, synchronously, so
+    a slice's output (`build_cmd._stream`) streams exactly as it does in text
+    mode; the buffered copy exists purely so the `SystemExit` handler below can
+    read back what Click already printed.
+    """
+
+    def __init__(self, real: object) -> None:
+        self._real = real
+        self._buffer = io.StringIO()
+
+    def write(self, s: str) -> int:
+        self._buffer.write(s)
+        return self._real.write(s)
+
+    def flush(self) -> None:
+        self._real.flush()
+
+    def getvalue(self) -> str:
+        return self._buffer.getvalue()
 
 
 def main() -> None:
@@ -198,21 +403,56 @@ def main() -> None:
     missing stdout envelope when the exit signals failure under `--format
     json`.
     """
-    argv = sys.argv[1:]
+    argv = _reorder_global_flags(sys.argv[1:])
+    sys.argv = [sys.argv[0], *argv]
     json_mode = _wants_json(argv)
-    try:
+
+    if json_mode and _wants_help(argv):
+        # `--help` short-circuits Click before `root`/any command ever runs
+        # (see `_emit_help_envelope`), so it needs its own path entirely --
+        # by the time a `SystemExit` from it would reach the block below,
+        # Click has already printed the human help text straight to stdout.
+        # `sys.exit`, not a bare `return`: the process exit code must agree
+        # with the `exitCode` of the envelope just printed (Rust's own
+        # `json_exit_code` doc comment states the same invariant) --
+        # `tan --format json badcmd --help` renders help for an unknown
+        # command at exit 2, and a bare `return` here left the process exiting
+        # 0 regardless.
+        sys.exit(_emit_help_envelope(argv))
+
+    if not json_mode:
         app()
-    except SystemExit as exc:
-        code = exc.code
-        if code is None:
-            code = int(ExitCode.SUCCESS)
-        elif not isinstance(code, int):
-            code = int(ExitCode.RUNTIME_FAILURE)
-        # `not envelope_emitted()`: this fallback exists for the Click-level
-        # usage error, which exits before any command runs and so leaves
-        # stdout empty. A command that already wrote its own envelope and then
-        # exited non-zero (every failed `tan build`) must not get a second one
-        # appended -- two JSON documents on stdout is the same break as none.
-        if json_mode and code != 0 and not envelope_emitted():
-            print(_usage_error_envelope(code))
-        raise
+        return
+
+    # `--format json`, past `--help`: TEE stderr for the duration of the run
+    # (`_TeeStderr`) rather than capturing it -- every write still reaches the
+    # real stderr AS IT HAPPENS, so a slice's live output (build's `_stream`)
+    # streams exactly as it does in text mode; a long `tan build --format
+    # json` against a real Zephyr tree no longer goes silent for the whole
+    # build and dumps at the end. The kept copy exists only to fold Click's
+    # own pre-dispatch usage-error text (bare invocation, an unknown command,
+    # a bad flag -- printed straight to stderr before any command runs,
+    # mirroring clap's `err.exit()`) into the envelope below via
+    # `_usage_error_envelope`, so the specific reason a caller's argv was
+    # rejected is not silently different between the two channels.
+    # `not envelope_emitted()` -- the same flag `emit()` sets -- still gates
+    # the envelope fallback itself: a command that already wrote its own and
+    # then exited non-zero (every failed `tan build`) must not get a second
+    # one appended, two JSON documents on stdout is the same break as none.
+    real_stderr = sys.stderr
+    captured_stderr = _TeeStderr(real_stderr)
+    sys.stderr = captured_stderr
+    try:
+        try:
+            app()
+        except SystemExit as exc:
+            code = exc.code
+            if code is None:
+                code = int(ExitCode.SUCCESS)
+            elif not isinstance(code, int):
+                code = int(ExitCode.RUNTIME_FAILURE)
+            if code != 0 and not envelope_emitted():
+                print(_usage_error_envelope(code, captured_stderr.getvalue()))
+            raise
+    finally:
+        sys.stderr = real_stderr

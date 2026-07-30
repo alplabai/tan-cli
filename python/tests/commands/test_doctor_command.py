@@ -413,3 +413,53 @@ def test_text_mode_writes_nothing_to_stdout(tmp_path):
 def test_an_invalid_format_is_rejected(tmp_path):
     proc = run_tan("doctor", "--format", "yaml", cwd=tmp_path)
     assert proc.returncode == 2
+
+
+# --------------------------------------------------------------------------
+# `project` envelope field -- posix separators, anchored on `--project`
+# --------------------------------------------------------------------------
+
+
+def test_project_envelope_uses_posix_separators_not_native(tmp_path):
+    """`root`/`boardYaml` must be forward-slash on every platform, matching the
+    oracle -- verified: `tan --project app doctor --format json` from a scratch
+    tree reports `"root":"C:/Users/.../app"`. `Project(root=str(workspace_root),
+    board_yaml=board_yaml)` used to emit the native `C:\\Users\\...\\app`
+    (`os.path.join`/`Path` on Windows) instead."""
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "board.yaml").write_text("", encoding="utf-8")
+    proc = run_tan(
+        "--project", "app", "doctor", "--format", "json", cwd=tmp_path, scrub_path=True
+    )
+    envelope = json.loads(proc.stdout)
+    assert envelope["project"] == {
+        "root": app.as_posix(),
+        "boardYaml": (app / "board.yaml").as_posix(),
+    }
+
+
+def test_explicit_relative_board_yaml_is_anchored_on_project_not_cwd(tmp_path):
+    """`--project app doctor --board-yaml board.yaml` must resolve onto
+    `<tmp_path>/app/board.yaml`, not the real cwd -- verified against the
+    oracle. Before the fix, `--board-yaml` was anchored only inside the
+    discovery branch (`if board_yaml is None and ...`); an EXPLICIT relative
+    `--board-yaml` skipped that branch entirely and was reported verbatim
+    (`'board.yaml'`, resolving against the real cwd downstream) -- the Critical
+    wrong-project defect class `build_cmd.build` already guards against,
+    surviving here."""
+    app = tmp_path / "app"
+    app.mkdir()
+    (app / "board.yaml").write_text("app board\n", encoding="utf-8")
+    # A DIFFERENT board.yaml sitting in the real cwd -- the one that would
+    # (wrongly) win if the anchor is missing.
+    (tmp_path / "board.yaml").write_text("cwd board\n", encoding="utf-8")
+    proc = run_tan(
+        "--project", "app", "doctor", "--board-yaml", "board.yaml", "--format", "json",
+        cwd=tmp_path, scrub_path=True,
+    )
+    envelope = json.loads(proc.stdout)
+    assert envelope["project"] == {
+        "root": app.as_posix(),
+        "boardYaml": (app / "board.yaml").as_posix(),
+    }

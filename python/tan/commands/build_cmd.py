@@ -498,6 +498,9 @@ def build(
     board_yaml: str = typer.Option(
         None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
     ),
+    project: str = typer.Option(
+        None, "--project", metavar="PATH", help="Project root (defaults to '.')."
+    ),
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
@@ -508,6 +511,37 @@ def build(
             f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
         )
     json_mode = output_format == "json"
+
+    # `util::cli_workspace_root`: `--project` joined to the (real) cwd, THEN
+    # everything below anchors on this instead of the bare cwd -- board.yaml
+    # discovery, the default build root, and SDK discovery. Was previously
+    # missing entirely (this command had no `--project` at all): the extension
+    # falls back to it when no project is active in the workspace
+    # (`alp-sdk-vscode/src/west.ts`'s `alpBuild`, `--project <example> build`).
+    # A Typer option Typer does not declare is a Click parse error (exit 2),
+    # so the missing flag REFUSED outright rather than building silently; the
+    # actual wrong-project risk is the relative `--board-yaml` anchor fixed
+    # below. `project is None` (the overwhelming common case, no flag given)
+    # makes `workspace_root == cwd`, byte-for-byte the prior behaviour -- this
+    # only changes anything when `--project` is actually given.
+    cwd = Path.cwd()
+    workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
+
+    # Anchor an EXPLICIT `--board-yaml` on `workspace_root`, not the real cwd,
+    # before anything derives from it (the default build root below included).
+    # `_abs_posix` is purely lexical (`os.path.abspath`, which anchors on
+    # `os.getcwd()`), so a relative `--board-yaml` left untouched re-anchors on
+    # the real cwd instead -- matching Rust's `resolve_board_yaml_path`
+    # (`crates/tan-core/src/project.rs:198-208`, which joins a relative
+    # configured path onto `workspace_root`). Verified against the oracle in a
+    # scratch tree (`tmp/app/board.yaml`, cwd=`tmp`): `tan --project app build
+    # --board-yaml board.yaml --format json` must report `project.root` /
+    # `project.boardYaml` under `tmp/app`, not `tmp` -- with a board.yaml also
+    # sitting in the real cwd, the pre-fix anchor planned and built the WRONG
+    # project without a word, exactly the failure class this port exists to
+    # remove.
+    if board_yaml is not None and not os.path.isabs(board_yaml):
+        board_yaml = os.path.join(str(workspace_root), board_yaml)
 
     # Resolution, in one place, before anything can fail -- and to ABSOLUTE,
     # BOTH sides, from the same anchor.
@@ -529,17 +563,22 @@ def build(
     # `board_yaml_path` by joining onto THAT, so both are absolute before the
     # guard ever runs (`crates/tan-cli/src/util.rs`, `crates/tan-core/src/
     # project.rs::resolve_board_yaml_path`).
-    if board_yaml is None and (Path.cwd() / "board.yaml").is_file():
-        board_yaml = "board.yaml"
+    if board_yaml is None and (workspace_root / "board.yaml").is_file():
+        # Already absolute (anchored on `workspace_root`, not a bare
+        # relative "board.yaml") so `_abs_posix` below is a no-op
+        # normalisation rather than a re-anchor onto the real cwd -- the
+        # divergence that would reappear the moment `--project` differs
+        # from cwd.
+        board_yaml = str(workspace_root / "board.yaml")
     if build_root is None:
-        build_root = str(Path(board_yaml).parent) if board_yaml else "."
+        build_root = str(Path(board_yaml).parent) if board_yaml else str(workspace_root)
     build_root = _abs_posix(build_root)
     if board_yaml is not None:
         board_yaml = _abs_posix(board_yaml)
 
     explicit_sdk = sdk_root is not None
     if sdk_root is None:
-        found = discover_sdk_root(Path.cwd())
+        found = discover_sdk_root(workspace_root)
         sdk_root = str(found) if found else None
     sdk = (
         SdkInfo(sdk_root, "sdkRootFlag" if explicit_sdk else "discovery")

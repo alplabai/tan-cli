@@ -64,7 +64,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import discover_sdk_root
+from tan.commands.build_cmd import _abs_posix, discover_sdk_root
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -791,6 +791,9 @@ def _generated_at() -> str:
 
 
 def doctor(
+    project: str = typer.Option(
+        None, "--project", metavar="PATH", help="Project root (defaults to '.')."
+    ),
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
@@ -808,18 +811,39 @@ def doctor(
         )
     json_mode = output_format == "json"
 
-    if board_yaml is None and (Path.cwd() / "board.yaml").is_file():
-        board_yaml = "./board.yaml"
+    # `util::cli_workspace_root`: `--project` joined onto the cwd, and
+    # everything below (board.yaml discovery, SDK discovery, the reported
+    # `project.root`) anchors on THAT -- see `build_cmd.build` for the same
+    # pattern and why an unanchored `--project` builds the wrong project.
+    cwd = Path.cwd()
+    workspace_root = cwd if project is None else Path(os.path.join(str(cwd), project))
+
+    # Anchor an EXPLICIT `--board-yaml` on `workspace_root`, not the real cwd,
+    # BEFORE the discovery branch below -- same pattern as `build_cmd.build`
+    # and `crates/tan-core/src/project.rs:198-208`'s `resolve_board_yaml_path`.
+    # Left unanchored, a relative `--board-yaml` under `--project app` reports
+    # (and would build/flash) the board.yaml sitting in the real cwd instead
+    # of the one inside `app`.
+    if board_yaml is not None and not os.path.isabs(board_yaml):
+        board_yaml = os.path.join(str(workspace_root), board_yaml)
+    if board_yaml is None and (workspace_root / "board.yaml").is_file():
+        board_yaml = str(workspace_root / "board.yaml")
     explicit_sdk = sdk_root is not None
     if sdk_root is None:
-        found = discover_sdk_root(Path.cwd())
+        found = discover_sdk_root(workspace_root)
         sdk_root = str(found) if found else None
     sdk = (
         SdkInfo(sdk_root, "sdkRootFlag" if explicit_sdk else "discovery")
         if sdk_root is not None
         else None
     )
-    project = Project(root=str(Path.cwd()), board_yaml=board_yaml)
+    # Forward slashes -- the established envelope contract on this seam
+    # (`build_cmd.build`, `flash_cmd._resolve_project`), not the native
+    # separators `str(Path(...))` would emit on Windows.
+    project = Project(
+        root=_abs_posix(str(workspace_root)),
+        board_yaml=_abs_posix(board_yaml) if board_yaml is not None else None,
+    )
 
     try:
         checks = _collect(sdk_root)

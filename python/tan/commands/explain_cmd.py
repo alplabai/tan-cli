@@ -568,11 +568,26 @@ def explain(
         metavar="EMIT",
         help="Generation output target to explain (e.g. zephyr-conf, zephyr-board).",
     ),
+    project: str = typer.Option(  # accepted, not read; see below
+        None, "--project", metavar="PATH", help="Project root (defaults to '.')."
+    ),
+    sdk_root: str = typer.Option(  # accepted, not read; see below
+        None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
+    ),
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
 ) -> None:
-    """Explain a project/module template or a generation target."""
+    """Explain a project/module template or a generation target.
+
+    `--project`/`--sdk-root` are declared, not consumed: `explain` is
+    project-agnostic (it reads no board.yaml and no checkout, and the oracle's
+    `project` stays `null`/`null` regardless of either flag's value), but
+    clap makes both `global = true` in Rust, so `tan --sdk-root X explain` /
+    `tan --project X explain` must not be parse errors -- verified against the
+    oracle. `alp-sdk-vscode/src/ideHub/newProjectFlowPanel.ts:188` invokes
+    exactly the `--sdk-root` shape.
+    """
     if output_format not in ("text", "json"):
         raise typer.BadParameter(
             f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"

@@ -141,8 +141,9 @@ def _abs_join(*parts: str) -> str:
     return os.path.join(*parts)
 
 
-def workspace_root() -> str:
-    """`util.rs::cli_workspace_root` -- the CWD.
+def workspace_root(project: str | None = None) -> str:
+    """`util.rs::cli_workspace_root` -- the CWD, joined with the GLOBAL
+    `--project` flag.
 
     **Not `app_path`.** Rust anchors both `project.*` and SDK discovery on
     `cli_workspace_root(g)`, which is the cwd joined with the GLOBAL `--project`
@@ -153,7 +154,9 @@ def workspace_root() -> str:
     hunts for the SDK a level too deep -- verified on both, and invisible to any
     test that only ever passes `.`.
 
-    This port has no global `--project`, so the cwd is the whole of it.
+    `project` is joined via `os.path.join`, mirroring `build_cmd.build`'s
+    `Path(os.path.join(str(cwd), project))` -- an absolute `--project` value
+    replaces the cwd outright, same as `os.path.join`'s own rule.
 
     **Cannot raise.** `os.getcwd()` throws `FileNotFoundError` when the working
     directory has been deleted underneath the process -- entirely reachable, since
@@ -166,9 +169,10 @@ def workspace_root() -> str:
     stdout.
     """
     try:
-        return os.getcwd()
+        cwd = os.getcwd()
     except OSError:
         return "."
+    return os.path.join(cwd, project) if project else cwd
 
 
 def _resolve_project(root: str, board_yaml: str | None) -> Project:
@@ -735,10 +739,10 @@ def _run(
     dry_run: bool,
     skip_missing_tools: bool,
     capture: bool,
+    cwd: str,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
-    cwd = workspace_root()
     app_dir = _abs_join(cwd, app_path)
     if build_root_arg is not None:
         build_root = (
@@ -884,6 +888,9 @@ def flash(
         help="Application source directory (default: the current directory). "
         "`build_root` defaults to <APP_PATH>/build.",
     ),
+    project: str = typer.Option(
+        None, "--project", metavar="PATH", help="Project root (defaults to '.')."
+    ),
     build_root: str = typer.Option(
         None,
         "--build-root",
@@ -942,12 +949,13 @@ def flash(
         )
     json_mode = resolved_format == "json"
 
-    # Resolved OUTSIDE the guard: `project` is reported on every path including
-    # the internal-failure one, and `_resolve_project` is pure string work that
-    # cannot raise. The port's most-repeated defect was a helper that throws
-    # being called from the exception guard's own recovery path -- so nothing
-    # below the guard may compute a field the guard itself needs.
-    project = _resolve_project(workspace_root(), board_yaml)
+    # Resolved OUTSIDE the guard: `project_obj` is reported on every path
+    # including the internal-failure one, and `_resolve_project` is pure string
+    # work that cannot raise. The port's most-repeated defect was a helper that
+    # throws being called from the exception guard's own recovery path -- so
+    # nothing below the guard may compute a field the guard itself needs.
+    cwd = workspace_root(project)
+    project_obj = _resolve_project(cwd, board_yaml)
 
     sdk: SdkInfo | None = None
     try:
@@ -961,6 +969,7 @@ def flash(
             dry_run=dry_run,
             skip_missing_tools=skip_missing_tools,
             capture=json_mode,
+            cwd=cwd,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an
@@ -972,7 +981,7 @@ def flash(
         text_lines = ["flash: internal failure"]
 
     if json_mode:
-        emit(Envelope("flash", project, data, issues, exit_code, sdk=sdk))
+        emit(Envelope("flash", project_obj, data, issues, exit_code, sdk=sdk))
     else:
         for line in text_lines:
             print(line, file=sys.stderr)

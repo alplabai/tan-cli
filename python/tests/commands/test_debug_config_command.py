@@ -421,6 +421,7 @@ def test_an_unexpected_exception_is_still_a_coded_envelope(monkeypatch, capsys):
             preview=False,
             project=None,
             board_yaml=None,
+            sdk_root=None,
             output_format="json",
             quiet=False,
         )

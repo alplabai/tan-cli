@@ -381,9 +381,9 @@ def test_internal_failure_is_an_envelope_not_a_traceback(tmp_path, monkeypatch, 
 
     with pytest.raises(typer.Exit) as raised:
         flash_cmd.flash(
-            _Ctx(), app_path=".", build_root=None, sdk_root=None, board_yaml=None,
-            core=None, helper=None, dry_run=False, skip_missing_tools=False,
-            output_format="json",
+            _Ctx(), app_path=".", project=None, build_root=None, sdk_root=None,
+            board_yaml=None, core=None, helper=None, dry_run=False,
+            skip_missing_tools=False, output_format="json",
         )
     assert raised.value.exit_code == 5
     payload = json.loads(capsys.readouterr().out)
@@ -479,9 +479,9 @@ def test_a_deleted_working_directory_still_produces_an_envelope(monkeypatch, cap
 
     with pytest.raises(typer.Exit) as raised:
         flash_cmd.flash(
-            _Ctx(), app_path=".", build_root=None, sdk_root=None, board_yaml=None,
-            core=None, helper=None, dry_run=True, skip_missing_tools=False,
-            output_format="json",
+            _Ctx(), app_path=".", project=None, build_root=None, sdk_root=None,
+            board_yaml=None, core=None, helper=None, dry_run=True,
+            skip_missing_tools=False, output_format="json",
         )
     payload = json.loads(capsys.readouterr().out)
     assert payload["command"] == "flash"

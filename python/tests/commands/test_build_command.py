@@ -510,6 +510,45 @@ def test_the_default_invocation_substitutes_an_absolute_project_root(project, tm
     assert env["project"]["root"] == root
 
 
+def test_relative_board_yaml_anchors_on_project_not_the_real_cwd(project):
+    """`--project app --board-yaml board.yaml` must resolve `board.yaml`
+    relative to `<cwd>/app` (the `--project`-joined workspace root), NEVER the
+    real cwd -- matching the Rust oracle's `resolve_board_yaml_path`
+    (`crates/tan-core/src/project.rs:198-208`, which joins a relative
+    configured path onto `workspace_root`).
+
+    A board.yaml sits in BOTH the real cwd and `app/` here, so a re-anchor
+    onto the real cwd (the pre-fix bug: `_abs_posix` is purely lexical
+    `os.path.abspath`, which anchors on `os.getcwd()`) would silently resolve
+    to the WRONG one without any error -- planning and building the wrong
+    project. Verified against the oracle in exactly this shape: `tan --project
+    app build --board-yaml board.yaml --format json` reports `project.root` /
+    `project.boardYaml` under `<cwd>/app`, not `<cwd>`.
+    """
+    app = project / "app"
+    app.mkdir()
+    (app / "board.yaml").write_text("som:\n  sku: E1M-TEST-APP\n", encoding="utf-8")
+    # The decoy: a DIFFERENT board.yaml in the real cwd, so a re-anchor onto it
+    # would silently succeed instead of loudly failing.
+    (project / "board.yaml").write_text("som:\n  sku: E1M-TEST-CWD-DECOY\n", encoding="utf-8")
+
+    proc = run_tan(
+        "--project", "app", "build", "--board-yaml", "board.yaml", "--format", "json",
+        cwd=project,
+    )
+    env = envelope_of(proc)
+    # No SDK is configured, so this refuses at the planning step -- but
+    # `project` is resolved and reported BEFORE that refusal (build_cmd.build),
+    # which is exactly the field this anchor bug corrupted.
+    assert env["issues"][0]["code"] == "build.plan-unavailable", env
+    # `os.path.abspath`, not `.resolve()`: matches `_abs_posix`, which is
+    # deliberately lexical (see its docstring) so a symlinked tmp dir cannot
+    # make this assertion diverge from what the command itself computes.
+    expected_root = os.path.abspath(str(app)).replace("\\", "/")
+    assert env["project"]["root"] == expected_root, env["project"]
+    assert env["project"]["boardYaml"] == f"{expected_root}/board.yaml", env["project"]
+
+
 def test_an_unwritable_build_root_is_a_write_failure(project):
     doc = two_slice_plan(ALL_ARTEFACTS)
     # A shared artefact whose parent directory is an existing FILE: mkdir of

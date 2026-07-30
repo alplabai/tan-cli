@@ -935,12 +935,23 @@ def debug_config(
     board_yaml: str = typer.Option(
         None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
     ),
+    sdk_root: str = typer.Option(  # accepted, not read; see below
+        None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
+    ),
     output_format: str = typer.Option(
         None, "--format", metavar="FORMAT", help="Output format: text or json."
     ),
     quiet: bool = typer.Option(False, "--quiet", help="Suppress non-essential output."),
 ) -> None:
-    """Generate (or preview) a VS Code launch.json debug configuration."""
+    """Generate (or preview) a VS Code launch.json debug configuration.
+
+    `--sdk-root` is declared, not consumed: `debug-config` reads only this
+    project's OWN build output (`build/system-manifest.yaml`), never the SDK
+    checkout, matching the module docstring above. clap makes `--sdk-root`
+    `global = true` in Rust regardless, so `tan --sdk-root X debug-config`
+    must not be a parse error -- verified against the oracle (an arbitrary
+    value changes nothing in the envelope).
+    """
     # `--format` is accepted BEFORE the subcommand too (`tan --format json
     # debug-config ...`, which is what the committed goldens invoke and what
     # clap's `global = true` gives the Rust); the root callback records it and
