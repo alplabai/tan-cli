@@ -71,6 +71,13 @@ CASES = [
     # per-case `home` are exactly what stop a stray checkout resolving here, and
     # `project.root` is the same absolute cwd for both sides.
     (["presets", "--format", "json"], ENVELOPE, None),
+    # `clean` in a scratch directory with no SDK anywhere: both sides refuse with
+    # `clean.sdk-root-not-found` at exit 1, report an empty `data.buildRoot`, and
+    # emit NO `sdk` key. Non-destructive on either side, which is what makes it
+    # safe here -- `clean`'s real cases delete, so running both implementations in
+    # one shared `work_dir` would leave the second nothing to do and "match"
+    # vacuously. Those live in `test_clean_parity.py`, on mirrored trees.
+    (["clean", "--format", "json"], ENVELOPE, None),
     (
         ["build", "--plan", "--format", "json"],
         PLAN,
