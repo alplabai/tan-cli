@@ -596,6 +596,286 @@ fn every_emitted_issue_code_is_registered() {
     );
 }
 
+/// The PREFIXING sites: a helper that builds an issue code by prepending a
+/// family, so the whole code never appears as a literal anywhere and
+/// [`emitted_code_literals`] cannot see it (tan-cli#224).
+///
+/// `(file, prefix, helper call openers)`. A DECLARED list, not a heuristic: a
+/// scan that guessed which functions prefix would either miss a new one
+/// silently or invent codes from unrelated calls. Adding a third helper means
+/// adding a row here, and [`every_prefixed_issue_code_is_registered`]'s
+/// non-vacuity check fails if a declared row stops matching anything.
+/// The trailing `usize` is the EXACT number of call sites expected in that file,
+/// and it is pinned rather than floored on purpose.
+///
+/// A `hits > 0` floor would let a site DISAPPEAR unnoticed: rename one of
+/// `mod.rs`'s fifteen calls and fourteen still satisfy it, so the gate keeps
+/// passing while covering one fewer emit. That is the same silent-coverage shape
+/// as a lockfile leaving files unpinned — the count is the only thing that
+/// notices a site leaving.
+///
+/// It also backstops the fixed 10-line suffix window. A helper added later with
+/// nine arguments before its code falls outside that window; usually it then
+/// reads a message instead of a suffix and fails as unresolvable, but if it
+/// happens to find another code-shaped literal it would resolve to the WRONG
+/// code silently. Pinning the counts means the site is at least known to exist.
+///
+/// Changing a number here is a deliberate act: a call added or removed is a real
+/// change to what tan emits, so it should cost one line of declaration.
+const PREFIXING_SITES: [(&str, &str, &[&str], usize); 3] = [
+    (
+        "crates/tan-cli/src/commands/bootstrap/mod.rs",
+        "bootstrap.",
+        &["failure(", "log.warn("],
+        15,
+    ),
+    (
+        "crates/tan-cli/src/commands/bootstrap/steps.rs",
+        "bootstrap.",
+        &["log.warn("],
+        9,
+    ),
+    (
+        "crates/tan-cli/src/commands/debug_config.rs",
+        "debug-config.",
+        &["failure_envelope("],
+        2,
+    ),
+];
+
+/// The exact number of distinct codes the reconstruction must yield. Pinned for
+/// the same reason as the per-file counts: a floor cannot see a code stop being
+/// reachable.
+const PREFIXED_CODE_COUNT: usize = 17;
+
+/// Call sites that FORWARD an issue code rather than naming one, declared so
+/// they are skipped knowingly rather than silently (tan-cli#224).
+///
+/// `(file, the expression passed in the code position)`. Each forwards a code
+/// whose literal lives at its ORIGIN, which is where registration belongs:
+///
+/// * `code` — `select_workspace`'s refusal path re-emits the code carried by a
+///   `relocate::Resolution` variant (`workspace-guard`, `workspace-invalid`),
+///   whose literals are at the `Resolution` construction sites.
+/// * `f.code` — `check_prerequisites`' `PrereqFailure.code`, whose literal is in
+///   `tan_core::bootstrap::prerequisites` (`prerequisites-missing`,
+///   `python-not-runnable`, `python-too-old`).
+///
+/// A forwarder is not an exemption from registration: every code above IS in the
+/// registry, put there by #111/#209 with `emittedBy` pointing at its origin, and
+/// `frozen_issue_codes` walks each back to that origin. This list only says
+/// "there is no literal HERE to read", which is a fact about the call, not a
+/// licence to skip the code.
+const DECLARED_FORWARDERS: [(&str, &str); 3] = [
+    ("crates/tan-cli/src/commands/bootstrap/mod.rs", " code,"),
+    ("crates/tan-cli/src/commands/bootstrap/mod.rs", " f.code,"),
+    // A test driving the same refusal path; `PrereqFailure.code` again.
+    (
+        "crates/tan-cli/src/commands/bootstrap/mod.rs",
+        " refusal.code,",
+    ),
+];
+
+/// tan-cli#224: the codes [`emitted_code_literals`] structurally cannot find.
+///
+/// `every_emitted_issue_code_is_registered` scans for the whole literal
+/// `code: "family.name"`. A code assembled as `format!("bootstrap.{code}")` from
+/// a bare suffix (`"yocto-host"`, `"pip-upgrade"`) has no such literal, so it was
+/// invisible to that gate — covered only by `frozen_issue_codes` walking the
+/// registry back to source, which by construction cannot notice a code that was
+/// never registered in the first place. Both directions were blind to a NEW
+/// prefixed code at once, which is exactly the hole #219 closed for plain ones.
+///
+/// This reconstructs `prefix + suffix` and asserts registration, so the two
+/// gates together now cover every code tan emits by either idiom.
+///
+/// An unresolvable site FAILS rather than being skipped. If the suffix is not a
+/// plain literal — a variable, a `match` arm, anything computed — the scan says
+/// so and asks for the code to be registered by hand, because the alternative is
+/// guessing a code name from the next string it happens to find.
+#[test]
+fn every_prefixed_issue_code_is_registered() {
+    let registry: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(contract_root().join("issue-codes.json"))
+            .expect("read contract/issue-codes.json"),
+    )
+    .expect("contract/issue-codes.json is not valid JSON");
+    let registered: BTreeSet<String> = registry["issueCodes"]
+        .as_array()
+        .expect("issueCodes must be an array")
+        .iter()
+        .filter_map(|e| e["code"].as_str().map(str::to_string))
+        .collect();
+
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    let mut unresolvable: Vec<String> = Vec::new();
+
+    for (rel, prefix, openers, expected_sites) in PREFIXING_SITES {
+        let source = std::fs::read_to_string(repo_root().join(rel))
+            .unwrap_or_else(|e| panic!("{rel}: {e} — PREFIXING_SITES names a file that is gone"));
+        // `(ORIGINAL 1-based line number, text)`, comments dropped but the
+        // numbering KEPT. Collapsing to a joined string first (as `code_lines`
+        // does) renumbers everything, and this gate's whole value is telling a
+        // reader WHICH call it could not read — a location off by the number of
+        // preceding comment lines sends them into an unrelated function. Same
+        // defect as #234's `assert!(bool)`, in a gate written to name failures.
+        let lines: Vec<(usize, &str)> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim_start().starts_with("//"))
+            .map(|(i, l)| (i + 1, l))
+            .collect();
+        let mut hits = 0usize;
+
+        for (idx, (lineno, line)) in lines.iter().enumerate() {
+            for opener in openers {
+                // A CALL, not a substring and not the definition.
+                //
+                // `describe_reconcile_failure(` contains `failure(`, and matching
+                // it produced a phantom site whose "unreadable suffix" pointed at
+                // an unrelated function — a false finding, which is worse than a
+                // missed one because it costs someone a search. So the opener must
+                // start at a word boundary.
+                //
+                // And `fn failure(` / `fn failure_envelope(` are the helpers
+                // THEMSELVES: their own `code: &str` parameter is not a call site,
+                // and the `format!("bootstrap.{code}")` inside is the prefixing
+                // machinery, not an emit.
+                let Some(at) = call_offset(line, opener) else {
+                    continue;
+                };
+                hits += 1;
+                // The suffix is the first string literal at or after the call.
+                // `g`, `ExitCode::…` and `&mut log` are not literals, so a small
+                // window reaches it for both the inline and multi-line shapes.
+                // 10 lines, not 6: `debug_config`'s `failure_envelope(` takes
+                // eight arguments before the code, so a 6-line window missed
+                // three real sites and reported them as unreadable. Measured,
+                // not guessed.
+                let window = lines[idx..lines.len().min(idx + 10)]
+                    .iter()
+                    .map(|(_, l)| *l)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let after = &window[at + opener.len()..];
+                match first_string_literal(after) {
+                    Some(suffix) if is_code_suffix(&suffix) => {
+                        found.insert(format!("{prefix}{suffix}"));
+                    }
+                    // A FORWARDER: the call passes a code that originated
+                    // elsewhere (`failure(g, exit, code, …)`,
+                    // `failure(g, …, f.code, …)`), so there is no literal here to
+                    // read and the origin's own literal is what needs registering.
+                    // Declared per file, so a NEW forwarder is a failure until
+                    // someone writes it down — the point is that nothing is
+                    // skipped silently, not that everything is resolvable.
+                    _ if DECLARED_FORWARDERS
+                        .iter()
+                        .any(|(f, expr)| *f == rel && after.contains(expr)) => {}
+                    other => unresolvable.push(format!(
+                        "  {rel}:{lineno} — `{opener}` with a suffix this scan cannot read ({}). \
+                         Either pass a literal suffix, or add the forwarding expression to \
+                         DECLARED_FORWARDERS with a note on where the code originates.",
+                        other.map_or_else(
+                            || "no string literal nearby".to_string(),
+                            |s| format!("found {s:?}, which is not code-shaped")
+                        )
+                    )),
+                }
+            }
+        }
+        assert_eq!(
+            hits, expected_sites,
+            "{rel}: PREFIXING_SITES expects {expected_sites} call site(s) of {openers:?} but \
+             found {hits}. A site was ADDED (register its code, then bump the number) or LOST \
+             (a rename, and the gate silently stopped covering an emit — the reason this is \
+             pinned rather than floored)."
+        );
+    }
+
+    assert!(
+        unresolvable.is_empty(),
+        "{} prefixed emit site(s) could not be resolved:\n{}",
+        unresolvable.len(),
+        unresolvable.join("\n")
+    );
+
+    // Non-vacuity: the reconstruction must actually produce codes. A scan that
+    // silently finds none passes while gating nothing, the failure mode #219
+    // was filed about.
+    assert_eq!(
+        found.len(),
+        PREFIXED_CODE_COUNT,
+        "reconstruction yielded {} prefixed codes, expected {PREFIXED_CODE_COUNT}. Fewer means \
+         a code stopped being reachable and the gate stopped covering it; more means a new one \
+         to register. Either way this number is a declaration, not a floor: {found:?}",
+        found.len()
+    );
+
+    let missing: Vec<&String> = found.iter().filter(|c| !registered.contains(*c)).collect();
+    assert!(
+        missing.is_empty(),
+        "{} prefixed issue code(s) are emitted but not in contract/issue-codes.json:\n{}\n\n\
+         These are built by a prefixing helper, so they never appear as a whole literal and \
+         `every_emitted_issue_code_is_registered` cannot see them. Add each with \
+         `\"status\": \"reserved\"` and `\"consumer\": \"none\"` unless a consumer really \
+         binds it.",
+        missing.len(),
+        missing
+            .iter()
+            .map(|c| format!("  {c}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// The byte offset of `opener` in `line` when it is a genuine CALL: at a word
+/// boundary, and not the helper's own `fn` definition.
+///
+/// Both exclusions were found by this gate reporting phantom sites.
+/// `describe_reconcile_failure(` contains `failure(`, and a substring match
+/// produced an "unreadable suffix" pointing at an unrelated function — a false
+/// finding, which costs more than a missed one because someone has to go look.
+/// And `fn failure(` / `fn failure_envelope(` are the prefixing helpers
+/// themselves: their `code: &str` parameter is not an emit site.
+fn call_offset(line: &str, opener: &str) -> Option<usize> {
+    let name = opener.trim_end_matches('(');
+    if line.trim_start().starts_with("fn ") && line.contains(&format!("fn {name}(")) {
+        return None;
+    }
+    let mut from = 0usize;
+    while let Some(rel) = line[from..].find(opener) {
+        let at = from + rel;
+        let boundary = !line[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if boundary {
+            return Some(at);
+        }
+        from = at + opener.len();
+    }
+    None
+}
+
+/// The first `"…"` in `s`, without escape handling — issue-code suffixes contain
+/// none, and [`is_code_suffix`] rejects anything that would.
+fn first_string_literal(s: &str) -> Option<String> {
+    let start = s.find('"')? + 1;
+    let rest = &s[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Whether `s` looks like an issue-code suffix: lowercase, digits and dashes.
+/// A message, a path or a format string is not, and must not be turned into a
+/// code name.
+fn is_code_suffix(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 /// Every `code: "family.name"` string literal in `source`. Deliberately narrow:
 /// it matches the one shape an `Issue`/`FailCtx` literal takes, so prose and
 /// unrelated `code:` fields cannot widen it into false demands for registration.
