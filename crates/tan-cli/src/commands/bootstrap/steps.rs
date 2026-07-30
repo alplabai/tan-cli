@@ -406,24 +406,29 @@ pub(super) fn ensure_venv(
     let _ = std::fs::create_dir_all(ws.workspace_dir);
     if ws.venv_present() {
         let existing = ws.venv_bin();
-        if venv_has_usable_pip(&existing) {
-            log.line(&format!(
+        match probe_venv_pip(&existing) {
+            Ok(()) => log.line(&format!(
                 "Workspace venv already present at {}",
                 native(ws.venv_dir)
-            ));
-        } else {
-            log.line(&format!(
-                "Workspace venv at {} has no usable pip (a previous bootstrap likely failed \
-                 partway) -- removing and recreating it",
-                native(ws.venv_dir)
-            ));
-            std::fs::remove_dir_all(ws.venv_dir).map_err(|e| {
-                format!(
-                    "failed to remove the broken venv at {}: {e}",
+            )),
+            Err(reason) => {
+                // The REASON is printed, not just the verdict. This line is
+                // immediately followed by deleting the directory, and "no usable
+                // pip" was the only explanation a customer got for that -- wrong
+                // whenever the probe could not spawn at all, where recreating
+                // does not fix the actual fault (#234).
+                log.line(&format!(
+                    "Workspace venv at {} is not usable ({reason}) -- removing and recreating it",
                     native(ws.venv_dir)
-                )
-            })?;
-            create_venv(ws, log, runner, host)?;
+                ));
+                std::fs::remove_dir_all(ws.venv_dir).map_err(|e| {
+                    format!(
+                        "failed to remove the broken venv at {}: {e}",
+                        native(ws.venv_dir)
+                    )
+                })?;
+                create_venv(ws, log, runner, host)?;
+            }
         }
     } else {
         create_venv(ws, log, runner, host)?;
@@ -473,12 +478,47 @@ fn create_venv(
 /// answer about a host interpreter must not block a clean host), an existing
 /// venv that cannot even be spawned is itself the evidence of brokenness this
 /// check exists to catch, so it fails CLOSED (triggers a recreate).
-fn venv_has_usable_pip(venv: &VenvBin) -> bool {
-    Command::new(&venv.python)
+///
+/// Returns a REASON rather than a bare `bool` (tan-cli#234). The verdict is
+/// unchanged — every `Err` is still "not usable", so the fail-closed behaviour
+/// above is preserved exactly — but the three outcomes it collapses (spawn
+/// failed / spawned and exited non-zero / usable) are no longer
+/// indistinguishable to the caller.
+///
+/// That mattered twice, in opposite directions:
+///
+/// * The RECREATE path told a customer their venv "has no usable pip" and then
+///   deleted it, without ever saying what it observed. If the probe could not
+///   spawn at all — a venv on a `noexec` mount, a broken symlink, a permissions
+///   problem — the message blamed a missing `pip` for something else entirely,
+///   and the remedy (delete and recreate) would not fix it.
+/// * `venv_has_usable_pip_reads_the_probe_exit_status` failed the v0.4.1 release
+///   run's ubuntu leg, which skipped `build`, `release` and both publishes and
+///   left a tag with nothing behind it. The only evidence was
+///   `assertion failed: venv_has_usable_pip(&healthy)` — a `bool` that came back
+///   false for one of three reasons, none of them recorded. The cause is still
+///   unknown, because the code discarded it. A flake you cannot diagnose is a
+///   reporting bug before it is a timing bug.
+fn probe_venv_pip(venv: &VenvBin) -> Result<(), String> {
+    let program = native(&venv.python);
+    match Command::new(&venv.python)
         .args(["-m", "pip", "--version"])
         .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
+    {
+        Ok(out) if out.status.success() => Ok(()),
+        // Spawned fine, so the interpreter is there and `pip` is what is
+        // missing -- the tan-cli#161 case this probe was written for.
+        Ok(out) => Err(format!(
+            "`{program} -m pip --version` exited {}: {}",
+            out.status
+                .code()
+                .map_or_else(|| "with a signal".to_string(), |c| c.to_string()),
+            capture_tail(&out.stdout, &out.stderr)
+        )),
+        // Could NOT spawn. A different fault with a different remedy, and the
+        // one the old `unwrap_or(false)` made invisible.
+        Err(e) => Err(format!("could not run `{program}`: {e}")),
+    }
 }
 
 /// Install west into the venv, then `west init -l` / `west update` /
@@ -725,7 +765,12 @@ mod tests {
             west: ok,
             bin_dir: "bin".to_string(),
         };
-        assert!(venv_has_usable_pip(&healthy));
+        // `expect`, not `assert!`. This exact assertion failed the v0.4.1 release
+        // run and reported only `assertion failed`, with no errno and no message,
+        // so the cause could not be determined afterwards (#234). The probe now
+        // returns a reason and the reason is what gets printed.
+        probe_venv_pip(&healthy)
+            .expect("a shim that exits 0 must probe as usable; the reason is the diagnosis");
 
         let bad = exit_code_shim(&root, "python-bad", 1);
         let broken = VenvBin {
@@ -733,7 +778,10 @@ mod tests {
             west: bad,
             bin_dir: "bin".to_string(),
         };
-        assert!(!venv_has_usable_pip(&broken));
+        // The non-zero-exit arm, which must be distinguishable from the
+        // cannot-spawn arm below -- collapsing the two is what #234 fixed.
+        let err = probe_venv_pip(&broken).expect_err("a shim that exits 1 is not usable");
+        assert!(err.contains("exited 1"), "{err}");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -751,7 +799,11 @@ mod tests {
             west: root.join("bin").join("does-not-exist-west"),
             bin_dir: "bin".to_string(),
         };
-        assert!(!venv_has_usable_pip(&ghost));
+        let err = probe_venv_pip(&ghost).expect_err("an absent interpreter is not usable");
+        assert!(
+            err.contains("could not run"),
+            "a spawn failure must say so rather than read as a missing pip: {err}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
