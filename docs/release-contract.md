@@ -230,6 +230,15 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
   | `publish · crates.io` | `CARGO_REGISTRY_TOKEN` | `cargo install alp-tan-cli` does not resolve |
   | `publish · npm shim` | `NPM_TOKEN` | `npm i -g @alplabai/tan` does not resolve |
 
+  **Present is not the same as usable.** `NPM_TOKEN` was configured for v0.4.1
+  and the job still failed — `npm error code EOTP`, because a classic/publish
+  token on a 2FA account makes `npm publish` demand an interactive one-time
+  password no CI run can answer. Only an npm **automation** token (or a granular
+  token) is exempt. The missing-secret refusal above cannot catch this: the token
+  is there, so the job proceeds and fails at the registry, after signing a
+  provenance statement into the public transparency log for a version that never
+  published (#233).
+
   Both previously emitted a `::warning::` and exited **0**, so the run summary
   read `publish · crates.io  success` while crates.io answered
   `crate 'alp-tan-cli' does not exist`. That is what shipped for v0.4.0 (#151).
