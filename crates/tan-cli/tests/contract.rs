@@ -605,23 +605,48 @@ fn every_emitted_issue_code_is_registered() {
 /// silently or invent codes from unrelated calls. Adding a third helper means
 /// adding a row here, and [`every_prefixed_issue_code_is_registered`]'s
 /// non-vacuity check fails if a declared row stops matching anything.
-const PREFIXING_SITES: [(&str, &str, &[&str]); 3] = [
+/// The trailing `usize` is the EXACT number of call sites expected in that file,
+/// and it is pinned rather than floored on purpose.
+///
+/// A `hits > 0` floor would let a site DISAPPEAR unnoticed: rename one of
+/// `mod.rs`'s fifteen calls and fourteen still satisfy it, so the gate keeps
+/// passing while covering one fewer emit. That is the same silent-coverage shape
+/// as a lockfile leaving files unpinned — the count is the only thing that
+/// notices a site leaving.
+///
+/// It also backstops the fixed 10-line suffix window. A helper added later with
+/// nine arguments before its code falls outside that window; usually it then
+/// reads a message instead of a suffix and fails as unresolvable, but if it
+/// happens to find another code-shaped literal it would resolve to the WRONG
+/// code silently. Pinning the counts means the site is at least known to exist.
+///
+/// Changing a number here is a deliberate act: a call added or removed is a real
+/// change to what tan emits, so it should cost one line of declaration.
+const PREFIXING_SITES: [(&str, &str, &[&str], usize); 3] = [
     (
         "crates/tan-cli/src/commands/bootstrap/mod.rs",
         "bootstrap.",
         &["failure(", "log.warn("],
+        15,
     ),
     (
         "crates/tan-cli/src/commands/bootstrap/steps.rs",
         "bootstrap.",
         &["log.warn("],
+        9,
     ),
     (
         "crates/tan-cli/src/commands/debug_config.rs",
         "debug-config.",
         &["failure_envelope("],
+        2,
     ),
 ];
+
+/// The exact number of distinct codes the reconstruction must yield. Pinned for
+/// the same reason as the per-file counts: a floor cannot see a code stop being
+/// reachable.
+const PREFIXED_CODE_COUNT: usize = 17;
 
 /// Call sites that FORWARD an issue code rather than naming one, declared so
 /// they are skipped knowingly rather than silently (tan-cli#224).
@@ -685,7 +710,7 @@ fn every_prefixed_issue_code_is_registered() {
     let mut found: BTreeSet<String> = BTreeSet::new();
     let mut unresolvable: Vec<String> = Vec::new();
 
-    for (rel, prefix, openers) in PREFIXING_SITES {
+    for (rel, prefix, openers, expected_sites) in PREFIXING_SITES {
         let source = std::fs::read_to_string(repo_root().join(rel))
             .unwrap_or_else(|e| panic!("{rel}: {e} — PREFIXING_SITES names a file that is gone"));
         // `(ORIGINAL 1-based line number, text)`, comments dropped but the
@@ -759,10 +784,12 @@ fn every_prefixed_issue_code_is_registered() {
                 }
             }
         }
-        assert!(
-            hits > 0,
-            "{rel}: PREFIXING_SITES declares {openers:?} but none appear — the helper was \
-             renamed or removed, and this row now gates nothing"
+        assert_eq!(
+            hits, expected_sites,
+            "{rel}: PREFIXING_SITES expects {expected_sites} call site(s) of {openers:?} but \
+             found {hits}. A site was ADDED (register its code, then bump the number) or LOST \
+             (a rename, and the gate silently stopped covering an emit — the reason this is \
+             pinned rather than floored)."
         );
     }
 
@@ -776,9 +803,12 @@ fn every_prefixed_issue_code_is_registered() {
     // Non-vacuity: the reconstruction must actually produce codes. A scan that
     // silently finds none passes while gating nothing, the failure mode #219
     // was filed about.
-    assert!(
-        found.len() > 10,
-        "reconstructed only {} prefixed codes — the scan is broken: {found:?}",
+    assert_eq!(
+        found.len(),
+        PREFIXED_CODE_COUNT,
+        "reconstruction yielded {} prefixed codes, expected {PREFIXED_CODE_COUNT}. Fewer means \
+         a code stopped being reachable and the gate stopped covering it; more means a new one \
+         to register. Either way this number is a declaration, not a floor: {found:?}",
         found.len()
     );
 
