@@ -6,6 +6,35 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from pathlib import Path
+
+
+def normalize_path(path: Path) -> Path:
+    """Lexical `.`/`..` collapse, no filesystem access -- port of
+    `tan_core::path_guard::normalize` (crates/tan-core/src/path_guard.rs).
+    Used (joined onto a resolved workspace root first) so a relative and an
+    absolute spelling of the SAME `--sdk-root` normalize to the identical
+    string before [`sdk_stamp_key`] compares them -- otherwise a relative
+    `--sdk-root ../alp-sdk` byte-mismatches the absolute pointer `tan sdk
+    switch` already pinned for the SAME checkout, thrashing a full wipe on
+    every alternating invocation between the two forms (tan-cli#163).
+
+    A `..` past the anchor (the drive/root, or nothing left on a relative
+    path) is dropped rather than kept literal, matching `PathBuf::pop`'s own
+    "false, does nothing" behaviour at the top."""
+    anchor = path.anchor
+    parts: list[str] = []
+    for part in (path.parts[1:] if anchor else path.parts):
+        if part == ".":
+            continue
+        if part == "..":
+            if parts:
+                parts.pop()
+            continue
+        parts.append(part)
+    if anchor:
+        return Path(anchor).joinpath(*parts)
+    return Path(*parts) if parts else Path(".")
 
 
 class PolicyAction(StrEnum):
@@ -111,3 +140,23 @@ def sdk_stamp_action(
     if current is None:
         return SdkStampAction.KEEP
     return SdkStampAction.KEEP if cached == current else SdkStampAction.PRISTINE
+
+
+def sdk_stamp_key(sdk_root: str | None, sdk_commit: str | None) -> str | None:
+    """The identity [`sdk_stamp_action`] actually compares, and the executor
+    writes to `.tan-sdk-root`: the resolved SDK root path alone is not enough,
+    because a standalone checkout that changes CONTENT at the SAME path (a
+    `git pull`/`git checkout <tag>` in a `--sdk-root ../alp-sdk` checkout)
+    leaves a path-only stamp matching while the build dir is actually stale.
+    Folding the plan's own `sdkCommit` in closes it: a freshly emitted plan
+    always reflects the SDK checkout's CURRENT git HEAD, so a content change
+    at the same root changes the key.
+
+    `sdk_commit` blank or absent (an older plan, or an SDK checkout with no
+    resolvable git HEAD) degrades the key to the root alone -- the historical,
+    path-only stamp. `None` when `sdk_root` itself is unresolved -- nothing to
+    key on at all."""
+    if sdk_root is None:
+        return None
+    commit = sdk_commit.strip() if sdk_commit is not None else ""
+    return f"{sdk_root}@{commit}" if commit else sdk_root

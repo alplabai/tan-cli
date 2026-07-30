@@ -41,14 +41,21 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build.execute import KNOWN_BACKENDS, SliceOutcome, execute_slices
+from tan.commands.build.execute import (
+    KNOWN_BACKENDS,
+    SliceOutcome,
+    execute_slices,
+    last_manifest_write_failure,
+    last_sdk_switch_issues,
+    reset_last_manifest_write,
+)
 from tan.commands.build.materialise import MaterialiseError, materialise_plan
 from tan.commands.build.token_substitution import (
     TokenSubstitutionError,
     apply_plan_token_substitution,
 )
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
-from tan.core.plan_exec import PolicyAction, resolve_action
+from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -325,7 +332,11 @@ def _slice_result(core_id: str, backend: str, outcome: SliceOutcome) -> dict:
 
 
 def _dispatch(
-    plan: BuildPlan, demotions, build_root: Path
+    plan: BuildPlan,
+    demotions,
+    build_root: Path,
+    sdk_root: str | None,
+    sdk_root_for_stamp: str | None,
 ) -> tuple[list[SliceOutcome], list[Issue]]:
     """Run the plan's slices, holding back the ones token substitution demoted.
 
@@ -341,6 +352,32 @@ def _dispatch(
     Precedence is preserved: a demoted slice that ALSO names an unknown
     backend or carries no command is left to `execute_slices`, because both of
     those outrank a provisioning fact and are checked first there.
+
+    `sdk_root` is threaded straight through to `execute_slices` -- it is
+    THIS run's already-resolved `--sdk-root`/discovered checkout (`_build`'s
+    own parameter), the identity `execute_slices`'s sdk-switch-pristine guard
+    (issue #52) keys its stamp comparison on. Without it every stamp
+    comparison degrades to "unresolved", which never wipes anything -- see
+    `tan.core.plan_exec.sdk_stamp_key`. `sdk_root_for_stamp` is the SAME
+    checkout, NORMALIZED and anchored on the workspace root (`build()`'s own
+    `tan.core.plan_exec.normalize_path(workspace_root / sdk_root)`) -- passed
+    separately so a relative `--sdk-root ../alp-sdk` keys the stamp
+    IDENTICALLY to the absolute form `tan sdk switch` would pin for the same
+    checkout (tan-cli#163), without changing what `sdk_root` itself
+    substitutes for `${SDK_ROOT}` or reports as `sdk.root`.
+
+    Held slices are also threaded into `execute_slices` as `held_outcomes`
+    (tan-cli #89 MINOR 4, oracle `execute/mod.rs:379-400`): `execute_slices`
+    only ever sees the RUNNABLE subset of the plan (`replace(plan,
+    slices=runnable)` below), so its own post-build manifest overlay would
+    otherwise never learn a demoted slice existed at all -- leaving that
+    core's `system-manifest.yaml` entry at its plan-time (or a previous
+    run's) `status`/`output_artefact` forever, which `tan size`/
+    `tan debug-config` read with no status check of their own. Each held
+    outcome's `output_artefact` is the explicit empty string, never `None`:
+    the overlay (`overlay_run_results_raw`) treats `None` as "preserve
+    whatever is already there", which is correct for a slice this run never
+    touched but wrong for one THIS run knows never dispatched.
     """
     held = {
         d.slice_index: d
@@ -350,6 +387,17 @@ def _dispatch(
     }
     action = resolve_action(plan.execution_policy, "missing_tool", PolicyAction.SKIP)
     failed = action is PolicyAction.FAIL
+
+    held_outcomes = {
+        i: SliceOutcome(
+            plan.slices[i].core_id,
+            "failed" if failed else "skipped",
+            None,
+            d.reason,
+            output_artefact="",
+        )
+        for i, d in held.items()
+    }
 
     runnable = [sl for i, sl in enumerate(plan.slices) if i not in held]
     dispatched = iter(
@@ -365,6 +413,9 @@ def _dispatch(
             # relying on the CLI to fill them.
             gap_fillers=(),
             on_output=_stream,
+            sdk_root=sdk_root,
+            sdk_root_for_stamp=sdk_root_for_stamp,
+            held_outcomes=held_outcomes.values(),
         )
     )
 
@@ -375,9 +426,7 @@ def _dispatch(
         if demotion is None:
             outcomes.append(next(dispatched))
             continue
-        outcomes.append(
-            SliceOutcome(sl.core_id, "failed" if failed else "skipped", None, demotion.reason)
-        )
+        outcomes.append(held_outcomes[i])
         issues.append(
             Issue(
                 # Same code as the plan-fatal sibling on purpose: the
@@ -413,7 +462,12 @@ def _backend_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[Issue
 
 
 def _build(
-    *, plan_from: str | None, build_root: str, sdk_root: str | None, board_yaml: str | None
+    *,
+    plan_from: str | None,
+    build_root: str,
+    sdk_root: str | None,
+    sdk_root_for_stamp: str | None,
+    board_yaml: str | None,
 ) -> tuple[ExitCode, dict, list[Issue]]:
     plan = _acquire_plan(plan_from, sdk_root, board_yaml)
 
@@ -450,7 +504,14 @@ def _build(
             "build.materialise-failed", err.message, ExitCode.WRITE_FAILURE
         ) from err
 
-    outcomes, issues = _dispatch(plan, demotions, Path(build_root))
+    # Cleared before dispatch, mirroring `run_cmd.py`'s own pattern, so a
+    # leftover signal from an earlier in-process `_build` (e.g. a test
+    # harness calling `build()` more than once) never gets misread as THIS
+    # run's own write outcome below.
+    reset_last_manifest_write()
+    outcomes, issues = _dispatch(
+        plan, demotions, Path(build_root), sdk_root, sdk_root_for_stamp
+    )
 
     any_failed = any(o.status not in ("succeeded", "skipped") for o in outcomes)
     exit_code = ExitCode.RUNTIME_FAILURE if any_failed else ExitCode.SUCCESS
@@ -459,6 +520,31 @@ def _build(
             0, Issue("build.slice-failed", "error", "one or more slices failed to build")
         )
     issues.extend(_backend_issues(plan, outcomes))
+    # The sdk-switch-pristine wipe (issue #52) must not be stderr-only in
+    # JSON mode -- the VS Code extension only ever sees the envelope, not
+    # `_stream`'s output. Verbatim oracle codes/severity
+    # (`crates/tan-cli/src/commands/build/execute/mod.rs:591,617`):
+    # `build.sdk-switch-pristine` for the wipe itself, `-failed` when the
+    # wipe could not fully land.
+    issues.extend(last_sdk_switch_issues())
+
+    manifest_reason = last_manifest_write_failure()
+    if manifest_reason is not None:
+        # A failed manifest write used to report only through `on_output`
+        # (stderr) -- so the envelope said `ok: true, issues: []` while
+        # `system-manifest.yaml` still named the PREVIOUS run's status and
+        # artefact, which `tan size` re-derives and `tan flash` would go on
+        # to program. Verbatim oracle code/message
+        # (`crates/tan-cli/src/commands/build/execute/mod.rs:809-814`):
+        # dropping this half is exactly how a stale manifest used to look
+        # identical to `ok: true`.
+        issues.append(
+            Issue(
+                "build.manifest-write-failed",
+                "warning",
+                f"system-manifest.yaml was not updated — {manifest_reason}",
+            )
+        )
 
     data = {
         "schemaVersion": "1",
@@ -585,6 +671,17 @@ def build(
         if sdk_root is not None
         else None
     )
+    # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the
+    # sdk-switch-pristine guard actually compares (tan-cli#163), kept
+    # SEPARATE from `sdk_root` itself: an explicit `--sdk-root` is a
+    # documented, supported relative form, and `sdk_root` unchanged still
+    # feeds `${SDK_ROOT}` token substitution and the `sdk.root` envelope
+    # field verbatim, matching the Rust oracle's own split between
+    # `normalized_sdk_root_str` (stamp-only) and the raw `resolve_sdk_root`
+    # result used everywhere else.
+    sdk_root_for_stamp = (
+        str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
+    )
     project = Project(root=build_root, board_yaml=board_yaml)
 
     try:
@@ -592,6 +689,7 @@ def build(
             plan_from=plan_from,
             build_root=build_root,
             sdk_root=sdk_root,
+            sdk_root_for_stamp=sdk_root_for_stamp,
             board_yaml=board_yaml,
         )
     except BuildError as err:

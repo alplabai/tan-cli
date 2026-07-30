@@ -21,33 +21,33 @@ or `Command::Flash`. What IS shared is the *engine*: `run` composes the same
 two engines `build` and `flash` already own, exactly once each, rather than
 re-implementing a third copy of either.
 
-**Known port gap.** `tan.commands.build.execute` does not write a post-build
-`system-manifest.yaml` yet (its own docstring names the gap), so this port's
-build engine cannot supply an in-memory `native_sim_target`/`manifest_written`
-signal. Until that lands, `run()` below passes `native_sim_target=None`,
-`manifest_written=False` to `decide_run_action` -- the honest "could not be
-established" reading (see `tan.core.run`'s module doc for why that must never
-be produced by re-reading a stale `system-manifest.yaml` off disk instead).
-The practical effect: today, every successful `tan run` reports `BUILD_ONLY`
-(bare) or `MANIFEST_STALE` (`--flash`) -- it never wrongly executes or
-flashes, it just cannot yet auto-detect a host target. The `EXECUTE_NATIVE`/
-`FLASH` dispatch arms below are still fully wired (reachable the moment the
-build engine starts supplying real signals) and covered by unit tests that
-call the internal helpers directly, the same way the Rust oracle's own tests
-exercise `execute_native_arm`/`decide_run_action` in isolation.
+**The `native_sim_target`/`manifest_written` signal is now real.**
+`tan.commands.build.execute.execute_slices` writes the post-build
+`system-manifest.yaml` as a side effect of every dispatch (`tan build`'s own
+CLI invocation gets it too, not just `run`'s), and records the two signals
+`decide_run_action` needs via `execute.last_manifest_write()` -- a
+same-process recorder, not a widened return value, because `execute_slices`
+is reached only through `tan.commands.build_cmd._dispatch` / `_build`, both
+out of THIS module's ownership for this change (a disjoint parallel-unit
+split, not an architecture choice); see `execute.py`'s own module docstring
+for the full reasoning and why reading the recorder here is still safe
+against the R1 staleness defect (three attempts in the Rust oracle) that the
+module doc below and `test_execute_native_arm_refuses_stale_exe_when_
+manifest_write_unconfirmed` both pin. `_run` resets the recorder immediately
+before calling the build engine (`execute.reset_last_manifest_write()`) so a
+build that never reaches dispatch -- an early coded refusal, or a
+monkeypatched `_build` stub in a test -- reads the honest default
+`(False, None)` rather than a previous invocation's leftover.
 
-**`--flash`/`--core` are not accepted-but-ignored.** A hardware `tan run
---flash` today always exits 1 with the coded, actionable
-`run.manifest-stale` refusal above -- `decide_run_action`'s own decision
-table makes a silent `BUILD_ONLY` no-op unreachable under `flash_requested=
-True` regardless of `native_sim_target`/`manifest_written` (`tan.core.run`'s
-own tests pin this). `--core` genuinely has no live effect yet, because it is
-only consumed on the `FLASH` arm, which is unreached until the signal lands
--- but it forwards correctly the moment that arm IS reached (`_flash_args_for`
-is unit-tested in isolation, the same way the Rust oracle tests
-`flash_args_for`). So the gap is the upstream signal, not this file's wiring;
-closing it is `tan.commands.build.execute` gaining the post-build
-`system-manifest.yaml` write, out of scope for this module.
+**`--flash`/`--core` reach the flash engine once the build confirms a
+hardware target.** `decide_run_action`'s own decision table still makes a
+silent `BUILD_ONLY` no-op unreachable under `flash_requested=True` regardless
+of `native_sim_target`/`manifest_written` (`tan.core.run`'s own tests pin
+this) -- a hardware target without a confirmed manifest write still refuses
+via `MANIFEST_STALE`, never guesses. `--core` is forwarded verbatim to the
+native flash path's `--core` once the `FLASH` arm is actually reached
+(`_flash_args_for` is unit-tested in isolation, the same way the Rust oracle
+tests `flash_args_for`).
 """
 from __future__ import annotations
 
@@ -60,8 +60,10 @@ from typing import Any
 import typer
 
 from tan.commands import flash_cmd
+from tan.commands.build import execute
 from tan.commands.build_cmd import BuildError, _abs_posix, _build, discover_sdk_root
 from tan.core.flash_plan import resolve_artefact_path
+from tan.core.plan_exec import normalize_path
 from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice
 from tan.core.system_manifest import SystemManifestError, parse_system_manifest
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -238,6 +240,7 @@ def _run(
     *,
     build_root: str,
     sdk_root: str | None,
+    sdk_root_for_stamp: str | None,
     board_yaml: str | None,
     flash: bool,
     core: str | None,
@@ -245,9 +248,19 @@ def _run(
 ) -> tuple[ExitCode, dict[str, Any] | None, list[Issue], list[str]]:
     """Everything between the resolved paths and the envelope. Returns
     `(exit_code, data, issues, text_lines)`."""
+    # Reset BEFORE calling the build engine, not after: see the module doc
+    # and `execute.reset_last_manifest_write`'s own docstring for why an
+    # unreset recorder would leak a PREVIOUS invocation's signal into a build
+    # that never reaches dispatch (an early `BuildError`, or a monkeypatched
+    # `_build` stub in a test).
+    execute.reset_last_manifest_write()
     try:
         build_exit, build_data, build_issues = _build(
-            plan_from=None, build_root=build_root, sdk_root=sdk_root, board_yaml=board_yaml
+            plan_from=None,
+            build_root=build_root,
+            sdk_root=sdk_root,
+            sdk_root_for_stamp=sdk_root_for_stamp,
+            board_yaml=board_yaml,
         )
     except BuildError as err:
         # A CODED refusal (no SDK, no board.yaml, an unparsable plan, ...),
@@ -261,10 +274,9 @@ def _run(
         )
     build_ok = build_exit == ExitCode.SUCCESS
 
-    # NOT YET PORTED: see the module doc. Both `None`/`False` until
-    # `build_cmd`'s engine gains a post-build system-manifest write.
-    native_sim_target: bool | None = None
-    manifest_written = False
+    # The real signal from THIS build's own dispatch (see the module doc) --
+    # never a re-read of `system-manifest.yaml` off disk afterward.
+    manifest_written, native_sim_target = execute.last_manifest_write()
 
     action = decide_run_action(build_ok, native_sim_target, flash, manifest_written)
 
@@ -360,12 +372,21 @@ def run(
         if sdk_root is not None
         else None
     )
+    # Same normalized, workspace-root-anchored stamp identity `build_cmd.build`
+    # computes (tan-cli#163) -- `_build` now requires it (the sdk-switch-
+    # pristine guard's stamp comparison, threaded through from `execute_slices`
+    # rather than self-discovered), and `run` reuses the same engine so it must
+    # resolve it the same way, not just `sdk_root` itself.
+    sdk_root_for_stamp = (
+        str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
+    )
     project_obj = Project(root=build_root, board_yaml=board_yaml)
 
     try:
         exit_code, data, issues, text_lines = _run(
             build_root=build_root,
             sdk_root=sdk_root,
+            sdk_root_for_stamp=sdk_root_for_stamp,
             board_yaml=board_yaml,
             flash=flash,
             core=core,

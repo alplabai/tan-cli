@@ -109,7 +109,7 @@ def _stub_build(**_kwargs):
 def test_internal_run_reaches_build_only_when_no_flash(tmp_path, monkeypatch):
     monkeypatch.setattr(run_cmd, "_build", _stub_build)
     exit_code, data, issues, text = run_cmd._run(
-        build_root=str(tmp_path), sdk_root=None, board_yaml=None,
+        build_root=str(tmp_path), sdk_root=None, sdk_root_for_stamp=None, board_yaml=None,
         flash=False, core=None, json_mode=False,
     )
     assert exit_code == ExitCode.SUCCESS
@@ -123,7 +123,7 @@ def test_internal_run_refuses_flash_when_target_unconfirmed(tmp_path, monkeypatc
     refuses rather than guessing -- see `run_cmd`'s module doc."""
     monkeypatch.setattr(run_cmd, "_build", _stub_build)
     exit_code, data, issues, text = run_cmd._run(
-        build_root=str(tmp_path), sdk_root=None, board_yaml=None,
+        build_root=str(tmp_path), sdk_root=None, sdk_root_for_stamp=None, board_yaml=None,
         flash=True, core=None, json_mode=True,
     )
     assert exit_code == ExitCode.RUNTIME_FAILURE
@@ -144,7 +144,7 @@ def test_internal_run_build_failed_short_circuits(tmp_path, monkeypatch):
 
     monkeypatch.setattr(run_cmd, "_build", failing_build)
     exit_code, data, issues, text = run_cmd._run(
-        build_root=str(tmp_path), sdk_root=None, board_yaml=None,
+        build_root=str(tmp_path), sdk_root=None, sdk_root_for_stamp=None, board_yaml=None,
         flash=True, core=None, json_mode=True,
     )
     # `--flash` is irrelevant: a failed build never reaches the flash decision.
@@ -178,7 +178,7 @@ def test_internal_run_flash_delegates_to_the_flash_engine_at_the_built_root(tmp_
 
     monkeypatch.setattr(flash_cmd, "_run", fake_flash_run)
     exit_code, data, issues, text = run_cmd._run(
-        build_root=str(tmp_path), sdk_root="/sdk", board_yaml=None,
+        build_root=str(tmp_path), sdk_root="/sdk", sdk_root_for_stamp="/sdk", board_yaml=None,
         flash=True, core="m55_hp", json_mode=False,
     )
     assert exit_code == ExitCode.SUCCESS
@@ -191,6 +191,74 @@ def test_internal_run_flash_delegates_to_the_flash_engine_at_the_built_root(tmp_
     assert calls["core"] == "m55_hp"
     assert calls["sdk_root_arg"] == "/sdk"
     assert text == ["flash: 0 failure(s)."]
+
+
+def test_internal_run_reaches_flash_via_the_real_recorded_signal_not_a_stub(tmp_path, monkeypatch):
+    """The wiring this unit exists for: `--core`/`--flash` reach the flash
+    engine driven by the REAL `tan.commands.build.execute.last_manifest_write`
+    recorder + the REAL `decide_run_action` -- neither monkeypatched here,
+    unlike `test_internal_run_flash_delegates_to_the_flash_engine_at_the_
+    built_root` above (which replaces `decide_run_action` itself). Simulates
+    what a hardware build's OWN dispatch would have just recorded
+    (`manifest_written=True`, `native_sim_target=False`) rather than spawning
+    a real `west build`."""
+    from tan.commands.build import execute as execute_module
+
+    def _stub_build_and_record(**_kwargs):
+        # Stands in for `execute_slices` having just run to completion inside
+        # `_build` -- the recorder is set exactly the way `execute_slices`
+        # itself sets it (see `execute.py`'s own module doc for why reading
+        # it afterward is safe).
+        execute_module._last_manifest_write = execute_module._ManifestWriteSignal(
+            manifest_written=True, native_sim_target=False
+        )
+        return ExitCode.SUCCESS, {"schemaVersion": "1", "slices": [], "warnings": []}, []
+
+    monkeypatch.setattr(run_cmd, "_build", _stub_build_and_record)
+    calls = {}
+
+    def fake_flash_run(**kwargs):
+        calls.update(kwargs)
+        return (
+            ExitCode.SUCCESS,
+            {"schemaVersion": "1", "buildRoot": kwargs["app_path"], "entries": []},
+            [],
+            ["flash: 0 failure(s)."],
+            None,
+        )
+
+    monkeypatch.setattr(flash_cmd, "_run", fake_flash_run)
+    exit_code, data, issues, text = run_cmd._run(
+        build_root=str(tmp_path), sdk_root="/sdk", sdk_root_for_stamp="/sdk", board_yaml=None,
+        flash=True, core="m55_hp", json_mode=False,
+    )
+    assert exit_code == ExitCode.SUCCESS
+    assert issues == []
+    assert calls["app_path"] == str(tmp_path)
+    assert calls["core"] == "m55_hp"
+    assert text == ["flash: 0 failure(s)."]
+
+
+def test_internal_run_reset_before_build_stops_a_stale_signal_reaching_flash(tmp_path, monkeypatch):
+    """A previous invocation's leftover recorder state must never leak into a
+    build that never reaches dispatch. Seed the recorder as if a PRIOR
+    hardware build had just written its manifest, then call `_run` with a
+    stubbed `_build` that does NOT touch the recorder (mirrors a real
+    early-refusal build, e.g. no SDK found) -- the reset in `_run` must make
+    this refuse via `MANIFEST_STALE`, not fall through to `FLASH` on the
+    stale leftover."""
+    from tan.commands.build import execute as execute_module
+
+    execute_module._last_manifest_write = execute_module._ManifestWriteSignal(
+        manifest_written=True, native_sim_target=False
+    )
+    monkeypatch.setattr(run_cmd, "_build", _stub_build)
+    exit_code, data, issues, text = run_cmd._run(
+        build_root=str(tmp_path), sdk_root=None, sdk_root_for_stamp=None, board_yaml=None,
+        flash=True, core=None, json_mode=True,
+    )
+    assert exit_code == ExitCode.RUNTIME_FAILURE
+    assert issues[0].code == "run.manifest-stale"
 
 
 def test_flash_args_target_the_project_base_not_cwd():
