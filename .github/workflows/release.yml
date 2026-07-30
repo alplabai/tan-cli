@@ -618,6 +618,31 @@ jobs:
           # way -- a disarmed channel still has to exit 0 having said so.
           if [ "$NPM_RESULT" != "success" ]; then
             bad "the npm job did not complete cleanly (job: ${NPM_RESULT}). Disarmed it must report NOT PUBLISHED and exit 0; armed it must publish."
+          # The job succeeded, so `published` MUST be one of the two values it
+          # writes. Anything else means the outputs wiring between `publish_npm`
+          # and this gate is broken, and the comparisons below would be reading
+          # nothing.
+          #
+          # This is the one hole `always()` + a declaration check cannot close by
+          # itself. An unresolvable `needs.publish_npm.outputs.published` --
+          # renamed step id, removed `outputs:` block, a context GitHub does not
+          # populate -- evaluates to the EMPTY STRING; it does not error. And ''
+          # satisfies `!= "true"`, which is the disarmed-expected branch, which is
+          # the state tan is in today. So a broken wiring would pass GREEN on every
+          # disarmed tag and only surface at ARMING time, reported as "npm did not
+          # publish" when npm may have published fine and the gate is describing
+          # its own broken input. Arming is the moment this gate most needs to be
+          # trustworthy; it must not be the moment it starts lying.
+          #
+          # A gate that reads an empty input and reports "matched declared intent"
+          # is #151's silent success one level up, which is what this job exists to
+          # remove.
+          #
+          # Kept in the SAME elif chain rather than a separate `case`, so a broken
+          # wiring reports exactly one cause: a garbage value would otherwise also
+          # trip a declaration comparison it has nothing to compare against.
+          elif [ "$NPM_PUBLISHED" != "true" ] && [ "$NPM_PUBLISHED" != "false" ]; then
+            bad "the npm job reported published='${NPM_PUBLISHED:-<empty>}', which is neither true nor false. The outputs wiring between publish_npm and this gate is broken, so the declaration checks are comparing against nothing. Check publish_npm's \`outputs:\` block and the \`declined\`/\`published\` step ids."
           elif [ "$NPM_DECLARED" = "true" ] && [ "$NPM_PUBLISHED" != "true" ]; then
             bad "TAN_NPM_PUBLISH is 'true' but the npm job did not publish (published=${NPM_PUBLISHED:-<none>}). An armed channel that ships nothing is the silent-success failure #151 removed."
           elif [ "$NPM_DECLARED" != "true" ] && [ "$NPM_PUBLISHED" = "true" ]; then
