@@ -17,6 +17,13 @@ import, and therefore before `cli.py`'s parser exists.
 
 This is a developer/parity entry, not the customer surface: `tan build` reaches
 the same dispatch in-process via `tan.planner_root.emit`.
+
+Which is why `alp_project.py`'s emit modes hang off THIS entry (`tan.planner
+.cli.PROJECT_MODES`) and not off a new `tan` subcommand -- the customer surface
+is frozen, and what needs those modes is a gate, not a customer: alp-sdk's
+`scripts/check_emit_snapshots.py` and `scripts/check_zephyr_conf_parity.py`
+spawn an emitter and diff its stdout. `tan generate` serves the same modes for
+customers, but writes a FILE and prints an envelope, so it cannot stand in.
 """
 
 from __future__ import annotations

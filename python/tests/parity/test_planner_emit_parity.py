@@ -286,6 +286,85 @@ def test_the_subprocess_entry_points_agree_too():
     assert mine.stdout == up.stdout, _first_diff(up.stdout, mine.stdout)
 
 
+#: Every mode alp-sdk's `scripts/check_emit_snapshots.py` reaches through
+#: `scripts/alp_project.py` -- the 25 of its 35 cases that were still spawning
+#: the SDK's Python. Run UNSCOPED, because that is the shape the gate runs: its
+#: `_emit()` passes `--input` and `--emit` and nothing else.
+#:
+#: `scaffold` is absent, and that is a FINDING rather than an omission:
+#: `alp_project.py --emit scaffold` renders through `scripts/alp_template.py`,
+#: which has NOT relocated, so `tan.planner_cli` refuses it (argparse: invalid
+#: choice) and those four snapshot cases cannot repoint yet.
+_SNAPSHOT_PROJECT_MODES = (
+    "zephyr-conf", "dts-overlay", "native-sim-overlay", "hw-info-h",
+    "west-libraries", "os-topology", "composed-route-table", "carrier-netlist",
+)
+
+
+def _argv_stdout(argv: list[str], cwd: Path, pythonpath: Path) -> tuple[int, bytes]:
+    """`(rc, raw stdout BYTES)`. Bytes, not `text=True`: a snapshot gate diffs
+    the byte stream, and universal-newline decoding is precisely the translation
+    that would hide a line-ending difference between the two entries."""
+    proc = subprocess.run(
+        argv, capture_output=True, cwd=str(cwd), check=False,
+        env={**os.environ, "PYTHONPATH": str(pythonpath)})
+    return (proc.returncode, proc.stdout)
+
+
+@pytest.mark.parametrize("mode", _SNAPSHOT_PROJECT_MODES)
+def test_the_project_modes_agree_on_stdout_through_argv(mode):
+    """`python -m tan.planner_cli --emit <mode>` vs `alp_project.py --emit <mode>`.
+
+    The `tan generate` layers below compare FILES; a snapshot gate reads STDOUT,
+    and nothing else in this module does. So this is the layer that catches the
+    artefact arriving with an envelope around it, a progress line ahead of it, or
+    a trailing newline of tan's own -- each of which passes every file-based
+    comparison here and fails `check_emit_snapshots.py` on the first byte.
+    """
+    assert SDK is not None
+    board = SDK / "examples" / "aen" / "aen-analog-validate" / "board.yaml"
+    if not board.is_file():
+        pytest.skip(f"{board} not in this checkout")
+    want_rc, want = _argv_stdout(
+        [sys.executable, str(SDK / "scripts" / "alp_project.py"),
+         "--input", str(board), "--emit", mode],
+        cwd=SDK, pythonpath=SDK / "scripts")
+    got_rc, got = _argv_stdout(
+        [sys.executable, "-m", "tan.planner_cli", "--sdk-root", str(SDK),
+         "--input", str(board), "--emit", mode],
+        cwd=PYTHON_ROOT, pythonpath=PYTHON_ROOT)
+    assert got_rc == want_rc, f"alp_project rc={want_rc}, tan rc={got_rc}"
+    assert got == want, _first_diff(want.decode("utf-8", "replace"),
+                                    got.decode("utf-8", "replace"))
+
+
+def test_the_tree_mode_refuses_on_stdout_exactly_as_alp_project_does():
+    """`--emit zephyr-board` writes a DIRECTORY, so neither entry can stream it.
+
+    `alp_project.py` refuses it without `--output <dir>`; `tan.planner_cli` has
+    no `--output` at all and refuses it outright (`tan generate --target
+    zephyr-board --output <dir>` is what serves it). Pinned because the tempting
+    "fix" -- streaming the tree with some separator between files -- would be a
+    convention neither side has, invented in the one place a byte gate cannot
+    see it.
+    """
+    assert SDK is not None
+    board = SDK / "examples" / "multicore" / "rpmsg-aen" / "board.yaml"
+    if not board.is_file():
+        pytest.skip(f"{board} not in this checkout")
+    for argv, cwd, pythonpath in (
+        ([sys.executable, str(SDK / "scripts" / "alp_project.py"),
+          "--input", str(board), "--emit", "zephyr-board", "--core", "m55_hp"],
+         SDK, SDK / "scripts"),
+        ([sys.executable, "-m", "tan.planner_cli", "--sdk-root", str(SDK),
+          "--input", str(board), "--emit", "zephyr-board", "--core", "m55_hp"],
+         PYTHON_ROOT, PYTHON_ROOT),
+    ):
+        rc, out = _argv_stdout(argv, cwd, pythonpath)
+        assert rc != 0, f"{argv[1:3]} streamed a board tree instead of refusing"
+        assert out == b"", f"{argv[1:3]} put {len(out)} bytes on stdout"
+
+
 def test_the_kconfig_dumper_no_longer_names_a_path_in_the_sdk(planners):
     """`--emit kconfig`'s dumper used to be a path into the bound alp-sdk
     checkout -- first a `__file__`-relative sibling walk (`../kconfig/`,

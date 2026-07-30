@@ -10,6 +10,13 @@ lifted out of `main()` into `emit_artefact()` so the in-process caller
 (`tan.planner_root.emit`, which is how `tan build` gets its plan) and this argv
 path render through the SAME branch table. Two copies of an eight-way `--emit`
 switch is how one surface silently starts emitting differently from the other.
+
+`--emit` also accepts `alp_project.py`'s OWN modes (`zephyr-conf`,
+`carrier-netlist`, ...), rendered through `tan.planner_emit` -- the same
+in-process engine `tan generate` uses, so a mode still has exactly one renderer
+whichever front door reached it. They print RAW ARTEFACT BYTES, undecorated,
+because alp-sdk's `scripts/check_emit_snapshots.py` diffs this stdout against a
+committed golden; a trailing newline of our own would fail it.
 """
 
 from __future__ import annotations
@@ -17,6 +24,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Iterable, Optional
+
+from tan import planner_emit
 
 from . import (
     OrchestratorError,
@@ -30,9 +39,25 @@ from . import (
     emit_tfm_sysbuild_conf,
     load_board_yaml,
 )
+from .paths import REPO
 
 if False:  # typing-only; keeps the runtime import graph unchanged
     from .models import BoardProject
+
+#: The eight modes alp-sdk's `alp_orchestrate` CLI exposed, every one of them
+#: served by `emit_artefact`.
+ORCHESTRATOR_MODES = (
+    "system-manifest", "ipc-contract-h", "dts-reservations", "dts-partitions",
+    "storage-mounts-c", "tfm-sysbuild-conf", "build-plan", "kconfig",
+)
+
+#: The rest of `--emit`: `alp_project.py`'s modes, served by `tan.planner_emit`.
+#: DERIVED from `IN_PROCESS_MODES` rather than listed again -- a second list is
+#: how `tan generate` and this entry would drift apart on which modes exist.
+#: `ipc-contract-h` is in both sets and stays with `emit_artefact`; sorted, so
+#: `--help` does not reorder itself between interpreters.
+PROJECT_MODES = tuple(
+    sorted(planner_emit.IN_PROCESS_MODES.difference(ORCHESTRATOR_MODES)))
 
 
 def emit_artefact(project: "BoardProject", mode: str, *, board_yaml: Path,
@@ -78,14 +103,25 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
                              "(required by --emit kconfig; every other "
                              "mode ignores it).")
     parser.add_argument("--emit", default=None,
-                        choices=["system-manifest", "ipc-contract-h",
-                                 "dts-reservations", "dts-partitions",
-                                 "storage-mounts-c",
-                                 "tfm-sysbuild-conf", "build-plan",
-                                 "kconfig"],
+                        choices=[*ORCHESTRATOR_MODES, *PROJECT_MODES],
                         help="Skip the build; just emit one of the "
                              "generated artefacts to stdout.")
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.emit in PROJECT_MODES:
+        # Straight to the relocated renderers, deliberately WITHOUT the
+        # `load_board_yaml` below: `carrier-netlist` / `composed-route-table`
+        # read the raw board.yaml dict (mirroring `alp_project.main()`, which
+        # dispatches them before its per-core machinery), so loading here would
+        # refuse a board the SDK's own front door serves.
+        try:
+            sys.stdout.write(planner_emit.render(
+                args.emit, sdk_root=REPO, board_yaml=args.input,
+                core=args.core))
+        except (OrchestratorError, planner_emit.PlannerEmitError) as e:
+            print(f"alp-orchestrate: {e}", file=sys.stderr)
+            return 1
+        return 0
 
     try:
         project = load_board_yaml(args.input)
