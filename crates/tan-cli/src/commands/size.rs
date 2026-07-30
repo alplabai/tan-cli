@@ -48,10 +48,7 @@ const SIZE_TOOLS: [&str; 3] = ["arm-zephyr-eabi-size", "llvm-size", "size"];
 /// `tan size` entry. See the module docs for the faithful-plus behaviour.
 pub fn run(g: &GlobalArgs, args: &SizeArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 

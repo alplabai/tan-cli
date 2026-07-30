@@ -144,10 +144,7 @@ pub fn run(g: &GlobalArgs, args: &TraceArgs) -> CommandRun {
     } else {
         trace_text(&decisions, g)
     };
-    let project_env = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project_env = Project::from_context(&context);
     let data = TraceData {
         schema_version: "1".to_string(),
         generated_at,
