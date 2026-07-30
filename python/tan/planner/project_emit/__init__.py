@@ -14,9 +14,9 @@ truth:
   `metadata/registries/peripheral-kconfig.json` here.
 * `_CHIP_SUBSYSTEMS` -- already in `slugs.py`, with its I-26 justification.
 
-`composed-route-table` is likewise absent: it is a debug surface `tan generate`
-has no target for, so `bom_netlist.py` came across with the shared
-`_composed_route_rows` helper and the `carrier-netlist` contract only.
+`composed-route-table` came across too: `bom_netlist.py` carries
+`_emit_composed_route_table` alongside `_emit_carrier_netlist`, sharing the same
+`_composed_route_rows` helper.
 
 What DOES live here is the one fact genuinely shared by two leaves: the canonical
 E1M / E1M-X GPIO pad order, which `dts.py` (`--emit dts-overlay`) and

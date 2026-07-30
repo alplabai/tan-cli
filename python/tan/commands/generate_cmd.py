@@ -2,12 +2,13 @@
 """`tan generate` -- run the board-derived emitters and report what landed.
 
 **tan invents no output of its own**, but it no longer spawns alp-sdk to produce
-it either. All ELEVEN targets render in-process from `tan.planner`
+it either. All TWELVE targets render in-process from `tan.planner`
 (`tan.planner_emit.IN_PROCESS_MODES`) -- the five modes the planner relocation
-brought over first, plus the last six whose renderers moved with it:
-`dts-overlay`, `native-sim-overlay`, `hw-info-h`, `west-libraries`,
-`carrier-netlist` and `zephyr-board`. No interpreter on PATH, no PYTHONPATH, no
-process.
+brought over first, the six whose renderers moved with it (`dts-overlay`,
+`native-sim-overlay`, `hw-info-h`, `west-libraries`, `carrier-netlist` and
+`zephyr-board`), plus `composed-route-table` (the older debug view of
+`carrier-netlist`'s own route rows, ported alongside it). No interpreter on
+PATH, no PYTHONPATH, no process.
 
 The spawned engine survives as an ESCAPE HATCH, not a code path anything reaches
 by default:
@@ -136,9 +137,17 @@ _OUTPUT_RELATIVE_PATH = {
     "hw-info-h": "build/generated/alp_hw_info_build.h",
     "os-topology": "build/generated/os-topology.json",
     # Explicit-only (see EXPLICIT_ONLY_TARGETS) -- still in this table because
-    # it has one canonical path, and `alp_sdk_ipc_contract_header()` in
-    # alp-sdk's `cmake/alp.cmake` names exactly this one:
-    # `${CMAKE_BINARY_DIR}/generated/alp/system_ipc.h`.
+    # each has one canonical path.
+    # `composed-route-table` is the older debug/demonstrator view of
+    # `carrier-netlist`'s own route rows -- alp-sdk's docs/cli.md lists it as
+    # "JSON route-table dump (demonstrator)", a maintainer-only tool with no
+    # product consumer. The Rust oracle's `tan_core::ALL_EMIT_MODES`
+    # (crates/tan-core/src/loader.rs) excludes it from the default/`--all`
+    # set for the same reason, so a bare `tan generate` never runs a full
+    # pad-route composition.
+    "composed-route-table": "build/generated/composed-route-table.json",
+    # `alp_sdk_ipc_contract_header()` in alp-sdk's `cmake/alp.cmake` names
+    # exactly this one: `${CMAKE_BINARY_DIR}/generated/alp/system_ipc.h`.
     "ipc-contract-h": "build/generated/alp/system_ipc.h",
 }
 
@@ -155,10 +164,21 @@ ZEPHYR_BOARD = "zephyr-board"
 #: report a failed target on almost every project.
 IPC_CONTRACT_H = "ipc-contract-h"
 
+#: The pad-route debug/demonstrator view (see `_OUTPUT_RELATIVE_PATH`'s
+#: comment). Not defaultable: it is a maintainer-only tool with no product
+#: consumer, so a bare `tan generate` must not pay for a full pad-route
+#: composition on every project -- a prior revision listed this in
+#: `_OUTPUT_RELATIVE_PATH` without also listing it here, which silently grew
+#: the default set from 9 targets to 10.
+COMPOSED_ROUTE_TABLE = "composed-route-table"
+
 #: Targets an explicit `--target` can reach but the default/`--all` set never
 #: does. `zephyr-board` is absent from `_OUTPUT_RELATIVE_PATH` (it writes a
-#: directory, named per SKU+core); `ipc-contract-h` is in it.
-EXPLICIT_ONLY_TARGETS = frozenset({ZEPHYR_BOARD, IPC_CONTRACT_H})
+#: directory, named per SKU+core); `composed-route-table` and
+#: `ipc-contract-h` are both in it.
+EXPLICIT_ONLY_TARGETS = frozenset(
+    {ZEPHYR_BOARD, COMPOSED_ROUTE_TABLE, IPC_CONTRACT_H}
+)
 
 #: The default/`--all` target set. Derived, so it cannot disagree with the path
 #: table above.
@@ -167,12 +187,12 @@ ALL_EMIT_MODES = tuple(
 )
 
 #: Targets `--core` optionally SCOPES, beyond `zephyr-board` which requires it.
-#: Verbatim from `alp_project.py`'s own `--core` help. `carrier-netlist` and
-#: `native-sim-overlay` are excluded because the SDK never reads `--core` for
-#: them at all, and `os-topology` because it accepts the flag and then prints
-#: `--core is ignored for --emit os-topology (project-level emit)` and ignores
-#: it -- the same "does nothing" shape, so all three are refused rather than
-#: silently accepted.
+#: Verbatim from `alp_project.py`'s own `--core` help. `carrier-netlist`,
+#: `composed-route-table` and `native-sim-overlay` are excluded because the SDK
+#: never reads `--core` for them at all, and `os-topology` because it accepts
+#: the flag and then prints `--core is ignored for --emit os-topology
+#: (project-level emit)` and ignores it -- the same "does nothing" shape, so all
+#: four are refused rather than silently accepted.
 CORE_SCOPABLE_TARGETS = (
     "zephyr-conf",
     "yocto-conf",

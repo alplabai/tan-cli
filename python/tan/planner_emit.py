@@ -8,23 +8,25 @@ into `tan/planner/` but whose `--emit` flag lived on `scripts/alp_project.py`.
 that script -- so nothing had actually moved off alp-sdk's Python, whatever the
 relocation commit said.
 
-**All eleven modes `tan generate` can reach now render here.** The last six --
+**All twelve modes `tan generate` can reach now render here.** The last six --
 `dts-overlay`, `native-sim-overlay`, `hw-info-h`, `west-libraries`,
 `carrier-netlist` and `zephyr-board` -- relocated in the same MOVE-not-rewrite
-shape as the first five, so `IN_PROCESS_MODES` is the whole reachable set and
-`tan generate` spawns nothing:
+shape as the first five, plus `composed-route-table` (the older debug view of
+`carrier-netlist`'s own route rows), so `IN_PROCESS_MODES` is the whole
+reachable set and `tan generate` spawns nothing:
 
-    zephyr-conf         kconfig.py                 _slice_alp_conf
-    cmake-args          kconfig.py                 _slice_cmake_args
-    yocto-conf          kconfig.py                 _slice_local_conf
-    os-topology         topology.py                emit_os_topology
-    ipc-contract-h      headers.py                 emit_ipc_contract_h
-    dts-overlay         project_emit/dts.py        _emit_dts_overlay
-    native-sim-overlay  project_emit/native_sim.py _emit_native_sim_overlay
-    hw-info-h           project_emit/hw_info.py    _emit_hw_info_h
-    west-libraries      project_emit/west_libs.py  _emit_west_libraries
-    carrier-netlist     project_emit/bom_netlist.py _emit_carrier_netlist
-    zephyr-board        zephyr_board.py            emit_zephyr_board
+    zephyr-conf          kconfig.py                  _slice_alp_conf
+    cmake-args           kconfig.py                  _slice_cmake_args
+    yocto-conf           kconfig.py                  _slice_local_conf
+    os-topology          topology.py                 emit_os_topology
+    ipc-contract-h       headers.py                   emit_ipc_contract_h
+    dts-overlay          project_emit/dts.py          _emit_dts_overlay
+    native-sim-overlay   project_emit/native_sim.py   _emit_native_sim_overlay
+    hw-info-h            project_emit/hw_info.py      _emit_hw_info_h
+    west-libraries       project_emit/west_libs.py    _emit_west_libraries
+    carrier-netlist      project_emit/bom_netlist.py  _emit_carrier_netlist
+    composed-route-table project_emit/bom_netlist.py  _emit_composed_route_table
+    zephyr-board         zephyr_board.py              emit_zephyr_board
 
 The mapping is not guessed: `metadata/emit-registry-v1.json` names each mode's
 `owner.module`, and every module above is one of those owners, relocated.
@@ -42,9 +44,10 @@ including the details a rewrite loses:
 * `dts-overlay` needs the Zephyr/baremetal core-id LIST, not just the union, so
   the AEN i3c wiring can ask whether `m55_he` is in scope at all;
 * `native-sim-overlay` takes no `--core` scoping of any kind;
-* `carrier-netlist` never builds a per-core slice model -- it reads the raw
-  board.yaml dict, the SoM preset and the inline-or-preset board, exactly as
-  `main()` does before the per-core machinery is ever reached.
+* `carrier-netlist` and `composed-route-table` never build a per-core slice
+  model -- both read the raw board.yaml dict, the SoM preset and the
+  inline-or-preset board, exactly as `main()` does before the per-core
+  machinery is ever reached.
 
 **`write` uses `newline=""`, matching the SDK's own `_write_or_print`.** Windows
 text mode would translate every `\\n` to `\\r\\n`; the SDK's emits are LF on every
@@ -94,6 +97,7 @@ IN_PROCESS_MODES = frozenset({
     "hw-info-h",
     "west-libraries",
     "carrier-netlist",
+    "composed-route-table",
     "zephyr-board",
 })
 
@@ -109,6 +113,13 @@ _SLICE_RENDERER = {
     "zephyr-conf": "_slice_alp_conf",
     "yocto-conf": "_slice_local_conf",
     "cmake-args": "_slice_cmake_args",
+}
+
+#: `carrier-netlist` / `composed-route-table` share one resolution shape (see
+#: `_render_route_table`); this maps each to the emitter function that owns it.
+_ROUTE_TABLE_EMITTER = {
+    "carrier-netlist": "_emit_carrier_netlist",
+    "composed-route-table": "_emit_composed_route_table",
 }
 
 #: The emit registry, relative to the SDK checkout root.
@@ -204,13 +215,13 @@ def render(
     bind_sdk_root(sdk_root)
     import tan.planner as planner  # noqa: PLC0415 -- must follow the bind
 
-    if mode == "carrier-netlist":
-        # NOT via `load_board_yaml`: `alp_project.main()` dispatches this mode
-        # before the per-core slice machinery is reached, off the raw board.yaml
-        # dict alone. Routing it through the v2 loader would resolve a topology
-        # the emitter never looks at -- and could refuse a board the SDK's own
-        # front door serves.
-        return _render_carrier_netlist(board_yaml)
+    if mode in _ROUTE_TABLE_EMITTER:
+        # NOT via `load_board_yaml`: `alp_project.main()` dispatches these two
+        # modes before the per-core slice machinery is reached, off the raw
+        # board.yaml dict alone. Routing them through the v2 loader would
+        # resolve a topology the emitter never looks at -- and could refuse a
+        # board the SDK's own front door serves.
+        return _render_route_table(mode, board_yaml)
 
     project = planner.load_board_yaml(Path(board_yaml))
     if mode in _SLICE_RENDERER:
@@ -270,12 +281,10 @@ def render_tree(
     return {relpath.split("/", 1)[1]: content for relpath, content in files.items()}
 
 
-def _render_carrier_netlist(board_yaml: Path) -> str:
-    """`--emit carrier-netlist`, mirroring `alp_project.main()`'s own branch."""
+def _render_route_table(mode: str, board_yaml: Path) -> str:
+    """`--emit carrier-netlist` / `--emit composed-route-table`, mirroring
+    `alp_project.main()`'s own branch (the two share one dispatch there too)."""
     from tan.planner.loader import _load_yaml  # noqa: PLC0415
-    from tan.planner.project_emit.bom_netlist import (  # noqa: PLC0415
-        _emit_carrier_netlist,
-    )
     from tan.planner.paths import METADATA_ROOT  # noqa: PLC0415
     from tan.planner.project_loader import (  # noqa: PLC0415
         _resolve_inline_or_preset_board,
@@ -291,10 +300,13 @@ def _render_carrier_netlist(board_yaml: Path) -> str:
     if not isinstance(sku, str) or not sku:
         raise PlannerEmitError(
             f"{board_yaml}: `som.sku` is missing or is not a string; "
-            "--emit carrier-netlist renders the SoM's pad routes against it.")
+            f"--emit {mode} renders the SoM's pad routes against it.")
     sku_preset = _resolve_sku(sku, METADATA_ROOT)
     board_preset = _resolve_inline_or_preset_board(project, METADATA_ROOT)
-    return _emit_carrier_netlist(project, sku_preset, board_preset, METADATA_ROOT)
+    from tan.planner.project_emit import bom_netlist  # noqa: PLC0415
+
+    emitter = getattr(bom_netlist, _ROUTE_TABLE_EMITTER[mode])
+    return emitter(project, sku_preset, board_preset, METADATA_ROOT)
 
 
 #: The four modes `alp_project.py` re-fitted onto the v2 schema by projecting the

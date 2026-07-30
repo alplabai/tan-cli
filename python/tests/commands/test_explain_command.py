@@ -170,10 +170,17 @@ def test_available_generation_targets_lists_all_ten():
 #: frozen conformance golden (`contract/envelopes/explain-overview`), so adding
 #: it would be a UI change dressed up as a plumbing fix.
 #:
+#: `composed-route-table` is alp-sdk's own "demonstrator" debug view of
+#: `carrier-netlist`'s route rows (`scripts/alp_project_emit/bom_netlist.py`'s
+#: own docstring), not a shipped artefact any build or picker consumes -- the
+#: same "not a human picker item" reasoning as `ipc-contract-h` -- and
+#: `GENERATION_TARGETS` mirrors `crates/tan-core/src/loader.rs`'s
+#: `GENERATION_TARGET_CATALOG` verbatim, which (frozen) has no entry for it.
+#:
 #: Named here rather than left to a set-difference so the exclusion is a
 #: decision on the record: anything else that appears in `generate`'s table
 #: without a catalogue entry still fails the drift check below.
-UNCATALOGUED_GENERATE_TARGETS = frozenset({"ipc-contract-h"})
+UNCATALOGUED_GENERATE_TARGETS = frozenset({"ipc-contract-h", "composed-route-table"})
 
 
 def test_catalogue_cannot_drift_from_what_generate_actually_emits():

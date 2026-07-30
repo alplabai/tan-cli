@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Carrier netlist / BOM emission (`--emit carrier-netlist`).
+"""Carrier netlist / BOM emission (`--emit carrier-netlist` /
+`--emit composed-route-table`).
 
 RELOCATED (was alp-sdk `scripts/alp_project_emit/bom_netlist.py`) -- see this
 package's `__init__.py` for the move's contract.
 
-`--emit composed-route-table` did NOT come across: `tan generate` has no target
-for it (it is the older debug view of the same rows), so `_emit_composed_route_
-table` stays alp-sdk's. `_composed_route_rows`, which the two share and which is
-where the hw_rev pad-route override actually happens, is here in full -- that is
-the part `carrier-netlist` reaches.
+`_emit_composed_route_table` relocated alongside `_emit_carrier_netlist`
+(tan-cli composed-route-table front door): the two share `_composed_route_rows`
+in full -- that is where the hw_rev pad-route override actually happens -- so a
+second copy of that resolution could not exist to drift.
 """
 
 from __future__ import annotations
@@ -340,5 +340,36 @@ def _emit_carrier_netlist(
             "som_internals_excluded",
             "quantity_null_when_board_populated_has_no_count",
         ],
+    }
+    return json.dumps(result, indent=2) + "\n"
+
+
+def _emit_composed_route_table(
+    project: dict[str, Any],
+    sku_preset: dict[str, Any],
+    board_preset: dict[str, Any] | None,
+    metadata_root: Path,
+) -> str:
+    """Emit a JSON summary of the fully-composed pad route table for
+    the current (board x SoM) pair.
+
+    The table is derived by calling _resolve_pad_routes() (SoM side) and
+    _compose_route() (join with board side) for every E1M pad that
+    appears in either the board's e1m_routes: block or the SoM's
+    pad_routes: block.
+
+    Pads that only appear in the SoM's pad_routes: block (i.e. no
+    board-side role assigned) are included with null board_* fields
+    so the table is complete for the SoM-standalone scenario.
+    """
+    routes, hw_rev, silicon_variant_str = _composed_route_rows(
+        project, sku_preset, board_preset, metadata_root)
+    board_name = (board_preset or {}).get("name") or project.get("name")
+    result: dict[str, Any] = {
+        "board": board_name,
+        "som": project["som"]["sku"],
+        "hw_rev": hw_rev,
+        "silicon_variant": silicon_variant_str,
+        "routes": routes,
     }
     return json.dumps(result, indent=2) + "\n"

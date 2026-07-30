@@ -26,7 +26,7 @@ of the bound checkout. **No `tan.planner` module imports anything under
 `<sdk_root>/scripts` any more**, which is what makes an in-process emit load zero
 of alp-sdk's Python
 (`tests/parity/test_planner_emit_parity.py::test_the_in_process_path_loads_none_of_the_sdks_python`
-is the measurement, per mode across all eleven).
+is the measurement, per mode across all twelve).
 
 **Binding does NOT put `<sdk_root>/scripts` on `sys.path`, deliberately.** Nothing
 in `tan`'s own execution needs it: every `tan generate` target renders
