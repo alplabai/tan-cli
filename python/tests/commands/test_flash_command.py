@@ -288,15 +288,24 @@ boot_order: []
     assert payload["data"]["entries"][0]["status"] == "failed"
 
 
-def test_unwritable_temp_dir_fails_the_entry_not_the_process(tmp_path):
-    """The J-Link path materialises a Commander script into the system temp dir.
-    Point every temp variable at a path that does not exist: `mkstemp` raises,
-    and the entry must fail with an envelope rather than the process dying.
+def test_a_confirmed_flow_d_entry_fails_contained_when_no_tool_resolves(tmp_path):
+    """A confirmed Flow D entry must fail as an ENVELOPE, not kill the process.
 
-    Reached via a CONFIRMED Flow D entry, the only J-Link plan that spawns
-    without a probe present... and it does not get that far, which is the point:
-    the temp write is attempted by the DPIDR preflight/plan spawn and its failure
-    is contained.
+    **`PATH` is scrubbed deliberately, and that is a hardware-safety requirement,
+    not tidiness.** This manifest carries `confirm: true` and the test runs
+    WITHOUT `--dry-run`, so with a J-Link on the inherited `PATH` tan would
+    genuinely spawn Commander with `si SWD / connect / loadbin ... 0x80010000 /
+    loadbin ... 0x8057F5B0 / RSetType 2 / r / g` -- i.e. connect to whatever board
+    is attached, attempt an MRAM write, and pin-reset it, from `pytest`. The
+    maintainer's bench has a probe wired to a live AEN EVK. No test in this file
+    may ever inherit `PATH` on a confirmed, non-dry-run flash path.
+
+    The original version of this test also asserted a false premise: it claimed
+    `mkstemp` raises when `TMPDIR`/`TEMP`/`TMP` point at a nonexistent directory,
+    but `tempfile.gettempdir()` falls back past all three, so it passed for an
+    unrelated reason on every host -- the tool gate without a probe, a real spawn
+    with one. The hostile temp vars are kept (they must not break anything), but
+    the assertion now rests on the tool gate, which is what actually fires.
     """
     missing = str(tmp_path / "no" / "such" / "dir")
     manifest = f"""schema_version: 1
@@ -313,12 +322,19 @@ boot_order: []
         tmp_path,
         "--format",
         "json",
-        env={"TMPDIR": missing, "TEMP": missing, "TMP": missing},
+        # PATH="" so NOTHING can resolve: no JLinkExe, no west, no cmake. This is
+        # the guard that stops a confirmed, non-dry-run Flow D entry reaching real
+        # hardware from the test suite. Do not remove it.
+        env={"TMPDIR": missing, "TEMP": missing, "TMP": missing, "PATH": ""},
         manifest=manifest,
     )
     payload = envelope(out)
     assert exit_code == 1
     assert codes(payload) == ["flash.entry-failed"]
+    # And prove no burn was even attempted: the entry died at the TOOL GATE,
+    # before any Commander script was written or spawned.
+    message = payload["data"]["entries"][0]["message"]
+    assert "on PATH; none found" in message, message
 
 
 def test_text_mode_writes_nothing_to_stdout(tmp_path):
