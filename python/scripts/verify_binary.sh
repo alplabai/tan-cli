@@ -49,9 +49,23 @@ trap 'rm -rf "$work"' EXIT
 # help text -- on Windows that surfaces as `OSError: [Errno 22] Invalid
 # argument` from the cp1252 stdout wrapper, printed after the check already
 # passed. Harmless to the check, indistinguishable from a real crash in a log.
+#
+# The question is whether the FLAG EXISTS, not how rich chose to draw it, so the
+# text is reduced to letters/digits/hyphens before looking -- box borders, column
+# padding and line breaks all disappear, and an option name wrapped across two
+# lines rejoins. Grepping the rendered text made both macOS assets fail this
+# check while the same build shape passed on Windows and Linux: the binaries were
+# correct (`tan 0.5.0-dev`, all other proofs green) and the check was measuring
+# terminal width. On failure the raw help is dumped, because a proof that fails
+# without showing what it saw sends the next person to the wrong place.
 echo "== 2/4 generate --help carries --output"
 "$BIN" generate --help >"$work/help.txt" || fail "generate --help exited non-zero"
-grep -q -- "--output" "$work/help.txt" || fail "generate --help has no --output (pre-0.5 binary?)"
+if ! tr -cd 'A-Za-z0-9-' <"$work/help.txt" | grep -q -- "--output"; then
+  echo "---- generate --help, as rendered ----" >&2
+  cat "$work/help.txt" >&2
+  echo "--------------------------------------" >&2
+  fail "generate --help has no --output (pre-0.5 binary?)"
+fi
 
 cd "$work"
 
