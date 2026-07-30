@@ -31,6 +31,7 @@ knowing which SKUs exist.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,16 +41,69 @@ import typer
 
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.version import TAN_VERSION
 
 #: `data.schemaVersion` for this command's payload -- the envelope payload's own
 #: version, unrelated to `board.yaml`'s `schemaVersion:`.
 DATA_SCHEMA_VERSION = "1"
+
+#: The `--format` values this command accepts. `diagnostic-v1` and `sarif` are
+#: NOT part of the shared `Format::Text`/`Format::Json` enum every other
+#: command mirrors from `crates/tan-cli/src/cli.rs` -- there is no Rust
+#: precedent for them yet. They exist so alp-sdk's quality gate
+#: (`scripts/check_diagnostic_schema.py`) can point at `tan` instead of
+#: spawning `python -m alp_cli.main validate --format json`.
+#:
+#: WARNING -- `--format json` does NOT mean the same thing in the two CLIs.
+#: In alp-sdk (`scripts/alp_cli/validate.py:20,34`), `--format json` IS the
+#: diagnostic-v1 document. In tan, `--format json` is the envelope
+#: (`{command,ok,exitCode,project,data,issues}`; see `_emit` below) and the
+#: diagnostic-v1 document moved to its own `--format diagnostic-v1`. The
+#: obvious find-and-replace swap -- pointing the gate's argv at `tan` while
+#: keeping `"--format", "json"` -- validates the envelope against
+#: `diagnostic-v1.schema.json` (whose root is `additionalProperties: false`)
+#: and fails with something like "Additional properties are not allowed
+#: ('command', 'ok', 'exitCode', ...)", which names nothing about the real
+#: cause. The gate-side edit `check_diagnostic_schema.py` needs is therefore
+#: NOT a repoint of the same argv -- it must spawn
+#: `tan validate --offline --format diagnostic-v1`, not
+#: `tan validate --offline --format json`. `--format sarif` keeps its name
+#: unchanged in both CLIs, so only the `json` case silently diverges.
+#:
+#: `diagnostic-v1` is alp-sdk's `metadata/schemas/diagnostic-v1.schema.json`
+#: (mirroring `scripts/alp_cli/diagnostic_format.py:to_machine_json`'s shape --
+#: `schemaVersion`/`tool`/`diagnostics[]`, zero-based LSP ranges), `sarif` is
+#: its SARIF 2.1.0 sibling (`to_sarif`). `text` is unchanged by this addition.
+FORMAT_TEXT = "text"
+FORMAT_JSON = "json"
+FORMAT_DIAGNOSTIC_V1 = "diagnostic-v1"
+FORMAT_SARIF = "sarif"
+_FORMATS = (FORMAT_TEXT, FORMAT_JSON, FORMAT_DIAGNOSTIC_V1, FORMAT_SARIF)
+
+#: `diagnostic-v1.schema.json`'s own `schemaVersion` -- an integer `const: 1`,
+#: unrelated to `DATA_SCHEMA_VERSION` above (a different document, a different
+#: field, a different type).
+_DIAGNOSTIC_SCHEMA_VERSION = 1
+
+_SARIF_SCHEMA_URI = (
+    "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/"
+    "sarif-schema-2.1.0.json"
+)
 
 #: Outcome strings, verbatim from `tan_core::validate::Outcome::as_str`. The
 #: issue code is `validate.<outcome>`, so these strings are wire contract.
 OUTCOME_CLEAN = "clean"
 OUTCOME_SCHEMA_VIOLATION = "schema-violation"
 OUTCOME_FAILED = "failed"
+
+#: `Issue.severity` -> SARIF `level`, mirroring
+#: `scripts/alp_cli/diagnostic_format.py:_SARIF_LEVEL`. A deliberate explicit
+#: table, not a passthrough: an `Issue.severity` outside this set must raise
+#: (KeyError) rather than silently emit a SARIF log whose `level` is not one
+#: of the spec's three values. Unreachable today -- every `Issue` this file
+#: builds hardcodes `"error"` -- but the guard is the point, mirroring the
+#: oracle's own dict rather than trusting the string straight through.
+_SARIF_LEVEL = {"error": "error", "warning": "warning", "note": "note"}
 
 
 @dataclass(frozen=True)
@@ -175,23 +229,119 @@ def _resolve_board_path(project: str | None, board_yaml: str | None) -> tuple[st
     return root, f"{root}{sep}{leaf}"
 
 
+#: A single point in the offline structural checks' output: `board.yaml`
+#: parses fine, so every issue they raise is document-level rather than tied to
+#: a source line/column tan tracks today (unlike the SDK's own
+#: `Diagnostic.line`/`.col`, which the deferred spawn path would carry). Zero
+#: satisfies `diagnostic-v1.schema.json`'s `required: [start, end]` honestly --
+#: it is not a claim about *where* on the line, only that no better position
+#: is known.
+_ZERO_POSITION = {"line": 0, "character": 0}
+
+
+def _issue_to_diagnostic(issue: Issue, board_path: str) -> dict[str, Any]:
+    """One `issues[].code` (e.g. `validate.schema-violation`) as one
+    `$defs/diagnostic` entry. The dot is stripped because `diagnostic-v1`'s
+    `code` pattern (`^[A-Za-z][A-Za-z0-9_-]*$`) forbids it -- this is a
+    different wire, not a rename of the envelope code.
+
+    Deliberate omission: the oracle (`diagnostic_format.py:_diagnostic_to_
+    json`) sets `documentationUri` unconditionally via `_doc_url`, which
+    builds `docs/diagnostics/<code>.md`. tan ships no such landing pages, so
+    there is no honest URL to put there; the field is left out rather than
+    invented. It is optional in `diagnostic-v1.schema.json`, so the document
+    still validates."""
+    return {
+        "uri": board_path,
+        "range": {"start": _ZERO_POSITION, "end": _ZERO_POSITION},
+        "severity": issue.severity,
+        "code": issue.code.replace(".", "-"),
+        "message": issue.message,
+    }
+
+
+def _diagnostic_v1_document(issues: list[Issue], board_path: str) -> dict[str, Any]:
+    """`metadata/schemas/diagnostic-v1.schema.json`, mirroring
+    `scripts/alp_cli/diagnostic_format.py:to_machine_json`'s shape."""
+    return {
+        "schemaVersion": _DIAGNOSTIC_SCHEMA_VERSION,
+        "tool": {"name": "tan", "version": TAN_VERSION},
+        "diagnostics": [_issue_to_diagnostic(i, board_path) for i in issues],
+    }
+
+
+def _sarif_document(issues: list[Issue], board_path: str) -> dict[str, Any]:
+    """SARIF 2.1.0 (`runs[].results[]`), mirroring
+    `scripts/alp_cli/diagnostic_format.py:to_sarif`. A separate artefact from
+    `diagnostic-v1.schema.json` -- SARIF `region` is one-based by spec, so it
+    does not reuse `_ZERO_POSITION`.
+
+    Deliberate omission: the oracle's `_sarif_rules` gives every rule a
+    `helpUri` via the same `_doc_url`-backed `documentationUri` as above. Same
+    reasoning as `_issue_to_diagnostic`: tan has no `docs/diagnostics/<code>.md`
+    to point at, so `helpUri` is left off each rule rather than faked.
+    `helpUri` is optional in the SARIF 2.1.0 schema."""
+    rules: dict[str, dict[str, str]] = {}
+    results = []
+    for issue in issues:
+        code = issue.code.replace(".", "-")
+        rules.setdefault(code, {"id": code})
+        results.append(
+            {
+                "ruleId": code,
+                "level": _SARIF_LEVEL[issue.severity],
+                "message": {"text": issue.message},
+                "locations": [
+                    {
+                        "physicalLocation": {
+                            "artifactLocation": {"uri": board_path},
+                            "region": {
+                                "startLine": 1,
+                                "startColumn": 1,
+                                "endLine": 1,
+                                "endColumn": 1,
+                            },
+                        }
+                    }
+                ],
+            }
+        )
+    return {
+        "$schema": _SARIF_SCHEMA_URI,
+        "version": "2.1.0",
+        "runs": [
+            {
+                "tool": {
+                    "driver": {
+                        "name": "tan",
+                        "informationUri": "https://github.com/alplabai/tan-cli",
+                        "version": TAN_VERSION,
+                        "rules": list(rules.values()),
+                    }
+                },
+                "results": results,
+            }
+        ],
+    }
+
+
 def _emit(
     *,
-    json_mode: bool,
+    output_format: str,
     root: str,
     board_path: str,
     outcome: str,
     issues: list[Issue],
     exit_code: ExitCode,
 ) -> None:
-    data = {
-        "schemaVersion": DATA_SCHEMA_VERSION,
-        "outcome": outcome,
-        "issueCount": len(issues),
-        "commandLine": "",
-        "boardYamlPath": board_path,
-    }
-    if json_mode:
+    if output_format == FORMAT_JSON:
+        data = {
+            "schemaVersion": DATA_SCHEMA_VERSION,
+            "outcome": outcome,
+            "issueCount": len(issues),
+            "commandLine": "",
+            "boardYamlPath": board_path,
+        }
         emit(
             Envelope(
                 "validate",
@@ -201,6 +351,15 @@ def _emit(
                 exit_code,
             )
         )
+    elif output_format == FORMAT_DIAGNOSTIC_V1:
+        # indent=2, matching scripts/alp_cli/validate.py:34's
+        # `json.dumps(to_machine_json(collector), indent=2)` -- these two
+        # formats are ported documents, not the envelope (which is
+        # deliberately compact; see `tan.envelope.emit`'s `separators`).
+        typer.echo(json.dumps(_diagnostic_v1_document(issues, board_path), indent=2))
+    elif output_format == FORMAT_SARIF:
+        # indent=2, matching scripts/alp_cli/validate.py:36.
+        typer.echo(json.dumps(_sarif_document(issues, board_path), indent=2))
     else:
         stream = typer.get_text_stream("stderr")
         if issues:
@@ -226,7 +385,10 @@ def validate(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
     output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
+        "text",
+        "--format",
+        metavar="FORMAT",
+        help="Output format: text, json, diagnostic-v1, or sarif.",
     ),
 ) -> None:
     """Validate a board.yaml.
@@ -240,16 +402,16 @@ def validate(
     and Click rejects it there as unrecognised -- the pre-subcommand position
     the extension actually uses (`alpCli/vscodeAdapter.ts`'s `withSdkRoot`).
     """
-    if output_format not in ("text", "json"):
+    if output_format not in _FORMATS:
         raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
+            f"'{output_format}' (choose from 'text', 'json', 'diagnostic-v1', 'sarif')",
+            param_hint="--format",
         )
-    json_mode = output_format == "json"
     root, board_path = _resolve_board_path(project, board_yaml)
 
     def fail(code: str, message: str, exit_code: ExitCode) -> None:
         _emit(
-            json_mode=json_mode,
+            output_format=output_format,
             root=root,
             board_path=board_path,
             outcome=OUTCOME_FAILED,
@@ -313,7 +475,7 @@ def validate(
         else ExitCode.VALIDATION_FAILURE
     )
     _emit(
-        json_mode=json_mode,
+        output_format=output_format,
         root=root,
         board_path=board_path,
         outcome=result.outcome,

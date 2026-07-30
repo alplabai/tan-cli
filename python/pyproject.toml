@@ -69,8 +69,6 @@ dependencies = ["typer>=0.12", "rich>=13", "pyyaml>=6", "jsonschema>=4.18", "cli
 # install the moment `monitor` is registered, so
 # `tests/gates/test_declared_dependencies.py` fails if an extras-only import
 # migrates to module scope.
-[project.optional-dependencies]
-monitor = ["pyserial>=3.5"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
@@ -80,6 +78,17 @@ classifiers = [
   "Topic :: Software Development :: Build Tools",
   "Topic :: Software Development :: Embedded Systems",
 ]
+
+
+# LAST of the `[project]` content on purpose. A table header ends the parent
+# table, so every bare `key = ...` after it belongs to the SUB-table, not to
+# `[project]`. Putting this above `classifiers` silently reparented it into the
+# extras group -- `optional-dependencies` grew a bogus `classifiers` extra,
+# `project.classifiers` vanished from the metadata, and `pip install ./python`
+# failed outright. Keep new `[project]` KEYS above this line and new
+# `[project.*]` TABLES below it.
+[project.optional-dependencies]
+monitor = ["pyserial>=3.5"]
 
 [project.urls]
 Homepage = "https://github.com/alplabai/tan-cli"

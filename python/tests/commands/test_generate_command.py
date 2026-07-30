@@ -18,6 +18,7 @@ import typer
 from tan.commands import generate_cmd
 from tan.commands.generate_cmd import (
     ALL_EMIT_MODES,
+    COMPOSED_ROUTE_TABLE,
     CORE_SCOPABLE_TARGETS,
     EXPLICIT_ONLY_TARGETS,
     IPC_CONTRACT_H,
@@ -76,6 +77,12 @@ def test_bare_invocation_resolves_every_default_target():
     # zephyr-board is never folded into the default set: it hard-requires
     # --core and writes a directory, so a bare run has no path for it.
     assert ZEPHYR_BOARD not in ALL_EMIT_MODES
+    # Pinned against the Rust oracle's `tan_core::ALL_EMIT_MODES` (9 entries,
+    # crates/tan-core/src/loader.rs) so a target landing in
+    # `_OUTPUT_RELATIVE_PATH` without also landing in `EXPLICIT_ONLY_TARGETS`
+    # cannot silently grow what a bare `tan generate` runs again.
+    assert len(ALL_EMIT_MODES) == 9
+    assert COMPOSED_ROUTE_TABLE not in ALL_EMIT_MODES
 
 
 def test_single_target_resolves_to_itself():
@@ -372,6 +379,26 @@ def test_a_successful_emit_reports_the_relative_written_path(tmp_path, monkeypat
 
 
 # --------------------------------------------------------------------------
+# `composed-route-table`: the third explicit-only target
+#
+# The older pad-route debug/demonstrator view of `carrier-netlist`'s own
+# route rows -- a maintainer-only tool with no product consumer, so it must
+# stay reachable via an explicit `--target` without joining the default set a
+# bare `tan generate` runs.
+# --------------------------------------------------------------------------
+
+
+def test_composed_route_table_is_reachable_but_never_default():
+    """The regression this guards: `composed-route-table` landing in
+    `_OUTPUT_RELATIVE_PATH` without also landing in `EXPLICIT_ONLY_TARGETS`
+    silently grows the default/`--all` set and makes a bare `tan generate`
+    run a full pad-route composition for every project."""
+    assert COMPOSED_ROUTE_TABLE not in ALL_EMIT_MODES
+    assert COMPOSED_ROUTE_TABLE in EXPLICIT_ONLY_TARGETS
+    assert resolve_targets(COMPOSED_ROUTE_TABLE, False, None) == (COMPOSED_ROUTE_TABLE,)
+
+
+# --------------------------------------------------------------------------
 # `ipc-contract-h`: the second explicit-only target
 #
 # It exists so `alp_sdk_ipc_contract_header()` in alp-sdk's `cmake/alp.cmake`
@@ -663,7 +690,7 @@ def test_quiet_drops_the_summary_but_never_an_issue(tmp_path):
 # --------------------------------------------------------------------------
 # Which engine ran, and saying so
 #
-# `tan generate` renders every one of its eleven targets with `tan.planner`
+# `tan generate` renders every one of its twelve targets with `tan.planner`
 # in-process; spawning alp-sdk is now only an escape hatch
 # (`TAN_GENERATE_EXECUTOR=subprocess`) or a reported fallback. The bytes are
 # pinned by `tests/parity/test_planner_emit_parity.py` against a real checkout;
@@ -709,7 +736,7 @@ def test_the_engine_split_is_reported_per_target(tmp_path, monkeypatch, capsys):
 
 def test_every_reachable_target_renders_in_process():
     """The claim this whole change exists to make: `tan generate` serves all
-    ELEVEN targets without alp-sdk's Python.
+    TWELVE targets without alp-sdk's Python.
 
     Pinned as an equality against the reachable set, not a subset check -- a
     subset check passes just as happily when a mode quietly goes back to being
@@ -718,7 +745,7 @@ def test_every_reachable_target_renders_in_process():
     intent from drifting.
     """
     reachable = set(ALL_EMIT_MODES) | EXPLICIT_ONLY_TARGETS
-    assert len(reachable) == 11
+    assert len(reachable) == 12
     assert generate_cmd.planner_emit.IN_PROCESS_MODES == reachable
     # `zephyr-board` is the one that writes a DIRECTORY, so it must be the one
     # (and only) member of TREE_MODES -- `render()` refuses it by design.

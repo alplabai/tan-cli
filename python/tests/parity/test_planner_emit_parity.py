@@ -23,7 +23,7 @@ checks that directly, and `tests/core/test_kconfig_symbols.py` covers the
 render's own invariants hermetically.
 
 Further layers sit below that library comparison, because `tan generate` renders
-ALL ELEVEN of its targets IN-PROCESS instead of spawning
+ALL TWELVE of its targets IN-PROCESS instead of spawning
 `scripts/alp_project.py`, and a library-level match does not prove the command
 produces the same file:
 
@@ -56,7 +56,7 @@ produces the same file:
   `alp_project` / `alp_registries` / `alp_cli.validator` at module scope. Every
   emit passed while the dependency the port exists to remove was fully intact.
   `test_the_in_process_path_loads_none_of_the_sdks_python` measures it PER MODE
-  across all eleven, so a single target regressing names itself.
+  across all twelve, so a single target regressing names itself.
 * and `tan build`'s own reach, measured the same way.  `build` acquired its plan
   in-process but kept a SILENT `python -m alp_orchestrate` fallback; that is
   retired, and `test_tan_build_reaches_no_sdk_python` proves the plan-acquire
@@ -506,6 +506,7 @@ def test_the_two_engines_produce_the_same_bytes(planners, tmp_path):
         ("west-libraries", ["--core", core]),
         ("native-sim-overlay", []),
         ("carrier-netlist", []),
+        ("composed-route-table", []),
     ):
         tag = f"{mode}-{'scoped' if args else 'unscoped'}"
         common = ["--target", mode, "--board-yaml", str(board), *args]
@@ -643,6 +644,7 @@ GENERATE_MODES = (
     ("west-libraries", ANY_CORE),
     ("native-sim-overlay", None),
     ("carrier-netlist", None),
+    ("composed-route-table", None),
 )
 
 
@@ -680,20 +682,21 @@ def _oracle_emit(board: Path, mode: str, core: str | None,
     project_level = ("os-topology", "ipc-contract-h", "system-manifest",
                      "dts-reservations")
     try:
-        if mode == "carrier-netlist":
-            # `main()`'s own branch, not `_run_v2_per_core_emit`: this mode is
-            # dispatched before the per-core slice machinery is reached, off the
-            # raw board.yaml dict plus the SoM preset and the inline-or-preset
-            # board. Comparing against `_emit_carrier_netlist` alone would pass
-            # while that resolution diverged.
+        if mode in ("carrier-netlist", "composed-route-table"):
+            # `main()`'s own branch, not `_run_v2_per_core_emit`: these two modes
+            # are dispatched before the per-core slice machinery is reached, off
+            # the raw board.yaml dict plus the SoM preset and the
+            # inline-or-preset board. Comparing against the emitter alone would
+            # pass while that resolution diverged.
             raw = alp_project._validate_and_load(board, args.metadata_root)
             sku_preset = alp_project._resolve_sku(
                 raw["som"]["sku"], args.metadata_root)
             board_preset = alp_project._resolve_inline_or_preset_board(
                 raw, args.metadata_root)
+            emitter = (alp_project._emit_carrier_netlist if mode == "carrier-netlist"
+                      else alp_project._emit_composed_route_table)
             rc = alp_project._write_or_print(
-                alp_project._emit_carrier_netlist(
-                    raw, sku_preset, board_preset, args.metadata_root),
+                emitter(raw, sku_preset, board_preset, args.metadata_root),
                 destination)
         else:
             runner = (alp_project._run_v2_emit if mode in project_level
@@ -882,11 +885,12 @@ def test_the_breadth_layer_still_covers_every_board():
     total = sum(_ARTEFACTS_COMPARED.values())
     assert len(_ARTEFACTS_COMPARED) >= 90, (
         f"only {len(_ARTEFACTS_COMPARED)} boards were measured")
-    # 99 boards / 3109 artefacts as measured once the last six modes relocated
-    # (738 before). The floor keeps room for boards coming and going while still
-    # tripping if a whole mode leaves `GENERATE_MODES` -- the cheapest mode there
-    # is worth ~100 artefacts, and the board-tree layer ~450.
-    assert total >= 2800, f"only {total} artefacts were compared byte for byte"
+    # 100 boards / 3245 artefacts as measured with `composed-route-table`
+    # counted in `GENERATE_MODES` (3109 before it was added). The floor keeps
+    # room for boards coming and going while still tripping if a whole mode
+    # leaves `GENERATE_MODES` -- the cheapest mode there is worth ~100
+    # artefacts, and the board-tree layer ~450.
+    assert total >= 2900, f"only {total} artefacts were compared byte for byte"
 
 
 # ==========================================================================
@@ -1160,6 +1164,7 @@ _LAST_RELOCATED = (
     ("hw-info-h", []),
     ("west-libraries", []),
     ("carrier-netlist", []),
+    ("composed-route-table", []),
     ("zephyr-board", ["--core", "m33"]),
 )
 
@@ -1433,7 +1438,7 @@ def test_the_in_process_path_loads_none_of_the_sdks_python(tmp_path):
     measured as 32 loaded modules, and why the number to assert is 0 rather than
     some smaller number.
 
-    Measured per mode across all eleven, and the count is CUMULATIVE, so the
+    Measured per mode across all twelve, and the count is CUMULATIVE, so the
     failure message names the mode that first pulled something in rather than
     reporting one anonymous total. That matters here specifically: the last six
     modes reach `project_emit/`, `project_loader.py` and `zephyr_board.py`, whose
@@ -1461,7 +1466,7 @@ def test_the_in_process_path_loads_none_of_the_sdks_python(tmp_path):
     # The probe iterates `IN_PROCESS_MODES`, so this is what pins the SET as well
     # as the counts -- a mode dropped from that frozenset would otherwise go
     # unmeasured and pass.
-    assert len(per_mode) == 11, f"only {sorted(per_mode)} were measured"
+    assert len(per_mode) == 12, f"only {sorted(per_mode)} were measured"
 
     orchestrate = {
         mode: [n for n in loaded

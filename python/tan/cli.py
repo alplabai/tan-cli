@@ -22,10 +22,14 @@ from tan.commands.debug_config_cmd import debug_config
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain
+from tan.commands.faultdecode_cmd import faultdecode
 from tan.commands.flash_cmd import flash
 from tan.commands.generate_cmd import generate
 from tan.commands.image_cmd import image
 from tan.commands.init_cmd import init
+from tan.commands.model_cmd import model
+from tan.commands.monitor_cmd import monitor
+from tan.commands.new_som_cmd import new_som
 from tan.commands.presets_cmd import presets
 from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
@@ -49,10 +53,14 @@ app.command("debug-config")(debug_config)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("explain")(explain)
+app.command("faultdecode")(faultdecode)
 app.command("flash")(flash)
 app.command("generate")(generate)
 app.command("image")(image)
 app.command("init")(init)
+app.command("model")(model)
+app.command("monitor")(monitor)
+app.command("new-som")(new_som)
 app.command("presets")(presets)
 app.command("sdk")(sdk)
 app.command("size")(size)
@@ -64,8 +72,8 @@ app.command("validate")(validate)
 _SUBCOMMAND_NAMES = frozenset(
     {
         "bootstrap", "build", "clean", "debug-config", "doctor", "examples",
-        "explain", "flash", "generate", "image", "init", "presets", "sdk",
-        "size", "validate",
+        "explain", "faultdecode", "flash", "generate", "image", "init",
+        "model", "monitor", "new-som", "presets", "sdk", "size", "validate",
     }
 )
 
