@@ -44,7 +44,33 @@ requires-python = ">=3.12"
 # invariants into hand-written code -- the opposite of consume-what-exists. The
 # planner `sys.exit`s with an install hint if it is absent and `tan build` turns
 # that into a coded `build.plan-unavailable` envelope, never a traceback.
-dependencies = ["typer>=0.12", "rich>=13", "pyyaml>=6", "jsonschema>=4.18"]
+#
+# `click` is the fifth, and it is declared because `tan/cli.py` IMPORTS IT
+# DIRECTLY -- `from click.testing import CliRunner`, which is how `--help` under
+# `--format json` is captured into one envelope instead of Click printing
+# straight to stdout and calling `ctx.exit(0)` before `emit()` can run
+# (`_emit_help_envelope`). It rode along transitively for years because typer
+# depended on click; **typer 0.27.0 does not** -- its requires are
+# `shellingham`, `rich`, `annotated-doc` and `colorama` (Windows only). So a
+# clean `pip install alp-tan` produced `ModuleNotFoundError: No module named
+# 'click'` on first run, and every local test suite passed regardless because
+# click was present for other reasons. A package that imports a module must
+# declare it; leaning on someone else's dependency graph is what broke.
+# `tests/gates/test_declared_dependencies.py` now fails if any module under
+# `tan/` imports a distribution this list omits.
+dependencies = ["typer>=0.12", "rich>=13", "pyyaml>=6", "jsonschema>=4.18", "click>=8.1"]
+
+# `pyserial` is OPTIONAL, not required: only `tan monitor` needs it, and a serial
+# console is not worth adding to every install of a build tool. `monitor_cmd`
+# imports it lazily inside the two functions that use it and refuses with an
+# actionable message when it is absent, so `tan --version` and every other
+# command still work without it. That laziness is load-bearing, not incidental --
+# a module-scope `import serial` would make the whole CLI unimportable on a clean
+# install the moment `monitor` is registered, so
+# `tests/gates/test_declared_dependencies.py` fails if an extras-only import
+# migrates to module scope.
+[project.optional-dependencies]
+monitor = ["pyserial>=3.5"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
