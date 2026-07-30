@@ -1,0 +1,1261 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Pure planning for ``tan flash`` -- the decision + argv-building half.
+
+Port of ``crates/tan-core/src/flash/`` (``mod.rs`` / ``args.rs`` /
+``builders.rs`` / ``registry.rs`` / ``storage.rs``) plus the manifest reader in
+``crates/tan-core/src/system_manifest.rs``. Every string, argv, filter and
+per-backend command shape lives here with NO IO; the subprocess / filesystem /
+temp-file half is ``tan.commands.flash_cmd``.
+
+The flow mirrors ``alp_flash.dispatch`` + ``_flash_entry``: walk the manifest's
+``boot_order`` (or the sorted slice ``core_id``s when empty), map each step to
+its slice, append the helper MCUs after, then dispatch each entry's
+``flash_method`` to a backend plan-builder.
+
+**Strict ``flash_args`` reading.** A whole ``flash_args`` that is not a mapping
+(the AEN701 helper's ``flash_args: TBD`` string) reads as an empty map -- but a
+sub-key that IS present is read STRICTLY: every behaviour-affecting bool/int
+(``erase``, ``use_openocd``, ``reset``, ``base``, ``baud``, ...) goes through a
+``_checked`` accessor that hard-errors on a wrong-type scalar rather than
+silently defaulting, since a wrong flash is worse than a refused one. Do not
+reintroduce a tolerant bool/int reader here.
+
+**No hardware facts (I-26 / ADR-0017).** Nothing in this module names a SKU, an
+address, a pin, an I2C address, a probe serial or a vendor branch. Every such
+value arrives in ``flash_args``, passed through from alp-sdk ``metadata/``. The
+ONE exception is inherited verbatim from the Rust oracle and flagged at its
+definition (``_DEFAULT_JLINK_DEVICE``); do not add a second.
+"""
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from typing import Any, Callable
+
+#: The system-manifest schema major this command consumes. A different value is
+#: REFUSED rather than read as if it were v1 -- mirrors
+#: `system_manifest.rs::SYSTEM_MANIFEST_SCHEMA_VERSION`.
+SYSTEM_MANIFEST_SCHEMA_VERSION = 1
+
+_DEFAULT_BASE = "0x08000000"
+#: INHERITED HARDWARE FACT, not a new one. `builders.rs:15`'s
+#: `DEFAULT_JLINK_DEVICE`. This is a part number in tan, which ADR-0017 / I-26
+#: forbids, and it is already shipped in the Rust binary -- changing or dropping
+#: it here would make the port disagree with the oracle on every `swd_probe`
+#: entry whose `flash_args` omits `jlink_device`. Kept byte-identical and
+#: quarantined to this one constant; the correct fix is for the SoM preset to
+#: always supply `flash_args.jlink_device` (E1M-V2N101 already does not), after
+#: which this default becomes unreachable and can be deleted on BOTH sides.
+_DEFAULT_JLINK_DEVICE = "GD32G553MEY7TR"
+_DEFAULT_JLINK_SPEED = 4000
+_JLINK_BINARIES = ("JLinkExe", "JLink")
+
+
+class ManifestError(Exception):
+    """`build/system-manifest.yaml` could not be consumed. `message` is the
+    human text; the caller pairs it with `flash.manifest-invalid`."""
+
+
+class FlashPlanError(Exception):
+    """A backend refused to build a plan -- the `Err(String)` arm of every
+    `plan_*` builder in `builders.rs`/`storage.rs`. The message is reported
+    verbatim as the entry's `message`."""
+
+
+# ── manifest reading ────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class Slice:
+    """One per-core image from the manifest's `slices[]`. Tolerant reader: only
+    the fields `tan flash` consumes are modeled and unknown additive-v1 keys are
+    ignored, per the stability policy in `system_manifest.rs`."""
+
+    core_id: str
+    os: str
+    status: str = ""
+    output_artefact: str | None = None
+    flash_method: str | None = None
+    flash_args: Any = None
+
+
+@dataclass(frozen=True)
+class HelperMcu:
+    """One on-module helper MCU from `helper_mcus[]`."""
+
+    name: str
+    firmware_path: str | None = None
+    flash_method: str | None = None
+    flash_args: Any = None
+    update_channel: str | None = None
+
+
+@dataclass(frozen=True)
+class Manifest:
+    sku: str = ""
+    slices: tuple[Slice, ...] = ()
+    helper_mcus: tuple[HelperMcu, ...] = ()
+    boot_order: tuple[Any, ...] = ()
+
+
+def _opt_str(raw: Any) -> str | None:
+    """A manifest string field, or `None`. A non-string scalar reads as absent
+    rather than being coerced: `serde` would have failed the whole document, and
+    `str(4)` here would silently invent a path/method name."""
+    return raw if isinstance(raw, str) else None
+
+
+def parse_system_manifest(text: str) -> Manifest:
+    """Parse + version-guard a `system-manifest.yaml` document.
+
+    Raises `ManifestError` for: PyYAML unavailable, malformed YAML, a non-mapping
+    document, a `schema_version` that is not 1, or a `slices[]`/`helper_mcus[]`
+    entry missing a field the Rust struct declares non-`Option` (`core_id`/`os`
+    for a slice, `name`/`chip` for a helper) -- serde fails the ENTIRE parse in
+    that last case, so a partial read here would flash against a manifest the
+    oracle rejects.
+
+    tan ships no YAML dependency of its own (`python/pyproject.toml`), so PyYAML
+    is imported lazily. Its absence is FATAL here, unlike in `debug-config`
+    where the manifest is a best-effort enrichment: `flash` cannot pick a target
+    or an artefact without it, and silently flashing nothing would be the worse
+    outcome.
+    """
+    try:
+        import yaml  # noqa: PLC0415  (optional at runtime, by design)
+    except ImportError as err:
+        raise ManifestError(
+            "reading a system-manifest needs PyYAML, which is not importable "
+            f"({err}); install it (`pip install pyyaml`) or run tan from a "
+            "bootstrapped workspace"
+        ) from err
+    try:
+        doc = yaml.safe_load(text)
+    except Exception as err:  # noqa: BLE001 -- the SDK's output, not ours
+        raise ManifestError(f"system-manifest is not valid YAML: {err}") from err
+    if doc is None or not isinstance(doc, dict):
+        raise ManifestError(
+            "system-manifest is not valid YAML: expected a mapping at the "
+            f"document root, got {type(doc).__name__}"
+        )
+    version = doc.get("schema_version")
+    if version != SYSTEM_MANIFEST_SCHEMA_VERSION:
+        raise ManifestError(
+            f"unsupported system-manifest schema_version {version} (this CLI "
+            f"consumes v{SYSTEM_MANIFEST_SCHEMA_VERSION}); upgrade the CLI or "
+            "the SDK so the versions match"
+        )
+
+    hw_info = doc.get("hw_info")
+    sku = ""
+    if isinstance(hw_info, dict) and isinstance(hw_info.get("sku"), str):
+        sku = hw_info["sku"]
+
+    slices: list[Slice] = []
+    for raw in _seq(doc.get("slices")):
+        if not isinstance(raw, dict):
+            raise ManifestError("system-manifest is not valid YAML: slices[] entry is not a mapping")
+        core_id, os_name = raw.get("core_id"), raw.get("os")
+        if not isinstance(core_id, str) or not isinstance(os_name, str):
+            raise ManifestError(
+                "system-manifest is not valid YAML: every slices[] entry needs a "
+                "string `core_id` and `os`"
+            )
+        slices.append(
+            Slice(
+                core_id=core_id,
+                os=os_name,
+                status=raw["status"] if isinstance(raw.get("status"), str) else "",
+                output_artefact=_opt_str(raw.get("output_artefact")),
+                flash_method=_opt_str(raw.get("flash_method")),
+                flash_args=raw.get("flash_args"),
+            )
+        )
+
+    helpers: list[HelperMcu] = []
+    for raw in _seq(doc.get("helper_mcus")):
+        if not isinstance(raw, dict):
+            raise ManifestError(
+                "system-manifest is not valid YAML: helper_mcus[] entry is not a mapping"
+            )
+        name, chip = raw.get("name"), raw.get("chip")
+        if not isinstance(name, str) or not isinstance(chip, str):
+            raise ManifestError(
+                "system-manifest is not valid YAML: every helper_mcus[] entry needs "
+                "a string `name` and `chip`"
+            )
+        helpers.append(
+            HelperMcu(
+                name=name,
+                firmware_path=_opt_str(raw.get("firmware_path")),
+                flash_method=_opt_str(raw.get("flash_method")),
+                flash_args=raw.get("flash_args"),
+                update_channel=_opt_str(raw.get("update_channel")),
+            )
+        )
+
+    return Manifest(
+        sku=sku,
+        slices=tuple(slices),
+        helper_mcus=tuple(helpers),
+        boot_order=tuple(_seq(doc.get("boot_order"))),
+    )
+
+
+def _seq(raw: Any) -> list[Any]:
+    """A manifest list field. `#[serde(default)]` means a missing key is an
+    empty list; a key present with a NON-list value is a shape error serde would
+    reject, so it is not silently treated as empty here either -- `[]` is
+    returned only for genuinely absent/null."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ManifestError(
+            f"system-manifest is not valid YAML: expected a sequence, got {type(raw).__name__}"
+        )
+    return raw
+
+
+# ── target selection ────────────────────────────────────────────────────────
+
+SLICE = "slice"
+HELPER = "helper"
+
+
+@dataclass(frozen=True)
+class FlashTarget:
+    """One manifest entry selected for flashing, in dispatch order."""
+
+    kind: str
+    id: str
+    flash_method: str | None
+    flash_args: Any
+    output_artefact: str | None = None
+    firmware_path: str | None = None
+    update_channel: str | None = None
+
+
+@dataclass(frozen=True)
+class TargetPlan:
+    targets: tuple[FlashTarget, ...]
+    warnings: tuple[str, ...]
+    refused: tuple[str, ...]
+
+
+def plan_flash_targets(
+    manifest: Manifest, core: str | None = None, helper: str | None = None
+) -> TargetPlan:
+    """Build the ordered flash target list + any `boot_order` warnings/refusals.
+
+    - Empty `boot_order`: one step per slice `core_id`, sorted ascending.
+    - Non-empty `boot_order`: walked in order; a step naming a `core_id` not in
+      `slices` is dropped and surfaced as a warning.
+    - A slice whose `status` is not `ok` is REFUSED, not flashed and not silently
+      dropped: `overlay_run_results` PRESERVES the plan-time `output_artefact`
+      when a later run has no artefact for that core, so a run-1 success followed
+      by a run-2 failure/skip leaves run-1's elf on disk under a manifest
+      reporting a broken slice. Flashing that stale elf and silently dropping the
+      slice are the same silent-failure class.
+    - Helpers always come AFTER all slices.
+    - `core` flashes only that slice and skips every helper; `helper` skips every
+      slice and flashes only that helper.
+
+    Callers MUST surface `refused` as an error (not a warning): those entries
+    never enter `targets`, so a caller that only reports `targets`/`warnings`
+    would show a clean run while a stale artefact stayed unflashed.
+    """
+    targets: list[FlashTarget] = []
+    warnings: list[str] = []
+    refused: list[str] = []
+
+    def find_slice(cid: str) -> Slice | None:
+        # Non-empty core_id only, matching the Python dict-comprehension guard
+        # `alp_flash` used and the `!s.core_id.is_empty()` filter in Rust.
+        for s in manifest.slices:
+            if s.core_id and s.core_id == cid:
+                return s
+        return None
+
+    if not manifest.boot_order:
+        steps = sorted(s.core_id for s in manifest.slices if s.core_id)
+    else:
+        steps = []
+        for step in manifest.boot_order:
+            if not isinstance(step, dict):
+                continue
+            named = step.get("core")
+            if isinstance(named, str) and named:
+                steps.append(named)
+
+    # A slice present in `slices` but never named by a `boot_order` step used to
+    # be dropped with NO warning at all -- a heterogeneous system silently
+    # flashed a strict subset of its cores and reported success. Only warn on the
+    # unfiltered default run: `--core` deliberately narrows the slice set and
+    # `--helper` deliberately suppresses every slice.
+    if manifest.boot_order and helper is None and core is None:
+        for s in manifest.slices:
+            if s.core_id and s.core_id not in steps:
+                warnings.append(f"flash: slice '{s.core_id}' has no boot_order entry; not flashed")
+
+    if helper is None:
+        for cid in steps:
+            if core is not None and cid != core:
+                continue
+            found = find_slice(cid)
+            if found is None:
+                warnings.append(
+                    f"flash: boot_order references core '{cid}' not in slices; skipping"
+                )
+                continue
+            if not slice_should_flash(found.status):
+                refused.append(
+                    f"flash: slice '{found.core_id}' build status is '{found.status}' "
+                    "(not 'ok'); refusing to flash its artefact -- it may be stale "
+                    "from a previous successful build. Rebuild it first."
+                )
+                continue
+            targets.append(
+                FlashTarget(
+                    kind=SLICE,
+                    id=found.core_id,
+                    flash_method=found.flash_method,
+                    flash_args=found.flash_args,
+                    output_artefact=found.output_artefact,
+                )
+            )
+
+    if core is None:
+        for h in manifest.helper_mcus:
+            if not h.name:
+                continue
+            if helper is not None and h.name != helper:
+                continue
+            targets.append(
+                FlashTarget(
+                    kind=HELPER,
+                    id=h.name,
+                    flash_method=h.flash_method,
+                    flash_args=h.flash_args,
+                    firmware_path=h.firmware_path,
+                    update_channel=h.update_channel,
+                )
+            )
+
+    return TargetPlan(tuple(targets), tuple(warnings), tuple(refused))
+
+
+def slice_should_flash(status: str) -> bool:
+    """A slice is flashed iff it built successfully. `image_bundle.rs::
+    slice_should_bundle` -- the same one-line predicate, shared on purpose so
+    `flash` and `image` can never disagree about which artefacts are real."""
+    return status == "ok"
+
+
+# ── path helpers ────────────────────────────────────────────────────────────
+
+
+def is_rust_absolute(path: str) -> bool:
+    """`Path::is_absolute()` semantics, NOT `os.path.isabs`.
+
+    On Windows Rust requires BOTH a prefix (drive/UNC) and a root, so a
+    rooted-but-driveless `/dev/sdb` or `\\x` is RELATIVE and `base.join(p)`
+    discards part of `base`. `os.path.isabs("/dev/sdb")` answered True on
+    Windows until Python 3.13 and False from 3.13 on -- so reaching for it would
+    make artefact resolution differ from the oracle AND differ between two
+    supported interpreters on the same host.
+    """
+    if os.name == "nt":
+        drive, rest = os.path.splitdrive(path)
+        return bool(drive) and rest[:1] in ("\\", "/")
+    return path.startswith("/")
+
+
+def resolve_artefact_path(
+    artefact: str,
+    build_root: str,
+    sdk_root: str | None,
+    is_file: Callable[[str], bool],
+) -> str:
+    """Resolve a manifest artefact string to a path. Absolute strings pass
+    through; a relative string tries `build_root/artefact`, then
+    `sdk_root/artefact`, then west's NESTED `build_root/build/artefact`, and
+    falls back to the `build_root` candidate. `is_file` is injected to keep this
+    pure.
+
+    The first two candidates and the fallback are `flash/mod.rs::
+    resolve_artefact_path` verbatim. The third is the consumer half of **I-18**:
+    the planner emits `west build` with NO `-d`, so west's tree lands at
+    `<buildDir>/build/` while the plan's `artifacts` block still reports
+    `<buildDir>/zephyr/zephyr.elf`. Rust reconciles that at manifest-WRITE time
+    (`build/execute/manifest.rs::resolve_zephyr_artefact`, tan's only writer of
+    `output_artefact`, which stores the nested ABSOLUTE path); this port's
+    `build` does not write the manifest yet, so an artefact string that still
+    carries the planner's un-nested spelling would resolve to a file that is not
+    there and fail the entry. Probed LAST and only when the oracle's own
+    candidates all miss a real file, so it can never change a resolution the
+    oracle already makes -- an absolute artefact never reaches it at all.
+    """
+    if is_rust_absolute(artefact):
+        return artefact
+    cand_build = os.path.join(build_root, artefact)
+    if sdk_root is None:
+        return cand_build
+    if is_file(cand_build):
+        return cand_build
+    cand_sdk = os.path.join(sdk_root, artefact)
+    if is_file(cand_sdk):
+        return cand_sdk
+    cand_nested = os.path.join(build_root, "build", artefact)
+    if is_file(cand_nested):
+        return cand_nested
+    return cand_build
+
+
+# ── flash_args accessors ────────────────────────────────────────────────────
+
+
+def _fa_get(value: Any, key: str) -> Any:
+    """A `flash_args` sub-key, or `None` when `flash_args` is not a mapping.
+    Mirrors `args.rs::fa_get`'s `v.as_mapping()?`: the AEN701 helper's
+    `flash_args: TBD` string reads as an empty map, not an error."""
+    if not isinstance(value, dict):
+        return None
+    return value.get(key)
+
+
+def _yaml_debug(value: Any) -> str:
+    """`serde_yaml::Value`'s `{:?}` rendering, so the strict accessors' refusal
+    messages match the oracle byte for byte (`String("true")`, `Number(1)`,
+    `Bool(true)`, `Sequence [Number(1), Number(2)]`). Verified against the
+    shipped binary; the messages ship to the customer and to the extension's
+    issue list, and a diff harness that has to special-case them stops being
+    able to prove anything about the rest of the envelope."""
+    if value is None:
+        return "Null"
+    if isinstance(value, bool):
+        return f"Bool({'true' if value else 'false'})"
+    if isinstance(value, str):
+        return f'String("{value}")'
+    if isinstance(value, (int, float)):
+        return f"Number({value})"
+    if isinstance(value, list):
+        return "Sequence [" + ", ".join(_yaml_debug(v) for v in value) + "]"
+    if isinstance(value, dict):
+        body = ", ".join(f"{_yaml_debug(k)}: {_yaml_debug(v)}" for k, v in value.items())
+        return "Mapping {" + body + "}"
+    return f"String(\"{value}\")"
+
+
+def fa_str(value: Any, key: str) -> str | None:
+    """A non-empty string sub-key; `None` when absent, empty, or non-string."""
+    raw = _fa_get(value, key)
+    if isinstance(raw, str) and raw:
+        return raw
+    return None
+
+
+def fa_bool_checked(value: Any, key: str) -> bool | None:
+    """Strict bool accessor for every behaviour-affecting `flash_args` bool
+    (`reset`, `erase`, `use_openocd`, `use_pyocd`, `confirm`, ...).
+
+    A quoted `"false"` is NOT a bool, and a tolerant reader would read it as
+    absent, apply the caller's default and program the OPPOSITE of what was
+    written. `None` only for genuinely absent/null; any other shape raises."""
+    raw = _fa_get(value, key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    raise FlashPlanError(
+        f"flash_args.{key} must be a bare boolean (true/false, unquoted; got "
+        f"{_yaml_debug(raw)}) -- refusing to silently fall back to a default -- "
+        "this plans a real flash write."
+    )
+
+
+def fa_int_checked(value: Any, key: str) -> int | None:
+    """Strict int accessor (`jlink_speed`, `baud`, `jobs`, `speed`).
+
+    `0`-means-absent semantics are preserved from the oracle: an explicit `0`
+    yields `None`, i.e. "use the default". `bool` is checked BEFORE `int` --
+    Python's `True` IS an `int`, so an unguarded `isinstance(raw, int)` would
+    accept `jobs: true` and emit `-j 1`."""
+    raw = _fa_get(value, key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise FlashPlanError(_int_refusal(key, raw))
+    if isinstance(raw, int):
+        return raw if raw != 0 else None
+    raise FlashPlanError(_int_refusal(key, raw))
+
+
+def _int_refusal(key: str, raw: Any) -> str:
+    return (
+        f"flash_args.{key} must be a bare number (unquoted; got {_yaml_debug(raw)}) "
+        "-- refusing to silently fall back to a default -- this plans a real "
+        "flash write."
+    )
+
+
+def fa_str_checked(value: Any, key: str, as_hex_address: bool) -> str | None:
+    """Strict string accessor for fields where falling back to a baked-in default
+    is dangerous -- a flash base address, an OpenOCD interface/target name that
+    gets interpolated into a spawned command.
+
+    `fa_str` treats ANY non-string value -- including the bare YAML integer an
+    unquoted `base: 0x08000000` resolves to -- as "absent", so the caller
+    silently substitutes the default and programs real silicon at the wrong
+    address with no warning. This returns `None` only for genuinely
+    absent/null/empty, round-trips a bare non-negative number back into a string
+    (hex for an address field, decimal otherwise), and refuses every other shape.
+
+    A NEGATIVE number is refused outright rather than formatted: Rust's
+    `n as u64` sign-extends `-8` into `0xFFFFFFFFFFFFFFF8`, which
+    `validate_address` (a pure charset check) then ACCEPTS as a plausible
+    address and the J-Link/OpenOCD command interpolates verbatim.
+    """
+    raw = _fa_get(value, key)
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        # Guarded before the int arm for the same reason as `fa_int_checked`:
+        # `True` is an `int`, and `base: true` must not resolve to `0x00000001`.
+        raise FlashPlanError(_str_refusal(key, raw))
+    if isinstance(raw, str):
+        return raw or None
+    if isinstance(raw, int):
+        if raw < 0:
+            raise FlashPlanError(
+                f"flash_args.{key} = {raw} is negative; refusing to interpret it as "
+                "an address/count -- this plans a real flash write."
+            )
+        return f"0x{raw:08X}" if as_hex_address else str(raw)
+    raise FlashPlanError(_str_refusal(key, raw))
+
+
+def _str_refusal(key: str, raw: Any) -> str:
+    return (
+        f"flash_args.{key} must be a quoted string (got {_yaml_debug(raw)}); "
+        "refusing to silently fall back to a default -- this plans a real flash write."
+    )
+
+
+def flash_args_has_tbd(value: Any) -> bool:
+    """Whether `flash_args` carries an unresolved `TBD` ANYWHERE -- a bare `TBD`
+    scalar, or a mapping/sequence value that trims to `TBD`.
+
+    Deliberately broader than a single-key check: a `TBD` anywhere means the
+    entry is not finalised yet under the SDK's pending-placeholder convention.
+    Do not narrow this back to a set of known keys."""
+    if isinstance(value, str):
+        return value.strip() == "TBD"
+    if isinstance(value, dict):
+        return any(flash_args_has_tbd(v) for v in value.values())
+    if isinstance(value, list):
+        return any(flash_args_has_tbd(v) for v in value)
+    return False
+
+
+# ── validators ──────────────────────────────────────────────────────────────
+
+
+def validate_identifier(text: str, field_name: str) -> None:
+    """Reject anything that is not a plain identifier, or a `/`-separated path
+    of plain identifier segments.
+
+    `interface`/`target` are interpolated verbatim into an OpenOCD
+    `-f <name>.cfg` path and a `-c` Tcl command string, so an unrestricted value
+    is a path-traversal + Tcl-injection primitive into a process routinely run
+    with device-flashing privileges. Multi-segment is allowed because OpenOCD
+    ships interface configs in subdirectories (`ftdi/olimex-arm-usb-ocd-h`).
+
+    Rust composes `path_guard::is_plain_relative` with a per-segment charset
+    check. The charset alone is EQUIVALENT here and is what is implemented: the
+    only shapes `is_plain_relative` adds are absolute/rooted/drive-prefixed and
+    `.`/`..`, and every one of those carries a character (`/` leading -> an empty
+    segment, `:`, `\\`, `.`) the charset already rejects. Cross-checked against
+    the oracle on `a;b`, `../x`, `/x`, `\\x`, `C:/x`, `a//b`, `.`.
+    """
+    segments = text.split("/")
+    ok = bool(text) and all(
+        seg and all(c.isascii() and (c.isalnum() or c in "-_") for c in seg) for seg in segments
+    )
+    if not ok:
+        raise FlashPlanError(
+            f"flash_args.{field_name} = {_quoted(text)} is not a plain identifier or "
+            "'/'-separated path of plain identifiers (letters, digits, '-', '_' per "
+            "segment) -- refusing to interpolate it into a spawned command / OpenOCD "
+            "Tcl script."
+        )
+
+
+def validate_address(text: str, field_name: str) -> None:
+    """A flash base address must be purely hex digits, with an optional `0x`/`0X`.
+
+    `base` is interpolated verbatim into a J-Link Commander script LINE and an
+    OpenOCD `-c` Tcl command string -- both line/command-oriented interpreters,
+    so a newline (or `;`, `[`, `]`) inside `base` runs arbitrary extra commands
+    against whatever silicon is attached.
+    """
+    digits = text
+    for prefix in ("0x", "0X"):
+        if digits.startswith(prefix):
+            digits = digits[len(prefix) :]
+            break
+    if not digits or not all(c in "0123456789abcdefABCDEF" for c in digits):
+        raise FlashPlanError(
+            f"flash_args.{field_name} = {_quoted(text)} is not a plain hex/decimal "
+            "address -- refusing to interpolate it into a J-Link/OpenOCD command."
+        )
+
+
+#: `char::escape_debug`'s named escapes, which is what Rust's `{:?}` for a
+#: `&str` emits. Applied in ONE pass -- escaping `\\` up front and then
+#: re-scanning would revisit the backslashes it just added.
+_DEBUG_ESCAPES = {
+    "\\": "\\\\",
+    '"': '\\"',
+    "\t": "\\t",
+    "\r": "\\r",
+    "\n": "\\n",
+}
+
+
+def _quoted(text: str) -> str:
+    """Rust's `{s:?}` for a `&str`.
+
+    Not just `"` and `\\`: Rust escapes control characters too, so a `base`
+    containing a real newline renders as `"0x8000\\n r"` -- ONE line -- and not
+    as a refusal message split across two. These messages are exactly the ones
+    reporting an injection attempt (`validate_address`/`validate_identifier`
+    exist to catch a newline smuggled into a J-Link Commander script line), so a
+    diagnostic that itself breaks across lines is the worst possible rendering:
+    a reader sees a truncated message and the offending bytes on their own line.
+    Caught by the oracle diff, not by review.
+    """
+    rendered = [
+        _DEBUG_ESCAPES.get(char)
+        or (char if char.isprintable() else f"\\u{{{ord(char):x}}}")
+        for char in text
+    ]
+    return '"' + "".join(rendered) + '"'
+
+
+def is_raw_bin(artefact: str) -> bool:
+    """Whether an artefact is a raw binary (needs an explicit load address), as
+    opposed to ELF/HEX which carry their own. Passing a load offset for a
+    non-`.bin` artefact shifts every section by that offset and writes outside
+    the intended flash region."""
+    return os.path.splitext(artefact)[1].lower() == ".bin"
+
+
+# ── the plan + backend registry ─────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class FlashPlan:
+    """A built flash plan: the argv, the success message, whether it is
+    planning-only (never spawns real device IO), and -- for the J-Link path --
+    the Commander script the caller must materialise to a temp file."""
+
+    argv: tuple[str, ...]
+    ok_message: str
+    planning_only: bool = False
+    jlink_script: str | None = None
+
+
+@dataclass(frozen=True)
+class BackendMeta:
+    """A registered backend: the tool-gate `requires` list + its plan-builder."""
+
+    requires: tuple[str, ...]
+    build: Callable[["FlashInputs", Callable[[str], bool]], FlashPlan]
+
+
+@dataclass(frozen=True)
+class FlashInputs:
+    """Everything a backend plan-builder consumes. Injected by the CLI layer."""
+
+    artefact: str
+    flash_args: Any
+    core_id: str
+    sku: str
+    dry_run: bool = False
+    #: The env half of the confirm gate (`ALP_FLASH_FORCE=1`). The per-entry
+    #: `flash_args.confirm` is OR-ed in by the gated builders, so the effective
+    #: gate is `flash_args.confirm OR ALP_FLASH_FORCE=1`.
+    force_confirm: bool = False
+
+
+def backend_for(method: str) -> BackendMeta | None:
+    """Resolve a `flash_method` string to its backend metadata, or `None`."""
+    return _REGISTRY.get(method)
+
+
+def registry_keys() -> list[str]:
+    """The registered method names, sorted -- for the "Available: ..." error."""
+    return sorted(_REGISTRY)
+
+
+def registry_keys_debug() -> str:
+    """`{:?}` of a `Vec<&str>`, for the unknown-method message."""
+    return _str_list_debug(registry_keys())
+
+
+def _str_list_debug(items) -> str:
+    return "[" + ", ".join(_quoted(i) for i in items) + "]"
+
+
+# ── swd_probe ───────────────────────────────────────────────────────────────
+
+
+def jlink_commander_script(artefact: str, base: str, do_reset: bool) -> str:
+    """The J-Link Commander script: reset/halt, load (`loadbin`+base for `.bin`,
+    else `loadfile`), optional reset-and-go, quit-close."""
+    lines = ["r", "halt"]
+    if is_raw_bin(artefact):
+        lines.append(f"loadbin {artefact}, {base}")
+    else:
+        lines.append(f"loadfile {artefact}")
+    if do_reset:
+        lines += ["r", "g"]
+    lines.append("qc")
+    return "\n".join(lines) + "\n"
+
+
+def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
+    """`swd_probe`: J-Link (primary) / OpenOCD / pyOCD."""
+    fa = inp.flash_args
+    base = fa_str_checked(fa, "base", True)
+    if base is not None:
+        validate_address(base, "base")
+    else:
+        base = _DEFAULT_BASE
+    do_reset = _default(fa_bool_checked(fa, "reset"), True)
+    force_pyocd = _default(fa_bool_checked(fa, "use_pyocd"), False)
+    force_openocd = _default(fa_bool_checked(fa, "use_openocd"), False)
+    core = inp.core_id
+    is_bin = is_raw_bin(inp.artefact)
+
+    # `--dry-run` is documented to bypass the required-tool PATH gate entirely;
+    # without the `inp.dry_run` bypass here this inner probe hard-failed a dry
+    # run on any box without a probe tool installed, making `--dry-run`
+    # host-dependent instead of a pure preview.
+    jlink: str | None = None
+    if not (force_pyocd or force_openocd):
+        if inp.dry_run:
+            jlink = _JLINK_BINARIES[0]
+        else:
+            jlink = next((n for n in _JLINK_BINARIES if which(n)), None)
+    if jlink is not None:
+        device = _default(fa_str_checked(fa, "jlink_device", False), _DEFAULT_JLINK_DEVICE)
+        speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
+        return FlashPlan(
+            argv=(
+                jlink, "-device", device, "-if", "SWD", "-speed", str(speed),
+                "-AutoConnect", "1", "-ExitOnError", "1", "-NoGui", "1",
+                "-CommanderScript",
+            ),
+            ok_message=(
+                f"swd_probe[{core}]: GD32G553 flashed via J-Link ({device}) @ {base}"
+            ),
+            jlink_script=jlink_commander_script(inp.artefact, base, do_reset),
+        )
+
+    interface = _default(fa_str_checked(fa, "interface", False), "")
+    target = _default(fa_str_checked(fa, "target", False), "")
+    if not interface or not target:
+        raise FlashPlanError(
+            "swd_probe: flash_args.interface and flash_args.target are required for "
+            "the openocd/pyocd path (e.g. interface=cmsis-dap, target=gd32g553) -- "
+            "or install SEGGER J-Link for the primary path."
+        )
+    validate_identifier(interface, "interface")
+    validate_identifier(target, "target")
+    openocd = not force_pyocd and (inp.dry_run or which("openocd"))
+    pyocd = not force_openocd and (inp.dry_run or which("pyocd"))
+    if openocd:
+        program = f"program {inp.artefact} verify"
+        if do_reset:
+            program += " reset"
+        # `base` is a load OFFSET, meaningful only for a raw `.bin`; ELF/HEX
+        # carry their own addresses and OpenOCD's `program` proc adds a trailing
+        # address to them, so passing it unconditionally shifts every section.
+        program += f" exit {base}" if is_bin else " exit"
+        argv = (
+            "openocd", "-f", f"interface/{interface}.cfg",
+            "-f", f"target/{target}.cfg", "-c", program,
+        )
+    elif pyocd:
+        parts = ["pyocd", "flash", "--target", target]
+        # pyOCD's --base-address is documented binary-only; passing it for an
+        # ELF/HEX is meaningless at best and a wrong-address write at worst.
+        if is_bin:
+            parts += ["--base-address", base]
+        parts.append(inp.artefact)
+        argv = tuple(parts)
+    else:
+        raise FlashPlanError(
+            "swd_probe: no flash tool found -- install SEGGER J-Link (preferred), "
+            "or `openocd`, or `pyocd`."
+        )
+    return FlashPlan(argv=argv, ok_message=f"swd_probe[{core}]: GD32G553 flashed @ {base}")
+
+
+def _default(value, fallback):
+    """`Option::unwrap_or`. Spelled out because `value or fallback` is WRONG for
+    every falsy-but-present value this module reads -- `reset: false`,
+    `jlink_speed` legitimately absent-as-0, `interface: ""`."""
+    return fallback if value is None else value
+
+
+# ── zephyr_west_flash / baremetal_cmake_flash ───────────────────────────────
+
+
+def zephyr_build_dir(artefact: str) -> str:
+    """The Zephyr build dir derived from the artefact: `parent.parent` when the
+    artefact sits directly in a `zephyr/` subdirectory, else `parent`.
+
+    Checks the PARENT DIRECTORY NAME, never the artefact's basename: an
+    MCUboot-signed (`zephyr.signed.hex`) or sysbuild (`merged.hex`) output still
+    lands in `<build_dir>/zephyr/` under a different name, and a basename
+    allowlist sent those one directory too deep -- `west flash --build-dir
+    <that>` then failed with no CMakeCache.txt there.
+
+    `os.path.dirname`, not `Path.parent`: it slices the string and preserves
+    whatever separators the joined path already mixes (a native `build_root` +
+    a `/`-authored manifest artefact), exactly as Rust's `Path::parent` does.
+    """
+    parent = os.path.dirname(artefact)
+    if os.path.basename(parent).lower() == "zephyr":
+        return os.path.dirname(parent)
+    return parent
+
+
+def plan_zephyr_west_flash(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
+    """`zephyr_west_flash`: `west flash --build-dir <d> [--runner <r>] [--erase]
+    [--hex-file <h>]`.
+
+    `runner` is OPTIONAL -- when absent, `--runner` is omitted and `west flash`
+    falls back to the board.cmake default runner (on an AEN board that is
+    `alif_flash`, i.e. Flow A over the SE-UART).
+    """
+    del which  # this backend probes nothing
+    fa = inp.flash_args
+    runner = fa_str(fa, "runner")
+    build_dir = _default(fa_str(fa, "build_dir"), zephyr_build_dir(inp.artefact))
+    argv = ["west", "flash", "--build-dir", build_dir]
+    if runner is not None:
+        argv += ["--runner", runner]
+    if _default(fa_bool_checked(fa, "erase"), False):
+        argv.append("--erase")
+    hex_file = fa_str(fa, "hex_file")
+    if hex_file is not None:
+        argv += ["--hex-file", hex_file]
+    return FlashPlan(
+        argv=tuple(argv),
+        ok_message=(
+            f"zephyr_west_flash[{inp.core_id}]: programmed via "
+            f"{runner if runner is not None else 'board-default runner'}"
+        ),
+    )
+
+
+def plan_baremetal_cmake_flash(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
+    """`baremetal_cmake_flash`: `cmake --build <d> --target <t> [--config <c>] [-j N]`."""
+    del which
+    fa = inp.flash_args
+    build_dir = _default(fa_str(fa, "build_dir"), os.path.dirname(inp.artefact))
+    target = _default(fa_str(fa, "target"), "flash")
+    argv = ["cmake", "--build", build_dir, "--target", target]
+    config = fa_str(fa, "config")
+    if config is not None:
+        argv += ["--config", config]
+    jobs = fa_int_checked(fa, "jobs")
+    if jobs is not None:
+        argv += ["-j", str(jobs)]
+    return FlashPlan(
+        argv=tuple(argv),
+        ok_message=f"baremetal_cmake_flash[{inp.core_id}]: target `{target}` ok",
+    )
+
+
+# ── storage backends ────────────────────────────────────────────────────────
+
+PIPE = "|"
+
+
+def plan_yocto_wic(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
+    """`yocto_wic_to_sd_or_emmc` / `yocto_wic`: bmaptool (preferred) or dd to a
+    raw `/dev/` block device. Compressed images pipe `gunzip`/`xz` into `dd`.
+    Planning-only unless the confirm gate is armed."""
+    fa = inp.flash_args
+    target = fa_str(fa, "target")
+    if target is None:
+        raise FlashPlanError("yocto_wic: flash_args.target is required (e.g. /dev/sdb)")
+    if not target.startswith("/dev/"):
+        raise FlashPlanError(
+            f"yocto_wic: refusing target '{target}' -- must start with /dev/ to avoid "
+            "clobbering a regular file. Set flash_args.target to a real block device."
+        )
+    artefact = inp.artefact
+    compress = fa_str(fa, "compress")
+    if compress is None:
+        suffix = os.path.splitext(artefact)[1].lstrip(".")
+        compress = suffix if suffix in ("gz", "xz") else None
+    confirm = inp.force_confirm or _default(fa_bool_checked(fa, "confirm"), False)
+    planning_only = inp.dry_run or not confirm
+
+    bmaptool = which("bmaptool")
+    dd = which("dd")
+    if bmaptool or (planning_only and not dd):
+        argv: tuple[str, ...] = ("bmaptool", "copy", artefact, target)
+    elif dd:
+        bs = _default(fa_str(fa, "bs"), "4M")
+        dd_cmd = ["dd", f"of={target}", f"bs={bs}", "conv=fsync", "status=progress"]
+        if compress == "gz":
+            if which("gunzip"):
+                dcmp = ["gunzip", "-c", artefact]
+            elif which("gzip"):
+                dcmp = ["gzip", "-dc", artefact]
+            else:
+                raise FlashPlanError(
+                    "yocto_wic: compressed .wic.gz fallback needs `gunzip` or `gzip` on PATH."
+                )
+            argv = tuple([*dcmp, PIPE, *dd_cmd])
+        elif compress == "xz":
+            if not which("xz"):
+                raise FlashPlanError(
+                    "yocto_wic: compressed .wic.xz fallback needs `xz` on PATH."
+                )
+            argv = tuple(["xz", "-dc", artefact, PIPE, *dd_cmd])
+        else:
+            argv = (
+                "dd", f"if={artefact}", f"of={target}", f"bs={bs}",
+                "conv=fsync", "status=progress",
+            )
+    else:
+        raise FlashPlanError(
+            "yocto_wic: neither `bmaptool` nor `dd` is on PATH; install bmaptool "
+            "(preferred -- sparse aware) via `apt install bmap-tools` or run on a "
+            "host with coreutils."
+        )
+    return FlashPlan(
+        argv=argv,
+        ok_message=f"yocto_wic[{inp.core_id}]: programmed {target}",
+        planning_only=planning_only,
+    )
+
+
+def plan_xspi_flashwriter(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
+    """`xspi_flashwriter`: Renesas Flash Writer over SCIF. Planning-only unless
+    confirmed; the confirmed real write is HW-gated and fails today."""
+    del which
+    fa = inp.flash_args
+    partition = _default(fa_str(fa, "flash_partition"), "")
+    if partition not in ("mtd0", "mtd1"):
+        raise FlashPlanError(
+            "xspi_flashwriter: flash_args.flash_partition must be 'mtd0' (bl2) or 'mtd1' (fip)"
+        )
+    port = _default(fa_str(fa, "port"), "<port>")
+    writer = _default(fa_str(fa, "flash_writer"), "<flash_writer.mot>")
+    baud = _default(fa_int_checked(fa, "baud"), 115200)
+    artefact_name = os.path.basename(inp.artefact)
+    argv = (
+        "flash-writer-scif", f"port={port}", f"writer={writer}", f"baud={baud}",
+        f"partition={partition}", f"artefact={artefact_name}",
+    )
+    confirm = inp.force_confirm or _default(fa_bool_checked(fa, "confirm"), False)
+    if inp.dry_run or not confirm:
+        why = "dry-run" if inp.dry_run else "flash_args.confirm is false"
+        return FlashPlan(
+            argv=argv,
+            ok_message=(
+                f"xspi_flashwriter[{inp.core_id}]: would write {artefact_name} -> xSPI "
+                f"{partition} via Flash Writer on {port} ({why})"
+            ),
+            planning_only=True,
+        )
+    raise FlashPlanError(
+        "xspi_flashwriter: the real SCIF write is HW-gated and not yet validated on "
+        "silicon (bench shelved). Run with --dry-run; see docs/provisioning.md."
+    )
+
+
+# ── Flow D: J-Link direct MRAM write ────────────────────────────────────────
+
+#: The `flash_args` keys that ARM Flow D. Both must be present: without a
+#: part-number device profile J-Link has no MRAM loader at all, and without the
+#: app's own MRAM address there is nothing to `loadbin` it to. See
+#: `plan_alif_mram_jlink`.
+FLOW_D_KEYS = ("jlink_flash_device", "mram_address")
+FLOW_D_METHOD = "alif_mram_jlink"
+
+
+def flow_d_available(flash_args: Any) -> bool:
+    """Whether the manifest armed Flow D for this entry, i.e. supplied BOTH
+    `FLOW_D_KEYS`. Purely a data question -- see `select_flash_method`.
+
+    PRESENCE, deliberately -- not "is a non-empty string". `plan_alif_mram_jlink`
+    reads both keys with `fa_str_checked`, which accepts the bare YAML integer an
+    UNQUOTED hex `mram_address:` resolves to; a `fa_str`-based check here would
+    call that entry unarmed and SILENTLY route it to Flow A over the SE-UART
+    instead. Transport must never be decided by a quoting detail: a
+    present-but-malformed Flow D arming is a loud refusal from the builder, which
+    is the correct outcome, and this predicate's job is only to get it there.
+    """
+    return all(_fa_get(flash_args, key) is not None for key in FLOW_D_KEYS)
+
+
+def select_flash_method(target: FlashTarget) -> str | None:
+    """The `flash_method` actually dispatched for `target` -- **Flow D by
+    default, Flow A as the fallback.**
+
+    Two host paths put a signed image into MRAM on an Alif Ensemble part. Both
+    need the SETOOLS `app-gen-toc` step to sign the ATOC; they differ only in
+    TRANSPORT, and the transport is the part tan owns:
+
+    * **Flow A** -- `zephyr_west_flash` with no runner, so `west flash` picks the
+      board.cmake default (`alif_flash`) and burns over the SE-UART. Needs a
+      dedicated 1.8 V-capable USB-UART, which the bench runbook calls the #1
+      trap.
+    * **Flow D** -- `alif_mram_jlink`: J-Link straight over SWD, no SE-UART. Same
+      blobs, same addresses, ~0.16 s, and the bench's day-to-day default
+      (`docs/aen-bench-bringup.md`: "Flow D is the day-to-day default now").
+
+    The switch is made **entirely from data**, never from silicon knowledge: a
+    `zephyr_west_flash` entry whose `flash_args` carries both `FLOW_D_KEYS` is
+    dispatched as Flow D instead. tan cannot ask "is this an AEN MRAM part?" --
+    that would put a SKU or an address in tan, which ADR-0017 / I-26 forbid and
+    no gate would catch. What it CAN ask is "did the SoM preset hand me a
+    part-number J-Link profile and an MRAM address for this slice?", because
+    those arriving at all IS metadata's statement that this silicon has a J-Link
+    MRAM loader.
+
+    Consequence, stated plainly: with today's alp-sdk emit
+    (`alp_orchestrate/orchestrator.py::_slice_flash_recipe` returns
+    `("zephyr_west_flash", {})` for every Zephyr slice) NO entry carries those
+    keys, so every AEN slice still takes Flow A. Arming Flow D is a one-function
+    change on the alp-sdk side; it is deliberately NOT emulated here by
+    sniffing the SKU.
+    """
+    method = target.flash_method or None
+    if method == "zephyr_west_flash" and flow_d_available(target.flash_args):
+        return FLOW_D_METHOD
+    return method
+
+
+def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
+    """Flow D: burn the app blob + its signed ATOC into MRAM over SWD with
+    J-Link's built-in Alif MRAM loader, verify both, then PIN-reset so the
+    Secure Enclave boot ROM boots the image -- the same two blobs at the same
+    addresses SETOOLS writes over the SE-UART, so no re-signing and no keys.
+
+    **Every identifier is read from `flash_args`; none is baked in.** Required:
+
+    * `jlink_flash_device` -- the PART-NUMBER device profile. Only this unlocks
+      the loader; with a generic `Cortex-M55` profile there is no loader and
+      `loadbin` to MRAM does nothing useful. It is also the wrong profile for
+      attaching to a live core, which is why it is a distinct metadata key
+      (`jlink_flash_device`, not `jlink_device`) on the SoC spec.
+    * `mram_address` -- where the app itself is linked, so the SE boots it in
+      place rather than loading it.
+    * `atoc` + `atoc_address` -- the signed ATOC blob and its MRAM placement.
+      The addresses SHIFT per build/config and the runbook says outright not to
+      hardcode them; they are read from the signing step's own report. tan does
+      NOT run `app-gen-toc`: signing is common to both flows and belongs to
+      whatever produced the ATOC, and a license-gated vendor tool whose output
+      map file tan would have to parse for an address is not a dependency the
+      transport step needs.
+
+    Absent any of them this REFUSES. There is no default to fall back to: a
+    guessed MRAM address is a write to the wrong place on a part whose Secure
+    Enclave then boots whatever is there.
+
+    Confirm-gated (`flash_args.confirm` OR `ALP_FLASH_FORCE=1`) like the other
+    two persistent-device backends -- see the `planning_only` note below.
+    """
+    fa = inp.flash_args
+    device = fa_str_checked(fa, "jlink_flash_device", False)
+    if device is None:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.jlink_flash_device is required -- only the "
+            "part-number J-Link device profile unlocks the MRAM loader, and the "
+            "generic profile has none. It is a per-variant metadata fact "
+            "(socs/**/*.json `variants[].debug.jlink_flash_device`); tan does not "
+            "guess a part number."
+        )
+    validate_identifier(device, "jlink_flash_device")
+    app_address = fa_str_checked(fa, "mram_address", True)
+    if app_address is None:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.mram_address is required -- it is where the "
+            "app is linked and where the Secure Enclave boots it in place. Refusing "
+            "to guess an MRAM address."
+        )
+    validate_address(app_address, "mram_address")
+
+    atoc = fa_str(fa, "atoc")
+    atoc_address = fa_str_checked(fa, "atoc_address", True)
+    if atoc is None or atoc_address is None:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.atoc (the signed ATOC blob) and "
+            "flash_args.atoc_address are both required. Both flows burn the SAME "
+            "signed ATOC -- sign it with the SETOOLS `app-gen-toc` step and pass the "
+            "blob plus the placement its own report prints; the addresses shift per "
+            "build and must not be hardcoded."
+        )
+    validate_address(atoc_address, "atoc_address")
+
+    speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
+    # Probe serial: the ONLY disambiguator when a bench carries more than one
+    # J-Link. No default -- a bench-wide serial can be shared by two probes that
+    # differ only by USB path, and a silent default can select the wrong board.
+    serial = fa_str(fa, "jlink_serial")
+    # The expected SW-DP IDR. When the manifest supplies one, the Commander
+    # script connects with the READ profile first and the caller ABORTS unless
+    # that ID appears -- writing MRAM on the wrong attached board is the one
+    # unrecoverable mistake this path can make. A hardware value, so it comes
+    # from data: tan neither knows nor invents an IDR.
+    expect_dpidr = fa_str_checked(fa, "expect_dpidr", False)
+    if expect_dpidr is not None:
+        validate_address(expect_dpidr, "expect_dpidr")
+
+    jlink = _JLINK_BINARIES[0] if inp.dry_run else next(
+        (n for n in _JLINK_BINARIES if which(n)), None
+    )
+    if jlink is None:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: needs SEGGER J-Link on PATH (JLinkExe/JLink), on a "
+            "V9.46+ DLL with the probe on matched firmware -- the built-in Alif MRAM "
+            "loader ships with the DLL and older ones cannot connect with the "
+            "part-number device profile."
+        )
+
+    lines: list[str] = []
+    if serial is not None:
+        lines.append(f"SelectEmuBySN {serial}")
+    lines += ["si SWD", f"speed {speed}", f"device {device}", "connect"]
+    lines += [
+        f"loadbin {inp.artefact} {app_address}",
+        f"loadbin {atoc} {atoc_address}",
+        f"verifybin {inp.artefact} {app_address}",
+        f"verifybin {atoc} {atoc_address}",
+        # PIN reset (RSetType 2), then run: the Secure Enclave boot ROM re-reads
+        # and boots the ATOC, exactly as it does after an SE-UART burn. A core
+        # reset would leave the SE out of the loop.
+        "RSetType 2",
+        "r",
+        "g",
+        "exit",
+    ]
+    argv = (
+        jlink, "-device", device, "-if", "SWD", "-speed", str(speed),
+        "-ExitOnError", "1", "-NoGui", "1", "-CommanderScript",
+    )
+    confirm = inp.force_confirm or _default(fa_bool_checked(fa, "confirm"), False)
+    return FlashPlan(
+        argv=argv,
+        ok_message=(
+            f"{FLOW_D_METHOD}[{inp.core_id}]: app -> {app_address}, signed ATOC -> "
+            f"{atoc_address} via J-Link ({device}); verified and PIN-reset"
+        ),
+        # `planning_only` -- and therefore the `planned` status + the
+        # `flash.confirm-required` warning -- for an UNCONFIRMED run, matching
+        # `yocto_wic`/`xspi_flashwriter`. This is a NEW backend, so nothing in
+        # the oracle is being diverged from, and it is the only backend in the
+        # registry that persistently programs on-die MRAM: a `tan flash` in a
+        # fresh customer's checkout must not silently reprogram an attached
+        # module. `swd_probe` is ungated for a reason that does not apply here
+        # (it targets an external helper MCU's own flash).
+        planning_only=inp.dry_run or not confirm,
+        jlink_script="\n".join(lines) + "\n",
+    )
+
+
+def flow_d_preflight_script(inp: FlashInputs) -> tuple[str, str] | None:
+    """The read-only DPIDR preflight for a Flow D plan: `(script, expected_id)`,
+    or `None` when the manifest declared no `expect_dpidr`.
+
+    Run BEFORE any write, with the manifest's READ device profile (a live-core
+    attach profile, which the part-number one is not), so the caller can abort on
+    the wrong board while the session is still read-only. Both the device name
+    and the expected ID come from `flash_args`.
+    """
+    fa = inp.flash_args
+    expected = fa_str_checked(fa, "expect_dpidr", False)
+    read_device = fa_str_checked(fa, "jlink_device", False)
+    if expected is None or read_device is None:
+        return None
+    validate_address(expected, "expect_dpidr")
+    validate_identifier(read_device, "jlink_device")
+    speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
+    lines = []
+    serial = fa_str(fa, "jlink_serial")
+    if serial is not None:
+        lines.append(f"SelectEmuBySN {serial}")
+    lines += ["si SWD", f"speed {speed}", f"device {read_device}", "connect", "exit"]
+    return "\n".join(lines) + "\n", expected
+
+
+_REGISTRY: dict[str, BackendMeta] = {
+    "swd_probe": BackendMeta(("JLinkExe", "JLink", "openocd", "pyocd"), plan_swd_probe),
+    "zephyr_west_flash": BackendMeta(("west",), plan_zephyr_west_flash),
+    "baremetal_cmake_flash": BackendMeta(("cmake",), plan_baremetal_cmake_flash),
+    "yocto_wic_to_sd_or_emmc": BackendMeta(("bmaptool", "dd"), plan_yocto_wic),
+    "yocto_wic": BackendMeta(("bmaptool", "dd"), plan_yocto_wic),
+    "xspi_flashwriter": BackendMeta((), plan_xspi_flashwriter),
+    FLOW_D_METHOD: BackendMeta(("JLinkExe", "JLink"), plan_alif_mram_jlink),
+}
+
+
+# ── the required-tool gate ──────────────────────────────────────────────────
+
+PROCEED = "proceed"
+SKIP = "skip"
+FAIL = "fail"
+
+
+@dataclass(frozen=True)
+class ToolGate:
+    outcome: str
+    message: str = ""
+
+
+def tool_gate(
+    requires,
+    dry_run: bool,
+    skip_missing: bool,
+    kind: str,
+    entry_id: str,
+    method: str,
+    which: Callable[[str], bool],
+) -> ToolGate:
+    """A backend is usable when AT LEAST ONE of `requires` is on PATH. Bypassed
+    entirely under `--dry-run`, and for a backend with an empty `requires`."""
+    if dry_run or not requires:
+        return ToolGate(PROCEED)
+    if any(which(t) for t in requires):
+        return ToolGate(PROCEED)
+    msg = (
+        f"flash: {kind} '{entry_id}' backend '{method}' needs one of "
+        f"{_str_list_debug(requires)} on PATH; none found."
+    )
+    if skip_missing:
+        return ToolGate(SKIP, f"{msg} (skipped via --skip-missing-tools)")
+    return ToolGate(FAIL, msg)
+
+
+# ── argv display ────────────────────────────────────────────────────────────
+
+
+def display_argv(plan: FlashPlan) -> str:
+    """The would-run display string; a J-Link plan shows a `<generated.jlink>`
+    placeholder for the temp Commander script (which does not exist yet, and
+    whose name carries a pid + nanosecond stamp that must never reach a
+    golden)."""
+    parts = list(plan.argv)
+    if plan.jlink_script is not None:
+        parts.append("<generated.jlink>")
+    return " ".join(parts)

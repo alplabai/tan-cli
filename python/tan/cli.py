@@ -17,6 +17,7 @@ from tan.commands.debug_config_cmd import debug_config
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain
+from tan.commands.flash_cmd import flash
 from tan.commands.generate_cmd import generate
 from tan.commands.init_cmd import init
 from tan.commands.presets_cmd import presets
@@ -39,6 +40,7 @@ app.command("debug-config")(debug_config)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("explain")(explain)
+app.command("flash")(flash)
 app.command("generate")(generate)
 app.command("init")(init)
 app.command("presets")(presets)
@@ -49,7 +51,7 @@ app.command("validate")(validate)
 #: the subcommand name for them (clap's `global = true`). Grow this as each
 #: command is taught to; see `root` for why an unlisted command must REFUSE the
 #: pre-subcommand position rather than silently ignore it.
-_HONOURS_ROOT_FORMAT = frozenset({"debug-config"})
+_HONOURS_ROOT_FORMAT = frozenset({"debug-config", "flash"})
 
 
 @app.callback(invoke_without_command=True)
