@@ -7,6 +7,38 @@ All notable changes to `tan` are documented here. Format follows
 
 ## [Unreleased]
 
+### Fixed
+- **A `TBD` placeholder reached every flash backend as a real value** (#222).
+  `TBD` is a deliberate alp-sdk convention — where the exact hardware
+  configuration is not yet known the field is marked `TBD` rather than invented —
+  so the convention itself routinely produces the value, and every guard in this
+  area tested for *empty*, which is the one thing `TBD` is not. `fa_str`, the
+  accessor all thirteen string reads in every backend go through, returned it:
+  the literal string `TBD` became a `west flash --runner`, a build directory, a
+  hex file, an OpenOCD config path and a `dd` destination. The same defect was
+  measured in alp-sdk (`flash/mod.rs:307`), where it resolved to
+  `<build_root>/TBD` and a real flasher was spawned against it.
+
+  Fixed once, in the accessor, not thirteen times at the call sites: `TBD` now
+  reads as **absent**, which is what it means. Every caller's existing
+  `unwrap_or_else(default)` / `if let Some` then treats it as the unfilled field
+  it is, with no new branch anywhere — `build_dir` falls back to the computed
+  Zephyr build dir instead of a literal `TBD` directory, `target` to `flash`,
+  `bs` to `4M`. It also matches what tan already did with the whole entry
+  (`commands::flash` SKIPS a target whose `flash_args` contains `TBD`) and what
+  the sibling `fa_bool_checked`/`fa_int_checked` already did with a bare
+  `flash_args: TBD`.
+
+  The sentinel is now defined ONCE (`PENDING_PLACEHOLDER` /
+  `is_pending_placeholder`) rather than written out at three sites, because the
+  failure mode of three copies is a fourth reader written without one.
+
+  Every one of the thirteen call sites was audited for whether "absent" is safe
+  there. Each is either already protected by a closed-set check that `TBD` also
+  failed (`plan_yocto_wic`'s required-`target` plus its `/dev/` prefix refusal,
+  `plan_xspi_flashwriter`'s `mtd0`/`mtd1`) or strictly improves. None was found
+  where absent is more dangerous than the placeholder was.
+
 ### Added
 - **Linux and macOS now see the manual-install hints the SDK provides for them**
   (#230). alp-sdk v0.14.0 added `manualInstallHints.posix.note` — the POSIX twin
