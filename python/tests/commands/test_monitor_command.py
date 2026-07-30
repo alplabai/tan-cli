@@ -224,3 +224,52 @@ def test_a_bad_format_value_is_a_usage_error_not_a_traceback():
     result = runner.invoke(app, ["--format", "xml"])
     assert result.exit_code == 2
     assert "Traceback" not in (result.output or "")
+
+
+def _block_pyserial(monkeypatch):
+    """Make `from serial.tools import list_ports` raise ImportError.
+
+    Simulates a build without the `monitor` extra. Blocking at `sys.modules`
+    with `None` is what makes the guarded import raise the same ImportError an
+    absent distribution would, without uninstalling anything.
+    """
+    for name in ("serial", "serial.tools", "serial.tools.list_ports"):
+        monkeypatch.setitem(sys.modules, name, None)
+
+
+def test_frozen_build_without_the_extra_reports_pyserial_missing_not_a_tan_bug(monkeypatch):
+    """The FROZEN path is the one the precheck deliberately skips.
+
+    `_run_monitor` only validates pyserial when it is about to spawn THIS
+    interpreter; under PyInstaller `sys.frozen` is set, that precheck is
+    skipped, and `_available_ports()` becomes the first thing to touch
+    pyserial -- in-process, before any child exists. Unguarded, that surfaced
+    as `monitor.internal-failure` at exit 5, which tells a customer tan is
+    broken when the honest answer is that an optional dependency was never
+    installed. Regression pin for a real frozen no-extras build.
+    """
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    _block_pyserial(monkeypatch)
+
+    result = runner.invoke(app, ["--format", "json"])
+
+    envelope = json.loads(result.stdout)
+    codes = [issue["code"] for issue in envelope["issues"]]
+    assert codes == ["monitor.pyserial-missing"], envelope
+    assert "monitor.internal-failure" not in codes
+    assert result.exit_code == 1, f"expected RUNTIME_FAILURE, got {result.exit_code}"
+    assert 'alp-tan[monitor]' in envelope["issues"][0]["message"]
+
+
+def test_unfrozen_build_without_pyserial_reports_the_same_code(monkeypatch):
+    """The source-install path must not diverge from the frozen one: same code,
+    same message, so a consumer matching on `monitor.pyserial-missing` sees one
+    spelling regardless of how tan was delivered."""
+    monkeypatch.setattr(sys, "frozen", False, raising=False)
+    _block_pyserial(monkeypatch)
+
+    result = runner.invoke(app, ["--format", "json"])
+
+    envelope = json.loads(result.stdout)
+    assert [i["code"] for i in envelope["issues"]] == ["monitor.pyserial-missing"], envelope
+    assert result.exit_code == 1
