@@ -78,6 +78,15 @@ jobs:
       # catching it (npm-shim was six releases stale before this check existed).
       # Same style as the check above deliberately: grep the one version line
       # rather than parse the JSON with a tool this job doesn't otherwise need.
+      #
+      # KEPT WHILE npm PUBLISHING IS OFF, on purpose. `publish_npm` is opt-in
+      # (see its own `NPM_PUBLISH_ENABLED`), so as of v0.4.1 this gate keeps a
+      # package version in step that nothing consumes — the release cut is a
+      # FIVE-file bump for a channel that does not publish. That is deliberate,
+      # not an oversight: the day the token is fixed (#233) the shim must already
+      # be at the right version, and the alternative is re-discovering the
+      # six-releases-stale bug this check exists to prevent. Cheap to keep,
+      # expensive to re-earn.
       - name: npm-shim version == Cargo version
         shell: bash
         run: |
@@ -426,6 +435,25 @@ jobs:
         working-directory: npm-shim
     env:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Publishing is OPT-IN, off by default. Set the repository VARIABLE
+      # `TAN_NPM_PUBLISH` to `true` to arm it (Settings -> Secrets and variables
+      # -> Actions -> Variables). A variable, not a secret: the value is not
+      # sensitive, and a secret that gates behaviour is invisible in the UI.
+      #
+      # WHY off (#233): v0.4.1's publish failed with `npm error code EOTP` --
+      # `NPM_TOKEN` is a classic/publish token on a 2FA account, so `npm publish`
+      # demands an interactive one-time password no CI run can answer. Only an
+      # npm AUTOMATION (or granular) token is exempt. That is an account-side
+      # fix, so the failure recurs on every final tag until it is made.
+      #
+      # A permanently-red job on the release workflow is worse than no job. It is
+      # the mirror of a gate that cannot fail: a job that can only fail teaches
+      # everyone to stop reading the one board where ignoring red is least
+      # affordable. So this is gated OFF rather than left red -- and the OFF path
+      # is LOUD (see `npm publishing is disabled` below), because the other
+      # failure this repo spent the week removing is a channel that quietly
+      # reports success while shipping nothing (#151).
+      NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -433,29 +461,55 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
 
+      # Runs whether or not publishing is armed. The shim is still a shipped
+      # artefact of this repo, and a shim that stops packing is worth catching
+      # while it is cheap rather than on the day the token is fixed.
       - name: Pack (smoke — confirm the shim packs with its bin + postinstall)
         run: |
           npm pack --dry-run
           node -e "const p=require('./package.json'); if(!p.bin||!p.bin.tan) throw new Error('shim missing bin.tan')"
+
+      # The OFF path, and it says so out loud in the run summary rather than
+      # passing silently. Exits 0: not publishing is the DECISION here, not a
+      # failure, and the release itself is unaffected.
+      - name: npm publishing is disabled
+        if: ${{ env.NPM_PUBLISH_ENABLED != 'true' }}
+        run: |
+          {
+            echo "### npm: NOT PUBLISHED — deliberately disabled"
+            echo
+            echo "\`@alplabai/tan@${GITHUB_REF_NAME#v}\` was **not** published. The shim packed cleanly; publishing is gated off."
+            echo
+            echo "Reason: the configured \`NPM_TOKEN\` requires an interactive one-time password (\`npm error code EOTP\`), which no CI run can supply. It needs replacing with an npm **automation** token — see [#233](https://github.com/alplabai/tan-cli/issues/233)."
+            echo
+            echo "To arm this job once that is done, set the repository variable \`TAN_NPM_PUBLISH\` to \`true\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::npm publish is gated off (TAN_NPM_PUBLISH is not 'true'). @alplabai/tan was NOT published for this tag; see #233."
 
       # Same rule as the crates.io job, and for the same reason: this job only
       # runs on a final tag, so a missing token means the release advertises
       # `npm i -g @alplabai/tan` for a package that does not exist. v0.4.0 did
       # (#151). The pack smoke above still runs first, so a genuinely broken
       # shim is reported as a broken shim rather than as a missing secret.
+      # The three ARMED steps below all carry the same gate. Left individually
+      # conditional rather than split into a second job, so the token refusal,
+      # the publish and the outcome record stay next to the pack smoke they
+      # belong with.
       - name: Refuse to "publish" with no token
-        if: ${{ env.NPM_TOKEN == '' }}
+        if: ${{ env.NPM_PUBLISH_ENABLED == 'true' && env.NPM_TOKEN == '' }}
         run: |
           echo "### npm: NOT PUBLISHED" >> "$GITHUB_STEP_SUMMARY"
           echo "\`NPM_TOKEN\` is not set, so \`npm i -g @alplabai/tan\` will not resolve for this release. The shim packed cleanly." >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::NPM_TOKEN is not set. A FINAL release must not report a successful npm publish it did not perform (#151). Add the secret, or drop the npm install path from the docs and this job."
+          echo "::error::NPM_TOKEN is not set, but TAN_NPM_PUBLISH is 'true'. A FINAL release must not report a successful npm publish it did not perform (#151). Add the secret, or unset TAN_NPM_PUBLISH."
           exit 1
 
       - name: Publish to npm
+        if: ${{ env.NPM_PUBLISH_ENABLED == 'true' }}
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Record the npm outcome
+        if: ${{ env.NPM_PUBLISH_ENABLED == 'true' }}
         run: |
           echo "### npm: published \`@alplabai/tan@${GITHUB_REF_NAME#v}\`" >> "$GITHUB_STEP_SUMMARY"
