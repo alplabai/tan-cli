@@ -38,6 +38,14 @@ path byte-identity is measured on
   the file with a bare `path.read_text()`, i.e. in the host's locale encoding, so
   a non-ASCII board.yaml decoded as cp1252 on Windows. `loader._load_yaml` reads
   UTF-8 explicitly.
+
+A fourth change landed later and IS behavioural on a refusal path: alp-sdk
+#1025 fixed `_hwrev_pad_route_overrides` to raise on an `hw_rev` absent from
+the resolved `hw_revisions:` table -- ported here in the same shape (see that
+function's own docstring). Before it, an unrecognised `hw_rev` silently
+resolved to base-revision pad routing with a clean exit code on this file's
+two emit modes (`carrier-netlist` / `composed-route-table`), which never run
+`loader.load_board_yaml` and so never saw that fix's other half.
 """
 
 from __future__ import annotations
@@ -47,8 +55,9 @@ from typing import Any
 
 import yaml
 
+from . import sdk_compat
 from .loader import _load_yaml
-from .models import OrchestratorError
+from .models import OrchestratorError, SdkRevisionUnknown
 from .paths import METADATA_ROOT, REPO
 from .som_metadata import _sku_family
 
@@ -161,6 +170,19 @@ def _hwrev_pad_route_overrides(
     returns that rev's list (empty when it declares none, so the base
     ``pad_routes:`` then applies verbatim).  Applying these is what makes
     the composed route table differ between revisions of one SKU.
+
+    Raises `SdkRevisionUnknown` when `hw_rev` is set but isn't a key in the
+    family table (alp-sdk #1025's `carrier-netlist` / `composed-route-table`
+    half).  Before that fix an unrecognised `hw_rev` fell through to `{}`
+    here, so the composed table silently emitted with base (production) pad
+    routing instead of naming the wrong-hardware problem: this emit path
+    resolves its own SoM/board data independently of
+    `loader.load_board_yaml`, so it needs its own gate -- `loader`'s own
+    existence check, `_check_hw_rev_exists`, only runs inside
+    `load_board_yaml` and never reaches this path. Same predicate
+    (`sdk_compat.revision_known`), same error type and message shape as
+    that gate's SoM-side refusal, so a caller does not see two different
+    shapes of the same problem depending on which `--emit` mode it used.
     """
     if not hw_rev:
         return []
@@ -172,6 +194,11 @@ def _hwrev_pad_route_overrides(
     if not path.is_file():
         return []
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if sdk_compat.revision_known(data, hw_rev) is False:
+        available = sorted((data.get("hw_revisions") or {}).keys())
+        raise SdkRevisionUnknown(
+            f"SoM {sku} hw_rev {hw_rev!r} is not a known hardware "
+            f"revision. Available hw_rev(s) for {sku}: {available}.")
     rev = (data.get("hw_revisions") or {}).get(hw_rev) or {}
     overrides = rev.get("pad_route_overrides") or []
     return [e for e in overrides
