@@ -56,19 +56,29 @@ on:
   # they were measured under -- they move with the worktree and the SDK pin, so
   # they are not repeated here. Deliberately reuses this workflow rather than
   # duplicating python-tests into release.yml: PINNED_SDK_TAG + the alp-sdk
-  # checkout steps live here. seam1/seam2/first-blink are gated on the
-  # `python_only` input below -- with the `push: branches: [main]` trigger
-  # above they now genuinely run on every commit that LANDS on `main`, by PR or
-  # by direct push, so re-running them for a tag cut from `main` would add
-  # matrix minutes and no coverage; python-tests is the one job a release has
-  # never run before, so it is the one this trigger adds.
+  # checkout steps live here. seam2/first-blink, and MOST of seam1's own
+  # steps, are gated on the `python_only` input below -- with the
+  # `push: branches: [main]` trigger above they now genuinely run on every
+  # commit that LANDS on `main`, by PR or by direct push, so re-running them
+  # for a tag cut from `main` would add matrix minutes and no coverage;
+  # python-tests is the one job a release has never run before, so it is one
+  # of the things this trigger adds.
   #
-  # The residual assumption, stated rather than hidden: a tag cut from a commit
-  # that is NOT on `main` gets no seam1/seam2/first-blink vote. release.yml:90
-  # refuses that same assumption for the Rust gates and re-runs ci.yml
+  # seam1's tests/gates block is the OTHER thing this trigger adds, and is
+  # deliberately NOT gated on `python_only` (see that input's own comment) --
+  # unlike the rest of seam1/seam2/first-blink, it always runs under a
+  # `python_only: true` call, so a release tag gets tests/gates coverage
+  # regardless of whether its commit ever landed on `main`.
+  #
+  # The residual assumption, narrowed rather than removed: a tag cut from a
+  # commit that is NOT on `main` still gets no seam2/first-blink vote, and no
+  # vote from seam1's emit/kconfig/bootstrap/toolchain/scaffold parity steps
+  # (it does now get seam1's tests/gates vote, unconditionally). release.yml:90
+  # refuses the analogous assumption for the Rust gates and re-runs ci.yml
   # unconditionally. Tag from `main` and the two agree; tag from anywhere else
-  # and the Python side is deliberately the weaker of the two. If tags ever get
-  # cut off-main, delete the `python_only` skip rather than re-deriving this.
+  # and the Python side is still the weaker of the two, just less weak than it
+  # was. If tags ever get cut off-main, delete the remaining `python_only`
+  # skips rather than re-deriving this.
   #
   # `github.event_name != 'workflow_call'` looks like the obvious guard for
   # "skip on workflow_call" but is wrong for a REUSABLE workflow: inside a
@@ -83,7 +93,7 @@ on:
       # is falsy) on both `pull_request` and `repository_dispatch`, so those
       # two paths are unaffected by this input's existence.
       python_only:
-        description: "Run only python-tests (release.yml's python-gates call); skip seam1/seam2/first-blink, which the push+pull_request triggers already run on every commit that lands on main."
+        description: "release.yml's python-gates call: skip seam2/first-blink and seam1's emit/kconfig/bootstrap/toolchain/scaffold parity steps, all of which the push+pull_request triggers already ran for this commit on main. Does NOT skip seam1's tests/gates block (audit-commit byte-hash gate + live jlink-freshness) -- that block is the only place tests/gates runs at all, and a tag cut from a commit that never landed on main (the residual case below) would otherwise get zero tests/gates coverage."
         type: boolean
         default: false
 
@@ -128,14 +138,21 @@ env:
 jobs:
   seam1-plan-shape:
     name: "seam1 -- plan-shape parity"
-    # Skipped only when release.yml's `python-gates` job passes
-    # `python_only: true` -- see the trigger's own comment above for why
-    # `github.event_name != 'workflow_call'` cannot express this (it is always
-    # true inside a called workflow, so it never actually gated anything).
-    # The `push`/`pull_request` triggers above run this on every commit that
-    # lands on `main`, so a tag cut from `main` gains nothing re-running it --
-    # see the trigger comment for the off-main tag case that leaves open.
-    if: ${{ !inputs.python_only }}
+    # NOT job-gated on `python_only` (it used to be, in full -- that was the
+    # bug: it took this job's tests/gates block down with it). This job now
+    # ALWAYS runs; `python_only: true` (release.yml's `python-gates` call)
+    # instead marks the individual emit/kconfig/bootstrap/toolchain/scaffold
+    # parity steps below `if: ${{ !inputs.python_only }}` -- see each step --
+    # because THOSE are what the `push`/`pull_request` triggers above already
+    # ran for this commit on `main`, and a tag cut from `main` gains nothing
+    # re-running them. The tests/gates block (audit-commit checkout + jlink
+    # freshness, further down) carries no such `if:` and always runs: it is
+    # the only place in this workflow tests/gates runs at all, and skipping it
+    # under `python_only` was the hole where a release tag got zero
+    # tests/gates coverage even though seam1's OTHER steps looked like they
+    # covered it. See the `python_only` input's own comment for the off-main
+    # tag case this still cannot see (the tag's own commit was never pushed to
+    # `main`, so nothing upstream of this job ran either).
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
@@ -239,20 +256,29 @@ jobs:
       - name: install SDK emit + test deps
         run: python3 -m pip install --upgrade pip pyyaml jsonschema pytest
 
+      # These five steps (through scaffold byte-parity) are the ones the
+      # `push`/`pull_request` triggers above already ran for this exact commit
+      # once it landed on `main` -- re-running them under `python_only: true`
+      # (a tag cut from that same commit) adds minutes, not coverage. Skipped
+      # ONLY there; the tests/gates block below carries no such condition.
+      #
       # The comparator judges every live alp-sdk emit against the frozen
       # oracle -- a broken comparator (e.g. a tolerance that silently waves
       # through a dropped command) must be caught here, before it is trusted
       # to judge alp-sdk below.
       - name: seam1 comparator self-test (test_seam1_field_diff.py)
+        if: ${{ !inputs.python_only }}
         run: python3 -m pytest tests/parity/test_seam1_field_diff.py -q
 
       - name: seam1 field diff (live emit vs. frozen oracle)
+        if: ${{ !inputs.python_only }}
         run: >
           python3 tests/parity/seam1_field_diff.py
           --sdk alp-sdk
           --oracle tests/parity/oracle
 
       - name: kconfig fixture byte-parity (vendored vs. pinned alp-sdk)
+        if: ${{ !inputs.python_only }}
         run: python3 tests/parity/kconfig_fixture_parity.py --sdk alp-sdk
 
       # `tan bootstrap` reads the SDK's metadata/bootstrap.json (alp-sdk#917)
@@ -263,6 +289,7 @@ jobs:
       # (and #928), so this step byte-diffs for real -- same milestone the
       # kconfig step passed once its pin moved past #897.
       - name: bootstrap manifest byte-parity (vendored vs. pinned alp-sdk)
+        if: ${{ !inputs.python_only }}
         run: python3 tests/parity/bootstrap_manifest_parity.py --sdk alp-sdk
 
       # `tan doctor`'s zephyrSdk check (tan-cli#160) prints a hand-ported copy
@@ -273,6 +300,7 @@ jobs:
       # tan-side half, reusing this job's alp-sdk checkout rather than a
       # second clone.
       - name: toolchain lock byte-parity (vendored vs. pinned alp-sdk)
+        if: ${{ !inputs.python_only }}
         run: python3 tests/parity/toolchain_lock_parity.py --sdk alp-sdk
 
       # Vendored wizard scaffold tree vs. the pinned alp-sdk's live
@@ -282,6 +310,7 @@ jobs:
       # fails here instead of shipping silently (the drift that hid the stale
       # `minimal` README before this gate ran in CI).
       - name: scaffold byte-parity (vendored tree vs. pinned alp-sdk --emit scaffold)
+        if: ${{ !inputs.python_only }}
         run: python3 tests/parity/scaffold_byte_parity.py --sdk alp-sdk
 
       # `python/tests/gates/test_planner_relocation_freshness.py` pins its own
@@ -959,10 +988,14 @@ jobs:
   # ---------------------------------------------------------------------------
   # `python/tests` ran on NO CI machine at all before this job (see the collect
   # counts a few lines down -- collection depends on ALP_SDK_ROOT and
-  # --ignore=tests/gates; this job runs with both bound). `ci.yml` runs the
-  # four cargo gates plus cross-platform build/MSRV checks only -- grep for
-  # `pytest` in that file returns zero hits -- and BEFORE d9a22c0 no slice of
-  # `python/tests` ran in any workflow at all. `git show --stat d9a22c0` is
+  # --ignore=tests/gates; this job runs with both bound). `ci.yml` ALSO runs
+  # the four cargo gates plus cross-platform build/MSRV checks plus its own
+  # `python` job (`python -m pytest tests -q`, no --ignore) -- grep for
+  # `pytest` in that file does NOT return zero hits -- but that job only binds
+  # `ALP_SDK_ROOT` when called with `sdk_parity: true`, which release.yml's
+  # `gates` job does not do (see that job's own comment for the open
+  # divergence), so this job's per-push, always-bound run is not redundant
+  # with it. BEFORE d9a22c0 no slice of
   # insertions-only (87/0 on this file): it CREATED the gate step rather than
   # narrowing an existing one. SINCE d9a22c0/ecab9da, `tests/gates` is the only
   # slice any workflow invokes (the five gate files armed by seam1

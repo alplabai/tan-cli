@@ -86,15 +86,21 @@
 #   RC at all and keeps using what it already has; RC testers install by hand.
 #   Repointing that entry travels with the pin move at GA (#268).
 #
-#   SIZE: build_binary.sh fails the build above 15000000 B and prints what it
-#   measured. The TIGHTEST measurement to date is the Windows freeze at
-#   13717947 B — about 1.3 MB of headroom — so the next runtime dependency
-#   added to python/pyproject.toml is plausibly the one that trips it, under a
-#   tag. (build_binary.sh and tests/conformance/test_packaged_binary.py each
-#   cite an older/other-platform figure for the same artefact; the 15000000 B
-#   ceiling is the single invariant, the sizes are just measurements of it.)
-#   Raising the ceiling is not the fix: it is the only thing that detects a
-#   dirty-interpreter build.
+#   SIZE: build_binary.sh fails the build above the per-class ceiling in
+#   python/scripts/artifact_ceilings.env — TAN_MAX_ARTIFACT_BYTES_DEFAULT=
+#   16500000 (glibc, what every asset THIS release publishes uses) and
+#   TAN_MAX_ARTIFACT_BYTES_MUSL=18000000 (musl links libc statically and runs
+#   larger; not published here, see the Linux section above) — and prints
+#   what it measured. The TIGHTEST measurement to date is the Windows freeze
+#   at 13717947 B — about 2.8 MB of headroom against the DEFAULT ceiling — so
+#   the next runtime dependency added to python/pyproject.toml is plausibly
+#   the one that trips it, under a tag. (build_binary.sh and
+#   tests/conformance/test_packaged_binary.py both source/parse this one file
+#   rather than each carrying its own number — see artifact_ceilings.env's own
+#   header: a single flat 15000000 B ceiling used to REJECT a correct
+#   arm64-alpine build before it was split in two.) Raising a ceiling further
+#   is not the fix: it is the only thing that detects a dirty-interpreter
+#   build.
 #
 # See docs/release-contract.md for the full contract + the vscode mapping table.
 # ===========================================================================
@@ -145,48 +151,61 @@ jobs:
   # any commit, so "it was green on main" is an assumption, not a fact.
   gates:
     uses: ./.github/workflows/ci.yml
-    # `sdk_parity: true` is what SHOULD be here, and is deliberately not, yet.
+    # `sdk_parity: true` used to be deliberately off here, on the grounds that
+    # `tan/planner/manifest.py:93,118` wrote `firmware_path: null`
+    # unconditionally while alp-sdk's own manifest emitter omits the key when
+    # unset -- a real divergence that would have redded every tag for a defect
+    # a tag cannot fix.
     #
-    # Off, the python suite is green having skipped 282 of 1163 tests -- every
-    # planner byte-parity case among them, which is the comparison that says the
-    # port still emits what the SDK does. On, measured against public alp-sdk
-    # main (v0.14.0, ef79eab): `25 failed, 1622 passed, 209 skipped`. The failures
-    # are one real divergence, not a flake or a line-ending artefact:
-    # `--emit system-manifest` from `tan/planner/manifest.py:93,118` writes
-    # `firmware_path: null` unconditionally, while alp-sdk's
-    # `scripts/alp_orchestrate/manifest.py:92-93` emits the key only when it is
-    # not None (its own comment: "`firmware_path` is entirely ABSENT from ...").
+    # That citation no longer matches the file: `tan/planner/manifest.py` is
+    # 104 lines (no line 118), and line 93 IS
+    # `if firmware_path is not None:` -- the write-only-when-set rule, not its
+    # absence. Fixed in abdd6f1 ("resync the relocated planner with the
+    # alp-sdk it actually ships"), which also closed the four other deltas
+    # from the same stale-relocation root cause (`sdk_compat.py` missing
+    # entirely, the dropped `"TBD"` note, the legacy `on_module.*` fallback).
+    # Re-measured here against a pinned alp-sdk checkout: the planner/manifest
+    # parity tests (`-k "manifest or system_manifest"`) pass in full, and
+    # `python/tests/gates` (the five files armed by parity.yml's seam1 job,
+    # jlink freshness deselected) passes clean against the exact alp-sdk
+    # commit tan/planner/ is audited against. One unrelated pre-existing
+    # failure was found while re-measuring
+    # (`test_bootstrap_command.py::test_the_fallback_constants_match_the_real_manifest_field_for_field`,
+    # a `prerequisites_posix` mismatch) -- it fails identically with or
+    # without `ALP_SDK_ROOT` bound, so it is not a `sdk_parity` regression and
+    # not this input's concern; it already reddens `ci.yml`'s `python` job
+    # today regardless of this flag and needs its own fix.
     #
-    # So turning it on today would make every tag red for a defect a tag cannot
-    # fix. Flip it to `sdk_parity: true` once that divergence is closed -- a gate
-    # that cannot go green is not a gate, and one that is on-but-ignored is worse.
-    #
-    # Re-checked against alp-sdk `design/tan-python-port` (ac903335, post
-    # main-merge, 0 behind): `25 failed, 1715 passed, 209 skipped` -- the same 25,
-    # so this is not the relocated planner reading a stale oracle. That worktree's
-    # `scripts/alp_orchestrate/manifest.py:92-94` keeps the write-only-when-set
-    # rule, and `tan/planner/manifest.py:93,118` still writes the key
-    # unconditionally.
+    # A gate that cannot go green is not a gate, and one that is on-but-ignored
+    # is worse -- flipped on now that the divergence it was off for is closed.
     with:
-      sdk_parity: false
+      sdk_parity: true
     # A called workflow inherits the caller's permissions; the gates compile
     # third-party deps and need no write on the release.
     permissions:
       contents: read
 
-  # ci.yml is Rust-only (its own header comment says so); python/tests never
-  # ran on a release tag before this job, so v0.5.0-rc.1 could ship with the
-  # entire Python port failing. `python_only: true` is what actually confines
-  # parity.yml's `workflow_call` run to the `python-tests` job —
-  # seam1-plan-shape/seam2/first-blink read that input (negated) in their
+  # ci.yml's own `python` job runs the general `python/tests` suite (see
+  # `gates` above), but only with `ALP_SDK_ROOT` bound when THIS caller passes
+  # `sdk_parity: true` — off above — and even then it never ran
+  # `python/tests/gates` against the alp-sdk commit tan/planner/ was actually
+  # audited against (it checks out alp-sdk's default branch, not a pinned
+  # audit SHA). `python_only: true` is what actually confines parity.yml's
+  # `workflow_call` run here to skipping seam2/first-blink and most of
+  # seam1-plan-shape's own steps (they read that input, negated, in their
   # `if:`, not `github.event_name`: inside a called workflow `github` is the
   # CALLER's context (this file's own `push` trigger), so
   # `github.event_name != 'workflow_call'` is always true and cannot gate
   # anything — an explicit input is the only way this caller can tell
-  # parity.yml which jobs to skip. seam1/seam2/first-blink already gate every
-  # commit on `main` as tan-cli's own PR check, so a release tag (cut from an
-  # already-green commit) gains nothing re-running them here; see parity.yml's
-  # `workflow_call:` comment.
+  # parity.yml which jobs/steps to skip). seam1-plan-shape's tests/gates block
+  # (audit-commit byte-hash gate + live jlink-freshness) is deliberately NOT
+  # gated on that input and always runs here too — it is the only place in
+  # either workflow that runs `python/tests/gates` against the commit
+  # tan/planner/ was actually audited against, so this job is what puts it on
+  # the release tag's vote. seam2/first-blink and seam1's OTHER steps already
+  # gate every commit on `main` as tan-cli's own PR check, so a release tag
+  # (cut from an already-green commit) gains nothing re-running THOSE here;
+  # see parity.yml's `workflow_call:` comment.
   python-gates:
     uses: ./.github/workflows/parity.yml
     with:
@@ -561,13 +580,15 @@ jobs:
   # Two independent reasons, either one sufficient:
   #
   #  1. The shim resolves its asset URLs per host from `npm-shim/postinstall.js`
-  #     (`TAG = v${pkg.version}`), and two entries in its map name assets this
-  #     tag does not publish: `win32/arm64` -> aarch64-pc-windows-msvc and
-  #     `linux/arm64` -> aarch64-unknown-linux-gnu. (`linux/x64` ->
-  #     x86_64-unknown-linux-gnu DOES resolve: postinstall.js:36 already names
-  #     the gnu triple this tag publishes.) Publishing the shim against a
+  #     (`TAG = v${pkg.version}`), and its map (postinstall.js:45-51) names
+  #     LINUX AS MUSL — `linux/x64` -> x86_64-unknown-linux-musl — while this
+  #     tag's only Linux asset is `-gnu` (see the header). So THREE of the
+  #     map's six entries name assets this tag does not publish, not two:
+  #     `win32/arm64` -> aarch64-pc-windows-msvc, `linux/x64` ->
+  #     x86_64-unknown-linux-musl, and `linux/arm64` ->
+  #     aarch64-unknown-linux-musl. Publishing the shim against a
   #     partial asset set turns `npm i -g @alplabai/tan` into a 404 at
-  #     POSTINSTALL time on those two hosts, which is worse than not
+  #     POSTINSTALL time on those three hosts, which is worse than not
   #     publishing it.
   #  2. #233: NPM_TOKEN is a classic publish token on a 2FA account, so
   #     `npm publish` answers `EOTP` and demands an interactive OTP. It cannot

@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# tan CI — the four cargo gates, plus the two promises nothing else checks:
-# that `tan` still builds and passes on every host platform it ships a release
-# asset for, and that the declared MSRV is real.
+# tan CI — the four cargo gates, the Python package job (installs the
+# declared package + runs `python/tests`, `ALP_SDK_ROOT`-gated via
+# `sdk_parity`), the npm-shim platform-mapping check, plus the two promises
+# nothing else checks: that `tan` still builds and passes on every host
+# platform it ships a release asset for, and that the declared MSRV is real.
 name: ci
 on:
   push:
