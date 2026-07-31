@@ -154,10 +154,14 @@ def copy_fixture_inputs(case_dir, work_dir):
 )
 def test_envelope_matches_expected(fixture):
     case = fixture.name
-    argv = [line.strip() for line in (fixture / "args.txt").read_text().splitlines()]
+    # `encoding=`, not the platform locale: these fixtures are the committed
+    # contract and the child is decoded as UTF-8 twenty lines below, so reading
+    # the expectation as cp1252/cp932 would diff two different decodings the
+    # moment a fixture grows one non-ASCII character.
+    argv = [line.strip() for line in (fixture / "args.txt").read_text(encoding="utf-8").splitlines()]
     argv = [tok for tok in argv if tok]
-    expected_exit = int((fixture / "expected.exit").read_text().strip())
-    expected = json.loads((fixture / "expected.json").read_text())
+    expected_exit = int((fixture / "expected.exit").read_text(encoding="utf-8").strip())
+    expected = json.loads((fixture / "expected.json").read_text(encoding="utf-8"))
 
     work_dir = fresh_dir(case)
     home_dir = fresh_dir(f"{case}-home")
