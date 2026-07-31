@@ -76,15 +76,67 @@ pub enum ParseError {
     /// The input was not syntactically valid YAML.
     #[error("board.yaml is not valid YAML: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    /// The document parsed to YAML `null` (empty text, or comments/whitespace
+    /// only). Matches the Python port's `BoardShapeError` for the same shape
+    /// (`python/tan/commands/validate_cmd.py:244-245`).
+    #[error("board.yaml is not valid: the document is empty")]
+    EmptyDocument,
+    /// The document parsed to a non-mapping (a bare scalar or a list as the
+    /// *whole* board.yaml, not a field inside it). Matches the Python port's
+    /// `BoardShapeError` for the same shape
+    /// (`python/tan/commands/validate_cmd.py:246-249`); `{0}` is Python's
+    /// `type(doc).__name__`.
+    #[error("board.yaml is not valid: the top level must be a mapping of keys, got {0}")]
+    NotAMapping(&'static str),
     /// `som:` is present but is not a mapping (e.g. a bare SKU string instead
-    /// of `som:\n  sku: <SKU>`). Byte-identical to the Python port's
-    /// `BoardShapeError` for the same shape — see
-    /// `python/tan/commands/validate_cmd.py:251-256` — and pinned by the
-    /// `validate-offline-schema-violation` contract golden.
+    /// of `som:\n  sku: <SKU>`). Matches the Python port's `BoardShapeError`
+    /// for the same shape — see `python/tan/commands/validate_cmd.py:251-256`,
+    /// pinned by the `validate-offline-schema-violation` contract golden —
+    /// byte-identical for string/int/float/bool/flat-list scalars whose
+    /// YAML 1.1 (PyYAML) and YAML 1.2 (serde_yaml) resolutions agree. Two
+    /// known gaps `python_repr` does not close (tracked as a GA follow-up,
+    /// not fixed here): a mapping nested inside a sequence renders as a
+    /// `{...}` placeholder instead of Python's own dict repr, and
+    /// non-printable characters inside a string are not escaped the way
+    /// Python's `repr()` escapes them.
     #[error(
         "board.yaml is not valid: `som:` must be a mapping carrying a `sku:` key, but a scalar was given ({0}). Write it as:\n  som:\n    sku: <SKU>"
     )]
     SomNotMapping(String),
+}
+
+/// Rejects the two document-level shapes Python's `validate_board_text`
+/// treats as a `BoardShapeError` (`validate_cmd.py:244-249`) before
+/// `parse_board_model`'s own TS-parity leniency — a scalar/null top-level
+/// document silently becoming the default model — would otherwise report
+/// them as "clean". Scoped to the offline `validate` path on purpose:
+/// `parse_board_model`'s other callers (preview, diff, doctor, generate, …)
+/// keep mirroring TS `parseBoardModel`, which is deliberately tolerant of an
+/// in-progress/empty document.
+fn reject_non_mapping_document(text: &str) -> Result<(), ParseError> {
+    let value: serde_yaml::Value = serde_yaml::from_str(text)?;
+    if value.is_null() {
+        return Err(ParseError::EmptyDocument);
+    }
+    if !value.is_mapping() {
+        return Err(ParseError::NotAMapping(python_type_name(&value)));
+    }
+    Ok(())
+}
+
+/// Python `type(doc).__name__` for the top-level shapes a non-mapping
+/// board.yaml document can parse to.
+fn python_type_name(value: &serde_yaml::Value) -> &'static str {
+    match value {
+        serde_yaml::Value::Null => "NoneType",
+        serde_yaml::Value::Bool(_) => "bool",
+        serde_yaml::Value::Number(n) if n.is_i64() || n.is_u64() => "int",
+        serde_yaml::Value::Number(_) => "float",
+        serde_yaml::Value::String(_) => "str",
+        serde_yaml::Value::Sequence(_) => "list",
+        serde_yaml::Value::Mapping(_) => "dict",
+        serde_yaml::Value::Tagged(tagged) => python_type_name(&tagged.value),
+    }
 }
 
 /// Parse board.yaml text into a [`BoardModel`].
@@ -112,10 +164,12 @@ pub fn parse_board_model(text: &str) -> Result<BoardModel, ParseError> {
     }
 }
 
-/// Renders a `serde_yaml::Value` scalar the way Python's `repr()` would —
-/// only covers the shapes a mis-typed `som:` can actually take (string,
-/// number, bool, sequence); mappings/null never reach this function (see
-/// `parse_board_model`'s guard).
+/// Renders a `serde_yaml::Value` the way Python's `repr()` would, for the
+/// shapes a mis-typed `som:` can take (string, number, bool, sequence — see
+/// `ParseError::SomNotMapping`'s doc comment for exactly how far this tracks
+/// Python's actual `repr()`). A mapping can reach this arm nested inside a
+/// sequence (`som: [{k: v}]`); it renders as a `{...}` placeholder rather
+/// than Python's own dict repr — one of the known gaps noted there.
 fn python_repr(value: &serde_yaml::Value) -> String {
     match value {
         serde_yaml::Value::Null => "None".to_string(),
@@ -164,6 +218,7 @@ fn python_repr_str(s: &str) -> String {
 /// for schema_version >= 2, top-level `os:` is rejected and a non-empty
 /// `cores:` block is required.
 pub fn validate_board_yaml_local(text: &str) -> Result<ValidationResult, ParseError> {
+    reject_non_mapping_document(text)?;
     let model = parse_board_model(text)?;
     let mut issues = Vec::new();
 
@@ -496,6 +551,41 @@ mod tests {
         // must still fall through to the typed parse, not SomNotMapping.
         assert!(parse_board_model("som: null\n").is_ok());
         assert!(parse_board_model("preset: e1m-evk\n").is_ok());
+    }
+
+    #[test]
+    fn empty_document_matches_python_byte_for_byte() {
+        for text in ["", "   \n", "# just a comment\n"] {
+            let err = validate_board_yaml_local(text).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "board.yaml is not valid: the document is empty"
+            );
+        }
+    }
+
+    #[test]
+    fn non_mapping_document_matches_python_byte_for_byte() {
+        let err = validate_board_yaml_local("- a\n- b\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "board.yaml is not valid: the top level must be a mapping of keys, got list"
+        );
+        let err = validate_board_yaml_local("just a string\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "board.yaml is not valid: the top level must be a mapping of keys, got str"
+        );
+    }
+
+    #[test]
+    fn mapping_document_is_not_rejected_by_the_document_shape_guard() {
+        // A real syntax error must still surface as `ParseError::Yaml`, not
+        // get relabelled by `reject_non_mapping_document`.
+        assert!(matches!(
+            validate_board_yaml_local("som: [\n").unwrap_err(),
+            ParseError::Yaml(_)
+        ));
     }
 
     #[test]
