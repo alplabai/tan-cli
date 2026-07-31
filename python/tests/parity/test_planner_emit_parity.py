@@ -346,30 +346,32 @@ _SCAFFOLD_CASES = (
     ("examples/peripheral-io/i2c-master/board.yaml", "sensor", "E1M-V2N101"),
     ("examples/ai/cold-chain-monitor/board.yaml", "edge-ai", "E1M-V2N101"),
 )
-#: Known, judged divergences from the oracle, keyed by template id -- NOT port
-#: bugs, so not silently fixed to match. `peripheral` (gpio-button-led onto
-#: E1M-V2N101): the oracle's own `_substitute_readme_pins`
-#: (`scripts/alp_template.py`) does a bare `ALP_<old> -> ALP_<new>` token swap
-#: and leaves any trailing `(index N)` parenthetical untouched, so it renames
-#: `ALP_E1M_GPIO_PWM3` -> `ALP_E1M_X_GPIO_PWM5` but keeps the source family's
-#: "(index 29)" verbatim -- numerically wrong for the target family:
-#: `e1m_x_pinout.h`'s PWM0..7 starts at index 36, so `ALP_E1M_X_GPIO_PWM5` is
-#: index 41, not 29. `tan.planner.template._substitute_readme_pins` drops the
-#: stale parenthetical on a cross-family rename instead of carrying the wrong
-#: number forward -- a deliberate correctness improvement over the oracle,
-#: not a reproduction of its behaviour.
-_SCAFFOLD_XFAILS = {
-    "peripheral": pytest.mark.xfail(
-        strict=True,
-        reason="tan drops a stale per-family '(index N)' README parenthetical "
-               "on a cross-family pin rename that the oracle leaves in place "
-               "wrong; see _SCAFFOLD_XFAILS docstring above."),
-}
-_SCAFFOLD_PARAMS = [
-    pytest.param(*case, marks=_SCAFFOLD_XFAILS[case[1]])
-    if case[1] in _SCAFFOLD_XFAILS else case
-    for case in _SCAFFOLD_CASES
-]
+#: All four cases assert plain byte-identity. There is no xfail here any more,
+#: and re-adding one for `peripheral` would be a step backwards -- the history
+#: is worth the paragraph, because the marker outlived its subject silently.
+#:
+#: `peripheral` (gpio-button-led onto E1M-V2N101) used to be a STRICT xfail: the
+#: oracle's `_substitute_readme_pins` (`scripts/alp_template.py`) did a bare
+#: `ALP_<old> -> ALP_<new>` token swap and left the trailing `(index N)`
+#: parenthetical untouched, renaming `ALP_E1M_GPIO_PWM3` -> `ALP_E1M_X_GPIO_PWM5`
+#: while keeping the source family's "(index 29)" -- numerically wrong for the
+#: target, since `e1m_x_pinout.h`'s PWM0..7 starts at 36, making that pin index
+#: 41. tan dropped the stale parenthetical instead, a deliberate correctness
+#: improvement rather than a reproduction, so the two could not agree.
+#:
+#: alp-sdk `a6ff095d` (#1014) then fixed the ORACLE the same way -- its regex is
+#: now `` `{old_tok}`(?:\s*\(index\s+\d+\))? ``, dropping the parenthetical on a
+#: cross-family rename exactly as tan does. The divergence is resolved upstream,
+#: so the two sides agree and strict xfail turns that agreement into a FAILURE.
+#:
+#: Verified rather than inferred from the XPASS, which on its own says only "no
+#: longer differs" and not why: tan's emit still renames to
+#: `ALP_E1M_X_GPIO_PWM5` with no `(index ...)` following it, and the oracle's
+#: substitution source carries the same optional-parenthetical regex. Both drop
+#: it; neither carries a wrong number forward. Had they instead converged on
+#: *keeping* a stale index, that would have been a regression in tan, and
+#: deleting the marker would have hidden it.
+_SCAFFOLD_PARAMS = list(_SCAFFOLD_CASES)
 
 
 @pytest.mark.parametrize("board_rel,template,sku", _SCAFFOLD_PARAMS,
