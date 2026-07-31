@@ -10,7 +10,10 @@ Commander temp file.
 **Per-entry rc convention**, mirroring `alp_flash._flash_entry` exactly:
 `0` success / clean-dry-run / clean-skip-via-flag, `-1` silently skipped (no
 `flash_method` / tools missing under `--skip-missing-tools` / an unresolved
-`TBD` in `flash_args`), `>0` failed. `failed` counts only `rc > 0`; skipped
+`TBD` in `flash_args`), `>0` failed -- including an `output_artefact`/
+`firmware_path` that is the unresolved `TBD` sentinel rather than a path
+(**#222**: a `TBD` in `flash_args` skips, a `TBD` artefact fails).
+`failed` counts only `rc > 0`; skipped
 entries never count. Within rc 0, `status` further distinguishes a real/dry-run
 `ok` from a `planned` entry -- the confirm gate declining a REAL write, nothing
 programmed -- so a `--format json` consumer cannot mistake a no-op for a
@@ -66,6 +69,7 @@ from tan.core.flash_plan import (
     fa_str_checked,
     flash_args_has_tbd,
     flow_d_preflight_script,
+    is_pending,
     parse_atoc_start_address,
     parse_system_manifest,
     plan_flash_targets,
@@ -666,6 +670,42 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         )
         lines.append(msg)
         return -1, entry(method, "skipped", -1, msg), lines
+
+    # The SIBLING of the check above, and the one #222 actually reports: an
+    # `output_artefact`/`firmware_path` of `TBD` is not `flash_args`, so the
+    # guard above never sees it -- and the emptiness guard below never fires,
+    # because a `TBD` placeholder is the one thing that is not empty. It
+    # therefore used to resolve to `<build_root>/TBD` and reach a real flasher:
+    # a J-Link Commander script whose `loadfile` names it, `dd if=` it, `west
+    # flash` a build dir derived from it. That is byte-for-byte the alp-sdk
+    # `flash/mod.rs:307` sighting (`.filter(|s| !s.is_empty())`), one field over.
+    #
+    # FAILED, not skipped, and unlike the `flash_args` case above it fails under
+    # `--dry-run` too. Three reasons, in order:
+    #   * A dry run is the preview a bench trusts before arming a real write --
+    #     reporting `ok` for a manifest that cannot possibly flash is the exact
+    #     silent-success class this file guards everywhere else.
+    #   * `flash_args: TBD` is a helper whose WIRING is unfinished, which must
+    #     not block the resolved slices (hence its skip). An artefact of `TBD`
+    #     is a target with no image at all -- there is nothing to program, and
+    #     `""` in that same field already fails below.
+    #   * `skipped` pushes no `issues[]` entry, so the extension would render a
+    #     clean flash for a target that was never going to be written.
+    # Ordered AFTER the `flash_args` check on purpose: the AEN801 `cc3501e_otp`
+    # helper the issue reports carries BOTH, and it must keep skipping cleanly.
+    pending = next(
+        (v for v in (target.output_artefact, target.firmware_path) if is_pending(v)), None
+    )
+    if pending is not None:
+        field = "output_artefact" if is_pending(target.output_artefact) else "firmware_path"
+        msg = (
+            f"flash: {kind} '{entry_id}' has {field}: '{pending}' -- the SDK's "
+            "unresolved-placeholder sentinel, not a path. Refusing to resolve it "
+            f"under the build root and flash '<build_root>/{pending.strip()}'. "
+            "Build this target (or fill the field in) first."
+        )
+        lines.append(msg)
+        return 1, entry(method, "failed", 1, msg), lines
 
     artefact = target.output_artefact or target.firmware_path or ""
     if not artefact:

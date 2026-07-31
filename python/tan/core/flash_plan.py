@@ -32,6 +32,8 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from tan.core.image_bundle import PENDING_SENTINEL
+
 #: The system-manifest schema major this command consumes. A different value is
 #: REFUSED rather than read as if it were v1 -- mirrors
 #: `system_manifest.rs::SYSTEM_MANIFEST_SCHEMA_VERSION`.
@@ -608,15 +610,51 @@ def _str_refusal(key: str, raw: Any) -> str:
     )
 
 
+def is_pending(value: Any) -> bool:
+    """Whether a manifest SCALAR is the SDK's unfilled-field sentinel.
+
+    **The one definition for the whole flash path (#222).** Every guard in this
+    area used to test for EMPTY, and empty is the one thing a `TBD` placeholder
+    is not -- so an unfilled field behaved exactly like a filled one, and
+    whether that ended in a loud refusal or a spawned flasher came down to
+    whether the particular consumer happened to validate against a closed set.
+    `flash_method: TBD` hit the backend registry and failed safely;
+    `output_artefact`/`firmware_path: TBD` hit nothing at all, resolved to
+    `<build_root>/TBD` and reached a real J-Link write. Route every new
+    manifest-derived field through THIS, never through a fresh `== "TBD"`.
+
+    Trimmed before comparing -- a YAML `device: "  TBD  "` is the same unfilled
+    field -- but deliberately NOT case-folded and NOT a substring test:
+    `TBD-1234-XYZ` is a plausible part number and `flash_args.build_dir:
+    /opt/TBDtool/x` a plausible path, and refusing either would block a
+    legitimate flash. `tbd` lowercase is not the sentinel alp-sdk emits;
+    widening to it means widening the SDK's convention first, in one place,
+    not here.
+
+    The constant is SHARED with the bundle writer (`image_bundle`) so `tan
+    image` and `tan flash` can never disagree about what "unfilled" means --
+    which is the central ask of #222: decide it once, not per consumer.
+    """
+    return isinstance(value, str) and value.strip() == PENDING_SENTINEL
+
+
 def flash_args_has_tbd(value: Any) -> bool:
     """Whether `flash_args` carries an unresolved `TBD` ANYWHERE -- a bare `TBD`
     scalar, or a mapping/sequence value that trims to `TBD`.
 
     Deliberately broader than a single-key check: a `TBD` anywhere means the
     entry is not finalised yet under the SDK's pending-placeholder convention.
-    Do not narrow this back to a set of known keys."""
+    Do not narrow this back to a set of known keys. Recurses into mapping VALUES
+    and sequence elements, not mapping keys: every accessor here reads by a
+    known key name, so a key literally named `TBD` selects nothing and cannot
+    reach an argv.
+
+    This covers `flash_args` ONLY. The sibling artefact fields
+    (`output_artefact`/`firmware_path`) are NOT part of `flash_args` and are
+    guarded separately at the point of use -- see `is_pending`.
+    """
     if isinstance(value, str):
-        return value.strip() == "TBD"
+        return is_pending(value)
     if isinstance(value, dict):
         return any(flash_args_has_tbd(v) for v in value.values())
     if isinstance(value, list):

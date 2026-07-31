@@ -1305,3 +1305,293 @@ def test_identifier_guard_matches_the_composed_rust_rule():
     for bad in ("a;b", "../x", "/x", "\\x", "C:/x", "a//b", ".", "..", "", "a b", "a\nb", "a]b"):
         with pytest.raises(FlashPlanError):
             validate_identifier(bad, "interface")
+
+
+# ── #222: the unresolved `TBD` sentinel must never reach a spawn ────────────
+#
+# `TBD` is truthy, so it survived every empty-string guard in this area. In
+# alp-sdk (`flash/mod.rs:307`, `.filter(|s| !s.is_empty())`) it resolved to
+# `<build_root>/TBD` and a real flasher was spawned against it; the shipped Rust
+# `tan` oracle has the SAME hole on `output_artefact`/`firmware_path` -- verified
+# by running it, which is why none of the artefact cases below appears in
+# `tests/parity/test_flash_oracle_parity.py`. The two implementations disagree
+# here BY DESIGN and an oracle diff would only ever fail. Do not "restore
+# parity" by deleting these.
+#
+# The split, deliberate: a `TBD` in `flash_args` SKIPS (a helper whose wiring is
+# unfinished must not block the resolved slices, and that behaviour IS oracle
+# pinned), a `TBD` artefact FAILS (there is no image to program at all, and the
+# empty string in that same field already fails).
+
+_HELPER_222 = """schema_version: 1
+hw_info: {{sku: E1M-AEN801}}
+slices: []
+helper_mcus:
+- {{name: cc3501e_otp, chip: cc3501e, firmware_path: {firmware},
+   flash_method: {method}, flash_args: {args}}}
+boot_order: []
+"""
+
+_SLICE_222 = """schema_version: 1
+hw_info: {{sku: E1M-AEN801}}
+slices:
+- {{core_id: c1, os: zephyr, output_artefact: {artefact}, status: ok,
+   flash_method: {method}, flash_args: {args}}}
+helper_mcus: []
+boot_order: []
+"""
+
+
+def _h222(args="{}", firmware="fw.bin", method="swd_probe"):
+    return _HELPER_222.format(firmware=firmware, method=method, args=args)
+
+
+def _s222(args="{}", artefact="a.bin", method="swd_probe"):
+    return _SLICE_222.format(artefact=artefact, method=method, args=args)
+
+
+#: `(id, manifest, expected entry status, expected exit)`. Every shape the
+#: sentinel actually takes in a manifest, plus the two that must NOT trip the
+#: guard -- a guard that fires on a legitimate part number or path blocks a
+#: real flash, which is its own safety failure.
+_TBD_SHAPES = [
+    # -- flash_args: skipped, never spawned -----------------------------------
+    ("fa-bare-scalar", _h222("TBD"), "skipped", 0),
+    ("fa-mapping-value", _h222("{speed: 921600, device: TBD, mode: TBD}"), "skipped", 0),
+    ("fa-inside-a-list", _h222("{modes: [otp_program, TBD]}"), "skipped", 0),
+    ("fa-surrounding-whitespace", _h222('{device: "  TBD  "}'), "skipped", 0),
+    ("fa-nested-mapping", _h222("{probe: {device: TBD}}"), "skipped", 0),
+    ("fa-on-a-slice-too", _s222("{device: TBD}"), "skipped", 0),
+    # -- the siblings #222 reports: FAILED, never spawned ---------------------
+    ("artefact-helper-firmware-path", _h222(firmware="TBD"), "failed", 1),
+    ("artefact-slice-output-artefact", _s222(artefact="TBD"), "failed", 1),
+    ("artefact-surrounding-whitespace", _s222(artefact='"  TBD  "'), "failed", 1),
+    ("artefact-west-backend", _s222(artefact="TBD", method="zephyr_west_flash"), "failed", 1),
+    ("artefact-cmake-backend", _s222(artefact="TBD", method="baremetal_cmake_flash"),
+     "failed", 1),
+    # -- already safe, pinned so it stays that way ----------------------------
+    # A closed set is what made this one fail loudly while the artefact did not.
+    ("flash-method-is-tbd", _h222(method="TBD"), "failed", 1),
+]
+
+#: Shapes that must NOT trip the guard. `tbd` lowercase is not the sentinel
+#: alp-sdk emits, and a substring is a legitimate value -- `TBD-1234-XYZ` is a
+#: plausible part number, `/opt/TBDtool/x` a plausible path. These reach the
+#: normal path (and fail only on the absent tool), which is the point.
+_NOT_TBD_SHAPES = [
+    ("lowercase-tbd", _h222("{device: tbd}")),
+    ("substring-part-number", _h222("{jlink_device: TBD-1234-XYZ}")),
+    ("substring-in-a-path", _h222("{build_dir: /opt/TBDtool/x}", method="zephyr_west_flash")),
+    # Keys are not values: every accessor reads by a known key name, so a key
+    # named `TBD` selects nothing and cannot reach an argv.
+    ("key-named-tbd", _h222("{TBD: 1}")),
+]
+
+
+@pytest.mark.parametrize(
+    "manifest,status,exit_expected",
+    [pytest.param(m, s, e, id=i) for i, m, s, e in _TBD_SHAPES],
+)
+def test_tbd_sentinel_never_reaches_a_flasher(tmp_path, manifest, status, exit_expected):
+    """Every shape the sentinel takes is refused, in a real envelope.
+
+    Run WITHOUT `--dry-run`: the dry-run flag bypasses the tool gate and would
+    make the refusal look complete on a host that simply has no J-Link. The
+    proof that it happens BEFORE any spawn is
+    `test_tbd_refusal_precedes_every_spawn` below; this pins the contract the
+    extension reads.
+    """
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == exit_expected, payload
+    assert [e["status"] for e in payload["data"]["entries"]] == [status], payload
+    assert "TBD" in payload["data"]["entries"][0]["message"]
+
+
+@pytest.mark.parametrize("manifest", [pytest.param(m, id=i) for i, m in _NOT_TBD_SHAPES])
+def test_a_tbd_substring_is_not_the_sentinel(tmp_path, manifest):
+    """The guard must not fire on a legitimate value that merely CONTAINS `TBD`,
+    nor on lowercase `tbd`. Asserted via `--dry-run`, so the outcome does not
+    depend on which probe tools this host has: a tripped guard shows up as a
+    `skipped`/`failed` entry, an untripped one previews the command."""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "ok", payload
+    assert entry["message"].startswith("would run "), payload
+
+
+def test_the_artefact_sentinel_fails_under_dry_run_too(tmp_path):
+    """`--dry-run` is the preview a bench trusts before arming a real write, so
+    a manifest that cannot possibly flash must not preview as `ok`. This is
+    where the guard differs from the empty-artefact one it sits beside, which
+    dry-runs to a `<missing-artefact-for-*>` placeholder on purpose."""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=_s222(artefact="TBD")
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert codes(payload) == ["flash.entry-failed"]
+    assert payload["data"]["entries"][0]["status"] == "failed"
+
+
+def test_a_pending_helper_still_skips_rather_than_failing_the_run(tmp_path):
+    """The exact AEN801 shape from the issue: `flash_args: {mode: TBD, device:
+    TBD}` AND `firmware_path: TBD` on the same helper. It must keep SKIPPING --
+    the artefact guard is ordered after the `flash_args` one precisely so an
+    unfinished helper never blocks the resolved slices."""
+    manifest = _h222("{speed: 921600, device: TBD, mode: TBD}", firmware="TBD")
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0, payload
+    assert payload["data"]["entries"][0]["status"] == "skipped"
+
+
+#: An in-process probe: install a CPython audit hook, drive `flash_cmd._run`,
+#: report every process creation it attempted. `subprocess.Popen`'s audit event
+#: fires at the top of `_execute_child`, BEFORE the CreateProcess/exec call --
+#: so a spawn is recorded even when the tool turns out not to be launchable,
+#: which is what makes this a measurement of "did tan try to flash" rather than
+#: "did the host happen to have a flasher".
+#:
+#: The fake tool dir exists to get PAST the required-tool gate: `on_path` only
+#: asks `is_file()` + `X_OK`, so a bare file named `JLinkExe` satisfies it while
+#: being entirely inert. Nothing here can reach hardware -- and the positive
+#: control proves the hook can see a spawn at all, so a `spawns == []` result is
+#: never vacuous.
+_SPAWN_PROBE = r'''
+import json, os, sys
+from pathlib import Path
+
+work, manifest = Path(sys.argv[1]), sys.argv[2]
+spawns = []
+
+
+def hook(event, args):
+    if event == "subprocess.Popen":
+        # `args[1]` is a list on posix and a joined STRING on Windows. Iterating
+        # it blindly splits the command line character by character.
+        raw = args[1]
+        spawns.append(raw if isinstance(raw, str) else [str(a) for a in (raw or [])])
+    elif event.startswith(("os.exec", "os.spawn", "os.posix_spawn")):
+        spawns.append(event)
+
+
+sys.addaudithook(hook)
+
+(work / "build").mkdir(parents=True, exist_ok=True)
+(work / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+(work / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+(work / "build" / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+
+tools = work / "faketools"
+tools.mkdir(exist_ok=True)
+for name in ("JLinkExe", "JLink", "openocd", "pyocd", "west", "cmake", "dd", "bmaptool"):
+    path = tools / name
+    path.write_text("", encoding="utf-8")
+    os.chmod(path, 0o755)
+os.environ["PATH"] = str(tools) + os.pathsep + os.environ.get("PATH", "")
+os.environ.pop("ALP_FLASH_FORCE", None)
+
+from tan.commands import flash_cmd
+
+exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+    app_path=".", build_root_arg=None, sdk_root_arg=str(work / "sdk"), board_yaml=None,
+    core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=True,
+    cwd=str(work),
+)
+print(json.dumps({
+    "exitCode": int(exit_code),
+    "entries": data["entries"],
+    "spawns": spawns,
+}))
+'''
+
+
+def _spawn_probe(tmp_path, manifest, tag):
+    work = tmp_path / tag
+    work.mkdir()
+    probe = tmp_path / f"{tag}-probe.py"
+    probe.write_text(_SPAWN_PROBE, encoding="utf-8")
+    inherited = os.environ.get("PYTHONPATH")
+    proc = subprocess.run(
+        [sys.executable, str(probe), str(work), manifest],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        cwd=str(PACKAGE_ROOT), timeout=180,
+        env={
+            **os.environ,
+            "HOME": str(work), "USERPROFILE": str(work),
+            "PYTHONPATH": os.pathsep.join(
+                [str(PACKAGE_ROOT), *([inherited] if inherited else [])]
+            ),
+        },
+    )
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}"
+    return json.loads(proc.stdout.strip())
+
+
+def test_the_spawn_probe_can_see_a_spawn(tmp_path):
+    """The positive control, and it is not optional: every `spawns == []`
+    assertion below is worthless if the hook cannot observe a spawn at all.
+
+    The same manifest as the artefact cases but with a REAL artefact name --
+    which is exactly the difference under test, so this also shows the guard is
+    what stops the others, not some unrelated refusal earlier in the walk."""
+    result = _spawn_probe(tmp_path, _h222(firmware="fw.bin"), "control")
+    assert result["spawns"], (
+        "the audit hook observed no process creation on a manifest that plans a "
+        "real J-Link write -- every no-spawn assertion in this file is vacuous")
+    assert "JLink" in str(result["spawns"][0])
+
+
+@pytest.mark.parametrize(
+    "manifest", [pytest.param(m, id=i) for i, m, _s, _e in _TBD_SHAPES]
+)
+def test_tbd_refusal_precedes_every_spawn(tmp_path, manifest):
+    """No `TBD` shape reaches a process creation -- measured, not inferred.
+
+    A refusal MESSAGE proves nothing on its own: the alp-sdk sighting this
+    pins also produced a sensible-looking message, after the flasher had
+    already been spawned against `<build_root>/TBD`. What matters is that
+    nothing was launched, and only an audit hook can say so.
+
+    Covers both spawn call sites in `_flash_entry`, which are the only two on
+    the flash path: `_execute` (the write) and `_flow_d_preflight` (the
+    read-only DPIDR probe). Both sit downstream of both guards.
+    """
+    result = _spawn_probe(tmp_path, manifest, "refused")
+    assert result["spawns"] == [], (
+        f"a TBD shape reached a spawn: {result['spawns']}")
+
+
+def test_no_spawn_for_a_pending_artefact_even_with_force_confirm(tmp_path, monkeypatch):
+    """`ALP_FLASH_FORCE=1` arms the confirm gate on every gated backend. It must
+    not also arm a placeholder path: `dd if=<build_root>/TBD of=/dev/sdb` on a
+    confirmed run is the worst reachable version of this bug."""
+    manifest = _s222(artefact="TBD", method="yocto_wic", args="{target: /dev/sdb}")
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", env={"ALP_FLASH_FORCE": "1"}, manifest=manifest
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["data"]["entries"][0]["status"] == "failed"
+    assert "TBD" in payload["data"]["entries"][0]["message"]
+
+
+def test_is_pending_is_the_one_definition_shared_with_the_bundle_writer():
+    """#222's central ask: decide what an unfilled field IS once, not per
+    consumer. `tan image` and `tan flash` must never drift apart on it."""
+    from tan.core.image_bundle import PENDING_SENTINEL
+
+    assert flash_plan.PENDING_SENTINEL is PENDING_SENTINEL
+    assert flash_plan.is_pending("TBD")
+    assert flash_plan.is_pending("  TBD  ")
+    assert not flash_plan.is_pending("tbd")
+    assert not flash_plan.is_pending("TBD-1234")
+    assert not flash_plan.is_pending("")
+    assert not flash_plan.is_pending(None)
+    # Not a recursive check -- `flash_args_has_tbd` owns the containers, and
+    # collapsing the two would make a whole `flash_args` mapping read as pending.
+    assert not flash_plan.is_pending({"a": "TBD"})
+    assert not flash_plan.is_pending(["TBD"])
