@@ -155,7 +155,17 @@ def codes(env):
 def make_sdk(root: Path, *, manifest=REAL_MANIFEST, tools=None, marker=True) -> Path:
     """A minimal alp-sdk checkout under `root/ws`, with `root/ws` holding NOTHING
     else -- otherwise the workspace-parent guard fires before the gate under
-    test. `tools` shrinks the prerequisite lists to names this host really has."""
+    test. `tools` shrinks the prerequisite lists to names this host really has.
+
+    All three host-keyed lists (`posix`/`macos`/`windows`) are overwritten, not
+    just `posix`/`windows`: `prerequisites(MACOS)` reads its OWN manifest key
+    rather than falling back to `posix` (see
+    `test_macos_reads_its_own_tool_list_and_falls_back_to_posix_without_one`),
+    so leaving `macos` at the real manifest's `["git", "cmake", "python3",
+    "ninja"]` let a macOS run silently check a DIFFERENT tool list than the one
+    the test asked for -- `tools=["tan-no-such-tool-xyz"]` never touched a macOS
+    host at all, since every one of those four tools is actually on the runner.
+    """
     sdk = root / "ws" / "alp-sdk"
     (sdk / "scripts").mkdir(parents=True)
     if marker:
@@ -166,6 +176,7 @@ def make_sdk(root: Path, *, manifest=REAL_MANIFEST, tools=None, marker=True) -> 
         if tools is not None:
             doc = json.loads(text)
             doc["prerequisites"]["posix"] = list(tools)
+            doc["prerequisites"]["macos"] = list(tools)
             doc["prerequisites"]["windows"] = list(tools)
             text = json.dumps(doc, indent=2)
         (sdk / "metadata" / "bootstrap.json").write_text(text, encoding="utf-8")
