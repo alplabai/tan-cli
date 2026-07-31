@@ -7,45 +7,62 @@ These states were measured by running the ACTUAL released v0.4.1 binary
 (``tan-x86_64-unknown-linux-gnu``, ``tan 0.4.1``), not read out of the Rust
 source:
 
-* **materialised only** -- ``tan build --materialise`` writes exactly six
-  ``build/`` files and NO ``build/system-manifest.yaml``; the manifest is a
-  POST-BUILD artefact.
-* **built** -- a real ``tan build`` writes those same six files PLUS
-  ``build/system-manifest.yaml``.
+* **materialised only** -- ``tan build --plan-from <plan> --materialise``
+  writes exactly six ``build/`` files and NO ``build/system-manifest.yaml``;
+  the manifest is a POST-BUILD artefact.
+* **built** -- a real ``tan build`` (no ``--materialise``) writes those same
+  six files PLUS ``build/system-manifest.yaml``.
 
-This module can only reproduce the first state hermetically: the port has no
-standalone ``--materialise``/``--manifest`` mode yet (see ``build_cmd.py``'s
-module docstring -- ``tan build`` always both materialises and dispatches), so
-what stands in for "materialised only" here is a `--plan-from` run with no
-resolvable SDK -- the post-build manifest write then reports "no alp-sdk
-checkout resolved" and never reaches disk (`build.manifest-write-failed`,
-covered by `write_post_build_manifest`'s own gated tests in
-`test_build_manifest.py`), which is byte-for-byte the same on-disk shape a
-real `--materialise`-only run leaves. The "built" half -- a real SDK's
-`--emit system-manifest` landing on disk with the overlay applied -- is
-already covered, hermetically AND against a real SDK checkout, by
-`test_build_manifest.py`'s `write_post_build_manifest` suite; this module does
-not repeat that coverage.
+This port now carries both flags. Measured on the same fixture used below
+(`multicore_rpmsg-aen.build-plan.json`), scrubbed `PATH`, no
+`--sdk-root`/`--board-yaml`:
+
+* ``build --plan-from plan.json --format json`` (no ``--materialise``) --
+  rc=0, ZERO files under ``build/``, `data` is the plan itself -- a
+  show-and-exit, matching the oracle's own `--plan-from`-alone behaviour.
+* ``build --plan-from plan.json --materialise --format json`` -- rc=0, the
+  same six files the oracle's `--materialise`-only run wrote, `issues ==
+  []`. Measured: this mode never attempts the post-build manifest emit at
+  all (no slice dispatch, no manifest issue reported) -- it is a REAL
+  `--materialise`-only run, not a look-alike produced by a failed manifest
+  write. The "built" half -- a real SDK's `--emit system-manifest` landing
+  on disk with the overlay applied -- is already covered, hermetically AND
+  against a real SDK checkout, by `test_build_manifest.py`'s
+  `write_post_build_manifest` suite; this module does not repeat that
+  coverage.
 
 **What IS new here, and load-bearing for Target 2:**
 
-* The materialised-only tree's LAYOUT RULE and BANNER, checked against the
-  real captured plan `tests/parity/oracle/multicore_rpmsg-aen.build-plan.json`
-  -- whose six artefact paths are exactly the six the real v0.4.1 binary wrote
-  (`build/generated/**` for shared artefacts, `build/<core_id>-<os>/` per
-  slice). Deliberately NOT a whole-file byte comparison: this fixture was
-  captured from a different point in the SDK's history than the v0.4.1
-  session's measurement, and the artefact CONTENTS have already drifted
-  (verified: this fixture's `dts-partitions.dtsi` is 299 bytes, matching the
-  measured v0.4.1 output byte for byte, but every other file here differs by
-  tens to hundreds of bytes) even though the LAYOUT and BANNER are stable.
-  That drift is exactly why the banner + layout rule -- not whole-file bytes
-  -- is the correct compatibility assertion.
-* That the materialised-only tree carries no `system-manifest.yaml`.
+* The resulting tree's LAYOUT RULE and BANNER, checked against the real
+  captured plan `tests/parity/oracle/multicore_rpmsg-aen.build-plan.json` --
+  whose six artefact paths are exactly the six the real v0.4.1 binary wrote
+  (`build/generated/**` for shared artefacts, `build/<core_id>-<backend>/`
+  per slice, asserted against the plan's own declared `buildDir` rather than
+  re-derived by hand; the plan has no `os` key). This module does not
+  byte-compare: the real v0.4.1 binary's captured `dts-partitions.dtsi` is
+  299 bytes and matches this fixture's declared artefact byte for byte, but
+  every other one of the six differs from the real binary's output by tens
+  to hundreds of bytes -- the banner + layout is the compatibility contract
+  this module pins, not the exact bytes.
+* That the tree carries no `system-manifest.yaml`, and that the six files
+  above are the COMPLETE set of files under `build/` -- a stray seventh file
+  fails here too.
 * That the real v0.4.1 `.alp/sdk-path` pointer shape --
-  `{"sdkPath": ..., "updatedAt": ...}`, not a bare path -- round-trips through
-  `tan build`'s own project-pin discovery tier with NEITHER key touched by
-  this port, i.e. an unmigrated v0.4.1 pointer file is honoured verbatim.
+  `{"sdkPath": ..., "updatedAt": ...}`, pretty-printed with a trailing
+  newline, never a bare path -- round-trips through `tan build`'s own
+  project-pin discovery tier with NEITHER key touched by this port, i.e. an
+  unmigrated v0.4.1 pointer file is honoured verbatim. Measured on the
+  oracle: `tan.exe sdk switch <path>` writes the pointer with `indent=2` and
+  a trailing newline; this port's own writer, `scaffold.sdk_pointer_json`,
+  matches that shape.
+
+Hermeticity here depends on `python/tests/conftest.py`'s autouse
+`_scrub_sdk_discovery_env` fixture (deletes `ALP_SDK_ROOT`, repoints
+`HOME`/`USERPROFILE` at a scratch dir before every test): without it, a
+developer's real `ALP_SDK_ROOT` or `~/.alp/sdk-default` could outrank the
+project pin in the SDK-discovery tier order, and the second test's premise --
+that the on-disk `.alp/sdk-path` pointer is what actually resolves -- would
+not hold.
 """
 import json
 import os
@@ -144,14 +161,26 @@ def project(tmp_path):
 def test_materialise_only_state_has_the_v041_layout_and_banner_and_no_manifest(project):
     plan_doc = real_plan("multicore_rpmsg-aen")
     plan = write_plan(project, plan_doc)
-    # No `--sdk-root`/`--board-yaml`: the post-build manifest write cannot
-    # resolve an SDK, so this run leaves the tree in exactly the same shape a
-    # real v0.4.1 `--materialise`-only run does (see module docstring).
+    # No `--sdk-root`/`--board-yaml`: with `--materialise`, this run takes the
+    # port's real materialise-only path (see module docstring) -- the same
+    # tree shape a real v0.4.1 `--materialise`-only run leaves.
     proc = run_tan(
-        "build", "--plan-from", str(plan), "--format", "json", cwd=project, scrub_path=True
+        "build",
+        "--plan-from",
+        str(plan),
+        "--materialise",
+        "--format",
+        "json",
+        cwd=project,
+        scrub_path=True,
     )
     env = envelope_of(proc)
     assert proc.returncode == 0, env
+
+    # Materialise mode never attempts the post-build manifest emit, so there
+    # is no manifest-write issue to pin here (unlike a real `tan build`,
+    # covered by `test_build_manifest.py`).
+    assert env["issues"] == [], env["issues"]
 
     for rel, slice_name in EXPECTED_ARTEFACTS:
         content = (project / rel).read_text(encoding="utf-8")
@@ -160,17 +189,27 @@ def test_materialise_only_state_has_the_v041_layout_and_banner_and_no_manifest(p
             assert slice_name in content, f"{rel} does not name its own slice {slice_name!r}"
 
     # The layout rule itself: every per-slice file lives under its own
-    # `build/<core_id>-<os>/`, every shared one under `build/generated/`.
+    # `build/<core_id>-<backend>/` (the plan's own declared `buildDir`, not a
+    # hand-derived path -- the plan has no `os` key), every shared one under
+    # `build/generated/`.
     for rel, slice_name in EXPECTED_ARTEFACTS:
         if slice_name is None:
             assert rel.startswith("build/generated/"), rel
         else:
             sl = next(s for s in plan_doc["slices"] if s["coreId"] == slice_name)
-            assert rel.startswith(f"build/{slice_name}-{sl['backend']}/"), rel
+            assert rel.startswith(f"{sl['buildDir']}/"), rel
 
-    # The structural finding this whole module exists to pin: materialising
-    # is not building, and does not write the manifest.
-    assert not (project / "build" / "system-manifest.yaml").exists()
+    # The structural finding this whole module exists to pin: a real
+    # `--materialise`-only run writes no manifest (asserted above) because
+    # the write is never attempted, not because it failed or the build was
+    # skipped -- and the six files above are the COMPLETE contents of
+    # `build/` -- a stray seventh file fails this too.
+    actual_files = {
+        str(p.relative_to(project)).replace(os.sep, "/")
+        for p in (project / "build").rglob("*")
+        if p.is_file()
+    }
+    assert actual_files == {rel for rel, _ in EXPECTED_ARTEFACTS}
 
 
 def test_a_full_v041_shaped_sdk_path_pointer_resolves_unmigrated(project, tmp_path):
@@ -183,8 +222,13 @@ def test_a_full_v041_shaped_sdk_path_pointer_resolves_unmigrated(project, tmp_pa
 
     alp_dir = project / ".alp"
     alp_dir.mkdir()
+    # Pretty-printed with a trailing newline -- measured on the oracle,
+    # `tan.exe sdk switch <path>` writes this shape (`indent=2` + trailing
+    # newline); this port's own writer, `scaffold.sdk_pointer_json`, matches
+    # it. The point of this fixture is the real v0.4.1 on-disk SHAPE, not a
+    # minified stand-in for it.
     (alp_dir / "sdk-path").write_text(
-        json.dumps({"sdkPath": str(sdk), "updatedAt": "2026-01-01T00:00:00Z"}),
+        json.dumps({"sdkPath": str(sdk), "updatedAt": "2026-01-01T00:00:00Z"}, indent=2) + "\n",
         encoding="utf-8",
         newline="",
     )
