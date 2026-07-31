@@ -304,6 +304,78 @@ else installs by hand.
   half as the fix and called the defect Windows-only. It is the reverse:
   Windows was green throughout and POSIX was the broken platform.
 
+- **The same `TBD` defect on the Rust side: a placeholder reached every
+  flash backend as a real value** (#222).
+  `TBD` is a deliberate alp-sdk convention — where the exact hardware
+  configuration is not yet known the field is marked `TBD` rather than invented —
+  so the convention itself routinely produces the value, and every guard in this
+  area tested for *empty*, which is the one thing `TBD` is not. `fa_str`, the
+  accessor twelve string reads across the backends go through, returned it:
+  the literal string `TBD` became a `west flash --runner`, a build directory, a
+  hex file, an OpenOCD config path and a `dd` destination. The same defect was
+  measured in alp-sdk (`flash/mod.rs:307`), where it resolved to
+  `<build_root>/TBD` and a real flasher was spawned against it.
+
+  **There are two string accessors, and both carried the defect.**
+  `plan_swd_probe` reads four fields — `base`, `jlink_device`, `interface`,
+  `target` — through the *strict* `builders::fa_str_checked`, which had the same
+  `!s.is_empty()` filter. That is the accessor whose whole reason for existing
+  is the fields where a silent fallback to a baked-in default is dangerous, and
+  two of the four reached a spawned command:
+
+  - `jlink_device: TBD` has no validator behind it at all, so the plan was
+    `JLinkExe -device TBD -if SWD -speed 4000 …` with `planning_only: false` —
+    the alp-sdk sighting this issue reports, reproduced exactly.
+  - `interface: TBD` / `target: TBD` are *worse* than unvalidated:
+    `validate_identifier` accepts `TBD` (it is a plain alphanumeric identifier),
+    and being non-empty it also suppressed the "`interface` and `target` are
+    required" refusal — so the plan was
+    `openocd -f interface/TBD.cfg -f target/TBD.cfg -c "program … verify reset exit"`.
+    The correct error was silenced *because* the placeholder is not empty, which
+    is the issue's thesis word for word.
+  - `base: TBD` was already refused, but by `validate_address` happening to
+    reject a non-hex charset — safe by a second guard, not by the accessor.
+
+  There the placeholder is an **error**, not absent: reading an unfilled
+  `jlink_device` as absent would flash a GD32G553 with `DEFAULT_JLINK_DEVICE`,
+  and an unfilled `base` would program real silicon at `DEFAULT_BASE`, both
+  while the manifest was saying "not yet known". This makes the string member of
+  the `_checked` family agree with `fa_bool_checked`/`fa_int_checked`, which
+  already hard-error on a present `TBD`. The tolerant `fa_str` reads it as
+  absent because its callers' defaults are safe; the strict one refuses.
+
+  Fixed once per accessor, not at the call sites: `TBD` now
+  reads as **absent**, which is what it means. Every caller's existing
+  `unwrap_or_else(default)` / `if let Some` then treats it as the unfilled field
+  it is, with no new branch anywhere — `build_dir` falls back to the computed
+  Zephyr build dir instead of a literal `TBD` directory, `target` to `flash`,
+  `bs` to `4M`. It also matches what tan already did with the whole entry
+  (`commands::flash` SKIPS a target whose `flash_args` contains `TBD`) and what
+  the sibling `fa_bool_checked`/`fa_int_checked` already did with a bare
+  `flash_args: TBD`.
+
+  The sentinel is now defined ONCE (`PENDING_PLACEHOLDER` /
+  `is_pending_placeholder`) rather than written out at four sites — the fourth
+  being `sdk_catalogue::parse::is_tbd`, which four comments in `commands::flash`
+  and `commands::image` cite *by name* as the definition of the convention. The
+  failure mode of four copies is a fifth reader written without one, and
+  `fa_str_checked` was that fifth reader.
+
+  Two readers outside the flash path are knowingly left separate: `pinmux` drops
+  a `TBD` `e1m_pad` as a sentinel row (that silicon pad has no E1M edge ball),
+  and `size::resolve_variant` skips a `TBD` `silicon_variant` before its reverse
+  SKU lookup. Different schemas, different questions, and neither plans a flash
+  write. Both compare untrimmed, so `' TBD '` slips past them — filed as #276
+  rather than folded in here, along with the open question of whether
+  `PENDING_PLACEHOLDER` should live somewhere more neutral than `flash::args`.
+
+  Every `fa_str` call site was audited for whether "absent" is safe there. Each
+  is either already protected by a closed-set check that `TBD` also failed
+  (`plan_yocto_wic`'s required-`target` plus its `/dev/` prefix refusal,
+  `plan_xspi_flashwriter`'s `mtd0`/`mtd1`) or strictly improves. None was found
+  where absent is more dangerous than the placeholder was — which is precisely
+  why the four `fa_str_checked` fields got the opposite answer.
+
 - **`project.boardYaml` now agrees with the filesystem in both directions**
   (#236, #170). The field's own contract has always read "if found", and the
   code returned a path either way: twenty commands each cloned
