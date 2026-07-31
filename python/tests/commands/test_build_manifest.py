@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """`tan.commands.build.manifest`: the post-build `system-manifest.yaml` write
 seam -- `write_post_build_manifest`'s failure branches (pure/no-SDK-needed),
-`resolve_zephyr_artefact`'s default-nested-build-dir resolution, and
-`discover_sdk_root`'s candidate ladder.
+`resolve_zephyr_artefact`'s default-nested-build-dir resolution,
+`discover_sdk_root`'s candidate ladder, and the tier ORDER of
+`resolve_sdk_root_ladder` that wraps it.
 
 The SUCCESS path (a real SDK emit + overlay landing on disk) needs a real
 alp-sdk checkout and is gated on `ALP_SDK_ROOT`, mirroring
@@ -11,6 +12,7 @@ needs no SDK at all and always runs.
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -21,7 +23,7 @@ from tan.commands.build.manifest import (
     resolve_zephyr_artefact,
     write_post_build_manifest,
 )
-from tan.commands.build_cmd import discover_sdk_root
+from tan.commands.build_cmd import discover_sdk_root, resolve_sdk_root_ladder
 from tan.core.system_manifest import SliceRunResult, parse_system_manifest
 
 
@@ -112,6 +114,92 @@ def test_discover_sdk_root_none_when_nothing_nearby(tmp_path):
     workspace = tmp_path / "myproj"
     workspace.mkdir()
     assert discover_sdk_root(workspace) is None
+
+
+# ------------------------------------------------------- resolve_sdk_root_ladder
+#
+# The ORDER of the ladder's last two tiers, pinned against the oracle binary
+# (tan-cli#263). `discover_sdk_root` above puts the CHILD `<ws>/alp-sdk` first;
+# `resolve_sdk_tiered`'s own discovery probes only the workspace root and the
+# LATERAL `../alp-sdk`, else the nearest enclosing checkout. A workspace holding
+# both is the one layout that tells the two apart -- and nothing exercised it,
+# which is why an inversion here was proposed as a fix. Every expectation below
+# is a measured `tan <cmd> --format json` -> `sdk.root` from the Rust oracle in
+# exactly this layout, not a reading of the port.
+#
+# `~/.alp/sdk-default` and `ALP_SDK_ROOT` are scrubbed for every test by the
+# autouse fixture in `tests/conftest.py`, so only the layout decides.
+
+
+def _write_pin(workspace: Path, target: Path) -> None:
+    """`.alp/sdk-path` in the `{"sdkPath": ...}` shape `sdk_cmd._pointer_target`
+    reads -- a bare path string parses as invalid JSON and falls through."""
+    (workspace / ".alp").mkdir(parents=True, exist_ok=True)
+    (workspace / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(target).replace("\\", "/")}), encoding="utf-8"
+    )
+
+
+def test_ladder_takes_the_lateral_checkout_over_a_competing_child(tmp_path):
+    # Oracle, measured: `../alp-sdk`. The narrow tier hits laterally and
+    # short-circuits, so the child-first wide walk never runs. Hoisting the
+    # wide walk above it would return `ws/alp-sdk` here and move the SDK root
+    # under every already-built workspace of this shape.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+
+    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path / "alp-sdk", "discovery")
+
+
+def test_ladder_takes_the_enclosing_checkout_over_a_competing_child(tmp_path):
+    # Oracle, measured: the enclosing checkout. Same short-circuit, reached
+    # through the narrow tier's ancestor fallback rather than its lateral probe.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(tmp_path)
+    _make_sdk(workspace / "alp-sdk")
+
+    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path, "discovery")
+
+
+def test_ladder_falls_through_to_the_wide_walk_for_a_bootstrap_child(tmp_path):
+    # The canonical tan-cli#218 layout: no lateral and no enclosing checkout, so
+    # the narrow tier answers None and the wide walk's child rung is what
+    # resolves. This is the tier the two tests above must not cost us.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+
+    assert resolve_sdk_root_ladder(None, workspace) == (workspace / "alp-sdk", "discovery")
+
+
+def test_ladder_project_pin_outranks_every_discovery_candidate(tmp_path):
+    # Oracle, measured: the pinned path, tier `projectPin` -- with a child AND a
+    # lateral checkout both present and both ignored.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+    _make_sdk(tmp_path / "pinned")
+    _write_pin(workspace, tmp_path / "pinned")
+
+    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path / "pinned", "projectPin")
+
+
+def test_ladder_sdk_root_flag_is_terminal_and_unvalidated(tmp_path):
+    # I-31: the flag wins even when it names no checkout, so a bad `--sdk-root`
+    # surfaces as a readiness failure on the path the user typed instead of
+    # silently cleaning/building against the lateral one below it.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(tmp_path / "alp-sdk")
+
+    assert resolve_sdk_root_ladder(str(tmp_path / "nope"), workspace) == (
+        tmp_path / "nope",
+        "sdkRootFlag",
+    )
 
 
 # ------------------------------------------------------ write_post_build_manifest

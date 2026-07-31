@@ -656,19 +656,30 @@ def sdk_root_resolves(sdk_root: str | None, workspace_root: Path) -> bool:
     a checkout the caller never named -- checked explicitly below because the
     ladder itself returns a `--sdk-root` value unvalidated (matching the
     oracle's `resolve_sdk_tiered`, terminal for REPORTING); this gate matches
-    `util::resolve_sdk_root`, terminal AND validated. The pin/`ALP_SDK_ROOT`/
+    `util::resolve_sdk_root`, terminal AND validated. The project-pin and
     global-default tiers are best-effort, so a stale pointer falls through
     instead of locking the user out.
 
-    Uses the WIDE positional walk as its final tier (root, child `alp-sdk`,
+    The ladder's LAST tier is the wide positional walk (root, child `alp-sdk`,
     sibling `alp-sdk`, sibling `alp-sdk-upstream`, then ancestors; first match
-    wins) -- not the narrower `resolve_sdk_tiered`'s own discovery, which
-    [`resolve_sdk`][tan.commands.presets_cmd.resolve_sdk] (below) still uses
-    for the REPORTED `sdk` key. The oracle calls both in one `clean` run: the
-    wider one gates the command, the narrower one decides what is reported.
-    Collapsing them to one would make `tan clean` refuse to run in a
-    `tan bootstrap` workspace, where the checkout is a CHILD of the cwd
-    (tan-cli#218).
+    wins), but it is reached only when the narrower `resolve_sdk_tiered`
+    discovery tier AHEAD of it answers `None` -- a narrow hit short-circuits.
+    So in a workspace holding BOTH a child `alp-sdk` and a lateral one, what
+    gates this command is the lateral checkout, not the child, and the wide
+    walk never runs (measured against the oracle: `tan clean` there resolves
+    `../alp-sdk` too, tan-cli#263).
+
+    That ordering does not move this boolean: every candidate the narrow tier
+    probes is also one the wide walk probes, so a narrow hit implies a wide
+    hit. What the wide tail still buys is the case the narrow tier cannot
+    answer -- a `tan bootstrap` workspace whose checkout is a CHILD of the cwd,
+    where narrow returns `None` and, without the tail, `tan clean` would refuse
+    to run (tan-cli#218; measured: the oracle resolves `<ws>/alp-sdk` there).
+
+    Note this gate and the REPORTED `sdk` key are still two different
+    resolutions: [`resolve_sdk`][tan.commands.presets_cmd.resolve_sdk] (below)
+    reports through `resolve_sdk_tiered` alone, so a bootstrap-child workspace
+    gates open here while reporting no `sdk` at all.
     """
     resolved, tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
     if resolved is None:

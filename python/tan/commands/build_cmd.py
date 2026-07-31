@@ -273,6 +273,23 @@ def resolve_sdk_root_ladder(
     contract change no consumer (the vscode extension, `tan sdk current
     --json`) expects. The project-pin tier above already makes `tan init &&
     tan build` compose without it.
+
+    **The narrow tier short-circuiting the wide one is deliberate, and
+    measured** (tan-cli#263, which proposed inverting it): the wide walk puts
+    the CHILD `<ws>/alp-sdk` ahead of the lateral `../alp-sdk`, so hoisting it
+    above `resolve_sdk_tiered` would flip every workspace holding both. Driven
+    through the oracle binary in constructed layouts, thirteen of its commands
+    -- `build`, `doctor`, `clean`, `run`, `flash`, `size`, `image`, `kconfig`,
+    `validate`, `presets`, `inspect`, `trace`, `sdk current` -- resolve the
+    LATERAL one there, i.e. the narrow order this ladder already has; only
+    `init`, `generate`, `examples` and `renode` take the child. The oracle
+    carries two resolutions, not one, and this ladder mirrors the majority
+    (narrow) one plus the wide walk as its tail. Inverting it to match the
+    other four would move the SDK root under thirteen commands, and a moved
+    root is what `plan_exec.sdk_stamp_action` reads as a switch: every existing
+    such workspace would take the `build.sdk-switch-pristine` branch on its
+    next build and lose every slice's build dir. The four wide commands are the
+    real gap and want a separate wide helper, not a change here.
     """
     flag = (sdk_root_arg or "").strip()
     if flag:
