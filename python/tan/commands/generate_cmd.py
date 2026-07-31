@@ -93,7 +93,7 @@ import typer
 from tan import planner_emit
 from tan.commands.build_cmd import _planner_python, resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
-from tan.envelope import Envelope, Issue, Project, emit
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
 #: `data.schemaVersion` for this command's payload.
@@ -636,21 +636,34 @@ def _resolve_board_path(board_yaml: str | None, workspace_root: Path) -> Path:
     return workspace_root / "board.yaml"
 
 
-def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> Path | None:
-    """`--sdk-root` is TERMINAL: an explicit path that is not an SDK checkout
-    fails loudly here rather than silently falling through to discovery and
-    generating against a different checkout than the caller named (I-31).
+def _resolve_sdk_root(
+    sdk_root: str | None, workspace_root: Path
+) -> tuple[Path, str, str] | None:
+    """`(path, sourceTier, reported)` -- or `None` when unresolved. `--sdk-root`
+    is TERMINAL: an explicit path that is not an SDK checkout fails loudly here
+    rather than silently falling through to discovery and generating against a
+    different checkout than the caller named (I-31); its tier is always
+    `sdkRootFlag`, matching the oracle's closed `SdkSourceTier`.
 
     Without `--sdk-root`: `.alp/sdk-path` project pin > the machine-global
     default (`~/.alp/sdk-default`) > the positional walk
-    (`resolve_sdk_root_ladder`). No `ALP_SDK_ROOT` tier (tried and reverted --
-    see `resolve_sdk_root_ladder`'s own docstring).
+    (`resolve_sdk_root_ladder`, which reports its own tier). No `ALP_SDK_ROOT`
+    tier (tried and reverted -- see `resolve_sdk_root_ladder`'s own docstring).
+
+    `reported` is the string to put in the envelope's `sdk.root`: for
+    `sdkRootFlag` it is the flag's raw text, NOT `str(path)` -- pathlib
+    silently drops a trailing separator (`E:/GitHub/alp-sdk/` in, `.../alp-sdk`
+    out), which the oracle does not do. Every other tier reports `str(path)`;
+    those come from a pinned/discovered path, not user-typed argv, so there is
+    no trailing-separator input to preserve.
     """
     if sdk_root:
         candidate = Path(sdk_root)
-        return candidate if (candidate / "scripts" / "alp_project.py").is_file() else None
-    found, _tier = resolve_sdk_root_ladder(None, workspace_root)
-    return found
+        if (candidate / "scripts" / "alp_project.py").is_file():
+            return candidate, "sdkRootFlag", sdk_root
+        return None
+    found, tier = resolve_sdk_root_ladder(None, workspace_root)
+    return (found, tier, str(found)) if found is not None else None
 
 
 def _finish(
@@ -665,6 +678,7 @@ def _finish(
     issues: list[Issue],
     exit_code: ExitCode,
     engine: dict[str, str] | None = None,
+    sdk: SdkInfo | None = None,
 ) -> None:
     data = {
         "schemaVersion": DATA_SCHEMA_VERSION,
@@ -679,7 +693,7 @@ def _finish(
     if engine:
         data["engine"] = engine
     if json_mode:
-        emit(Envelope("generate", project, data, issues, exit_code))
+        emit(Envelope("generate", project, data, issues, exit_code, sdk=sdk))
     else:
         # stdout is the envelope channel in both modes; human text never
         # touches it.
@@ -785,12 +799,18 @@ def generate(
             verbose=verbose,
             quiet=quiet,
             project=reported,
+            sdk=sdk_info,
             **kwargs,
         )
 
     def refuse(err: GenerateError) -> None:
         # No `engine`: a refusal resolved no targets, so there is no run to
         # describe (and the committed conformance golden pins that data shape).
+        # `sdk` still reports (via `finish`'s default) once it is resolved --
+        # only a refusal that precedes/IS the SDK resolution itself leaves it
+        # unset, matching the oracle (`generate.board-yaml-missing` and
+        # `generate.sdk-root-unresolved` both carry no `sdk`; every guard past
+        # a successful resolution does).
         finish(
             targets=(),
             written=[],
@@ -800,6 +820,7 @@ def generate(
         )
 
     engine: dict[str, str] = {}
+    sdk_info: SdkInfo | None = None
     try:
         workspace_root = Path(os.path.abspath(project)) if project else Path.cwd()
         board_path = _resolve_board_path(board_yaml, workspace_root)
@@ -811,14 +832,22 @@ def generate(
                 ExitCode.VALIDATION_FAILURE,
             )
 
-        resolved_sdk = _resolve_sdk_root(sdk_root, workspace_root)
-        if resolved_sdk is None:
+        resolved = _resolve_sdk_root(sdk_root, workspace_root)
+        if resolved is None:
             raise GenerateError(
                 "generate.sdk-root-unresolved",
                 "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk "
                 "switch <version|path>`, or place the project near an alp-sdk checkout.",
                 ExitCode.VALIDATION_FAILURE,
             )
+        resolved_sdk, sdk_tier, sdk_reported = resolved
+        # Set only now: every guard from here on runs with a resolved SDK, so
+        # the envelope carries `sdk` on both success and a later refusal
+        # (`--target`/`--core` mistakes, an overlay guard, ...), matching the
+        # oracle. The two guards above (`board.yaml` missing, this one) raise
+        # before `sdk_info` exists, so their envelopes carry no `sdk` --
+        # exactly the oracle's shape for both.
+        sdk_info = SdkInfo(sdk_reported, sdk_tier)
 
         targets = resolve_targets(target, all_targets, core)
 
