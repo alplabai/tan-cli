@@ -3,17 +3,25 @@
 # Build (and self-verify) the eight release assets from the PYTHON package.
 #
 # `workflow_dispatch` ONLY, and it creates NO release and uploads NOTHING to a
-# tag: this workflow exists to PROVE the eight assets can be produced from
+# tag: this workflow exists to PROVE all eight targets CAN be produced from
 # `python/`, not to publish them. Cutting a release stays release.yml's job and
-# the maintainer's call. Fold this build job into release.yml when the Python
-# port is the shipped artifact -- `docs/python-release-feasibility.md` carries
-# the exact edits, including the `verify-version` change (that job greps
-# `^version = ` out of Cargo.toml, which a Python-versioned tag never moves).
+# the maintainer's call -- and release.yml already ships the Python port, from
+# v0.5.0, but only FOUR of these eight assets: adding the
+# `aarch64-pc-windows-msvc` and Linux-arm64 runner legs was out of scope for
+# that tag (a scope decision, not a platform limit -- see release.yml's
+# header). Fold the missing two legs into release.yml's `build` matrix if/when
+# arm64 assets are wanted; `docs/python-release-feasibility.md` carries the
+# exact edits. `release.yml`'s `verify-version` job already reads
+# `TAN_VERSION` via `python/scripts/version_check.py` rather than grepping
+# `^version = ` out of Cargo.toml, so that half of the fold is done.
 #
 # Why one job per asset instead of release.yml's three runners: `cargo` cross-
 # compiles, PyInstaller CANNOT. It freezes the interpreter it is RUNNING, so
 # every asset must be built on its own OS+arch. Eight assets, eight native
-# hosts (all eight labels are available to private repos as of 2026-07).
+# hosts (all eight labels are available on this PUBLIC repo -- an earlier
+# revision of this comment said "private repos", which stopped being true when
+# the repo went public, the same correction release.yml's own header and
+# docs/release-contract.md already carry for the two unpublished arm64 assets).
 #
 # The two `-gnu` jobs build inside `python:3.12-slim-bullseye` (Debian 11,
 # glibc 2.31) to match the floor release.yml's cargo-zigbuild pins with
@@ -49,22 +57,26 @@ env:
   # declared one. PyInstaller stays out of pyproject.toml on purpose: it is a
   # build-time tool, not a runtime dependency.
   #
-  # Extras are deliberately NOT installed (no `[monitor]`): an extra is optional
-  # at runtime by definition, so freezing pyserial in would make the binary
-  # promise more than the wheel does.
+  # `[monitor]` IS installed -- decided on the numbers, not on principle.
   #
-  # MEASURED, both on this host, clean venvs: no extras 13571067 B, with
-  # `[monitor]` 13648433 B -- a 77366 B (0.57%) delta against 2.85 MB of headroom
-  # under the DEFAULT ceiling, so the ceiling is NOT what decides this. What the
-  # delta buys: with pyserial bundled, `tan monitor` enumerates ports
-  # (`monitor.no-port`, exit 1); without it, the frozen binary answers
-  # `monitor.internal-failure` at exit 5 carrying a raw
-  # `ModuleNotFoundError: No module named 'serial'` -- because
-  # `tan/commands/monitor_cmd.py:108` skips its own pyserial precheck when
-  # `sys.frozen` is set, then `_available_ports()` imports `serial.tools`
-  # unguarded at line 76. So `monitor.pyserial-missing` cannot fire on a frozen
-  # build at all. To ship monitor in the binary: `-e .[monitor]` on all three
-  # install lines below. Recommended, but it is a release-content decision.
+  # An extra is optional at runtime by definition, so the default was to leave it
+  # out. Measured on one host, clean venvs, after bd7079d: without it 13574636 B,
+  # with it 13648028 B. A 73392 B (0.54%) delta against 2.85 MB of headroom under
+  # the DEFAULT ceiling is not a size decision, and the thing it buys is a `tan
+  # monitor` that can open a serial port at all -- pyserial cannot be added to a
+  # `--onefile` binary after the fact, so a frozen build without the extra is a
+  # build whose `monitor` can never work on the machine holding it.
+  #
+  # It hides nothing: without the extra the command now refuses honestly with
+  # `monitor.pyserial-missing` at exit 1, naming the extra and saying a frozen
+  # binary resolves it at BUILD time (bd7079d guarded `_available_ports()`, the
+  # choke point every port-listing path routes through -- the precheck at
+  # `monitor_cmd.py` cannot fire under `sys.frozen`, so guarding the callers
+  # would have left this path open).
+  #
+  # Keep the quotes: `[monitor]` is a bash glob character class, and an unquoted
+  # `-e .[monitor]` is at the mercy of what happens to sit in the working
+  # directory.
   BUILD_DEPS: pyinstaller>=6.10
   # Debian 11, i.e. glibc 2.31 -- NOT the runner's own image.
   #
@@ -88,8 +100,14 @@ jobs:
         include:
           - asset: tan-x86_64-pc-windows-msvc.exe
             os: windows-latest
+            machine: "0x8664" # IMAGE_FILE_MACHINE_AMD64
           - asset: tan-aarch64-pc-windows-msvc.exe
+            # `windows-11-arm`, and it has to be: PyInstaller freezes the
+            # interpreter it is RUNNING and cannot cross-compile, so building
+            # this asset on `windows-latest` would upload an x86_64 binary under
+            # the aarch64 name. The `arch` step below is what refuses that.
             os: windows-11-arm
+            machine: "0xaa64" # IMAGE_FILE_MACHINE_ARM64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -106,9 +124,30 @@ jobs:
         run: |
           python -m venv .venv-build
           .venv-build/Scripts/python -m pip install --quiet --upgrade pip
-          .venv-build/Scripts/python -m pip install --quiet -e . $BUILD_DEPS
+          .venv-build/Scripts/python -m pip install --quiet -e ".[monitor]" $BUILD_DEPS
           PYTHON=.venv-build/Scripts/python.exe bash scripts/build_binary.sh
           cp dist/tan.exe "${{ matrix.asset }}"
+      # Same reason the macOS job runs `file`: PyInstaller freezes the host's
+      # arch, so a wrong runner label produces a correctly NAMED asset of the
+      # wrong architecture, and the extension selects by name without ever
+      # inspecting the file. Read the PE COFF machine field rather than shelling
+      # `file`, which is a Git-for-Windows accident rather than a guarantee:
+      # 0x8664 = AMD64, 0xaa64 = ARM64.
+      - name: arch
+        shell: bash
+        run: |
+          python - "python/${{ matrix.asset }}" "${{ matrix.machine }}" <<'PY'
+          import struct, sys
+          path, want = sys.argv[1], int(sys.argv[2], 16)
+          with open(path, "rb") as fh:
+              fh.seek(0x3C)
+              pe = struct.unpack("<I", fh.read(4))[0]
+              fh.seek(pe + 4)
+              machine = struct.unpack("<H", fh.read(2))[0]
+          print(f"{path}: PE machine 0x{machine:04x} (want 0x{want:04x})")
+          if machine != want:
+              raise SystemExit(f"::error::{path} is not the architecture its asset name claims")
+          PY
       - name: verify
         if: inputs.verify
         shell: bash
@@ -161,14 +200,14 @@ jobs:
               set -e
               apk add --no-cache binutils bash
               python -m venv /tmp/v
-              /tmp/v/bin/pip install --quiet -e . '"$BUILD_DEPS"'
+              /tmp/v/bin/pip install --quiet -e ".[monitor]" '"$BUILD_DEPS"'
               PYTHON=/tmp/v/bin/python bash scripts/build_binary.sh'
           else
             docker run --rm -v "$PWD/python:/w" -w /w "$GNU_IMAGE" bash -c '
               set -e
               apt-get -qq update && apt-get -qq install -y binutils
               python -m venv /tmp/v
-              /tmp/v/bin/pip install --quiet -e . '"$BUILD_DEPS"'
+              /tmp/v/bin/pip install --quiet -e ".[monitor]" '"$BUILD_DEPS"'
               PYTHON=/tmp/v/bin/python bash scripts/build_binary.sh'
           fi
           cp python/dist/tan "python/${{ matrix.asset }}"
@@ -220,7 +259,7 @@ jobs:
         run: |
           python3 -m venv .venv-build
           .venv-build/bin/python -m pip install --quiet --upgrade pip
-          .venv-build/bin/python -m pip install --quiet -e . $BUILD_DEPS
+          .venv-build/bin/python -m pip install --quiet -e ".[monitor]" $BUILD_DEPS
           PYTHON=.venv-build/bin/python bash scripts/build_binary.sh
           cp dist/tan "${{ matrix.asset }}"
       # `file` proves the arch, because a PyInstaller build cannot: it always

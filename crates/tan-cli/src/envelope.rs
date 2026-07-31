@@ -3,7 +3,8 @@
 //! CLI's `CliEnvelope`. JSON mode writes exactly one of these to stdout.
 
 use serde::Serialize;
-use tan_core::SdkSourceTier;
+use std::path::Path;
+use tan_core::{ProjectContext, SdkSourceTier, debug::DebugWorkspaceContext};
 
 /// A single diagnostic carried in an envelope's `issues` list.
 #[derive(Debug, Clone, Serialize)]
@@ -24,6 +25,65 @@ pub struct Project {
     /// Absolute path to the project's `board.yaml`, if found.
     #[serde(rename = "boardYaml")]
     pub board_yaml: Option<String>,
+}
+
+impl Project {
+    /// The `project` block for a resolved [`ProjectContext`] — the one place
+    /// every command builds it (tan-cli#236).
+    ///
+    /// `board_yaml` is `Some` only when a file is really at the resolved path.
+    /// The doc above has always said "if found"; before this, twenty call sites
+    /// each cloned `context.board_yaml_path` straight through, so the field
+    /// named `<root>/board.yaml` whether or not anything was there and a
+    /// consumer that opened it got ENOENT. `null` is not a new value here —
+    /// it is what the field already carries wherever resolution produces
+    /// nothing at all.
+    ///
+    /// Deliberately NOT done by making
+    /// [`tan_core::project::resolve_project_context`] return `None`:
+    /// `ProjectContext::board_yaml_path` is the path a command ACTS on, and
+    /// several need it precisely when the file is absent — `doctor`'s
+    /// `read_board_model`, `validate`/`diff`'s "board.yaml is not valid YAML"
+    /// path, and `tan-core::debug::create_debug_workspace_context`, which
+    /// mirrors the TypeScript side by carrying the path and a SEPARATE
+    /// `board_yaml_exists` flag. Emptying it there would strip the path out of
+    /// every "no board.yaml at `<path>`" message. Reporting is the seam; the
+    /// resolver is not.
+    ///
+    /// `root` is passed through untouched — tan-cli#236 rules a
+    /// directory-is-not-a-project question explicitly out of scope.
+    pub fn from_context(context: &ProjectContext) -> Self {
+        Self::from_context_with(context, |p| Path::new(p).exists())
+    }
+
+    /// The `project` block for a [`DebugWorkspaceContext`] — `doctor`,
+    /// `inspect` and `support-bundle` hold one of these rather than a bare
+    /// [`ProjectContext`].
+    ///
+    /// Reuses the context's own `board_yaml_exists`, which
+    /// [`tan_core::debug::create_debug_workspace_context`] already computed
+    /// through its injected probe, instead of stat-ing the path a second time.
+    /// One answer per run: a second probe could disagree with the flag the rest
+    /// of the same envelope was built from.
+    pub fn from_debug_context(context: &DebugWorkspaceContext) -> Self {
+        Project {
+            root: context.workspace_root.clone(),
+            board_yaml: context
+                .board_yaml_path
+                .clone()
+                .filter(|_| context.board_yaml_exists),
+        }
+    }
+
+    /// [`Project::from_context`] with the existence probe injected, mirroring
+    /// [`tan_core::project::resolve_project_context`]'s own shape so the rule
+    /// is unit-testable without touching a filesystem.
+    pub fn from_context_with(context: &ProjectContext, exists: impl Fn(&str) -> bool) -> Self {
+        Project {
+            root: context.workspace_root.clone(),
+            board_yaml: context.board_yaml_path.clone().filter(|path| exists(path)),
+        }
+    }
 }
 
 /// The alp-sdk root a command actually resolved and used, plus which
@@ -124,6 +184,106 @@ impl<T: Serialize> Envelope<T> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    fn context_with_board_yaml(board_yaml_path: Option<&str>) -> ProjectContext {
+        ProjectContext {
+            workspace_root: Some("/work/proj".to_string()),
+            sdk_root: Some("/work/alp-sdk".to_string()),
+            board_yaml_path: board_yaml_path.map(str::to_string),
+            west_cwd: Some("/work/proj".to_string()),
+            python_binary: "python3".to_string(),
+        }
+    }
+
+    /// tan-cli#236: the resolver joins root + configured name unconditionally,
+    /// so this path is `Some` whether or not a file is there. The envelope must
+    /// not repeat the claim — a consumer that opens it gets ENOENT.
+    #[test]
+    fn board_yaml_is_null_when_nothing_is_at_the_resolved_path() {
+        let context = context_with_board_yaml(Some("/work/proj/board.yaml"));
+        let project = Project::from_context_with(&context, |_| false);
+        assert_eq!(project.board_yaml, None);
+    }
+
+    /// The other direction (tan-cli#170): a real `board.yaml` must be reported,
+    /// not dropped. Together with the test above, this is what stops the fix
+    /// being "always null", which would pass the #236 case alone.
+    #[test]
+    fn board_yaml_is_reported_when_the_file_really_exists() {
+        let context = context_with_board_yaml(Some("/work/proj/board.yaml"));
+        let project = Project::from_context_with(&context, |p| p == "/work/proj/board.yaml");
+        assert_eq!(project.board_yaml.as_deref(), Some("/work/proj/board.yaml"));
+    }
+
+    /// The probe must be asked about the path the envelope is about to report,
+    /// not about the root or some other field.
+    #[test]
+    fn the_existence_probe_is_asked_about_the_board_yaml_path_itself() {
+        let context = context_with_board_yaml(Some("/work/proj/board.yaml"));
+        let asked = std::cell::RefCell::new(Vec::new());
+        let project = Project::from_context_with(&context, |p| {
+            asked.borrow_mut().push(p.to_string());
+            true
+        });
+        assert_eq!(
+            asked.into_inner(),
+            vec!["/work/proj/board.yaml".to_string()]
+        );
+        assert!(project.board_yaml.is_some());
+    }
+
+    /// tan-cli#236 rules `project.root` explicitly out of scope: a directory
+    /// that is not a project still legitimately reports where the run stood.
+    /// A fix that emptied `root` alongside `board_yaml` would be a wider,
+    /// unasked-for wire change.
+    #[test]
+    fn root_is_passed_through_whatever_the_board_yaml_verdict() {
+        let context = context_with_board_yaml(Some("/work/proj/board.yaml"));
+        for exists in [true, false] {
+            let project = Project::from_context_with(&context, |_| exists);
+            assert_eq!(project.root.as_deref(), Some("/work/proj"), "{exists}");
+        }
+    }
+
+    /// A context that resolved no path at all stays null without the probe
+    /// inventing one.
+    #[test]
+    fn an_unresolved_board_yaml_path_stays_null() {
+        let context = context_with_board_yaml(None);
+        let project = Project::from_context_with(&context, |_| true);
+        assert_eq!(project.board_yaml, None);
+    }
+
+    /// `doctor`/`inspect`/`support-bundle` hold a `DebugWorkspaceContext`,
+    /// which already carries the answer. It must be trusted in BOTH directions
+    /// rather than re-probed — two probes in one run can disagree.
+    #[test]
+    fn the_debug_context_variant_trusts_its_own_exists_flag() {
+        let base = tan_core::debug::create_debug_workspace_context(
+            &context_with_board_yaml(Some("/work/proj/board.yaml")),
+            "1970-01-01T00:00:00Z".to_string(),
+            |_| true,
+            true,
+            crate::commands::doctor::standalone_debugger_extensions(),
+        );
+        assert_eq!(
+            Project::from_debug_context(&base).board_yaml.as_deref(),
+            Some("/work/proj/board.yaml")
+        );
+
+        let missing = tan_core::debug::create_debug_workspace_context(
+            &context_with_board_yaml(Some("/work/proj/board.yaml")),
+            "1970-01-01T00:00:00Z".to_string(),
+            |_| false,
+            true,
+            crate::commands::doctor::standalone_debugger_extensions(),
+        );
+        assert_eq!(Project::from_debug_context(&missing).board_yaml, None);
+        assert_eq!(
+            Project::from_debug_context(&missing).root.as_deref(),
+            Some("/work/proj")
+        );
+    }
 
     /// A `Vec` key (mirrors a YAML sequence/mapping key surviving into
     /// `serde_yaml::Value` passthrough) makes serde_json's map-key serializer

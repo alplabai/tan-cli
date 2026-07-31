@@ -520,7 +520,10 @@ pub struct BuildArgs {
     /// heuristic doesn't (or can't yet) catch. Same wipe, same two safety
     /// guards (an explicit `-d`/`--build-dir` in the slice's own command, or a
     /// plan cwd outside `build/`): this never touches a dir tan can't vouch
-    /// for, same as the automatic path.
+    /// for, same as the automatic path. A slice the wipe declines — for either
+    /// guard, or because the dir was never configured — says so on the
+    /// envelope and in text (`build.pristine-skipped`, tan-cli#183), so
+    /// "pristine" never silently means "incremental".
     #[arg(long)]
     pub pristine: bool,
 }
@@ -543,7 +546,10 @@ pub struct BootstrapArgs {
     /// Skip the west init/update step.
     #[arg(long = "no-west")]
     pub no_west: bool,
-    /// Only print the environment-variable lines and exit.
+    /// Only print the environment-variable lines and exit, installing nothing.
+    /// Written to STDOUT (tan-cli#227) — unlike every other text output, which
+    /// goes to stderr — so `eval "$(tan bootstrap --print-env)"` and
+    /// `tan bootstrap --print-env > env.sh` both work.
     #[arg(long = "print-env")]
     pub print_env: bool,
     /// Report success even when a dependency install failed and the workspace

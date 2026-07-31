@@ -136,16 +136,20 @@ pub struct ManualInstallHint {
 /// — the POSIX counterpart, telling a Linux/macOS customer that the Zephyr SDK
 /// is a separate manual `west sdk install`.
 ///
-/// tan does not read it yet, so that hint reaches no tan surface: `posix` has no
-/// field here and `optional_libs_block` renders only the Windows notes. Serde
-/// ignores the unknown key, so the re-vendor is safe — this is a MISSED
-/// improvement, not a regression, and the same class as the 7-Zip note being
-/// prose-only before #204. Tracked as tan-cli#230; the comment is corrected here
-/// rather than left asserting an absence the manifest has since filled.
+/// Both are read now (tan-cli#230). `posix` is OPTIONAL on the wire, and its
+/// absence has to stay clean: every SDK before v0.14.0 declares only `windows`,
+/// and a required field here would turn each of them into a hard
+/// `ValidationFailure` that `tan build` inherits through auto-bootstrap — the
+/// same trap `prerequisites.install` and `prerequisites.macos` already document.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ManualInstallHints {
     /// `manualInstallHints.windows`.
     pub windows: ManualInstallHint,
+    /// `manualInstallHints.posix`, or `None` when the manifest declares none
+    /// (every SDK before alp-sdk v0.14.0). `None` renders nothing at all, which
+    /// is exactly what those SDKs did before this field existed.
+    #[serde(default)]
+    pub posix: Option<ManualInstallHint>,
 }
 
 /// `prerequisites.install` — one shell install command per prerequisite tool,
@@ -710,6 +714,13 @@ pub fn fallback_facts(min_python: (u32, u32)) -> BootstrapFacts {
                     "native_sim / Yocto need WSL2 (docs/cross-platform-setup.md section 5).",
                 ]),
             },
+            posix: Some(ManualInstallHint {
+                note: owned(&[
+                    "The Zephyr SDK (`west sdk install`) is a separate, manual, one-time install on Linux/macOS -- not auto-installed by bootstrap.sh. It is the one every Zephyr-on-M customer needs: it provides the `arm-zephyr-eabi` cross toolchain the real-silicon build (`west build` / `west flash`) actually uses. Run it from your west workspace's top-level directory -- the alp-sdk checkout's parent directory -- after this script completes, e.g. `west sdk install --gnu-toolchains arm-zephyr-eabi --no-hosttools --install-dir \"$PWD/zephyr-sdk\"`; see docs/getting-started.md for the full one-liner and the `tan sdk switch` step that pins it per project.",
+                    "The Arm GNU Toolchain (`arm-none-eabi-gcc`) is a SEPARATE manual install, needed by three opt-in paths -- rebuilding the GD32 bridge firmware (custom-carrier bring-up or bridge recovery), building the CC3501E bridge firmware's silicon-free stub target (its production image builds with TI ticlang, not this toolchain), or hand-writing bare-metal firmware for a real M-class core -- most customers never touch any of them, since the GD32G553 ships pre-flashed by Alp Lab (rebuilding it is optional and fully open, see docs/gd32-bridge.md). See docs/cross-platform-setup.md section 2.3 (Linux) / 3.4 (macOS) for the apt/brew/curl install.",
+                    "`west sdk install` may print \"could not find a 'file' executable, falling back to guess mime type by file extension\" -- patool's extension-based fallback works fine without it; this is WARN-only, not a bootstrap.sh prerequisite. Install `file` (`apt-get install -y file` / it ships by default on macOS) only to silence the message.",
+                ]),
+            }),
         },
         from_manifest: false,
     }

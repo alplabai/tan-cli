@@ -36,12 +36,49 @@ done
 os="$(uname -s)"
 case "$os" in
 Darwin) os_part="apple-darwin" ;;
-# musl (static): no glibc floor, runs on any distro; TLS is rustls/ring so
-# there are no extra runtime deps either. Only published from tan-cli
-# v0.3.0 onward -- see the --version 404 note below.
-Linux) os_part="unknown-linux-musl" ;;
+# gnu, NOT musl. From v0.5.0 the binary is a PyInstaller freeze of the Python
+# port, and PyInstaller cannot produce the "static, runs on any libc" artefact
+# the Rust -musl target did: a musl freeze is dynamically linked against
+# /lib/ld-musl-x86_64.so.1 and runs ONLY on musl distros. So the Linux asset is
+# built on Debian 11 and named -gnu, and requesting -musl here would 404 on
+# every v0.5.0+ tag. Older (Rust) releases published BOTH, so this also
+# resolves for them -- with the Rust build's measured GLIBC_2.30 floor
+# (readelf -V on the shipped binary; its cargo-zigbuild pin target was a
+# different number, 2.31 -- see CHANGELOG 0.4.0, which retracts pairing
+# "2.31 floor" with the pre-fix "GLIBC_2.39 not found" symptom as wrong on
+# both numbers).
+Linux) os_part="unknown-linux-gnu" ;;
 *) echo "install.sh: unsupported OS '$os' -- on Windows use install.ps1" >&2; exit 1 ;;
 esac
+
+# musl hosts (Alpine and similar) cannot run the -gnu binary above AT ALL --
+# not a checksum failure, a bare "not found" from the shell AFTER the sha256
+# verify below already passed, so none of that section's four refusals ever
+# fires and the script reports success. Catch it here instead, before any
+# download: `ldd --version` names musl on the first line where glibc's ldd
+# names itself; some minimal images have no ldd at all, so also check for the
+# musl dynamic loader directly.
+if [ "$os_part" = "unknown-linux-gnu" ]; then
+	is_musl=0
+	if command -v ldd >/dev/null 2>&1; then
+		if ldd --version 2>&1 | grep -qi musl; then
+			is_musl=1
+		fi
+	elif ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
+		# Only reached when there is no ldd to ask. The loader-file probe alone
+		# is NOT sufficient on its own: Debian/Ubuntu's musl package (pulled in
+		# by musl-tools, which any host that ever cross-built the -musl target
+		# has) installs /lib/ld-musl-x86_64.so.1 on an otherwise glibc host, and
+		# that host's ldd correctly reports glibc -- so it must never be gated
+		# out by falling through here.
+		is_musl=1
+	fi
+	if [ "$is_musl" = "1" ]; then
+		echo "install.sh: this host's libc is musl (e.g. Alpine) -- no Linux asset is published for it. From v0.5.0 the binary is a PyInstaller freeze, which cannot produce the static musl artefact older Rust releases did; the only Linux asset now is -unknown-linux-gnu, and it cannot exec on a musl host." >&2
+		echo "install.sh: refusing to install. Install from a checkout instead: git clone https://github.com/${REPO} && pip install ./tan-cli/python" >&2
+		exit 1
+	fi
+fi
 
 # host arch -> rust target arch part
 arch="$(uname -m)"
@@ -108,16 +145,15 @@ dl_ok=1
 download "$url" "$tmp" || dl_ok=0
 if [ "$dl_ok" = "0" ]; then
 	echo "install.sh: download failed: ${url}" >&2
-	# Only name the musl floor when the requested tag is actually below it --
-	# a DNS/proxy/500 failure, or a perfectly valid >=v0.3.0 tag, gets no
-	# invented explanation.
-	if [ "$os_part" = "unknown-linux-musl" ]; then
-		case "$VERSION" in
-		v0.0.* | v0.1.* | v0.2.*)
-			echo "install.sh: note -- Linux musl assets only exist from v0.3.0 onward; ${VERSION} predates that and has no ${asset} asset." >&2
-			;;
-		esac
-	fi
+	# The transport error above says THAT it failed, never why, and a 404 for
+	# an asset that was never published looks identical to a proxy outage. Name
+	# the causes this script can actually know; guess at nothing else.
+	case "${arch_part}-${os_part}" in
+	aarch64-unknown-linux-gnu)
+		echo "install.sh: note -- there is no prebuilt Linux arm64 asset from v0.5.0 onward. The binary is a frozen build that must be produced on the architecture it runs on, and the release builds no arm64 Linux. Install from a checkout instead: git clone https://github.com/${REPO} && pip install ./tan-cli/python" >&2
+		;;
+	esac
+	echo "install.sh: if this is a 404 rather than a network failure, check which assets ${VERSION} actually publishes: https://github.com/${REPO}/releases" >&2
 	exit 1
 fi
 
@@ -234,4 +270,21 @@ case ":${PATH}:" in
 	fi
 	;;
 esac
-"$dest" --version 2>/dev/null || echo "install.sh: run 'tan --version' to verify (once on PATH)."
+# The sha256 check above proves the BYTES are the ones the release published;
+# it says nothing about whether THIS host can execute them (e.g. a glibc floor
+# the host's libc is below -- the -gnu asset's dynamic loader then fails with
+# a message like `GLIBC_2.xx not found`, on stderr). Capture stdout+stderr
+# rather than discarding it: that line is the single most useful diagnostic a
+# user in this situation can be handed, and reporting exit 0 anyway is a false
+# "installed" for a binary that cannot run. A verified-but-unrunnable binary is
+# removed rather than left at $dest: it is the correct bytes for a host this
+# is NOT, and leaving it on PATH turns every later `tan` invocation into this
+# same opaque failure instead of a clear "not installed".
+if verify_out="$("$dest" --version 2>&1)"; then
+	echo "install.sh: verified: ${verify_out}"
+else
+	echo "install.sh: installed binary failed to run: ${verify_out}" >&2
+	rm -f "$dest"
+	echo "install.sh: removed ${dest} -- install failed. If the message above names a GLIBC symbol, this host's glibc is older than the release floor; install from a checkout instead: git clone https://github.com/${REPO} && pip install ./tan-cli/python" >&2
+	exit 1
+fi

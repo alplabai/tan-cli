@@ -104,6 +104,26 @@
       "note": "Set from `LaunchJsonWritePlan::comments_dropped` (`tan_core::debug_launch::write_content`): for a splice, whether `strip_jsonc` changes the replaced entry's own original byte span; for the whole-document fallback, whether it changes the original file at all. Never fires on the no-op short-circuit path (an unchanged merge returns `original` verbatim) or on an append (nothing existing is ever rewritten)."
     },
     {
+      "code": "debug-config.sdk-identity-overwrite",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to surface a one-time notice that a `tan debug-config` write just replaced a concrete existing `device`/`targetId`/`configFiles` value with one resolved from the SDK's published per-variant debug-probe identity (alp-sdk#987) rather than from a real build (alp-sdk#1026 review finding #1).",
+      "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
+      "literal": "\"debug-config.sdk-identity-overwrite\"",
+      "note": "Set from `tan_core::debug_launch::sdk_identity_overwrites`, called only for the field(s) `fill_debug_probe_identity_from_sdk` itself populated this run (never for a field a real build's `runners.yaml` already resolved -- that overwrite is pre-existing, intended behaviour per `merge_configuration`'s own doc comment, not something this code is scoped to disclose). Fires once per overwritten field, only on the write path (never `--preview`, which never reads or merges into the existing file at all)."
+    },
+    {
+      "code": "debug-config.sdk-identity-key-absent",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to distinguish 'this SoM's SDK-published debug-probe identity exists but does not include a value for this server's field yet' (e.g. every Alif variant today, for `openocd_config`) from the generic 'still needs resolution' case, which fires for the same reason a pre-build project has no `device` at all.",
+      "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
+      "literal": "\"debug-config.sdk-identity-key-absent\"",
+      "note": "alp-sdk#1026 review finding #4: the generic 'Placeholder fields...' preview note is real but unspecific, and names `device` even for e.g. an OpenOCD draft that carries no `device` key at all. Fires when `fill_debug_probe_identity_from_sdk` found a `variants[].debug` block for the resolved SoC variant but the field `server_identity_field` maps to this server is still an unresolved placeholder in the draft. Emitted on BOTH `--preview` and a write -- this is advisory about resolution state, not about what a write changed on disk, unlike its `sdk-identity-overwrite` sibling above."
+    },
+    {
       "code": "bootstrap.workspace-guard",
       "status": "reserved",
       "severity": "error",
@@ -330,6 +350,15 @@
       "emittedBy": "crates/tan-cli/src/commands/build/execute/mod.rs",
       "literal": "code: \"build.sdk-switch-pristine\"",
       "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.pristine-skipped",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "crates/tan-cli/src/commands/build/execute/mod.rs",
+      "literal": "code: \"build.pristine-skipped\"",
+      "note": "Added by tan-cli#183: `tan build --pristine` has three paths that correctly decline to wipe (an overridden `-d`/`--build-dir`, a cwd outside `build/`, and a dir that was never configured) and all three used to be silent, so a customer who asked for a clean build got an incremental one and was told nothing. Registered `reserved` per tan-cli#219's rule that every literal issue code under crates/ appears in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "build.sdk-switch-pristine-failed",

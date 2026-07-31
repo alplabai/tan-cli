@@ -46,10 +46,7 @@ pub fn run(g: &GlobalArgs, args: &DoctorArgs) -> CommandRun {
     let context = resolve_context(g, &project, &generated_at);
 
     // Resolved project paths are reported on the success path only (mirrors TS).
-    let resolved_project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let resolved_project = Project::from_debug_context(&context);
 
     // An ABSENT `--target-kind` used to parse to `native-host`, and an absent
     // `--server` to `none`, so plain `tan doctor` reported debug readiness for
@@ -155,10 +152,7 @@ fn run_build_readiness(g: &GlobalArgs, generated_at: &str, fix: bool) -> Command
         context = resolve_cli_project_context(g);
     }
 
-    let resolved_project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let resolved_project = Project::from_context(&context);
 
     let os_set = read_board_model(&context)
         .map(|board| board_os_set(&board))

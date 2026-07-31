@@ -10,9 +10,9 @@ executes it — it is the single executor and the user command surface for
 building, flashing, and inspecting Alp Lab E1M / E1M-X firmware.
 
 `bootstrap` / `build` / `run` / `size` / `image` / `flash` / `clean` / `renode`
-are native Rust — `bootstrap` included, so there is no `bash` dependency and
-native Windows is a first-class host. Only `migrate` / `lock` / `quality` still
-forward to `west alp-*`, and
+run directly in `tan` — `bootstrap` included, so there is no `bash` dependency
+and native Windows is a first-class host. Only `migrate` / `lock` / `quality`
+still forward to `west alp-*`, and
 `model` / `monitor` / `new-som` / `faultdecode` to the SDK `alp` CLI. Licensed
 **Apache-2.0** (see [`LICENSE`](LICENSE); the SPDX identifier is also set in each
 `Cargo.toml` and source header).
@@ -75,7 +75,7 @@ version number.)
 # Resolve latest ONCE (or set TAG=vX.Y.Z yourself), same redirect install.sh follows.
 TAG=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
   https://github.com/alplabai/tan-cli/releases/latest | sed 's#.*/tag/##')
-ASSET=tan-x86_64-unknown-linux-musl   # swap for your platform; musl = static, any distro
+ASSET=tan-x86_64-unknown-linux-gnu   # swap for your platform; gnu, not musl -- see docs/release-contract.md's glibc floor (a PyInstaller freeze can't produce a static musl artefact; the floor is measured per-release, published in that release's notes)
 BASE=https://github.com/alplabai/tan-cli/releases/download/$TAG
 
 # macOS has shasum, not sha256sum -- pick whichever is present.
@@ -168,33 +168,36 @@ cargo install --path crates/tan-cli --locked
 
 ### Package managers
 
-> [!WARNING]
-> **Neither package-manager path resolves yet.** The release workflow's
-> crates.io and npm publish jobs have never run with a token, so no version of
-> `alp-tan-cli` exists on crates.io and no version of `@alplabai/tan` exists on
-> npm — both jobs reported success while publishing nothing
-> ([#151](https://github.com/alplabai/tan-cli/issues/151)). Use the release
-> binaries above, or build from source. The commands below are the contract
-> these channels will honour once the tokens are configured; they are documented
-> now so the naming does not change under anyone later.
-
-**crates.io** (Rust **1.86+**, edition 2024) — the published crate is named
-`alp-tan-cli` (`tan`/`tan-cli` were already taken on crates.io by an unrelated
-project); the installed binary is still `tan`:
+**crates.io** — **works** as of `v0.4.1`. Rust **1.86+**, edition 2024. The
+published crate is named `alp-tan-cli` (`tan`/`tan-cli` were already taken on
+crates.io by an unrelated project); the installed binary is still `tan`:
 
 ```sh
 cargo install alp-tan-cli --locked
 tan --version
 ```
 
-**npm** — a shim that downloads the matching platform binary on install (see
-[`npm-shim/`](npm-shim/)); no Rust toolchain needed:
+**npm — does not resolve. Do not use these commands yet.**
 
-```sh
-npm install -g @alplabai/tan
-# or run without installing:
-npx @alplabai/tan --version
-```
+> [!WARNING]
+> `@alplabai/tan` **does not exist on the npm registry at any version.**
+> `npm install -g @alplabai/tan` and `npx @alplabai/tan` both fail with
+> `404 Not Found`. The v0.4.1 publish job failed with `npm error code EOTP` —
+> the configured `NPM_TOKEN` requires an interactive one-time password, which no
+> CI run can supply, so it needs replacing with an npm **automation** token
+> ([#233](https://github.com/alplabai/tan-cli/issues/233)). Use a release binary
+> above, the installer, or crates.io.
+>
+> The commands are recorded here only so the package naming does not change
+> under anyone later:
+>
+> ```sh
+> npm install -g @alplabai/tan   # 404 today
+> npx @alplabai/tan --version    # 404 today
+> ```
+>
+> The shim downloads the matching platform binary on install (see
+> [`npm-shim/`](npm-shim/)); no Rust toolchain needed.
 
 `tan` needs an **alp-sdk checkout** to plan against. It is found, in order, from
 `--sdk-root <path>`, the `.alp/sdk-path` pointer `tan sdk switch` writes, or an
@@ -225,7 +228,8 @@ tan run --flash                       # build, then run (host) or program (hardw
 west) alongside debug readiness for the selected target/server. `tan doctor
 --build --fix` goes further, resolving the OS set from `board.yaml` and
 diagnosing (and repairing what it can) a build environment that is not ready;
-`--fix` requires `--build`. `tan completion --shell zsh` emits a completion
+`--fix` requires `--build`. `tan completion --shell zsh` is deferred in this
+build (see Commands below) and exits 1 rather than emitting a completion
 script.
 
 `bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; it
@@ -264,11 +268,16 @@ foreign content either.
 
 | Area | Commands |
 | --- | --- |
-| **Project** | `init` · `scaffold` · `examples` · `explain` · `presets` · `pinmux` |
-| **Configure & verify** | `validate` · `generate` · `diff` · `inspect` · `trace` · `doctor` · `debug-config` · `support-bundle` · `kconfig` |
-| **Build & run** (native) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
-| **Environment** (native) | `bootstrap` · `sdk` · `completion` |
+| **Project** | `init` · `scaffold`† · `examples` · `explain` · `presets` · `pinmux`† |
+| **Configure & verify** | `validate` · `generate` · `diff`† · `inspect`† · `trace`† · `doctor` · `debug-config` · `support-bundle`† · `kconfig` |
+| **Build & run** (direct) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
+| **Environment** (direct) | `bootstrap` · `sdk` · `completion`† |
 | **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `model` · `monitor` · `new-som` · `faultdecode` → `python -m alp_cli` |
+
+† Deferred to v0.6.0 (tan-cli#260): a working command in the Rust CLI
+(tan-cli v0.4.1), but the Python port shipping this release stubs it —
+exits 1, with the issue code `cli.command-deferred` in `--format json`;
+text mode prints only the deferral message.
 
 `tan <command> --help` for flags. Global flags apply to every command:
 
@@ -278,8 +287,8 @@ foreign content either.
 | `--board-yaml <PATH>` | Explicit `board.yaml`, overriding project resolution. |
 | `--sdk-root <PATH>` | alp-sdk checkout to plan against. |
 | `--format json` | Machine-readable envelope instead of text. |
-| `--non-interactive` | Never prompt. A command with a documented default takes it (`init` scaffolds `zephyr-app` into `.`); one without fails naming the missing flag (`scaffold` needs `--name`). Applied unasked when stdin or stderr is not a terminal — piped, redirected, or a CI runner (#187). |
-| `--ci` | Implies `--non-interactive` and disables color. |
+| `--non-interactive` | Not implemented in this build. Only `build --non-interactive` is even accepted, and it is itself deferred (tan-cli#260); no command changes behaviour for it yet. In the Rust CLI: never prompt, a command with a documented default takes it, one without fails naming the missing flag; applied unasked when stdin or stderr is not a terminal (#187). |
+| `--ci` | Not implemented as a global flag in this build; `size --ci` is the one live exception, and only as an alias for `--no-color` there (`size` never prompts). In the Rust CLI: implies `--non-interactive` and disables color everywhere. |
 | `--quiet` / `--verbose` / `--no-color` | Output volume and styling. |
 
 `--format json` emits the stable envelope

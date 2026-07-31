@@ -84,10 +84,7 @@ struct Notice {
 /// `tan image` entry.
 pub fn run(g: &GlobalArgs, args: &ImageArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -332,7 +329,8 @@ fn bundle_helper(
         Some(p) => p,
         None => return Ok(HelperOutcome::Absent),
     };
-    if raw.trim() == "TBD" {
+    // The shared sentinel test, not a third copy of the literal (#222).
+    if tan_core::is_pending_placeholder(raw) {
         return Ok(HelperOutcome::Pending(raw.to_string()));
     }
     // Absolute as-is, relative anchored to the build root (where the manifest lives).

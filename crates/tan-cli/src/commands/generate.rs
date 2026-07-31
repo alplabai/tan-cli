@@ -105,9 +105,16 @@ pub fn run(g: &GlobalArgs, args: &GenerateArgs) -> CommandRun {
         .board_yaml
         .clone()
         .unwrap_or_else(|| "board.yaml".to_string());
+    // tan-cli#236: reported only when the file is really at `board_path`. This
+    // site does not go through `Project::from_context` — it deliberately
+    // reports the AS-GIVEN relative strings rather than the resolved absolute
+    // ones, so the goldens stay machine-independent — but it owes the same
+    // guarantee, and it was the starkest instance of breaking it: the refusal
+    // one line below says "the file does not exist" in the same envelope whose
+    // `boardYaml` named that file.
     let project = Project {
         root: Some(project_str),
-        board_yaml: Some(board_yaml_str),
+        board_yaml: board_path.exists().then_some(board_yaml_str),
     };
 
     if !board_path.exists() {

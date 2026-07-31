@@ -15,8 +15,16 @@ fn yget<'a>(map: &'a Mapping, key: &str) -> Option<&'a YamlValue> {
     map.get(YamlValue::String(key.to_string()))
 }
 
+/// The pending-placeholder test, routed through the single definition in
+/// [`crate::is_pending_placeholder`] (#222).
+///
+/// This used to be its own `value.trim() == "TBD"` — byte-identical to the one
+/// in `flash::args`, and the copy that four comments in `commands::flash` and
+/// `commands::image` cite BY NAME as the definition of the convention. The
+/// local name stays (31 `str_clean` sites and those four comments refer to it);
+/// only the answer now comes from one place.
 fn is_tbd(value: &str) -> bool {
-    value.trim() == "TBD"
+    crate::is_pending_placeholder(value)
 }
 
 fn str_clean(value: Option<&YamlValue>) -> Option<String> {

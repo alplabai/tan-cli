@@ -99,7 +99,24 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("tan-" + [Guid]::NewGuid().ToString
 $sumsTmp = "$tmp.checksums.txt"
 Write-Host "install.ps1: downloading tan ($archPart, $Version)..."
 try {
-	Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+	# The transport error a 404 throws here says only THAT the fetch failed,
+	# never why -- and a 404 for an asset that was never published looks
+	# identical to a network/proxy outage otherwise. Name the one cause this
+	# script can actually know (there is no Windows arm64 asset, ever, from
+	# v0.5.0 -- a PyInstaller freeze cannot be cross-compiled, and this release
+	# builds on four runners, not six) and point at the source install; guess
+	# at nothing else. Mirrors install.sh's equivalent case for linux/arm64.
+	try {
+		Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+	} catch {
+		Write-Host "install.ps1: download failed: $url" -ForegroundColor Red
+		if ($archPart -eq "aarch64") {
+			Write-Error "install.ps1: there is no prebuilt Windows arm64 asset from v0.5.0 onward. The binary is a frozen build that must be produced on the architecture it runs on, and the release builds no Windows arm64 leg. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
+		} else {
+			Write-Error "install.ps1: if this is a 404 rather than a network failure, check which assets $Version actually publishes: https://github.com/$repo/releases"
+		}
+		exit 1
+	}
 
 	# -----------------------------------------------------------------------
 	# Verify what landed against the checksums.txt published in the SAME release.
@@ -166,4 +183,28 @@ if (-not ($curPath -split ';' | Where-Object { $_ -eq $Dir })) {
 }
 
 Write-Host "install.ps1: installed tan -> $dest"
-& $dest --version
+# The sha256 check above proves the BYTES are the ones the release published;
+# it says nothing about whether THIS host can execute them. `& $dest --version`
+# with its exit code unchecked does not fail the script even when the binary
+# cannot run (e.g. a missing runtime dependency) -- PowerShell does not turn a
+# non-zero native exit code into a terminating error on its own, $ErrorAction-
+# Preference or not, so this would report success regardless. Capture the
+# output and check $LASTEXITCODE instead. A verified-but-unrunnable binary is
+# removed rather than left at $dest and on the $scope Path: it is the correct
+# bytes for a host this is NOT, and leaving it in place turns every later
+# `tan` invocation into this same opaque failure instead of a clear "not found".
+try {
+	$verifyOut = (& $dest --version 2>&1 | Out-String).Trim()
+	$verifyExit = $LASTEXITCODE
+} catch {
+	$verifyOut = $_.Exception.Message
+	$verifyExit = 1
+}
+if ($verifyExit -eq 0) {
+	Write-Host "install.ps1: verified: $verifyOut"
+} else {
+	Write-Host "install.ps1: installed binary failed to run: $verifyOut" -ForegroundColor Red
+	Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
+	Write-Error "install.ps1: removed $dest -- install failed. This host may be missing a runtime dependency the binary needs, or security software may have altered it. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
+	exit 1
+}

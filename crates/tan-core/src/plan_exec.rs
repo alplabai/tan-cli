@@ -126,6 +126,86 @@ pub enum SdkStampAction {
     Pristine,
 }
 
+/// Why an explicit `tan build --pristine` did NOT wipe a slice's build dir
+/// (tan-cli#183).
+///
+/// Every one of these suppressions is correct and none of them changes: the two
+/// structural guards were mutation-proved load-bearing in #181, and there is
+/// nothing to wipe in a dir that was never configured. The defect was the
+/// SILENCE. A customer who asks for a clean build, gets an incremental one, and
+/// is told nothing then debugs the stale artefact rather than the flag — and the
+/// command reported success, so the flag is the last place they look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PristineSkipped {
+    /// The slice's argv carries `-d`/`--build-dir`, so west wrote somewhere tan
+    /// cannot know; wiping `<cwd>/build` would miss it and might hit something
+    /// else.
+    BuildDirOverridden,
+    /// The plan cwd does not normalise under `CONSUMER_BUILD_ROOT`, so the wipe
+    /// target could land on files the build never created.
+    CwdOutsideBuildRoot,
+    /// The dir has no `CMakeCache.txt` — it was never configured, so a wipe
+    /// would remove nothing. NOT one of the two guards, and the only one of the
+    /// three reachable from a stock plan today: `write_sdk_stamp` itself
+    /// `create_dir_all`s `<cwd>/build`, so after any prior slice the directory
+    /// exists holding nothing but tan's stamp.
+    NeverConfigured,
+}
+
+impl PristineSkipped {
+    /// One clause naming what stopped the wipe, for the issue message and the
+    /// text line. Phrased as the reason, not as an apology.
+    pub fn reason(self) -> &'static str {
+        match self {
+            PristineSkipped::BuildDirOverridden => {
+                "the slice redirects west's build dir (`-d`/`--build-dir`), so tan cannot know \
+                 which directory to wipe"
+            }
+            PristineSkipped::CwdOutsideBuildRoot => {
+                "the plan cwd is not under `build/`, so the wipe target could hold files the \
+                 build never created"
+            }
+            PristineSkipped::NeverConfigured => {
+                "that build dir has no CMakeCache.txt — it was never configured, so there was \
+                 nothing to wipe"
+            }
+        }
+    }
+}
+
+/// Whether an explicit `--pristine` was suppressed, and why — `None` when the
+/// wipe actually happened or none was asked for (tan-cli#183).
+///
+/// ONE decision for all THREE suppression paths, rather than a message bolted
+/// onto the branch #183 happened to name. The issue lists two (the structural
+/// guards); the third — a never-configured dir — is inside them, is equally
+/// silent, and is the only one a stock plan reaches today. Adding a line to
+/// either guard would have fixed the two unreachable cases and left the
+/// reachable one silent.
+///
+/// Order is most-specific-first: an overridden build dir is the reason even if
+/// the cwd would also have failed, because that is the fact the user must change.
+pub fn pristine_suppression(
+    force_pristine: bool,
+    build_dir_overridden: bool,
+    cwd_under_build_root: bool,
+    cache_configured: bool,
+) -> Option<PristineSkipped> {
+    if !force_pristine {
+        return None;
+    }
+    if build_dir_overridden {
+        return Some(PristineSkipped::BuildDirOverridden);
+    }
+    if !cwd_under_build_root {
+        return Some(PristineSkipped::CwdOutsideBuildRoot);
+    }
+    if !cache_configured {
+        return Some(PristineSkipped::NeverConfigured);
+    }
+    None
+}
+
 /// Decide [`SdkStampAction`] for one slice (pure — the caller resolves every
 /// input from disk/argv). `cached` is the `<cwd>/build/.tan-sdk-root` stamp
 /// tan itself wrote on a previous dispatch (`None` = absent, either a
@@ -387,6 +467,65 @@ mod tests {
             sdk_stamp_action(Some("/sdk/v0.11.0"), None, true, false, true),
             SdkStampAction::Keep
         );
+    }
+
+    #[test]
+    fn pristine_suppression_is_silent_when_no_pristine_was_asked_for() {
+        // The overwhelmingly common call. Every other input is deliberately the
+        // most suppression-worthy shape there is, so only `force_pristine`
+        // itself can be what returns None.
+        assert_eq!(pristine_suppression(false, true, false, false), None);
+    }
+
+    #[test]
+    fn pristine_suppression_is_silent_when_the_wipe_actually_ran() {
+        assert_eq!(pristine_suppression(true, false, true, true), None);
+    }
+
+    #[test]
+    fn pristine_suppression_names_an_overridden_build_dir_first() {
+        // Most-specific-first: an overridden -d is the reason even when the cwd
+        // would also have failed, because it is the fact the user must change.
+        assert_eq!(
+            pristine_suppression(true, true, false, true),
+            Some(PristineSkipped::BuildDirOverridden)
+        );
+    }
+
+    #[test]
+    fn pristine_suppression_names_a_cwd_outside_the_build_root() {
+        assert_eq!(
+            pristine_suppression(true, false, false, true),
+            Some(PristineSkipped::CwdOutsideBuildRoot)
+        );
+    }
+
+    #[test]
+    fn pristine_suppression_names_a_never_configured_dir() {
+        // The third path — inside both guards, and the only one reachable from
+        // a stock plan (tan-cli#183).
+        assert_eq!(
+            pristine_suppression(true, false, true, false),
+            Some(PristineSkipped::NeverConfigured)
+        );
+    }
+
+    #[test]
+    fn every_pristine_suppression_reason_is_distinct_and_non_empty() {
+        // The whole point of the enum is that the user learns WHICH of the
+        // three applied; two variants sharing a reason string would report a
+        // suppression while still leaving them guessing what to change.
+        let reasons = [
+            PristineSkipped::BuildDirOverridden.reason(),
+            PristineSkipped::CwdOutsideBuildRoot.reason(),
+            PristineSkipped::NeverConfigured.reason(),
+        ];
+        assert!(reasons.iter().all(|r| !r.trim().is_empty()), "{reasons:?}");
+        for (i, a) in reasons.iter().enumerate() {
+            for b in &reasons[i + 1..] {
+                assert_ne!(a, b, "{reasons:?}");
+            }
+        }
     }
 
     #[test]

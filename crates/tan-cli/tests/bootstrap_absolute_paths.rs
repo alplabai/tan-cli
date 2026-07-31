@@ -48,9 +48,12 @@ fn make_sdk_root(dir: &Path) {
 /// of the same command: JSON mode reports the envelope, text mode prints the
 /// block a customer is told to paste, and #217 is about both.
 ///
-/// The text block comes off **stderr** (tan-cli#227): text output goes there
-/// so `--format json` owns stdout outright. Reading stdout here would make
-/// every assertion below vacuous -- it is empty in text mode.
+/// Both come off **stdout**. Text output in tan goes to stderr so `--format
+/// json` owns stdout outright, and `--print-env` is the single documented
+/// exception (tan-cli#227): it is not a report ABOUT a run, it is a shell
+/// fragment meant to be captured, and on stderr both `eval "$(...)"` and
+/// `> env.sh` silently produced nothing. This helper therefore doubles as
+/// #227's regression test -- see the empty-stderr assertion.
 fn run_print_env(cwd: &Path, home: &Path, sdk_root_flag: &str) -> (serde_json::Value, String) {
     let invoke = |json: bool| {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_tan"));
@@ -73,8 +76,17 @@ fn run_print_env(cwd: &Path, home: &Path, sdk_root_flag: &str) -> (serde_json::V
             "tan bootstrap --print-env failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let stream = if json { out.stdout } else { out.stderr };
-        String::from_utf8(stream).expect("output is utf-8")
+        // tan-cli#227: nothing on stderr in EITHER mode. A `--print-env` run
+        // installs nothing and reports nothing, so a byte here means the block
+        // is leaking back onto the stream where a pipe cannot see it.
+        assert!(
+            out.stderr.is_empty(),
+            "tan bootstrap --print-env wrote {} byte(s) to stderr -- #227: this block must be \
+             on stdout, where `eval \"$(...)\"` and `> env.sh` can capture it. stderr was:\n{}",
+            out.stderr.len(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).expect("stdout is utf-8")
     };
 
     let envelope = serde_json::from_str(&invoke(true)).expect("stdout is a JSON envelope");

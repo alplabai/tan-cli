@@ -6,3 +6,25 @@
 # Python bytecode cache (tests/parity/seam1_field_diff.py)
 __pycache__/
 *.pyc
+.pytest_cache/
+# PyInstaller output + the clean build venv (python/scripts/build_binary.sh)
+/python/dist/
+/python/.build/
+/python/.venv-build/
+python/build/
+python/*.egg-info/
+# `tan doctor` support bundles. They snapshot the DEVELOPER's machine -- two so
+# far have carried a literal `C:\Users\<name>` home path. This is a public repo;
+# they must never be committable by a stray `git add -A`.
+#
+# NOT anchored with a leading slash, deliberately. The first version of this rule
+# was `/.alp-support/`, which matches the repo root only -- and a bundle promptly
+# appeared at `python/.alp-support/` and slipped straight past it. `tan doctor`
+# writes relative to wherever it is invoked, so the directory can land at any
+# depth.
+.alp-support/
+# Editor state written by the test suite, not by a human: `tan debug-config`
+# writes a launch.json, and `test_debug_config_command.py` has leaked one into
+# the real tree. No `.vscode/` is tracked in this repo, so ignoring it at any
+# depth costs nothing; use `git add -f` if one is ever meant to ship.
+.vscode/

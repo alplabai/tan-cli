@@ -1,0 +1,507 @@
+# SPDX-License-Identifier: Apache-2.0
+"""`tan image` -- assemble a flashable-image bundle from
+`build/system-manifest.yaml`.
+
+Port of `crates/tan-cli/src/commands/image.rs`: the IO half. tar+gzip each built
+slice's `build_dir` into `image-bundle/slices/<core>-<os>.tar.gz`, copy each
+helper-MCU firmware into `image-bundle/helper-mcus/`, and write
+`image-bundle/bundle-manifest.json`. Every non-IO decision -- bundle shape, key
+order, forward-slash artefact paths, the ok-slice gate, the path guard -- is pure
+in `tan.core.image_bundle`.
+
+**Nothing here shells the SDK, and nothing here needs one.** The only input is a
+file this project's own build wrote (I-32 / anti-pattern #22). No `sdk` key is
+emitted unless the shared project resolver happened to resolve a checkout, which
+is exactly what the oracle reports.
+
+Deliberate divergences from the retired `west alp-image`, carried over from the
+Rust and re-verified against the binary:
+  - the helper entry carries `chip`, not the perpetually-`null` `role`;
+  - artefact paths are forward-slash, always (the Python `\\` on Windows was a
+    latent cross-platform bug in the MACHINE contract);
+  - an IO failure is WriteFailure(3), not a traceback at rc 1;
+  - a helper's DECLARED, concrete `firmware_path` that does not resolve to a file
+    is a HARD error, not a silent skip: a consumer keying on `ok`/exit code must
+    not see a "complete" bundle missing a promised artefact. The `TBD` pending
+    sentinel and an absent `firmware_path` stay non-fatal skips.
+
+The one divergence from the ORACLE is the archive bytes: Python's `tarfile` +
+`gzip` cannot produce the Rust `tar`+`flate2` stream byte-for-byte (member order,
+header fields, gzip metadata), so `slices[].sha256`/`size` differ. The contract
+those fields have to satisfy is self-consistency -- each hash matches the bytes
+this run actually wrote at that artefact path -- and
+`tests/commands/test_image_command.py` asserts exactly that. Helper firmwares are
+plain copies and DO hash identically to the oracle.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tarfile
+from dataclasses import dataclass
+from typing import Any
+
+import typer
+
+from tan.commands.build_output import (
+    ManifestInvalid,
+    ManifestUnavailable,
+    ProjectContext,
+    load_manifest,
+    resolve_app_base,
+    resolve_build_root,
+    resolve_project_context,
+)
+from tan.core.image_bundle import (
+    BUNDLE_DIR,
+    BUNDLE_MANIFEST,
+    HELPERS_DIR,
+    PENDING_SENTINEL,
+    SLICES_DIR,
+    assemble_bundle_manifest,
+    helper_artefact_rel,
+    helper_entry,
+    slice_archive_name,
+    slice_artefact_rel,
+    slice_entry,
+    slice_should_bundle,
+)
+from tan.core.system_manifest import (
+    SystemManifest,
+    anchor_under,
+    raw_passthrough,
+    slice_build_dir,
+)
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
+from tan.exit_codes import ExitCode
+
+#: Streaming read size for the SHA-256, matching the oracle's 65536-byte buffer.
+_HASH_CHUNK = 65536
+
+
+class BundleWriteError(Exception):
+    """A bundle-assembly IO failure -- `image.bundle-write-failed` at exit 3."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+@dataclass
+class _Notice:
+    """A slice or helper item left OUT of the bundle. Carries its own issue code
+    so `--format json` reports it as an `Issue`, not only as a text line: before
+    that, an incomplete bundle was indistinguishable from a complete one in the
+    mode the extension always uses.
+
+    `severity` is `warning` for a legitimate, already-accounted-for gap (no
+    build_dir yet, an unsafe core_id/os, a `TBD` helper). The one `error` case is
+    a helper's declared, concrete `firmware_path` that is not a file -- and that
+    flips the exit/`ok`, even though assembly itself completed.
+    """
+
+    code: str
+    severity: str
+    message: str
+
+
+@dataclass
+class _Outcome:
+    exit_code: ExitCode
+    data: dict[str, Any]
+    project: Project
+    issues: list[Issue]
+    text: list[str]
+    sdk: SdkInfo | None = None
+
+
+def _sha256_and_size(path: str) -> tuple[str, int]:
+    """Streaming lowercase-hex SHA-256 + byte length. Raises
+    [`BundleWriteError`] rather than an OSError, so no read failure can escape
+    the error contract."""
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(_HASH_CHUNK)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        size = os.stat(path).st_size
+    except OSError as err:
+        raise BundleWriteError(f"hash {path}: {err}") from err
+    return digest.hexdigest(), size
+
+
+def _basename(path: str) -> str:
+    """`Path::file_name()`: the last component, with any trailing separator
+    ignored (`os.path.basename` returns `""` there, Rust's `file_name` does not)
+    and `/` honoured as a separator on Windows too."""
+    return os.path.basename(path.replace("\\", "/").rstrip("/"))
+
+
+def _tar_gzip_dir(src_dir: str, dest: str) -> None:
+    """Recursively tar+gzip `src_dir` into `dest`, tar root arcname =
+    basename(src_dir). Any existing archive is unlinked first, matching the
+    oracle (and so a half-written archive from a previous run can never be
+    appended to)."""
+    try:
+        if os.path.lexists(dest):
+            os.remove(dest)
+    except OSError as err:
+        raise BundleWriteError(f"unlink {dest}: {err}") from err
+    arcname = _basename(src_dir) or "build"
+    try:
+        with tarfile.open(dest, "w:gz") as archive:
+            archive.add(src_dir, arcname=arcname)
+    except (OSError, tarfile.TarError) as err:
+        raise BundleWriteError(f"tar {src_dir}: {err}") from err
+
+
+def _bundle_slice(
+    slice_: dict, build_root: str, slices_dir: str
+) -> dict[str, Any] | _Notice:
+    """Tar+gzip one ok slice, or a notice saying why it was left out."""
+    core_id = str(slice_.get("core_id"))
+    os_name = str(slice_.get("os"))
+    build_dir = slice_build_dir(slice_, build_root)
+    if build_dir is None or not _is_dir(build_dir):
+        return _Notice(
+            "image.slice-skipped",
+            "warning",
+            f"image: skipping {core_id} (build_dir missing)",
+        )
+    # The shared seam that rejects a `core_id`/`os` shaped like `../../x` or
+    # `C:/x`: without it, joining onto `slices_dir` escaped the bundle dir and the
+    # unlink above could remove an arbitrary `*.tar.gz` outside the build tree.
+    archive_name = slice_archive_name(core_id, os_name)
+    if archive_name is None:
+        return _Notice(
+            "image.slice-unsafe-name",
+            "warning",
+            f"image: skipping {core_id} (core_id/os is not a safe archive name)",
+        )
+    archive = os.path.join(slices_dir, archive_name)
+    _tar_gzip_dir(build_dir, archive)
+    sha256, size = _sha256_and_size(archive)
+    artefact = slice_artefact_rel(core_id, os_name)
+    assert artefact is not None  # already validated by slice_archive_name above
+    return slice_entry(core_id, os_name, artefact, sha256, size)
+
+
+def _bundle_helper(
+    helper: dict, build_root: str, helpers_dir: str, used_names: set[str]
+) -> dict[str, Any] | _Notice | None:
+    """Copy one helper's firmware, or a notice, or `None` for an absent one.
+
+    `used_names` tracks every destination basename already claimed this run:
+    Zephyr's default layout puts EVERY helper's firmware at the same basename
+    (`zephyr.bin`), flattened from different `firmware_path`s. Without it, the
+    second helper's copy silently overwrote the first's file and the first's
+    already-recorded `sha256` pointed at bytes that were no longer there.
+    """
+    raw = helper.get("firmware_path")
+    if not isinstance(raw, str) or raw == "":
+        return None
+    if raw.strip() == PENDING_SENTINEL:
+        # The documented not-yet-built placeholder: a legitimate state, so a
+        # warning, never the error a genuinely missing concrete path gets.
+        return _Notice(
+            "image.helper-skipped",
+            "warning",
+            f"image: helper-mcu firmware not found at {raw}; skipping",
+        )
+    firmware = anchor_under(raw, build_root)
+    if not _is_file(firmware):
+        return _Notice(
+            "image.helper-missing",
+            "error",
+            f"image: helper-mcu firmware not found at {raw}; refusing to produce "
+            "an incomplete bundle",
+        )
+    basename = _basename(firmware) or "firmware.bin"
+    dest_name = basename
+    counter = 1
+    while dest_name in used_names:
+        counter += 1
+        dest_name = f"{counter}-{basename}"
+    used_names.add(dest_name)
+
+    destination = os.path.join(helpers_dir, dest_name)
+    try:
+        _copy_file(firmware, destination)
+    except OSError as err:
+        raise BundleWriteError(f"copy {firmware} -> {destination}: {err}") from err
+    sha256, size = _sha256_and_size(destination)
+    name = helper.get("name")
+    chip = helper.get("chip")
+    return helper_entry(
+        name if isinstance(name, str) else None,
+        chip if isinstance(chip, str) else None,
+        helper_artefact_rel(dest_name),
+        sha256,
+        size,
+    )
+
+
+def _copy_file(src: str, dst: str) -> None:
+    """Byte copy, streamed. `shutil.copy` is avoided deliberately: it also copies
+    permission bits, and on a read-only source firmware that leaves the bundle
+    copy unwritable, so the NEXT `tan image` run fails to overwrite it."""
+    with open(src, "rb") as reader, open(dst, "wb") as writer:
+        while True:
+            chunk = reader.read(_HASH_CHUNK)
+            if not chunk:
+                break
+            writer.write(chunk)
+
+
+def _is_dir(path: str) -> bool:
+    try:
+        return os.path.isdir(path)
+    except (OSError, ValueError):
+        return False
+
+
+def _is_file(path: str) -> bool:
+    try:
+        return os.path.isfile(path)
+    except (OSError, ValueError):
+        # A path the OS refuses to stat at all (a too-long name, an embedded NUL
+        # from a hand-edited manifest) is "not a file", never an exception that
+        # escapes the envelope.
+        return False
+
+
+def _assemble_bundle(
+    build_root: str, manifest: SystemManifest, yaml_text: str
+) -> tuple[list[_Notice], dict[str, Any], str]:
+    """Do the filesystem work: mkdir the bundle tree, tar each ok slice, copy each
+    present helper firmware, write `bundle-manifest.json`."""
+    bundle_dir = os.path.join(build_root, BUNDLE_DIR)
+    slices_dir = os.path.join(bundle_dir, SLICES_DIR)
+    helpers_dir = os.path.join(bundle_dir, HELPERS_DIR)
+    for directory in (bundle_dir, slices_dir, helpers_dir):
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as err:
+            raise BundleWriteError(f"mkdir {directory}: {err}") from err
+
+    notices: list[_Notice] = []
+    slice_entries: list[dict[str, Any]] = []
+    for slice_ in manifest.slices:
+        if not slice_should_bundle(slice_.get("status")):
+            continue
+        result = _bundle_slice(slice_, build_root, slices_dir)
+        if isinstance(result, _Notice):
+            notices.append(result)
+        else:
+            slice_entries.append(result)
+
+    helper_entries: list[dict[str, Any]] = []
+    used_names: set[str] = set()
+    for helper in manifest.helper_mcus:
+        result = _bundle_helper(helper, build_root, helpers_dir, used_names)
+        if result is None:
+            continue
+        if isinstance(result, _Notice):
+            notices.append(result)
+        else:
+            helper_entries.append(result)
+
+    hw_info, boot_order = raw_passthrough(yaml_text)
+    bundle = assemble_bundle_manifest(hw_info, boot_order, slice_entries, helper_entries)
+
+    try:
+        # `indent=2` + serde_json's `to_string_pretty` separators, and exactly one
+        # trailing newline written with `newline=""` so a Windows host cannot
+        # silently rewrite the file to CRLF (I-27).
+        document = json.dumps(bundle, indent=2) + "\n"
+    except (TypeError, ValueError) as err:
+        # `hw_info` is verbatim YAML: a mapping key JSON cannot express reaches
+        # here. The oracle hits the same wall in `Envelope::to_json` and reports
+        # it as an issue rather than aborting; this reports it as a write failure,
+        # which is where the failure actually is.
+        raise BundleWriteError(f"serialize {BUNDLE_MANIFEST}: {err}") from err
+    manifest_out = os.path.join(bundle_dir, BUNDLE_MANIFEST)
+    try:
+        with open(manifest_out, "w", encoding="utf-8", newline="") as handle:
+            handle.write(document)
+    except OSError as err:
+        raise BundleWriteError(f"write {manifest_out}: {err}") from err
+
+    return notices, bundle, bundle_dir
+
+
+def _empty_bundle() -> dict[str, Any]:
+    """An empty bundle manifest, so the envelope's `data` shape stays stable on
+    every failure path."""
+    return assemble_bundle_manifest({}, [], [], [])
+
+
+def _error_outcome(
+    project: Project,
+    sdk: SdkInfo | None,
+    exit_code: ExitCode,
+    code: str,
+    message: str,
+) -> _Outcome:
+    return _Outcome(
+        exit_code,
+        _empty_bundle(),
+        project,
+        [Issue(code, "error", message)],
+        [f"image: {message}"],
+        sdk,
+    )
+
+
+def _run(
+    *,
+    app_path: str | None,
+    build_root_arg: str | None,
+    project_arg: str | None,
+    board_yaml_arg: str | None,
+    sdk_root_arg: str | None,
+) -> _Outcome:
+    context: ProjectContext = resolve_project_context(
+        project_arg, board_yaml_arg, sdk_root_arg
+    )
+    project = context.project()
+    app_base = resolve_app_base(app_path, context.workspace_root)
+    build_root = resolve_build_root(build_root_arg, app_base)
+
+    try:
+        yaml_text, manifest = load_manifest(build_root)
+    except ManifestUnavailable as err:
+        # Note the asymmetry with `size`, which is faithful: `image` does NOT put
+        # the OS error in its message, and a non-UTF-8 manifest is "not found"
+        # here too (the read fails before the parser ever sees it).
+        return _error_outcome(
+            project,
+            context.sdk,
+            ExitCode.RUNTIME_FAILURE,
+            "image.manifest-unavailable",
+            f"system-manifest.yaml not found at {err.path}; run `tan build` first.",
+        )
+    except ManifestInvalid as err:
+        return _error_outcome(
+            project,
+            context.sdk,
+            ExitCode.RUNTIME_FAILURE,
+            "image.manifest-invalid",
+            f"{err.path}: {err.detail}",
+        )
+
+    try:
+        notices, bundle, bundle_dir = _assemble_bundle(build_root, manifest, yaml_text)
+    except BundleWriteError as err:
+        return _error_outcome(
+            project,
+            context.sdk,
+            ExitCode.WRITE_FAILURE,
+            "image.bundle-write-failed",
+            err.message,
+        )
+
+    # Not always a green exit: an `error`-severity notice (a helper's concrete,
+    # declared firmware_path that is not a file) flips exit/`ok` even though
+    # assembly completed -- mkdir/tar/write all succeeded, so the manifest and
+    # every OTHER artefact are still on disk and inspectable.
+    exit_code = (
+        ExitCode.RUNTIME_FAILURE
+        if any(n.severity == "error" for n in notices)
+        else ExitCode.SUCCESS
+    )
+    return _Outcome(
+        exit_code,
+        bundle,
+        project,
+        [Issue(n.code, n.severity, n.message) for n in notices],
+        [n.message for n in notices] + [f"image: bundle ready at {bundle_dir}"],
+        context.sdk,
+    )
+
+
+def image(
+    ctx: typer.Context,
+    app_path: str = typer.Argument(
+        None,
+        metavar="APP_PATH",
+        help="Application source directory (default: the resolved --project "
+        "workspace). build_root defaults to <APP_PATH>/build.",
+    ),
+    build_root: str = typer.Option(
+        None,
+        "--build-root",
+        metavar="PATH",
+        help="Override the build root holding system-manifest.yaml "
+        "(default: <APP_PATH>/build).",
+    ),
+    project: str = typer.Option(
+        None, "--project", metavar="PATH", help="Project root (defaults to '.')."
+    ),
+    board_yaml: str = typer.Option(
+        None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
+    ),
+    sdk_root: str = typer.Option(
+        None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
+    ),
+    output_format: str = typer.Option(
+        None, "--format", metavar="FORMAT", help="Output format: text or json."
+    ),
+) -> None:
+    """Assemble a flashable-image bundle from build/system-manifest.yaml."""
+    resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
+    if resolved_format not in ("text", "json"):
+        raise typer.BadParameter(
+            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
+        )
+    json_mode = resolved_format == "json"
+
+    try:
+        outcome = _run(
+            app_path=app_path,
+            build_root_arg=build_root,
+            project_arg=project,
+            board_yaml_arg=board_yaml,
+            sdk_root_arg=sdk_root,
+        )
+    except Exception as err:  # noqa: BLE001
+        # The port's most-repeated defect class: a traceback puts nothing
+        # parseable on stdout and the extension renders an empty panel with no
+        # error. Anything reaching here is a tan bug, reported as one. Nothing in
+        # this handler can itself throw -- `_empty_bundle()` and
+        # `Project(None, None)` are both total, and no path helper is called.
+        outcome = _Outcome(
+            ExitCode.INTERNAL_FAILURE,
+            _empty_bundle(),
+            Project(root=None, board_yaml=None),
+            [
+                Issue(
+                    "image.internal-failure",
+                    "error",
+                    f"image failed unexpectedly: {type(err).__name__}: {err}",
+                )
+            ],
+            ["image: internal failure"],
+        )
+
+    if json_mode:
+        emit(
+            Envelope(
+                "image",
+                outcome.project,
+                outcome.data,
+                outcome.issues,
+                outcome.exit_code,
+                sdk=outcome.sdk,
+            )
+        )
+    else:
+        stream = typer.get_text_stream("stderr")
+        for line in outcome.text:
+            stream.write(f"{line}\n")
+    raise typer.Exit(int(outcome.exit_code))

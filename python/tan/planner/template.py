@@ -1,0 +1,1199 @@
+# SPDX-License-Identifier: Apache-2.0
+"""`--emit scaffold`: a NEW project's files, rendered from the SDK's catalog.
+
+RELOCATED (was alp-sdk `scripts/alp_template.py`). Only the `--emit scaffold`
+path came across -- `render_to_envelope()` and everything it reaches. What stayed
+behind stayed because nothing in `tan` reaches it and a second copy would be a
+second source of truth:
+
+* `render()` / `RenderPlan` / `DestinationNotEmptyError` -- the disk-writing
+  front door (`alp_template.py render`, and `alp generate`'s `sku=` form). The
+  one line of its `plan()` this path actually uses is the FILE ORDER, inlined
+  below as `_ordered_files`.
+* `validate()` / `ValidateResult` / `_count_passed` -- the twister self-test that
+  renders a template into a temp dir and builds it. An SDK CI gate, not a
+  customer path.
+* `default_sku()` and the `argparse` CLI -- callers that stayed in alp-sdk.
+
+**This is NOT `tan/core/scaffold.py`, and the two must not be merged.** That
+module serves `tan init` from a VENDORED capture under `tan/templates/vendored/`
+and consults no SDK checkout at all (invariant I-32), deliberately -- see its own
+docstring on why re-deriving the SDK's `_scaffold_cmakelists()` rewrite in tan
+would be a silent `ALP_SDK_ROOT`-guess bug. This module is the OTHER path: it
+runs behind `tan.planner_cli`, which has already bound a real SDK root, so it
+reads that checkout's LIVE `metadata/templates/catalog-v1.json` and the canonical
+example the record names, exactly as `scripts/alp_project.py` did. Two paths, two
+purposes: `tan init` must keep working with no SDK anywhere; `--emit scaffold`
+exists to be byte-identical to the SDK's own front door, which no vendored
+snapshot can promise for a template x SKU pair nobody captured.
+
+Two relocation changes, no behavioural one:
+
+* **`REPO` / `METADATA_ROOT` are the BOUND SDK checkout** (`paths.py`), not a
+  `__file__` walk. The walk landed on the SDK because the file lived there;
+  inside `tan` it would land on the `tan` package and every `metadata/**` and
+  `examples/**` path would be wrong.
+* **`plan()` collapsed to `_ordered_files`.** `render_to_envelope` called
+  `plan()` for one value -- `tuple(sorted(record["files"]["user_owned"]))` -- and
+  re-validated the params the very next line already validates. The rest of
+  `plan()` served `render()`, which did not come across.
+
+Docstrings below still name `render()`, `validate()`, `plan()`/`RenderPlan` and
+`alp_template.py render`: those are alp-sdk's own paths, and the sentences are
+true of the file this moved from. They are kept verbatim so the move stays
+diffable against it.
+"""
+
+from __future__ import annotations
+
+import json
+import posixpath
+import re
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+from .paths import METADATA_ROOT, REPO
+
+__all__ = [
+    "ParameterError",
+    "SkuNotSupportedError",
+    "TemplateError",
+    "TemplateNotFoundError",
+    "emit_scaffold",
+    "render_to_envelope",
+]
+
+CATALOG = REPO / "metadata" / "templates" / "catalog-v1.json"
+
+
+def _ordered_files(record: dict[str, Any]) -> tuple[str, ...]:
+    """The envelope's file ORDER: the record's own `files.user_owned` list,
+    sorted. Verbatim from `plan()`, which did not otherwise come across (see the
+    module docstring). `files.generated` is never in it -- those artefacts are
+    emitted later, at build-configure time, by the planner itself."""
+    return tuple(sorted(record["files"]["user_owned"]))
+
+
+class TemplateError(Exception):
+    """Base for every error alp_template raises -- never a bare
+    KeyError/ValueError escapes to a caller."""
+
+
+class TemplateNotFoundError(TemplateError):
+    """No record with this id in the catalog."""
+
+
+class ParameterError(TemplateError):
+    """An unknown parameter name, a type mismatch, or a constraint
+    violation (enum / minimum / maximum)."""
+
+
+class SkuNotSupportedError(TemplateError):
+    """`render_to_envelope`'s --sku is not in the record's declared
+    `supported.som_skus` -- a hard error, never a best-effort render."""
+
+
+def load_catalog(catalog_path: Path | None = None) -> dict[str, Any]:
+    path = catalog_path or CATALOG
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def find_template(doc: dict[str, Any], template_id: str) -> dict[str, Any]:
+    for rec in doc.get("templates", []):
+        if rec["id"] == template_id:
+            return rec
+    known = ", ".join(sorted(t["id"] for t in doc.get("templates", [])))
+    raise TemplateNotFoundError(
+        f"no template {template_id!r} in catalog (known: {known})")
+
+
+def _coerce(spec: dict[str, Any], raw: Any) -> Any:
+    """Coerce a CLI-style string override to the parameter's declared
+    type. Values already of the right type (e.g. an untouched default,
+    or a native value a Python caller passed directly) pass through."""
+    if not isinstance(raw, str):
+        return raw
+    ptype = spec["type"]
+    if ptype == "integer":
+        try:
+            return int(raw)
+        except ValueError as exc:
+            raise ParameterError(
+                f"{spec['name']}: {raw!r} is not an integer") from exc
+    if ptype == "boolean":
+        if raw.lower() in ("1", "true", "yes"):
+            return True
+        if raw.lower() in ("0", "false", "no"):
+            return False
+        raise ParameterError(f"{spec['name']}: {raw!r} is not a boolean")
+    return raw  # string / enum stay strings
+
+
+def _check_constraints(template_id: str, spec: dict[str, Any], value: Any) -> None:
+    constraints = spec.get("constraints") or {}
+    if "enum" in constraints and value not in constraints["enum"]:
+        raise ParameterError(
+            f"{template_id}: {spec['name']}={value!r} not in "
+            f"{constraints['enum']}")
+    if "minimum" in constraints and value < constraints["minimum"]:
+        raise ParameterError(
+            f"{template_id}: {spec['name']}={value!r} < minimum "
+            f"{constraints['minimum']}")
+    if "maximum" in constraints and value > constraints["maximum"]:
+        raise ParameterError(
+            f"{template_id}: {spec['name']}={value!r} > maximum "
+            f"{constraints['maximum']}")
+
+
+def _resolve_params(
+    record: dict[str, Any], params: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Resolve every declared parameter to its effective value (override
+    or default), rejecting any name the record doesn't declare -- this
+    can never invent a knob the catalog doesn't have."""
+    declared = {p["name"]: p for p in record.get("parameters", [])}
+    params = dict(params or {})
+    unknown = sorted(set(params) - set(declared))
+    if unknown:
+        raise ParameterError(
+            f"{record['id']}: unknown parameter(s) {unknown}; declared: "
+            f"{sorted(declared) or '(none)'}")
+
+    resolved: dict[str, Any] = {}
+    for name, spec in declared.items():
+        value = _coerce(spec, params.get(name, spec["default"]))
+        _check_constraints(record["id"], spec, value)
+        resolved[name] = value
+    return resolved
+
+
+def _substitutions_for(
+    record: dict[str, Any], resolved: dict[str, Any],
+) -> dict[str, list[tuple[str, str]]]:
+    """dest-relative file -> [(literal_to_replace, new_value_str), ...].
+
+    Reads an opt-in `substitute: {"file": ..., "literal": <optional,
+    defaults to str(default)>}` key on a parameter record. No parameter
+    the shipped catalog declares today carries this key (the schema
+    forbids it -- additionalProperties: false), so this is a no-op for
+    every real template; see the module docstring and
+    tests/scripts/test_alp_template.py's synthetic-fixture case.
+    """
+    per_file: dict[str, list[tuple[str, str]]] = {}
+    for spec in record.get("parameters", []):
+        sub = spec.get("substitute")
+        if not sub:
+            continue
+        value = resolved[spec["name"]]
+        if value == spec["default"]:
+            continue  # override equals default: nothing to change
+        literal = sub.get("literal", str(spec["default"]))
+        per_file.setdefault(sub["file"], []).append((literal, str(value)))
+    return per_file
+
+
+def _rendered_bytes(
+    template_id: str,
+    record: dict[str, Any],
+    files: tuple[str, ...],
+    resolved: dict[str, Any],
+    base_dir: Path,
+) -> list[tuple[str, bytes]]:
+    """Read + apply every declared-parameter substitution for `files`
+    (a RenderPlan.files list), returning [(relpath, bytes), ...] in the
+    same order. Shared by render()'s disk-write loop and
+    render_to_envelope()'s in-memory capture -- the same bytes a
+    customer gets from `alp_template.py render` are what `--emit
+    scaffold` hands back as JSON `contents` (see the module docstring)."""
+    example = base_dir / record["example"]
+    file_subs = _substitutions_for(record, resolved)
+    out: list[tuple[str, bytes]] = []
+    for rel in files:
+        data = (example / rel).read_bytes()
+        subs = file_subs.get(rel)
+        if subs:
+            text = data.decode("utf-8")
+            for literal, value in subs:
+                if literal not in text:
+                    raise ParameterError(
+                        f"{template_id}: substitution literal {literal!r} "
+                        f"not found in {rel}")
+                text = text.replace(literal, value)
+            data = text.encode("utf-8")
+        out.append((rel, data))
+    return out
+
+
+# ---------------------------------------------------------------------
+# --emit scaffold (issue #864): in-memory, SKU-parameterised capture
+# ---------------------------------------------------------------------
+
+def _load_som_doc(sku: str, metadata_root: Path) -> dict[str, Any]:
+    """Parse metadata/e1m_modules/<sku>.yaml -- shared by
+    `_default_preset_for_sku` (the `default_board:` field) and
+    `_derive_core_renames` (the `topology:` block), so both read the
+    exact same doc for the same `(sku, metadata_root)`."""
+    som_path = metadata_root / "e1m_modules" / f"{sku}.yaml"
+    if not som_path.is_file():
+        raise TemplateError(
+            f"no metadata/e1m_modules/{sku}.yaml for sku {sku!r}")
+    return yaml.safe_load(som_path.read_text(encoding="utf-8")) or {}
+
+
+def _default_preset_for_sku(sku: str, metadata_root: Path) -> str:
+    """The board preset a fresh project targeting `sku` ships with by
+    default -- metadata/e1m_modules/<sku>.yaml's `default_board:`,
+    lower-cased to match the `preset:` value every example board.yaml
+    already uses (e.g. `E1M-EVK` -> `e1m-evk`, `E1M-X-EVK` ->
+    `e1m-x-evk`). This is the SAME field board.yaml's own comments point
+    customers at by hand ("copy this directory, change som.sku ...,
+    edit the preset:") -- render_to_envelope just does that edit for
+    them."""
+    board = _load_som_doc(sku, metadata_root).get("default_board")
+    if not board:
+        raise TemplateError(
+            f"metadata/e1m_modules/{sku}.yaml has no default_board")
+    return board.lower()
+
+
+def _derive_core_renames(
+    original_core_ids: list[str], sku: str, metadata_root: Path,
+) -> dict[str, str] | None:
+    """Re-derive every STALE core id a catalog template's `cores:`
+    block declares, for `sku`'s OWN SoM topology (issue #864 follow-up:
+    the shallow "byte-copy the example + swap som.sku" `render_to_
+    envelope()` #864 shipped hard-coded the CANONICAL example's own
+    core id -- e.g. `m55_hp`, an Alif-only Zephyr cluster -- into every
+    substituted board.yaml/CMakeLists.txt, emitting a non-buildable
+    scaffold for any cross-SoM-family sku: `alp_project.py --emit
+    zephyr-conf --core m55_hp` against an E1M-V2N101 board.yaml fails
+    with rc=1, "unknown core id ... did you mean ['a55_cluster',
+    'm33_sm']").
+
+    EVERY key `cores:` declares must exist in the target sku's own
+    topology -- `alp_orchestrate.loader._validate_topology_cores` hard-
+    errors on an unmatched key unconditionally, whether or not that
+    core is `os: off` -- so a template that also declares the OTHER
+    cluster explicitly disabled (edge-ai's `cores.a32_cluster: {os:
+    off}`, alongside the active `m55_hp`) needs THAT id renamed too,
+    not just the one core the app actually runs on.
+
+    Returns `None` when every declared id already exists in `sku`'s
+    `metadata/e1m_modules/<sku>.yaml` `topology:` -- the canonical
+    example's own SoM, or a same-family sibling that shares its core
+    ids -- a byte-identical passthrough, nothing to rewrite. Otherwise
+    returns `{old_core_id: new_core_id, ...}` for every stale id: each
+    replacement is `sku`'s own topology core sharing the same leading
+    core-class letter (`m`/`a`), additionally requiring a Zephyr
+    `board:` target for an `m`-class replacement (only that core is
+    ever `--core`-buildable, which is why CMakeLists.txt needs it too
+    -- see `_substitute_cmake_core`); an `a`-class utility core carries
+    no such requirement (it's only ever `os: off` in every template
+    that declares one today).
+
+    Candidates are picked in `topology:`'s OWN declaration order, NOT
+    alphabetically (issue #864 Fable-review MAJOR D): a multi-m-core
+    SoM's PRIMARY app core is whichever one the SoM preset author
+    listed first, not whichever sorts first -- E1M-AEN801's `topology:`
+    declares `m55_hp` (the real app core) before `m55_he` (a stock-shim
+    peer core), but `m55_he` sorts first alphabetically.
+    `alp_project_emit.hw_info._pick_primary_core_os` picks its "primary
+    core" alphabetically -- that convention is NOT reused here for
+    exactly this reason; it would silently rename onto the wrong core
+    the day any multi-m-core SKU joins a template's supported set
+    (verified: `_derive_core_renames(["m33_sm"], "E1M-AEN801", ...)`
+    resolved `m55_he`, not the real app core `m55_hp`, before this
+    fix -- unreachable today, since no template's `supported.som_skus`
+    combo exercises it, but latently wrong).
+    """
+    topology = _load_som_doc(sku, metadata_root).get("topology") or {}
+    stale = [cid for cid in original_core_ids if cid not in topology]
+    if not stale:
+        return None
+    claimed = set(original_core_ids) & set(topology)
+    renames: dict[str, str] = {}
+    for old in stale:
+        prefix = old[0]
+        require_board = prefix == "m"
+        candidates = [
+            cid for cid, spec in topology.items()
+            if cid.startswith(prefix) and cid not in claimed
+            and cid not in renames.values()
+            and (spec.get("board") if require_board else True)
+        ]
+        if not candidates:
+            raise TemplateError(
+                f"metadata/e1m_modules/{sku}.yaml topology has no "
+                f"{prefix!r}-class core"
+                + (" with a Zephyr `board:` target" if require_board else "")
+                + f" to replace {old!r}")
+        renames[old] = candidates[0]
+    return renames
+
+
+_ROUTE_SECTIONS = ("gpio", "buses", "pwm", "adc", "dac", "i2s", "can", "qenc")
+
+
+def _board_route_entries(board_name: str, metadata_root: Path) -> list[dict[str, Any]]:
+    """Every metadata/boards/<board_name>.yaml `e1m_routes:` entry,
+    flattened across sections -- mirrors
+    scripts/gen_portability_matrix.py's `_route_entries` (same section
+    list, same join; mirrored here rather than imported across module
+    boundaries for a handful of lines)."""
+    board_path = metadata_root / "boards" / f"{board_name}.yaml"
+    if not board_path.is_file():
+        raise TemplateError(
+            f"no metadata/boards/{board_name}.yaml for board {board_name!r}")
+    routes = (
+        yaml.safe_load(board_path.read_text(encoding="utf-8")) or {}
+    ).get("e1m_routes") or {}
+    return [
+        entry for section in _ROUTE_SECTIONS
+        for entry in (routes.get(section) or [])
+        if isinstance(entry, dict)
+    ]
+
+
+def _board_alias_to_entry(board_name: str, metadata_root: Path) -> dict[str, dict[str, Any]]:
+    """{board_alias: route_entry} -- mirrors
+    scripts/gen_portability_matrix.py's `_route_by_alias`."""
+    out: dict[str, dict[str, Any]] = {}
+    for entry in _board_route_entries(board_name, metadata_root):
+        alias = entry.get("board_alias")
+        if isinstance(alias, str):
+            out[alias] = entry
+    return out
+
+
+def _pin_pad_and_macro(item: Any) -> tuple[str | None, str | None]:
+    """A `pins:` list item is either a bare E1M pad string, or a
+    `{e1m, macro?, doc?}` mapping -- normalise both shapes to
+    `(pad, macro)`, `None` for whichever half a bare string doesn't
+    carry."""
+    if isinstance(item, str):
+        return item, None
+    if isinstance(item, dict):
+        pad = item.get("e1m")
+        macro = item.get("macro")
+        return (
+            pad if isinstance(pad, str) else None,
+            macro if isinstance(macro, str) else None,
+        )
+    return None, None
+
+
+def _alias_for_pin(entries: list[dict[str, Any]], pad: str, macro: str | None) -> str | None:
+    """Resolve a `pins:` entry's `board_alias` on its OWN board --
+    MACRO-FIRST (issue #876 review MAJOR 1). A pad can carry more
+    than one `board_alias:` (e.g. e1m-evk's `E1M_PWM1` is BOTH
+    `BOARD_PWM_LED_BLUE` and `BOARD_PWM_ARD1`, at different `macro:`
+    entries), and macro names are unique per board -- every one is
+    compiled into a single C header (scripts/gen_board_header.py), so
+    two entries sharing a macro would be a duplicate-symbol build
+    error -- so matching by `macro:` first is unambiguous.
+
+    Only when the pin carries no `macro:` at all (a bare pad-string
+    entry) does this fall back to matching by `e1m:` alone, and only
+    when exactly ONE route entry claims that pad: a bare-string entry
+    naming a multi-alias pad has nothing to disambiguate with, so
+    `None` is returned (the caller hard-errors) rather than silently
+    picking whichever entry happens to come first in the board's
+    `e1m_routes:` -- the same class of silent-wrong-pin bug a naive
+    `{alias: pad}` dict inversion (this function's predecessor) had
+    for the macro-bearing case."""
+    if macro is not None:
+        for entry in entries:
+            if entry.get("macro") == macro:
+                alias = entry.get("board_alias")
+                return alias if isinstance(alias, str) else None
+        return None
+    matches = [entry for entry in entries if entry.get("e1m") == pad]
+    if len(matches) != 1:
+        return None
+    alias = matches[0].get("board_alias")
+    return alias if isinstance(alias, str) else None
+
+
+def _resolve_pin_target(
+    item: Any, sku: str, source_preset: str, metadata_root: Path,
+) -> dict[str, Any] | None:
+    """Resolve ONE `pins:` entry to its target-board route entry
+    (issue #876, hardened by the review's MAJOR 1): looks up the
+    entry's `board_alias` on `source_preset` via `_alias_for_pin`
+    (macro-first, so a multi-alias pad resolves to the RIGHT alias
+    instead of whichever wins a lossy pad->alias dict inversion), then
+    looks that alias up on `sku`'s own target board preset.
+
+    Returns `None` when `sku`'s own default board preset IS
+    `source_preset` -- the canonical example's own sku, or a same-
+    family sibling that shares its board preset -- a byte-identical
+    passthrough, nothing to resolve.
+
+    DESIGN DECISION (maintainer-approved default): a pad with no
+    unambiguous `board_alias:` on `source_preset` -- no cross-EVK
+    correspondence declared for that role at all, or a multi-alias
+    pad with no `macro:` to disambiguate (issue #876 review MINOR 3)
+    -- is a hard error, same philosophy as `_derive_core_renames`'s
+    missing-core-class error: a genuinely unsupportable combo must
+    fail loudly here, never emit a `pins:` entry that's silently
+    stale (or a scaffold `--emit zephyr-conf` then rejects)."""
+    target_preset = _default_preset_for_sku(sku, metadata_root)
+    if target_preset == source_preset:
+        return None
+    pad, macro = _pin_pad_and_macro(item)
+    if pad is None:
+        return None
+    alias = _alias_for_pin(_board_route_entries(source_preset, metadata_root), pad, macro)
+    if alias is None:
+        raise TemplateError(
+            f"metadata/boards/{source_preset}.yaml `e1m_routes:` has no "
+            f"unambiguous `board_alias:` for pins: entry {item!r} -- can't "
+            f"re-derive it for sku {sku!r} (board {target_preset!r})")
+    target_entry = _board_alias_to_entry(target_preset, metadata_root).get(alias)
+    if target_entry is None:
+        raise TemplateError(
+            f"metadata/boards/{target_preset}.yaml `e1m_routes:` has no "
+            f"route for board_alias {alias!r} (needed to re-derive pins: "
+            f"entry {item!r} for sku {sku!r})")
+    return target_entry
+
+
+def _derive_pin_renames(
+    original_pins: list[Any], sku: str, source_preset: str, metadata_root: Path,
+) -> dict[str, str]:
+    """Re-derive every catalog template's `pins:` entries -- each an
+    E1M pad name (`E1M_GPIO_IO4`) taken from the CANONICAL example's
+    own board preset (`source_preset`, e.g. `e1m-evk`) -- for `sku`'s
+    OWN default board preset (issue #876: the #864/#877 stopgap that
+    dropped E1M-V2N101 from `peripheral`/`sensor`/`edge-ai`'s
+    `supported.som_skus` rather than shipping a scaffold whose `pins:`
+    block named an E1M-EVK-only pad that an E1M-X-EVK-resolved
+    board.yaml's `e1m_routes:` doesn't have).
+
+    Each item is resolved via `_resolve_pin_target` (macro-first
+    `board_alias` match -- see its docstring for the multi-alias
+    fix). Returns `{}` when `sku`'s own default board preset IS
+    `source_preset` -- a byte-identical passthrough, nothing to
+    rewrite. Raises if two DIFFERENT `pins:` entries name the SAME
+    source pad but resolve to two different target pads (only
+    possible if a template ever lists one pad twice under two
+    different `board_alias` roles) -- ambiguous for the flat
+    `{old_pad: new_pad}` map `_substitute_board_yaml_pins` applies
+    across the whole file, so this fails loudly rather than silently
+    keeping whichever resolution happened to run last."""
+    renames: dict[str, str] = {}
+    for item in original_pins:
+        target = _resolve_pin_target(item, sku, source_preset, metadata_root)
+        if target is None:
+            continue
+        pad, _ = _pin_pad_and_macro(item)
+        new_pad = target.get("e1m")
+        if not isinstance(new_pad, str):
+            raise TemplateError(
+                f"metadata/boards/{_default_preset_for_sku(sku, metadata_root)}"
+                f".yaml route for pins: entry {item!r} has no `e1m:` pad")
+        if new_pad == pad:
+            continue
+        if pad in renames and renames[pad] != new_pad:
+            raise TemplateError(
+                f"pad {pad!r} re-derives to two different targets "
+                f"({renames[pad]!r} and {new_pad!r}) across `pins:` "
+                f"entries for sku {sku!r} -- ambiguous")
+        renames[pad] = new_pad
+    return renames
+
+
+def _derive_pin_macro_renames(
+    original_pins: list[Any], sku: str, source_preset: str, metadata_root: Path,
+) -> dict[str, str]:
+    """Companion to `_derive_pin_renames`: re-derives a `pins:` entry's
+    `macro:` field (`EVK_PIN_ENCODER_SW` -> `XEVK_PIN_ENCODER_SW`)
+    alongside whichever pad it renames. Needed because
+    `alp_orchestrate.loader._validate_topology_cores`'s `pins:` cross-
+    check hard-errors when a declared `macro:` doesn't match the
+    resolved board's OWN macro for the (possibly re-derived) pad, not
+    only on an unrecognised `e1m:` pad (verified: re-deriving `e1m:`
+    alone against `peripheral`/E1M-V2N101 still failed `--emit
+    zephyr-conf` with `pins[0].macro: EVK_PIN_ENCODER_SW does not
+    match the resolved board 'E1M-X-EVK's macros for pad
+    E1M_X_GPIO_IO28: ['XEVK_PIN_ENCODER_SW']`). A bare-string `pins:`
+    entry (no `macro:` at all) contributes nothing here -- there's no
+    macro to keep in sync. Same passthrough/ambiguity-collision
+    philosophy as `_derive_pin_renames` (whose pad-rename result this
+    always agrees with -- both resolve the SAME target entry via
+    `_resolve_pin_target`, just read a different column off it)."""
+    renames: dict[str, str] = {}
+    for item in original_pins:
+        if not isinstance(item, dict):
+            continue
+        old_macro = item.get("macro")
+        if not isinstance(old_macro, str):
+            continue
+        target = _resolve_pin_target(item, sku, source_preset, metadata_root)
+        if target is None:
+            continue
+        new_macro = target.get("macro")
+        if not isinstance(new_macro, str):
+            raise TemplateError(
+                f"metadata/boards/{_default_preset_for_sku(sku, metadata_root)}"
+                f".yaml route for pins: entry {item!r} has no `macro:`")
+        if new_macro == old_macro:
+            continue
+        if old_macro in renames and renames[old_macro] != new_macro:
+            raise TemplateError(
+                f"macro {old_macro!r} re-derives to two different targets "
+                f"({renames[old_macro]!r} and {new_macro!r}) across "
+                f"`pins:` entries for sku {sku!r} -- ambiguous")
+        renames[old_macro] = new_macro
+    return renames
+
+
+def _derive_pin_doc_renames(
+    original_pins: list[Any], sku: str, source_preset: str, metadata_root: Path,
+) -> dict[str, str | None]:
+    """Companion to `_derive_pin_renames`: re-derives a `pins:`
+    entry's `doc:` field to the TARGET route's own `doc:` (issue #876
+    review MAJOR 2) -- a renamed pin's `doc:` otherwise keeps
+    describing the SOURCE board's physical pad/electricals (e.g.
+    e1m-evk's encoder-switch doc names a PEC12R-4222F-S0024 debounce
+    network; e1m-x-evk's own doc for the same role describes a
+    different part with RC debounce), which is actively wrong prose
+    once the pad itself has changed -- the same "copy the target's
+    own doc" behaviour scripts/gen_portability_matrix.py's
+    `_remap_pins` already applies for its own (unrelated) board-preset
+    swap path.
+
+    A value of `None` in the returned map means DROP the `doc:` field
+    entirely -- the target route has no `doc:` of its own, and the
+    loader already falls back to the resolved board's own `doc:` in
+    that case (metadata/schemas/board.schema.json), so dropping it is
+    safe, not a silent content gap. An entry without its own `doc:`
+    at all contributes nothing (nothing to re-derive)."""
+    renames: dict[str, str | None] = {}
+    for item in original_pins:
+        if not isinstance(item, dict):
+            continue
+        old_doc = item.get("doc")
+        if not isinstance(old_doc, str):
+            continue
+        target = _resolve_pin_target(item, sku, source_preset, metadata_root)
+        if target is None:
+            continue
+        new_doc = target.get("doc")
+        if isinstance(new_doc, str):
+            if new_doc != old_doc:
+                renames[old_doc] = new_doc
+        else:
+            renames[old_doc] = None
+    return renames
+
+
+# Matches board.yaml's `som:\n  sku: E1M-...` line and the top-level
+# `preset: <name>` line -- through end-of-line (incl. any trailing inline
+# comment), so a value CHANGE can drop a comment describing the OLD SoM
+# (e.g. `sku: E1M-AEN801   # Alif Ensemble E8 SoM` must not survive as a
+# stale label once the value becomes E1M-V2N101). Unbounded (no count=):
+# every match is inspected so a board.yaml with more than one matching
+# `sku:`/`preset:` line -- ambiguous, could silently rewrite a decoy while
+# the real som.sku/preset line survives untouched -- hard-errors instead
+# of guessing which one is real.
+_SOM_SKU_RE = re.compile(r"(?m)^(\s*sku:\s*)(E1M-[A-Z0-9]+)[^\n]*$")
+_PRESET_RE = re.compile(r"(?m)^(preset:\s*)(\S+)[^\n]*$")
+
+
+def _substitute_board_yaml_sku(text: str, sku: str, preset: str) -> str:
+    def _sub_sku(m: re.Match[str]) -> str:
+        # Value unchanged -> leave the WHOLE line (incl. any comment)
+        # untouched: this is the byte-passthrough guarantee for sku ==
+        # the example's own default.
+        return m.group(0) if m.group(2) == sku else f"{m.group(1)}{sku}"
+
+    text, n_sku = _SOM_SKU_RE.subn(_sub_sku, text)
+    if n_sku != 1:
+        raise TemplateError(
+            f"board.yaml must have exactly one `som.sku:` line to "
+            f"substitute (found {n_sku})")
+
+    def _sub_preset(m: re.Match[str]) -> str:
+        return m.group(0) if m.group(2) == preset else f"{m.group(1)}{preset}"
+
+    text, n_preset = _PRESET_RE.subn(_sub_preset, text)
+    if n_preset != 1:
+        raise TemplateError(
+            f"board.yaml must have exactly one top-level `preset:` line "
+            f"to substitute (found {n_preset})")
+    return text
+
+
+_LIBRARY_CORE_SCOPE_RE = re.compile(r"(cores:\s*\[)([^\]]*)(\])")
+
+
+def _strip_stale_core_prose(text: str, old: str) -> str:
+    """Delete any full comment LINE naming `old` in PROSE form (issue
+    #864 Fable-review MINOR F) -- e.g. gpio-button-led's board.yaml
+    carries `# Single-core slice: M55-HP runs the demo.  M55-HE
+    inherits...` directly above `cores:\\n  m55_hp:`, which the plain
+    `m55_hp:` key-line regex below never touches (different case,
+    hyphen instead of underscore). Matches case-insensitively with `_`
+    /`-` interchangeable. A hardware-specific sentence about the
+    canonical SoM's OTHER core/topology doesn't have a sensible
+    equivalent on a different SoM family, so deleting the line is
+    safer than guessing a replacement."""
+    prose = re.escape(old).replace("_", "[_-]")
+    line_re = re.compile(rf"(?mi)^[ \t]*#.*\b{prose}\b.*\n?")
+    return line_re.sub("", text)
+
+
+def _substitute_board_yaml_core(text: str, old: str, new: str) -> str:
+    """Rewrite the `cores:` mapping's single top-level `<old>:` key to
+    `<new>:`. The per-core content underneath (`app:`, `peripherals:`)
+    is core-id-agnostic -- metadata/schemas/board.schema.json's
+    `core_entry` says every field is optional and inherits the SoM
+    preset's `topology.<core_id>` default, so only the KEY changes.
+
+    Also renames `old` wherever a top-level `libraries:` entry scopes
+    itself to this core via a `cores: [<id>, ...]` flow list (e.g.
+    cold-chain-monitor's `libraries: [{name: tflite-micro, cores:
+    [m55_hp]}]`) -- `alp_orchestrate.loader._normalize_libraries` hard-
+    errors if that list still names a core id that no longer exists
+    once the `cores:` mapping key above is renamed ("libraries: entry
+    '<name>' is scoped to core '<old>', which is not declared under
+    `cores:`"). Also strips any comment line describing `old` in prose
+    (see `_strip_stale_core_prose`)."""
+    text = _strip_stale_core_prose(text, old)
+    pattern = re.compile(rf"(?m)^(\s*){re.escape(old)}:([ \t]*)$")
+    new_text, n = pattern.subn(lambda m: f"{m.group(1)}{new}:{m.group(2)}", text)
+    if n != 1:
+        raise TemplateError(
+            f"board.yaml must have exactly one `cores.{old}:` line to "
+            f"re-derive to {new!r} (found {n})")
+
+    def _fix_scope_list(m: re.Match[str]) -> str:
+        inner = re.sub(rf"\b{re.escape(old)}\b", new, m.group(2))
+        return f"{m.group(1)}{inner}{m.group(3)}"
+
+    return _LIBRARY_CORE_SCOPE_RE.sub(_fix_scope_list, new_text)
+
+
+def _substitute_board_yaml_pins(
+    text: str, renames: dict[str, str], original_pins: list[Any],
+) -> str:
+    """Rewrite each renamed pad wherever a `pins:` entry names it --
+    scoped to the two shapes a `pins:` list item can take (issue #876
+    review MINOR 3), not a blanket `\\b<pad>\\b` replace over the whole
+    file (a pad name can also appear in unrelated prose, e.g. gpio-
+    button-led's `preset:` header comment -- see `_strip_stale_core_
+    prose`, reused for pins in `render_to_envelope`):
+
+    * the dict form's `e1m: <old>` field (`(e1m:\\s*)<pad>\\b`), and
+    * the bare pad-string list-item form (`- <old>`,
+      `([ \\t]*-[ \\t]*)<pad>\\b`) the schema also allows -- a template
+      using this form had its pad left stale by the dict-only regex
+      (silent `--emit zephyr-conf` failure downstream: the exact class
+      of bug #876 exists to kill), and a MIXED bare + dict entry for
+      the same pad hid it entirely (the dict match alone satisfied the
+      old "at least one occurrence" guard).
+
+    `original_pins` supplies the EXPECTED occurrence count per pad (how
+    many entries -- bare or dict -- actually name it), so the rewrite
+    is verified exact rather than "found at least one"."""
+    for old, new in renames.items():
+        expected = sum(
+            1 for item in original_pins
+            if _pin_pad_and_macro(item)[0] == old
+        )
+        dict_pattern = re.compile(rf"(e1m:\s*){re.escape(old)}\b")
+        text, n_dict = dict_pattern.subn(lambda m: f"{m.group(1)}{new}", text)
+        bare_pattern = re.compile(rf"(?m)^([ \t]*-[ \t]*){re.escape(old)}\b")
+        text, n_bare = bare_pattern.subn(lambda m: f"{m.group(1)}{new}", text)
+        if n_dict + n_bare != expected:
+            raise TemplateError(
+                f"board.yaml `pins:` re-derive of `{old}` -> {new!r}: "
+                f"expected {expected} occurrence(s), rewrote "
+                f"{n_dict + n_bare}")
+    return text
+
+
+def _substitute_board_yaml_pin_macros(text: str, renames: dict[str, str]) -> str:
+    """Companion to `_substitute_board_yaml_pins`: rewrite each `pins:`
+    entry's `macro:` field per `_derive_pin_macro_renames`'s map, the
+    same scoped-to-the-key approach (`(macro:\\s*)<old>\\b`) -- `macro:`
+    only ever appears in the dict form (a bare pad-string entry has
+    no `macro:` at all)."""
+    for old, new in renames.items():
+        pattern = re.compile(rf"(macro:\s*){re.escape(old)}\b")
+        new_text, n = pattern.subn(lambda m: f"{m.group(1)}{new}", text)
+        if n < 1:
+            raise TemplateError(
+                f"board.yaml `pins:` has no `macro: {old}` entry to "
+                f"re-derive to {new!r}")
+        text = new_text
+    return text
+
+
+def _substitute_board_yaml_pin_docs(text: str, renames: dict[str, str | None]) -> str:
+    """Companion to `_substitute_board_yaml_pins`: rewrite (or drop) a
+    `pins:` entry's `doc:` field per `_derive_pin_doc_renames`'s map
+    (issue #876 review MAJOR 2) -- `doc:` only ever appears in the
+    dict form. A `None` value means the target route has no `doc:` of
+    its own; the loader falls back to the resolved board's own `doc:`
+    in that case, so the field is dropped entirely rather than left
+    describing the wrong board."""
+    for old_doc, new_doc in renames.items():
+        old_quoted = re.escape(f'"{old_doc}"')
+        if new_doc is not None:
+            pattern = re.compile(rf"(doc:\s*){old_quoted}")
+            new_text, n = pattern.subn(lambda m: f'{m.group(1)}"{new_doc}"', text)
+        else:
+            pattern = re.compile(rf",\s*doc:\s*{old_quoted}")
+            new_text, n = pattern.subn("", text)
+        if n < 1:
+            raise TemplateError(
+                f'board.yaml `pins:` has no `doc: "{old_doc}"` entry to '
+                f"re-derive")
+        text = new_text
+    return text
+
+
+def _substitute_cmake_core(text: str, old: str, new: str) -> str:
+    """Rewrite CMakeLists.txt's `alp_sdk_zephyr_conf(<old> ...)` core
+    argument to the re-derived core id. Still accepts the pre-helper
+    `alp_project.py --emit zephyr-conf --core <old>` spelling, so an
+    example not yet migrated to `cmake/alp.cmake` re-derives rather than
+    scaffolding the wrong core."""
+    pattern = re.compile(
+        rf"(alp_sdk_zephyr_conf\(\s*|--core\s+){re.escape(old)}\b")
+    new_text, n = pattern.subn(lambda m: f"{m.group(1)}{new}", text)
+    if n != 1:
+        raise TemplateError(
+            f"CMakeLists.txt must name core {old!r} exactly once (as "
+            f"`alp_sdk_zephyr_conf({old} ...)` or `--core {old}`) to "
+            f"re-derive to {new!r} (found {n})")
+    return new_text
+
+
+# ---------------------------------------------------------------------
+# --emit scaffold content adaptation (issue #864 follow-up)
+# ---------------------------------------------------------------------
+#
+# Every catalog template's user_owned files are the SDK's own example,
+# verbatim -- correct for render()'s documented byte-for-byte contract
+# (validate()'s in-tree twister self-test relies on exactly that), but
+# wrong for a scaffold a customer unpacks OUTSIDE the SDK tree: a
+# `west build ... examples/<...>` argument naming a path that doesn't
+# exist in their project, `../`-relative links that only resolve
+# inside the SDK checkout, and a CMakeLists.txt that silently guesses
+# `../../..` for ALP_SDK_ROOT (correct only for the in-tree example,
+# never a copied-out scaffold -- the retired tan-cli generator hard-
+# failed on exactly this: "ALP_SDK_ROOT is not set"). These transforms
+# run ONLY in render_to_envelope() (the `--emit scaffold` path, for
+# EVERY sku including the canonical example's own) -- render()/
+# validate() stay byte-for-byte faithful to the real example, since
+# that's what validate()'s temp-dir twister run is proving builds.
+
+_ALP_SDK_ROOT_GUESS_RE = re.compile(
+    r"if\(DEFINED ENV\{ALP_SDK_ROOT\}\)\n"
+    r"    set\(ALP_SDK_ROOT \$ENV\{ALP_SDK_ROOT\}\)\n"
+    r"else\(\)\n"
+    r"    get_filename_component\(ALP_SDK_ROOT \$\{CMAKE_CURRENT_SOURCE_DIR\}(?:/\.\.)+ ABSOLUTE\)\n"
+    r"endif\(\)"
+)
+# `cold-chain-monitor`'s own shape: no ALP_SDK_ROOT resolution at all, just a
+# hardcoded in-tree-relative path straight to `alp_project.py` (worse than the
+# guess above -- no override is even possible).
+_HARDCODED_ALP_PROJECT_PY_RE = re.compile(
+    r"\$\{CMAKE_CURRENT_SOURCE_DIR\}(?:/\.\.)+/scripts/alp_project\.py"
+)
+# Anything that only resolves against a real alp-sdk checkout, i.e. that a
+# scaffold copied OUT of the SDK tree cannot satisfy unless ALP_SDK_ROOT has
+# been rewritten into a hard requirement: the shared `cmake/alp.cmake`
+# include, either helper it defines, or a direct `alp_project.py` shell.
+_SDK_ROOT_DEPENDENT_RE = re.compile(
+    r"cmake/alp\.cmake|alp_sdk_zephyr_conf|alp_sdk_ipc_contract_header"
+    r"|alp_project\.py")
+_ALP_SDK_ROOT_REQUIRED_BLOCK = (
+    # Issue #864 Fable-review MAJOR E: the ORIGINAL block here checked
+    # only `ENV{ALP_SDK_ROOT}` while the message also advertised
+    # `-DALP_SDK_ROOT=...` -- a customer passing ONLY the -D cache
+    # variable still hit the FATAL_ERROR (ENV{} was never set), and
+    # even a customer setting BOTH had the -D value silently clobbered
+    # by `set(ALP_SDK_ROOT $ENV{ALP_SDK_ROOT})`. Check + prefer
+    # whichever is actually DEFINED; only fall back to the env var when
+    # the cache variable itself isn't set.
+    "if(NOT DEFINED ALP_SDK_ROOT AND NOT DEFINED ENV{ALP_SDK_ROOT})\n"
+    "    message(FATAL_ERROR\n"
+    "        \"ALP_SDK_ROOT is not set -- point it at your alp-sdk checkout, \"\n"
+    "        \"e.g. `export ALP_SDK_ROOT=/path/to/alp-sdk` or "
+    "`-DALP_SDK_ROOT=/path/to/alp-sdk`.\")\n"
+    "endif()\n"
+    "if(NOT DEFINED ALP_SDK_ROOT)\n"
+    "    set(ALP_SDK_ROOT $ENV{ALP_SDK_ROOT})\n"
+    "endif()"
+)
+
+
+def _scaffold_cmakelists(text: str) -> str:
+    """Replace an in-tree-relative ALP_SDK_ROOT guess with a hard
+    requirement.
+
+    Two shapes exist across the catalog's example CMakeLists.txt files
+    today: the `if(DEFINED ENV{ALP_SDK_ROOT}) ... else()
+    get_filename_component(...)` guess most examples carry immediately
+    above `include(${ALP_SDK_ROOT}/cmake/alp.cmake)`, and
+    `cold-chain-monitor`'s own hardcoded
+    `${CMAKE_CURRENT_SOURCE_DIR}/../../../scripts/alp_project.py` call
+    with no ALP_SDK_ROOT resolution at all (worse: no override is even
+    possible). Both resolve only for the in-tree example; a scaffold a
+    customer unpacks elsewhere needs the value supplied, so each becomes
+    a FATAL_ERROR-if-unset block -- the guess shape's `include()` line
+    already names `${ALP_SDK_ROOT}` and needs no further rewriting, the
+    hardcoded shape's path is rewritten to `${ALP_SDK_ROOT}/scripts/
+    alp_project.py` alongside inserting the block.
+
+    A CMakeLists.txt with no SDK-root-dependent line at all (e.g.
+    multicore-rpmsg's `linux/CMakeLists.txt`) is legitimately returned
+    unchanged. One that DOES depend on the SDK root but carries an
+    unrecognised resolution shape raises: this used to be a silent
+    best-effort no-op, which shipped every scaffolded project an
+    `include()`/`alp_project.py` path that resolves only inside an SDK
+    checkout -- broken on the very first thing a new customer does, with
+    nothing failing here to say so."""
+    new_text, n = _ALP_SDK_ROOT_GUESS_RE.subn(_ALP_SDK_ROOT_REQUIRED_BLOCK, text)
+    if n:
+        return new_text
+    if _ALP_SDK_ROOT_REQUIRED_BLOCK in text:
+        return text  # already hardened (idempotent)
+    if _HARDCODED_ALP_PROJECT_PY_RE.search(text):
+        text = _HARDCODED_ALP_PROJECT_PY_RE.sub(
+            "${ALP_SDK_ROOT}/scripts/alp_project.py", text)
+        return text.replace(
+            "execute_process(\n",
+            _ALP_SDK_ROOT_REQUIRED_BLOCK + "\n\nexecute_process(\n", 1)
+    dependent = _SDK_ROOT_DEPENDENT_RE.search(text)
+    if dependent:
+        raise TemplateError(
+            f"CMakeLists.txt depends on the SDK root (`{dependent.group(0)}`) "
+            f"but carries no recognised ALP_SDK_ROOT resolution block to "
+            f"rewrite into a hard requirement -- a scaffold of it would ship "
+            f"a path that only resolves inside an alp-sdk checkout. Use the "
+            f"`if(DEFINED ENV{{ALP_SDK_ROOT}}) ... else() "
+            f"get_filename_component(...) endif()` shape the other examples "
+            f"use, or teach `_scaffold_cmakelists` the new one.")
+    return text
+
+
+_RELATIVE_LINK_RE = re.compile(r"\]\((\.\./[^)\s]+)\)")
+
+
+def _core_board(sku: str, core_id: str | None, metadata_root: Path) -> str | None:
+    """`metadata/e1m_modules/<sku>.yaml` `topology.<core_id>.board` --
+    the qualified Zephyr board id (`<board>/<soc>/<cpucluster>`) `west
+    build -b` needs. `None` for a missing/off/a-class core (no Zephyr
+    target) so callers can skip the README board-target rewrite
+    cleanly instead of guessing."""
+    if not core_id:
+        return None
+    topology = _load_som_doc(sku, metadata_root).get("topology") or {}
+    return (topology.get(core_id) or {}).get("board")
+
+
+def _docs_ref(base_dir: Path) -> str:
+    """The GitHub ref a scaffolded README's doc links should pin to
+    (issue #864 Fable-review MINOR H): `metadata/sdk_version.yaml`'s
+    own `v<version>` tag when `status: released` (a released checkout's
+    docs are stable at that tag; linking `main` could point at docs
+    that have since changed or moved), else `main` -- an unreleased/
+    development checkout has no matching tag yet to pin to."""
+    try:
+        doc = yaml.safe_load(
+            (base_dir / "metadata" / "sdk_version.yaml").read_text(encoding="utf-8")
+        ) or {}
+    except OSError:
+        return "main"
+    version = doc.get("version")
+    if doc.get("status") == "released" and version:
+        return f"v{version}"
+    return "main"
+
+
+def _substitute_readme_pins(text: str, renames: dict[str, str]) -> str:
+    """Rewrite a scaffolded README's `ALP_<old_pad>` mentions to
+    `ALP_<new_pad>` for every renamed pin (issue #876 review MINOR 4)
+    -- e.g. gpio-button-led's README teaches `ALP_E1M_GPIO_IO4` as THE
+    button pin, which becomes actively wrong prose once the pad itself
+    has changed for a cross-family sku.
+
+    Paragraph-scoped (split on blank lines): a paragraph that ALREADY
+    mentions BOTH the old and the new `ALP_<pad>` form (e.g. i2c-
+    master's "resolves to `ALP_E1M_I2C0` on the E1M EVK and
+    `ALP_E1M_X_I2C0` on the E1M-X EVK" cross-EVK teaching sentence) is
+    left alone -- it's correct, portable prose about the alias
+    mechanism itself, not a stale claim about which pad THIS scaffold
+    uses, and blindly substituting would turn it into a duplicate,
+    factually wrong statement ("... on the E1M EVK" would then name
+    the E1M-X pad).
+
+    A `` `ALP_<old_pad>` (index N) `` parenthetical (e.g. gpio-button-
+    led's "`ALP_E1M_GPIO_PWM0` (index 26)") names N per `old_pad`'s
+    OWN family's `ALP_E1M_GPIO_<class><N>` numbering
+    (`include/alp/e1m_pinout.h`'s canonical IO0..25 = 0..25, PWM0..7 =
+    26..33 order) -- a DIFFERENT numbering on a cross-family target
+    (E1M-X's `include/alp/e1m_x_pinout.h` has 36 IOs, so its PWM0..7
+    sits at 36..43, not the source family's index at all). The route
+    data available here (`metadata/boards/*.yaml` `e1m_routes:`
+    entries: `e1m`/`macro`/`board_alias`/`doc`, no index column) can't
+    re-derive `new_pad`'s own index, so rather than carry the stale
+    source-family number forward as if it were true of the target,
+    drop the parenthetical along with the pad it was describing."""
+    if not renames:
+        return text
+    paragraphs = text.split("\n\n")
+    for i, para in enumerate(paragraphs):
+        changed = para
+        for old, new in renames.items():
+            old_tok, new_tok = f"ALP_{old}", f"ALP_{new}"
+            if old_tok in para and new_tok in para:
+                continue  # already-correct dual-EVK teaching prose
+            changed = re.sub(
+                rf"`{re.escape(old_tok)}`(?:\s*\(index\s+\d+\))?",
+                f"`{new_tok}`", changed)
+            changed = re.sub(rf"\b{re.escape(old_tok)}\b", new_tok, changed)
+        paragraphs[i] = changed
+    return "\n\n".join(paragraphs)
+
+
+def _scaffold_readme(
+    text: str,
+    example_path: str,
+    docs_ref: str,
+    example_sku: str = "",
+    sku: str = "",
+    source_board: str | None = None,
+    target_board: str | None = None,
+    pin_renames: dict[str, str] | None = None,
+) -> str:
+    """Every vendored README's `../`-relative links (`../../../docs/
+    x.md`, a sibling example's `../i2c-scanner/`, ...) resolve against
+    the CANONICAL example's OWN position inside the alp-sdk tree --
+    dangling once copied out as a standalone scaffold. Rewrite each to
+    an absolute GitHub URL (pinned to `docs_ref` -- see `_docs_ref`)
+    instead. Also rewrites the one non-existent-once-copied-out token
+    every Build section carries: a `west build ...` invocation naming
+    THIS template's own repo-relative example path -- the scaffold IS
+    the project root wherever the customer unpacks it, so that argument
+    becomes `.`. Best-effort (neither pattern found -> text returned
+    unchanged); per-template narrative prose (e.g. `tan build
+    alp-sdk/examples/...` invocations, cross-references phrased as
+    prose rather than a link) is intentionally not scaffold-normalised
+    by this pass.
+
+    Two more issue #864 Fable-review fixes, both applied unconditionally
+    (best-effort, no-op when the pattern is absent):
+
+    * MAJOR B -- `-DEXTRA_ZEPHYR_MODULES=$(pwd)` only registers the
+      alp-sdk checkout as a Zephyr module when `$(pwd)` IS that
+      checkout (true in-tree); in a copied-out scaffold `$(pwd)` is the
+      SCAFFOLD dir, so the module never registers and the documented
+      `west build` fails (`CONFIG_ALP_*` unset, `<alp/*.h>`
+      unresolvable). Rewritten to `$ALP_SDK_ROOT`, the same var the
+      hardened CMakeLists.txt now requires (`_scaffold_cmakelists`).
+
+    * MAJOR C -- the canonical example's own SoM label ("# Example for
+      E1M-AEN801:") and qualified Zephyr board target
+      (`alp_e1m_aen801_m55_hp`) otherwise survive a cross-family sku
+      swap untouched (a V2N101 scaffold shipping `-b
+      alp_e1m_aen801_m55_hp`; the real
+      `alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33` appears nowhere).
+      `source_board`/`target_board` are the qualified board id
+      (`_core_board`) for the example's own sku / the requested sku's
+      re-derived app core respectively; only the SHORT board-id prefix
+      (before the first `/`) needs to match literally in the README, so
+      the whole qualified `target_board` is substituted in its place --
+      upgrading even the passthrough case to the fully-qualified id
+      Zephyr 4.4 actually requires (issue #720; the source README's own
+      bare `alp_e1m_aen801_m55_hp` is itself ambiguous/unresolvable).
+
+    `pin_renames` (issue #876 review MINOR 4) is `_derive_pin_renames`'s
+    map -- see `_substitute_readme_pins`.
+    """
+    def _fix_link(m: re.Match[str]) -> str:
+        target = posixpath.normpath(f"{example_path}/{m.group(1)}")
+        kind = "blob" if "." in target.rsplit("/", 1)[-1] else "tree"
+        return f"](https://github.com/alplabai/alp-sdk/{kind}/{docs_ref}/{target})"
+
+    text = _RELATIVE_LINK_RE.sub(_fix_link, text)
+    text = re.sub(rf"(?<!\S){re.escape(example_path)}(?!\S)", ".", text)
+    text = text.replace(
+        "-DEXTRA_ZEPHYR_MODULES=$(pwd)", "-DEXTRA_ZEPHYR_MODULES=$ALP_SDK_ROOT")
+    if source_board and target_board:
+        source_marker = source_board.split("/", 1)[0]
+        text = re.sub(rf"\b{re.escape(source_marker)}\b", target_board, text)
+    if example_sku and sku and example_sku != sku:
+        text = text.replace(example_sku, sku)
+    text = _substitute_readme_pins(text, pin_renames or {})
+    return text
+
+
+def render_to_envelope(
+    template_id: str,
+    sku: str,
+    params: dict[str, Any] | None = None,
+    *,
+    catalog_path: Path | None = None,
+    base_dir: Path | None = None,
+    metadata_root: Path | None = None,
+) -> list[tuple[str, str]]:
+    """Render `template_id` for `sku` entirely in memory: no dest_dir, no
+    disk write. Returns `[(path, contents), ...]` in the same sorted
+    order `plan()` computes -- the `{path, contents}[]` shape
+    `scripts/alp_project.py --emit scaffold` JSON-encodes (issue #864),
+    matching the shape `--emit build-plan`'s `configArtefacts` /
+    `sharedArtefacts` already use. `testcase.yaml` is never in this
+    envelope (dropped from the catalog's `files.user_owned`: SDK CI
+    wiring, not a user's project file).
+
+    `sku` MUST be one of the record's declared `supported.som_skus` --
+    SkuNotSupportedError (naming the supported set) otherwise, never a
+    silent best-effort render. The rendered `board.yaml`'s `som.sku:`
+    and top-level `preset:` are substituted for `sku`'s own default
+    board (metadata/e1m_modules/<sku>.yaml `default_board:`). The app
+    CORE is re-derived too (`_derive_core_renames`): `board.yaml`'s
+    `cores:` key(s) and CMakeLists.txt's `--core` flag are rewritten
+    from the canonical example's own SoM core (e.g. `m55_hp`) to
+    `sku`'s own Zephyr-buildable core (e.g. `m33_sm` for E1M-V2N101)
+    whenever the canonical core isn't already valid for `sku` -- this
+    is the fix for issue #864's follow-up: the shallow `som.sku`-only
+    swap emitted a board.yaml `--emit zephyr-conf --core m55_hp` can't
+    build against for any cross-SoM-family sku. `board.yaml`/`prj.conf`
+    /`src/main.c` are a byte-identical passthrough when `sku` already
+    matches the example's own default (or shares its core ids);
+    CMakeLists.txt and README.md are ALSO scaffold-adapted regardless
+    of `sku` (`_scaffold_cmakelists` / `_scaffold_readme`) -- their
+    in-tree `ALP_SDK_ROOT` guess and SDK-tree-relative links/paths are
+    wrong for a copied-out scaffold no matter which sku was requested.
+    """
+    doc = load_catalog(catalog_path)
+    record = find_template(doc, template_id)
+    supported = record["supported"]["som_skus"]
+    if sku not in supported:
+        raise SkuNotSupportedError(
+            f"{template_id}: sku {sku!r} is not supported "
+            f"(supported: {sorted(supported)})")
+
+    files = _ordered_files(record)
+    resolved = _resolve_params(record, params)
+    base = base_dir or REPO
+    metadata_root = metadata_root or METADATA_ROOT
+    preset = _default_preset_for_sku(sku, metadata_root)
+
+    board_yaml_text = (base / record["example"] / "board.yaml").read_text(encoding="utf-8")
+    example_doc = yaml.safe_load(board_yaml_text) or {}
+    original_core_ids = list((example_doc.get("cores") or {}).keys())
+    example_sku = (example_doc.get("som") or {}).get("sku", "")
+    core_renames = _derive_core_renames(original_core_ids, sku, metadata_root)
+    # `pins:` re-derivation (issue #876): each entry is either a bare
+    # pad string or a `{e1m, macro?, doc?}` mapping (same shape
+    # alp_orchestrate.loader's pins cross-check accepts); only the
+    # example's OWN preset (not an inline board def -- no catalog
+    # template ships one today) has a metadata/boards/<preset>.yaml to
+    # re-derive against.
+    original_pins = list(example_doc.get("pins") or [])
+    source_preset = example_doc.get("preset")
+    pin_renames = (
+        _derive_pin_renames(original_pins, sku, source_preset, metadata_root)
+        if original_pins else {}
+    )
+    pin_macro_renames = (
+        _derive_pin_macro_renames(original_pins, sku, source_preset, metadata_root)
+        if original_pins else {}
+    )
+    pin_doc_renames = (
+        _derive_pin_doc_renames(original_pins, sku, source_preset, metadata_root)
+        if original_pins else {}
+    )
+    # The one rename CMakeLists.txt's `--core` flag also needs (the
+    # m-class core the app actually builds on) -- None when nothing
+    # was renamed, or when the template has no m-class core at all
+    # (never happens for a real `runtimes: [zephyr]` catalog record).
+    app_core_old = next((c for c in original_core_ids if c.startswith("m")), None)
+    app_core_sub = (
+        (app_core_old, core_renames[app_core_old])
+        if core_renames and app_core_old in core_renames else None
+    )
+    # README board-target rewrite (MAJOR C): the example's OWN board id
+    # for its own sku, vs. the requested sku's board id for the
+    # (possibly re-derived) app core.
+    source_board = _core_board(example_sku, app_core_old, metadata_root)
+    target_board = _core_board(
+        sku, app_core_sub[1] if app_core_sub else app_core_old, metadata_root)
+    docs_ref = _docs_ref(base)
+
+    out: list[tuple[str, str]] = []
+    for rel, data in _rendered_bytes(template_id, record, files, resolved, base):
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # render() copies any file as raw bytes; the JSON envelope
+            # cannot -- a future binary user_owned asset must fail
+            # cleanly here, not escape _run_scaffold_emit's `except
+            # TemplateError` as a raw traceback.
+            raise TemplateError(
+                f"{template_id}: {rel} is not valid UTF-8 text, cannot "
+                f"be JSON-encoded for --emit scaffold ({exc})") from exc
+        if rel == "board.yaml":
+            text = _substitute_board_yaml_sku(text, sku, preset)
+            for old, new in (core_renames or {}).items():
+                text = _substitute_board_yaml_core(text, old, new)
+            if pin_renames:
+                text = _substitute_board_yaml_pins(text, pin_renames, original_pins)
+            if pin_macro_renames:
+                text = _substitute_board_yaml_pin_macros(text, pin_macro_renames)
+            if pin_doc_renames:
+                text = _substitute_board_yaml_pin_docs(text, pin_doc_renames)
+            # A renamed pad can also survive as a stale mention in
+            # unrelated prose (issue #876 review MINOR 4) -- e.g.
+            # gpio-button-led's `preset:` header comment names the
+            # E1M-EVK pad in a continuation line the `preset:`
+            # substitution above never touches. Same treatment
+            # `_substitute_board_yaml_core` already gives a renamed
+            # core id (`_strip_stale_core_prose`).
+            for old in (pin_renames or {}):
+                text = _strip_stale_core_prose(text, old)
+        elif rel.endswith("CMakeLists.txt"):
+            if app_core_sub:
+                text = _substitute_cmake_core(text, *app_core_sub)
+            text = _scaffold_cmakelists(text)
+        elif rel == "README.md":
+            text = _scaffold_readme(
+                text, record["example"], docs_ref,
+                example_sku=example_sku, sku=sku,
+                source_board=source_board, target_board=target_board,
+                pin_renames=pin_renames)
+        out.append((rel, text))
+    return out
+
+
+def emit_scaffold(
+    template_id: str,
+    sku: str,
+    params: dict[str, Any] | None = None,
+    *,
+    catalog_path: Path | None = None,
+    base_dir: Path | None = None,
+    metadata_root: Path | None = None,
+) -> str:
+    """`--emit scaffold`'s STDOUT, byte for byte.
+
+    RELOCATED from `alp_project._run_scaffold_emit`'s two serialising lines. The
+    envelope is `[{path, contents}, ...]` -- `render_to_envelope`'s ordered
+    pairs, `json.dumps(..., indent=2)`, one trailing newline -- and alp-sdk's
+    `scripts/check_emit_snapshots.py` diffs exactly these bytes against a
+    committed golden, so the shape is the contract, not a presentation choice.
+    """
+    envelope = render_to_envelope(
+        template_id, sku, params, catalog_path=catalog_path, base_dir=base_dir,
+        metadata_root=metadata_root)
+    return json.dumps(
+        [{"path": p, "contents": c} for p, c in envelope], indent=2) + "\n"

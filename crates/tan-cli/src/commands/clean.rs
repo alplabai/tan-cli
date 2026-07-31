@@ -77,10 +77,7 @@ pub fn run(g: &GlobalArgs, args: &CleanArgs) -> CommandRun {
     } else {
         cwd.join(&args.app_path)
     };
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     // SDK-root guard — faithful to alp_clean.py `log.die('Cannot locate
     // alp-sdk root.')`. ponytail: arguably YAGNI (removing a build dir needs no

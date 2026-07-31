@@ -5,6 +5,468 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.5.0-rc1] — 2026-07-31
+
+*The first release in which `tan` is a Python program: the planner relocated
+into it, so `tan` now plans AND executes, and the four assets are PyInstaller
+freezes of `python/` rather than cargo builds of `crates/`.*
+
+**No stable user upgrades onto this release.** `SUPPORTED_CLI_VERSION` in
+`alp-sdk-vscode` moves to `0.5.0-rc1` only on that extension's PRE-RELEASE
+channel -- extension `v0.5.0`, an odd minor, which `release-vsix.yml`
+publishes with `--pre-release` (alp-sdk-vscode#446). Stable extension users
+stay on an even minor pinned at the Rust `tan` and are untouched until GA
+(#268); opting into the beta channel is the whole delivery mechanism for this
+RC. The tag also publishes with `prerelease: true` / `make_latest: false`, and
+both installers resolve `latest` through GitHub, which excludes prereleases, so
+`install.sh` and `install.ps1` still install the last stable release. Everyone
+else installs by hand.
+
+### Changed
+- **The planner relocated into `tan`, so `tan` now plans AND executes.**
+  alp-sdk's `scripts/alp_orchestrate/` (20 modules, ~6.2k lines) is now
+  `python/tan/planner/`, and `tan build` renders the build plan **in-process**
+  instead of shelling
+  `PYTHONPATH=<sdk>/scripts python -m alp_orchestrate --emit build-plan`. That
+  drops the requirement for an interpreter named `python`/`python3` on PATH
+  carrying PyYAML and jsonschema — the frozen binary's single most likely
+  first-run failure. The subprocess call survives as a fallback for exactly one
+  case: a build of `tan` that cannot import its own planner (no `jsonschema`),
+  against an SDK that still ships `alp_orchestrate`.
+
+  This is a MOVE, not a rewrite — the accumulated silicon behaviour (carve-out
+  top-down allocation, FNV-1a endpoint ids, partition bottom-up allocation,
+  per-core OS derivation from Cortex class, Kconfig section order) is precisely
+  what must not be re-derived. `tests/parity/test_planner_emit_parity.py`
+  imports both planners into one process and asserts byte-identical output for
+  every mode over every `board.yaml` in the SDK's `examples/`; it skips, loudly,
+  without an `ALP_SDK_ROOT` naming a checkout that still carries the original.
+
+  **`metadata/**` did not move and must not** (ADR-0017): the generators
+  relocated, the facts did not. The fact readers stayed too —
+  `alp_project_loader`, `alp_project_emit`, `alp_registries` and
+  `alp_cli.validator` are still imported from `<sdk_root>/scripts`, and
+  `scripts/alp_project.py` remains tan's canonical SDK-root marker. What
+  replaced `paths.py`'s walk-up-from-`__file__` derivation is an explicit
+  binding (`tan/planner_root.py`): every `metadata/**` path is a function of the
+  resolved `sdk_root`, and importing the planner before a root is bound raises
+  instead of silently reading the wrong tree.
+- **The release assets are PyInstaller `--onefile` freezes of `python/`, and
+  there are FOUR of them, not eight** (#271). The published set is
+  `tan-x86_64-pc-windows-msvc.exe`, `tan-x86_64-apple-darwin`,
+  `tan-aarch64-apple-darwin` and `tan-x86_64-unknown-linux-gnu`. `--onefile` is
+  required rather than preferred: the extension downloads a raw binary to ONE
+  cached path and has no unpack step anywhere in it. The asset NAMES keep the
+  Rust target triples because `alp-sdk-vscode`'s `releaseAssetForTarget`
+  hardcodes them and builds its download URL from them.
+
+  **`tan-aarch64-pc-windows-msvc.exe` and an arm64 Linux asset are NOT
+  published**, and a download of either 404s. PyInstaller cannot
+  cross-compile -- every asset must be frozen on the architecture it runs on
+  -- and adding two more runner types was out of scope for this tag. That is a
+  decision, not a platform limit (`windows-11-arm` and `ubuntu-24.04-arm` are
+  current hosted labels, and this repo is public, so arm64 minutes are not a
+  barrier either), so it can be revisited whenever arm64 assets are wanted;
+  `pip install ./python` is the route until then. There is no `-musl` asset
+  either: PyInstaller's musllinux bootloader carries ELF interpreter
+  `/lib/ld-musl-x86_64.so.1`, so a musl freeze runs ONLY on musl distros --
+  it is not the run-anywhere static binary the Rust `-musl` target produced,
+  and shipping it would have broken every Ubuntu/Debian/Fedora user.
+
+  **The Linux asset is glibc**, frozen in `python:3.12-slim-bullseye` (Debian
+  11, glibc 2.31) -- exactly the floor the retired `cargo-zigbuild`
+  `x86_64-unknown-linux-gnu.2.31` pin targeted, so nothing is lost against the
+  Rust asset. The floor quoted in the release notes is MEASURED over the
+  appended PyInstaller payload (libpython plus the extension modules,
+  enumerated from `.build/tan/PKG-00.toc`) inside the build container, never
+  asserted and never read off the outer ELF: `readelf -V dist/tan` there sees
+  only PyInstaller's vendored bootloader, a container-invariant `GLIBC_2.14`
+  that cannot detect the build image regressing to a newer glibc. The release
+  job fails rather than publish notes quoting a floor nothing measured.
+
+  `alp-sdk-vscode`'s `service.ts` still maps `linux/x64` to the MUSL triple,
+  so the extension cannot download this asset. Deliberate for this tag -- it
+  never reaches an RC anyway -- and repointed with the pin move at GA (#268).
+- **`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace` and
+  `support-bundle` are withdrawn from this build, not silently absent.** The
+  Python port stubs all seven (`python/tan/commands/deferred_cmd.py`) rather
+  than porting them yet: each parses its real argv (any positional/flags are
+  accepted, never rejected) and then exits `RUNTIME_FAILURE` (1) naming
+  `tan-cli#260`, in both `--format json` and text mode; the shared issue code
+  `cli.command-deferred` is carried in the JSON envelope only -- text mode
+  prints just the deferral message and the issue URL. That is deliberately
+  louder than Typer's own unknown-command `UsageError` (exit 2,
+  `cli.parse-error`) would have been for an absent verb -- a caller (or the
+  extension) can tell "known but deferred" apart from a typo like `tan bulid`
+  by the issue code in `--format json`, or by exit 1 vs Typer's exit 2 in
+  text mode.
+- `jsonschema` is now the fourth runtime dependency. It arrived with the
+  planner, which validates every `board.yaml` against
+  `metadata/schemas/board.schema.json` before it plans anything. The frozen
+  one-file binary measures 12377580 B against the 15000000 B ceiling.
+
+### Added
+- **`tan build --execute` -- run a plan that came from `--plan-from`.** ADDED
+  BY THIS PORT: v0.4.1 has no such flag, and there `--plan-from` implies
+  `--plan` and outranks `--native`, so a file-supplied plan could not be
+  dispatched at all. Taking a pinned, reviewed plan file and running it
+  reproducibly is a normal hermetic-CI request, so this is a supported
+  capability rather than a parity gap or a test hook. `--execute` implies
+  `--materialise` (nothing can run that was never written) and reports the
+  ORDINARY build shape -- `{schemaVersion, baseDir, slices[], warnings[]}` --
+  with `written` deliberately omitted, being byte-for-byte the pinned plan's
+  own declared artefact paths. A conflicting combination is refused with its
+  own code, never resolved by silent precedence: `--execute --materialise` ->
+  `build.conflicting-flags`, exit 2; `--execute` with a deferred flag ->
+  `cli.command-deferred`, exit 1.
+
+  **`--plan-from` itself still means what it meant in v0.4.1** -- it is a plan
+  SOURCE, not a build trigger. Measured against the shipped `tan 0.4.1-dev`
+  binary rather than inferred: `--plan-from p.json` and
+  `--plan-from p.json --native` both give rc 0 and write 0 files with `data`
+  = the plan, and `--plan-from p.json --materialise` gives rc 0 and 6 files.
+  All three are reproduced exactly, `--native` included. Two earlier revisions
+  of the port each redefined one of those argvs, which would have made a
+  v0.4.1 script that only ever INSPECTED a plan silently begin writing six
+  files into its own tree.
+
+- **`tan debug-config` now resolves a real J-Link device / pyOCD target id
+  from the SDK's published debug-probe identity, before the project has ever
+  been built** (alp-sdk#1026). alp-sdk#987 shipped `variants[].debug.
+  {pyocd_target, jlink_device, jlink_flash_device, openocd_config}` across 13
+  Alif Ensemble variants with a schema, a gate and tests, and no reader
+  anywhere — every generated `launch.json` kept the literal `<resolved-
+  device>` / `<resolved-target-id>` placeholders #987 was filed to replace.
+  `device` resolves from `jlink_device[<core id>]` (the `--core` flag, or the
+  core a prior build already resolved); `targetId` resolves from the scalar
+  `pyocd_target` with no core or build needed at all. A real build's own
+  `runners.yaml` resolution still wins wherever it exists; this is a fallback
+  for the field(s) it did not already resolve. `openocd_config` is absent
+  from every published SoC family today, and stays the existing placeholder —
+  the schema's own stance that an unpopulated key is a published "unknown" is
+  never overridden with a guess. New `debug-config.sdk-identity-key-absent`
+  (reserved) issue names that case explicitly instead of relying only on the
+  generic "still needs resolution" note, which used to name `device` even for
+  a server whose draft carries no such key.
+
+### Fixed
+- **A pending `TBD` placeholder can no longer reach a flasher** (#222). alp-sdk
+  writes `TBD` into a manifest field it has not filled in yet, and every guard
+  on the flash path used to test for EMPTY -- which is the one thing a `TBD`
+  placeholder is not. An unfilled field therefore behaved exactly like a
+  filled one, and whether that ended in a loud refusal or a spawned flasher
+  came down to whether the particular consumer happened to validate against a
+  closed set: `flash_method: TBD` hit the backend registry and failed safely,
+  while `output_artefact`/`firmware_path: TBD` hit nothing at all, resolved to
+  `<build_root>/TBD` and reached a real J-Link write.
+
+  One definition now answers it for the whole path (`flash_plan.is_pending`),
+  shared with the bundle writer so `tan image` and `tan flash` can never
+  disagree about what "unfilled" means. The value is trimmed before comparing
+  -- a YAML `device: "  TBD  "` is the same unfilled field -- but deliberately
+  NOT case-folded and NOT a substring test: `TBD-1234-XYZ` is a plausible part
+  number and `flash_args.build_dir: /opt/TBDtool/x` a plausible path, and
+  refusing either would block a legitimate flash. The two sites differ by
+  consequence, per the per-entry rc convention: an unresolved `TBD` in
+  `flash_args` SKIPS the entry (rc `-1`, never counted as a failure), an
+  unresolved `TBD` artefact FAILS it (rc `> 0`).
+- **`tan validate` in a fresh project answered "not ported yet" (exit 1) where
+  the shipped binary answers `validate.board-yaml-missing` (exit 2).** The
+  not-ported stub for the non-`--offline` spawn path short-circuited ABOVE the
+  missing-`board.yaml` guard, so `tan validate` in an empty directory -- among
+  the first things a brand-new user runs -- answered a different question than
+  the oracle, with a different exit code. The guard now runs first, on both
+  paths, under the existing `validate.board-yaml-missing` code.
+
+  Measured against `target/debug/tan.exe` (`tan 0.4.1-dev`, `--format json`),
+  not inferred from `crates/` and not taken from a report: an empty directory
+  exits **2** `validate.board-yaml-missing` with `data.outcome: "failed"`; a
+  project with `board.yaml` but no SDK root exits **2**
+  `validate.sdk-root-unresolved`. Exit 1 is reachable in the oracle only AFTER
+  a validator actually spawns and returns an unexpected status. The oracle
+  therefore draws a line -- pre-spawn guards at 2, post-spawn failure at 1 --
+  that the stub had flattened.
+
+  An earlier revision of this entry claimed the opposite, and was wrong in both
+  halves: that the oracle returns 1 for these cases, and that moving to 2 would
+  be a considered BREAK for v0.6.0 (#262). Neither was ever measured. For the
+  guard cases 2 is what the oracle already does, so matching it is a
+  compatibility fix. #262 is re-scoped to the one case that is a genuine
+  v0.6.0 decision: `validate.failed` after a real spawn.
+
+  Still divergent, deliberately, and tracked in #262: `board.yaml` present but
+  no SDK root, where the oracle says 2 `validate.sdk-root-unresolved` and this
+  port says 1 `validate.spawn-not-implemented`. Closing it needs the real spawn
+  path. The two genuine internal failures in the same file (an unreadable
+  `board.yaml`, an unexpected exception inside the offline structural checker)
+  are unchanged at exit 5, matching the oracle's offline path exactly.
+
+- **`tan sdk install` / `tan sdk switch` refused at exit 5 (`InternalFailure`),
+  telling CI and the extension that tan had crashed.** Neither is ported; that
+  is a gap, not a crash. Both now exit 1 (`RuntimeFailure`) -- the code every
+  other refusal in `sdk_cmd` already used (`sdk list` without `--online`, a
+  bare `tan sdk`), the code the deferred-verb stubs settled on, and the code
+  the oracle itself returns for a `sdk switch` that cannot resolve (measured:
+  `tan sdk switch 0.0.0-nonexistent --format json` -> rc=1
+  `sdk.path-not-found`). The 5 was justified in-code as "following
+  `validate_cmd`'s precedent for its own unported spawn path" -- `validate_cmd`
+  uses 1, so the comment cited a precedent for the opposite of what it did.
+
+- **`tan init` could pin a customer to the WRONG SDK, permanently** (#263).
+  `init`, `generate`, `examples` and `renode` were routed through the same
+  SDK-root ladder as the other thirteen commands, whose last tier is the NARROW
+  probe. The oracle carries two ladders, and those four take the WIDE one.
+  Measured against `target/debug/tan.exe`, `HOME`/`USERPROFILE` isolated and
+  `ALP_SDK_ROOT` unset: with a child `<ws>/alp-sdk` and a competing sibling
+  `../alp-sdk`, the oracle resolves the child and the port resolved the sibling;
+  inside an enclosing checkout, the oracle resolves the child and the port
+  resolved the enclosing tree.
+
+  `tan init` is the sharp one, because it WRITES `.alp/sdk-path` -- and that pin
+  then outranks discovery for every later command in that project. A customer
+  running `tan bootstrap` and then `tan init` beside a second checkout was bound
+  to the wrong SDK for good, with nothing in any envelope saying so. Asserted on
+  the FILE, not just the envelope: `.alp/sdk-path`'s `sdkPath` now holds the
+  child in both cases. `build`, `doctor`, `sdk current` and `presets` are
+  byte-identical to before -- their narrow ladder was always right.
+
+  The issue's own prescribed fix -- inverting tier 4 for ALL commands -- was
+  refuted by that measurement and deliberately not applied: it would have
+  changed the thirteen too, tripping `build.sdk-switch-pristine` and deleting
+  build directories. The five regression tests pinning the narrow ladder are
+  untouched, precisely so nobody re-applies it.
+
+- **`tan monitor` would have been a dead command in every published binary.**
+  pyserial is an EXTRA (`[project.optional-dependencies] monitor`), so a frozen
+  build carries it only if the build venv installed `.[monitor]`.
+  `python-binaries.yml` did; `release.yml` -- the workflow a `v*` tag actually
+  runs -- froze a bare `.`. So every asset this tag publishes would have
+  advertised `tan monitor` in its `--help` and then refused to run it with
+  `monitor.pyserial-missing`, whose hint (`pip install "alp-tan[monitor]"`) is
+  the one thing a holder of a `--onefile` binary can never act on.
+
+  Both workflows now freeze `.[monitor]`, and `tests/conformance/test_packaged_binary.py`
+  asserts the frozen artifact reaches pyserial -- by issue code, not exit code,
+  since a runner with no serial hardware exits non-zero either way
+  (`monitor.no-port` is the pass, `monitor.pyserial-missing` the failure).
+
+  Both halves measured on real freezes rather than reasoned about, because a
+  gate that cannot fail is worse than none: with the extra the artifact is
+  13805270 B and answers `monitor.no-port`; without it, 13729615 B and
+  `monitor.pyserial-missing`. So PyInstaller does follow the lazy in-function
+  `import serial` when it is installed, and does not acquire it otherwise -- no
+  `--hidden-import` is needed and the extra genuinely decides the outcome.
+  +75655 B, against 2.69 MB of headroom under the 16500000 B ceiling.
+
+  The rationale in `build_binary.sh` said the opposite ("extras stay OUT ...
+  freezing one in would make the binary disagree with what the wheel
+  promises"), which inverts who can act: a wheel user can add an extra whenever
+  they like, a binary holder cannot.
+
+- **`install.sh` handed musl hosts a binary that cannot exec.** It maps every
+  Linux host to `unknown-linux-gnu` with no libc detection. From v0.5.0 that is
+  the only Linux asset, so on Alpine the failure mode is the bad one: not a
+  checksum mismatch but a bare `not found` from the shell, AFTER the sha256
+  verify has already passed -- so none of the four refusals fires and the
+  script reports success. It also regresses people who worked before, since
+  `latest` still resolves to v0.4.1 and its `tan-x86_64-unknown-linux-musl`
+  asset is genuinely static. Now detected BEFORE the download (`ldd --version`
+  naming musl, or the musl loader directly on images with no `ldd`) and refused
+  with a reason and a pointer at the source install. README's manual-download
+  recipe named the musl asset with the comment "musl = static, any distro";
+  that asset is gone from this release on, and the static claim was never true
+  of a PyInstaller freeze.
+
+- **`tan <cmd> | head` exited 1 on Linux and macOS where the oracle exits 0.**
+  Any reader that stops early (`head`, `grep -q`, a closed pager) closes tan's
+  stdout mid-write. `__main__.py` guarded that, but on POSIX its `except
+  OSError` arm is never reached: Rich's `Console._check_buffer` catches the
+  `BrokenPipeError` and `Console.on_broken_pipe` raises `SystemExit(1)` before
+  it -- and Typer's `_main` carries the same EPIPE-to-`sys.exit(1)` arm behind
+  that. Both raise from INSIDE the block that caught the pipe, so the original
+  error is left on `SystemExit.__context__`; following that chain is what
+  identifies the case. `SystemExit(1)` alone is far too broad to remap (every
+  failed `tan build` raises it), and the alternatives -- Click's
+  `PacifyFlushWrapper` swap, Rich's `console.quiet` -- are private detail of
+  someone else's library that an entrypoint has no business importing.
+
+  Measured, not inferred: `tan 0.4.1` linux-musl writing its 4327-byte `--help`
+  into a never-read 4 KiB pipe (`F_SETPIPE_SZ`, so EPIPE is guaranteed) exits 0
+  with empty stderr; the port exited 1. Verified after: `tan generate --help |
+  head -n1` under `pipefail` returns 0, `tan build` still 1, `tan bogus` still
+  2, `--version` still 0.
+
+  The Windows arm of the same guard (`errno.EINVAL` with `filename is None`,
+  because CPython's Windows layer maps `ERROR_NO_DATA` to EINVAL rather than
+  EPIPE) already existed and is unchanged -- it was factored into
+  `_is_broken_pipe` here, not added. An earlier revision of this entry, and the
+  message on the commit that carried the fix, both described that pre-existing
+  half as the fix and called the defect Windows-only. It is the reverse:
+  Windows was green throughout and POSIX was the broken platform.
+
+- **The same `TBD` defect on the Rust side: a placeholder reached every
+  flash backend as a real value** (#222).
+  `TBD` is a deliberate alp-sdk convention — where the exact hardware
+  configuration is not yet known the field is marked `TBD` rather than invented —
+  so the convention itself routinely produces the value, and every guard in this
+  area tested for *empty*, which is the one thing `TBD` is not. `fa_str`, the
+  accessor twelve string reads across the backends go through, returned it:
+  the literal string `TBD` became a `west flash --runner`, a build directory, a
+  hex file, an OpenOCD config path and a `dd` destination. The same defect was
+  measured in alp-sdk (`flash/mod.rs:307`), where it resolved to
+  `<build_root>/TBD` and a real flasher was spawned against it.
+
+  **There are two string accessors, and both carried the defect.**
+  `plan_swd_probe` reads four fields — `base`, `jlink_device`, `interface`,
+  `target` — through the *strict* `builders::fa_str_checked`, which had the same
+  `!s.is_empty()` filter. That is the accessor whose whole reason for existing
+  is the fields where a silent fallback to a baked-in default is dangerous, and
+  two of the four reached a spawned command:
+
+  - `jlink_device: TBD` has no validator behind it at all, so the plan was
+    `JLinkExe -device TBD -if SWD -speed 4000 …` with `planning_only: false` —
+    the alp-sdk sighting this issue reports, reproduced exactly.
+  - `interface: TBD` / `target: TBD` are *worse* than unvalidated:
+    `validate_identifier` accepts `TBD` (it is a plain alphanumeric identifier),
+    and being non-empty it also suppressed the "`interface` and `target` are
+    required" refusal — so the plan was
+    `openocd -f interface/TBD.cfg -f target/TBD.cfg -c "program … verify reset exit"`.
+    The correct error was silenced *because* the placeholder is not empty, which
+    is the issue's thesis word for word.
+  - `base: TBD` was already refused, but by `validate_address` happening to
+    reject a non-hex charset — safe by a second guard, not by the accessor.
+
+  There the placeholder is an **error**, not absent: reading an unfilled
+  `jlink_device` as absent would flash a GD32G553 with `DEFAULT_JLINK_DEVICE`,
+  and an unfilled `base` would program real silicon at `DEFAULT_BASE`, both
+  while the manifest was saying "not yet known". This makes the string member of
+  the `_checked` family agree with `fa_bool_checked`/`fa_int_checked`, which
+  already hard-error on a present `TBD`. The tolerant `fa_str` reads it as
+  absent because its callers' defaults are safe; the strict one refuses.
+
+  Fixed once per accessor, not at the call sites: `TBD` now
+  reads as **absent**, which is what it means. Every caller's existing
+  `unwrap_or_else(default)` / `if let Some` then treats it as the unfilled field
+  it is, with no new branch anywhere — `build_dir` falls back to the computed
+  Zephyr build dir instead of a literal `TBD` directory, `target` to `flash`,
+  `bs` to `4M`. It also matches what tan already did with the whole entry
+  (`commands::flash` SKIPS a target whose `flash_args` contains `TBD`) and what
+  the sibling `fa_bool_checked`/`fa_int_checked` already did with a bare
+  `flash_args: TBD`.
+
+  The sentinel is now defined ONCE (`PENDING_PLACEHOLDER` /
+  `is_pending_placeholder`) rather than written out at four sites — the fourth
+  being `sdk_catalogue::parse::is_tbd`, which four comments in `commands::flash`
+  and `commands::image` cite *by name* as the definition of the convention. The
+  failure mode of four copies is a fifth reader written without one, and
+  `fa_str_checked` was that fifth reader.
+
+  Two readers outside the flash path are knowingly left separate: `pinmux` drops
+  a `TBD` `e1m_pad` as a sentinel row (that silicon pad has no E1M edge ball),
+  and `size::resolve_variant` skips a `TBD` `silicon_variant` before its reverse
+  SKU lookup. Different schemas, different questions, and neither plans a flash
+  write. Both compare untrimmed, so `' TBD '` slips past them — filed as #276
+  rather than folded in here, along with the open question of whether
+  `PENDING_PLACEHOLDER` should live somewhere more neutral than `flash::args`.
+
+  Every `fa_str` call site was audited for whether "absent" is safe there. Each
+  is either already protected by a closed-set check that `TBD` also failed
+  (`plan_yocto_wic`'s required-`target` plus its `/dev/` prefix refusal,
+  `plan_xspi_flashwriter`'s `mtd0`/`mtd1`) or strictly improves. None was found
+  where absent is more dangerous than the placeholder was — which is precisely
+  why the four `fa_str_checked` fields got the opposite answer.
+
+- **`project.boardYaml` now agrees with the filesystem in both directions**
+  (#236, #170). The field's own contract has always read "if found", and the
+  code returned a path either way: twenty commands each cloned
+  `context.board_yaml_path` straight into the envelope, and the resolver builds
+  `<root>/board.yaml` unconditionally — so a run in a directory with no
+  `board.yaml` reported one, and a consumer that opened it got ENOENT. #170 is
+  the same field failing the other way; its fix routed `debug-config` through
+  that shared resolver, which without this would have traded a hardcoded `null`
+  for a path to a file that need not exist.
+
+  Both ends are fixed at the reporting seam — a new `Project::from_context`
+  (plus `from_debug_context`, which reuses the `board_yaml_exists` flag
+  `doctor`/`inspect`/`support-bundle` already carry) that all twenty sites now
+  route through. Deliberately NOT in `resolve_project_context`:
+  `board_yaml_path` is the path commands ACT on, and several need it precisely
+  when the file is absent — `doctor`'s `read_board_model`, `validate`'s
+  "does not exist" refusal, and `create_debug_workspace_context`, which mirrors
+  the TypeScript side by carrying the path and a separate existence flag.
+  Emptying it there would have stripped the path out of every "no board.yaml at
+  `<path>`" message.
+
+  Two further sites build the block by hand and were the starkest instances:
+  `generate` and `validate --offline` each reported the path one line above the
+  refusal that says the file does not exist. Both now report `null` and keep
+  naming the path in the message.
+
+  **Wire change (reporting only).** Seven golden envelopes move
+  `project.boardYaml` from a path to `null` — the four `debug-config-preview-*`
+  cases, both `presets-*` cases, and `generate-board-yaml-missing`, every one of
+  which runs in a scratch directory that provably has no `board.yaml`. Nothing
+  in `alp-sdk-vscode` reads the field; its only declaration
+  (`src/alpCli/models.ts`) is already `string | null`. `project.root` is
+  untouched — #236 rules that question explicitly out of scope.
+
+- **`tan build --pristine` now reports the slices it did not wipe** (#183).
+  `--pristine` has three paths that correctly decline the wipe, and all three
+  were silent: the slice carries an explicit `-d`/`--build-dir` (west wrote
+  somewhere tan cannot know), the plan cwd does not normalise under `build/`
+  (the wipe target could hold files the build never created), or the build dir
+  has no `CMakeCache.txt` (never configured, nothing to wipe). The run then
+  exited 0 having done an incremental build the user had explicitly asked not
+  to have — so a stale artefact sent them debugging the artefact, not the flag,
+  and the command had told them it handled it. Each suppressed slice now emits
+  `build.pristine-skipped` (severity `warning`, registered `reserved`) naming
+  the slice and which of the three reasons applied, plus a `note:` line in text
+  mode.
+
+  The decision is one pure function, `tan_core::plan_exec::pristine_suppression`,
+  with one emit site placed **outside** the two-guard block in
+  `crates/tan-cli/src/commands/build/execute/mod.rs` — a message written into
+  either guard could not have seen the other, and neither could have seen the
+  third path, which sits inside both. That third path is also the only one a
+  stock plan reaches: `write_sdk_stamp` itself `create_dir_all`s `<cwd>/build`
+  to write `.tan-sdk-root`, so after any prior slice the directory exists
+  holding nothing but tan's stamp, and every subsequent `--pristine` declined
+  silently. The two named in the issue require a hand-written plan.
+
+  No suppression changed. All three remain exactly as `#163` mutation-proved
+  them; only the silence is gone.
+
+- **A write could silently replace a hand-filled `.vscode/launch.json` value**
+  with one resolved from the SDK's identity above, at `exit 0` with
+  `issues: []` (alp-sdk#1026 review). The overwrite itself is the same,
+  by-design behaviour a value resolved from a real build has always had; the
+  defect was that it was undisclosed for this new source. A write that
+  replaces a concrete existing `device`/`targetId`/`configFiles` value now
+  emits a new `debug-config.sdk-identity-overwrite` (reserved) issue naming
+  the old and new values.
+
+- **Linux and macOS now see the manual-install hints the SDK provides for them**
+  (#230). alp-sdk v0.14.0 added `manualInstallHints.posix.note` — the POSIX twin
+  of the Windows key `tan bootstrap` already printed — and tan did not read it, so
+  the data existed and was inert. Three facts reached no POSIX customer: that the
+  Zephyr SDK is a separate, manual `west sdk install` (with the exact invocation),
+  that the Arm GNU Toolchain is a separate install needed by three opt-in paths,
+  and why `west sdk install` may print a `could not find a 'file' executable`
+  warning that is harmless. The same class as 7-Zip being prose-only before #204,
+  one file over.
+
+  Shape, heading and position come from the oracle rather than from tan:
+  `v0.14.0:scripts/bootstrap.sh` prints these under `NOT auto-installed (manual,
+  one-time):` for `linux|macos` only, after the optional-native-libs section. The
+  host gate is `Linux | MacOs` and deliberately **not** "anything that is not
+  Windows" — `HostOs::Other` is a host tan could not identify, and every sentence
+  in the note is Linux/macOS-specific.
+
+  An SDK that declares no `manualInstallHints.posix` (every release before
+  v0.14.0) renders exactly what it always did. The field is `Option` for that
+  reason: a required field would turn each of those SDKs into a hard
+  `ValidationFailure` that `tan build` inherits through auto-bootstrap.
+
 ## [0.4.1] — 2026-07-29
 
 ### Added
@@ -161,6 +623,36 @@ All notable changes to `tan` are documented here. Format follows
   the scripts is alp-sdk#1038's decision.
 
 ### Fixed
+- **`tan bootstrap --print-env` wrote to stderr, so the one thing it exists to
+  produce could not be captured** (#227). Both obvious ways of consuming it
+  produced nothing, and neither errored:
+  ```sh
+  eval "$(tan bootstrap --print-env)"                  # evaluated ""
+  tan bootstrap --print-env > env.sh && . ./env.sh     # sourced ""
+  ```
+  `sh -n` on the empty file passed too — an empty file is a valid shell script
+  — so even a check that the emitted block *parses* could report green having
+  read nothing. That is exactly what `getting-started.yml`'s own `--print-env`
+  step (#216) did: it passed while asserting nothing at all, and its uploaded
+  `gs-print-env.sh` artefact was empty.
+  The block now goes to **stdout**, and it is the only text output in tan that
+  does. Sending text to stderr so `--format json` owns stdout outright is the
+  right rule and every other command keeps it — but `--print-env` is not a
+  report *about* a run, it is the run's product: a shell fragment whose whole
+  purpose is to be consumed, in a CLI whose every other machine-readable
+  surface is `--format json`. `--print-env`'s help text now says so.
+  JSON mode is unchanged: the envelope remains the only thing on stdout there,
+  and it already carries every path the block renders (`data.zephyrBase`,
+  `data.venvDir`), so a JSON consumer never needed the shell spelling.
+  Printed at the `--print-env` short-circuit rather than through `emit`,
+  because `emit`'s two channels *are* the two streams (`json` → stdout, `text`
+  → stderr) and threading a third through `CommandRun` would touch all 174 of
+  its construction sites to serve one flag; `text` is returned empty so the
+  block is never also written to stderr. Verified: stdout 480 bytes, stderr 0.
+  Two permanent gates, in the places that were fooled: the #217 regression
+  suite now reads the block off stdout and asserts stderr is empty in both
+  modes, and `getting-started.yml`'s step uses a plain pipe again (no `2>&1`),
+  so a return to stderr empties the capture and fails the size check.
 - **`tan bootstrap` reported cwd-relative paths in `data.*` and `--print-env`
   while `project.root` in the same envelope was absolute** (#217). Every path
   the command reports is derived from `--sdk-root`, and the flag's spelling
@@ -1238,7 +1730,6 @@ All notable changes to `tan` are documented here. Format follows
   (PR #369): no `fix`, so nothing lands in `nextSteps` and no `doctor.lldb`
   issue is raised. The resolved executable name is still reported when one is
   found on PATH -- only the verdict and the advice for a miss were wrong.
-
 
 ## [0.4.0] — 2026-07-28
 

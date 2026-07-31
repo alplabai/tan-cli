@@ -74,15 +74,15 @@ pub use debug::{
 };
 pub use debug_launch::{
     LaunchJsonWritePlan, LaunchResolution, apply_launch_resolution, create_launch_draft,
-    create_launch_json_write_plan, is_unresolved_placeholder, launch_preview_document,
-    launch_preview_notes,
+    create_launch_json_write_plan, fill_debug_probe_identity_gaps, is_unresolved_placeholder,
+    launch_preview_document, launch_preview_notes, sdk_identity_overwrites,
 };
 pub use diff::{DiffEntry, DiffKind, collect_diff_entries, prune_nulls};
 pub use flash::{
-    BackendKind, FlashBackendMeta, FlashInputs, FlashKind, FlashPlan, FlashTarget, ToolGate,
-    backend_for, jlink_commander_script, plan_baremetal_cmake_flash, plan_flash_targets,
-    plan_swd_probe, plan_xspi_flashwriter, plan_yocto_wic, plan_zephyr_west_flash, registry_keys,
-    resolve_artefact_path, tool_gate,
+    BackendKind, FlashBackendMeta, FlashInputs, FlashKind, FlashPlan, FlashTarget,
+    PENDING_PLACEHOLDER, ToolGate, backend_for, is_pending_placeholder, jlink_commander_script,
+    plan_baremetal_cmake_flash, plan_flash_targets, plan_swd_probe, plan_xspi_flashwriter,
+    plan_yocto_wic, plan_zephyr_west_flash, registry_keys, resolve_artefact_path, tool_gate,
 };
 pub use host_env::{
     HostEnvProbe, ZEPHYR_SDK_HOSTS, ZEPHYR_SDK_INSTALL_VERSION, host_environment_checks,
@@ -142,9 +142,10 @@ pub use sdk_catalogue::{
     parse_soc_spec, parse_som_preset,
 };
 pub use size::{
-    MemoryBudget, SliceSize, SocVariant, WARN_FRACTION, build_size_report, classify, core_token,
-    footprint_total, human_bytes, over_budget_rows, parse_berkeley_size, region_cell, region_json,
-    render_table_lines, resolve_budget, resolve_variant, round1, unknown_budget_rows,
+    MemoryBudget, SliceSize, SocVariant, SocVariantDebug, WARN_FRACTION, build_size_report,
+    classify, core_token, footprint_total, human_bytes, over_budget_rows, parse_berkeley_size,
+    region_cell, region_json, render_table_lines, resolve_budget, resolve_variant, round1,
+    unknown_budget_rows,
 };
 pub use validate::{
     Outcome, ParseError, Severity, ValidationIssue, ValidationResult, ValidatorExecution,

@@ -25,24 +25,51 @@ const REPO = "alplabai/tan-cli";
 const TAG = `v${pkg.version}`;
 const BINARY_DIR = path.join(__dirname, "binary");
 
+// The platform -> triple table, and it must equal the "Targets published"
+// table in docs/release-contract.md, which install.sh also follows.
+//
+// From v0.5.0 the release is a PyInstaller freeze of `python/`, not a `cargo`
+// build, and that flips the Linux answer: LINUX IS gnu, NOT musl. The Rust
+// releases published a genuinely static `-musl` asset that ran on any distro,
+// which is why this table (and install.sh, and the VS Code extension) used to
+// map Linux there. PyInstaller cannot produce that artefact -- its musllinux
+// bootloader is dynamically linked against /lib/ld-musl-x86_64.so.1 and runs
+// ONLY on musl distros -- so the Python-era release ships only `-gnu`, frozen
+// in `python:3.12-slim-bullseye` (glibc 2.31), and a `-musl` entry here would
+// 404 on every v0.5.0+ tag while being wrong for the Ubuntu/Debian/Fedora hosts
+// that asked for it.
+//
+// win32/arm64 and linux/arm64 are OMITTED entirely, not mapped to a triple
+// that 404s: PyInstaller cannot cross-compile (every asset must be frozen on
+// the architecture it runs on), and this release freezes on four runners, not
+// six. A host in neither list hits `resolveTarget()`'s "no prebuilt binary"
+// branch below -- one clear message and a `pip install` fallback, not a raw
+// HTTP 404 mid-download.
+//
+// npm-shim/test/libc-mapping.test.js pins this table against the contract doc
+// and install.sh, because the drift -- not the wrong value -- was the bug both
+// times.
+const TARGETS = {
+  "win32/x64": "x86_64-pc-windows-msvc",
+  "linux/x64": "x86_64-unknown-linux-gnu",
+  "darwin/x64": "x86_64-apple-darwin",
+  "darwin/arm64": "aarch64-apple-darwin",
+};
+
 /** Map the host platform/arch to the release target triple. */
 function resolveTarget() {
   const key = `${process.platform}/${process.arch}`;
-  // Same platform -> triple table as install.sh/install.ps1 and the VS Code
-  // extension's releaseAssetForTarget (docs/release-contract.md, main repo).
-  const targets = {
-    "win32/x64": "x86_64-pc-windows-msvc",
-    "win32/arm64": "aarch64-pc-windows-msvc",
-    "linux/x64": "x86_64-unknown-linux-gnu",
-    "linux/arm64": "aarch64-unknown-linux-gnu",
-    "darwin/x64": "x86_64-apple-darwin",
-    "darwin/arm64": "aarch64-apple-darwin",
-  };
+  const targets = TARGETS;
   const target = targets[key];
   if (!target) {
     throw new Error(
       `@alplabai/tan: no prebuilt binary for ${key}. Supported: ${Object.keys(targets).join(", ")}. ` +
-        `Build from source: cargo install alp-tan-cli --locked (see https://github.com/${REPO}).`,
+        // `pip install alp-tan`, NOT `cargo install`: from 0.5.0 the released
+        // binaries are PyInstaller freezes of the Python package (`alp-tan` on
+        // PyPI), so there is no crate at this version to build from source. The
+        // pip path needs no prebuilt asset for this platform at all -- it is the
+        // real answer for a host this release's four-asset matrix does not cover.
+        `Install from PyPI instead: pip install alp-tan (needs Python 3.12+; see https://github.com/${REPO}).`,
     );
   }
   return target;
@@ -122,7 +149,15 @@ function parseChecksum(text, asset) {
   return null;
 }
 
-main().catch((error) => {
-  console.error(error && error.message ? error.message : String(error));
-  process.exit(1);
-});
+// `require.main === module` so the mapping can be imported by
+// test/libc-mapping.test.js without DOWNLOADING a binary as a side effect of
+// being read. Without the guard the pin test would have to re-parse this file as
+// text, i.e. test a copy of the table rather than the table.
+if (require.main === module) {
+  main().catch((error) => {
+    console.error(error && error.message ? error.message : String(error));
+    process.exit(1);
+  });
+}
+
+module.exports = { TARGETS, resolveTarget, parseChecksum };
