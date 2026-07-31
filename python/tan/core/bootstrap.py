@@ -356,6 +356,10 @@ class BootstrapFacts:
     venv_posix_bin_dir: str
     venv_windows_bin_dir: str
     prerequisites_posix: tuple[str, ...]
+    #: `prerequisites.macos`, or EMPTY when the manifest declares none -- which
+    #: means "read `posix`", the behaviour of every SDK before v0.14.0. See
+    #: `prerequisites` for why that fallback is load-bearing rather than tidy.
+    prerequisites_macos: tuple[str, ...]
     prerequisites_windows: tuple[str, ...]
     python_min_version: tuple[int, int]
     #: `prerequisites.install`, keyed `linux`/`macos`/`windows` -> tool ->
@@ -383,11 +387,26 @@ class BootstrapFacts:
     def venv_bin_dir(self, is_windows: bool) -> str:
         return self.venv_windows_bin_dir if is_windows else self.venv_posix_bin_dir
 
-    def prerequisites(self, is_windows: bool) -> tuple[str, ...]:
-        """The tool list for this host. The two genuinely differ (`python` vs
+    def prerequisites(self, host: str) -> tuple[str, ...]:
+        """The tool list for this host. The lists genuinely differ (`python` vs
         `python3`) and the manifest records that faithfully rather than
-        unifying them -- so does this."""
-        return self.prerequisites_windows if is_windows else self.prerequisites_posix
+        unifying them -- so does this.
+
+        Takes the HOST, not `is_windows`, since alp-sdk v0.14.0: that release
+        added `xz` and `wget` to `prerequisites.posix` AND a separate
+        `prerequisites.macos` that omits them. Keying off a bool hands macOS the
+        POSIX list and refuses a stock macOS host -- which ships neither `wget`
+        nor a standalone `xz` -- over tools the SDK does not ask macOS for.
+
+        An EMPTY `prerequisites_macos` means the manifest declared none (every
+        SDK before v0.14.0), and macOS then reads `posix` exactly as it always
+        did. The fallback is the old behaviour, not a guess.
+        """
+        if host == WINDOWS:
+            return self.prerequisites_windows
+        if host == MACOS and self.prerequisites_macos:
+            return self.prerequisites_macos
+        return self.prerequisites_posix
 
     def install_for_host(self, host: str) -> dict[str, str]:
         """THE one place the manifest's `linux`/`macos`/`windows` install keying
@@ -560,6 +579,10 @@ def parse_bootstrap_manifest(text: str) -> BootstrapFacts:
         venv_posix_bin_dir=_require(venv, "posixBinDir", str, "venv"),
         venv_windows_bin_dir=_require(venv, "windowsBinDir", str, "venv"),
         prerequisites_posix=_str_list(prerequisites.get("posix"), "prerequisites.posix"),
+        # OPTIONAL on the wire: absent means "use `posix`", which is every SDK
+        # before v0.14.0. Required here, it would turn each of those into a hard
+        # ValidationFailure that `tan build` inherits through auto-bootstrap.
+        prerequisites_macos=_str_list(prerequisites.get("macos", []), "prerequisites.macos"),
         prerequisites_windows=_str_list(
             prerequisites.get("windows"), "prerequisites.windows"
         ),
@@ -606,12 +629,24 @@ def _fallback_install_commands() -> dict[str, dict[str, str]]:
             "cmake": "sudo apt-get install -y cmake",
             "python3": "sudo apt-get install -y python3",
             "ninja": "sudo apt-get install -y ninja-build",
+            # `xz`/`wget` joined `prerequisites.posix` at alp-sdk v0.14.0. Same
+            # package-name-differs-from-binary-name point as `ninja`: the binary
+            # is `xz`, the package is `xz-utils`.
+            "xz": "sudo apt-get install -y xz-utils",
+            "wget": "sudo apt-get install -y wget",
         },
         MACOS: {
             "git": "brew install git",
             "cmake": "brew install cmake",
             "python3": "brew install python3",
             "ninja": "brew install ninja",
+            # Present even though `prerequisites.macos` does NOT list `xz`/`wget`
+            # -- the manifest declares these commands for macOS regardless, and
+            # this table is byte-pinned to it. A user who needs them (an SDK
+            # predating `prerequisites.macos`, so macOS reads the POSIX list)
+            # gets the `brew` line rather than Linux's `apt-get`.
+            "xz": "brew install xz",
+            "wget": "brew install wget",
         },
         WINDOWS: {
             "git": "winget install -e --id Git.Git",
@@ -668,8 +703,11 @@ def fallback_facts(min_python: tuple[int, int]) -> BootstrapFacts:
         venv_windows_bin_dir="Scripts",
         # `ninja` is POSIX too, not Windows-only: Zephyr picks Ninja as its
         # default CMake generator on every host, so a POSIX box without it fails
-        # `west build` with a CMake error naming nothing useful.
-        prerequisites_posix=("git", "cmake", "python3", "ninja"),
+        # `west build` with a CMake error naming nothing useful. `xz`/`wget`
+        # joined the list at alp-sdk v0.14.0, which also split `macos` out
+        # WITHOUT them -- a stock macOS host has neither.
+        prerequisites_posix=("git", "cmake", "python3", "ninja", "xz", "wget"),
+        prerequisites_macos=("git", "cmake", "python3", "ninja"),
         prerequisites_windows=("git", "cmake", "python", "ninja"),
         python_min_version=min_python,
         install=_fallback_install_commands(),

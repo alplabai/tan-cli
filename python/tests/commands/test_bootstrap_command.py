@@ -110,6 +110,19 @@ def run_tan(*argv, cwd, env_extra=None):
     # an ambient `$ZEPHYR_BASE` must not decide the workspace plan or the floor.
     env.pop("ZEPHYR_BASE", None)
     env.pop("SOURCE_DATE_EPOCH", None)
+    # The prerequisite gate probes `python3`/`python` FROM PATH and refuses a
+    # host below the EFFECTIVE floor (Zephyr's 3.12) -- so which interpreter is
+    # first on PATH decides the exit code of nearly every case below. An
+    # unactivated venv on Ubuntu 22.04 leaves `python3` = the system 3.10, and 19
+    # cases here then failed with `bootstrap.python-too-old`, saying nothing
+    # about the code under test. Pin the probed interpreter to the one running
+    # the suite (>= 3.12 by pyproject's `requires-python`), exactly as CI's
+    # setup-python and a venv activation both do -- the same hermeticity
+    # `make_sdk(tools=...)` gives the TOOL list. The refusal itself keeps its own
+    # coverage in `test_the_effective_floor_refuses_a_host_the_manifest_would_accept`.
+    env["PATH"] = os.pathsep.join(
+        [str(Path(sys.executable).parent), *([p] if (p := env.get("PATH")) else [])]
+    )
     home = Path(cwd).parent / "fake-home"
     home.mkdir(parents=True, exist_ok=True)
     env["HOME"] = env["USERPROFILE"] = str(home)
@@ -273,7 +286,10 @@ def test_the_gate_applies_the_version_floor_on_every_host_not_just_windows(monke
     the Windows branch and states outright that the POSIX branch "cannot fail on
     version". Both branches refuse here."""
     facts = parse_bootstrap_manifest(REAL_MANIFEST)
-    facts = type(facts)(**{**vars(facts), "prerequisites_posix": (), "prerequisites_windows": ()})
+    blank = dict.fromkeys(
+        ("prerequisites_posix", "prerequisites_macos", "prerequisites_windows"), ()
+    )
+    facts = type(facts)(**{**vars(facts), **blank})
     floor = PythonFloor(effective=(99, 9), source="a floor no host can meet", manifest=(3, 10))
 
     import tan.commands.bootstrap_cmd as mod
@@ -428,7 +444,13 @@ def test_a_refusals_text_output_is_the_issue_message_split_back_into_lines(tmp_p
         if line.strip() and not line.startswith("bootstrap: ")
     ]
     assert message["message"] == " ".join(refusal_lines)
-    assert refusal_lines[0] == "Missing required tools:"
+    # The CONTRACT is that the first refusal line names the missing tools; its
+    # exact shape is the HOST's, and both oracles are honoured verbatim.
+    # `bootstrap.ps1` heads a per-tool list, `bootstrap.sh` puts the names inline
+    # on one line -- so pinning the PowerShell rendering here failed on Linux
+    # against perfectly correct POSIX output.
+    assert refusal_lines[0].startswith("Missing required tools:")
+    assert "tan-no-such-tool-xyz" in " ".join(refusal_lines)
 
 
 @pytest.mark.parametrize(
@@ -979,6 +1001,22 @@ def test_every_host_gets_its_own_package_managers_command_for_one_tool():
     # A POSIX host that is neither: no manifest entry, so `null` -- never a
     # wrong-OS command.
     assert facts.install_for_host(OTHER) == {}
+
+
+def test_macos_reads_its_own_tool_list_and_falls_back_to_posix_without_one():
+    """alp-sdk v0.14.0 added `xz`/`wget` to `prerequisites.posix` and a separate
+    `prerequisites.macos` that omits them. Keying the list off `is_windows` hands
+    macOS the POSIX list and refuses a stock macOS host -- which ships neither --
+    for tools the SDK does not ask macOS for."""
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    assert facts.prerequisites(LINUX)[-2:] == ("xz", "wget")
+    assert "xz" not in facts.prerequisites(MACOS)
+    assert facts.prerequisites(WINDOWS) == ("git", "cmake", "python", "ninja")
+
+    # An SDK predating the split declares no `macos` -- which must keep meaning
+    # "read `posix`", not "no prerequisites at all".
+    legacy = type(facts)(**{**vars(facts), "prerequisites_macos": ()})
+    assert legacy.prerequisites(MACOS) == legacy.prerequisites(LINUX)
 
 
 def test_the_posix_refusal_stays_one_line_with_two_spaces_before_install():
