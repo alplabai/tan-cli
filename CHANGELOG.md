@@ -11,14 +11,16 @@ All notable changes to `tan` are documented here. Format follows
 into it, so `tan` now plans AND executes, and the four assets are PyInstaller
 freezes of `python/` rather than cargo builds of `crates/`.*
 
-**Nothing upgrades onto this release; you have to go and get it.**
-`SUPPORTED_CLI_VERSION` in `alp-sdk-vscode` deliberately does NOT move to
-`0.5.0-rc1`, so the extension never reaches an RC at all and keeps using the
-Rust `tan` it already has -- repointing that pin travels with GA (#268). The
-tag also publishes with `prerelease: true` / `make_latest: false`, and both
-installers resolve `latest` through GitHub, which excludes prereleases, so
-`install.sh` and `install.ps1` still install the last stable release. RC
-testers install by hand.
+**No stable user upgrades onto this release.** `SUPPORTED_CLI_VERSION` in
+`alp-sdk-vscode` moves to `0.5.0-rc1` only on that extension's PRE-RELEASE
+channel -- extension `v0.5.0`, an odd minor, which `release-vsix.yml`
+publishes with `--pre-release` (alp-sdk-vscode#446). Stable extension users
+stay on an even minor pinned at the Rust `tan` and are untouched until GA
+(#268); opting into the beta channel is the whole delivery mechanism for this
+RC. The tag also publishes with `prerelease: true` / `make_latest: false`, and
+both installers resolve `latest` through GitHub, which excludes prereleases, so
+`install.sh` and `install.ps1` still install the last stable release. Everyone
+else installs by hand.
 
 ### Changed
 - **The planner relocated into `tan`, so `tan` now plans AND executes.**
