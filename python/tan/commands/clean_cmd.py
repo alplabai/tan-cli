@@ -81,9 +81,9 @@ from typing import Any
 import typer
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
-from tan.commands.build_cmd import discover_sdk_root
+from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import SDK_MARKER, resolve_sdk_tiered
+from tan.commands.sdk_cmd import SDK_MARKER
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -648,27 +648,34 @@ def _cli_workspace_root(project_arg: str | None) -> Path:
 
 
 def sdk_root_resolves(sdk_root: str | None, workspace_root: Path) -> bool:
-    """Whether `util::resolve_sdk_root` would resolve a checkout -- the guard
-    behind `clean.sdk-root-not-found`.
+    """Whether `build_cmd.resolve_sdk_root_ladder` would resolve a checkout --
+    the guard behind `clean.sdk-root-not-found`.
 
     `--sdk-root` is TERMINAL (I-31): an explicit path without the loader marker
     fails here rather than falling through to a lower tier and cleaning against
-    a checkout the caller never named. Both pointer tiers are best-effort, so a
-    stale pointer falls through instead of locking the user out.
+    a checkout the caller never named -- checked explicitly below because the
+    ladder itself returns a `--sdk-root` value unvalidated (matching the
+    oracle's `resolve_sdk_tiered`, terminal for REPORTING); this gate matches
+    `util::resolve_sdk_root`, terminal AND validated. The pin/`ALP_SDK_ROOT`/
+    global-default tiers are best-effort, so a stale pointer falls through
+    instead of locking the user out.
 
-    The discovery tier is `build_cmd.discover_sdk_root` -- `util.rs`'s WIDER
-    candidate set (root, child `alp-sdk`, sibling `alp-sdk`, sibling
-    `alp-sdk-upstream`, then ancestors; first match wins) -- and NOT
-    `resolve_sdk_tiered`'s narrower `discover_workspace_sdk`. The oracle calls
-    both functions in one `clean` run: the wider one gates the command, the
-    narrower one decides the reported `sdk` key. Collapsing them to one would
-    make `tan clean` refuse to run in a `tan bootstrap` workspace, where the
-    checkout is a CHILD of the cwd (tan-cli#218).
+    Uses the WIDE positional walk as its final tier (root, child `alp-sdk`,
+    sibling `alp-sdk`, sibling `alp-sdk-upstream`, then ancestors; first match
+    wins) -- not the narrower `resolve_sdk_tiered`'s own discovery, which
+    [`resolve_sdk`][tan.commands.presets_cmd.resolve_sdk] (below) still uses
+    for the REPORTED `sdk` key. The oracle calls both in one `clean` run: the
+    wider one gates the command, the narrower one decides what is reported.
+    Collapsing them to one would make `tan clean` refuse to run in a
+    `tan bootstrap` workspace, where the checkout is a CHILD of the cwd
+    (tan-cli#218).
     """
-    active = resolve_sdk_tiered(sdk_root, workspace_root)
-    if active.path is not None and active.tier != "discovery":
-        return Path(active.path).joinpath(*SDK_MARKER).exists()
-    return discover_sdk_root(workspace_root) is not None
+    resolved, tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    if resolved is None:
+        return False
+    if tier == "sdkRootFlag":
+        return resolved.joinpath(*SDK_MARKER).exists()
+    return True
 
 
 # ---------------------------------------------------------------------------

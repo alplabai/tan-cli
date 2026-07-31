@@ -138,6 +138,16 @@ def run_renode_cmd(work: Path, *argv, path_override: str | None = None):
         env=child_env,
         capture_output=True,
         text=True,
+        # Without these, `text=True` decodes with the host's preferred encoding
+        # -- cp1252 on a stock Windows box -- and Click/Rich's box-drawing usage
+        # output is UTF-8 (`┐` is E2 94 90). The reader thread `communicate()`
+        # spawns for `timeout=` then dies on the undecodable byte and BOTH
+        # streams come back `None`, so the assertion fails as
+        # `TypeError: argument of type 'NoneType' is not iterable` -- never
+        # naming the encoding. Every other spawn harness in this suite
+        # (test_init_command, test_sdk_command) already passes these.
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     return proc.returncode, proc.stdout, proc.stderr
@@ -206,6 +216,16 @@ def test_sdk_root_not_found_never_reports_an_sdk_block(tmp_path: Path):
         env=child_env,
         capture_output=True,
         text=True,
+        # Without these, `text=True` decodes with the host's preferred encoding
+        # -- cp1252 on a stock Windows box -- and Click/Rich's box-drawing usage
+        # output is UTF-8 (`┐` is E2 94 90). The reader thread `communicate()`
+        # spawns for `timeout=` then dies on the undecodable byte and BOTH
+        # streams come back `None`, so the assertion fails as
+        # `TypeError: argument of type 'NoneType' is not iterable` -- never
+        # naming the encoding. Every other spawn harness in this suite
+        # (test_init_command, test_sdk_command) already passes these.
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     envelope = json.loads(proc.stdout)

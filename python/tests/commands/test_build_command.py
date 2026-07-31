@@ -602,6 +602,88 @@ def test_no_plan_and_no_sdk_is_a_coded_envelope_not_a_traceback(project):
     assert "Traceback" not in proc.stderr
 
 
+def test_build_resolves_the_sdk_tan_init_pinned_with_no_sdk_root_flag_and_no_env_var(
+    project, monkeypatch
+):
+    # The worst reported CX defect: `tan init` writes `<project>/.alp/sdk-path`
+    # naming the SDK it just pinned, but `tan build` used to jump straight
+    # from `--sdk-root` to the positional (sibling/child/ancestor) walk and
+    # never read that pointer at all -- so a customer running `tan init` then
+    # `tan build` in the SAME directory, with no `--sdk-root` and even with
+    # `ALP_SDK_ROOT` exported, got "no alp-sdk checkout found" with the
+    # checkout sitting right there in `.alp/sdk-path`.
+    monkeypatch.delenv("ALP_SDK_ROOT", raising=False)
+
+    # An SDK checkout that is deliberately NOT a sibling/child/ancestor of
+    # `project` -- the positional walk must be unable to find it any other
+    # way, so a passing assertion proves the `.alp/sdk-path` pin was read.
+    sdk = project.parent / "elsewhere-sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8", newline="")
+
+    alp_dir = project / ".alp"
+    alp_dir.mkdir()
+    (alp_dir / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(sdk)}), encoding="utf-8", newline=""
+    )
+
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build",
+        "--plan-from",
+        str(plan),
+        "--board-yaml",
+        "board.yaml",
+        "--format",
+        "json",
+        cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    assert env["sdk"]["root"].replace("\\", "/") == str(sdk).replace("\\", "/")
+    assert env["sdk"]["sourceTier"] == "projectPin"
+
+
+def test_alp_sdk_root_env_is_not_a_discovery_tier(project, monkeypatch):
+    # `ALP_SDK_ROOT` is deliberately NOT read back for discovery: the oracle's
+    # `SdkSourceTier` (`crates/tan-core/src/sdk.rs`) is a closed five-value
+    # enum with no slot for it, and `util.rs::resolve_sdk_root` only ever
+    # WRITES that variable into a build slice's env. An earlier version of
+    # this port's ladder invented a sixth `envAlpSdkRoot` tier to read it
+    # back -- reverted, because it changed `sdk.sourceTier`'s wire values to
+    # something no consumer (the vscode extension, `tan sdk current --json`)
+    # knows. The `.alp/sdk-path` project pin (see the test above) is the
+    # tier that makes `tan init && tan build` compose; this proves an
+    # exported `ALP_SDK_ROOT` alone -- no pin, no positional match -- still
+    # resolves nothing.
+    sdk = project.parent / "env-only-sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8", newline="")
+    monkeypatch.setenv("ALP_SDK_ROOT", str(sdk))
+
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build",
+        "--plan-from",
+        str(plan),
+        "--board-yaml",
+        "board.yaml",
+        "--format",
+        "json",
+        cwd=project,
+    )
+
+    env = envelope_of(proc)
+    # The build itself still succeeds -- `--plan-from` needs no SDK -- but
+    # `sdk` is OMITTED (never a phantom `envAlpSdkRoot` value), and the
+    # post-build system-manifest emit, which DOES need a resolved root,
+    # reports exactly the "nothing resolved" reason.
+    assert proc.returncode == 0, env
+    assert "sdk" not in env
+    assert "no alp-sdk checkout resolved" in proc.stderr
+
+
 # --- an unresolved ${TOOLCHAIN_ROOT} is never dispatched --------------------
 
 

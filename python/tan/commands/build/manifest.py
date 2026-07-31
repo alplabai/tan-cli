@@ -19,11 +19,11 @@ already resolved. This port's real caller, `tan.commands.build_cmd._dispatch` /
 `_build`, now threads its own already-resolved `--sdk-root` straight through
 (`execute_slices(..., sdk_root=sdk_root)` -> [`write_post_build_manifest`]) --
 mirroring the oracle's `ProjectContext` exactly. The fallback below (the plan's
-own `boardYaml` field plus [`tan.commands.build_cmd.discover_sdk_root`]'s exact
-candidate ladder) stays for any OTHER caller of `execute_slices` that passes no
-`sdk_root` at all (every test in this port's own suite does exactly that), so
-the write is never permanently unreachable just because a caller omitted the
-override.
+own `boardYaml` field plus [`tan.commands.build_cmd.resolve_sdk_root_ladder`]'s
+full precedence chain) stays for any OTHER caller of `execute_slices` that
+passes no `sdk_root` at all (every test in this port's own suite does exactly
+that), so the write is never permanently unreachable just because a caller
+omitted the override.
 """
 from __future__ import annotations
 
@@ -133,13 +133,23 @@ def write_post_build_manifest(
     if effective_sdk_root is None and effective_board_yaml:
         # Local import: `build_cmd.py` imports `tan.commands.build.execute`,
         # which imports this module, at module level -- a module-level import
-        # of `discover_sdk_root` here would be circular. Same pattern as the
-        # `tan.planner_root` import a few lines below and `tan.core.run` in
-        # `_native_sim_target_from_yaml`, deferred to call time instead of
+        # of `resolve_sdk_root_ladder` here would be circular. Same pattern as
+        # the `tan.planner_root` import a few lines below and `tan.core.run`
+        # in `_native_sim_target_from_yaml`, deferred to call time instead of
         # duplicating the candidate ladder.
-        from tan.commands.build_cmd import discover_sdk_root
+        #
+        # The FULL ladder (`--sdk-root` > project pin > global default >
+        # positional walk), not the positional walk alone: this fallback only
+        # fires for a caller of `execute_slices` that passed no `sdk_root`
+        # (every test in this port's own suite), and the positional walk
+        # alone would let the post-build manifest record a DIFFERENT SDK root
+        # than `resolve_sdk_root_ladder` resolved for the build itself the
+        # moment a project pin or machine-global default was in play.
+        from tan.commands.build_cmd import resolve_sdk_root_ladder
 
-        discovered = discover_sdk_root(Path(effective_board_yaml).parent)
+        discovered, _tier = resolve_sdk_root_ladder(
+            None, Path(effective_board_yaml).parent
+        )
         effective_sdk_root = str(discovered) if discovered else None
 
     if effective_sdk_root is None or not effective_board_yaml:

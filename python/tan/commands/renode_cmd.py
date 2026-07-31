@@ -79,10 +79,9 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import discover_sdk_root
+from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.build_output import ManifestInvalid, ManifestUnavailable, load_manifest
 from tan.commands.doctor_cmd import on_path
-from tan.commands.sdk_cmd import resolve_sdk_tiered
 from tan.core.renode_plan import (
     RenodeError,
     build_renode_argv,
@@ -136,29 +135,18 @@ def _is_sdk_root(path: str) -> bool:
 def _resolve_sdk_root_and_tier(
     sdk_root_arg: str | None, workspace_root: str
 ) -> tuple[str | None, str | None]:
-    """`util.rs::resolve_sdk_root`: `--sdk-root` (TERMINAL -- returned AS
-    TYPED when it has the loader script, `None` otherwise, never falling
-    through to a lower tier) > workspace pin > machine-global default > wide
-    auto-discovery (workspace root itself, child `alp-sdk`, sibling
-    `alp-sdk`, sibling `alp-sdk-upstream`, first match wins, else the nearest
-    ENCLOSING checkout).
-
-    Composed from the same building blocks `tan.commands.build_output.
-    resolve_metadata_sdk_root` uses (`resolve_sdk_tiered` for the pin/
-    global-default/narrow-discovery tiers, `discover_sdk_root` for the wide
-    final one) -- that function only returns the path, and this command also
-    needs the TIER, to populate the envelope's `sdk` block the same way the
-    oracle's `sdk_report` side channel does.
+    """`--sdk-root` (TERMINAL -- returned AS TYPED when it has the loader
+    script, `None` otherwise, never falling through to a lower tier) > the
+    project's own `.alp/sdk-path` pin > the machine-global default
+    (`~/.alp/sdk-default`) > the positional walk
+    (`build_cmd.resolve_sdk_root_ladder`, the shared ladder every
+    `--sdk-root`-reading command now uses). No `ALP_SDK_ROOT` tier (tried
+    and reverted -- see `resolve_sdk_root_ladder`'s own docstring).
     """
     if sdk_root_arg is not None:
         return (sdk_root_arg, "sdkRootFlag") if _is_sdk_root(sdk_root_arg) else (None, None)
-    active = resolve_sdk_tiered(None, Path(workspace_root))
-    if active.path is not None and _is_sdk_root(active.path):
-        return active.path, active.tier
-    discovered = discover_sdk_root(Path(workspace_root))
-    if discovered is not None:
-        return str(discovered), "discovery"
-    return None, None
+    found, tier = resolve_sdk_root_ladder(None, Path(workspace_root))
+    return (str(found), tier) if found is not None else (None, None)
 
 
 def _data(**overrides: Any) -> dict[str, Any]:

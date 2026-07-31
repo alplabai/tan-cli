@@ -23,23 +23,15 @@ same env vars, as `tests/parity/test_planner_emit_parity.py`.
 from __future__ import annotations
 
 import ast
-import os
 import sys
 import types
 from pathlib import Path
 
 import pytest
 
+from tests.conftest import sdk_root
 
-def _sdk_root() -> Path | None:
-    for var in ("ALP_SDK_PARITY_ROOT", "ALP_SDK_ROOT"):
-        raw = os.environ.get(var)
-        if raw and (Path(raw) / "scripts" / "alp_project.py").is_file():
-            return Path(raw).resolve()
-    return None
-
-
-SDK = _sdk_root()
+SDK = sdk_root()
 
 pytestmark = pytest.mark.skipif(
     SDK is None,

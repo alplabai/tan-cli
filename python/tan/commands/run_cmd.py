@@ -61,7 +61,7 @@ import typer
 
 from tan.commands import flash_cmd
 from tan.commands.build import execute
-from tan.commands.build_cmd import BuildError, _abs_posix, _build, discover_sdk_root
+from tan.commands.build_cmd import BuildError, _abs_posix, _build, resolve_sdk_root_ladder
 from tan.core.flash_plan import resolve_artefact_path
 from tan.core.plan_exec import normalize_path
 from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice
@@ -363,15 +363,15 @@ def run(
     if board_yaml is not None:
         board_yaml = _abs_posix(board_yaml)
 
-    explicit_sdk = sdk_root is not None
-    if sdk_root is None:
-        found = discover_sdk_root(workspace_root)
-        sdk_root = str(found) if found else None
-    sdk = (
-        SdkInfo(sdk_root, "sdkRootFlag" if explicit_sdk else "discovery")
-        if sdk_root is not None
-        else None
-    )
+    # Same ladder `build_cmd.build` resolves -- `--sdk-root` > `.alp/sdk-path`
+    # project pin > the machine-global default (`~/.alp/sdk-default`) > the
+    # positional walk (`resolve_sdk_root_ladder`); `run` builds via the same
+    # engine, so it must agree with `build` on which checkout that is. No
+    # `ALP_SDK_ROOT` tier (tried and reverted -- see `resolve_sdk_root_ladder`'s
+    # own docstring).
+    resolved_sdk_root, sdk_tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
+    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Same normalized, workspace-root-anchored stamp identity `build_cmd.build`
     # computes (tan-cli#163) -- `_build` now requires it (the sdk-switch-
     # pristine guard's stamp comparison, threaded through from `execute_slices`

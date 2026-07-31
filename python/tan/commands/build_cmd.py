@@ -54,6 +54,8 @@ from tan.commands.build.token_substitution import (
     TokenSubstitutionError,
     apply_plan_token_substitution,
 )
+from tan.commands.sdk_cmd import resolve_sdk_tiered
+from tan.core.bootstrap import VenvLayout, venv_layout
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -131,10 +133,12 @@ def discover_sdk_root(workspace_root: Path) -> Path | None:
     is both slow and non-hermetic (it lets an unrelated checkout elsewhere on
     the machine decide what a test resolves).
 
-    Deliberately NOT the full Rust ladder -- `tan sdk switch`'s workspace pin
-    and machine-global default (`~/.alp/sdk-default`) are tiers this port has
-    no `sdk` command to write yet, and half a precedence chain that silently
-    picks the wrong checkout is worse than an honest `--sdk-root`.
+    Deliberately just the positional walk, not the full ladder -- the project
+    pin and machine-global default tiers that outrank this one live in
+    [`resolve_sdk_root_ladder`], below, which every `--sdk-root`-less caller
+    should use instead of calling this directly (this function remains that
+    ladder's own final fallback tier, and the one place that still calls it
+    alone is `tan-cli#218`'s own regression test).
     """
     parent = workspace_root.parent
     for candidate in (
@@ -151,29 +155,143 @@ def discover_sdk_root(workspace_root: Path) -> Path | None:
     return None
 
 
-def _planner_python() -> str:
+def resolve_sdk_root_ladder(
+    sdk_root_arg: str | None, workspace_root: Path
+) -> tuple[Path | None, str]:
+    """`(path, sourceTier)` -- the ONE discovery ladder every command that
+    actually reads an SDK checkout shares (`build`, `doctor`, `run`, `flash`,
+    `examples`, `generate`, `renode`, `size`, `clean`, `init`'s pin choice):
+    `--sdk-root` (terminal, I-31) > the project's own pin (`.alp/sdk-path`,
+    written by `tan init` / relocated by `tan bootstrap`) > the machine-global
+    default (`~/.alp/sdk-default`) > the wide positional walk
+    (`discover_sdk_root`, above) -- exactly the Rust oracle's closed
+    `SdkSourceTier` (`crates/tan-core/src/sdk.rs`): `SdkRootFlag`,
+    `ProjectPin`, `GlobalDefault`, `Discovery`, `None`. No sixth tier.
+
+    This is the fix for the worst reported CX defect in this port: `tan init`
+    writes `.alp/sdk-path` into the project it just scaffolded, but every
+    command below used to jump straight from `--sdk-root` to the positional
+    walk, skipping `resolve_sdk_tiered` (`sdk_cmd.py`) entirely -- so that
+    pointer was silently ignored the moment `tan build` ran in that SAME
+    directory, unless the checkout also happened to sit beside the project by
+    coincidence. `resolve_sdk_tiered` already IS the oracle's `--sdk-root` >
+    project pin > global default > discovery chain; the only thing missing
+    from it here is the WIDER positional walk as one more fallback below
+    `discovery`, for callers ported before `resolve_sdk_tiered` existed.
+
+    An `ALP_SDK_ROOT` env-var tier was tried here and reverted: the oracle's
+    `util.rs::resolve_sdk_root` only ever WRITES that variable into a build
+    slice's env, never reads it back for discovery, and `SdkSourceTier` has no
+    slot for it -- a sixth `sourceTier` value in the envelope is a wire
+    contract change no consumer (the vscode extension, `tan sdk current
+    --json`) expects. The project-pin tier above already makes `tan init &&
+    tan build` compose without it.
+    """
+    flag = (sdk_root_arg or "").strip()
+    if flag:
+        return Path(flag), "sdkRootFlag"
+
+    tiered = resolve_sdk_tiered(None, workspace_root)
+    if tiered.path is not None:
+        return Path(tiered.path), tiered.tier
+
+    found = discover_sdk_root(workspace_root)
+    if found is not None:
+        return found, "discovery"
+    return None, "none"
+
+
+def _has_west(venv: Path, layout: VenvLayout) -> bool:
+    return (venv / layout.bin_dir / layout.west).is_file()
+
+
+def _find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
+    """Locate the west-capable workspace `.venv`, mirroring Rust's
+    `find_workspace_venv` (`crates/tan-cli/src/venv.rs`): gated on `west`
+    actually being present under the candidate (not just the directory
+    existing), in this order:
+
+      1. a `.venv` in the project tree, searched from `start` upward;
+      2. the workspace venv derived from `$ZEPHYR_BASE`
+         (`<ZEPHYR_BASE>/../.venv`);
+      3. the SDK's canonical `<sdk-parent>/.venv` (post-alp-sdk#782) or the
+         legacy `<sdk-parent>/zephyrproject/.venv`.
+
+    `None` when none resolve (CI, an activated venv, the contract harness).
+    """
+    layout = venv_layout(os.name == "nt")
+
+    directory: Path | None = Path(start)
+    while directory is not None:
+        candidate = directory / ".venv"
+        if _has_west(candidate, layout):
+            return candidate
+        parent = directory.parent
+        directory = parent if parent != directory else None
+
+    zephyr_base = os.environ.get("ZEPHYR_BASE")
+    if zephyr_base:
+        candidate = Path(zephyr_base).parent / ".venv"
+        if _has_west(candidate, layout):
+            return candidate
+
+    if sdk_root is not None:
+        parent = Path(sdk_root).parent
+        for workspace in (parent, parent / "zephyrproject"):
+            candidate = workspace / ".venv"
+            if _has_west(candidate, layout):
+                return candidate
+
+    return None
+
+
+def _venv_python(start: str, sdk_root: str | None) -> str | None:
+    """The west-capable workspace venv's `python` (see
+    `_find_workspace_venv`), mirroring Rust's `venv_python`. `None` when no
+    workspace venv resolves, or the one that does has no `python` binary --
+    the caller then keeps its own PATH-name fallback rather than spawning a
+    path that doesn't exist.
+
+    Forward-slashed, matching `_abs_posix` and `apply_plan_token_substitution`'s
+    own `project_root` handling: this value is substituted verbatim into
+    `${PYTHON}`, which lands in a `-DPython3_EXECUTABLE=<...>` CMake `-D`
+    argument (`orchestrator.py`), and a Windows backslash there is an escape
+    character (alp-sdk#849 -- CMake read `\\U`/`\\N` etc. as invalid character
+    escapes). `apply_plan_token_substitution` only forward-slashes
+    `project_root`, not `python`, so an un-normalised venv path under
+    `C:\\Users\\...` reached CMake unescaped.
+    """
+    venv = _find_workspace_venv(start, sdk_root)
+    if venv is None:
+        return None
+    layout = venv_layout(os.name == "nt")
+    candidate = venv / layout.bin_dir / layout.python
+    return str(candidate).replace("\\", "/") if candidate.is_file() else None
+
+
+def _planner_python(start: str, sdk_root: str | None) -> str:
     """The interpreter a SPAWNED build step runs under.
 
     Two callers remain now that planning and every `generate` target run
     in-process: `${PYTHON}` token substitution (below), and
     `generate_cmd`'s `TAN_GENERATE_EXECUTOR=subprocess` escape hatch.
 
-    A PATH name, mirroring `tan_core::project::resolve_python_binary`
-    (`python3` off Windows, `python` on it) -- NOT `sys.executable`. Two
-    reasons, and either alone is decisive: frozen by PyInstaller,
-    `sys.executable` is `tan` itself, so spawning it would just re-enter this
-    CLI; and this value is also the `${PYTHON}` substituted into the plan, which
-    the planner bakes into every Zephyr slice as `-DPython3_EXECUTABLE`
-    (alp-sdk#787) -- it has to name an interpreter the slice can find, not this
-    process.
+    Prefers the west-capable workspace venv's `python` (`_venv_python`,
+    mirroring Rust's `venv_python`/`resolved_planner_python`), because the SDK
+    planner bakes ITS `sys.executable` into every Zephyr slice as
+    `-DPython3_EXECUTABLE=<...>` (alp-sdk#787) -- a bare PATH `python3` may
+    lack the `west` module entirely, which surfaced as the planner's own
+    `ModuleNotFoundError: No module named 'west'` inside CMake configure
+    (tan-cli, the documented-install-path bug) rather than a working build.
 
-    NOT YET PORTED: Rust prefers the west-capable workspace venv's python
-    (`venv_python`) and falls back to this only when no venv resolves. Without
-    that, a host whose PATH `python` lacks the `west` module gets the planner's
-    own ImportError surfaced through `build.plan-unavailable` rather than a
-    working build.
+    Falls back to a bare PATH name -- `python3` off Windows, `python` on it,
+    mirroring `tan_core::project::resolve_python_binary` -- only when no
+    workspace venv resolves. NOT `sys.executable`: frozen by PyInstaller,
+    `sys.executable` is `tan` itself, so spawning it would just re-enter this
+    CLI; and this value is also the `${PYTHON}` substituted into the plan, so
+    it has to name an interpreter the slice can find, not this process.
     """
-    return "python" if os.name == "nt" else "python3"
+    return _venv_python(start, sdk_root) or ("python" if os.name == "nt" else "python3")
 
 
 def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
@@ -481,7 +599,7 @@ def _build(
             board_yaml_path=board_yaml,
             exec_base=build_root,
             sdk_root=sdk_root,
-            python=_planner_python(),
+            python=_planner_python(build_root, sdk_root),
             # NOT YET PORTED: `crate::toolchain::resolve_toolchain_root`. Left
             # unresolved rather than guessed -- resolution is lazy, so a plan
             # that never names ${TOOLCHAIN_ROOT} (every SDK plan today) is
@@ -662,15 +780,14 @@ def build(
     if board_yaml is not None:
         board_yaml = _abs_posix(board_yaml)
 
-    explicit_sdk = sdk_root is not None
-    if sdk_root is None:
-        found = discover_sdk_root(workspace_root)
-        sdk_root = str(found) if found else None
-    sdk = (
-        SdkInfo(sdk_root, "sdkRootFlag" if explicit_sdk else "discovery")
-        if sdk_root is not None
-        else None
-    )
+    # `--sdk-root` > the project's own `.alp/sdk-path` pin > the machine-global
+    # default > the positional walk (`resolve_sdk_root_ladder`, above) --
+    # previously this skipped straight from `--sdk-root` to the positional
+    # walk, so `tan init`'s own pointer went unread the moment `tan build` ran
+    # in the same directory.
+    resolved_sdk_root, sdk_tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
+    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the
     # sdk-switch-pristine guard actually compares (tan-cli#163), kept
     # SEPARATE from `sdk_root` itself: an explicit `--sdk-root` is a

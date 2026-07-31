@@ -10,6 +10,7 @@ from tan.core.build_plan import parse_build_plan
 from tan.commands.build.execute import execute_slices
 from tan.commands.build.manifest import PostBuildManifest
 from tan.core.system_manifest import parse_system_manifest
+from tests.conftest import sdk_root
 
 # A JSON string literal (quotes included) for the running interpreter --
 # `sys.executable` is `C:\Python311\python.exe` on Windows, and interpolating
@@ -17,6 +18,16 @@ from tan.core.system_manifest import parse_system_manifest
 # an invalid `\P`/`\p` escape. json.dumps() escapes it correctly on every
 # platform.
 PYTHON = json.dumps(sys.executable)
+
+#: Captured at MODULE IMPORT time -- i.e. at collection, before pytest ever
+#: runs a test function. `tests/conftest.py`'s autouse `_scrub_sdk_discovery_env`
+#: deletes `ALP_SDK_ROOT` from the process environment ahead of every test
+#: function (hermeticity for the tests that assert "nothing resolves"), so a
+#: call to `sdk_root()` made from inside a test body -- i.e. AFTER that
+#: fixture has already run -- always sees it gone, even on a host where it
+#: was exported for real. `test_native_sim_e2e.py` and `test_kconfig_symbols.py`
+#: hit the same fixture and use the identical module-level-capture pattern.
+SDK = sdk_root()
 
 
 def _stub_manifest_write(monkeypatch) -> None:
@@ -710,20 +721,12 @@ def test_execute_slices_writes_a_real_manifest_when_the_sdk_is_discoverable(tmp_
     checkout bought no extra coverage and instead wrote a `build/` directory
     into it (and the real example's own `board.yaml.parent` is a read-only
     checkout in this project's own dev setup)."""
-    import os as _os
-
-    sdk = None
-    for var in ("ALP_SDK_PARITY_ROOT", "ALP_SDK_ROOT"):
-        raw = _os.environ.get(var)
-        if raw and (Path(raw) / "scripts" / "alp_project.py").is_file():
-            sdk = Path(raw).resolve()
-            break
-    if sdk is None:
+    if SDK is None:
         import pytest
 
         pytest.skip("set ALP_SDK_ROOT to an alp-sdk checkout to exercise the real write")
 
-    board_yaml = sdk / "examples" / "aen" / "aen-analog-validate" / "board.yaml"
+    board_yaml = SDK / "examples" / "aen" / "aen-analog-validate" / "board.yaml"
     assert board_yaml.is_file(), "fixture example moved -- update the path"
 
     from tan.commands.build import execute as execute_module
