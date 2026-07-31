@@ -91,7 +91,7 @@ import typer
 # which interpreter name the SDK's own scripts run under -- a PATH name, never
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
 from tan import planner_emit
-from tan.commands.build_cmd import _planner_python, resolve_sdk_root_ladder
+from tan.commands.build_cmd import _planner_python, resolve_sdk_root_wide
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -646,9 +646,12 @@ def _resolve_sdk_root(
     `sdkRootFlag`, matching the oracle's closed `SdkSourceTier`.
 
     Without `--sdk-root`: `.alp/sdk-path` project pin > the machine-global
-    default (`~/.alp/sdk-default`) > the positional walk
-    (`resolve_sdk_root_ladder`, which reports its own tier). No `ALP_SDK_ROOT`
-    tier (tried and reverted -- see `resolve_sdk_root_ladder`'s own docstring).
+    default (`~/.alp/sdk-default`) > the WIDE positional walk
+    (`resolve_sdk_root_wide`, which reports its own tier) -- the wide ladder,
+    not the narrow one thirteen other commands take, because the oracle's
+    `generate` prefers the child `<ws>/alp-sdk` over a competing `../alp-sdk`
+    (tan-cli#263). No `ALP_SDK_ROOT` tier (tried and reverted -- see
+    `resolve_sdk_root_ladder`'s own docstring).
 
     `reported` is the string to put in the envelope's `sdk.root`: for
     `sdkRootFlag` it is the flag's raw text, NOT `str(path)` -- pathlib
@@ -662,7 +665,7 @@ def _resolve_sdk_root(
         if (candidate / "scripts" / "alp_project.py").is_file():
             return candidate, "sdkRootFlag", sdk_root
         return None
-    found, tier = resolve_sdk_root_ladder(None, workspace_root)
+    found, tier = resolve_sdk_root_wide(None, workspace_root)
     return (found, tier, str(found)) if found is not None else None
 
 

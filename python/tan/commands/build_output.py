@@ -109,8 +109,9 @@ def resolve_metadata_sdk_root(
     """The alp-sdk checkout `tan size` reads `metadata/**` out of -- port of
     `util::resolve_sdk_root`: `--sdk-root` (terminal) > the project's own
     `.alp/sdk-path` pin > the machine-global default (`~/.alp/sdk-default`) >
-    the positional walk (`resolve_sdk_root_ladder`, shared with `build`/`doctor`/
-    every other command that reads an SDK checkout). No `ALP_SDK_ROOT` tier
+    the positional walk (`resolve_sdk_root_ladder`, the NARROW ladder shared
+    with `build`/`doctor`/the ten other narrowly-resolving commands -- not the
+    wide one `init`/`generate`/`examples`/`renode` take). No `ALP_SDK_ROOT` tier
     (tried and reverted -- see `resolve_sdk_root_ladder`'s own docstring).
 
     Kept separate from [`resolve_project_context`] because the oracle keeps them
