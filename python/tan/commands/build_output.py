@@ -20,7 +20,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from tan.commands.build_cmd import SDK_MARKER, discover_sdk_root
+from tan.commands.build_cmd import SDK_MARKER, resolve_sdk_root_ladder
 from tan.commands.sdk_cmd import resolve_sdk_tiered
 from tan.core.system_manifest import (
     MANIFEST_FILE,
@@ -107,10 +107,11 @@ def resolve_metadata_sdk_root(
     sdk_root_arg: str | None, workspace_root: str
 ) -> Path | None:
     """The alp-sdk checkout `tan size` reads `metadata/**` out of -- port of
-    `util::resolve_sdk_root`, which walks a WIDER candidate set than the project
-    context does (`discover_sdk_root` also probes the child `<ws>/alp-sdk` and
-    the sibling `../alp-sdk-upstream`, and takes the first hit rather than
-    requiring uniqueness).
+    `util::resolve_sdk_root`: `--sdk-root` (terminal) > the project's own
+    `.alp/sdk-path` pin > the machine-global default (`~/.alp/sdk-default`) >
+    the positional walk (`resolve_sdk_root_ladder`, shared with `build`/`doctor`/
+    every other command that reads an SDK checkout). No `ALP_SDK_ROOT` tier
+    (tried and reverted -- see `resolve_sdk_root_ladder`'s own docstring).
 
     Kept separate from [`resolve_project_context`] because the oracle keeps them
     separate: `size.rs` calls BOTH, and they can legitimately disagree -- a
@@ -126,10 +127,8 @@ def resolve_metadata_sdk_root(
         # Terminal: a bad `--sdk-root` must fail loudly as "no budget resolved",
         # not silently fall through to some other checkout.
         return Path(flag) if _has_loader(flag) else None
-    active = resolve_sdk_tiered(None, Path(workspace_root))
-    if active.path is not None and _has_loader(active.path):
-        return Path(active.path)
-    return discover_sdk_root(Path(workspace_root))
+    found, _tier = resolve_sdk_root_ladder(None, Path(workspace_root))
+    return found
 
 
 def resolve_app_base(app_path: str | None, workspace_root: str) -> str:

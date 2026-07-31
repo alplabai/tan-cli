@@ -18,11 +18,17 @@ import pytest
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     TEMPLATE_IDS,
+    CoresError,
     app_core_for_sku,
+    infer_runtime_for_core_id,
     is_plain_relative,
+    parse_cores,
     plan_template_files,
     retarget_board_yaml_som,
     scaffold_tree_preview,
+    splice_companion_cores,
+    vendored_app_core_key,
+    vendored_core_ids,
 )
 from tan.templates import VENDORED_ROOT
 
@@ -185,6 +191,85 @@ def test_plain_relative_accepts_plain_relative_paths(value):
 )
 def test_plain_relative_rejects_anything_that_can_escape_a_join(value):
     assert not is_plain_relative(value)
+
+
+# ---------------------------------------------------------------------------
+# --cores: parse_cores
+# ---------------------------------------------------------------------------
+
+
+def test_parse_cores_is_empty_by_default():
+    assert parse_cores(None) == []
+    assert parse_cores("") == []
+
+
+def test_parse_cores_infers_os_from_the_core_id():
+    assert parse_cores("m33_sm") == [("m33_sm", "zephyr")]
+    assert parse_cores("a55_cluster") == [("a55_cluster", "yocto")]
+
+
+def test_parse_cores_accepts_an_explicit_os_and_multiple_entries():
+    assert parse_cores("a55_cluster:off, m33_sm:zephyr") == [
+        ("a55_cluster", "off"),
+        ("m33_sm", "zephyr"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ["1bad", "M33", "m", "m33_sm:nope", "m33_sm:zephyr,m33_sm:off"],
+)
+def test_parse_cores_rejects_bad_id_bad_os_and_duplicates(raw):
+    with pytest.raises(CoresError):
+        parse_cores(raw)
+
+
+def test_infer_runtime_defaults_to_zephyr():
+    assert infer_runtime_for_core_id("m55_hp") == "zephyr"
+    assert infer_runtime_for_core_id("a55_cluster") == "yocto"
+    assert infer_runtime_for_core_id("a32_cluster") == "yocto"
+
+
+# ---------------------------------------------------------------------------
+# --cores: splicing into a planned board.yaml
+# ---------------------------------------------------------------------------
+
+
+def test_vendored_app_core_key_skips_a_pre_declared_companion_listed_first():
+    """`edge-ai-starter`'s vendored board.yaml lists its companion core BEFORE
+    the app core -- trusting position would return the companion."""
+    board = plan_template_files("edge-ai-starter", "E1M-AEN801")
+    content = next(f.content for f in board if f.relative_path == "board.yaml")
+
+    assert vendored_app_core_key(content) == "m55_hp"
+    ids = dict(vendored_core_ids(content))
+    assert ids["a32_cluster"] == '"off"'
+    assert ids["m55_hp"] == "zephyr"
+
+
+def test_splice_is_a_no_op_with_no_cores():
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+    assert splice_companion_cores(board, []) == board
+
+
+def test_splice_adds_a_companion_and_a_default_rpmsg_channel():
+    board = "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\nlibraries:\n  - x\n"
+    out = splice_companion_cores(board, [("a55_cluster", "yocto")])
+
+    assert "  a55_cluster:\n    os: yocto\n    image: alp-image-edge\n" in out
+    assert "ipc:\n  - kind: rpmsg\n" in out
+    assert "endpoints: [m55_hp, a55_cluster]" in out
+    # The companion lands inside the `cores:` block, before the next top-level key.
+    assert out.index("a55_cluster:") < out.index("libraries:")
+
+
+def test_splice_skips_a_core_already_declared_and_never_ipcs_an_off_companion():
+    board = "cores:\n  a32_cluster:\n    os: \"off\"\n  m55_hp:\n    app: ./src\n"
+    out = splice_companion_cores(board, [("a32_cluster", "off"), ("m55_hp", "zephyr")])
+
+    # Both requested ids already exist in the block -- nothing new spliced.
+    assert out == board
+    assert "ipc:" not in out
 
 
 def test_tree_preview_marks_the_last_entry():

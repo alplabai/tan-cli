@@ -63,6 +63,7 @@ from tan.core.debug_launch import (
     parse_target_kind,
 )
 from tan.core.jsonc_splice import pretty_json
+from tan.core.run import native_sim_exe_beside
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -83,10 +84,11 @@ _MANIFEST_OS = {
 #: `gdbserver`/`none` have no runner: neither is a Zephyr probe runner.
 _RUNNER_ID = {JLINK: "jlink", OPENOCD: "openocd", PYOCD: "pyocd"}
 
-#: The Zephyr board target naming the host simulator, and the runnable that
-#: sits beside its `zephyr.elf`. Verbatim from `tan_core::run`.
+#: The Zephyr board target naming the host simulator. Verbatim from
+#: `tan_core::run`. The sibling runnable's swap (`zephyr.elf` ->
+#: `zephyr.exe`) is `tan.core.run.native_sim_exe_beside` -- THE one spelling
+#: of that rule (#83); this module calls it rather than carrying its own copy.
 _NATIVE_SIM_BOARD = "native_sim"
-_NATIVE_SIM_EXE = "zephyr.exe"
 
 #: The system-manifest schema major this command consumes. A different value is
 #: ignored (nothing resolves) rather than silently mis-applied.
@@ -273,26 +275,6 @@ def _is_native_sim_board(board: Any) -> bool:
     )
 
 
-def _native_sim_exe_beside(elf: str) -> str:
-    """Swap a native_sim slice's `output_artefact` for the runnable `zephyr.exe`
-    beside it.
-
-    A manifest NEVER records the `.exe`: `resolve_zephyr_artefact` is tan's only
-    writer of `output_artefact` and stores `<slice-cwd>/build/zephyr/zephyr.elf`
-    unconditionally for every zephyr slice, native_sim included, and alp-sdk
-    (planner-only) never writes the field at all. So every consumer wanting the
-    host runnable must make this swap -- #83 took the artefact verbatim and
-    pointed `Alp: Native Sim Debug` at an ELF CodeLLDB cannot launch.
-
-    Splits on the separator the path itself uses rather than going through
-    `Path.with_name`, which on Windows rejoins with `\\` and would turn a
-    `/`-authored manifest path into a mixed `a/b\\zephyr.exe` -- visible, since
-    this value ships to a debug adapter verbatim.
-    """
-    cut = max(elf.rfind("/"), elf.rfind("\\"))
-    return _NATIVE_SIM_EXE if cut < 0 else elf[: cut + 1] + _NATIVE_SIM_EXE
-
-
 def _select_slice(
     slices: list[dict[str, Any]], target: str, core: str | None
 ) -> dict[str, Any] | None:
@@ -393,7 +375,7 @@ def _resolve_from_build(
         # A host target needs the sibling swap; every other target kind
         # genuinely wants the artefact verbatim.
         if target == NATIVE_HOST:
-            artefact = _native_sim_exe_beside(artefact)
+            artefact = native_sim_exe_beside(artefact)
         resolution.executable = _workspace_relative(workspace_root, artefact)
 
     build_dir = _str_or_none(slice_.get("build_dir"))

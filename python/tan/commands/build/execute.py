@@ -3,14 +3,36 @@
 skip-vs-fail dispositions, spawn the tool, stream its output, and report a
 per-slice outcome -- never an escaping exception. Mirrors the dispatch loop
 in `tan-cli/src/commands/build/execute/mod.rs`, trimmed to this port's
-current scope: no post-build system-manifest.yaml write, no
-sdk-switch-pristine wipe (genuinely unreachable here -- tracked separately,
-not a gap in this file), no Zephyr-boilerplate-loaded guard, and no
-`tool == "west"` rewrite to the venv's west (`with_venv_on_path` in the Rust
-oracle -- no Python venv-resolution module exists yet). What IS ported: the
-unknown-backend / null-command / unsafe-cwd / missing-tool skip-vs-fail
-policy and dispatch order, and the build-dir-must-exist-before-the-tool-runs
-precondition."""
+current scope: no `tan build --pristine` manual override (`force_pristine` in
+the Rust oracle -- this port's `build` command has no `--pristine` flag yet,
+so the automatic stamp comparison is the only path that can ever fire), no
+Zephyr-boilerplate-loaded guard, and no `tool == "west"` rewrite to the
+venv's west (`with_venv_on_path` in the Rust oracle -- no Python
+venv-resolution module exists yet). What IS ported: the unknown-backend /
+null-command / unsafe-cwd / missing-tool skip-vs-fail policy and dispatch
+order, the build-dir-must-exist-before-the-tool-runs precondition, the
+sdk-switch-pristine guard (issue #52: wipe a slice's build dir before
+dispatch when it was configured against a different SDK root than this run
+resolved, then re-stamp it -- see [_maybe_pristine_stale_sdk_build_dir]), and
+(see [`last_manifest_write`]) the post-build `system-manifest.yaml` write.
+
+**How the post-build write reaches `tan run` without a `build_cmd.py` change.**
+The Rust oracle's executor (`execute/mod.rs::execute_slices_outcome`) returns
+a `NativeBuildOutcome` bundling the dispatch result with the write's two
+signals, and `commands::run` consumes that value directly. This port's
+`execute_slices` is reached only through `tan.commands.build_cmd._dispatch` /
+`_build`, both out of THIS unit's scope (a parallel, disjoint-files
+work-split, not an architecture choice) -- so widening `execute_slices`'s
+return type would need `_dispatch`'s own unpacking (`iter(execute_slices(...))`
+/ `next(dispatched)`) to change too. Instead the write still happens as a
+side effect of every `execute_slices` call (so `tan build`'s own CLI
+invocation gets the file on disk exactly like `tan run`'s does), and the two
+signals are exposed through [`last_manifest_write`] -- a same-process
+recorder, not a return value. See that function's docstring for why reading
+it is still safe against the R1 staleness defect the Rust oracle's own module
+doc records (`decide_run_action` never consults it unless `build_ok`, and
+`build_ok` cannot be `True` without `execute_slices` having just run to
+completion in the SAME synchronous call)."""
 import os
 import queue
 import shutil
@@ -20,8 +42,25 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.commands.build.manifest import (
+    build_dir_overridden,
+    cmake_cache_configured,
+    read_sdk_stamp,
+    resolve_zephyr_artefact,
+    write_post_build_manifest,
+    write_sdk_stamp,
+)
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
-from tan.core.plan_exec import PolicyAction, assemble_slice_env, resolve_action
+from tan.core.plan_exec import (
+    PolicyAction,
+    SdkStampAction,
+    assemble_slice_env,
+    resolve_action,
+    sdk_stamp_action,
+    sdk_stamp_key,
+)
+from tan.core.system_manifest import SliceRunResult
+from tan.envelope import Issue
 
 if os.name != "nt":
     import signal
@@ -33,12 +72,28 @@ if os.name != "nt":
 # (default fail), never dispatched.
 KNOWN_BACKENDS = frozenset({"zephyr", "yocto", "baremetal"})
 
+#: `tan_core::build_plan::CONSUMER_BUILD_ROOT` -- the top-level dir name a
+#: slice's plan-supplied (relative, pre-`confine_to_build_root`) `cwd` must
+#: start with before the sdk-switch-pristine guard will touch it. Duplicated
+#: rather than imported to avoid a `tan.core.build_plan` <-> here cycle risk;
+#: it is the SDK's own build-plan schema constant, not derived from anything
+#: in this module.
+_CONSUMER_BUILD_ROOT = "build"
+
 # How often the output-draining loop checks `cancelled()` -- bounds
 # cancellation latency without spinning the CPU.
 _POLL_INTERVAL_S = 0.05
 # How long to give a terminated process to exit on its own before escalating
 # to a forceful kill.
 _TERMINATE_GRACE_S = 1.0
+
+#: Envelope-wire status vocabulary, from `SliceOutcome.status` -- verbatim
+#: `tan.commands.build_cmd._WIRE_STATUS` (duplicated rather than imported:
+#: `build_cmd.py` already imports this module, so the reverse import would be
+#: circular). Also the manifest schema's own `slices[].status` vocabulary
+#: (`ok`/`failed`/`skipped`), which is why [`_write_manifest_after_dispatch`]
+#: reuses it for the post-build overlay too.
+_WIRE_STATUS = {"succeeded": "ok", "skipped": "skipped"}
 
 
 @dataclass(frozen=True)
@@ -47,11 +102,93 @@ class SliceOutcome:
     status: str  # "succeeded" | "skipped" | "failed" | "cancelled"
     exit_code: int | None
     message: str | None
+    #: Real on-disk `zephyr.elf` path after a successful build (absolute),
+    #: fed into the post-build manifest so `size`/`renode`/`flash`/`run` find
+    #: the artefact west actually produced. `None` for every other status.
+    output_artefact: str | None = None
+    #: Real on-disk build directory (west's nested `<cwd>/build`, absolute).
+    #: `None` for every other status.
+    build_dir: str | None = None
 
 
 def _skip_or_fail(core_id: str, action: PolicyAction, message: str) -> SliceOutcome:
     status = "skipped" if action is PolicyAction.SKIP else "failed"
     return SliceOutcome(core_id, status, None, message)
+
+
+@dataclass
+class _ManifestWriteSignal:
+    manifest_written: bool = False
+    native_sim_target: bool | None = None
+    #: Why the write failed, when it did (`None` on success). A THIRD signal,
+    #: kept OUT of [`last_manifest_write`]'s tuple deliberately: that
+    #: function's 2-tuple shape is `tan.core.run.decide_run_action`'s own
+    #: contract (via `tan.commands.run_cmd`, out of this unit's scope), and
+    #: widening it would need that caller's own unpacking to change too.
+    #: [`last_manifest_write_failure`] exposes this one separately for
+    #: `tan.commands.build_cmd._build`, which folds it into the JSON
+    #: envelope's `issues` as the `build.manifest-write-failed` warning --
+    #: see that module's own call site.
+    write_failed_reason: str | None = None
+
+
+_last_manifest_write = _ManifestWriteSignal()
+
+
+def reset_last_manifest_write() -> None:
+    """Clear the recorded signal from the most recent [`execute_slices`] call
+    in this process. `tan run`'s `_run` calls this immediately before
+    invoking the build engine, so a build that never reaches dispatch (an
+    early coded refusal, or a monkeypatched stub in a test) reads the honest
+    default `(False, None)` below instead of a previous invocation's
+    leftover -- see [`last_manifest_write`] for why that default is always
+    safe regardless."""
+    global _last_manifest_write
+    _last_manifest_write = _ManifestWriteSignal()
+
+
+def last_manifest_write() -> tuple[bool, bool | None]:
+    """`(manifest_written, native_sim_target)` from the most recent
+    [`execute_slices`] call in this process -- the in-memory signal
+    `tan.core.run.decide_run_action` needs, exposed as a same-process
+    recorder rather than a return value (see this module's docstring for
+    why). Safe against staleness: `decide_run_action` only ever consults
+    these two values when `build_ok` is `True`
+    (`tan.commands.build_cmd._build`'s own exit code), and `build_ok` can
+    only be `True` after `_build` has run [`execute_slices`] to completion in
+    THIS SAME synchronous call -- there is no path to a successful build that
+    skips dispatch. Pair with [`reset_last_manifest_write`] before a build
+    that might not reach dispatch at all."""
+    return _last_manifest_write.manifest_written, _last_manifest_write.native_sim_target
+
+
+def last_manifest_write_failure() -> str | None:
+    """Why the most recent [`execute_slices`] call's post-build manifest
+    write failed, or `None` on success -- see
+    [`_ManifestWriteSignal.write_failed_reason`] for why this is a separate
+    accessor rather than a third element of [`last_manifest_write`]'s
+    tuple."""
+    return _last_manifest_write.write_failed_reason
+
+
+#: Coded envelope issues from the sdk-switch-pristine guard, one call's
+#: worth -- verbatim `crates/tan-cli/.../execute/mod.rs`'s `sdk_switch_issues`,
+#: which the Rust oracle folds into the JSON envelope (`build.sdk-switch-
+#: pristine` / `build.sdk-switch-pristine-failed`) instead of leaving the
+#: wipe stderr-only: the VS Code extension only ever sees the envelope, not
+#: `on_output`'s stream. Same same-process-recorder pattern as
+#: `_last_manifest_write`, for the same reason (see [`last_sdk_switch_issues`]
+#: and this module's own docstring).
+_last_sdk_switch_issues: list[Issue] = []
+
+
+def last_sdk_switch_issues() -> list[Issue]:
+    """The `build.sdk-switch-pristine`/`build.sdk-switch-pristine-failed`
+    issues recorded by the most recent [`execute_slices`] call in this
+    process -- always freshly OVERWRITTEN (never appended-to) on every call,
+    so a build with nothing to wipe reads back the honest empty list rather
+    than a previous invocation's leftover."""
+    return list(_last_sdk_switch_issues)
 
 
 def _drain_output(
@@ -166,6 +303,93 @@ def _tool_is_available(tool: str) -> bool:
     return _command_on_path(tool)
 
 
+def _cwd_under_build_root(raw_cwd: str | None) -> bool:
+    """`Path::new(&cmd.cwd).components().next() == CONSUMER_BUILD_ROOT` (Rust
+    oracle): checked against the slice's PLAN-supplied relative `cwd` string,
+    not the resolved absolute path -- a plan cwd of `src/` (still a legal
+    relative path) must not let the wipe target land at
+    `<project>/src/build`, which may hold files the build never created."""
+    if not raw_cwd:
+        return False
+    parts = Path(raw_cwd).parts
+    return bool(parts) and parts[0] == _CONSUMER_BUILD_ROOT
+
+
+def _maybe_pristine_stale_sdk_build_dir(
+    core_id: str,
+    cwd: Path,
+    raw_cwd: str | None,
+    cmd_args: Sequence[str],
+    sdk_stamp_key_str: str | None,
+    on_output: Callable[[str], None],
+) -> list[Issue]:
+    """Sdk-switch-pristine guard (issue #52): a build dir west configured
+    against a PREVIOUS `--sdk-root` makes it FATAL ERROR on this one ("please
+    clean it, use --pristine, or use --build-dir") -- a real failure that
+    otherwise reaches the user as a bare "terminated with exit code: 1".
+    Detect it here and wipe west's own nested build dir before the tool runs,
+    so the configure that follows is fresh instead of fatal, then re-stamp
+    the dir with this run's SDK identity BEFORE the tool is spawned (a
+    mid-configure failure still stamped correctly, since the dir really was
+    configured against it regardless of whether the build finishes).
+
+    Two guards (mirroring `resolve_zephyr_artefact`'s own refusal to trust a
+    build dir it cannot resolve) gate the whole function -- detection, wipe,
+    AND the stamp write -- so a `-d`/`--build-dir` override or a cwd outside
+    `CONSUMER_BUILD_ROOT` never gets touched. Best-effort throughout: a wipe
+    or write failure is reported via `on_output` but never raises -- it
+    fails toward a spurious future rebuild, never toward trusting a stale
+    build dir or crashing the build. Port of `execute/mod.rs`'s inline guard
+    (~line 505) plus `manifest.rs::write_sdk_stamp`'s call site.
+
+    Returns the coded `build.sdk-switch-pristine`/`build.sdk-switch-pristine-
+    failed` [`Issue`]s for this slice (verbatim `execute/mod.rs`'s
+    `sdk_switch_issues.push`, at `warning` severity like the oracle's) --
+    empty when nothing was wiped. `on_output` still gets the same "note: ..."
+    text regardless (this port's stderr stream is always-on, unlike the
+    oracle's text-mode-only `eprintln!`); the caller folds the returned
+    issues into the JSON envelope so the wipe is not stderr-only there."""
+    overridden = build_dir_overridden(cmd_args)
+    under_build_root = _cwd_under_build_root(raw_cwd)
+    if overridden or not under_build_root:
+        return []
+
+    issues: list[Issue] = []
+    cached = read_sdk_stamp(cwd)
+    action = sdk_stamp_action(
+        cached, sdk_stamp_key_str, cmake_cache_configured(cwd), overridden, under_build_root
+    )
+    if action is SdkStampAction.PRISTINE:
+        new_root = sdk_stamp_key_str or "?"
+        if cached is not None:
+            message = (
+                f"{core_id}: build dir was configured against SDK root `{cached}`; "
+                f"active SDK is `{new_root}` — running pristine"
+            )
+        else:
+            message = (
+                f"{core_id}: build dir predates the SDK-switch stamp (no recorded "
+                f"SDK root); running pristine against the active SDK `{new_root}`"
+            )
+        on_output(f"note: {message}")
+        issues.append(Issue("build.sdk-switch-pristine", "warning", message))
+        try:
+            shutil.rmtree(cwd / "build")
+        except OSError as err:
+            # Best-effort: west's own FATAL ERROR below (if the wipe didn't
+            # fully land) at least now ships with a note explaining why.
+            failed = f"{core_id}: could not fully wipe the stale build dir: {err}"
+            on_output(f"note: {failed}")
+            issues.append(Issue("build.sdk-switch-pristine-failed", "warning", failed))
+
+    if sdk_stamp_key_str is not None:
+        try:
+            write_sdk_stamp(cwd, sdk_stamp_key_str)
+        except OSError:
+            pass  # best-effort -- see this function's docstring
+    return issues
+
+
 def execute_slices(
     plan,
     *,
@@ -174,9 +398,46 @@ def execute_slices(
     gap_fillers: Sequence[tuple[str, str]],
     on_output: Callable[[str], None],
     cancelled: Callable[[], bool] = lambda: False,
+    sdk_root: str | None = None,
+    sdk_root_for_stamp: str | None = None,
+    held_outcomes: Sequence[SliceOutcome] = (),
 ) -> list[SliceOutcome]:
+    """Dispatch every slice of `plan` and return one [`SliceOutcome`] per
+    slice, in plan order.
+
+    `sdk_root_for_stamp` -- the identity the sdk-switch-pristine guard keys
+    its stamp comparison on, when it differs from `sdk_root` (the value the
+    post-build manifest write still uses). Defaults to `sdk_root` itself.
+    The caller (`tan.commands.build_cmd.build`) passes a NORMALIZED,
+    workspace-root-anchored form here (`tan.core.plan_exec.normalize_path`)
+    while leaving `sdk_root` raw -- mirroring the oracle's own split between
+    `normalized_sdk_root_str` (stamp-only) and the unnormalized
+    `resolve_sdk_root` result (`${SDK_ROOT}` token substitution, `sdk`
+    envelope reporting, the manifest emit's checkout lookup): a relative
+    `--sdk-root ../alp-sdk` must key the SAME as the absolute pointer `tan
+    sdk switch` already pinned for the identical checkout (tan-cli#163),
+    but must NOT change what `${SDK_ROOT}` substitutes to or what the
+    manifest emit resolves.
+
+    `held_outcomes` -- outcomes for slices the CALLER already decided not to
+    dispatch (`tan.commands.build_cmd._dispatch` holds back a
+    token-substitution-demoted slice before this function ever sees the
+    plan, tan-cli #89). They are folded into the post-build manifest overlay
+    ([`_write_manifest_after_dispatch`]) alongside this call's own outcomes,
+    but are NOT part of the returned list -- the caller already accounts for
+    them in its own outcome list and return-value shape must not double them
+    up. Omitting a held slice from the overlay would leave its
+    `system-manifest.yaml` entry at a previous run's `status`/
+    `output_artefact` forever, indistinguishable from a slice that actually
+    built (oracle `execute/mod.rs:379-400`)."""
     policy = plan.execution_policy
     outcomes: list[SliceOutcome] = []
+    sdk_switch_issues: list[Issue] = []
+    # Computed once per build (not per slice): the plan's `sdkCommit` reflects
+    # THIS run's freshly emitted plan, not a per-slice fact. `None` when
+    # `sdk_root` itself is unresolved -- see `sdk_stamp_key`'s docstring.
+    stamp_root = sdk_root_for_stamp if sdk_root_for_stamp is not None else sdk_root
+    sdk_stamp_key_str = sdk_stamp_key(stamp_root, plan.sdk_commit)
 
     for sl in plan.slices:
         if sl.backend not in KNOWN_BACKENDS:
@@ -239,6 +500,18 @@ def execute_slices(
             )
             continue
 
+        # Deliberately AFTER the missing-tool skip above (not right after
+        # `cwd.mkdir`): the wipe is destructive, and the tool-availability
+        # check is the only thing standing between "this slice is about to
+        # be rebuilt" and "this slice is about to be skipped" -- running the
+        # wipe first would delete the last good `zephyr.elf` for a rebuild
+        # that then never happens on a host missing `west`.
+        sdk_switch_issues.extend(
+            _maybe_pristine_stale_sdk_build_dir(
+                sl.core_id, cwd, sl.command.cwd, sl.command.args, sdk_stamp_key_str, on_output
+            )
+        )
+
         env = dict(os.environ)
         env.update(dict(assemble_slice_env(sl.env, sl.env_append_path, env_lookup, gap_fillers)))
 
@@ -286,6 +559,12 @@ def execute_slices(
             )
             continue
 
+        # On success, resolve the real on-disk artefact west produced so the
+        # post-build manifest points downstream consumers (`run`/`size`/
+        # `flash`/`image`) at the elf that exists, not a plan-time guess.
+        output_artefact, slice_build_dir = (
+            resolve_zephyr_artefact(cwd, sl.command.args) if code == 0 else (None, None)
+        )
         outcomes.append(
             SliceOutcome(
                 sl.core_id,
@@ -296,7 +575,73 @@ def execute_slices(
                 # envelope's `rc` must be null too, not the raw `-N`.
                 None if code < 0 else code,
                 None if code == 0 else f"slice `{sl.core_id}` terminated with exit code: {code}",
+                output_artefact,
+                slice_build_dir,
             )
         )
 
+    global _last_sdk_switch_issues
+    _last_sdk_switch_issues = sdk_switch_issues
+
+    _write_manifest_after_dispatch(plan, build_root, [*outcomes, *held_outcomes], on_output, sdk_root)
     return outcomes
+
+
+def _write_manifest_after_dispatch(
+    plan,
+    build_root: Path,
+    outcomes: list[SliceOutcome],
+    on_output: Callable[[str], None],
+    sdk_root: str | None,
+) -> None:
+    """The output seam: write the post-build `system-manifest.yaml` (the
+    contract `tan run`/`flash`/`size`/`image` read) reflecting this run's
+    per-slice status, and record the in-memory signals `tan run`/
+    `tan build` decide from -- see [`last_manifest_write`] and
+    [`last_manifest_write_failure`]. Always attempted, even for zero slices,
+    mirroring the Rust oracle's `execute_slices_outcome` (which calls
+    `write_post_build_manifest` unconditionally after its dispatch loop, not
+    only when at least one slice ran). `outcomes` here is the FULL set
+    overlaid onto the manifest -- dispatched slices plus any the caller
+    held back (see [`execute_slices`]'s `held_outcomes` parameter) -- not
+    necessarily what [`execute_slices`] itself returns."""
+    results = [
+        SliceRunResult(
+            core_id=o.core_id,
+            status=_WIRE_STATUS.get(o.status, "failed"),
+            output_artefact=o.output_artefact,
+            build_dir=o.build_dir,
+            reason=o.message,
+        )
+        for o in outcomes
+    ]
+    outcome = write_post_build_manifest(
+        sdk_root=sdk_root,
+        board_yaml=plan.board_yaml,
+        base=str(build_root),
+        plan_build_root=plan.build_root,
+        results=results,
+    )
+    global _last_manifest_write
+    _last_manifest_write = _ManifestWriteSignal(
+        manifest_written=outcome.write_failed_reason is None,
+        native_sim_target=outcome.native_sim_target,
+        write_failed_reason=outcome.write_failed_reason,
+    )
+    if outcome.write_failed_reason is not None:
+        # Not silent -- mirrors the Rust oracle's identical `eprintln!` (via
+        # `on_output`, this port's stderr-streaming callback: this function
+        # has no envelope/issues list of its own to fold a warning `Issue`
+        # into). `tan.commands.build_cmd._build` folds the SAME reason into
+        # the JSON envelope's `issues` as `build.manifest-write-failed`
+        # (`last_manifest_write_failure()`, see that module's own call
+        # site) -- so the envelope-side half this docstring used to call
+        # "out of this unit's scope" is covered too; this line is the
+        # text-mode/stderr half only. Unlike the oracle (`execute/mod.rs`
+        # gates its `eprintln!` on `text_mode`), this call fires in BOTH
+        # `--format text` and `--format json` -- the same deliberate,
+        # port-wide "stderr is always-on, never mode-gated" convention
+        # `_maybe_pristine_stale_sdk_build_dir`'s docstring documents for
+        # the sibling sdk-switch-pristine note; harmless since stdout, not
+        # stderr, is the JSON envelope's only channel.
+        on_output(f"note: skipped writing system-manifest.yaml — {outcome.write_failed_reason}")

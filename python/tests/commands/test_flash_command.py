@@ -35,6 +35,7 @@ from tan.core.flash_plan import (
     fa_str_checked,
     flow_d_available,
     is_rust_absolute,
+    parse_atoc_start_address,
     parse_system_manifest,
     plan_alif_mram_jlink,
     resolve_artefact_path,
@@ -191,6 +192,117 @@ boot_order: []
     assert "--target flash" in payload["data"]["entries"][0]["message"]
 
 
+# ── build-policy skip vs a genuine build failure ─────────────────────────────
+
+
+def test_a_build_skipped_slice_does_not_fail_flash(tmp_path):
+    """A slice `tan build` left `status: skipped` (e.g. `executionPolicy.
+    missingTool` skipped a Yocto slice because `bitbake` was not on PATH) must
+    not turn an otherwise-clean `tan flash` red -- the skip was already a
+    policy decision, not a failure. It still must not be flashed (there is
+    nothing built to flash), and the skip must stay visible in `issues`."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: a.elf, status: ok,
+   flash_method: zephyr_west_flash, flash_args: {}}
+- {core_id: c2, os: yocto, output_artefact: b.wic, status: skipped,
+   flash_method: yocto_wic_to_sd_or_emmc, flash_args: {}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0
+    assert payload["ok"] is True
+    assert codes(payload) == ["flash.slice-skipped"]
+    assert payload["issues"][0]["severity"] == "warning"
+    message = payload["issues"][0]["message"]
+    assert "c2" in message
+    # Wording pinned separately from the `refused` bucket's "stale, rebuild
+    # it" text (test_a_genuinely_failed_slice_still_fails_flash): neither half
+    # of that remedy holds for a policy skip -- nothing was ever built, so
+    # nothing is stale, and rebuilding on the SAME host reruns the same
+    # executionPolicy skip.
+    assert "Rebuild it first" not in message
+    assert "stale" not in message
+    assert "executionPolicy" in message
+    assert payload["data"]["entries"][0]["id"] == "c1"
+    assert payload["data"]["entries"][0]["status"] == "ok"
+    # c2 never became a target at all -- only c1's dry-run entry is reported.
+    assert len(payload["data"]["entries"]) == 1
+
+
+def test_a_genuinely_failed_slice_still_fails_flash(tmp_path):
+    """The opposite pin: a slice `status: failed` (a real build failure, not a
+    policy skip) must still fail `tan flash` -- the fix must not swallow real
+    failures alongside policy skips."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: a.elf, status: ok,
+   flash_method: zephyr_west_flash, flash_args: {}}
+- {core_id: c2, os: yocto, output_artefact: b.wic, status: failed,
+   flash_method: yocto_wic_to_sd_or_emmc, flash_args: {}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert codes(payload) == ["flash.slice-not-built"]
+    assert payload["issues"][0]["severity"] == "error"
+    assert "c2" in payload["issues"][0]["message"]
+
+
+def test_only_slice_skipped_flashes_nothing_and_fails(tmp_path):
+    """The inverted twin of the skip-alongside-a-flash pin above: when the
+    manifest's ONLY slice is `status: skipped`, nothing ever reaches the
+    dispatch loop, so a run where nothing was flashed must not exit 0 -- that
+    is the same silent-success class `status: failed` guards against, just
+    reached through the skip bucket instead."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c2, os: yocto, output_artefact: b.wic, status: skipped,
+   flash_method: yocto_wic_to_sd_or_emmc, flash_args: {}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert codes(payload) == ["flash.slice-skipped", "flash.nothing-flashed"]
+    assert payload["issues"][-1]["severity"] == "error"
+    assert payload["data"]["entries"] == []
+
+
+def test_core_filter_naming_a_skipped_slice_fails_flash(tmp_path):
+    """`--core c2` naming exactly the skipped slice: the user asked for one
+    slice, nothing was programmed, and that must fail the run even though a
+    sibling `c1` (excluded by the filter) built fine."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: a.elf, status: ok,
+   flash_method: zephyr_west_flash, flash_args: {}}
+- {core_id: c2, os: yocto, output_artefact: b.wic, status: skipped,
+   flash_method: yocto_wic_to_sd_or_emmc, flash_args: {}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--core", "c2", manifest=manifest
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["ok"] is False
+    assert codes(payload) == ["flash.slice-skipped", "flash.nothing-flashed"]
+    assert payload["data"]["entries"] == []
+
+
 def test_build_root_pointing_at_a_regular_file(tmp_path):
     (tmp_path / "notadir").write_text("x", encoding="utf-8")
     exit_code, out, _ = run_flash(
@@ -313,7 +425,7 @@ hw_info: {{sku: S}}
 slices:
 - {{core_id: c1, os: zephyr, output_artefact: a.bin, status: ok,
    flash_method: alif_mram_jlink,
-   flash_args: {{jlink_flash_device: PART_PROFILE, mram_address: "0x80010000",
+   flash_args: {{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
                 atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true}}}}
 helper_mcus: []
 boot_order: []
@@ -497,7 +609,7 @@ def test_a_deleted_working_directory_still_produces_an_envelope(monkeypatch, cap
 
 FLOW_D_ARGS = {
     "jlink_flash_device": "PART_PROFILE",
-    "mram_address": "0x80010000",
+    "slot0_load_address": "0x80010000",
     "atoc": "/blobs/AppTocPackage.bin",
     "atoc_address": "0x8057F5B0",
 }
@@ -516,38 +628,70 @@ def flow_d_inputs(**overrides):
 def test_flow_d_is_selected_over_flow_a_only_when_the_data_arms_it():
     """Flow D is the DEFAULT, and the switch is made from DATA alone -- never
     from a SKU, an address, or any other silicon knowledge tan is forbidden to
-    carry (I-26 / ADR-0017)."""
+    carry (I-26 / ADR-0017). Arming needs only `jlink_flash_device`:
+    `slot0_load_address` is not an arming key, it only selects the mramxip SHAPE
+    once Flow D is already armed (see
+    `test_flow_d_default_shape_omits_the_app_blob_when_slot0_load_address_is_absent`
+    and
+    `test_flow_d_mramxip_shape_still_writes_both_blobs_when_slot0_load_address_is_present`)."""
     armed = FlashTarget(SLICE, "m55_he", "zephyr_west_flash", FLOW_D_ARGS)
     assert select_flash_method(armed) == "alif_mram_jlink"
 
-    # Neither key -> Flow A, i.e. `west flash` on the board.cmake default runner.
+    # No jlink_flash_device -> Flow A, i.e. `west flash` on the board.cmake
+    # default runner: without the part-number profile J-Link has no MRAM
+    # loader to dispatch to at all.
     plain = FlashTarget(SLICE, "m55_he", "zephyr_west_flash", {})
     assert select_flash_method(plain) == "zephyr_west_flash"
+    no_device = {k: v for k, v in FLOW_D_ARGS.items() if k != "jlink_flash_device"}
+    assert select_flash_method(FlashTarget(SLICE, "m", "zephyr_west_flash", no_device)) == (
+        "zephyr_west_flash"
+    )
 
-    # HALF-armed is Flow A too: a device profile with no MRAM address leaves
-    # nothing to `loadbin` to, and guessing the address is the one thing this
-    # path must never do.
-    for key in ("jlink_flash_device", "mram_address"):
-        half = dict(FLOW_D_ARGS)
-        del half[key]
-        assert select_flash_method(FlashTarget(SLICE, "m", "zephyr_west_flash", half)) == (
-            "zephyr_west_flash"
-        ), key
+    # A device profile with NO `slot0_load_address` still arms Flow D -- it just
+    # takes the default single-ATOC-blob shape (the ATOC embeds the app, so
+    # there is nothing to `loadbin` an app to).
+    no_slot0_load_address = {k: v for k, v in FLOW_D_ARGS.items() if k != "slot0_load_address"}
+    assert select_flash_method(FlashTarget(SLICE, "m", "zephyr_west_flash", no_slot0_load_address)) == (
+        "alif_mram_jlink"
+    )
 
     # An explicitly-named method is never re-routed -- the preference applies to
     # the DEFAULT recipe only.
     named = FlashTarget(SLICE, "m", "swd_probe", FLOW_D_ARGS)
     assert select_flash_method(named) == "swd_probe"
     assert flow_d_available(FLOW_D_ARGS)
+    assert flow_d_available(no_slot0_load_address)
+    assert not flow_d_available(no_device)
     assert not flow_d_available("TBD")
 
+    # A present-but-NULL `jlink_flash_device` (bare `jlink_flash_device:` in
+    # YAML) must still ARM Flow D -- collapsing it to "unarmed" would silently
+    # burn the entry over the SE-UART (Flow A) with no diagnostic at all. The
+    # loud refusal comes from `plan_alif_mram_jlink`'s own explicit
+    # `_fa_has_key` re-check on `fa_str_checked`'s `None` (distinguishing
+    # "present but null/empty" from "absent") once Flow D is armed and
+    # dispatched, not from this predicate -- `fa_str_checked` itself returns
+    # `None` for present-but-null same as absent, it does not raise.
+    null_device = {**FLOW_D_ARGS, "jlink_flash_device": None}
+    assert flow_d_available(null_device)
+    assert select_flash_method(FlashTarget(SLICE, "m", "zephyr_west_flash", null_device)) == (
+        "alif_mram_jlink"
+    )
+    with pytest.raises(FlashPlanError, match="jlink_flash_device is present but null/empty"):
+        plan_alif_mram_jlink(
+            FlashInputs(artefact="/b/z.bin", flash_args=null_device, core_id="m", sku="S"),
+            lambda t: True,
+        )
 
-def test_an_unquoted_mram_address_still_arms_flow_d():
-    """PyYAML parses an unquoted `mram_address: 0x80010000` as an INTEGER. Arming
-    must key on PRESENCE, not on "is a non-empty string": a string-shaped check
-    would call this entry unarmed and silently route the burn to Flow A over the
-    SE-UART. Transport is never decided by a quoting detail."""
-    numeric = {**FLOW_D_ARGS, "mram_address": 0x80010000}
+
+def test_an_unquoted_slot0_load_address_still_arms_flow_d():
+    """PyYAML parses an unquoted `slot0_load_address: 0x80010000` as an INTEGER.
+    `slot0_load_address` selects the mramxip two-blob SHAPE (Flow D itself is armed
+    by `jlink_flash_device` alone); that selection must key on PRESENCE, not
+    on "is a non-empty string" -- a string-shaped check would call the shape
+    unselected and silently emit the default single-blob write instead.
+    Shape is never decided by a quoting detail."""
+    numeric = {**FLOW_D_ARGS, "slot0_load_address": 0x80010000}
     assert flow_d_available(numeric)
     assert select_flash_method(FlashTarget(SLICE, "m", "zephyr_west_flash", numeric)) == (
         "alif_mram_jlink"
@@ -561,7 +705,7 @@ def test_an_unquoted_mram_address_still_arms_flow_d():
     assert "loadbin /b/z.bin 0x80010000" in plan.jlink_script
 
     # A present-but-UNUSABLE value is a loud refusal, never a silent Flow A.
-    broken = {**FLOW_D_ARGS, "mram_address": ["not", "an", "address"]}
+    broken = {**FLOW_D_ARGS, "slot0_load_address": ["not", "an", "address"]}
     assert flow_d_available(broken)
     with pytest.raises(FlashPlanError):
         plan_alif_mram_jlink(
@@ -618,18 +762,77 @@ def test_flow_d_is_confirm_gated_like_every_other_persistent_write():
     "missing, expected",
     [
         ("jlink_flash_device", "jlink_flash_device is required"),
-        ("mram_address", "mram_address is required"),
         ("atoc", "flash_args.atoc"),
         ("atoc_address", "flash_args.atoc"),
     ],
 )
-def test_flow_d_refuses_rather_than_guessing_any_identifier(missing, expected):
-    """Every Flow D identifier is a hardware fact that arrives in `flash_args`.
-    None has a default: a guessed MRAM address is a write to the wrong place on a
-    part whose Secure Enclave then boots whatever is there."""
+def test_flow_d_refuses_rather_than_guessing_any_required_identifier(missing, expected):
+    """Every REQUIRED Flow D identifier is a hardware fact that arrives in
+    `flash_args`. None has a default: a guessed address is a write to the
+    wrong place on a part whose Secure Enclave then boots whatever is there.
+
+    `slot0_load_address` is deliberately absent from this table -- it is OPTIONAL
+    (see `test_flow_d_default_shape_omits_the_app_blob_when_slot0_load_address_is_
+    absent`), not a fourth required identifier."""
     with pytest.raises(FlashPlanError) as raised:
         plan_alif_mram_jlink(flow_d_inputs(**{missing: None}), lambda t: True)
     assert expected in str(raised.value)
+
+
+def test_flow_d_default_shape_omits_the_app_blob_when_slot0_load_address_is_absent():
+    """The day-to-day default (`flash-jlink.sh`) writes ONE self-contained
+    ATOC blob, not the two-blob mramxip shape -- the shape this port emitted
+    unconditionally before this fix, which wrote the app to `slot0_load_address`
+    while nothing set the app's own build to link there, corrupting the burn.
+    """
+    plan = plan_alif_mram_jlink(
+        flow_d_inputs(slot0_load_address=None, confirm=True), lambda t: t == "JLinkExe"
+    )
+    lines = plan.jlink_script.splitlines()
+    assert lines == [
+        "si SWD",
+        "speed 4000",
+        "device PART_PROFILE",
+        "connect",
+        "loadbin /blobs/AppTocPackage.bin 0x8057F5B0",
+        "verifybin /blobs/AppTocPackage.bin 0x8057F5B0",
+        "RSetType 2",
+        "r",
+        "g",
+        "exit",
+    ]
+    assert not any("zephyr.bin" in line for line in lines)
+    assert plan.ok_message == (
+        "alif_mram_jlink[m55_he]: signed ATOC (app embedded) -> 0x8057F5B0 "
+        "via J-Link (PART_PROFILE); verified and PIN-reset"
+    )
+
+
+def test_flow_d_mramxip_shape_still_writes_both_blobs_when_slot0_load_address_is_present():
+    """The ITCM-overflow exception (`flash-jlink-mramxip.sh`) -- unchanged from
+    before this fix, just now reachable only when `slot0_load_address` opts in."""
+    plan = plan_alif_mram_jlink(flow_d_inputs(confirm=True), lambda t: t == "JLinkExe")
+    lines = plan.jlink_script.splitlines()
+    assert "loadbin /build/zephyr/zephyr.bin 0x80010000" in lines
+    assert "verifybin /build/zephyr/zephyr.bin 0x80010000" in lines
+
+
+@pytest.mark.parametrize("bad_value", ["", None], ids=["empty-string", "null"])
+def test_flow_d_present_but_null_or_empty_slot0_load_address_refuses(bad_value):
+    """A `slot0_load_address` KEY that is present but resolves to an empty string or
+    a null must refuse loudly, exactly like any other malformed value --
+    never silently fall back to the default single-ATOC-blob shape. Both were
+    a silent default-shape selection pre-fix: `fa_str_checked` collapses a
+    present-but-null value and a genuinely-absent key to the same `None`, so
+    the `app_address is not None` check alone could not tell them apart. A
+    manifest quoting detail must never decide which shape burns."""
+    args = {**FLOW_D_ARGS, "slot0_load_address": bad_value, "confirm": True}
+    with pytest.raises(FlashPlanError) as raised:
+        plan_alif_mram_jlink(
+            FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S"),
+            lambda t: True,
+        )
+    assert "slot0_load_address" in str(raised.value)
 
 
 def test_flow_d_holds_no_part_number_of_its_own():
@@ -658,7 +861,7 @@ def test_flow_d_device_profile_is_charset_guarded(bad):
 @pytest.mark.parametrize("bad", ["0x8000 r", "zzz", "0x", "80010000\nr", "-1"])
 def test_flow_d_addresses_are_charset_guarded(bad):
     with pytest.raises(FlashPlanError):
-        plan_alif_mram_jlink(flow_d_inputs(mram_address=bad), lambda t: True)
+        plan_alif_mram_jlink(flow_d_inputs(slot0_load_address=bad), lambda t: True)
 
 
 def test_flow_d_probe_serial_is_optional_and_has_no_default():
@@ -673,13 +876,14 @@ def test_flow_d_probe_serial_is_optional_and_has_no_default():
 
 
 def test_flow_d_preflight_is_absent_unless_the_manifest_supplies_both_values():
-    """No `expect_dpidr` (or no attach-profile `jlink_device`) means NO preflight:
+    """Both `expect_dpidr` and `jlink_device` GENUINELY absent means NO preflight:
     tan cannot supply either value, and a wrong expected ID would refuse every
-    good board."""
+    good board. A half-armed manifest -- one key present, the other genuinely
+    absent -- refuses instead: supplying `expect_dpidr` alone is the manifest's
+    unambiguous statement that it wanted the wrong-board guard armed, so
+    silently skipping it must not happen (see
+    `test_flow_d_preflight_half_armed_by_a_missing_partner_key_refuses`)."""
     assert flash_plan.flow_d_preflight_script(flow_d_inputs()) is None
-    assert (
-        flash_plan.flow_d_preflight_script(flow_d_inputs(expect_dpidr="0x4C013477")) is None
-    )
     prepared = flash_plan.flow_d_preflight_script(
         flow_d_inputs(expect_dpidr="0x4C013477", jlink_device="Generic-Attach", jlink_serial="7")
     )
@@ -696,6 +900,55 @@ def test_flow_d_preflight_is_absent_unless_the_manifest_supplies_both_values():
         "connect",
         "exit",
     ]
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"expect_dpidr": "0x4C013477"}, {"jlink_device": "Generic-Attach"}],
+    ids=["expect_dpidr-only", "jlink_device-only"],
+)
+def test_flow_d_preflight_half_armed_by_a_missing_partner_key_refuses(overrides):
+    """One of `expect_dpidr` / `jlink_device` present, the other GENUINELY
+    absent (not null -- that is the two present-but-null tests below), must
+    refuse loudly. Supplying either key alone is the manifest's unambiguous
+    statement that it wanted the wrong-board guard armed; silently returning
+    `None` (no preflight) would drop that guard with no diagnostic at all,
+    immediately before the one write this backend's own docstring calls
+    unrecoverable."""
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.flow_d_preflight_script(flow_d_inputs(**overrides))
+    message = str(raised.value)
+    assert "expect_dpidr" in message
+    assert "jlink_device" in message
+
+
+@pytest.mark.parametrize("bad_value", ["", None], ids=["empty-string", "null"])
+def test_flow_d_preflight_present_but_null_or_empty_expect_dpidr_refuses(bad_value):
+    """`expect_dpidr` PRESENT but resolving to `None` (empty string or YAML
+    null) must refuse loudly, exactly like `slot0_load_address` -- never silently
+    fall through to `None` (no preflight). Reusing the "genuinely absent"
+    path there would drop the SW-DP IDR check with no diagnostic, on the
+    write path this backend's own docstring calls "the one unrecoverable
+    mistake" it can make."""
+    args = {**FLOW_D_ARGS, "expect_dpidr": bad_value, "jlink_device": "Generic-Attach"}
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.flow_d_preflight_script(
+            FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
+        )
+    assert "expect_dpidr" in str(raised.value)
+
+
+@pytest.mark.parametrize("bad_value", ["", None], ids=["empty-string", "null"])
+def test_flow_d_preflight_present_but_null_or_empty_jlink_device_refuses(bad_value):
+    """Same collapse, same refusal, for the read-device key: a `jlink_device: ""`
+    or bare `jlink_device:` must not silently produce `None` (no preflight)
+    when `expect_dpidr` is otherwise good."""
+    args = {**FLOW_D_ARGS, "expect_dpidr": "0x4C013477", "jlink_device": bad_value}
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.flow_d_preflight_script(
+            FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
+        )
+    assert "jlink_device" in str(raised.value)
 
 
 def test_flow_d_needs_jlink_on_path_for_a_real_run():
@@ -725,7 +978,7 @@ hw_info: {sku: S}
 slices:
 - {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
    flash_method: zephyr_west_flash,
-   flash_args: {jlink_flash_device: PART_PROFILE, mram_address: "0x80010000",
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
                 atoc: atoc.bin, atoc_address: "0x8057F5B0"}}
 helper_mcus: []
 boot_order: []
@@ -742,6 +995,203 @@ boot_order: []
     # pid + nanosecond stamp; a placeholder is what reaches the envelope.
     assert "<generated.jlink>" in entry["message"]
     assert "tan-flash-" not in entry["message"]
+
+
+def test_flow_d_dry_run_surfaces_a_half_armed_preflight_as_a_failure(tmp_path):
+    """A half-armed `expect_dpidr`/`jlink_device` pair used to be caught only at
+    real-write time (`_flow_d_preflight`, which never runs before the confirm
+    gate): `tan flash --dry-run` on this exact manifest used to report
+    `status: planned` / exit 0 with no diagnostic at all. The validate-only
+    half now runs PLAN-TIME, before the confirm/dry-run gate, so the same
+    misconfiguration surfaces as `flash.entry-failed` / exit 1 under
+    `--dry-run` too -- precisely where a customer should learn their manifest
+    is wrong, not only once they confirm a real write."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_address: "0x8057F5B0",
+                expect_dpidr: "0x4C013477"}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["ok"] is False
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "expect_dpidr" in entry["message"]
+    assert "jlink_device" in entry["message"]
+    codes = {issue["code"] for issue in payload["issues"]}
+    assert "flash.entry-failed" in codes
+
+
+# ── Flow D: the ATOC address is a BUILD-TIME output, not metadata ──────────
+#
+# An earlier design assumed `atoc_address` lived under `metadata/**`. It does
+# not: `app-gen-toc` writes it fresh into `app-package-map.txt` at SIGNING
+# time and the runbook says outright it shifts per build/config. These pin the
+# parser (`flash_plan.parse_atoc_start_address`) against real bench-script
+# report text, and the IO glue (`flash_cmd._resolve_flow_d_atoc_address`) that
+# feeds a parsed value into the plan without requiring the manifest to bake
+# one in.
+
+
+def test_parse_atoc_start_address_takes_the_last_match():
+    """Mirrors every bench script's own
+    `awk '/APP Package Start Address:/{print $NF}' app-package-map.txt | tail
+    -1` -- a re-signed re-run APPENDS a fresh block, so the LAST line wins, not
+    the first."""
+    report = (
+        "Device Algorithm Package\n"
+        "APP Package Start Address: 0x8000F000\n"
+        "\n"
+        "Device Algorithm Package (re-signed)\n"
+        "APP Package Start Address: 0x8057F5B0\n"
+    )
+    assert parse_atoc_start_address(report) == "0x8057F5B0"
+
+
+def test_parse_atoc_start_address_is_none_when_the_marker_is_absent():
+    assert parse_atoc_start_address("") is None
+    assert parse_atoc_start_address("some other report entirely\n") is None
+
+
+def test_resolve_flow_d_atoc_address_prefers_an_explicit_manifest_value(tmp_path):
+    """An explicit `atoc_address` always wins over a parsed one -- and the map
+    file is never even opened, so a stale/missing report cannot break a
+    manifest that already carries the real value.
+
+    The map file here is REAL and carries a DIFFERENT address than the
+    explicit one, so a precedence bug that reads the map anyway is caught by
+    the value, not just by object identity (a bug that fell through to
+    `plan_alif_mram_jlink`'s generic refusal via the missing-file no-op would
+    pass an `is args` check too)."""
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    (tmp_path / "app-package-map.txt").write_text(
+        "APP Package Start Address: 0x8000F000\n", encoding="utf-8"
+    )
+    args = {"atoc_address": "0x8057F5B0", "atoc_map": "app-package-map.txt"}
+    resolved = _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path))
+    assert resolved is args
+    assert resolved["atoc_address"] == "0x8057F5B0"
+
+
+def test_resolve_flow_d_atoc_address_swallows_a_malformed_explicit_value(tmp_path):
+    """A malformed `atoc_address` (not a string/bare-number shape) makes
+    `fa_str_checked` raise; this helper must swallow that and return the dict
+    UNTOUCHED so `plan_alif_mram_jlink` raises the real, precise refusal --
+    not silently overwrite it with a value parsed from the map."""
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    (tmp_path / "app-package-map.txt").write_text(
+        "APP Package Start Address: 0x8000F000\n", encoding="utf-8"
+    )
+    args = {"atoc_address": True, "atoc_map": "app-package-map.txt"}
+    assert _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path)) is args
+
+
+def test_resolve_flow_d_atoc_address_parses_the_map_file(tmp_path):
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    (tmp_path / "app-package-map.txt").write_text(
+        "APP Package Start Address: 0x8057F5B0\n", encoding="utf-8"
+    )
+    args = {"atoc": "atoc.bin", "atoc_map": "app-package-map.txt"}
+    resolved = _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path))
+    assert resolved["atoc_address"] == "0x8057F5B0"
+    assert resolved is not args, "must not mutate the manifest's own flash_args dict"
+    assert "atoc_address" not in args
+
+
+def test_resolve_flow_d_atoc_address_is_a_no_op_without_atoc_map(tmp_path):
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    args = {"atoc": "atoc.bin"}
+    assert _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path)) is args
+
+
+def test_resolve_flow_d_atoc_address_is_a_no_op_when_the_map_is_missing(tmp_path):
+    """The map path resolves to nothing yet (signing has not run, or ran
+    somewhere else) -- graceful no-op, letting `plan_alif_mram_jlink` raise its
+    own precise refusal rather than this helper inventing a different one."""
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    args = {"atoc": "atoc.bin", "atoc_map": "app-package-map.txt"}
+    assert _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path)) is args
+
+
+def test_resolve_flow_d_atoc_address_refuses_loudly_when_the_marker_is_missing(tmp_path):
+    """The map file WAS found -- it is not "no map yet", it is "found your map
+    and could not get an address out of it". Falling through to
+    `plan_alif_mram_jlink`'s generic "both required" refusal here would tell
+    the user to do the thing (supply a map) they already did."""
+    from tan.commands.flash_cmd import _resolve_flow_d_atoc_address
+
+    (tmp_path / "app-package-map.txt").write_text("nothing useful here\n", encoding="utf-8")
+    args = {"atoc": "atoc.bin", "atoc_map": "app-package-map.txt"}
+    with pytest.raises(FlashPlanError) as raised:
+        _resolve_flow_d_atoc_address(args, str(tmp_path), str(tmp_path))
+    msg = str(raised.value)
+    assert "app-package-map.txt" in msg
+    assert "APP Package Start Address" in msg
+
+
+def test_flow_d_end_to_end_resolves_atoc_address_from_the_build_output(tmp_path):
+    """The real wiring, driven through the CLI: a manifest with `atoc_map`
+    instead of a baked-in `atoc_address` must still PLAN successfully under
+    `--dry-run` -- proving the address came from the build report, not from a
+    refusal that `--dry-run` happens to mask. `--dry-run` is the only safe way
+    to drive this end to end: it bypasses the J-Link tool gate entirely, so
+    nothing here can ever reach a real probe."""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "app-package-map.txt").write_text(
+        "APP Package Start Address: 0x8057F5B0\n", encoding="utf-8"
+    )
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_map: app-package-map.txt}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 0
+    entry = payload["data"]["entries"][0]
+    assert entry["method"] == "alif_mram_jlink"
+    assert entry["status"] == "ok"
+
+
+def test_flow_d_end_to_end_fails_when_the_map_file_never_materialised(tmp_path):
+    """No baked `atoc_address` and no report on disk yet: `plan_alif_mram_jlink`
+    must still refuse loudly rather than the entry silently vanishing."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr/zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_map: app-package-map.txt}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json", "--dry-run", manifest=manifest)
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    # The distinguishing substring, not the `flash_args.atoc` prefix shared with
+    # `flash_args.atoc_address` -- a prefix match cannot tell which required
+    # field the refusal was actually about.
+    assert "flash_args.atoc_address" in entry["message"]
 
 
 # ── pure helpers with edge cases the oracle diff does not reach ─────────────

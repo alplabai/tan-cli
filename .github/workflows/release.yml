@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# tan release pipeline — build per-platform `tan` binaries on a version tag and
+# tan release pipeline — freeze per-platform `tan` binaries on a version tag and
 # publish them as GitHub release assets for the alp-sdk-vscode downloader.
 #
 # ===========================================================================
@@ -25,23 +25,76 @@
 #                GitHub build-provenance attestation covering all of the above —
 #                verify with `gh attestation verify <file> --repo alplabai/tan-cli`.
 #
+#   The binaries are PyInstaller --onefile freezes of `python/` (the Python
+#   port), NOT cargo builds of `crates/` — tan-cli#271. `--onefile` is required,
+#   not a preference: the extension downloads a raw binary to ONE cached path
+#   and has no unpack step anywhere in it
+#   (alp-sdk-vscode/src/alpCli/service.ts:295). The ASSET NAMES keep the RUST
+#   target triples because service.ts:34-46 hardcodes them and builds the
+#   download URL from them; python/scripts/build_binary.sh:33-35 documents the
+#   same rename-on-upload from its own side.
+#
 #   Targets    : win32  x64   -> tan-x86_64-pc-windows-msvc.exe
-#                win32  arm64 -> tan-aarch64-pc-windows-msvc.exe
-#                linux  x64   -> tan-x86_64-unknown-linux-gnu      (glibc >= 2.31)
-#                linux  arm64 -> tan-aarch64-unknown-linux-gnu     (glibc >= 2.31)
-#                linux  x64   -> tan-x86_64-unknown-linux-musl     (static, any libc)
-#                linux  arm64 -> tan-aarch64-unknown-linux-musl    (static, any libc)
 #                darwin x64   -> tan-x86_64-apple-darwin
 #                darwin arm64 -> tan-aarch64-apple-darwin
-#                (Windows ships BOTH x64 and arm64 — pick by process.arch.
-#                 Linux ships BOTH -gnu and -musl per arch — the -musl asset
-#                 runs on any distro/libc, including the -gnu asset's own host.)
+#                linux  x64   -> tan-x86_64-unknown-linux-gnu
 #
-#   Linux builds cross-build via cargo-zigbuild on ubuntu-latest (issue #6):
-#   the -gnu targets are pinned to a glibc 2.31 floor (building on the raw
-#   runner links its glibc — 2.39 on ubuntu-24.04 — which breaks consumers on
-#   older distros with `GLIBC_2.39 not found`); the -musl targets are fully
-#   static. TLS is rustls/ring (no OpenSSL), so musl needs no extra deps.
+#   DELIBERATELY NOT PUBLISHED — an accepted 404 on those two hosts, not an
+#   oversight: tan-aarch64-pc-windows-msvc.exe and
+#   tan-aarch64-unknown-linux-musl (or -gnu). PyInstaller cannot cross-compile:
+#   every asset must be frozen on its own architecture (build_binary.sh:36).
+#   The reason is NOT "no arm64 runner exists" — `windows-11-arm` and
+#   `ubuntu-24.04-arm` are current hosted labels — it is that adding two more
+#   runner types was out of scope for this tag, and on a PRIVATE repo arm64
+#   minutes are billed and plan-gated. Recorded precisely because a wrong
+#   reason is what stops anyone revisiting: the blocker is a decision, not a
+#   platform limit, and it can be revisited whenever arm64 assets are wanted.
+#
+#   The LINUX asset is `-gnu`, and that name is deliberate. It is frozen in
+#   python:3.12-slim-bullseye (Debian 11, glibc 2.31), so it IS a glibc binary;
+#   calling it `-musl` would bake a lie into a filename we support for years.
+#   Two rejected alternatives, both on MEASUREMENT rather than taste:
+#     * Alpine/musl — PyInstaller's musllinux bootloader
+#       (bootloader/Linux-64bit-intel-musl/run) carries ELF interpreter
+#       /lib/ld-musl-x86_64.so.1, so a musl freeze runs ONLY on musl distros.
+#       It is not the "static, runs on any libc" artefact the Rust -musl target
+#       produced, and shipping it would have broken every Ubuntu/Debian/Fedora
+#       user.
+#     * manylinux2014 — ships a STATIC-only CPython
+#       (`sysconfig.get_config_var("Py_ENABLE_SHARED")` is 0, no
+#       libpython3.12*.so anywhere in the image) and PyInstaller requires a
+#       shared libpython: "ERROR: Python was built without a shared library,
+#       which is required by PyInstaller." The whole Linux leg dies, and with
+#       `needs: build` the release job never runs — zero assets under a tag
+#       that is already pushed and irreversible.
+#   Debian 11's 2.31 is also exactly the floor the retired cargo-zigbuild pin
+#   (`x86_64-unknown-linux-gnu.2.31`) targeted, so nothing is lost against the
+#   Rust asset.
+#
+#   The floor in the release notes is MEASURED over the PAYLOAD, inside the
+#   build container, and never off the outer ELF. `readelf -V dist/tan` reads
+#   only PyInstaller's vendored bootloader, whose own floor is GLIBC_2.14 no
+#   matter what image built it (measured: bullseye and trixie both report 2.14
+#   there while the real floors are 2.30 and 2.38) — a constant that cannot
+#   detect the image regressing to a newer glibc, which is the entire point of
+#   measuring. The real floor lives in the appended archive: libpython plus the
+#   extension modules, enumerated from .build/tan/PKG-00.toc.
+#
+#   service.ts:34-46 still maps linux/x64 to the MUSL triple, so the extension
+#   cannot download this asset. Deliberate, for this tag: SUPPORTED_CLI_VERSION
+#   is still pinned to the last Rust release, so the extension never reaches an
+#   RC at all and keeps using what it already has; RC testers install by hand.
+#   Repointing that entry travels with the pin move at GA (#268).
+#
+#   SIZE: build_binary.sh fails the build above 15000000 B and prints what it
+#   measured. The TIGHTEST measurement to date is the Windows freeze at
+#   13717947 B — about 1.3 MB of headroom — so the next runtime dependency
+#   added to python/pyproject.toml is plausibly the one that trips it, under a
+#   tag. (build_binary.sh and tests/conformance/test_packaged_binary.py each
+#   cite an older/other-platform figure for the same artefact; the 15000000 B
+#   ceiling is the single invariant, the sizes are just measurements of it.)
+#   Raising the ceiling is not the fix: it is the only thing that detects a
+#   dirty-interpreter build.
 #
 # See docs/release-contract.md for the full contract + the vscode mapping table.
 # ===========================================================================
@@ -121,81 +174,172 @@ jobs:
     permissions:
       contents: read
 
+  # ci.yml is Rust-only (its own header comment says so); python/tests never
+  # ran on a release tag before this job, so v0.5.0-rc.1 could ship with the
+  # entire Python port failing. `python_only: true` is what actually confines
+  # parity.yml's `workflow_call` run to the `python-tests` job —
+  # seam1-plan-shape/seam2/first-blink read that input (negated) in their
+  # `if:`, not `github.event_name`: inside a called workflow `github` is the
+  # CALLER's context (this file's own `push` trigger), so
+  # `github.event_name != 'workflow_call'` is always true and cannot gate
+  # anything — an explicit input is the only way this caller can tell
+  # parity.yml which jobs to skip. seam1/seam2/first-blink already gate every
+  # commit on `main` as tan-cli's own PR check, so a release tag (cut from an
+  # already-green commit) gains nothing re-running them here; see parity.yml's
+  # `workflow_call:` comment.
+  python-gates:
+    uses: ./.github/workflows/parity.yml
+    with:
+      python_only: true
+    permissions:
+      contents: read
+
+  # One PyInstaller freeze of `python/` per runner. There is no cross-build step
+  # and there cannot be one: PyInstaller freezes the interpreter it is running
+  # under, so the runner IS the target. That is why two of the six triples the
+  # extension knows about are not published here — see the header for the real
+  # reason (it is a scope/plan decision, NOT the absence of arm64 runners).
   build:
-    needs: [verify-version, gates]
+    needs: [verify-version, gates, python-gates]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
+          - os: windows-latest
             asset: tan-x86_64-pc-windows-msvc.exe
             ext: .exe
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            asset: tan-aarch64-pc-windows-msvc.exe
-            ext: .exe
-          # `zigbuild_target` opts a job into cargo-zigbuild; the `.2.31`
-          # suffix pins the -gnu builds' glibc floor (zigbuild still writes
-          # the output under the bare `target/<target>/release/` dir).
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            asset: tan-x86_64-unknown-linux-gnu
-            ext: ""
-            zigbuild_target: x86_64-unknown-linux-gnu.2.31
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            asset: tan-aarch64-unknown-linux-gnu
-            ext: ""
-            zigbuild_target: aarch64-unknown-linux-gnu.2.31
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            asset: tan-x86_64-unknown-linux-musl
-            ext: ""
-            zigbuild_target: x86_64-unknown-linux-musl
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            asset: tan-aarch64-unknown-linux-musl
-            ext: ""
-            zigbuild_target: aarch64-unknown-linux-musl
-          - target: x86_64-apple-darwin
-            os: macos-latest
+          # macos-15-intel / macos-15, NOT macos-13 / macos-14: the macOS 13
+          # image is retired (gone from actions/runner-images, so `runs-on:
+          # macos-13` matches no runner and the job never schedules) and macOS
+          # 14 is flagged deprecated there. These two are the current Intel and
+          # Apple-silicon labels of the SAME OS version, which is what keeps the
+          # two darwin assets comparable.
+          - os: macos-15-intel
             asset: tan-x86_64-apple-darwin
             ext: ""
-          - target: aarch64-apple-darwin
-            os: macos-latest
+          - os: macos-15
             asset: tan-aarch64-apple-darwin
             ext: ""
+          # `container` both routes this leg through the docker step below AND
+          # is the single place the build image is named.
+          - os: ubuntu-latest
+            asset: tan-x86_64-unknown-linux-gnu
+            ext: ""
+            container: python:3.12-slim-bullseye
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # 3.12 is the floor python/pyproject.toml declares, and the floor is what
+      # ships: `tan build` bakes the interpreter into every Zephyr slice and
+      # Zephyr's own python.cmake rejects anything older.
+      - uses: actions/setup-python@v5
+        if: ${{ !matrix.container }}
         with:
-          toolchain: stable
-          target: ${{ matrix.target }}
-      - name: install cargo-zigbuild
-        if: matrix.zigbuild_target != ''
-        # Must be a pip --user install, NOT pipx: cargo-zigbuild finds zig via
-        # `zig` on PATH or `python3 -m ziglang`, and pipx isolates the ziglang
-        # wheel inside its own venv where neither works ("Failed to find zig").
-        # --break-system-packages sidesteps PEP 668 on the 24.04 runner; the
-        # user site keeps ziglang importable by the system python3.
-        run: |
-          pip3 install --user --break-system-packages cargo-zigbuild
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - name: build release binary
+          python-version: "3.12"
+
+      # A CLEAN venv, not the runner's shared interpreter: PyInstaller bundles
+      # whatever its hooks can see, and the hosted images ship numpy/Pillow/
+      # pywin32 — measured 34349423 B dirty vs ~13.7 MB clean, against the
+      # 15000000 B ceiling scripts/build_binary.sh asserts. Deps come from
+      # `pip install .` (pyproject is the one dependency list) rather than a
+      # hand-copied set that can drift from it.
+      - name: freeze tan (PyInstaller, clean venv)
+        if: ${{ !matrix.container }}
         shell: bash
-        # --locked: publish binaries built from the exact dep set CI compiled and
-        # tested, never a re-resolved one.
+        working-directory: python
         run: |
-          if [ -n "${{ matrix.zigbuild_target }}" ]; then
-            cargo zigbuild --release --locked --target "${{ matrix.zigbuild_target }}" --bin tan
-          else
-            cargo build --release --locked --target "${{ matrix.target }}" --bin tan
-          fi
+          set -euo pipefail
+          python -m venv .venv-build
+          VENV_PY=.venv-build/bin/python
+          [ -x "$VENV_PY" ] || VENV_PY=.venv-build/Scripts/python.exe
+          "$VENV_PY" -m pip install --quiet --upgrade pip
+          "$VENV_PY" -m pip install --quiet . "pyinstaller>=6.10"
+          PYTHON="$VENV_PY" bash scripts/build_binary.sh
+          # pytest AFTER the freeze, never before: the artifact is already built,
+          # so this cannot inflate it. tests/conformance/test_packaged_binary.py
+          # is the extension's own acceptance test (one file, <3 s --version,
+          # the --add-data scaffold templates) and it self-skips unless dist/
+          # exists -- which is exactly what the step above just produced. A
+          # compile used to prove the asset ran; a freeze proves nothing until
+          # it is executed, so it is executed here.
+          "$VENV_PY" -m pip install --quiet pytest
+          "$VENV_PY" -m pytest tests/conformance/test_packaged_binary.py -q
+
+      # The Linux freeze runs in an OLD-glibc container so the binary's floor is
+      # the CONTAINER's glibc, not the runner's. Freezing on bare ubuntu-latest
+      # links its glibc (2.39 on 24.04) and hands users `GLIBC_2.39 not found`
+      # — the exact defect the retired cargo-zigbuild `.2.31` pin existed to
+      # avoid. PyInstaller has no equivalent flag, so an old distro IS the
+      # mechanism. See the header for why this is neither Alpine/musl nor
+      # manylinux2014 (both were tried and both are disqualified by
+      # measurement, not preference).
+      #
+      # `docker run` from a normal job, NOT a job-level `container:`: checkout
+      # and upload-artifact then keep running on the host where their bundled
+      # Node works, and the image needs no git.
+      #
+      # The floor is measured HERE, in the image that produced the binary, over
+      # the PAYLOAD rather than the outer ELF: `.build/tan/PKG-00.toc` is a
+      # plain Python literal listing every file PyInstaller appended, so its
+      # BINARY/EXTENSION entries are exactly libpython + the extension modules
+      # + their .so dependencies. `readelf -V dist/tan` would report the
+      # bootloader's own GLIBC_2.14 under any image and is a lower bound only.
+      # It refuses (exit non-zero) rather than guessing if the TOC yields
+      # implausibly few native files or no GLIBC_ version at all — a wrong
+      # number here becomes a compatibility promise in the release notes.
+      - name: freeze tan (PyInstaller in ${{ matrix.container }}) + measure the glibc floor
+        if: ${{ matrix.container }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm -v "$PWD:/src" -w /src/python "${{ matrix.container }}" bash -euc '
+            python -m venv /tmp/venv
+            /tmp/venv/bin/pip install --quiet --upgrade pip
+            /tmp/venv/bin/pip install --quiet . "pyinstaller>=6.10"
+            PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
+            /tmp/venv/bin/pip install --quiet pytest pyelftools
+            /tmp/venv/bin/python -m pytest tests/conformance/test_packaged_binary.py -q
+            /tmp/venv/bin/python - <<"PY"
+          import ast, sys
+          from elftools.elf.elffile import ELFFile
+          from elftools.elf.gnuversions import GNUVerNeedSection
+
+          data = ast.literal_eval(open(".build/tan/PKG-00.toc", encoding="utf-8").read())
+          toc = [e for x in data if isinstance(x, list)
+                 for e in x if isinstance(e, tuple) and len(e) == 3]
+          paths = [p for _, p, t in toc if t in ("BINARY", "EXTENSION")]
+          vers = set()
+          for p in paths:
+              with open(p, "rb") as f:
+                  for sec in ELFFile(f).iter_sections():
+                      if isinstance(sec, GNUVerNeedSection):
+                          for _, auxes in sec.iter_versions():
+                              vers.update(a.name for a in auxes if a.name.startswith("GLIBC_"))
+          if len(paths) < 5 or not vers:
+              sys.exit("payload scan found %d native files / %d GLIBC_ versions -- "
+                       "refusing to guess a floor" % (len(paths), len(vers)))
+          floor = max(vers, key=lambda v: tuple(int(n) for n in v.split("_")[1].split(".")))
+          open("dist/glibc-floor.txt", "w").write(floor + "\n")
+          print("payload floor over %d native files: %s (saw: %s)"
+                % (len(paths), floor, " ".join(sorted(vers))))
+          PY
+          '
+
+      # Its own artifact, NOT part of the asset set -- the release job pulls the
+      # binaries with `pattern: tan-*` so this can never leak into assets/ and
+      # be published as a release asset.
+      - name: upload the measured glibc floor
+        if: ${{ matrix.container }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: glibc-floor
+          path: python/dist/glibc-floor.txt
+          if-no-files-found: error
+
       - name: stage asset
         shell: bash
-        run: cp "target/${{ matrix.target }}/release/tan${{ matrix.ext }}" "${{ matrix.asset }}"
+        run: cp "python/dist/tan${{ matrix.ext }}" "${{ matrix.asset }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
@@ -215,10 +359,18 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
+      # `pattern: tan-*` and not "everything": assets/ is published verbatim
+      # (`files: assets/*`), so anything else this workflow uploads must be
+      # fetched separately or it becomes a release asset by accident.
       - uses: actions/download-artifact@v4
         with:
+          pattern: tan-*
           path: assets
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: glibc-floor
+          path: meta
       # The JSON envelope contract, as a downloadable artefact (issue #106).
       # alp-sdk-vscode gates real behaviour on exact issue-code strings and
       # unversioned `data` field names, and every one of those matches fails
@@ -274,6 +426,21 @@ jobs:
       - name: Slice CHANGELOG section for the release notes
         shell: bash
         run: |
+          # Measured by the build leg, inside the image that produced the
+          # binary, over the appended payload -- see that step. It cannot be
+          # measured HERE: `readelf -V` on a onefile reads only the vendored
+          # bootloader (a container-invariant GLIBC_2.14), and the payload is
+          # inside the archive where the outer ELF's .gnu.version_r cannot see
+          # it. `|| true` because this step runs under `bash -eo pipefail`,
+          # where a failing substitution would abort before the guard below
+          # could ever print its reason.
+          GLIBC_FLOOR="$(cat meta/glibc-floor.txt 2>/dev/null || true)"
+          if [ -z "$GLIBC_FLOOR" ]; then
+            echo "::error::meta/glibc-floor.txt is missing or empty -- the Linux build leg did not report a measured floor, and the notes must not state one nothing measured."
+            exit 1
+          fi
+          echo "measured glibc floor of the published Linux asset: ${GLIBC_FLOOR}"
+
           # The tag is vX.Y.Z; the CHANGELOG header is `## [X.Y.Z]` (no v-prefix,
           # em-dash date). Extract that one section as the GitHub Release body.
           VERSION="${GITHUB_REF_NAME#v}"
@@ -324,13 +491,30 @@ jobs:
 
           ## Release assets
 
-          - `-gnu` Linux binaries are cross-built with a pinned **glibc 2.31**
-            floor -- they run on Debian 11 (bullseye) / Ubuntu 20.04 and newer.
-            `-musl` Linux binaries are fully static and run on any distro/libc.
+          Four binaries, each a single-file freeze of the Python `tan`:
+
+          - `tan-x86_64-pc-windows-msvc.exe` -- Windows x64
+          - `tan-x86_64-apple-darwin` / `tan-aarch64-apple-darwin` -- macOS
+          - `tan-x86_64-unknown-linux-gnu` -- Linux x64, frozen on Debian 11.
+            It requires **__GLIBC_FLOOR__** or newer -- measured from the
+            binary's own bundled payload at build time, not assumed from the
+            build image. Debian 11+ / Ubuntu 20.04+ / RHEL 9+ are comfortably
+            above it.
+
+          There is no arm64 Windows and no arm64 Linux asset in this release,
+          and no `-musl` asset. A frozen binary has to be built on the
+          architecture it runs on, and this release builds on four runners; if
+          you need an arm64 Linux or arm64 Windows `tan`, install from source
+          (`pip install ./python`) and say so on the issue tracker.
+
           - Every binary + `checksums.txt` carries a GitHub build-provenance
             attestation. Verify with:
             `gh attestation verify <downloaded-file> --repo alplabai/tan-cli`
           NOTES
+          # The heredoc above is quoted (no expansion -- it is full of backticks
+          # that would otherwise be command substitution), so the measured floor
+          # is substituted here instead.
+          sed -i "s/__GLIBC_FLOOR__/${GLIBC_FLOOR}/" release_notes.md
           echo "----- release_notes.md -----"; cat release_notes.md
       # A SemVer pre-release tag carries a hyphen in its version (`v0.4.0-rc1`);
       # a real release never does. Both flags are derived from that one fact so
@@ -362,99 +546,47 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
 
-  # crates.io — `cargo install alp-tan-cli` (the crate is `alp-tan-cli` because
-  # `tan`/`tan-cli` are already taken on crates.io; the built binary is still
-  # `tan`). Publishes tan-core THEN alp-tan-cli (core first — `cargo publish`
-  # waits for it to appear on the index before publishing the crate that
-  # path-depends on it). Gated on
-  # CARGO_REGISTRY_TOKEN; skipped (not failed) when the secret is unset so a
-  # fork/CI run without publish credentials still goes green.
+  # The crates.io job is GONE (tan-cli#271). It published `alp-tan-cli` from
+  # `crates/`, and no asset in this release comes from `crates/` any more -- the
+  # four binaries above are PyInstaller freezes of `python/`. Keeping it behind
+  # a false `if:` would have left a `cargo publish` in the release path shipping
+  # a different program under the same name; deleting it is the only version of
+  # "must not run" that is actually true. The PyPI equivalent (`pip install
+  # alp-tan`, the name python/pyproject.toml already reserves) is a separate
+  # decision and deliberately not smuggled in here.
+
+  # ---------------------------------------------------------------------------
+  # OFF. `if: ${{ false }}` — this job is skipped, not failed, on every tag.
   #
-  # A pre-release tag is deliberately NOT published to crates.io. crates.io
-  # allows a SemVer pre-release version and `cargo install` / `^` ranges do skip
-  # one by default, so this is a conservative call rather than a forced one --
-  # but a crates.io publish can only ever be YANKED, never deleted, while a
-  # GitHub pre-release can be removed outright. Keeping an rc off crates.io
-  # keeps it fully retractable, which is the whole point of cutting one. Relax
-  # this the day we want an rc installable via `cargo install --version`.
-  publish_crates:
-    name: publish · crates.io
-    needs: release
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    env:
-      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: stable
-          rustflags: "" # keep parity with the local gates (see ci.yml's lint job)
-
-      # `verify-version` no longer gates the tag on Cargo.toml -- the release
-      # assets are frozen from the Python package and `TAN_VERSION` is the source
-      # of truth -- so a v0.5.0 tag now REACHES this job with Cargo.toml still on
-      # its own 0.4.x cadence. Publishing then would put `alp-tan-cli@0.4.1-dev`
-      # on crates.io while the summary below claimed `alp-tan-cli@0.5.0`, and a
-      # crates.io publish is unretractable (yank hides it from resolution; it
-      # never disappears). So: a tag is a RUST release only when Cargo.toml says
-      # it is.
-      #
-      # Skipping is announced in the run summary, not just as an annotation --
-      # #151 is the proof that an annotation alone reads as a publish.
-      - name: Is this tag a Rust release?
-        id: rust
-        shell: bash
-        run: |
-          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
-          tag="${GITHUB_REF_NAME#v}"
-          echo "cargo=$cargo_version  tag=$tag"
-          if [ "$cargo_version" = "$tag" ]; then
-            echo "match=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "match=false" >> "$GITHUB_OUTPUT"
-            {
-              echo "### crates.io: NOT PUBLISHED — this tag is not a Rust release"
-              echo "\`Cargo.toml\` is \`$cargo_version\`, the tag is \`v$tag\`, and the release assets are PyInstaller freezes of \`python/\`. There is no crate at \`$tag\` to publish; \`pip install alp-tan\` is the source-install path for this release. Bump \`Cargo.toml\` and re-tag if a Rust release was intended."
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::warning::skipping crates.io: Cargo.toml $cargo_version != tag $tag (python-sourced release)"
-          fi
-
-      # This job ONLY runs on a final tag -- the `if:` above excludes every
-      # pre-release -- so a missing token here is not "an optional channel we
-      # skipped", it is a release advertising `cargo install alp-tan-cli` when
-      # that command does not resolve. v0.4.0 shipped exactly that: this job
-      # reported `success`, the `::warning::` went unread, and crates.io
-      # answered `crate 'alp-tan-cli' does not exist` (#151).
-      - name: Refuse to "publish" with no token
-        if: ${{ steps.rust.outputs.match == 'true' && env.CARGO_REGISTRY_TOKEN == '' }}
-        run: |
-          echo "### crates.io: NOT PUBLISHED" >> "$GITHUB_STEP_SUMMARY"
-          echo "\`CARGO_REGISTRY_TOKEN\` is not set, so \`cargo install alp-tan-cli\` will not resolve for this release." >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::CARGO_REGISTRY_TOKEN is not set. A FINAL release must not report a successful crates.io publish it did not perform (#151). Add the secret, or drop the crates.io install path from the docs and this job."
-          exit 1
-
-      - name: Publish tan-core then alp-tan-cli
-        if: ${{ steps.rust.outputs.match == 'true' }}
-        # tan-core first; cargo publish waits for it to hit the index before
-        # alp-tan-cli (which depends on it) is published.
-        run: |
-          cargo publish --package tan-core --locked
-          cargo publish --package alp-tan-cli --locked
-
-      # The run summary, not just an annotation. An annotation is the weakest
-      # signal GitHub has and #151 is the proof: the skip warning was emitted
-      # correctly on v0.4.0 and still read as a publish.
-      - name: Record the crates.io outcome
-        if: ${{ steps.rust.outputs.match == 'true' }}
-        run: |
-          echo "### crates.io: published \`alp-tan-cli@${GITHUB_REF_NAME#v}\`" >> "$GITHUB_STEP_SUMMARY"
-
+  # Two independent reasons, either one sufficient:
+  #
+  #  1. The shim resolves its asset URLs per host from `npm-shim/postinstall.js`
+  #     (`TAG = v${pkg.version}`), and two entries in its map name assets this
+  #     tag does not publish: `win32/arm64` -> aarch64-pc-windows-msvc and
+  #     `linux/arm64` -> aarch64-unknown-linux-gnu. (`linux/x64` ->
+  #     x86_64-unknown-linux-gnu DOES resolve: postinstall.js:36 already names
+  #     the gnu triple this tag publishes.) Publishing the shim against a
+  #     partial asset set turns `npm i -g @alplabai/tan` into a 404 at
+  #     POSTINSTALL time on those two hosts, which is worse than not
+  #     publishing it.
+  #  2. #233: NPM_TOKEN is a classic publish token on a 2FA account, so
+  #     `npm publish` answers `EOTP` and demands an interactive OTP. It cannot
+  #     succeed unattended regardless of (1).
+  #
+  # Nothing depends on it: `npm view @alplabai/tan` is `E404 Not Found` -- the
+  # package has never been published at any version -- and alp-sdk-vscode never
+  # reaches for npm (it downloads raw release assets; grep src/alpCli/*.ts for
+  # `@alplabai/tan` returns nothing). README already warns that neither
+  # package-manager install path resolves.
+  #
+  # Everything below is left intact and working so re-enabling is a one-line
+  # change once the shim's map matches the published asset set and the token is
+  # fixed.
+  #
   # npm shim — `npm i -g @alplabai/tan` / `npx @alplabai/tan`. One release tag
   # scheme (v*), one workflow. Gated on NPM_TOKEN; on a FINAL tag a missing
-  # token FAILS rather than skipping, mirroring the crates.io job above (#151).
+  # token FAILS rather than skipping, mirroring the crates.io job this file
+  # used to carry (#151).
   #
   # A pre-release tag is skipped here too, and this path was the sharpest of the
   # three: `npm publish` below passes no `--tag`, so npm defaults the release to
@@ -470,7 +602,8 @@ jobs:
   publish_npm:
     name: publish · npm shim
     needs: release
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
+    # Was: startsWith(github.ref,'refs/tags/') && !contains(github.ref_name,'-')
+    if: ${{ false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

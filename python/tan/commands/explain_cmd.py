@@ -556,6 +556,11 @@ def _emit(json_mode: bool, data: dict, issues: list[Issue], exit_code: ExitCode)
 
 
 def explain(
+    template_arg: str = typer.Argument(
+        None,
+        metavar="[TEMPLATE]",
+        help="Project or module template id -- shorthand for --template.",
+    ),
     template: str = typer.Option(
         None,
         "--template",
@@ -587,12 +592,39 @@ def explain(
     `tan --project X explain` must not be parse errors -- verified against the
     oracle. `alp-sdk-vscode/src/ideHub/newProjectFlowPanel.ts:188` invokes
     exactly the `--sdk-root` shape.
+
+    `[TEMPLATE]` (the positional) is a PORT-ONLY convenience, not oracle
+    behavior: the real `crates/tan-cli` `ExplainArgs` has no positional field,
+    only `#[arg(long)] template`, so `tan explain minimal-app` errors there too
+    ("Got unexpected extra argument(s)") even though every other `tan`
+    subcommand that names a single id (`inspect`, `generate --target`, ...)
+    reads naturally with one. Accepted here ONLY when `--template` is not
+    already given; giving BOTH is a coded error (`explain.positional-template-
+    conflict`), not a silent `--template`-wins -- the accepted-but-ignored
+    input class this port keeps re-introducing. Folded into `template` before
+    `resolve()` so the rest of this function is unaware of it.
     """
     if output_format not in ("text", "json"):
         raise typer.BadParameter(
             f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
         )
     json_mode = output_format == "json"
+
+    if template_arg is not None and template is not None:
+        _fail(
+            json_mode,
+            ExplainError(
+                "explain.positional-template-conflict",
+                f"Use either the positional template id ('{template_arg}') or "
+                f"--template ('{template}'), not both.",
+                f"explain: use either the positional template id ('{template_arg}') "
+                f"or --template ('{template}'), not both in the same command.",
+            ),
+        )
+        return
+
+    if template is None:
+        template = template_arg
 
     try:
         result = resolve(template, target)

@@ -240,6 +240,36 @@ class TargetPlan:
     targets: tuple[FlashTarget, ...]
     warnings: tuple[str, ...]
     refused: tuple[str, ...]
+    #: The subset of "status not ok" refusals whose slice `status` is
+    #: `"skipped"` -- i.e. `tan build` itself declined to build this slice
+    #: under `executionPolicy.missingTool`/`.nullCommand` (a host with no
+    #: `bitbake`, say). That was a policy decision already made and reported
+    #: at build time; `flash` refusing to flash a never-built artefact is
+    #: still correct (there is nothing to flash), but it must not ALSO read
+    #: as a flash failure for a slice the customer's manifest already
+    #: explained away. `refused` (a `"failed"`/`"pending"`/other status) is
+    #: the opposite: `tan build` tried and the slice is broken or was never
+    #: reconciled, which must keep failing `tan flash`. Callers surface this
+    #: bucket as a WARNING and must not fold it into a failure count -- see
+    #: `refused` for the error-severity, exit-code-affecting bucket.
+    #:
+    #: **DIVERGES from the shipped Rust oracle.** `crates/tan-core/src/
+    #: flash/mod.rs`'s `plan_flash_targets` has no `refused_skipped` bucket at
+    #: all -- a `status: skipped` slice/helper lands in the ONE `refused` list
+    #: alongside `failed`/`pending`/anything else non-`ok`, and the CLI seeds
+    #: `failed` from `refused.len()` before the dispatch loop even runs, so the
+    #: oracle FAILS the run on a `status: skipped` slice exactly like any other
+    #: bad status. This split (and the caller's warning-only, exit-0 treatment
+    #: when something else DID flash) is a deliberate product improvement on
+    #: top of the port, not a porting bug -- but the caller (`tan.commands.
+    #: flash_cmd.flash`) MUST still fail the run when every match was a
+    #: `refused_skipped` entry and nothing flashed (`flash.nothing-flashed`),
+    #: or this bucket reintroduces the exact silent-success class `refused`
+    #: exists to prevent, just inverted. `tests/parity/
+    #: test_flash_oracle_parity.py` deliberately carries no `status: skipped`
+    #: case for this reason -- the two implementations disagree there by
+    #: design and an oracle diff would only fail.
+    refused_skipped: tuple[str, ...] = ()
 
 
 def plan_flash_targets(
@@ -255,18 +285,27 @@ def plan_flash_targets(
       when a later run has no artefact for that core, so a run-1 success followed
       by a run-2 failure/skip leaves run-1's elf on disk under a manifest
       reporting a broken slice. Flashing that stale elf and silently dropping the
-      slice are the same silent-failure class.
+      slice are the same silent-failure class. A `status: skipped` refusal is
+      split into `refused_skipped` rather than `refused`: `tan build` already
+      decided (via `executionPolicy`) that this slice was not supposed to build
+      on this host -- e.g. no `bitbake` on an MCU-only checkout -- and that is
+      not a flash failure, it is `tan flash` agreeing with a decision already
+      made and reported. A genuinely broken slice (`status: failed`, or any
+      other non-`ok`/non-`skipped` value) stays in `refused`.
     - Helpers always come AFTER all slices.
     - `core` flashes only that slice and skips every helper; `helper` skips every
       slice and flashes only that helper.
 
-    Callers MUST surface `refused` as an error (not a warning): those entries
+    Callers MUST surface both `refused` and `refused_skipped`: those entries
     never enter `targets`, so a caller that only reports `targets`/`warnings`
-    would show a clean run while a stale artefact stayed unflashed.
+    would show a clean run while a stale/never-built artefact stayed unflashed.
+    Only `refused` (not `refused_skipped`) may fail the overall run -- see
+    `TargetPlan.refused_skipped`.
     """
     targets: list[FlashTarget] = []
     warnings: list[str] = []
     refused: list[str] = []
+    refused_skipped: list[str] = []
 
     def find_slice(cid: str) -> Slice | None:
         # Non-empty core_id only, matching the Python dict-comprehension guard
@@ -308,11 +347,26 @@ def plan_flash_targets(
                 )
                 continue
             if not slice_should_flash(found.status):
-                refused.append(
-                    f"flash: slice '{found.core_id}' build status is '{found.status}' "
-                    "(not 'ok'); refusing to flash its artefact -- it may be stale "
-                    "from a previous successful build. Rebuild it first."
-                )
+                if found.status == "skipped":
+                    # A policy decision `tan build` already made and reported
+                    # (`executionPolicy.missingTool`/`.nullCommand`), not a
+                    # broken build -- "stale, rebuild it" is wrong on both
+                    # counts: nothing was ever built, so nothing is stale, and
+                    # rebuilding ON THIS HOST hits the same policy skip again.
+                    refused_skipped.append(
+                        f"flash: slice '{found.core_id}' build status is 'skipped' -- "
+                        "tan build already declined to build it under executionPolicy "
+                        "(a missing tool or a null command on this host); there is "
+                        "nothing to flash. Rebuilding on this same host will skip it "
+                        "again -- it needs a host where that tool resolves."
+                    )
+                else:
+                    refused.append(
+                        f"flash: slice '{found.core_id}' build status is "
+                        f"'{found.status}' (not 'ok'); refusing to flash its artefact "
+                        "-- it may be stale from a previous successful build. "
+                        "Rebuild it first."
+                    )
                 continue
             targets.append(
                 FlashTarget(
@@ -341,7 +395,9 @@ def plan_flash_targets(
                 )
             )
 
-    return TargetPlan(tuple(targets), tuple(warnings), tuple(refused))
+    return TargetPlan(
+        tuple(targets), tuple(warnings), tuple(refused), tuple(refused_skipped)
+    )
 
 
 def slice_should_flash(status: str) -> bool:
@@ -421,6 +477,17 @@ def _fa_get(value: Any, key: str) -> Any:
     if not isinstance(value, dict):
         return None
     return value.get(key)
+
+
+def _fa_has_key(value: Any, key: str) -> bool:
+    """Whether `flash_args` is a mapping that carries `key` AT ALL --
+    independent of what it resolves to. `_fa_get`/`fa_str_checked` collapse a
+    present-but-null value and a genuinely-absent key to the same `None`,
+    which is right for every OPTIONAL field but wrong for one that must
+    distinguish "not selected" from "selected with a malformed value" (see
+    `slot0_load_address` in `plan_alif_mram_jlink`, and `expect_dpidr` /
+    `jlink_device` in `flow_d_preflight_script`)."""
+    return isinstance(value, dict) and key in value
 
 
 def _yaml_debug(value: Any) -> str:
@@ -985,27 +1052,38 @@ def plan_xspi_flashwriter(inp: FlashInputs, which: Callable[[str], bool]) -> Fla
 
 # ── Flow D: J-Link direct MRAM write ────────────────────────────────────────
 
-#: The `flash_args` keys that ARM Flow D. Both must be present: without a
-#: part-number device profile J-Link has no MRAM loader at all, and without the
-#: app's own MRAM address there is nothing to `loadbin` it to. See
-#: `plan_alif_mram_jlink`.
-FLOW_D_KEYS = ("jlink_flash_device", "mram_address")
+#: The `flash_args` key that ARMS Flow D. Only the part-number device profile
+#: is required: without it J-Link has no MRAM loader at all, so its presence
+#: alone is metadata's statement that this silicon has one. `slot0_load_address` is
+#: NOT an arming key -- it does not exist in any alp-sdk branch today (see
+#: `plan_alif_mram_jlink`'s shape note) and, even once published, it only ever
+#: selects the two-blob mramxip SHAPE, an ITCM-overflow exception, not whether
+#: Flow D applies at all. Requiring it here would leave Flow D permanently
+#: unarmed for every real AEN entry, which is the bug this comment replaces.
+FLOW_D_KEYS = ("jlink_flash_device",)
 FLOW_D_METHOD = "alif_mram_jlink"
 
 
 def flow_d_available(flash_args: Any) -> bool:
-    """Whether the manifest armed Flow D for this entry, i.e. supplied BOTH
-    `FLOW_D_KEYS`. Purely a data question -- see `select_flash_method`.
+    """Whether the manifest armed Flow D for this entry, i.e. supplied every
+    key in `FLOW_D_KEYS`. Purely a data question -- see `select_flash_method`.
 
-    PRESENCE, deliberately -- not "is a non-empty string". `plan_alif_mram_jlink`
-    reads both keys with `fa_str_checked`, which accepts the bare YAML integer an
-    UNQUOTED hex `mram_address:` resolves to; a `fa_str`-based check here would
-    call that entry unarmed and SILENTLY route it to Flow A over the SE-UART
-    instead. Transport must never be decided by a quoting detail: a
-    present-but-malformed Flow D arming is a loud refusal from the builder, which
-    is the correct outcome, and this predicate's job is only to get it there.
+    KEY PRESENCE, deliberately -- not "resolves to a non-null/non-empty
+    string": an `is not None` check collapses a present-but-null
+    `jlink_flash_device:` (bare YAML null) to "absent" and SILENTLY routes the
+    entry to Flow A over the SE-UART instead, with no diagnostic at all.
+    Transport must never be decided by a quoting detail. Using `_fa_has_key`
+    arms Flow D on presence alone, so a present-but-null/malformed value still
+    reaches `plan_alif_mram_jlink`, which turns it into the loud refusal it
+    already produces for every other malformed Flow D field -- not a silent
+    Flow A fallback. `fa_str_checked` itself only raises on a genuinely
+    malformed (wrong-type) value; for present-but-null it quietly returns
+    `None` same as for absent, so it is `plan_alif_mram_jlink`'s own explicit
+    `_fa_has_key` re-check on that `None` (distinguishing "present but
+    null/empty" from "absent") that decides the present-but-null case, not
+    `fa_str_checked`'s own check.
     """
-    return all(_fa_get(flash_args, key) is not None for key in FLOW_D_KEYS)
+    return all(_fa_has_key(flash_args, key) for key in FLOW_D_KEYS)
 
 
 def select_flash_method(target: FlashTarget) -> str | None:
@@ -1021,22 +1099,21 @@ def select_flash_method(target: FlashTarget) -> str | None:
       dedicated 1.8 V-capable USB-UART, which the bench runbook calls the #1
       trap.
     * **Flow D** -- `alif_mram_jlink`: J-Link straight over SWD, no SE-UART. Same
-      blobs, same addresses, ~0.16 s, and the bench's day-to-day default
+      blob(s), same addresses, ~0.16 s, and the bench's day-to-day default
       (`docs/aen-bench-bringup.md`: "Flow D is the day-to-day default now").
 
     The switch is made **entirely from data**, never from silicon knowledge: a
-    `zephyr_west_flash` entry whose `flash_args` carries both `FLOW_D_KEYS` is
+    `zephyr_west_flash` entry whose `flash_args` carries `FLOW_D_KEYS` is
     dispatched as Flow D instead. tan cannot ask "is this an AEN MRAM part?" --
     that would put a SKU or an address in tan, which ADR-0017 / I-26 forbid and
     no gate would catch. What it CAN ask is "did the SoM preset hand me a
-    part-number J-Link profile and an MRAM address for this slice?", because
-    those arriving at all IS metadata's statement that this silicon has a J-Link
-    MRAM loader.
+    part-number J-Link profile for this slice?", because that arriving at all
+    IS metadata's statement that this silicon has a J-Link MRAM loader.
 
     Consequence, stated plainly: with today's emit
     (`tan/planner/orchestrator.py::_slice_flash_recipe` returns
-    `("zephyr_west_flash", {})` for every Zephyr slice) NO entry carries those
-    keys, so every AEN slice still takes Flow A. Arming Flow D is now a
+    `("zephyr_west_flash", {})` for every Zephyr slice) NO entry carries that
+    key, so every AEN slice still takes Flow A. Arming Flow D is now a
     one-function change in THIS repo; it is deliberately NOT emulated here by
     sniffing the SKU.
     """
@@ -1046,32 +1123,89 @@ def select_flash_method(target: FlashTarget) -> str | None:
     return method
 
 
-def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
-    """Flow D: burn the app blob + its signed ATOC into MRAM over SWD with
-    J-Link's built-in Alif MRAM loader, verify both, then PIN-reset so the
-    Secure Enclave boot ROM boots the image -- the same two blobs at the same
-    addresses SETOOLS writes over the SE-UART, so no re-signing and no keys.
+def parse_atoc_start_address(text: str) -> str | None:
+    """The ATOC package's MRAM placement out of an `app-gen-toc`
+    `app-package-map.txt` report -- the LAST `APP Package Start Address:`
+    line's last field, mirroring every bench script's own
+    ``awk '/APP Package Start Address:/{print $NF}' app-package-map.txt | tail
+    -1`` byte for byte (last match wins: a re-signed re-run APPENDS a fresh
+    block rather than truncating the file, per
+    `scripts/bench/aen/flash-jlink.sh`/`flash-jlink-mramxip.sh`/
+    `flash-update-log-dual.sh`). `None` when the marker never appears -- an
+    empty, foreign or not-yet-signed file, not a malformed one; the caller
+    decides what that means.
 
-    **Every identifier is read from `flash_args`; none is baked in.** Required:
+    **This is a BUILD-TIME output, never plan-time metadata.** `app-gen-toc`
+    writes the address fresh at signing time and the runbook says outright it
+    SHIFTS per build/config -- no field under `metadata/**` can express it, so
+    parsing this report is the only correct source. See `plan_alif_mram_jlink`
+    for the required/optional split this feeds; the actual file read happens
+    in `tan.commands.flash_cmd` (IO), never here.
+    """
+    address: str | None = None
+    for line in text.splitlines():
+        if "APP Package Start Address:" not in line:
+            continue
+        fields = line.split()
+        if fields:
+            address = fields[-1]
+    return address
+
+
+def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
+    """Flow D: burn the signed ATOC into MRAM over SWD with J-Link's built-in
+    Alif MRAM loader, verify it, then PIN-reset so the Secure Enclave boot ROM
+    boots the image -- the same blob(s) at the same addresses SETOOLS writes
+    over the SE-UART, so no re-signing and no keys.
+
+    **Two shapes, selected from data, matching the two bench scripts they
+    port** (`scripts/bench/aen/flash-jlink.sh` / `flash-jlink-mramxip.sh`):
+
+    * **Default -- single ATOC blob.** The day-to-day flow
+      (`flash-jlink.sh`): the ATOC is self-contained (an ITCM-load package,
+      its own embedded load address set by `app-gen-toc`), so ONE
+      `loadbin`/`verifybin` of `atoc` at `atoc_address` is the whole write.
+      This is what runs whenever `flash_args` omits `slot0_load_address`.
+    * **mramxip -- two blobs.** The ITCM-overflow exception
+      (`flash-jlink-mramxip.sh`), for an app LINKED into MRAM slot0 (built
+      with `CONFIG_USE_DT_CODE_PARTITION=y`, a per-app-build opt-in tan does
+      not set): the app blob itself also needs writing, to `slot0_load_address`,
+      ahead of the ATOC. This activates only when `flash_args.slot0_load_address`
+      is present -- tan cannot detect the Kconfig opt-in from here, so a
+      manifest that arms the mramxip shape must supply the address that
+      proves it was built that way.
+
+    **Every identifier is read from `flash_args`; none is baked in.** Required
+    in both shapes:
 
     * `jlink_flash_device` -- the PART-NUMBER device profile. Only this unlocks
       the loader; with a generic `Cortex-M55` profile there is no loader and
       `loadbin` to MRAM does nothing useful. It is also the wrong profile for
       attaching to a live core, which is why it is a distinct metadata key
       (`jlink_flash_device`, not `jlink_device`) on the SoC spec.
-    * `mram_address` -- where the app itself is linked, so the SE boots it in
-      place rather than loading it.
     * `atoc` + `atoc_address` -- the signed ATOC blob and its MRAM placement.
-      The addresses SHIFT per build/config and the runbook says outright not to
-      hardcode them; they are read from the signing step's own report. tan does
-      NOT run `app-gen-toc`: signing is common to both flows and belongs to
-      whatever produced the ATOC, and a license-gated vendor tool whose output
-      map file tan would have to parse for an address is not a dependency the
-      transport step needs.
+      The address SHIFTS per build/config and the runbook says outright not to
+      hardcode it -- it is a BUILD-TIME output of the signing step, never a
+      metadata fact, so this function still requires it as a plain
+      `flash_args` value and REFUSES when it is absent. tan does NOT run
+      `app-gen-toc` here either way: signing is common to both flows and
+      belongs to whatever produced the ATOC. What changed is only WHO fills
+      `atoc_address` in before this function runs -- `tan.commands.flash_cmd`
+      resolves it from `flash_args.atoc_map` (an `app-package-map.txt` path)
+      via `parse_atoc_start_address` when the manifest supplies that instead
+      of a baked-in address, so a customer's manifest never has to hardcode a
+      value that changes every build.
 
-    Absent any of them this REFUSES. There is no default to fall back to: a
-    guessed MRAM address is a write to the wrong place on a part whose Secure
-    Enclave then boots whatever is there.
+    Optional, mramxip-only:
+
+    * `slot0_load_address` -- where the slot0-linked app itself sits, so the SE boots
+      it in place rather than loading it out of the ATOC. Present but
+      malformed is still a loud refusal, never a silent fall-back to the
+      default shape -- a quoting detail must never decide which shape burns.
+
+    Absent a required identifier this REFUSES. There is no default to fall
+    back to: a guessed MRAM address is a write to the wrong place on a part
+    whose Secure Enclave then boots whatever is there.
 
     Confirm-gated (`flash_args.confirm` OR `ALP_FLASH_FORCE=1`) like the other
     two persistent-device backends -- see the `planning_only` note below.
@@ -1079,6 +1213,14 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     fa = inp.flash_args
     device = fa_str_checked(fa, "jlink_flash_device", False)
     if device is None:
+        if _fa_has_key(fa, "jlink_flash_device"):
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: flash_args.jlink_flash_device is present but "
+                "null/empty -- refusing to write MRAM with no part-number J-Link "
+                "device profile; the generic profile has none. It is a per-variant "
+                "metadata fact (socs/**/*.json `variants[].debug.jlink_flash_device`); "
+                "tan does not guess a part number."
+            )
         raise FlashPlanError(
             f"{FLOW_D_METHOD}: flash_args.jlink_flash_device is required -- only the "
             "part-number J-Link device profile unlocks the MRAM loader, and the "
@@ -1087,14 +1229,29 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
             "guess a part number."
         )
     validate_identifier(device, "jlink_flash_device")
-    app_address = fa_str_checked(fa, "mram_address", True)
-    if app_address is None:
+    # OPTIONAL -- selects the mramxip two-blob shape when present; the default
+    # single-ATOC-blob shape (flash-jlink.sh) needs no app-address write at
+    # all, since the ATOC embeds the app. `None` only for genuinely absent; a
+    # present-but-malformed value still raises below, never silently reverts
+    # to the default shape.
+    #
+    # `fa_str_checked` alone cannot tell "key absent" from "key present with a
+    # null/empty-string value" -- both collapse to `None` (`raw or None` at
+    # line ~571). A key that IS present must still refuse when it resolves to
+    # `None`: a `slot0_load_address: ""` or a bare `slot0_load_address:` (YAML
+    # null) must never silently pick the default shape, exactly like any other
+    # malformed value.
+    app_address = fa_str_checked(fa, "slot0_load_address", True)
+    if app_address is None and _fa_has_key(fa, "slot0_load_address"):
         raise FlashPlanError(
-            f"{FLOW_D_METHOD}: flash_args.mram_address is required -- it is where the "
-            "app is linked and where the Secure Enclave boots it in place. Refusing "
-            "to guess an MRAM address."
+            f"{FLOW_D_METHOD}: flash_args.slot0_load_address is present but "
+            "null/empty -- refusing to silently select the default "
+            "single-ATOC-blob shape. Remove the key entirely to use the default "
+            "shape, or supply the app's real MRAM address to select the mramxip "
+            "two-blob shape."
         )
-    validate_address(app_address, "mram_address")
+    if app_address is not None:
+        validate_address(app_address, "slot0_load_address")
 
     atoc = fa_str(fa, "atoc")
     atoc_address = fa_str_checked(fa, "atoc_address", True)
@@ -1133,14 +1290,19 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
             "part-number device profile."
         )
 
+    # Two-blob mramxip shape only when `slot0_load_address` armed it; otherwise the
+    # default single-ATOC-blob shape (flash-jlink.sh) writes nothing for the
+    # app -- the ATOC already embeds it. See the docstring's "two shapes" note.
     lines: list[str] = []
     if serial is not None:
         lines.append(f"SelectEmuBySN {serial}")
     lines += ["si SWD", f"speed {speed}", f"device {device}", "connect"]
+    if app_address is not None:
+        lines.append(f"loadbin {inp.artefact} {app_address}")
+    lines.append(f"loadbin {atoc} {atoc_address}")
+    if app_address is not None:
+        lines.append(f"verifybin {inp.artefact} {app_address}")
     lines += [
-        f"loadbin {inp.artefact} {app_address}",
-        f"loadbin {atoc} {atoc_address}",
-        f"verifybin {inp.artefact} {app_address}",
         f"verifybin {atoc} {atoc_address}",
         # PIN reset (RSetType 2), then run: the Secure Enclave boot ROM re-reads
         # and boots the ATOC, exactly as it does after an SE-UART burn. A core
@@ -1155,12 +1317,18 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
         "-ExitOnError", "1", "-NoGui", "1", "-CommanderScript",
     )
     confirm = inp.force_confirm or _default(fa_bool_checked(fa, "confirm"), False)
+    ok_message = (
+        f"{FLOW_D_METHOD}[{inp.core_id}]: app -> {app_address}, signed ATOC -> "
+        f"{atoc_address} via J-Link ({device}); verified and PIN-reset"
+        if app_address is not None
+        else (
+            f"{FLOW_D_METHOD}[{inp.core_id}]: signed ATOC (app embedded) -> "
+            f"{atoc_address} via J-Link ({device}); verified and PIN-reset"
+        )
+    )
     return FlashPlan(
         argv=argv,
-        ok_message=(
-            f"{FLOW_D_METHOD}[{inp.core_id}]: app -> {app_address}, signed ATOC -> "
-            f"{atoc_address} via J-Link ({device}); verified and PIN-reset"
-        ),
+        ok_message=ok_message,
         # `planning_only` -- and therefore the `planned` status + the
         # `flash.confirm-required` warning -- for an UNCONFIRMED run, matching
         # `yocto_wic`/`xspi_flashwriter`. This is a NEW backend, so nothing in
@@ -1174,22 +1342,82 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     )
 
 
+def validate_flow_d_preflight_args(flash_args: Any) -> tuple[str | None, str | None]:
+    """The presence/pairing/shape checks for Flow D's DPIDR preflight,
+    returning `(expect_dpidr, jlink_device)` -- both `None` (opted out) or
+    both set (validated). Raises `FlashPlanError` for every half-armed or
+    malformed shape; never touches a J-Link binary or builds the Commander
+    script, so the CALLER decides when to run it. `flow_d_preflight_script`
+    (write-path) runs it then builds the script from the same values;
+    `tan.commands.flash_cmd` also runs it PLAN-TIME, before the confirm/
+    dry-run gate, so a half-armed or malformed manifest surfaces as a
+    `flash.entry-failed` issue in the planned envelope too -- not only at
+    real-write time.
+
+    `None`/`None` only for a genuinely ABSENT `expect_dpidr`/`jlink_device` --
+    the documented, test-pinned way to opt out of the preflight entirely. A
+    key that IS present must still refuse when it resolves to `None`
+    (`fa_str_checked` alone cannot tell "absent" from "present but
+    null/empty"; see `_fa_has_key`'s docstring): silently treating it as
+    absent would drop the SW-DP IDR check -- the one guard standing between a
+    wrong-board attach and an MRAM write -- with no diagnostic at all.
+    """
+    fa = flash_args
+    expected = fa_str_checked(fa, "expect_dpidr", False)
+    if expected is None and _fa_has_key(fa, "expect_dpidr"):
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.expect_dpidr is present but null/empty -- "
+            "refusing to silently skip the pre-write SW-DP IDR check. Remove the key "
+            "entirely to skip the preflight, or supply the board's real expected ID."
+        )
+    read_device = fa_str_checked(fa, "jlink_device", False)
+    if read_device is None and _fa_has_key(fa, "jlink_device"):
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.jlink_device is present but null/empty -- "
+            "refusing to silently skip the pre-write SW-DP IDR check. Remove the key "
+            "entirely to skip the preflight, or supply the live-core read device "
+            "profile."
+        )
+    # Half-armed by a genuinely ABSENT partner key (not a null one -- that is
+    # the two checks above): supplying `expect_dpidr` is the manifest's
+    # unambiguous statement that it wanted the wrong-board guard armed, and
+    # the reverse holds for `jlink_device`. Silently returning `None` here
+    # would drop the SW-DP IDR check with no diagnostic at all, immediately
+    # before the one write this backend's own docstring calls unrecoverable.
+    if (expected is None) != (read_device is None):
+        present_key, absent_key = (
+            ("expect_dpidr", "jlink_device")
+            if expected is not None
+            else ("jlink_device", "expect_dpidr")
+        )
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.{present_key} is present but flash_args."
+            f"{absent_key} is not -- refusing to silently skip the pre-write SW-DP "
+            "IDR check. Supply both flash_args.expect_dpidr and flash_args."
+            "jlink_device to arm the preflight, or remove both to skip it entirely."
+        )
+    if expected is None or read_device is None:
+        return None, None
+    validate_address(expected, "expect_dpidr")
+    validate_identifier(read_device, "jlink_device")
+    return expected, read_device
+
+
 def flow_d_preflight_script(inp: FlashInputs) -> tuple[str, str] | None:
     """The read-only DPIDR preflight for a Flow D plan: `(script, expected_id)`,
-    or `None` when the manifest declared no `expect_dpidr`.
+    or `None` when the manifest declared neither `expect_dpidr` nor
+    `jlink_device` at all -- see `validate_flow_d_preflight_args` for every
+    other case, which this delegates to before building the script.
 
     Run BEFORE any write, with the manifest's READ device profile (a live-core
     attach profile, which the part-number one is not), so the caller can abort on
     the wrong board while the session is still read-only. Both the device name
     and the expected ID come from `flash_args`.
     """
-    fa = inp.flash_args
-    expected = fa_str_checked(fa, "expect_dpidr", False)
-    read_device = fa_str_checked(fa, "jlink_device", False)
+    expected, read_device = validate_flow_d_preflight_args(inp.flash_args)
     if expected is None or read_device is None:
         return None
-    validate_address(expected, "expect_dpidr")
-    validate_identifier(read_device, "jlink_device")
+    fa = inp.flash_args
     speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
     lines = []
     serial = fa_str(fa, "jlink_serial")

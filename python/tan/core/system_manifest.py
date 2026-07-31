@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 #: The schema major this CLI consumes. A different value is REFUSED rather than
@@ -165,6 +167,22 @@ def _literal_scalar_loader(yaml_module):
     return LiteralScalarLoader
 
 
+def _import_yaml():
+    """PyYAML, or a [`SystemManifestError`] naming why it isn't available --
+    the one import guard [`load_yaml_document`] and [`serialize_system_manifest_raw`]
+    both funnel through, so a frozen `tan` built from a stale venv reports the
+    SAME coded envelope on either the read or the write path rather than one
+    of them tracebacking."""
+    try:
+        import yaml  # noqa: PLC0415  (declared nowhere; imported where needed)
+    except ImportError as err:
+        raise _parse_error(
+            f"no YAML parser available ({err}); install PyYAML "
+            "(`pip install pyyaml`) so tan can read system-manifest.yaml"
+        ) from err
+    return yaml
+
+
 def load_yaml_document(text: str, *, literal_scalars: bool = False) -> Any:
     """Parse a manifest document, with PyYAML's absence and every parse failure
     funnelled into [`SystemManifestError`].
@@ -184,13 +202,7 @@ def load_yaml_document(text: str, *, literal_scalars: bool = False) -> Any:
     `*.manifest-invalid`: an existing spelling with an honest message beats
     inventing one the extension has never heard of.
     """
-    try:
-        import yaml  # noqa: PLC0415  (declared nowhere; imported where needed)
-    except ImportError as err:
-        raise _parse_error(
-            f"no YAML parser available ({err}); install PyYAML "
-            "(`pip install pyyaml`) so tan can read system-manifest.yaml"
-        ) from err
+    yaml = _import_yaml()
     try:
         loader = (
             _literal_scalar_loader(yaml)
@@ -452,6 +464,126 @@ def parse_system_manifest(text: str) -> SystemManifest:
     if version != SYSTEM_MANIFEST_SCHEMA_VERSION:
         raise _unsupported_version_error(version)
     return manifest
+
+
+# --------------------------------------------------------------------------
+# The write path: overlay this run's per-slice outcomes onto a freshly
+# emitted system-manifest and serialize it back out. Port of the RAW half of
+# `tan_core::system_manifest` (`parse_system_manifest_raw` /
+# `overlay_run_results_raw` / `serialize_system_manifest_raw`) -- the half
+# `crates/tan-cli/src/commands/build/execute/manifest.rs` uses for the
+# post-build rewrite, never the typed `SystemManifest`/`serialize_system_
+# manifest` pair (the Rust module doc explains why: the typed struct there
+# only models the fields it reads, so re-serializing it silently drops any
+# field it doesn't model -- an rpmsg `IpcLink` carve-out, `hw_info.eeprom`,
+# anything a newer SDK adds).
+#
+# That specific defect does not reproduce here: [`SystemManifest`]'s own
+# `slices`/`helper_mcus` entries above are already plain `dict`s carrying
+# every key the document had (`_entries` normalises known string fields IN
+# PLACE and never drops the rest) -- so a plain re-dump of `SystemManifest.root`
+# would not lose an additive field either. This module still keeps a distinct
+# `parse_system_manifest_raw` entry point rather than reusing `parse_system_
+# manifest`, for a different reason: the typed reader does TWO parses of the
+# same text (a literal-scalar tree for `String` fields, a core-schema tree for
+# everything else -- see `parse_system_manifest`'s own docstring) specifically
+# to interpret an ARBITRARY, possibly hand-authored document the way serde_yaml
+# would. The write path's input is never that: it is the SDK's own YAML,
+# freshly emitted and immediately rewritten in the same step, so the single
+# core-schema parse `load_yaml_document` already performs is sufficient and
+# this avoids reasoning about which of the two trees a write should mutate.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SliceRunResult:
+    """One slice's post-build outcome, as the executor reports it -- the
+    write-side counterpart of a manifest `slices[]` entry. Port of
+    `tan_core::system_manifest::SliceRunResult` (a 5-tuple there; a dataclass
+    here for readability -- same fields, same order, same "`None` leaves the
+    plan-time value untouched" meaning for every optional one). Pass an
+    EXPLICIT empty string (never `None`) to actively CLEAR a stale
+    `output_artefact`/`build_dir` for a slice this run knows never dispatched
+    (mirrors the Rust oracle's `Some(String::new())` convention for a demoted
+    slice)."""
+
+    core_id: str
+    status: str
+    output_artefact: str | None = None
+    build_dir: str | None = None
+    reason: str | None = None
+
+
+def parse_system_manifest_raw(text: str) -> dict:
+    """Parse a `system-manifest.yaml` document into a raw mapping (str-in /
+    dict-out) -- the entry point the write path uses instead of
+    [`parse_system_manifest`]; see the section docstring above for why a
+    single core-schema parse is enough here. Still version-guarded
+    identically to the typed reader -- but with a DIFFERENT, collapsed error
+    message on a missing/malformed `schema_version`: the oracle's raw parser
+    (`tan_core::system_manifest::parse_system_manifest_raw`,
+    system_manifest.rs:294-310) extracts it with a single
+    `.get("schema_version").and_then(as_u64)` and reports every failure --
+    a missing key, a non-mapping root, a non-numeric, negative, or
+    out-of-`u64`-range value -- as the one string "missing or non-numeric
+    schema_version", not the typed reader's two-branch "missing field" /
+    "invalid type" pair. This string reaches a build's `issues[].message`
+    verbatim (a failed post-build manifest write folds it in), so the exact
+    wording is part of the wire contract, not cosmetic."""
+    root = load_yaml_document(text)
+    version = root.get("schema_version") if isinstance(root, dict) else None
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or not (0 <= version <= _SERDE_INT_MAX)
+    ):
+        raise _parse_error("missing or non-numeric schema_version")
+    if version != SYSTEM_MANIFEST_SCHEMA_VERSION:
+        raise _unsupported_version_error(version)
+    return root
+
+
+def overlay_run_results_raw(raw: dict, results: Sequence[SliceRunResult]) -> None:
+    """Overlay this run's per-slice outcomes onto the RAW manifest mapping (as
+    returned by [`parse_system_manifest_raw`]) so the written `system-
+    manifest.yaml` reflects what actually built. Slices are matched by
+    `core_id`; a slice with no matching result (e.g. an `off` core) is left
+    untouched. `output_artefact`/`build_dir`/`reason` are each written only
+    when the result carries one -- a `None` never wipes a plan-time value.
+    Port of `tan_core::system_manifest::overlay_run_results_raw`. Pure: no IO,
+    mutates `raw` in place."""
+    slices = raw.get("slices")
+    if not isinstance(slices, list):
+        return
+    # FIRST match wins, not last -- `results.iter().find(...)` in the oracle
+    # (system_manifest.rs:332-333). Unreachable with today's callers (one
+    # result per slice), but `setdefault` keeps a silent semantic flip out of
+    # a ported pure function rather than relying on "no caller ever hits it".
+    by_core: dict[str, SliceRunResult] = {}
+    for r in results:
+        by_core.setdefault(r.core_id, r)
+    for entry in slices:
+        if not isinstance(entry, dict):
+            continue
+        result = by_core.get(entry.get("core_id"))
+        if result is None:
+            continue
+        entry["status"] = result.status
+        if result.output_artefact is not None:
+            entry["output_artefact"] = result.output_artefact
+        if result.build_dir is not None:
+            entry["build_dir"] = result.build_dir
+        if result.reason is not None:
+            entry["reason"] = result.reason
+
+
+def serialize_system_manifest_raw(raw: dict) -> str:
+    """Serialize the RAW manifest mapping (as returned by
+    [`parse_system_manifest_raw`], possibly overlaid by
+    [`overlay_run_results_raw`]) back to YAML. Port of `tan_core::
+    system_manifest::serialize_system_manifest_raw`."""
+    yaml = _import_yaml()
+    return yaml.safe_dump(raw, sort_keys=False, default_flow_style=False, allow_unicode=True)
 
 
 #: `serde_yaml::Value`'s integer range: `i64::MIN ..= u64::MAX`. A YAML integer

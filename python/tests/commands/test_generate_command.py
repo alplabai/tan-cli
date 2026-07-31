@@ -235,7 +235,11 @@ def test_unresolved_sdk_is_a_refusal_not_a_crash(tmp_path):
     (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
     proc = run_cli(["--sdk-root", str(tmp_path / "nope"), "--format", "json"], cwd=project)
     assert proc.returncode == 2
-    assert envelope_of(proc)["issues"][0]["code"] == "generate.sdk-root-unresolved"
+    env = envelope_of(proc)
+    assert env["issues"][0]["code"] == "generate.sdk-root-unresolved"
+    # No `sdk` key: nothing resolved, so there is nothing to report -- absent,
+    # never null, matching the oracle (`crates/tan-cli`'s own refusal here).
+    assert "sdk" not in env
 
 
 def test_bad_target_is_a_refusal_once_the_board_and_sdk_resolve(tmp_path):
@@ -245,7 +249,90 @@ def test_bad_target_is_a_refusal_once_the_board_and_sdk_resolve(tmp_path):
     sdk = make_sdk(tmp_path / "alp-sdk")
     proc = run_cli(["--sdk-root", str(sdk), "--target", "bogus", "--format", "json"], cwd=project)
     assert proc.returncode == 2
-    assert envelope_of(proc)["issues"][0]["code"] == "generate.invalid-target"
+    env = envelope_of(proc)
+    assert env["issues"][0]["code"] == "generate.invalid-target"
+    # Unlike the unresolved-SDK refusal above, this guard runs AFTER the SDK
+    # resolved, so the envelope carries it -- matching the oracle, which
+    # reports `sdk` on every refusal past a successful resolution.
+    assert env["sdk"] == {"root": Path(sdk).as_posix(), "sourceTier": "sdkRootFlag"}
+
+
+def test_sdk_root_flag_reports_verbatim_including_a_trailing_separator(tmp_path):
+    """`sdk.root` echoes the flag's raw text, not `str(Path(...))` --
+    `pathlib` silently drops a trailing separator, which shell tab-completion
+    of a directory routinely adds, and the oracle does not drop it."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    # Posix form: both sides normalise a `--sdk-root` backslash to `/` before
+    # reporting it (`SdkInfo.to_dict`'s `.replace("\\", "/")`), so a
+    # backslash-separated raw string would pin that normalisation instead of
+    # the trailing-separator behaviour this case targets.
+    raw = sdk.as_posix() + "/"
+    proc = run_cli(["--sdk-root", raw, "--target", "bogus", "--format", "json"], cwd=project)
+    assert proc.returncode == 2
+    env = envelope_of(proc)
+    assert env["sdk"] == {"root": raw, "sourceTier": "sdkRootFlag"}
+
+
+def test_sdk_project_pin_tier_reports_in_the_envelope(tmp_path):
+    """Every other case here only ever exercises `sdkRootFlag` -- the same
+    shape of gap that once let the whole `sdk` envelope key drop out
+    unnoticed. `.alp/sdk-path` is written directly (mirroring
+    `test_sdk_command.py`'s own `write_pointer`) because `tan sdk switch` is
+    not ported."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (project / ".alp").mkdir()
+    (project / ".alp" / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(sdk), "updatedAt": "1970-01-01T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    proc = run_cli(["--target", "bogus", "--format", "json"], cwd=project)
+    assert proc.returncode == 2
+    env = envelope_of(proc)
+    assert env["issues"][0]["code"] == "generate.invalid-target"
+    assert env["sdk"] == {"root": Path(sdk).as_posix(), "sourceTier": "projectPin"}
+
+
+def test_sdk_global_default_tier_reports_in_the_envelope(tmp_path, monkeypatch):
+    """The third tier: `~/.alp/sdk-default`, tried when there is no
+    `--sdk-root` and no project pin. `conftest.py`'s autouse fixture has
+    already repointed `HOME`/`USERPROFILE` at a scratch dir, so writing the
+    pointer there cannot collide with a developer's real global default."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    home = Path(os.environ["HOME"])
+    (home / ".alp").mkdir(parents=True, exist_ok=True)
+    (home / ".alp" / "sdk-default").write_text(
+        json.dumps({"sdkPath": str(sdk), "updatedAt": "1970-01-01T00:00:00Z"}),
+        encoding="utf-8",
+    )
+    proc = run_cli(["--target", "bogus", "--format", "json"], cwd=project)
+    assert proc.returncode == 2
+    env = envelope_of(proc)
+    assert env["issues"][0]["code"] == "generate.invalid-target"
+    assert env["sdk"] == {"root": Path(sdk).as_posix(), "sourceTier": "globalDefault"}
+
+
+def test_sdk_discovery_tier_reports_in_the_envelope(tmp_path):
+    """The last resolving tier: no flag, no pin, no global default -- the
+    workspace root itself doubles as the SDK checkout, which is what an
+    in-tree `tan generate` (no separate alp-sdk checkout) resolves against."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    make_sdk(project)
+    proc = run_cli(["--target", "bogus", "--format", "json"], cwd=project)
+    assert proc.returncode == 2
+    env = envelope_of(proc)
+    assert env["issues"][0]["code"] == "generate.invalid-target"
+    assert env["sdk"] == {"root": project.as_posix(), "sourceTier": "discovery"}
 
 
 def test_non_e1m_sku_is_refused_before_naming_a_board_directory(tmp_path):
@@ -338,7 +425,7 @@ def test_a_failing_emit_reports_the_sdk_stderr_and_exit_3(tmp_path, monkeypatch,
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
 
     code = _call_generate(
         target="cmake-args", sdk_root=str(sdk), output_format="json"
@@ -367,7 +454,7 @@ def test_a_successful_emit_reports_the_relative_written_path(tmp_path, monkeypat
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     assert _call_generate(target="cmake-args", sdk_root=str(sdk), output_format="json") == 0
     env = json.loads(capsys.readouterr().out.strip())
     # Workspace-RELATIVE, never the absolute host path the envelope would
@@ -376,6 +463,11 @@ def test_a_successful_emit_reports_the_relative_written_path(tmp_path, monkeypat
     assert env["data"]["failed"] == []
     written = project / "build" / "generated" / "alp-cmake-args.txt"
     assert written.read_text(encoding="utf-8") == "generated\n"
+    # The resolved SDK, threaded through into the envelope -- this command used
+    # to discard the tier `_resolve_sdk_root` already had and drop `sdk` from
+    # the envelope entirely, a silent break in the vscode handshake that no
+    # fixture or compile error caught.
+    assert env["sdk"] == {"root": Path(sdk).as_posix(), "sourceTier": "sdkRootFlag"}
 
 
 # --------------------------------------------------------------------------
@@ -554,7 +646,7 @@ def test_output_redirects_the_emit_and_is_reported_verbatim(
     `written[]` reports that path rather than the default one."""
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
 
     code = _call_generate(
@@ -580,7 +672,7 @@ def test_output_writes_a_file_and_never_puts_its_contents_on_stdout(
     documents to parse, and it renders nothing at all."""
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
 
     _call_generate(
         target="zephyr-conf",
@@ -717,7 +809,7 @@ def test_the_engine_split_is_reported_per_target(tmp_path, monkeypatch, capsys):
     relocated emit from a spawned one without guessing."""
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     _stub_in_process(monkeypatch)
 
     assert _call_generate(sdk_root=str(sdk), all_targets=True,
@@ -758,7 +850,7 @@ def test_a_fallback_to_spawning_is_reported_not_silent(
 ):
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     _stub_in_process(monkeypatch, available=False)
 
     assert _call_generate(target="zephyr-conf", core="m55_hp",
@@ -781,7 +873,7 @@ def test_the_fallback_notice_never_displaces_a_target_failure(
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     _stub_in_process(monkeypatch, available=False)
 
     assert _call_generate(target="cmake-args", sdk_root=str(sdk),
@@ -798,7 +890,7 @@ def test_pinning_the_subprocess_engine_is_a_choice_not_a_fallback(
     and nothing else -- warning about a path the caller asked for is noise."""
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     _stub_in_process(monkeypatch)  # available, and deliberately not used
     monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
 

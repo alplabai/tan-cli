@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import typer
 
@@ -140,7 +141,11 @@ def _run_monitor(port: str | None, baud: int) -> tuple[dict, list[Issue], ExitCo
     # `build_cmd._planner_python` -- NOT `sys.executable`, which under a
     # PyInstaller freeze IS `tan` itself and would just re-enter this CLI.
     using_this_interpreter = not getattr(sys, "frozen", False) and bool(sys.executable)
-    python = sys.executable if using_this_interpreter else _planner_python()
+    python = (
+        sys.executable
+        if using_this_interpreter
+        else _planner_python(str(Path.cwd()), None)
+    )
 
     if using_this_interpreter:
         # This precheck only proves the interpreter about to be spawned --

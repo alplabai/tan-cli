@@ -143,6 +143,70 @@ def test_no_skew_check_when_the_two_floors_agree():
 
 
 # --------------------------------------------------------------------------
+# _load_manifest -- the provenance verdict, as DATA
+#
+# `manifest_is_real` used to be re-derived by `_collect` sniffing
+# `source.startswith("facts from alp-sdk")` -- a prefix match against
+# `_load_manifest`'s own f-string, silently flippable by a future reword with
+# nothing to catch it. `ManifestLoad.is_real` is now set once, at the read,
+# and these pin the three provenances a caller can see.
+# --------------------------------------------------------------------------
+
+
+def _write_bootstrap_json(root: Path, prerequisites: dict) -> Path:
+    path = root / "metadata" / "bootstrap.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"prerequisites": prerequisites}), encoding="utf-8")
+    return path
+
+
+def test_load_manifest_resolves_and_declares_the_python_floor(tmp_path):
+    _write_bootstrap_json(
+        tmp_path,
+        {"posix": ["git", "cmake", "python3", "ninja"], "pythonMinVersion": "3.10"},
+    )
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is True
+    assert loaded.error is None
+    assert loaded.source.startswith("facts from alp-sdk")
+    assert loaded.facts["pythonMinVersion"] == "3.10"
+
+
+def test_load_manifest_resolves_but_omits_the_python_floor(tmp_path):
+    """The manifest itself is real -- `is_real` must still say so -- even though
+    `pythonMinVersion` is absent and `_manifest_floor_from_facts` falls back to
+    `FALLBACK_PYTHON_FLOOR` for the NUMBER. Provenance and the floor value are
+    two different questions."""
+    _write_bootstrap_json(tmp_path, {"posix": ["git", "cmake", "python3", "ninja"]})
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is True
+    assert loaded.error is None
+    assert "pythonMinVersion" not in loaded.facts
+    assert doctor_cmd._manifest_floor_from_facts(loaded.facts) == doctor_cmd.FALLBACK_PYTHON_FLOOR
+
+
+def test_load_manifest_with_no_sdk_resolved_is_not_real():
+    loaded = doctor_cmd._load_manifest(None)
+    assert loaded.is_real is False
+    assert loaded.error is None
+    assert "fallback" in loaded.source
+    assert loaded.facts["pythonMinVersion"] == "3.10"
+
+
+def test_collect_reports_no_manifest_read_when_none_resolves(tmp_path, monkeypatch):
+    """The end-to-end wire: with no `metadata/bootstrap.json` under `sdk_root`,
+    `pythonFloor` (when it fires) must say the manifest was never consulted --
+    the exact case `manifest_is_real=False` exists for. `ZEPHYR_BASE` is cleared
+    so the built-in Zephyr floor (3.12), which already outranks the fallback
+    manifest floor (3.10), is what makes the skew fire deterministically."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    checks = doctor_cmd._collect(str(tmp_path))
+    skew = next((c for c in checks if c.name == "pythonFloor"), None)
+    assert skew is not None
+    assert "no alp-sdk metadata/bootstrap.json was read" in skew.detail
+
+
+# --------------------------------------------------------------------------
 # Prerequisites, west
 # --------------------------------------------------------------------------
 
@@ -172,6 +236,69 @@ def test_west_absent_fails():
 def test_west_present_but_unparseable_version_is_a_warning_not_a_crash():
     check = doctor_cmd.west_check(found="west", version=None, floor=(0, 14))
     assert check.status == "warn"
+
+
+# --------------------------------------------------------------------------
+# --build: zephyrWorkspace
+# --------------------------------------------------------------------------
+
+
+def test_zephyr_workspace_warns_with_no_zephyr_base():
+    check = doctor_cmd.zephyr_workspace_check(None, None, None)
+    assert check.status == "warn"
+    assert "ZEPHYR_BASE" in check.detail
+
+
+def test_zephyr_workspace_warns_when_the_dir_is_not_a_zephyr_checkout():
+    check = doctor_cmd.zephyr_workspace_check("/nope", None, None)
+    assert check.status == "warn"
+    assert "VERSION" in check.detail
+
+
+def test_zephyr_workspace_passes_with_no_sdk_pin_to_compare():
+    check = doctor_cmd.zephyr_workspace_check("/zephyrproject/zephyr", "4.4.0", None)
+    assert check.status == "pass"
+    assert "4.4.0" in check.detail
+
+
+def test_zephyr_workspace_warns_on_a_pin_mismatch():
+    check = doctor_cmd.zephyr_workspace_check("/zephyrproject/zephyr", "4.3.0", "4.4.1")
+    assert check.status == "warn"
+    assert "4.3.0" in check.detail and "4.4.1" in check.detail
+
+
+def test_zephyr_workspace_passes_on_a_matching_pin():
+    check = doctor_cmd.zephyr_workspace_check("/zephyrproject/zephyr", "4.4.1", "4.4.1")
+    assert check.status == "pass"
+
+
+def test_build_flag_adds_zephyr_workspace_to_the_check_list_plain_doctor_lacks(tmp_path):
+    plain = run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True)
+    built = run_tan("doctor", "--build", "--format", "json", cwd=tmp_path, scrub_path=True)
+    plain_env = json.loads(plain.stdout)
+    built_env = json.loads(built.stdout)
+
+    plain_names = {c["name"] for c in plain_env["data"]["checks"]}
+    built_names = {c["name"] for c in built_env["data"]["checks"]}
+    assert "zephyrWorkspace" not in plain_names
+    assert "zephyrWorkspace" in built_names
+    assert built_names - plain_names == {"zephyrWorkspace"}
+
+
+def test_build_flag_reads_a_real_zephyr_base(tmp_path):
+    zephyr = tmp_path / "zephyr"
+    zephyr.mkdir()
+    (zephyr / "VERSION").write_text(
+        "VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = 1\n", encoding="utf-8"
+    )
+    proc = run_tan(
+        "doctor", "--build", "--format", "json", cwd=tmp_path, scrub_path=True,
+        env_extra={"ZEPHYR_BASE": str(zephyr)},
+    )
+    env = json.loads(proc.stdout)
+    check = next(c for c in env["data"]["checks"] if c["name"] == "zephyrWorkspace")
+    assert check["status"] == "pass"
+    assert "4.4.1" in check["detail"]
 
 
 # --------------------------------------------------------------------------
@@ -243,6 +370,103 @@ def test_jlink_present_with_an_unreadable_version_still_reports_the_requirements
     check = doctor_cmd.jlink_check(found="/usr/bin/JLinkExe", version=None)
     assert check.status == "warn"
     assert "AE822FA0E5597LS0_M55_HE" in f"{check.detail} {check.fix or ''}"
+
+
+def test_jlink_check_names_a_caller_supplied_device_not_only_the_fallback():
+    """`_collect` passes the metadata-resolved profile through; a stand-in value
+    proves the parameter is actually used, not shadowed by the constant."""
+    check = doctor_cmd.jlink_check(
+        found="/usr/bin/JLinkExe", version=(9, 50), device="SOME_OTHER_PROFILE"
+    )
+    assert "SOME_OTHER_PROFILE" in check.detail
+    assert "AE822FA0E5597LS0_M55_HE" not in check.detail
+
+
+# --------------------------------------------------------------------------
+# jlink_flash_device -- resolving the AE822 profile from metadata
+# --------------------------------------------------------------------------
+
+
+def _write_e8_json(root: Path, variants: list[dict]) -> None:
+    e8 = root / "metadata" / "socs" / "alif" / "ensemble"
+    e8.mkdir(parents=True)
+    (e8 / "e8.json").write_text(json.dumps({"variants": variants}), encoding="utf-8")
+
+
+def test_jlink_flash_device_is_read_from_e8_json_when_an_sdk_resolves(tmp_path):
+    """The real shape: two AE822 package variants, only the second carrying a
+    `jlink_flash_device` -- the one variant with an MRAM loader profile."""
+    _write_e8_json(
+        tmp_path,
+        [
+            {"debug": {"jlink_device": {"m55_he": "Cortex-M55"}}},
+            {"debug": {"jlink_device": {"m55_he": "Cortex-M55"},
+                       "jlink_flash_device": "AE822FA0E5597LS0_M55_HE"}},
+        ],
+    )
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == "AE822FA0E5597LS0_M55_HE"
+    assert "e8.json" in source
+
+
+def test_jlink_flash_device_falls_back_with_no_sdk_root():
+    device, source = doctor_cmd.jlink_flash_device(None)
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "built-in fallback" in source
+
+
+def test_jlink_flash_device_falls_back_when_no_variant_carries_the_key(tmp_path):
+    _write_e8_json(tmp_path, [{"debug": {"jlink_device": {"m55_he": "Cortex-M55"}}}])
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "built-in fallback" in source
+
+
+def test_jlink_flash_device_survives_a_missing_or_malformed_e8_json(tmp_path):
+    """No file, and a directory where a file is expected: both fall back rather
+    than raising -- doctor's whole job is to run on a host where things are
+    wrong."""
+    assert doctor_cmd.jlink_flash_device(str(tmp_path))[0] == doctor_cmd.JLINK_AEN_DEVICE
+
+    (tmp_path / "metadata" / "socs" / "alif" / "ensemble").mkdir(parents=True)
+    (tmp_path / "metadata" / "socs" / "alif" / "ensemble" / "e8.json").mkdir()
+    assert doctor_cmd.jlink_flash_device(str(tmp_path))[0] == doctor_cmd.JLINK_AEN_DEVICE
+
+
+def test_jlink_flash_device_falls_back_when_variants_disagree(tmp_path):
+    """Two variants carrying DIFFERENT `jlink_flash_device` values is
+    ambiguous, not resolved: picking whichever serialises first would silently
+    name the wrong part with nothing to catch it, so this must fall back and
+    say why -- not pick either one."""
+    _write_e8_json(
+        tmp_path,
+        [
+            {"debug": {"jlink_flash_device": "AE822FA0E5597LS0_M55_HE"}},
+            {"debug": {"jlink_flash_device": "SOME_OTHER_PART_M55_HE"}},
+        ],
+    )
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "ambiguous" in source
+
+
+# --------------------------------------------------------------------------
+# _collect -- the production call site, not just the helpers in isolation
+# --------------------------------------------------------------------------
+
+
+def test_collect_wires_the_resolved_jlink_device_and_its_source_into_the_check(tmp_path):
+    """Reverting `_collect` to the old hardcoded `jlink_check(jlink_exe,
+    jlink_version)` call must fail THIS test: it is the only coverage of the
+    production call site, not just `jlink_flash_device`/`jlink_check` in
+    isolation. Also proves the source travels into the envelope (Finding 5):
+    the check text must differ depending on where the profile came from."""
+    _write_e8_json(tmp_path, [{"debug": {"jlink_flash_device": "STAND-IN-PROFILE"}}])
+    checks = doctor_cmd._collect(str(tmp_path))
+    jlink = next(c for c in checks if c.name == "jlink")
+    assert "STAND-IN-PROFILE" in jlink.detail
+    assert doctor_cmd.JLINK_AEN_DEVICE not in jlink.detail
+    assert "e8.json" in jlink.detail
 
 
 # --------------------------------------------------------------------------

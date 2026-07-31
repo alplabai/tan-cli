@@ -48,7 +48,7 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import discover_sdk_root
+from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import on_path
 from tan.core.flash_plan import (
     FAIL,
@@ -62,14 +62,18 @@ from tan.core.flash_plan import (
     ManifestError,
     backend_for,
     display_argv,
+    fa_str,
+    fa_str_checked,
     flash_args_has_tbd,
     flow_d_preflight_script,
+    parse_atoc_start_address,
     parse_system_manifest,
     plan_flash_targets,
     registry_keys_debug,
     resolve_artefact_path,
     select_flash_method,
     tool_gate,
+    validate_flow_d_preflight_args,
 )
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -203,20 +207,26 @@ def _resolve_project(root: str, board_yaml: str | None) -> Project:
 
 
 def _resolve_sdk(sdk_root: str | None, workspace_root: str) -> tuple[str | None, str | None]:
-    """`(sdk_root, sourceTier)` -- `util.rs::resolve_sdk_root`, trimmed to the two
-    tiers this port can honour.
+    """`(sdk_root, sourceTier)` -- `util.rs::resolve_sdk_root`: `--sdk-root`
+    (terminal) > the project's own `.alp/sdk-path` pin > the machine-global
+    default (`~/.alp/sdk-default`) > the wide positional walk -- the oracle's
+    closed five-value `SdkSourceTier` (`SdkRootFlag`, `ProjectPin`,
+    `GlobalDefault`, `Discovery`, `None`); no `ALP_SDK_ROOT` tier (tried and
+    reverted -- the oracle only ever WRITES that variable into a build
+    slice's env, never reads it back for discovery; the project-pin tier
+    already makes `tan init && tan build` compose without it).
 
     `--sdk-root` is TERMINAL and returned AS GIVEN when it holds the loader
     marker, else the whole command fails (I-31): a bad path must fail loudly
     rather than silently fall through to a lower tier and build/flash against a
-    different SDK. The `tan sdk switch` workspace pin and the machine-global
-    default are skipped for the reason `build_cmd.discover_sdk_root` records --
-    this port has no writer for either, and half a precedence chain that quietly
-    picks the wrong checkout is worse than an honest `--sdk-root`."""
+    different SDK. The pin/global-default/positional-walk tiers are
+    best-effort -- previously skipped here entirely (this port had no writer
+    for the pointer files when this comment was written; `tan init` writes
+    `.alp/sdk-path`, so skipping them silently ignored it)."""
     if sdk_root is not None:
         return (sdk_root if _is_sdk_root(sdk_root) else None), "sdkRootFlag"
-    found = discover_sdk_root_safe(workspace_root)
-    return found, "discovery"
+    found, tier = resolve_sdk_root_ladder_safe(workspace_root)
+    return found, tier
 
 
 def _is_sdk_root(path: str) -> bool:
@@ -229,15 +239,17 @@ def _is_sdk_root(path: str) -> bool:
         return False
 
 
-def discover_sdk_root_safe(workspace_root: str) -> str | None:
-    """`build_cmd.discover_sdk_root`, with its filesystem walk made incapable of
-    raising -- an unreadable ancestor on the walk must not become a traceback in
-    a command whose whole job is to report an envelope."""
+def resolve_sdk_root_ladder_safe(workspace_root: str) -> tuple[str | None, str | None]:
+    """`build_cmd.resolve_sdk_root_ladder(None, ...)`, made incapable of
+    raising -- an unreadable `.alp/sdk-path` pin, an unreadable global-default
+    pointer (`~/.alp/sdk-default`), or an unreadable ancestor on the
+    positional walk must not become a traceback in a command whose whole job
+    is to report an envelope."""
     try:
-        found = discover_sdk_root(_as_path(workspace_root))
+        found, tier = resolve_sdk_root_ladder(None, _as_path(workspace_root))
     except (OSError, ValueError):
-        return None
-    return str(found) if found is not None else None
+        return None, None
+    return (str(found), tier) if found is not None else (None, None)
 
 
 def _as_path(text: str):
@@ -326,15 +338,24 @@ def _spawn(argv, capture: bool, timeout: float) -> _Outcome:
 def _stderr_sink():
     """`sys.stderr` when it has a real OS handle a child can inherit, else `None`.
 
-    **A DELIBERATE divergence from the oracle**, and the only one in this file.
-    Rust's text path calls `cmd.status()`, which INHERITS stdio, so a flash tool's
-    stdout lands on tan's stdout. Here a child's stdout is routed to STDERR
-    instead. Both are safe today -- Rust's text mode writes nothing to stdout
-    either (`main.rs::emit` uses `eprintln!`) -- but in this process stdout is the
+    **A DELIBERATE divergence from the oracle.** Rust's text path calls
+    `cmd.status()`, which INHERITS stdio, so a flash tool's stdout lands on
+    tan's stdout. Here a child's stdout is routed to STDERR instead. Both are
+    safe today -- Rust's text mode writes nothing to stdout either
+    (`main.rs::emit` uses `eprintln!`) -- but in this process stdout is the
     envelope channel and the redirect makes that unconditional rather than true
     only as long as nobody adds a stdout write to the text path. Visible only to a
     caller doing `tan flash > log` in TEXT mode; `--format json` captures on both
     sides and is byte-identical (43 diffed cases).
+
+    NOT the only divergence in this file any more: `plan_flash_targets`
+    (`tan.core.flash_plan.TargetPlan.refused_skipped`) treats a `status:
+    skipped` slice/helper as a warning that alone never fails the run, where
+    the shipped Rust `plan_flash_targets` has no such bucket and refuses (and
+    fails) a `status: skipped` slice exactly like any other non-`ok` status.
+    See `TargetPlan.refused_skipped` for the reasoning and
+    `tests/parity/test_flash_oracle_parity.py` for why that case is not diffed
+    against the oracle.
     """
     try:
         sys.stderr.fileno()
@@ -528,6 +549,69 @@ class _Context:
     capture: bool
 
 
+def _resolve_flow_d_atoc_address(flash_args: Any, build_root: str, sdk_root: str) -> Any:
+    """Fill in `flash_args.atoc_address` from the `app-gen-toc` build report
+    (`flash_args.atoc_map`, an `app-package-map.txt` path) when the manifest
+    does not already carry one.
+
+    **The ATOC address is a BUILD-TIME output, not a plan-time metadata fact.**
+    `app-gen-toc` writes it fresh at signing time and the runbook says outright
+    it shifts per build/config, so nothing under `metadata/**` can express it
+    -- an earlier design here assumed it lived in metadata, which was wrong.
+    Every bench script reads it the same way
+    (`awk '/APP Package Start Address:/{print $NF}' app-package-map.txt |
+    tail -1`); see `flash_plan.parse_atoc_start_address` for the byte-identical
+    parse. This is the ONE place in `tan flash` that reads a file `plan_*`
+    itself never touches -- kept here, not in `flash_plan`, because the module
+    docstring is explicit that plan-building stays pure/no-IO.
+
+    Leaves `flash_args` UNCHANGED -- and therefore lets `plan_alif_mram_jlink`
+    raise its own, single required-field refusal -- whenever: `atoc_address` is
+    already present (an explicit manifest value always wins over a parsed one),
+    `atoc_map` is absent, or the map path does not resolve to a real file yet
+    (the ordinary "signing has not run" case -- there is nothing to read, so
+    `plan_alif_mram_jlink`'s own refusal is the right one).
+
+    Raises `FlashPlanError`, naming the resolved path, when `atoc_map` WAS
+    supplied and resolves to a real file but the file itself cannot be used --
+    unreadable, or missing the `APP Package Start Address:` marker. Those are
+    not "no map yet"; they are "found your map and could not get an address out
+    of it", and falling through to `plan_alif_mram_jlink`'s generic
+    "flash_args.atoc_address / flash_args.atoc are both required" refusal there
+    would tell the user to redo a step they already did.
+    """
+    try:
+        if fa_str_checked(flash_args, "atoc_address", True) is not None:
+            return flash_args
+    except FlashPlanError:
+        return flash_args  # let plan_alif_mram_jlink raise the real refusal
+    atoc_map = fa_str(flash_args, "atoc_map")
+    if atoc_map is None:
+        return flash_args
+    map_path = resolve_artefact_path(atoc_map, build_root, sdk_root, _is_file)
+    if not _is_file(map_path):
+        return flash_args
+    try:
+        text = _read(map_path)
+    except OSError as err:
+        raise FlashPlanError(
+            f"flash_args.atoc_map resolved to {map_path} but it could not be read "
+            f"({err}) -- pass a readable app-package-map.txt, or set "
+            "flash_args.atoc_address explicitly."
+        ) from err
+    address = parse_atoc_start_address(text)
+    if address is None:
+        raise FlashPlanError(
+            f"flash_args.atoc_map resolved to {map_path}, but no 'APP Package "
+            "Start Address:' line was found in it -- re-run the SETOOLS "
+            "app-gen-toc step so the report is current, or set "
+            "flash_args.atoc_address explicitly."
+        )
+    merged = dict(flash_args)
+    merged["atoc_address"] = address
+    return merged
+
+
 def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[str]]:
     """Dispatch + run one target. Returns `(rc, entry, text-lines)`."""
     kind, entry_id = target.kind, target.id
@@ -603,9 +687,25 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         lines.append(gate.message)
         return 1, entry(method, "failed", 1, gate.message), lines
 
+    flash_args = target.flash_args
+    if method == FLOW_D_METHOD:
+        # The one place `flash_args` is augmented before dispatch: the ATOC
+        # address is a build-time output, so it may need resolving from a
+        # build artefact rather than arriving on the manifest already. See
+        # `_resolve_flow_d_atoc_address`. A supplied-but-unusable `atoc_map`
+        # raises there rather than silently deferring to `plan_alif_mram_jlink`'s
+        # generic refusal -- caught here the same way `meta.build`'s is below.
+        try:
+            flash_args = _resolve_flow_d_atoc_address(flash_args, ctx.build_root, ctx.sdk_root)
+        except FlashPlanError as err:
+            msg = str(err)
+            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(f"  FAIL: {msg}")
+            return 1, entry(method, "failed", 1, msg), lines
+
     inputs = FlashInputs(
         artefact=artefact_path,
-        flash_args=target.flash_args,
+        flash_args=flash_args,
         core_id=entry_id,
         sku=ctx.sku,
         dry_run=ctx.dry_run,
@@ -620,6 +720,23 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         return 1, entry(method, "failed", 1, msg), lines
 
     lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+
+    # Flow D's DPIDR preflight args (`expect_dpidr`/`jlink_device`) are
+    # validated here too -- PLAN-TIME, before the confirm/dry-run gate below --
+    # not only in `_flow_d_preflight` at real-write time. Without this, `tan
+    # flash --dry-run` (or any unconfirmed run) on a half-armed or malformed
+    # manifest reports `status: planned`/`ok` with no diagnostic, and the
+    # customer only learns their manifest is wrong once they actually confirm
+    # a write. This calls the same validate-only half `_flow_d_preflight`
+    # calls (via `flow_d_preflight_script`); it builds no script and touches
+    # no J-Link binary, so it is safe to run unconditionally here.
+    if method == FLOW_D_METHOD:
+        try:
+            validate_flow_d_preflight_args(flash_args)
+        except FlashPlanError as err:
+            msg = str(err)
+            lines.append(f"  FAIL: {msg}")
+            return 1, entry(method, "failed", 1, msg), lines
 
     if plan.planning_only or ctx.dry_run:
         shown = display_argv(plan)
@@ -664,10 +781,13 @@ def _flow_d_preflight(inputs: FlashInputs) -> str | None:
     the SW-DP IDR before any MRAM write. Returns a refusal message, or `None`
     to proceed.
 
-    ABSENT-BY-DEFAULT, on purpose: a manifest that declares no `expect_dpidr`
-    (or no attach-profile `jlink_device`) gets no preflight, because tan has no
+    ABSENT-BY-DEFAULT, on purpose: a manifest that declares BOTH no `expect_dpidr`
+    AND no attach-profile `jlink_device` gets no preflight, because tan has no
     hardware knowledge to supply either value and a wrong expected ID would
-    refuse every good board. Both come from `flash_args`.
+    refuse every good board. Any other combination -- one present without the
+    other, or either present but null/empty -- refuses instead of silently
+    dropping the check (see `validate_flow_d_preflight_args`). Both come from
+    `flash_args`.
 
     Capture is forced on regardless of output mode: the whole point is to READ
     the connect banner, and letting it stream would both lose the value and put
@@ -793,6 +913,8 @@ def _run(
     # Seeded with the status-refused slices: they never become a target, so they
     # cannot increment `failed` in the loop -- but a slice `tan build` reports
     # non-`ok` must still fail the overall run, not disappear into a clean exit.
+    # `refused_skipped` is deliberately NOT folded in here -- see the loop
+    # below and `TargetPlan.refused_skipped`.
     failed = len(plan.refused)
     flashed_anything = False
 
@@ -805,6 +927,15 @@ def _run(
         # (possibly stale) artefact for flashing at all, so `ok` must disagree
         # with a green exit code here exactly as a spawned flash failure does.
         issues.append(Issue("flash.slice-not-built", "error", refusal))
+    for refusal in plan.refused_skipped:
+        text_lines.append(refusal)
+        # warning, not error, and NOT counted into `failed` below: `tan build`
+        # already decided (via `executionPolicy`) not to build this slice on
+        # this host -- e.g. no `bitbake` for a Yocto slice on an MCU-only
+        # checkout -- and reported that decision. An MCU customer who never
+        # asked for that slice must not see a red `tan flash` over it; the
+        # skip stays visible in the envelope instead of being swallowed.
+        issues.append(Issue("flash.slice-skipped", "warning", refusal))
 
     ctx = _Context(
         sku=manifest.sku,
@@ -833,16 +964,35 @@ def _run(
         if rc > 0:
             failed += 1
 
-    if not flashed_anything and not plan.refused:
-        # A refused slice DID match the requested filters -- it was refused, not
-        # absent -- so "nothing matched" would be a misleading second message on
-        # top of the flash.slice-not-built issue already pushed above.
+    if not flashed_anything and not plan.refused and not plan.refused_skipped:
+        # A refused (or skipped) slice DID match the requested filters -- it was
+        # refused, not absent -- so "nothing matched" would be a misleading
+        # second message on top of the flash.slice-not-built /
+        # flash.slice-skipped issue(s) already pushed above.
         message = "flash: nothing matched the requested filters."
         text_lines.append(message)
         # A `--core`/`--helper` filter matching nothing used to warn only in text
         # mode, so `--format json` reported `ok:true` with empty
         # `entries`/`issues` for a flash that never touched a device.
         issues.append(Issue("flash.nothing-matched", "warning", message))
+    elif not flashed_anything and not plan.refused and plan.refused_skipped:
+        # `refused_skipped` alone is fine ALONGSIDE at least one real flash (see
+        # `TargetPlan.refused_skipped`): the skip was already a policy decision
+        # `tan build` made and reported, and `flashed_anything` being True there
+        # means the run did something real. But when NOTHING flashed and every
+        # match was a skip, exiting 0 here would be the same silent-success bug
+        # `refused` fixes above, just inverted: a manifest whose only slice is
+        # `status: skipped` (or a `--core`/`--helper` filter naming exactly one)
+        # used to report `ok:true`/exit 0 with an empty `entries[]` -- a bench
+        # reads that as a completed flash over an unchanged board. `failed` is
+        # bumped the same way `refused` seeds it above (one per skipped match)
+        # so the count and the exit code both reflect that nothing was
+        # programmed; the individual `flash.slice-skipped` warnings above still
+        # say WHY each one didn't run.
+        failed += len(plan.refused_skipped)
+        message = "flash: every matched slice/helper was build-skipped; nothing was flashed."
+        text_lines.append(message)
+        issues.append(Issue("flash.nothing-flashed", "error", message))
     text_lines.append(f"flash: {failed} failure(s).")
 
     exit_code = ExitCode.RUNTIME_FAILURE if failed > 0 else ExitCode.SUCCESS

@@ -10,7 +10,69 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
 * without ``--offline`` the real validator is the SDK's own
   ``scripts/validate_board_yaml.py``, spawned as a subprocess. tan does not
   reimplement alp-sdk's schema: the SDK owns ``metadata/schemas/`` and
-  ADR-0017's doctrine is to consume what exists. Deferred, and it says so.
+  ADR-0017's doctrine is to consume what exists. Not ported yet, and it says
+  so -- at exit 1 (``RuntimeFailure``), not exit 5.
+
+  **Exit 1 here is a DEFERRAL, not a match to the oracle.** An earlier revision
+  of this docstring claimed it matched; that claim was never measured and was
+  wrong. Measured directly, running ``target/debug/tan.exe`` (tan 0.4.1-dev)
+  with ``--format json``:
+
+  - empty directory -> exit **2**, ``validate.board-yaml-missing``
+  - ``board.yaml`` present, no SDK root -> exit **2**,
+    ``validate.sdk-root-unresolved``
+
+  Exit 1 is reachable in the oracle only AFTER a validator actually spawns and
+  returns an unexpected status. So the oracle draws a line this port does not
+  yet: pre-spawn guards at 2, post-spawn failure at 1. The ``board.yaml``
+  -missing guard below is now aligned with it. The remaining divergence --
+  ``board.yaml`` present but no SDK, where the oracle says 2
+  ``sdk-root-unresolved`` and this port says 1 ``spawn-not-implemented`` -- is
+  the genuine v0.6.0 decision, tracked in tan-cli#262.
+
+  Exit 5 is wrong on every one of these paths regardless: reporting "not ported
+  yet" as ``InternalFailure`` would tell CI/the extension this is a tan crash,
+  the same mistake the Rust comment on the offline path (below) was written to
+  stop repeating.
+
+  Re-measure before changing any of this. Do not infer the oracle's behaviour
+  from a report, a docstring, or ``crates/`` -- run the binary.
+
+  **The wire string itself, ``validate.spawn-not-implemented``, has no oracle
+  counterpart -- decided KEEP, not renamed.** The oracle has no "not ported"
+  state at all; the closest thing it emits is ``validate.failed``. Measured
+  the FULL validator-exit-status -> outcome map against ``target/debug/tan.exe``
+  with a contrived SDK (``scripts/alp_project.py`` marker +
+  ``scripts/validate_board_yaml.py`` exiting a chosen code), ``board.yaml``
+  present, ``--sdk-root`` pointed at it, no ``--offline``:
+
+  =============== =============================== ===
+  validator exit   outcome                          rc
+  =============== =============================== ===
+  0                clean                            0
+  1                schema-violation                 2
+  2                missing-preset                    2
+  3                hardware-revision                2
+  5, 77            failed                            1
+  =============== =============================== ===
+
+  So ``validate.failed`` is specifically the "anything outside the 0-3 range
+  the resolver maps by number" case -- NOT every non-clean status, and in
+  particular not exit 2 or 3, which have their own named outcomes. A reader
+  must not infer "any nonzero -> failed" from this docstring. That is a
+  DIFFERENT failure shape from this port's: the oracle spawned and got back
+  nonsense, this port never spawns at all.
+  Reusing ``validate.failed`` here would conflate "we attempted validation
+  and the subprocess misbehaved" with "this code path does not exist yet"
+  under one string, which is a worse signal for the same reason the exit-code
+  choice above is. ``validate.spawn-not-implemented`` is therefore kept as a
+  deliberate, PORT-ONLY code: it is not in ``contract/issue-codes.json``
+  (nothing there mentions ``validate.*`` at all) and no v0.4.1 consumer has
+  ever seen it, since v0.4.1 is the Rust CLI and this spelling exists only in
+  this port. It becomes dead code the moment the real spawn path lands
+  (tan-cli#262) and this branch is deleted in favour of actually spawning, at
+  which point the resulting failures naturally become ``validate.failed``
+  like the oracle's.
 
 **A wrong-shaped board.yaml is the USER's problem, not a tan crash.** The Rust
 carries a comment earned the hard way: routing a malformed file through
@@ -419,21 +481,31 @@ def validate(
             exit_code=exit_code,
         )
 
-    if not offline:
-        # The SDK owns metadata/schemas/; tan does not reimplement it.
-        fail(
-            "internal-failure",
-            "the full (spawn) validator is not ported yet -- run with --offline, "
-            "or use the SDK's scripts/validate_board_yaml.py directly.",
-            ExitCode.INTERNAL_FAILURE,
-        )
-        return
-
     if not Path(board_path).exists():
+        # Ordered BEFORE the not-ported stub, deliberately. MEASURED against the
+        # oracle (`target/debug/tan.exe`, tan 0.4.1-dev) in an empty directory:
+        # exit 2, `validate.board-yaml-missing`, `outcome: "failed"` -- and the
+        # oracle reaches this guard on both paths, `--offline` or not. A stub
+        # that short-circuits above this check would answer "not ported yet" to
+        # a question the oracle answers "your board.yaml is missing", in the one
+        # case a brand-new user hits first. Cheap to keep compatible; keep it.
         fail(
             "board-yaml-missing",
             "board.yaml path could not be resolved or the file does not exist.",
             ExitCode.VALIDATION_FAILURE,
+        )
+        return
+
+    if not offline:
+        # The SDK owns metadata/schemas/; tan does not reimplement it. The spawn
+        # path is NOT ported, so this reports a deferral. See the module
+        # docstring for why exit 1 (RuntimeFailure) rather than exit 5, and for
+        # the one divergence from the oracle it knowingly keeps (tan-cli#262).
+        fail(
+            "spawn-not-implemented",
+            "the full (spawn) validator is not ported yet -- run with --offline, "
+            "or use the SDK's scripts/validate_board_yaml.py directly.",
+            ExitCode.RUNTIME_FAILURE,
         )
         return
 

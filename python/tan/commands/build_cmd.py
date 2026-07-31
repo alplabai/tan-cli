@@ -26,6 +26,41 @@ assert the OTHER slice's config artefact already exists.
 only thing ever written to stdout. The extension parses stdout whole; one
 stray byte and it renders nothing, with no error on either side.
 
+**`--plan-from` is a plan SOURCE, not a build trigger (v0.4.1 §gate).** The
+oracle's `--plan-from` help says "Implies `--plan`", and measured against the
+shipped `tan 0.4.1-dev` binary in fresh temp dirs, on
+`tests/parity/oracle/multicore_rpmsg-aen.build-plan.json`, it means it -- even
+against an EXPLICIT `--native`::
+
+    build --plan-from p.json                -> rc 0, 0 files, data = the plan
+    build --plan-from p.json --native       -> rc 0, 0 files, data = the plan
+    build --plan-from p.json --materialise  -> rc 0, 6 files,
+                                               data = {schemaVersion, baseDir, written}
+
+All three are reproduced here exactly (`_MODE_PLAN` / `_MODE_MATERIALISE`),
+`--native` included. Two earlier revisions of this file each redefined one of
+those argvs -- a bare `--plan-from` used to materialise AND dispatch, and then
+`--plan-from --native` did -- so a v0.4.1 script that only ever INSPECTED a
+plan silently began writing six files into its own tree. Changing what a
+v0.4.1 argv MEANS is the whole surprise this gate exists to remove.
+
+**`--execute` is a deliberate PORT ADDITION the oracle has no flag for.**
+Taking a pinned, reviewed plan file and running it reproducibly is a normal
+hermetic-CI request; v0.4.1's inability to do it is a LIMITATION of that CLI,
+not a contract worth preserving -- there `--plan-from`'s implied `--plan`
+outranks `--native`, so a file-supplied plan cannot be dispatched at all.
+`--execute` supplies exactly that capability without changing what any v0.4.1
+argv means. It is not a parity bug and not a test hook: a future reader who
+"fixes" it by deleting it removes a supported capability. Its `data` is the
+ORDINARY build shape -- `{schemaVersion, baseDir, slices[], warnings[]}` --
+because it IS a native build and only the plan's SOURCE differs; `written` is
+deliberately omitted, being byte-for-byte the pinned plan's own declared
+artefact paths, which the one caller who has that file already holds. A
+conflicting combination is refused with its own code, never resolved by silent
+precedence (`--execute --materialise` -> `build.conflicting-flags`, exit 2;
+`--execute` with a deferred flag -> `cli.command-deferred`, exit 1, because a
+flag this build does not implement at all cannot be honoured either way).
+
 **The OS is not an option (I-01/I-02).** There is deliberately no `--os` and
 no `--backend` flag. A core's runtime is derived from its Cortex class by the
 planner (`tan/planner/topology.py`), and `slices[].backend`
@@ -34,6 +69,7 @@ one-core `board.yaml` legitimately plans three (I-04), and "helpfully"
 dropping the ones the customer did not name is how a Yocto slice silently
 stops being built.
 """
+import json
 import os
 import sys
 from dataclasses import replace
@@ -41,14 +77,24 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build.execute import KNOWN_BACKENDS, SliceOutcome, execute_slices
+from tan.commands.build.execute import (
+    KNOWN_BACKENDS,
+    SliceOutcome,
+    execute_slices,
+    last_manifest_write_failure,
+    last_sdk_switch_issues,
+    reset_last_manifest_write,
+)
 from tan.commands.build.materialise import MaterialiseError, materialise_plan
 from tan.commands.build.token_substitution import (
     TokenSubstitutionError,
     apply_plan_token_substitution,
 )
+from tan.commands.deferred_cmd import DEFERRED_ISSUE_CODE, DEFERRED_ISSUE_URL
+from tan.commands.sdk_cmd import resolve_sdk_tiered
+from tan.core.bootstrap import VenvLayout, venv_layout
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
-from tan.core.plan_exec import PolicyAction, resolve_action
+from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -64,6 +110,56 @@ SDK_MARKER = ("scripts", "alp_project.py")
 #: (nothing here supplies a cancellation source) but maps to `failed` rather
 #: than falling through to a KeyError if one is ever wired up.
 _WIRE_STATUS = {"succeeded": "ok", "skipped": "skipped"}
+
+#: What this run does with the plan it acquires -- the oracle's own precedence,
+#: measured flag-combination by flag-combination against `target/debug/tan.exe`
+#: on the AEN fixture: `--materialise` outranks everything (`--plan-from
+#: --materialise --native` -> six files, `written` shape), the `--plan` implied
+#: by `--plan-from` outranks even an explicit `--native` (`--plan-from
+#: --native` -> the plan, zero files), and only a run naming NEITHER plan-mode
+#: flag builds. `_MODE_NATIVE` is therefore both the default and what the
+#: port-added `--execute` selects -- deliberately the SAME mode, so `--execute`
+#: reports the same `data` shape a plain `tan build` does rather than a fourth
+#: one no consumer is written for.
+_MODE_PLAN = "plan"
+_MODE_MATERIALISE = "materialise"
+_MODE_NATIVE = "native"
+
+#: Flags the oracle's `tan build` declares and this port does not implement,
+#: in the order a run naming several of them is refused. Declaring them is the
+#: whole point: an undeclared flag is a Click `UsageError` -- exit 2,
+#: `cli.parse-error`, and a message indistinguishable from `tan build
+#: --pristien`. Registering them turns "known, deferred" into its own coded
+#: answer at exit 1, exactly as `deferred_cmd` does for the seven deferred
+#: VERBS, whose `cli.command-deferred` code and tan-cli#260 URL are reused
+#: rather than forked (a caller special-casing deferral needs one code to
+#: match, not two).
+#:
+#: `--verbose`/`--quiet`/`--no-color`/`--non-interactive`/`--ci` are declared
+#: HERE, build-local, only because this port accepts none of them at the root
+#: today (measured: `tan --verbose build ...` -> exit 2, "No such option");
+#: in the oracle all five are clap `global = true` args declared once on the
+#: root and propagated. The moment `cli.py` grows a real root-level
+#: implementation these five must be DELETED from here, or a build-local
+#: declaration would shadow it.
+_DEFERRED_FLAGS = (
+    "--plan",
+    "--target",
+    "--all",
+    "--manifest",
+    "--manifest-from",
+    "--no-auto-bootstrap",
+    "--pristine",
+    "--verbose",
+    "--quiet",
+    "--no-color",
+    "--non-interactive",
+    "--ci",
+)
+
+#: `--help` text for every one of them -- one string, because they all report
+#: the same fact and a per-flag reason would be twelve things to keep true.
+_DEFERRED_HELP = "Deferred to v0.6.0, not implemented in this build (tan-cli#260)."
 
 
 class BuildError(Exception):
@@ -124,10 +220,12 @@ def discover_sdk_root(workspace_root: Path) -> Path | None:
     is both slow and non-hermetic (it lets an unrelated checkout elsewhere on
     the machine decide what a test resolves).
 
-    Deliberately NOT the full Rust ladder -- `tan sdk switch`'s workspace pin
-    and machine-global default (`~/.alp/sdk-default`) are tiers this port has
-    no `sdk` command to write yet, and half a precedence chain that silently
-    picks the wrong checkout is worse than an honest `--sdk-root`.
+    Deliberately just the positional walk, not the full ladder -- the project
+    pin and machine-global default tiers that outrank this one live in
+    [`resolve_sdk_root_ladder`], below, which every `--sdk-root`-less caller
+    should use instead of calling this directly (this function remains that
+    ladder's own final fallback tier, and the one place that still calls it
+    alone is `tan-cli#218`'s own regression test).
     """
     parent = workspace_root.parent
     for candidate in (
@@ -144,29 +242,160 @@ def discover_sdk_root(workspace_root: Path) -> Path | None:
     return None
 
 
-def _planner_python() -> str:
+def resolve_sdk_root_ladder(
+    sdk_root_arg: str | None, workspace_root: Path
+) -> tuple[Path | None, str]:
+    """`(path, sourceTier)` -- the ONE discovery ladder every command that
+    actually reads an SDK checkout shares (`build`, `doctor`, `run`, `flash`,
+    `examples`, `generate`, `renode`, `size`, `clean`, `init`'s pin choice):
+    `--sdk-root` (terminal, I-31) > the project's own pin (`.alp/sdk-path`,
+    written by `tan init` / relocated by `tan bootstrap`) > the machine-global
+    default (`~/.alp/sdk-default`) > the wide positional walk
+    (`discover_sdk_root`, above) -- exactly the Rust oracle's closed
+    `SdkSourceTier` (`crates/tan-core/src/sdk.rs`): `SdkRootFlag`,
+    `ProjectPin`, `GlobalDefault`, `Discovery`, `None`. No sixth tier.
+
+    This is the fix for the worst reported CX defect in this port: `tan init`
+    writes `.alp/sdk-path` into the project it just scaffolded, but every
+    command below used to jump straight from `--sdk-root` to the positional
+    walk, skipping `resolve_sdk_tiered` (`sdk_cmd.py`) entirely -- so that
+    pointer was silently ignored the moment `tan build` ran in that SAME
+    directory, unless the checkout also happened to sit beside the project by
+    coincidence. `resolve_sdk_tiered` already IS the oracle's `--sdk-root` >
+    project pin > global default > discovery chain; the only thing missing
+    from it here is the WIDER positional walk as one more fallback below
+    `discovery`, for callers ported before `resolve_sdk_tiered` existed.
+
+    An `ALP_SDK_ROOT` env-var tier was tried here and reverted: the oracle's
+    `util.rs::resolve_sdk_root` only ever WRITES that variable into a build
+    slice's env, never reads it back for discovery, and `SdkSourceTier` has no
+    slot for it -- a sixth `sourceTier` value in the envelope is a wire
+    contract change no consumer (the vscode extension, `tan sdk current
+    --json`) expects. The project-pin tier above already makes `tan init &&
+    tan build` compose without it.
+
+    **The narrow tier short-circuiting the wide one is deliberate, and
+    measured** (tan-cli#263, which proposed inverting it): the wide walk puts
+    the CHILD `<ws>/alp-sdk` ahead of the lateral `../alp-sdk`, so hoisting it
+    above `resolve_sdk_tiered` would flip every workspace holding both. Driven
+    through the oracle binary in constructed layouts, thirteen of its commands
+    -- `build`, `doctor`, `clean`, `run`, `flash`, `size`, `image`, `kconfig`,
+    `validate`, `presets`, `inspect`, `trace`, `sdk current` -- resolve the
+    LATERAL one there, i.e. the narrow order this ladder already has; only
+    `init`, `generate`, `examples` and `renode` take the child. The oracle
+    carries two resolutions, not one, and this ladder mirrors the majority
+    (narrow) one plus the wide walk as its tail. Inverting it to match the
+    other four would move the SDK root under thirteen commands, and a moved
+    root is what `plan_exec.sdk_stamp_action` reads as a switch: every existing
+    such workspace would take the `build.sdk-switch-pristine` branch on its
+    next build and lose every slice's build dir. The four wide commands are the
+    real gap and want a separate wide helper, not a change here.
+    """
+    flag = (sdk_root_arg or "").strip()
+    if flag:
+        return Path(flag), "sdkRootFlag"
+
+    tiered = resolve_sdk_tiered(None, workspace_root)
+    if tiered.path is not None:
+        return Path(tiered.path), tiered.tier
+
+    found = discover_sdk_root(workspace_root)
+    if found is not None:
+        return found, "discovery"
+    return None, "none"
+
+
+def _has_west(venv: Path, layout: VenvLayout) -> bool:
+    return (venv / layout.bin_dir / layout.west).is_file()
+
+
+def _find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
+    """Locate the west-capable workspace `.venv`, mirroring Rust's
+    `find_workspace_venv` (`crates/tan-cli/src/venv.rs`): gated on `west`
+    actually being present under the candidate (not just the directory
+    existing), in this order:
+
+      1. a `.venv` in the project tree, searched from `start` upward;
+      2. the workspace venv derived from `$ZEPHYR_BASE`
+         (`<ZEPHYR_BASE>/../.venv`);
+      3. the SDK's canonical `<sdk-parent>/.venv` (post-alp-sdk#782) or the
+         legacy `<sdk-parent>/zephyrproject/.venv`.
+
+    `None` when none resolve (CI, an activated venv, the contract harness).
+    """
+    layout = venv_layout(os.name == "nt")
+
+    directory: Path | None = Path(start)
+    while directory is not None:
+        candidate = directory / ".venv"
+        if _has_west(candidate, layout):
+            return candidate
+        parent = directory.parent
+        directory = parent if parent != directory else None
+
+    zephyr_base = os.environ.get("ZEPHYR_BASE")
+    if zephyr_base:
+        candidate = Path(zephyr_base).parent / ".venv"
+        if _has_west(candidate, layout):
+            return candidate
+
+    if sdk_root is not None:
+        parent = Path(sdk_root).parent
+        for workspace in (parent, parent / "zephyrproject"):
+            candidate = workspace / ".venv"
+            if _has_west(candidate, layout):
+                return candidate
+
+    return None
+
+
+def _venv_python(start: str, sdk_root: str | None) -> str | None:
+    """The west-capable workspace venv's `python` (see
+    `_find_workspace_venv`), mirroring Rust's `venv_python`. `None` when no
+    workspace venv resolves, or the one that does has no `python` binary --
+    the caller then keeps its own PATH-name fallback rather than spawning a
+    path that doesn't exist.
+
+    Forward-slashed, matching `_abs_posix` and `apply_plan_token_substitution`'s
+    own `project_root` handling: this value is substituted verbatim into
+    `${PYTHON}`, which lands in a `-DPython3_EXECUTABLE=<...>` CMake `-D`
+    argument (`orchestrator.py`), and a Windows backslash there is an escape
+    character (alp-sdk#849 -- CMake read `\\U`/`\\N` etc. as invalid character
+    escapes). `apply_plan_token_substitution` only forward-slashes
+    `project_root`, not `python`, so an un-normalised venv path under
+    `C:\\Users\\...` reached CMake unescaped.
+    """
+    venv = _find_workspace_venv(start, sdk_root)
+    if venv is None:
+        return None
+    layout = venv_layout(os.name == "nt")
+    candidate = venv / layout.bin_dir / layout.python
+    return str(candidate).replace("\\", "/") if candidate.is_file() else None
+
+
+def _planner_python(start: str, sdk_root: str | None) -> str:
     """The interpreter a SPAWNED build step runs under.
 
     Two callers remain now that planning and every `generate` target run
     in-process: `${PYTHON}` token substitution (below), and
     `generate_cmd`'s `TAN_GENERATE_EXECUTOR=subprocess` escape hatch.
 
-    A PATH name, mirroring `tan_core::project::resolve_python_binary`
-    (`python3` off Windows, `python` on it) -- NOT `sys.executable`. Two
-    reasons, and either alone is decisive: frozen by PyInstaller,
-    `sys.executable` is `tan` itself, so spawning it would just re-enter this
-    CLI; and this value is also the `${PYTHON}` substituted into the plan, which
-    the planner bakes into every Zephyr slice as `-DPython3_EXECUTABLE`
-    (alp-sdk#787) -- it has to name an interpreter the slice can find, not this
-    process.
+    Prefers the west-capable workspace venv's `python` (`_venv_python`,
+    mirroring Rust's `venv_python`/`resolved_planner_python`), because the SDK
+    planner bakes ITS `sys.executable` into every Zephyr slice as
+    `-DPython3_EXECUTABLE=<...>` (alp-sdk#787) -- a bare PATH `python3` may
+    lack the `west` module entirely, which surfaced as the planner's own
+    `ModuleNotFoundError: No module named 'west'` inside CMake configure
+    (tan-cli, the documented-install-path bug) rather than a working build.
 
-    NOT YET PORTED: Rust prefers the west-capable workspace venv's python
-    (`venv_python`) and falls back to this only when no venv resolves. Without
-    that, a host whose PATH `python` lacks the `west` module gets the planner's
-    own ImportError surfaced through `build.plan-unavailable` rather than a
-    working build.
+    Falls back to a bare PATH name -- `python3` off Windows, `python` on it,
+    mirroring `tan_core::project::resolve_python_binary` -- only when no
+    workspace venv resolves. NOT `sys.executable`: frozen by PyInstaller,
+    `sys.executable` is `tan` itself, so spawning it would just re-enter this
+    CLI; and this value is also the `${PYTHON}` substituted into the plan, so
+    it has to name an interpreter the slice can find, not this process.
     """
-    return "python" if os.name == "nt" else "python3"
+    return _venv_python(start, sdk_root) or ("python" if os.name == "nt" else "python3")
 
 
 def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
@@ -271,7 +500,14 @@ def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:
 
 def _acquire_plan(
     plan_from: str | None, sdk_root: str | None, board_yaml: str | None
-) -> BuildPlan:
+) -> tuple[str, BuildPlan]:
+    """`(source text, parsed plan)`. The TEXT comes back too because
+    `_MODE_PLAN` echoes it: the oracle's plan output is a raw passthrough, not
+    a round-trip through its own structs -- measured by adding an unknown
+    top-level key to the fixture, which survives verbatim into `data`. Echoing
+    a re-serialised `BuildPlan` would silently drop exactly the forward-compat
+    keys a newer SDK adds, which is the drift the version-skew guard exists to
+    make loud."""
     if plan_from is not None:
         try:
             text = Path(plan_from).read_text(encoding="utf-8")
@@ -292,7 +528,7 @@ def _acquire_plan(
         text = _emit_plan(sdk_root, board_yaml)
 
     try:
-        return parse_build_plan(text)
+        return text, parse_build_plan(text)
     except PlanParseError as err:
         # Exit 1, NOT 2. A malformed plan reads like a validation failure and
         # the semantic pull toward `ValidationFailure` is real -- but the
@@ -325,7 +561,11 @@ def _slice_result(core_id: str, backend: str, outcome: SliceOutcome) -> dict:
 
 
 def _dispatch(
-    plan: BuildPlan, demotions, build_root: Path
+    plan: BuildPlan,
+    demotions,
+    build_root: Path,
+    sdk_root: str | None,
+    sdk_root_for_stamp: str | None,
 ) -> tuple[list[SliceOutcome], list[Issue]]:
     """Run the plan's slices, holding back the ones token substitution demoted.
 
@@ -341,6 +581,32 @@ def _dispatch(
     Precedence is preserved: a demoted slice that ALSO names an unknown
     backend or carries no command is left to `execute_slices`, because both of
     those outrank a provisioning fact and are checked first there.
+
+    `sdk_root` is threaded straight through to `execute_slices` -- it is
+    THIS run's already-resolved `--sdk-root`/discovered checkout (`_build`'s
+    own parameter), the identity `execute_slices`'s sdk-switch-pristine guard
+    (issue #52) keys its stamp comparison on. Without it every stamp
+    comparison degrades to "unresolved", which never wipes anything -- see
+    `tan.core.plan_exec.sdk_stamp_key`. `sdk_root_for_stamp` is the SAME
+    checkout, NORMALIZED and anchored on the workspace root (`build()`'s own
+    `tan.core.plan_exec.normalize_path(workspace_root / sdk_root)`) -- passed
+    separately so a relative `--sdk-root ../alp-sdk` keys the stamp
+    IDENTICALLY to the absolute form `tan sdk switch` would pin for the same
+    checkout (tan-cli#163), without changing what `sdk_root` itself
+    substitutes for `${SDK_ROOT}` or reports as `sdk.root`.
+
+    Held slices are also threaded into `execute_slices` as `held_outcomes`
+    (tan-cli #89 MINOR 4, oracle `execute/mod.rs:379-400`): `execute_slices`
+    only ever sees the RUNNABLE subset of the plan (`replace(plan,
+    slices=runnable)` below), so its own post-build manifest overlay would
+    otherwise never learn a demoted slice existed at all -- leaving that
+    core's `system-manifest.yaml` entry at its plan-time (or a previous
+    run's) `status`/`output_artefact` forever, which `tan size`/
+    `tan debug-config` read with no status check of their own. Each held
+    outcome's `output_artefact` is the explicit empty string, never `None`:
+    the overlay (`overlay_run_results_raw`) treats `None` as "preserve
+    whatever is already there", which is correct for a slice this run never
+    touched but wrong for one THIS run knows never dispatched.
     """
     held = {
         d.slice_index: d
@@ -350,6 +616,17 @@ def _dispatch(
     }
     action = resolve_action(plan.execution_policy, "missing_tool", PolicyAction.SKIP)
     failed = action is PolicyAction.FAIL
+
+    held_outcomes = {
+        i: SliceOutcome(
+            plan.slices[i].core_id,
+            "failed" if failed else "skipped",
+            None,
+            d.reason,
+            output_artefact="",
+        )
+        for i, d in held.items()
+    }
 
     runnable = [sl for i, sl in enumerate(plan.slices) if i not in held]
     dispatched = iter(
@@ -365,6 +642,9 @@ def _dispatch(
             # relying on the CLI to fill them.
             gap_fillers=(),
             on_output=_stream,
+            sdk_root=sdk_root,
+            sdk_root_for_stamp=sdk_root_for_stamp,
+            held_outcomes=held_outcomes.values(),
         )
     )
 
@@ -375,9 +655,7 @@ def _dispatch(
         if demotion is None:
             outcomes.append(next(dispatched))
             continue
-        outcomes.append(
-            SliceOutcome(sl.core_id, "failed" if failed else "skipped", None, demotion.reason)
-        )
+        outcomes.append(held_outcomes[i])
         issues.append(
             Issue(
                 # Same code as the plan-fatal sibling on purpose: the
@@ -413,9 +691,27 @@ def _backend_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[Issue
 
 
 def _build(
-    *, plan_from: str | None, build_root: str, sdk_root: str | None, board_yaml: str | None
+    *,
+    # Defaulted so `mode` stays optional for the OTHER caller of this engine:
+    # `run_cmd._build_then_run` builds unconditionally (there is no `tan run
+    # --plan`/`--materialise`) and has no mode to pass.
+    mode: str = _MODE_NATIVE,
+    plan_from: str | None,
+    build_root: str,
+    sdk_root: str | None,
+    sdk_root_for_stamp: str | None,
+    board_yaml: str | None,
 ) -> tuple[ExitCode, dict, list[Issue]]:
-    plan = _acquire_plan(plan_from, sdk_root, board_yaml)
+    text, plan = _acquire_plan(plan_from, sdk_root, board_yaml)
+
+    if mode == _MODE_PLAN:
+        # Parsed (so a plan that will not load is still refused with its own
+        # code -- measured: the oracle rejects `schemaVersion: 2` and an
+        # unknown `executionPolicy` action in THIS mode too), then echoed
+        # verbatim. No token substitution: the oracle shows a `planPathMode:
+        # tokened` plan with no SDK resolvable at exit 0, unsubstituted, and
+        # only refuses it once `--materialise` asks for it on disk.
+        return ExitCode.SUCCESS, json.loads(text), []
 
     # Substitution runs on the in-memory plan BEFORE materialise writes
     # anything and before any command is assembled, so an unresolvable token
@@ -427,7 +723,7 @@ def _build(
             board_yaml_path=board_yaml,
             exec_base=build_root,
             sdk_root=sdk_root,
-            python=_planner_python(),
+            python=_planner_python(build_root, sdk_root),
             # NOT YET PORTED: `crate::toolchain::resolve_toolchain_root`. Left
             # unresolved rather than guessed -- resolution is lazy, so a plan
             # that never names ${TOOLCHAIN_ROOT} (every SDK plan today) is
@@ -450,7 +746,31 @@ def _build(
             "build.materialise-failed", err.message, ExitCode.WRITE_FAILURE
         ) from err
 
-    outcomes, issues = _dispatch(plan, demotions, Path(build_root))
+    if mode == _MODE_MATERIALISE:
+        # Write and stop -- the oracle dispatches nothing here, and its `data`
+        # carries no `slices` at all. `written` is rebuilt from the plan's own
+        # (post-substitution) artefact paths in `materialise_plan`'s documented
+        # order, shared first then per slice, because those are the RELATIVE
+        # strings the oracle reports; `materialise_plan` itself hands back
+        # resolved absolute paths, and relativising those back re-introduces
+        # every symlink/case difference `_abs_posix` exists to avoid.
+        written = [a["path"] for a in plan.shared_artefacts]
+        for sl in plan.slices:
+            written.extend(a["path"] for a in sl.config_artefacts)
+        return (
+            ExitCode.SUCCESS,
+            {"schemaVersion": "1", "baseDir": build_root, "written": written},
+            [],
+        )
+
+    # Cleared before dispatch, mirroring `run_cmd.py`'s own pattern, so a
+    # leftover signal from an earlier in-process `_build` (e.g. a test
+    # harness calling `build()` more than once) never gets misread as THIS
+    # run's own write outcome below.
+    reset_last_manifest_write()
+    outcomes, issues = _dispatch(
+        plan, demotions, Path(build_root), sdk_root, sdk_root_for_stamp
+    )
 
     any_failed = any(o.status not in ("succeeded", "skipped") for o in outcomes)
     exit_code = ExitCode.RUNTIME_FAILURE if any_failed else ExitCode.SUCCESS
@@ -459,6 +779,31 @@ def _build(
             0, Issue("build.slice-failed", "error", "one or more slices failed to build")
         )
     issues.extend(_backend_issues(plan, outcomes))
+    # The sdk-switch-pristine wipe (issue #52) must not be stderr-only in
+    # JSON mode -- the VS Code extension only ever sees the envelope, not
+    # `_stream`'s output. Verbatim oracle codes/severity
+    # (`crates/tan-cli/src/commands/build/execute/mod.rs:591,617`):
+    # `build.sdk-switch-pristine` for the wipe itself, `-failed` when the
+    # wipe could not fully land.
+    issues.extend(last_sdk_switch_issues())
+
+    manifest_reason = last_manifest_write_failure()
+    if manifest_reason is not None:
+        # A failed manifest write used to report only through `on_output`
+        # (stderr) -- so the envelope said `ok: true, issues: []` while
+        # `system-manifest.yaml` still named the PREVIOUS run's status and
+        # artefact, which `tan size` re-derives and `tan flash` would go on
+        # to program. Verbatim oracle code/message
+        # (`crates/tan-cli/src/commands/build/execute/mod.rs:809-814`):
+        # dropping this half is exactly how a stale manifest used to look
+        # identical to `ok: true`.
+        issues.append(
+            Issue(
+                "build.manifest-write-failed",
+                "warning",
+                f"system-manifest.yaml was not updated — {manifest_reason}",
+            )
+        )
 
     data = {
         "schemaVersion": "1",
@@ -478,12 +823,68 @@ def _build(
     return exit_code, data, issues
 
 
+def _refuse(code: str, message: str, exit_code: ExitCode, json_mode: bool) -> None:
+    """Report a refusal this command makes UP FRONT -- before any project is
+    resolved, any plan read, and any byte written -- and exit.
+
+    One helper for both of them (a deferred flag, and a conflicting flag pair)
+    because they differ only in code, message and exit code. `project` is left
+    unresolved, as `deferred_cmd`'s verb-level stubs leave it: nothing was
+    read, so reporting a root would be reporting work this run did not do."""
+    issue = Issue(code, "error", message)
+    if json_mode:
+        emit(
+            Envelope(
+                "build",
+                Project(root=None, board_yaml=None),
+                {"message": message},
+                [issue],
+                exit_code,
+            )
+        )
+    else:
+        print(f"error: {message}", file=sys.stderr)
+    raise typer.Exit(int(exit_code))
+
+
 def build(
     plan_from: str = typer.Option(
         None,
         "--plan-from",
         metavar="FILE",
-        help="Read the build plan from a JSON file instead of invoking the SDK planner.",
+        help="Read the build plan from a JSON file instead of invoking the SDK planner. "
+        "Implies --plan: shows the plan and exits unless --materialise or --execute "
+        "is given.",
+    ),
+    materialise: bool = typer.Option(
+        False,
+        "--materialise",
+        help="Write the plan's generated files (shared artefacts + per-slice config) "
+        "under the build root and stop, instead of just showing the plan.",
+    ),
+    # Accepted and INERT, exactly as in the oracle ("This is the default; the
+    # flag is kept as an explicit opt-in" -- its own `--native` help). Never
+    # read below on purpose: a bare build is already native, and letting it
+    # override the `--plan` implied by `--plan-from` is the divergence
+    # `test_plan_from_shows_the_plan_and_writes_nothing_even_with_native`
+    # exists to keep out. `--execute` is the flag that dispatches a
+    # file-supplied plan.
+    native: bool = typer.Option(
+        False,
+        "--native",
+        help="Build natively: materialise the plan, then run each slice's command. "
+        "The default when no plan-mode flag is given. Like v0.4.1, this does NOT "
+        "override the --plan implied by --plan-from -- use --execute for that.",
+    ),
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Materialise the plan AND run each slice's command, even when the plan "
+        "came from --plan-from -- run a pinned, reviewed plan file reproducibly. "
+        "Implies --materialise (nothing can run that was never written); reports the "
+        "ordinary build result. ADDED BY THIS PORT, not a v0.4.1 flag: there "
+        "--plan-from implies --plan and outranks --native, so a file-supplied plan "
+        "cannot be dispatched at all. Deliberate, not a parity gap.",
     ),
     build_root: str = typer.Option(
         None,
@@ -504,6 +905,26 @@ def build(
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
+    # --- declared so they are refused as DEFERRED, never as a typo ----------
+    # See `_DEFERRED_FLAGS`. Each is a real, working flag of the v0.4.1 oracle
+    # that this port does not implement. LISTED in `--help` rather than hidden,
+    # for the same reason `deferred_cmd` registers its seven verbs in the
+    # command list: a reader comparing this surface to v0.4.1's needs to see
+    # that tan knows the flag and is refusing it, which absence cannot say.
+    plan: bool = typer.Option(False, "--plan", help=_DEFERRED_HELP),
+    target: str = typer.Option(None, "--target", metavar="EMIT", help=_DEFERRED_HELP),
+    all_targets: bool = typer.Option(False, "--all", help=_DEFERRED_HELP),
+    manifest: bool = typer.Option(False, "--manifest", help=_DEFERRED_HELP),
+    manifest_from: str = typer.Option(
+        None, "--manifest-from", metavar="FILE", help=_DEFERRED_HELP
+    ),
+    no_auto_bootstrap: bool = typer.Option(False, "--no-auto-bootstrap", help=_DEFERRED_HELP),
+    pristine: bool = typer.Option(False, "--pristine", help=_DEFERRED_HELP),
+    verbose: bool = typer.Option(False, "--verbose", help=_DEFERRED_HELP),
+    quiet: bool = typer.Option(False, "--quiet", help=_DEFERRED_HELP),
+    no_color: bool = typer.Option(False, "--no-color", help=_DEFERRED_HELP),
+    non_interactive: bool = typer.Option(False, "--non-interactive", help=_DEFERRED_HELP),
+    ci: bool = typer.Option(False, "--ci", help=_DEFERRED_HELP),
 ) -> None:
     """Build every slice of the project's build plan."""
     if output_format not in ("text", "json"):
@@ -511,6 +932,76 @@ def build(
             f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
         )
     json_mode = output_format == "json"
+
+    # Before anything is resolved or read: a run naming a flag this port does
+    # not implement does no work at all, and says which flag and why.
+    given = dict(
+        zip(
+            _DEFERRED_FLAGS,
+            (
+                plan,
+                target is not None,
+                all_targets,
+                manifest,
+                manifest_from is not None,
+                no_auto_bootstrap,
+                pristine,
+                verbose,
+                quiet,
+                no_color,
+                non_interactive,
+                ci,
+            ),
+            strict=True,
+        )
+    )
+    # FIRST, ahead of the conflict check below: a flag this build does not
+    # implement at all cannot be honoured in any combination, so `--execute
+    # --plan` gets the accurate answer (that `--plan` is deferred) rather than
+    # a conflict message for a flag that would not have worked anyway. Either
+    # way it is a coded refusal, never a silent precedence win.
+    for flag, was_given in given.items():
+        if was_given:
+            _refuse(
+                DEFERRED_ISSUE_CODE,
+                f"`tan build {flag}` is deferred to v0.6.0 and not available in "
+                f"this build (see {DEFERRED_ISSUE_URL}).",
+                ExitCode.RUNTIME_FAILURE,
+                json_mode,
+            )
+
+    if execute and materialise:
+        # Two different answers to "what does this run leave behind" -- one
+        # stops after writing, one goes on to dispatch. Refused with its own
+        # code at exit 2 (this CLI's position for an invalid invocation, the
+        # same `--format bogus` takes) instead of letting either win quietly:
+        # a silent precedence win here is precisely what `--execute` exists to
+        # replace.
+        _refuse(
+            "build.conflicting-flags",
+            "`--execute` and `--materialise` cannot be combined: `--materialise` "
+            "writes the plan's files and stops, `--execute` writes them and then "
+            "runs each slice. Pick one (`--execute` already implies writing).",
+            ExitCode.VALIDATION_FAILURE,
+            json_mode,
+        )
+
+    # The oracle's own precedence, measured, reproduced exactly -- `--native`
+    # included: `--plan-from` implies `--plan`, and that implied `--plan` beats
+    # an explicit `--native`, so `--plan-from --native` shows the plan and
+    # writes nothing here too. `--execute` is the port's ADDED capability (see
+    # the module docstring) and the only thing that dispatches a file-supplied
+    # plan; it selects the same `_MODE_NATIVE` a plain `tan build` runs, so it
+    # reports the same `data` rather than a shape of its own. With no
+    # `--plan-from` it is a no-op -- that run already builds.
+    if execute:
+        mode = _MODE_NATIVE
+    elif materialise:
+        mode = _MODE_MATERIALISE
+    elif plan_from is not None:
+        mode = _MODE_PLAN
+    else:
+        mode = _MODE_NATIVE
 
     # `util::cli_workspace_root`: `--project` joined to the (real) cwd, THEN
     # everything below anchors on this instead of the bare cwd -- board.yaml
@@ -576,22 +1067,34 @@ def build(
     if board_yaml is not None:
         board_yaml = _abs_posix(board_yaml)
 
-    explicit_sdk = sdk_root is not None
-    if sdk_root is None:
-        found = discover_sdk_root(workspace_root)
-        sdk_root = str(found) if found else None
-    sdk = (
-        SdkInfo(sdk_root, "sdkRootFlag" if explicit_sdk else "discovery")
-        if sdk_root is not None
-        else None
+    # `--sdk-root` > the project's own `.alp/sdk-path` pin > the machine-global
+    # default > the positional walk (`resolve_sdk_root_ladder`, above) --
+    # previously this skipped straight from `--sdk-root` to the positional
+    # walk, so `tan init`'s own pointer went unread the moment `tan build` ran
+    # in the same directory.
+    resolved_sdk_root, sdk_tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
+    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
+    # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the
+    # sdk-switch-pristine guard actually compares (tan-cli#163), kept
+    # SEPARATE from `sdk_root` itself: an explicit `--sdk-root` is a
+    # documented, supported relative form, and `sdk_root` unchanged still
+    # feeds `${SDK_ROOT}` token substitution and the `sdk.root` envelope
+    # field verbatim, matching the Rust oracle's own split between
+    # `normalized_sdk_root_str` (stamp-only) and the raw `resolve_sdk_root`
+    # result used everywhere else.
+    sdk_root_for_stamp = (
+        str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
     )
     project = Project(root=build_root, board_yaml=board_yaml)
 
     try:
         exit_code, data, issues = _build(
+            mode=mode,
             plan_from=plan_from,
             build_root=build_root,
             sdk_root=sdk_root,
+            sdk_root_for_stamp=sdk_root_for_stamp,
             board_yaml=board_yaml,
         )
     except BuildError as err:
@@ -610,10 +1113,47 @@ def build(
     else:
         for issue in issues:
             print(f"{issue.severity}: {issue.message}", file=sys.stderr)
-        for result in (data or {}).get("slices", []):
-            reason = f" -- {result['reason']}" if "reason" in result else ""
+        _text_recap(mode, data)
+    raise typer.Exit(int(exit_code))
+
+
+def _text_recap(mode: str, data: dict | None) -> None:
+    """The stderr recap for whichever mode ran. Three shapes because `data`
+    has three shapes -- a plan-mode `data.slices[]` entry is a PLAN slice with
+    no `status` at all, so the build recap below would `KeyError` on it."""
+    if data is None:
+        return
+    if mode == _MODE_MATERIALISE:
+        print(
+            f"materialised {len(data['written'])} file(s) under {data['baseDir']}:",
+            file=sys.stderr,
+        )
+        for rel in data["written"]:
+            print(f"  {rel}", file=sys.stderr)
+        return
+    if mode == _MODE_PLAN:
+        print(
+            f"build plan (schema v{data.get('schemaVersion')}) -- {data.get('sku')}",
+            file=sys.stderr,
+        )
+        print(f"  board.yaml: {data.get('boardYaml')}", file=sys.stderr)
+        print(f"  build root: {data.get('buildRoot')}", file=sys.stderr)
+        slices = data.get("slices") or []
+        print(f"  slices ({len(slices)}):", file=sys.stderr)
+        for sl in slices:
             print(
-                f"{result['status']}: {result['coreId']} [{result['backend']}]{reason}",
+                f"    - {sl.get('coreId')} [{sl.get('backend')}] -> {sl.get('buildDir')}",
                 file=sys.stderr,
             )
-    raise typer.Exit(int(exit_code))
+        print(
+            f"  shared artefacts: {len(data.get('sharedArtefacts') or [])}",
+            file=sys.stderr,
+        )
+        print(f"  warnings: {len(data.get('warnings') or [])}", file=sys.stderr)
+        return
+    for result in data.get("slices", []):
+        reason = f" -- {result['reason']}" if "reason" in result else ""
+        print(
+            f"{result['status']}: {result['coreId']} [{result['backend']}]{reason}",
+            file=sys.stderr,
+        )

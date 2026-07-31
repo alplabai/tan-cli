@@ -40,6 +40,19 @@ All notable changes to `tan` are documented here. Format follows
   planner, which validates every `board.yaml` against
   `metadata/schemas/board.schema.json` before it plans anything. The frozen
   one-file binary measures 12377580 B against the 15000000 B ceiling.
+- **`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace` and
+  `support-bundle` are withdrawn from this build, not silently absent.** The
+  Python port stubs all seven (`python/tan/commands/deferred_cmd.py`) rather
+  than porting them yet: each parses its real argv (any positional/flags are
+  accepted, never rejected) and then exits `RUNTIME_FAILURE` (1) naming
+  `tan-cli#260`, in both `--format json` and text mode; the shared issue code
+  `cli.command-deferred` is carried in the JSON envelope only -- text mode
+  prints just the deferral message and the issue URL. That is deliberately
+  louder than Typer's own unknown-command `UsageError` (exit 2,
+  `cli.parse-error`) would have been for an absent verb -- a caller (or the
+  extension) can tell "known but deferred" apart from a typo like `tan bulid`
+  by the issue code in `--format json`, or by exit 1 vs Typer's exit 2 in
+  text mode.
 
 ### Added
 - **A CI job that actually runs the commands a customer types.** Until now NO
@@ -1273,6 +1286,51 @@ All notable changes to `tan` are documented here. Format follows
   issue is raised. The resolved executable name is still reported when one is
   found on PATH -- only the verdict and the advice for a miss were wrong.
 
+- **`tan validate` in a fresh project answered "not ported yet" (exit 1) where
+  the shipped binary answers `validate.board-yaml-missing` (exit 2).** The
+  not-ported stub for the non-`--offline` spawn path short-circuited ABOVE the
+  missing-`board.yaml` guard, so `tan validate` in an empty directory -- among
+  the first things a brand-new user runs -- answered a different question than
+  the oracle, with a different exit code. The guard now runs first, on both
+  paths, under the existing `validate.board-yaml-missing` code.
+
+  Measured against `target/debug/tan.exe` (`tan 0.4.1-dev`, `--format json`),
+  not inferred from `crates/` and not taken from a report: an empty directory
+  exits **2** `validate.board-yaml-missing` with `data.outcome: "failed"`; a
+  project with `board.yaml` but no SDK root exits **2**
+  `validate.sdk-root-unresolved`. Exit 1 is reachable in the oracle only AFTER
+  a validator actually spawns and returns an unexpected status. The oracle
+  therefore draws a line -- pre-spawn guards at 2, post-spawn failure at 1 --
+  that the stub had flattened.
+
+  An earlier revision of this entry claimed the opposite, and was wrong in both
+  halves: that the oracle returns 1 for these cases, and that moving to 2 would
+  be a considered BREAK for v0.6.0 (#262). Neither was ever measured. For the
+  guard cases 2 is what the oracle already does, so matching it is a
+  compatibility fix. #262 is re-scoped to the one case that is a genuine
+  v0.6.0 decision: `validate.failed` after a real spawn.
+
+  Still divergent, deliberately, and tracked in #262: `board.yaml` present but
+  no SDK root, where the oracle says 2 `validate.sdk-root-unresolved` and this
+  port says 1 `validate.spawn-not-implemented`. Closing it needs the real spawn
+  path. The two genuine internal failures in the same file (an unreadable
+  `board.yaml`, an unexpected exception inside the offline structural checker)
+  are unchanged at exit 5, matching the oracle's offline path exactly.
+
+- **`tan sdk install` / `tan sdk switch` refused at exit 5 (`InternalFailure`),
+  telling CI and the extension that tan had crashed.** Neither is ported; that
+  is a gap, not a crash. Both now exit 1 (`RuntimeFailure`) -- the code every
+  other refusal in `sdk_cmd` already used (`sdk list` without `--online`, a
+  bare `tan sdk`), the code the deferred-verb stubs settled on, and the code
+  the oracle itself returns for a `sdk switch` that cannot resolve (measured:
+  `tan sdk switch 0.0.0-nonexistent --format json` -> rc=1
+  `sdk.path-not-found`). The 5 was justified in-code as "following
+  `validate_cmd`'s precedent for its own unported spawn path" -- `validate_cmd`
+  uses 1, so the comment cited a precedent for the opposite of what it did.
+
+All notable changes to `tan` are documented here. Format follows
+[Keep a Changelog](https://keepachangelog.com/); versioning is
+[SemVer](https://semver.org/).
 
 ## [0.4.0] — 2026-07-28
 

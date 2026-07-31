@@ -13,10 +13,14 @@ import pytest
 
 from tan.core.system_manifest import (
     SYSTEM_MANIFEST_SCHEMA_VERSION,
+    SliceRunResult,
     SystemManifestError,
     anchor_under,
+    overlay_run_results_raw,
     parse_system_manifest,
+    parse_system_manifest_raw,
     raw_passthrough,
+    serialize_system_manifest_raw,
     slice_build_dir,
     slice_build_dir_or_default,
     slice_elf_candidates,
@@ -330,3 +334,115 @@ def test_i18_nesting_is_probed_after_the_plain_path_never_before():
         os.path.join("R", "c-zephyr"),
         os.path.join("R", "c-zephyr", "build"),
     ]
+
+
+# --------------------------------------------------------------- write path
+
+
+# AEN701 with an rpmsg carve-out (fields `IpcLink` doesn't model) and an
+# `hw_info.eeprom` block (fields `HwInfo` doesn't model) -- the two additive
+# shapes a lossy typed re-serializer would silently drop, mirrored from
+# `crates/tan-core/src/system_manifest.rs`'s own `manifest_with_additive_
+# fields` test fixture.
+_AEN701_WITH_ADDITIVE_FIELDS = AEN701.replace(
+    "ipc: []\n",
+    "ipc:\n- name: rpmsg0\n  kind: rpmsg\n  endpoints: [a55, m33]\n"
+    "  shm_addr: 0x48000000\n  shm_size: 0x100000\n",
+).replace("hw_info:\n", "hw_info:\n  eeprom:\n    magic: 0xA5\n")
+
+
+def test_parse_system_manifest_raw_rejects_unsupported_schema_version():
+    with pytest.raises(SystemManifestError):
+        parse_system_manifest_raw(AEN701.replace("schema_version: 1", "schema_version: 2"))
+
+
+def test_parse_system_manifest_raw_rejects_missing_schema_version():
+    with pytest.raises(SystemManifestError):
+        parse_system_manifest_raw("slices: []\n")
+
+
+def test_overlay_sets_status_and_leaves_unmatched_slices_untouched():
+    raw = parse_system_manifest_raw(AEN701)
+    overlay_run_results_raw(
+        raw,
+        [
+            SliceRunResult("m55_hp", "ok", "build/m55_hp-zephyr/build/zephyr/zephyr.elf",
+                            "build/m55_hp-zephyr/build", None),
+            # A result for a core not in the manifest is a no-op.
+            SliceRunResult("ghost", "ok"),
+        ],
+    )
+    hp = next(s for s in raw["slices"] if s["core_id"] == "m55_hp")
+    assert hp["status"] == "ok"
+    assert hp["output_artefact"] == "build/m55_hp-zephyr/build/zephyr/zephyr.elf"
+    assert hp["build_dir"] == "build/m55_hp-zephyr/build"
+
+    # The unmatched `off` slice is untouched.
+    a32 = next(s for s in raw["slices"] if s["core_id"] == "a32_cluster")
+    assert a32["status"] == "pending"
+
+
+def test_overlay_duplicate_core_id_results_the_first_wins():
+    """`by_core = {r.core_id: r for r in results}` would let the LAST
+    duplicate win; the oracle's `results.iter().find(|(cid, ..)| cid ==
+    core_id)` (system_manifest.rs:332-333) takes the FIRST. Unreachable with
+    today's real callers (one result per slice) but a silent semantic flip
+    in a ported pure function otherwise."""
+    raw = parse_system_manifest_raw(AEN701)
+    overlay_run_results_raw(
+        raw,
+        [
+            SliceRunResult("m55_hp", "ok", "build/first.elf"),
+            SliceRunResult("m55_hp", "failed", "build/second.elf"),
+        ],
+    )
+    hp = next(s for s in raw["slices"] if s["core_id"] == "m55_hp")
+    assert hp["status"] == "ok"
+    assert hp["output_artefact"] == "build/first.elf"
+
+
+def test_overlay_none_fields_preserve_the_plan_time_value():
+    raw = parse_system_manifest_raw(AEN701)
+    raw["slices"][1]["output_artefact"] = "build/plan-time.elf"
+    overlay_run_results_raw(raw, [SliceRunResult("m55_hp", "ok")])
+    assert raw["slices"][1]["output_artefact"] == "build/plan-time.elf"
+    assert raw["slices"][1]["status"] == "ok"
+
+
+def test_overlay_threads_the_reason_through():
+    raw = parse_system_manifest_raw(AEN701)
+    overlay_run_results_raw(
+        raw, [SliceRunResult("m55_hp", "skipped", reason="no command")]
+    )
+    hp = next(s for s in raw["slices"] if s["core_id"] == "m55_hp")
+    assert hp["reason"] == "no command"
+
+
+def test_overlay_and_serialize_round_trips_through_reparse():
+    raw = parse_system_manifest_raw(AEN701)
+    overlay_run_results_raw(raw, [SliceRunResult("m55_hp", "ok")])
+    out = serialize_system_manifest_raw(raw)
+    reparsed = parse_system_manifest(out)
+    hp = next(s for s in reparsed.slices if s["core_id"] == "m55_hp")
+    assert hp["status"] == "ok"
+
+
+def test_serialize_raw_preserves_additive_fields_ipc_carveout_and_eeprom():
+    # The defect the raw seam exists to avoid: a lossy typed re-serializer
+    # would silently drop `shm_addr`/`shm_size`/`eeprom` here.
+    raw = parse_system_manifest_raw(_AEN701_WITH_ADDITIVE_FIELDS)
+    overlay_run_results_raw(
+        raw, [SliceRunResult("m55_hp", "ok", "build/m55_hp-zephyr/build/zephyr/zephyr.elf")]
+    )
+    out = serialize_system_manifest_raw(raw)
+
+    assert "shm_addr" in out
+    assert "shm_size" in out
+    assert "eeprom" in out
+
+    reparsed = parse_system_manifest(out)
+    hp = next(s for s in reparsed.slices if s["core_id"] == "m55_hp")
+    assert hp["status"] == "ok"
+    assert hp["output_artefact"] == "build/m55_hp-zephyr/build/zephyr/zephyr.elf"
+    a32 = next(s for s in reparsed.slices if s["core_id"] == "a32_cluster")
+    assert a32["status"] == "pending"

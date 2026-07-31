@@ -198,7 +198,7 @@ def _resolve_sku_family(sku: str, sdk_root: Path) -> str | None:
         return None
     out = probe(
         [
-            _planner_python(),
+            _planner_python(str(sdk_root), str(sdk_root)),
             "-c",
             "import sys; sys.path.insert(0, sys.argv[1]); "
             "from alp_project_loader import _sku_family; "

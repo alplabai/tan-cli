@@ -27,9 +27,18 @@ from pathlib import Path
 
 import pytest
 
-from .oracle import ENVELOPE, PLAN, VERSION, compare, narrow_plan, rust_binary
+from tests.conftest import sdk_root
+
+from .oracle import ENVELOPE, PLAN, VERSION, _run, compare, narrow_plan, python_command, rust_binary
 
 RUST = rust_binary()
+
+#: A real, resolvable alp-sdk checkout for the `generate` case below -- set
+#: once at import time, before `tests.conftest._scrub_sdk_discovery_env` (an
+#: autouse fixture) deletes `ALP_SDK_ROOT` for every test function; see
+#: `sdk_root`'s own docstring for why the read must happen here and not inside
+#: a test body.
+GENERATE_SDK = sdk_root()
 
 #: Every case: argv, the surface it is scoped to, and -- when the port cannot
 #: satisfy it yet -- why. A ``None`` reason means the case runs for real.
@@ -170,6 +179,44 @@ args:
 
 
 @pytest.mark.skipif(not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
+@pytest.mark.parametrize("verb", ["migrate", "lock", "quality"])
+def test_west_forward_matches_rust(verb, work_dir, tmp_path):
+    """`west_forward_cmd.py`'s three verbs, run inside a real `.west` workspace
+    so `data.westCwd` actually goes through the workspace-walk branch (not just
+    the already-posix `--project` echo) -- the branch where a bare
+    `str(PathLikeObject)` re-renders with the platform separator on Windows
+    and breaks the envelope's platform-identical-path contract. Neither side
+    has a real `west` on PATH here, so both report the same launch-error
+    envelope; that error envelope still carries `data.westCommand`/`westCwd`/
+    `args`, which is exactly what a westCwd or args-capture regression would
+    move.
+    """
+    (work_dir / ".west").mkdir()
+    # `--format json` sits BEFORE the forwarded `--core`/`-b` flags on purpose:
+    # the oracle's clap `WestForwardArgs` (`trailing_var_arg = true`) swallows
+    # everything from the first unrecognised token onward, including a later
+    # `--format` -- so `--format` after `--core` never reaches JSON mode on
+    # the Rust side at all (see `test_json_mode_forwards_interspersed_
+    # unrecognised_flags_verbatim` in test_west_forward_command.py for that
+    # documented divergence). Ordered this way both sides land in JSON mode
+    # and the envelope, including `data.westCwd`/`args`, is directly
+    # comparable.
+    argv = [
+        "--project",
+        str(work_dir),
+        verb,
+        "--format",
+        "json",
+        "--core",
+        "m55_hp",
+        "-b",
+        "some_board",
+    ]
+    result = compare(argv, cwd=work_dir, home=tmp_path / "home")
+    assert result.matches, "\n".join(result.diffs)
+
+
+@pytest.mark.skipif(not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
 @pytest.mark.parametrize(
     "target,server",
     [
@@ -206,6 +253,55 @@ def test_debug_config_resolution_matches_rust(target, server, work_dir, tmp_path
         home=tmp_path / "home",
     )
     assert result.matches, "\n".join(result.diffs)
+
+
+@pytest.mark.skipif(not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
+@pytest.mark.skipif(
+    GENERATE_SDK is None,
+    reason="set ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT to a real alp-sdk checkout",
+)
+def test_generate_matches_rust_with_a_resolvable_sdk(tmp_path):
+    """`tan generate`'s success envelope, against a REAL alp-sdk checkout --
+    the case this suite had ZERO of when the top-level `sdk` envelope key
+    (`root` + `sourceTier`) silently dropped out of the port: no fixture, no
+    compile error, and this suite green throughout, all at once (see the
+    module docstring on why scope is everything here).
+
+    Each side scaffolds its OWN workspace via its OWN `tan init` first --
+    mirroring the exact repro (`tan init --template minimal-app` then
+    `generate --format json --sdk-root <sdk>`) -- rather than sharing one, so a
+    divergence in `init` itself could not silently feed `generate` two
+    different trees and still "match".
+
+    `data.engine` is the one key excluded from the diff: which engine
+    (`in-process` vs `subprocess`) rendered each target is a PYTHON-ONLY
+    concept -- Rust has no spawn-the-SDK escape hatch to report, so it never
+    emits this key at all, on any input. Every other key, including `sdk`
+    itself, is compared whole.
+    """
+    home = tmp_path / "home"
+    sides: dict[str, tuple[int, dict]] = {}
+    for name, command in (("rust", [RUST]), ("python", python_command())):
+        work = tmp_path / name
+        work.mkdir()
+        init_code, init_out = _run(command, ["init", "--template", "minimal-app"], work, home)
+        assert init_code == 0, f"{name} tan init failed: {init_out}"
+        sides[name] = _run(
+            command,
+            ["generate", "--format", "json", "--sdk-root", str(GENERATE_SDK)],
+            work,
+            home,
+        )
+
+    (r_code, r_out), (p_code, p_out) = sides["rust"], sides["python"]
+    diffs: list[str] = []
+    if r_code != p_code:
+        diffs.append(f"exit code: rust={r_code} python={p_code}")
+    p_out = {**p_out, "data": {k: v for k, v in p_out.get("data", {}).items() if k != "engine"}}
+    for key in sorted(set(r_out) | set(p_out)):
+        if r_out.get(key) != p_out.get(key):
+            diffs.append(f"{key}: rust={r_out.get(key)!r} python={p_out.get(key)!r}")
+    assert not diffs, "\n".join(diffs)
 
 
 # --- the harness must be able to go red ------------------------------------

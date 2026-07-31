@@ -55,6 +55,7 @@ import typer
 
 from tan.commands.build_cmd import _planner_python
 from tan.commands.build_output import resolve_metadata_sdk_root, resolve_project_context
+from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -66,11 +67,6 @@ DATA_SCHEMA_VERSION = "1"
 #: queued in one run. Bounded regardless, so a wedged vendor tool cannot hang
 #: a `--format json` consumer with no envelope and no error.
 _BUILD_TIMEOUT_S = 1800
-
-#: The floor the SDK's own scripts need (`@dataclass(slots=True)`). Same
-#: number `generate_cmd.MIN_PYTHON` / `doctor_cmd.FALLBACK_PYTHON_FLOOR`
-#: carry -- bump one, grep for the others.
-MIN_PYTHON = (3, 10)
 
 #: Driver run under the resolved SDK's Python, with `PYTHONPATH` pointed at
 #: `<sdk>/scripts` so `alp_model` resolves. Reads one JSON payload on stdin
@@ -234,10 +230,13 @@ def _run_driver(python: str, sdk_scripts: Path, payload: dict) -> dict:
         ) from err
 
 
-def _python_too_old(python: str) -> str | None:
-    """A message when `python` is below `MIN_PYTHON`, else `None` -- also for
+def _python_too_old(python: str, floor: tuple[int, int]) -> str | None:
+    """A message when `python` is below `floor`, else `None` -- also for
     "could not tell" (a missing/broken interpreter surfaces on its own at the
-    real spawn). Mirrors `generate_cmd._python_too_old`."""
+    real spawn). Mirrors `generate_cmd._python_too_old`; `floor` is the
+    resolved SDK's OWN declared floor from
+    `doctor_cmd.resolve_manifest_python_floor` -- not a second hardcoded 3.10
+    that could drift from the manifest's, or from `generate_cmd`'s own copy."""
     try:
         out = subprocess.run(
             [python, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
@@ -254,11 +253,11 @@ def _python_too_old(python: str) -> str | None:
         major, minor = (int(p) for p in out.stdout.strip().splitlines()[-1].split(".")[:2])
     except (IndexError, ValueError):
         return None
-    if (major, minor) >= MIN_PYTHON:
+    if (major, minor) >= floor:
         return None
     return (
         f"Python {major}.{minor} found at `{python}`, but alp-sdk requires Python "
-        f"{MIN_PYTHON[0]}.{MIN_PYTHON[1]}+. Put a newer `python` first on PATH."
+        f"{floor[0]}.{floor[1]}+. Put a newer `python` first on PATH."
     )
 
 
@@ -342,8 +341,9 @@ def _run_build(
             "compileOpts": _resolve_compile(m.get("compile"), base),
         })
 
-    python = _planner_python()
-    too_old = _python_too_old(python)
+    python = _planner_python(str(workspace_root), str(resolved_sdk))
+    floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
+    too_old = _python_too_old(python, floor)
     if too_old is not None:
         raise ModelError("model.python-too-old", too_old, ExitCode.RUNTIME_FAILURE)
 

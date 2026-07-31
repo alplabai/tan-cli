@@ -25,6 +25,27 @@ class OrchestratorError(RuntimeError):
     """
 
 
+class SdkRevisionUnsupported(OrchestratorError):
+    """The running SDK is outside a requested hw_rev's declared range.
+
+    A subclass rather than a flag so a caller COULD map exactly this
+    failure to a distinct exit code without string-matching a message.  In
+    alp-sdk that caller is `scripts/validate_board_yaml.py`, which maps it
+    to exit 3 -- but that script does not exist in tan-cli, and no port of
+    it is planned; `tan validate`'s own full-validator (spawn) path is
+    unported (`tan/commands/validate_cmd.py`).  Every command that reaches
+    `load_board_yaml` in-process (`build_cmd.py`'s `_emit_plan`,
+    `kconfig_cmd.py`'s planner-emit backstop, `generate_cmd.py`'s
+    `_emit_one_in_process`) currently catches it only via a broad
+    `except Exception`, folding it into the same generic runtime-failure
+    issue every other planner error gets -- distinguishable in the message
+    text (the exception's class name is included) but not by exit code or
+    issue code.  So today this is purely a subclass for `except
+    OrchestratorError` compatibility (#1019); no tan surface maps it to a
+    distinct verdict.
+    """
+
+
 _E1M_I2C_BUS_RE = re.compile(r"^e1m(?:_x)?_i2c([0-9]+)$")
 
 

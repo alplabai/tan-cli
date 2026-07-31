@@ -2,11 +2,18 @@
 """The `tan` command-line surface: the Typer app, the root callback, and the
 `--format json` error path that wraps Click's own dispatch.
 
-Owns the process entrypoint (``main``) so ``__main__.py`` stays a one-line
-shim. Commands register here with a STATIC import in a later task -- see
-``tan.commands.__init__`` for why an importlib/pkgutil registry is a trap --
-which is why this module, not a package `__init__`, is where `app` lives:
-one obvious place to add each `app.command()` / `app.add_typer()` call.
+Defines ``main``, but no longer owns the PROCESS boundary: ``pyproject.toml``'s
+``[project.scripts]`` names ``tan.__main__:main``, and ``__main__.py`` wraps
+this ``main`` to swallow a closed stdout (``tan generate --help | head``) as a
+quiet success instead of a traceback. Anything that must happen for EVERY
+invocation regardless of subcommand belongs there, not here.
+
+Commands register here with a STATIC import -- see ``tan.commands.__init__``
+for why an importlib/pkgutil registry is a trap: it works from source and
+fails inside a PyInstaller ``--onefile`` binary, which is how tan actually
+ships. That is why this module, not a package ``__init__``, is where ``app``
+lives: one obvious place to add each ``app.command()`` call, and one list
+(``_SUBCOMMAND_NAMES``) that must track it.
 """
 import io
 import sys
@@ -19,6 +26,17 @@ from tan.commands.bootstrap_cmd import bootstrap
 from tan.commands.build_cmd import build
 from tan.commands.clean_cmd import clean
 from tan.commands.debug_config_cmd import debug_config
+from tan.commands.deferred_cmd import (
+    DEFERRED_CONTEXT_SETTINGS,
+    DEFERRED_VERBS,
+    completion,
+    diff,
+    inspect,
+    pinmux,
+    scaffold,
+    support_bundle,
+    trace,
+)
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain
@@ -27,13 +45,17 @@ from tan.commands.flash_cmd import flash
 from tan.commands.generate_cmd import generate
 from tan.commands.image_cmd import image
 from tan.commands.init_cmd import init
+from tan.commands.kconfig_cmd import kconfig
 from tan.commands.model_cmd import model
 from tan.commands.monitor_cmd import monitor
 from tan.commands.new_som_cmd import new_som
 from tan.commands.presets_cmd import presets
+from tan.commands.renode_cmd import renode
+from tan.commands.run_cmd import run
 from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
 from tan.commands.validate_cmd import validate
+from tan.commands.west_forward_cmd import FORWARD_CONTEXT_SETTINGS, lock, migrate, quality
 from tan.envelope import Envelope, Issue, Project, emit, envelope_emitted
 from tan.exit_codes import ExitCode
 from tan.version import TAN_VERSION
@@ -49,7 +71,9 @@ app = typer.Typer(add_completion=False)
 app.command("bootstrap")(bootstrap)
 app.command("build")(build)
 app.command("clean")(clean)
+app.command("completion", context_settings=DEFERRED_CONTEXT_SETTINGS)(completion)
 app.command("debug-config")(debug_config)
+app.command("diff", context_settings=DEFERRED_CONTEXT_SETTINGS)(diff)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("explain")(explain)
@@ -58,12 +82,23 @@ app.command("flash")(flash)
 app.command("generate")(generate)
 app.command("image")(image)
 app.command("init")(init)
+app.command("inspect", context_settings=DEFERRED_CONTEXT_SETTINGS)(inspect)
+app.command("kconfig")(kconfig)
+app.command("lock", context_settings=FORWARD_CONTEXT_SETTINGS)(lock)
+app.command("migrate", context_settings=FORWARD_CONTEXT_SETTINGS)(migrate)
 app.command("model")(model)
 app.command("monitor")(monitor)
 app.command("new-som")(new_som)
+app.command("pinmux", context_settings=DEFERRED_CONTEXT_SETTINGS)(pinmux)
 app.command("presets")(presets)
+app.command("quality", context_settings=FORWARD_CONTEXT_SETTINGS)(quality)
+app.command("renode")(renode)
+app.command("run")(run)
+app.command("scaffold", context_settings=DEFERRED_CONTEXT_SETTINGS)(scaffold)
 app.command("sdk")(sdk)
 app.command("size")(size)
+app.command("support-bundle", context_settings=DEFERRED_CONTEXT_SETTINGS)(support_bundle)
+app.command("trace", context_settings=DEFERRED_CONTEXT_SETTINGS)(trace)
 app.command("validate")(validate)
 
 #: Every registered subcommand name -- must track the `app.command(...)` calls
@@ -71,9 +106,11 @@ app.command("validate")(validate)
 #: leading global flag across; it is never itself treated as a flag.
 _SUBCOMMAND_NAMES = frozenset(
     {
-        "bootstrap", "build", "clean", "debug-config", "doctor", "examples",
-        "explain", "faultdecode", "flash", "generate", "image", "init",
-        "model", "monitor", "new-som", "presets", "sdk", "size", "validate",
+        "bootstrap", "build", "clean", "completion", "debug-config", "diff",
+        "doctor", "examples", "explain", "faultdecode", "flash", "generate",
+        "image", "init", "inspect", "kconfig", "lock", "migrate", "model",
+        "monitor", "new-som", "pinmux", "presets", "quality", "renode", "run",
+        "scaffold", "sdk", "size", "support-bundle", "trace", "validate",
     }
 )
 
@@ -236,7 +273,32 @@ def _emit_help_envelope(argv: list[str]) -> int:
 #: the subcommand name for them (clap's `global = true`). Grow this as each
 #: command is taught to; see `root` for why an unlisted command must REFUSE the
 #: pre-subcommand position rather than silently ignore it.
-_HONOURS_ROOT_FORMAT = frozenset({"debug-config", "flash", "image", "size"})
+#:
+#: The non-deferred four (`debug-config`/`flash`/`image`/`size`) and
+#: `faultdecode` are hand-listed here -- each command's own module is where its
+#: `ctx.obj["format"]` read lives, so there is no shared list to derive them
+#: from the way the deferred seven have `deferred_cmd.DEFERRED_VERBS`.
+#: `faultdecode` was verified against the oracle the same way (measured:
+#: `target/debug/tan.exe --format json faultdecode --cfsr 0x8200` reaches the
+#: command rather than erroring on `--format`'s position) and its own module
+#: (`faultdecode_cmd.py:resolved_format`) already reads `ctx.obj`; this entry
+#: was the missing wire-up.
+#:
+#: The seven `deferred_cmd.py` stubs are DERIVED from `DEFERRED_VERBS` rather
+#: than retyped here -- a third hardcoded copy of the same seven names is
+#: exactly the drift this set exists to prevent (an eighth stub added to
+#: `deferred_cmd.py` without a matching edit here would otherwise pass every
+#: test while silently regressing to exit 2 for the new verb). Verified
+#: against the oracle (`target/debug/tan.exe`): `tan --format json scaffold`
+#: (and the other six) all reach the real command rather than erroring on
+#: `--format`'s position -- clap's `--format` is genuinely global, so a stub
+#: that refuses it pre-command would hand the JSON caller most likely to check
+#: for the deferral's issue code the exact typo-shaped exit-2 `cli.parse-error`
+#: that module exists to eliminate. Each stub reads `ctx.obj["format"]` (see
+#: `deferred_cmd.py`).
+_HONOURS_ROOT_FORMAT = frozenset(
+    {"debug-config", "flash", "image", "size", "faultdecode", *DEFERRED_VERBS}
+)
 
 
 @app.callback(invoke_without_command=True)
@@ -248,6 +310,19 @@ def root(
     ),
 ) -> None:
     """tan CLI -- board configuration, generation, and project tooling."""
+    if output_format is not None and output_format not in ("text", "json"):
+        # clap validates `--format`'s VALUE eagerly, ahead of everything else
+        # in this callback -- measured: `tan --format bogus`, `tan --format
+        # bogus --version`, and `tan --format "" build` (an empty value counts
+        # as invalid: clap says "a value is required for '--format <FORMAT>'
+        # but none was supplied") all exit 2 on the value itself, never
+        # reaching `--version` or the bare-invocation check below. Without this,
+        # a root-position `--format ""` silently defaulted to text mode for
+        # every command in `_HONOURS_ROOT_FORMAT` (rc 1, diverging from the
+        # oracle's rc 2) instead of being refused here. `ctx.fail()` gives the
+        # same Click UsageError shape (exit 2) every other CLI mistake here
+        # already gets.
+        ctx.fail(f"'{output_format}' is not one of 'text', 'json'")
     # Rust's `--format` is `global = true`, so clap accepts it on EITHER side of
     # the subcommand name; four committed goldens invoke `tan --format json
     # debug-config ...`. Click gives the group only what precedes the subcommand,

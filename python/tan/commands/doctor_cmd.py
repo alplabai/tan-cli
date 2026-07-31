@@ -5,7 +5,8 @@ Every check here answers a question some customer already lost an afternoon to.
 Two of them exist because the answer used to be a confident, wrong "Pass".
 
 **The Python floor is not what the manifest says it is.**
-`metadata/bootstrap.json` declares `prerequisites.pythonMinVersion: "3.10"`.
+`metadata/bootstrap.json` declares `prerequisites.pythonMinVersion` (read live
+below, currently `"3.10"` on alp-sdk's `dev`), while separately
 Zephyr's `cmake/modules/python.cmake` sets `PYTHON_MINIMUM_REQUIRED 3.12`. And
 the Rust oracle's POSIX bootstrap branch was explicit that it "cannot fail on
 version" (`crates/tan-cli/src/commands/bootstrap/steps.rs:230-234`). Ubuntu 22.04
@@ -46,12 +47,35 @@ environment is worse than no doctor: it converts a fixable setup problem into a
 mystery inside somebody else's build system.
 
 Deliberately NOT ported from `crates/tan-cli/src/commands/doctor.rs`: the debug
-half (`--target-kind`/`--server`, the cortex-debug/CodeLLDB extension set) and
-`--build`'s Zephyr-SDK/workspace preflight. Both need context this port has no
-command to produce yet, and half a debug verdict is worse than none. The
-envelope keys that survive -- `data.summary.{pass,warn,fail}` and `data.checks[]`
--- are the ones `alp-sdk-vscode` actually reads (`src/debug.ts`,
-`src/toolchain.ts`).
+half (`--target-kind`/`--server`, the cortex-debug/CodeLLDB extension set).
+That needs context this port has no command to produce yet, and half a debug
+verdict is worse than none. The envelope keys that survive --
+`data.summary.{pass,warn,fail}` and `data.checks[]` -- are the ones
+`alp-sdk-vscode` actually reads (`src/debug.ts`, `src/toolchain.ts`).
+
+**`--build` is accepted, real, and additive -- not the Rust oracle's second,
+disjoint check vocabulary.** Measured against a real `tan.exe`, plain `tan
+doctor` and `tan doctor --build` run two almost entirely different check
+lists (debug-readiness vs. zephyr/yocto/baremetal build-readiness -- compare
+`tan doctor`'s `workspaceRoot`/`codeLLDBExtension`/`lldb` against `tan doctor
+--build`'s `git`/`cmake`/`ninja`/`dtc`/`gperf`/`vendorToolchain`/...). Byte-
+parity with BOTH of those lists is a second command's worth of new checks,
+not a flag gap -- and this port's own check list (`hostPython`/
+`hostPrerequisites`/`west`/`setools`/`jlink`) is ALREADY build/flash-oriented
+by design (see above), unlike the Rust oracle's PLAIN `doctor`. So `--build`
+here means what it says on this port's own terms: it turns on ONE extra,
+genuinely-probed check plain `tan doctor` does not run --
+`zephyrWorkspace`, whether `$ZEPHYR_BASE` resolves to a real Zephyr checkout
+matching alp-sdk's `west.yml` pin -- rather than either silently doing
+nothing (the anti-pattern this whole command exists to avoid) or
+re-deriving the oracle's second, disjoint vocabulary from scratch. Both
+`alp-sdk-vscode` call sites (`["doctor", "--build"]`,
+`["doctor", "--build", "--fix"]`) still run this port's normal checks PLUS
+`zephyrWorkspace`.
+
+`--fix` is a separate, NOT-yet-ported flag gap (it is not part of this one):
+the oracle's `--build --fix` auto-repairs a missing Zephyr workspace by
+running `tan bootstrap`, and nothing here does that yet.
 """
 import importlib.util
 import json
@@ -64,7 +88,8 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import _abs_posix, discover_sdk_root
+from tan.commands.build_cmd import _abs_posix, resolve_sdk_root_ladder
+from tan.core.bootstrap import parse_west_zephyr_pin, parse_zephyr_version_file
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -76,7 +101,20 @@ from tan.exit_codes import ExitCode
 ZEPHYR_PYTHON_FLOOR = (3, 12)
 
 #: The floor `metadata/bootstrap.json` is assumed to declare when no manifest
-#: resolves -- mirrors `crate::util::MIN_PYTHON`, which is the same 3.10.
+#: resolves at all -- used ONLY as the `manifest_floor` input to `max()` below,
+#: never as a verdict by itself. It mirrors `crate::util::MIN_PYTHON`
+#: (`crates/tan-cli/src/util.rs`), which is frozen at 3.10 and does NOT track
+#: `metadata/bootstrap.json` -- that Rust constant and the manifest's declared
+#: `pythonMinVersion` are two independently-edited numbers, not one fact, and
+#: they can and do drift apart (the manifest is mid-raise to 3.12 as of this
+#: writing; the oracle constant is not). The manifest is the authority: when it
+#: resolves AND declares `pythonMinVersion`, that number is read live and this
+#: constant is not consulted for the verdict -- but a manifest that resolves
+#: while omitting the key still falls back to this same constant (see
+#: `resolve_manifest_python_floor`/`_collect` below), so this is not a
+#: no-manifest-only fallback. `ZEPHYR_PYTHON_FLOOR` above still composes with
+#: it via `max()` either way, so a resolvable SDK checkout with the key present
+#: never depends on this value being current.
 FALLBACK_PYTHON_FLOOR = (3, 10)
 
 #: Seconds any single probe may take before it is killed. Generous enough for a
@@ -250,6 +288,63 @@ def zephyr_python_floor(zephyr_base: str | None) -> tuple[tuple[int, int], str]:
     )
 
 
+def jlink_flash_device(sdk_root: str | None) -> tuple[str, str]:
+    """The Flow-D part-number J-Link device profile, and where it came from.
+
+    Read from `<sdk>/metadata/socs/alif/ensemble/e8.json`
+    `variants[].debug.jlink_flash_device` -- the ONE variant carrying that key
+    is the one with an MRAM loader profile at all; the other AE822 package
+    variant's `debug` has a `jlink_device` (attach) entry but no
+    `jlink_flash_device`, because it has no Flow D loader to unlock.
+    `JLINK_AEN_DEVICE` is only the FALLBACK for a host with no SDK checkout
+    resolved yet, mirroring `zephyr_python_floor`'s shape -- kept byte-identical
+    to today's metadata value so a doctor run with no `--sdk-root` still names
+    the right part instead of a stale one.
+
+    Every variant is checked, not just the first hit: if a future package
+    variant declares a DIFFERENT `jlink_flash_device`, picking whichever
+    serialises first would silently advise the wrong part with nothing to
+    catch it. More than one DISTINCT value is ambiguous, not resolved -- it
+    falls back to `JLINK_AEN_DEVICE` with a source that says so, rather than
+    guessing.
+
+    Never raises: a missing SDK, an unreadable or malformed `e8.json`, or no
+    variant carrying the key all fall back the same way -- doctor's whole job
+    is to run on a host where things are wrong.
+    """
+    if sdk_root:
+        path = Path(sdk_root) / "metadata" / "socs" / "alif" / "ensemble" / "e8.json"
+        text = _read_text(path)
+        if text is not None:
+            try:
+                doc = json.loads(text)
+            except ValueError:
+                doc = None
+            if isinstance(doc, dict):
+                found: set[str] = set()
+                for variant in doc.get("variants") or []:
+                    if not isinstance(variant, dict):
+                        continue
+                    debug = variant.get("debug")
+                    device = debug.get("jlink_flash_device") if isinstance(debug, dict) else None
+                    if isinstance(device, str) and device:
+                        found.add(device)
+                if len(found) == 1:
+                    return next(iter(found)), str(path)
+                if len(found) > 1:
+                    return JLINK_AEN_DEVICE, (
+                        f"tan's built-in fallback {JLINK_AEN_DEVICE} -- {path} "
+                        f"variants[].debug.jlink_flash_device carries {len(found)} "
+                        "DIFFERENT values across variants (ambiguous), refusing to "
+                        "pick one arbitrarily"
+                    )
+    return JLINK_AEN_DEVICE, (
+        f"tan's built-in fallback {JLINK_AEN_DEVICE} -- no alp-sdk checkout "
+        "resolved to read metadata/socs/alif/ensemble/e8.json "
+        "variants[].debug.jlink_flash_device from"
+    )
+
+
 def _fmt(version: tuple[int, int]) -> str:
     return f"{version[0]}.{version[1]}"
 
@@ -323,7 +418,10 @@ def python_check(
 
 
 def python_floor_skew_check(
-    manifest_floor: tuple[int, int], effective_floor: tuple[int, int], effective_source: str
+    manifest_floor: tuple[int, int],
+    effective_floor: tuple[int, int],
+    effective_source: str,
+    manifest_is_real: bool = True,
 ) -> Check | None:
     """`pythonFloor` -- the two declared floors disagree.
 
@@ -332,6 +430,16 @@ def python_floor_skew_check(
     trust, so while the skew stands the two sources disagree about which hosts
     are supported. Saying which number came from which file is the whole value:
     the fix belongs in `metadata/bootstrap.json`, not on the customer's machine.
+
+    `manifest_is_real` is `False` when `manifest_floor` never actually came from
+    a read `metadata/bootstrap.json` -- no SDK resolved, or this SDK predates
+    the manifest -- and is instead tan's own `FALLBACK_PYTHON_FLOOR` standing
+    in. Callers pass `_load_manifest`'s own `ManifestLoad.is_real` verdict
+    straight through -- never re-derived from `ManifestLoad.source`'s prose, so
+    a future rewording of that message cannot silently flip which branch below
+    fires. Misreporting that number as "alp-sdk's metadata/bootstrap.json
+    declares" sends the customer to edit a file that was never consulted, so
+    the wording and the fix both change for this case.
 
     `tan bootstrap` enforces the SAME effective floor this reports -- it calls
     `zephyr_python_floor` below with the same argument (see
@@ -343,18 +451,33 @@ def python_floor_skew_check(
     """
     if manifest_floor >= effective_floor:
         return None
+    if manifest_is_real:
+        claim = f"alp-sdk's metadata/bootstrap.json declares pythonMinVersion {_fmt(manifest_floor)}"
+        fix = (
+            f"Raise `prerequisites.pythonMinVersion` to {_fmt(effective_floor)} in "
+            f"alp-sdk's metadata/bootstrap.json (and re-run its "
+            f"scripts/check_bootstrap_manifest.py drift gate)."
+        )
+    else:
+        claim = (
+            f"no alp-sdk metadata/bootstrap.json was read (no SDK checkout resolved, "
+            f"or this SDK predates it), so tan's own built-in floor {_fmt(manifest_floor)} "
+            f"is standing in"
+        )
+        fix = (
+            "Resolve or pin an alp-sdk checkout (`tan sdk switch <version|path>`) so its "
+            "own metadata/bootstrap.json pythonMinVersion is read instead of tan's "
+            "built-in floor."
+        )
     return Check(
         "pythonFloor",
         "warn",
-        f"alp-sdk's metadata/bootstrap.json declares pythonMinVersion "
-        f"{_fmt(manifest_floor)}, but the build's effective floor is "
+        f"{claim}, but the build's effective floor is "
         f"{_fmt(effective_floor)} (from {effective_source}). Both `tan doctor` and "
         f"`tan bootstrap` enforce the higher, effective floor, so a host this "
         f"manifest would have accepted is refused up front rather than failing "
         f"later at Zephyr's CMake configure.",
-        f"Raise `prerequisites.pythonMinVersion` to {_fmt(effective_floor)} in "
-        f"alp-sdk's metadata/bootstrap.json (and re-run its "
-        f"scripts/check_bootstrap_manifest.py drift gate).",
+        fix,
     )
 
 
@@ -422,6 +545,51 @@ def west_check(
             "Upgrade inside the workspace venv: `pip install --upgrade west`.",
         )
     return Check("west", "pass", f"west {_fmt(version)} ({found}).")
+
+
+def zephyr_workspace_check(
+    zephyr_base: str | None, version_text: str | None, sdk_pin: str | None
+) -> Check:
+    """`zephyrWorkspace` -- `--build`-only: does `$ZEPHYR_BASE` actually
+    resolve to a Zephyr checkout, and does its version match what alp-sdk's
+    own `west.yml` pins?
+
+    Nothing else in this command asks. `hostPrerequisites`/`west` only check
+    that the TOOLS needed to build are on PATH -- neither confirms a Zephyr
+    tree is actually there to build against, or that it is the right one.
+    `--build` exists to dig one level deeper than plain `tan doctor` does
+    (see the module docstring); this is that extra level. WARN, never FAIL:
+    every other check already fails outright when a workspace is entirely
+    absent (`hostPrerequisites`/`west`), so this stays advisory -- a stale or
+    unresolved Zephyr pin is fixed by `tan bootstrap`, not a reason to refuse
+    the whole preflight.
+    """
+    if zephyr_base is None:
+        return Check(
+            "zephyrWorkspace",
+            "warn",
+            "no $ZEPHYR_BASE Zephyr workspace resolved.",
+            "Run `tan bootstrap` to create one.",
+        )
+    if version_text is None:
+        return Check(
+            "zephyrWorkspace",
+            "warn",
+            f"$ZEPHYR_BASE=`{zephyr_base}` does not look like a Zephyr checkout "
+            f"(no readable VERSION file).",
+            "Run `tan bootstrap`, or point $ZEPHYR_BASE at a real Zephyr checkout.",
+        )
+    if sdk_pin is not None and version_text != sdk_pin:
+        return Check(
+            "zephyrWorkspace",
+            "warn",
+            f"Zephyr {version_text} at $ZEPHYR_BASE=`{zephyr_base}` does not match "
+            f"alp-sdk's pinned {sdk_pin} (from west.yml).",
+            "Run `tan bootstrap` to reuse or refresh a matching workspace.",
+        )
+    return Check(
+        "zephyrWorkspace", "pass", f"Zephyr {version_text} at $ZEPHYR_BASE=`{zephyr_base}`."
+    )
 
 
 def setools_check(
@@ -503,7 +671,12 @@ def setools_check(
     )
 
 
-def jlink_check(found: str | None, version: tuple[int, int] | None) -> Check:
+def jlink_check(
+    found: str | None,
+    version: tuple[int, int] | None,
+    device: str = JLINK_AEN_DEVICE,
+    device_source: str | None = None,
+) -> Check:
     """`jlink` -- Flow D, the day-to-day burn path (J-Link direct MRAM flash over
     SWD, ~0.16 s, no SE-UART).
 
@@ -515,12 +688,24 @@ def jlink_check(found: str | None, version: tuple[int, int] | None) -> Check:
     silently is not one -- and the probe needs matched V13 firmware or the
     part-number device will not connect. The last two are not host-probeable,
     which is exactly why they must be said.
+
+    `device` defaults to `JLINK_AEN_DEVICE` so every existing call site keeps
+    working; `_collect` passes the metadata-resolved value from
+    `jlink_flash_device` instead, when an SDK checkout resolved one.
+
+    `device_source` (also from `jlink_flash_device`) is surfaced into the
+    detail text when given, so the same `device` string is not byte-identical
+    whether it came from a resolved SDK checkout or tan's built-in fallback --
+    otherwise a user on a host where the SDK did not resolve has no way to
+    tell which one they are looking at.
     """
     requirements = (
-        f"Flow D needs the `{JLINK_AEN_DEVICE}` part-number device profile (NOT the "
+        f"Flow D needs the `{device}` part-number device profile (NOT the "
         f"generic `Cortex-M55`, which has no MRAM loader), a J-Link DLL "
         f"V{_fmt(JLINK_MIN_DLL)}+, and a probe on matched J-Link V13 firmware."
     )
+    if device_source is not None:
+        requirements += f" Device profile resolved from: {device_source}."
     if found is None:
         return Check(
             "jlink",
@@ -645,9 +830,27 @@ def _probe_host_python(floor: tuple[int, int]) -> tuple[str, tuple[int, int]] | 
     return first_that_ran
 
 
-def _load_manifest(sdk_root: str | None) -> tuple[dict, str, str | None]:
-    """`(prerequisites facts, provenance, error)` from
-    `<sdk>/metadata/bootstrap.json`.
+@dataclass(frozen=True)
+class ManifestLoad:
+    """The result of resolving `<sdk>/metadata/bootstrap.json`.
+
+    `is_real` is the provenance verdict as DATA, set exactly once, at the one
+    return that actually read and parsed a manifest -- never re-derived by a
+    caller sniffing `source`'s prose. `source` is still carried for display
+    (the message names WHICH file or fallback), but nothing downstream may
+    infer `is_real` from it: that used to be `source.startswith("facts from
+    alp-sdk")`, which silently flips the verdict the moment this docstring's
+    or `source`'s wording changes, with nothing to catch it.
+    """
+
+    facts: dict
+    source: str
+    error: str | None
+    is_real: bool
+
+
+def _load_manifest(sdk_root: str | None) -> ManifestLoad:
+    """Resolve the prerequisites facts from `<sdk>/metadata/bootstrap.json`.
 
     A missing or malformed manifest is a WARNING with documented fallbacks, not
     a refusal: doctor's whole job is to run on a host where things are wrong,
@@ -661,54 +864,89 @@ def _load_manifest(sdk_root: str | None) -> tuple[dict, str, str | None]:
         "install": {},
     }
     if sdk_root is None:
-        return fallback, "tan's built-in fallback list (no alp-sdk checkout resolved)", None
+        return ManifestLoad(
+            fallback,
+            "tan's built-in fallback list (no alp-sdk checkout resolved)",
+            None,
+            is_real=False,
+        )
     path = Path(sdk_root) / "metadata" / "bootstrap.json"
     text = _read_text(path)
     if text is None:
-        return (
+        return ManifestLoad(
             fallback,
             "tan's built-in fallback list",
             f"could not read {path}",
+            is_real=False,
         )
     try:
         facts = json.loads(text)
     except ValueError as err:
-        return fallback, "tan's built-in fallback list", f"{path} is not valid JSON: {err}"
+        return ManifestLoad(
+            fallback, "tan's built-in fallback list", f"{path} is not valid JSON: {err}", is_real=False
+        )
     prerequisites = facts.get("prerequisites")
     if not isinstance(prerequisites, dict):
-        return (
+        return ManifestLoad(
             fallback,
             "tan's built-in fallback list",
             f"{path} has no `prerequisites` object",
+            is_real=False,
         )
     west = facts.get("west")
     if isinstance(west, dict):
         prerequisites = {**prerequisites, "_pipSpec": west.get("pipSpec")}
-    return prerequisites, f"facts from alp-sdk {path}", None
+    return ManifestLoad(prerequisites, f"facts from alp-sdk {path}", None, is_real=True)
 
 
-def _collect(sdk_root: str | None) -> list[Check]:
+def _manifest_floor_from_facts(facts: dict) -> tuple[int, int]:
+    """The `pythonMinVersion` `facts` declares, or `FALLBACK_PYTHON_FLOOR` when
+    absent/unparseable -- shared by `_collect` and `resolve_manifest_python_floor`
+    so the two never parse the same field two different ways."""
+    return _parse_two(str(facts.get("pythonMinVersion") or "")) or FALLBACK_PYTHON_FLOOR
+
+
+def resolve_manifest_python_floor(sdk_root: str | None) -> tuple[tuple[int, int], str]:
+    """`(floor, provenance)` for the SDK's OWN declared Python floor --
+    `<sdk>/metadata/bootstrap.json`'s `prerequisites.pythonMinVersion` -- for
+    callers gating a SPAWNED SDK interpreter (`generate`/`model`) rather than a
+    Zephyr build, so they want this floor, not `_collect`'s Zephyr-composed
+    effective one. The ONE reader: before this, `generate_cmd` and `model_cmd`
+    each carried their own hardcoded `MIN_PYTHON = (3, 10)`, a floor that could
+    drift from the manifest's -- and from each other's -- without either
+    command noticing.
+    """
+    loaded = _load_manifest(sdk_root)
+    return _manifest_floor_from_facts(loaded.facts), loaded.source
+
+
+def _collect(sdk_root: str | None, build: bool = False) -> list[Check]:
     """Every probe, in report order. Nothing here may raise -- see the module
     docstring; `probe`/`on_path`/`_read_text` are the only three ways this
-    module touches the outside world and none of them can."""
+    module touches the outside world and none of them can.
+
+    `build` (`--build`) appends `zephyrWorkspace` on top of the checks plain
+    `tan doctor` already runs -- see `zephyr_workspace_check`'s doc comment
+    for why that one check, and only that one, is gated on the flag rather
+    than always running.
+    """
     checks: list[Check] = []
 
-    facts, source, manifest_error = _load_manifest(sdk_root)
-    if manifest_error is not None:
+    loaded = _load_manifest(sdk_root)
+    facts, source = loaded.facts, loaded.source
+    if loaded.error is not None:
         checks.append(
             Check(
                 "bootstrapManifest",
                 "warn",
-                f"metadata/bootstrap.json rejected: {manifest_error}. Falling back to "
+                f"metadata/bootstrap.json rejected: {loaded.error}. Falling back to "
                 f"tan's built-in prerequisite list, which may not match this SDK.",
                 "Update `tan` or pin an SDK whose metadata/bootstrap.json this "
                 "version understands; `tan bootstrap` will refuse outright until then.",
             )
         )
 
-    manifest_floor = _parse_two(str(facts.get("pythonMinVersion") or "")) or (
-        FALLBACK_PYTHON_FLOOR
-    )
+    manifest_floor = _manifest_floor_from_facts(facts)
     zephyr_floor, zephyr_source = zephyr_python_floor(os.environ.get("ZEPHYR_BASE"))
     # The EFFECTIVE floor: the highest anything in the build chain enforces. The
     # manifest is not the authority here -- it is one of two claimants.
@@ -722,7 +960,12 @@ def _collect(sdk_root: str | None) -> list[Check]:
     checks.append(
         python_check(_probe_host_python(effective_floor), effective_floor, effective_source)
     )
-    skew = python_floor_skew_check(manifest_floor, effective_floor, effective_source)
+    skew = python_floor_skew_check(
+        manifest_floor,
+        effective_floor,
+        effective_source,
+        manifest_is_real=loaded.is_real,
+    )
     if skew is not None:
         checks.append(skew)
 
@@ -748,6 +991,20 @@ def _collect(sdk_root: str | None) -> list[Check]:
     west_version = _parse_two(probe(["west", "--version"]) or "") if west_exe else None
     checks.append(west_check(west_exe, west_version, _parse_two(str(facts.get("_pipSpec") or ""))))
 
+    if build:
+        zephyr_base = os.environ.get("ZEPHYR_BASE")
+        version_text = None
+        if zephyr_base:
+            body = _read_text(Path(zephyr_base) / "VERSION")
+            if body is not None:
+                version_text = parse_zephyr_version_file(body)
+        sdk_pin = None
+        if sdk_root is not None:
+            west_yml = _read_text(Path(sdk_root) / "west.yml")
+            if west_yml is not None:
+                sdk_pin = parse_west_zephyr_pin(west_yml)
+        checks.append(zephyr_workspace_check(zephyr_base, version_text, sdk_pin))
+
     checks.append(
         setools_check(
             os.environ.get("SETOOLS_DIR"),
@@ -764,7 +1021,8 @@ def _collect(sdk_root: str | None) -> list[Check]:
     # `-?` prints the banner and exits; with stdin closed it cannot sit waiting
     # for a probe that is not plugged in, and the timeout bounds it regardless.
     jlink_version = _parse_two(probe([jlink_exe, "-?"]) or "") if jlink_exe else None
-    checks.append(jlink_check(jlink_exe, jlink_version))
+    resolved_device, device_source = jlink_flash_device(sdk_root)
+    checks.append(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
 
     return checks
 
@@ -800,6 +1058,11 @@ def doctor(
     board_yaml: str = typer.Option(
         None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
     ),
+    build: bool = typer.Option(
+        False,
+        "--build",
+        help="Also run the build-readiness check (zephyrWorkspace: is $ZEPHYR_BASE a real, SDK-matching Zephyr checkout).",
+    ),
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
@@ -828,15 +1091,15 @@ def doctor(
         board_yaml = os.path.join(str(workspace_root), board_yaml)
     if board_yaml is None and (workspace_root / "board.yaml").is_file():
         board_yaml = str(workspace_root / "board.yaml")
-    explicit_sdk = sdk_root is not None
-    if sdk_root is None:
-        found = discover_sdk_root(workspace_root)
-        sdk_root = str(found) if found else None
-    sdk = (
-        SdkInfo(sdk_root, "sdkRootFlag" if explicit_sdk else "discovery")
-        if sdk_root is not None
-        else None
-    )
+    # `--sdk-root` > `.alp/sdk-path` project pin > machine-global default >
+    # the positional walk (`resolve_sdk_root_ladder`) -- no `ALP_SDK_ROOT`
+    # tier (tried and reverted -- see `resolve_sdk_root_ladder`'s own
+    # docstring). Previously this skipped straight from `--sdk-root` to the
+    # positional walk, silently ignoring `tan init`'s own pointer in the same
+    # directory.
+    resolved_sdk_root, sdk_tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
+    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Forward slashes -- the established envelope contract on this seam
     # (`build_cmd.build`, `flash_cmd._resolve_project`), not the native
     # separators `str(Path(...))` would emit on Windows.
@@ -846,7 +1109,7 @@ def doctor(
     )
 
     try:
-        checks = _collect(sdk_root)
+        checks = _collect(sdk_root, build=build)
         exit_code = exit_code_for(checks)
         issues = checks_to_issues(checks)
         data = {

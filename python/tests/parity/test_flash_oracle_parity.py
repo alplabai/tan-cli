@@ -117,6 +117,13 @@ boot_order: []
 """,
         ["--dry-run"],
     ),
+    # No `status: skipped` case here, deliberately: the Python port's
+    # `TargetPlan.refused_skipped` (see its docstring in `tan.core.flash_plan`)
+    # treats a skipped slice as a warning that alone never fails the run, while
+    # the oracle's `plan_flash_targets` refuses (and fails) it exactly like
+    # `status: failed` above -- the two implementations disagree there BY
+    # DESIGN, so diffing this case would only ever fail. Pinned instead in
+    # `tests/commands/test_flash_command.py`.
     # ── skips that must never fail the run ──────────────────────────────────
     ("helper-no-flash-method", _helper('""'), []),
     (

@@ -274,6 +274,213 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# `--cores`: heterogeneous scaffolding
+# ---------------------------------------------------------------------------
+
+#: Accepted per-core OS values for a `--cores` entry (`id:os`). Mirrors
+#: `tan-cli::commands::init::resolve::CORE_OS_CHOICES`.
+_CORE_OS_CHOICES = ("zephyr", "yocto", "baremetal", "off")
+
+
+class CoresError(Exception):
+    """`--cores` failed to parse or validate; carries the user-facing message
+    `init_cmd` wraps as `init.invalid-cores` (exit 2 -- validation)."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def infer_runtime_for_core_id(core_id: str) -> str:
+    """Best-effort runtime for a `--cores` entry with no `:os` given: an
+    `a<digit>` at a word start (e.g. `a55_cluster`) runs `yocto`; everything
+    else defaults to `zephyr`. Mirrors
+    `tan_core::wizard::infer_runtime_for_core_id` -- KEEP IN SYNC with
+    alp-sdk-vscode's ConfiguratorView `coreSiliconClass` (same word-start
+    test; the one intentional difference is the fallback, since a CLI must
+    pick a concrete runtime where the IDE can offer "unknown")."""
+    lower = core_id.lower()
+    word_start = True
+    for i, ch in enumerate(lower):
+        if word_start and ch == "a" and i + 1 < len(lower) and lower[i + 1].isdigit():
+            return "yocto"
+        word_start = ch in ("_", "-")
+    return "zephyr"
+
+
+def _is_valid_core_id(core_id: str) -> bool:
+    """`^[a-z][a-z0-9_]+$`, hand-checked (ASCII only) to mirror the Rust
+    byte-level test exactly rather than trust `str.isalpha`/`isdigit`, which
+    are Unicode-aware and would accept an id `board.yaml`'s own schema (and
+    the Rust CLI) both reject."""
+    if len(core_id) < 2 or not ("a" <= core_id[0] <= "z"):
+        return False
+    return all(("a" <= c <= "z") or ("0" <= c <= "9") or c == "_" for c in core_id)
+
+
+def parse_cores(raw: str | None) -> list[tuple[str, str]]:
+    """Parse + validate `--cores` (`id[:os],...`) into `(id, os)` pairs. OS is
+    inferred from the core-id silicon class when omitted. Raises `CoresError`
+    on an id outside `^[a-z][a-z0-9_]+$`, an unknown OS, or a duplicate id --
+    invalid values would otherwise flow verbatim into board.yaml. `None`/empty
+    -> no cores (single-core default). Mirrors
+    `tan-cli::commands::init::resolve::parse_cores`."""
+    if not raw:
+        return []
+    cores: list[tuple[str, str]] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        id_part, _sep, os_part = entry.partition(":")
+        core_id = id_part.strip()
+        if not core_id:
+            continue
+        if not _is_valid_core_id(core_id):
+            raise CoresError(
+                f"Invalid core id '{core_id}' in --cores (expected lowercase id "
+                f"matching ^[a-z][a-z0-9_]+$, e.g. m33_sm)."
+            )
+        os_value = os_part.strip()
+        if os_value:
+            if os_value not in _CORE_OS_CHOICES:
+                raise CoresError(
+                    f"Invalid OS '{os_value}' for core '{core_id}' in --cores "
+                    f"(expected one of: zephyr, yocto, baremetal, off)."
+                )
+        else:
+            os_value = infer_runtime_for_core_id(core_id)
+        if any(existing == core_id for existing, _ in cores):
+            raise CoresError(f"Duplicate core id '{core_id}' in --cores.")
+        cores.append((core_id, os_value))
+    return cores
+
+
+def _rust_lines(text: str) -> list[str]:
+    """`text.split("\\n")`, minus a trailing empty element from a trailing
+    `\\n` -- what Rust's `str::lines()` yields for the same LF-only text, and
+    what `vendored_app_core_key`/`vendored_core_ids`/`splice_companion_cores`
+    below are ported line-for-line against."""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def vendored_app_core_key(board_yaml: str) -> str | None:
+    """The `cores:` block's APP-core key (e.g. `"m33_sm"`) -- the core whose
+    block owns an `app:` line, NOT simply the first core listed. A
+    heterogeneous scaffold (`edge-ai`) lists its companion core FIRST
+    (`os: "off"`, no `app:`); trusting position would return the companion.
+    Works uniformly on every template this port plans (including the
+    hand-generated `minimal-app`, whose sole core also carries `app:`), so
+    unlike the Rust port there is no need for a per-template
+    `vendored_*_app_core_for_sku` family -- this reads the ACTUAL planned
+    content instead of a second, independently-derived lookup. Mirrors
+    `wizard::service::vendored::vendored_app_core_key`."""
+    in_cores = False
+    current_core: str | None = None
+    for line in _rust_lines(board_yaml):
+        if not in_cores:
+            in_cores = line == "cores:"
+            continue
+        if line and not line[0].isspace():
+            break  # The next top-level key ends the cores: block.
+        if line.startswith("  ") and not line[2:3].isspace() and line.endswith(":"):
+            current_core = line[2:-1]  # A `  <core>:` entry key line.
+        elif line.startswith("    app:"):
+            if current_core is not None:
+                return current_core
+    return None
+
+
+def vendored_core_ids(board_yaml: str) -> list[tuple[str, str]]:
+    """Every `(core id, os)` pair declared in a board.yaml's `cores:` block,
+    in file order -- the app core AND any pre-declared companions (e.g.
+    edge-ai's `a55_cluster`/`a32_cluster`). `os` is that core's own `os:`
+    child line verbatim (quotes and all, e.g. `"off"`), or `"zephyr"` when
+    absent (every vendored app core omits `os:` -- implicitly Zephyr).
+    Mirrors `wizard::service::vendored::vendored_core_ids`."""
+    in_cores = False
+    ids: list[list[str]] = []
+    for line in _rust_lines(board_yaml):
+        if not in_cores:
+            in_cores = line == "cores:"
+            continue
+        if line and not line[0].isspace():
+            break
+        if line.startswith("  ") and not line[2:3].isspace() and line.endswith(":"):
+            ids.append([line[2:-1], "zephyr"])
+        elif line.startswith("    os: "):
+            if ids:
+                ids[-1][1] = line[len("    os: ") :]
+    return [(core_id, os_value) for core_id, os_value in ids]
+
+
+def splice_companion_cores(board_yaml: str, cores: list[tuple[str, str]]) -> str:
+    """Splice `--cores` companions (and a default RPMsg channel to the first
+    ACTIVE one, `os != "off"`) into `board_yaml`, after the sole app-core
+    entry already inside its `cores:` block. A no-op when `cores` is empty or
+    the content has no `cores:` block. Skips any id already declared in the
+    `cores:` block (not just the app core) so this can never emit a
+    duplicate mapping key -- belt-and-suspenders behind `init_cmd`'s own
+    upfront guard. Mirrors
+    `wizard::service::vendored::splice_companion_cores`."""
+    if not cores:
+        return board_yaml
+    app_core = vendored_app_core_key(board_yaml)
+    if app_core is None:
+        return board_yaml
+    existing_ids = {core_id for core_id, _os in vendored_core_ids(board_yaml)}
+
+    companion_lines: list[str] = []
+    for core_id, os_value in cores:
+        if core_id == app_core or core_id in existing_ids:
+            continue
+        companion_lines.append(f"  {core_id}:")
+        companion_lines.append(f"    os: {os_value}")
+        if os_value == "yocto":
+            companion_lines.append("    image: alp-image-edge")
+    if not companion_lines:
+        return board_yaml
+
+    out: list[str] = []
+    in_cores = False
+    inserted = False
+    for line in _rust_lines(board_yaml):
+        is_top_level = bool(line) and line[0] not in (" ", "\t")
+        if is_top_level:
+            if in_cores and not inserted:
+                out.extend(companion_lines)
+                inserted = True
+            in_cores = line == "cores:"
+        out.append(line)
+    if in_cores and not inserted:
+        out.extend(companion_lines)
+        inserted = True
+
+    result = "\n".join(out) + "\n"
+    if inserted:
+        companion = next(
+            (
+                core_id
+                for core_id, os_value in cores
+                if core_id != app_core and os_value != "off" and core_id not in existing_ids
+            ),
+            None,
+        )
+        if companion is not None:
+            result += (
+                "\nipc:\n"
+                "  - kind: rpmsg\n"
+                "    name: alp_default_rpmsg\n"
+                f"    endpoints: [{app_core}, {companion}]\n"
+                "    carve_out_kb: 512\n"
+            )
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Template planning
 # ---------------------------------------------------------------------------
 

@@ -15,6 +15,16 @@ live ``alp_orchestrate --emit build-plan``), not hand-written stand-ins --
 slices, one with ``command: null``, and a matching ``warnings[]`` entry. Only
 the case that must actually SPAWN something uses a synthetic plan, because it
 needs a tool that exists on every host (``sys.executable``).
+
+**Every case names its MODE.** ``--plan-from`` is a plan SOURCE, not a build
+trigger: on its own -- and with ``--native`` too, which does NOT override it --
+it shows the plan and writes nothing (v0.4.1's implied ``--plan``),
+``--materialise`` writes and stops, and ``--execute`` (this port's own added
+flag, which v0.4.1 has no equivalent of) writes and then dispatches. A case
+that dropped its mode flag would silently stop testing what its name says --
+so the write cases carry ``--materialise``, the dispatch cases carry
+``--execute``, and the gate cases in the ``--plan-from`` section below pin the
+modes themselves against the captured oracle measurements.
 """
 import json
 import os
@@ -179,7 +189,9 @@ ALL_ARTEFACTS = (
 
 def test_a_two_slice_plan_reports_one_executed_and_one_skipped(project):
     plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
-    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project
+    )
 
     env = envelope_of(proc)
     assert proc.returncode == 0, env
@@ -199,7 +211,9 @@ def test_every_artefact_is_on_disk_before_the_first_slice_is_spawned(project):
     # yet on disk, which turns a late materialise into a failed slice and a
     # non-zero build.
     plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
-    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project
+    )
 
     env = envelope_of(proc)
     assert proc.returncode == 0, env
@@ -216,7 +230,9 @@ def test_the_ordering_probe_can_actually_fail(project):
     # A check that cannot go red is not evidence. Point the probe at a path
     # the plan never materialises: the slice must fail and the build exit 1.
     plan = write_plan(project, two_slice_plan(("build/never-written.conf",)))
-    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project
+    )
 
     env = envelope_of(proc)
     assert proc.returncode == 1, env
@@ -226,7 +242,9 @@ def test_the_ordering_probe_can_actually_fail(project):
 
 def test_slice_output_goes_to_stderr_and_stdout_stays_one_envelope(project):
     plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
-    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project
+    )
 
     # `json.loads` on the WHOLE of stdout: a second document, a log line or a
     # stray progress byte all fail here, which is exactly the break that
@@ -245,7 +263,8 @@ def test_a_null_command_slice_survives_with_its_warning(project):
     plan_doc = real_plan("multicore_rpmsg-imx93")
     plan = write_plan(project, plan_doc)
     proc = run_tan(
-        "build", "--plan-from", str(plan), "--format", "json", cwd=project, scrub_path=True
+        "build", "--plan-from", str(plan), "--execute", "--format", "json",
+        cwd=project, scrub_path=True,
     )
 
     env = envelope_of(proc)
@@ -267,7 +286,8 @@ def test_no_slice_is_filtered_out_however_few_cores_the_customer_named(project):
     # board.yaml need never have mentioned. The CLI must report all three.
     plan = write_plan(project, real_plan("multicore_rpmsg-aen"))
     proc = run_tan(
-        "build", "--plan-from", str(plan), "--format", "json", cwd=project, scrub_path=True
+        "build", "--plan-from", str(plan), "--execute", "--format", "json",
+        cwd=project, scrub_path=True,
     )
 
     env = envelope_of(proc)
@@ -278,20 +298,199 @@ def test_no_slice_is_filtered_out_however_few_cores_the_customer_named(project):
     assert all(s["status"] == "skipped" for s in slices), slices
 
 
-def test_materialise_writes_every_artefact_of_a_real_plan(project):
+def declared_artefacts(plan_doc: dict) -> list[str]:
+    """Every path the plan itself says will be written, in materialise order
+    (shared first, then per slice). Read out of the fixture rather than
+    hardcoded, so a re-captured plan cannot leave these cases asserting paths
+    the SDK no longer emits."""
+    paths = [a["path"] for a in plan_doc["sharedArtefacts"]]
+    for sl in plan_doc["slices"]:
+        paths.extend(a["path"] for a in sl["configArtefacts"])
+    assert paths, "fixture carries no artefacts; these cases would pass vacuously"
+    return paths
+
+
+# --- the `--plan-from` mode gate (measured against the v0.4.1 oracle) --------
+#
+# ORACLE MEASUREMENTS, re-taken in FRESH temp dirs against the shipped
+# `tan 0.4.1-dev` binary on this same `multicore_rpmsg-aen` fixture:
+#
+#   build --plan-from p.json                -> rc 0, 0 files, data = the plan
+#   build --plan-from p.json --native       -> rc 0, 0 files, data = the plan
+#   build --plan-from p.json --materialise  -> rc 0, 6 files,
+#                                              data = {schemaVersion, baseDir, written}
+#
+# All three are pinned below as PARITY assertions. `--execute` (the section
+# after) is this port's own added flag and deliberately has no oracle row.
+
+
+@pytest.mark.parametrize("also", [(), ("--native",)], ids=["bare", "with-native"])
+def test_plan_from_shows_the_plan_and_writes_nothing_even_with_native(project, also):
+    """ORACLE-PARITY ASSERTION. Do NOT "fix" this by making ``--native`` win.
+
+    v0.4.1's ``--plan-from`` help says "Implies ``--plan``", and the oracle
+    means it -- against an EXPLICIT ``--native`` too. Both rows above: rc=0,
+    ZERO files, ``data`` IS the plan.
+
+    Two earlier revisions of this port each broke one of those rows. First a
+    bare ``--plan-from`` materialised AND dispatched, so a v0.4.1 script that
+    only ever INSPECTED a plan silently wrote six files into the customer's
+    tree. Then ``--native`` was given precedence, so ``--plan-from --native``
+    -- which also wrote nothing under v0.4.1 -- wrote six files and ran the
+    slices. Same class of surprise, same answer: a v0.4.1 argv keeps its
+    v0.4.1 meaning. The capability the second revision was reaching for is
+    real, and is now ``--execute`` (next section) -- a flag of its own, not a
+    redefinition of an argv that already meant something else.
+    """
     plan_doc = real_plan("multicore_rpmsg-aen")
     plan = write_plan(project, plan_doc)
     proc = run_tan(
-        "build", "--plan-from", str(plan), "--format", "json", cwd=project, scrub_path=True
+        "build", "--plan-from", str(plan), *also, "--format", "json",
+        cwd=project, scrub_path=True,
     )
-    assert proc.returncode == 0, proc.stdout + proc.stderr
 
-    expected = [a["path"] for a in plan_doc["sharedArtefacts"]]
-    for sl in plan_doc["slices"]:
-        expected.extend(a["path"] for a in sl["configArtefacts"])
-    assert expected, "fixture carries no artefacts; this case would pass vacuously"
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    # Not "no build/ dir" -- NOTHING new on disk beside the plan file itself.
+    assert sorted(p.name for p in project.iterdir()) == ["plan.json"], sorted(
+        str(p.relative_to(project)) for p in project.rglob("*")
+    )
+    # `data` is the plan, verbatim: same keys, same order, same values. The
+    # oracle passes the document straight through rather than round-tripping
+    # it through its own structs (measured: an unknown top-level key survives
+    # into `data`), so a consumer reading a newer SDK's plan through
+    # `tan build --plan-from` loses nothing.
+    assert env["data"] == plan_doc
+    assert list(env["data"]) == list(plan_doc)
+
+
+def test_plan_from_with_materialise_writes_the_plans_files_and_stops(project):
+    """The oracle's ``--materialise``: rc=0, the plan's six files on disk, and
+    ``data`` = ``{schemaVersion, baseDir, written}`` -- no ``slices``, because
+    nothing is dispatched. This is where the port's write path now lives."""
+    plan_doc = real_plan("multicore_rpmsg-aen")
+    plan = write_plan(project, plan_doc)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--materialise", "--format", "json",
+        cwd=project, scrub_path=True,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    assert list(env["data"]) == ["schemaVersion", "baseDir", "written"], env["data"]
+
+    expected = declared_artefacts(plan_doc)
+    assert env["data"]["written"] == expected
     for rel in expected:
         assert (project / rel).is_file(), f"{rel} was not materialised"
+    # Materialise is not a build: the executor never ran, so the envelope
+    # carries no slice results to mistake for one.
+    assert "slices" not in env["data"]
+
+
+# --- `--execute`: this port's own addition, not a v0.4.1 flag ---------------
+#
+# The oracle cannot dispatch a plan read from a file AT ALL -- `--plan-from`'s
+# implied `--plan` outranks `--native` there (pinned above). That is a
+# LIMITATION of v0.4.1, not a contract: taking a pinned, reviewed plan and
+# running it reproducibly is an ordinary hermetic-CI request. `--execute`
+# serves it without touching what any v0.4.1 argv means, which is exactly why
+# these cases have no oracle row to match and must not be "fixed" into one.
+
+
+def test_execute_materialises_and_dispatches_a_file_supplied_plan(project):
+    plan_doc = two_slice_plan(ALL_ARTEFACTS)
+    plan = write_plan(project, plan_doc)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    # Materialised: `--execute` IMPLIES writing -- nothing can run that was
+    # never written, so the caller does not also have to pass `--materialise`
+    # (and passing both is refused, below).
+    for rel in declared_artefacts(plan_doc):
+        assert (project / rel).is_file(), f"{rel} was not materialised"
+    # AND dispatched -- the half `--materialise` stops short of, and the half
+    # the oracle has no argv for at all: the probe slice really ran.
+    statuses = {s["coreId"]: s["status"] for s in env["data"]["slices"]}
+    assert statuses == {"aaa_probe": "ok", "zzz_nocmd": "skipped"}, env["data"]
+
+
+def test_execute_reports_the_ordinary_build_shape_not_a_fourth_one(project):
+    """``--execute``'s ``data`` is the SAME shape a plain ``tan build``
+    returns -- ``{schemaVersion, baseDir, slices, warnings}``. It IS a native
+    build; only the plan's SOURCE differs, so no consumer should have to
+    switch on a fourth ``data`` shape just to read slice outcomes.
+
+    ``written`` is deliberately absent rather than merged in from
+    ``--materialise``: it would be byte-for-byte the pinned plan's own
+    declared artefact paths, which the one caller who supplied that file
+    already holds.
+    """
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    assert list(env["data"]) == ["schemaVersion", "baseDir", "slices", "warnings"], env["data"]
+    # `ok`/`exitCode` agree with each other and with the process.
+    assert env["ok"] is True
+    assert env["exitCode"] == 0
+
+
+def test_execute_without_plan_from_changes_nothing(project):
+    # `--execute` only overrides the `--plan` IMPLIED by `--plan-from`; with no
+    # plan file the run already builds, so the flag must be a no-op rather than
+    # a second code path. Whatever a bare `tan build` does in this scratch tree
+    # (no SDK resolves here, so: refuses), `--execute` must do identically.
+    bare = run_tan("build", "--format", "json", cwd=project)
+    with_execute = run_tan("build", "--execute", "--format", "json", cwd=project)
+    assert bare.returncode == with_execute.returncode, (bare.stdout, with_execute.stdout)
+    assert envelope_of(bare)["issues"] == envelope_of(with_execute)["issues"]
+
+
+def test_execute_with_materialise_is_a_coded_refusal_not_a_precedence_win(project):
+    """Two different answers to "what does this run leave behind": one stops
+    after writing, one goes on to dispatch. Letting either win silently is the
+    exact defect ``--execute`` exists to replace, so the pair is refused with
+    its own code at exit 2 -- this CLI's position for an invalid invocation,
+    the same one ``--format bogus`` takes."""
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--materialise",
+        "--format", "json", cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 2, env
+    assert env["command"] == "build"
+    assert env["ok"] is False
+    assert env["exitCode"] == 2
+    assert [i["code"] for i in env["issues"]] == ["build.conflicting-flags"], env["issues"]
+    # Refused before any work: neither mode half-ran.
+    assert not (project / "build").exists()
+    assert "Traceback" not in proc.stderr
+
+
+def test_execute_with_a_deferred_flag_is_refused_as_deferred(project):
+    """The other conflicting shape. ``--plan`` is not implemented in this
+    build at all, so it cannot be honoured in ANY combination -- the deferral
+    is the accurate answer and is checked FIRST, ahead of the conflict pair
+    above. Still a coded refusal, still never a silent precedence win."""
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--plan",
+        "--format", "json", cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 1, env
+    assert [i["code"] for i in env["issues"]] == ["cli.command-deferred"], env["issues"]
+    assert not (project / "build").exists()
 
 
 # --- every failure is an envelope, never a traceback ------------------------
@@ -415,10 +614,17 @@ def test_an_unknown_plan_path_mode_exits_1_from_the_substitution_pass_too(projec
     # The SAME `build.plan-invalid` code, raised by a different module
     # (`token_substitution.py`, not `build_plan.py`). One code must not mean
     # two different exit codes depending on which module raised it.
+    #
+    # `--materialise`, because the substitution pass only runs for a mode that
+    # puts something on disk or in an argv -- the oracle shows a `planPathMode:
+    # legacy` plan at exit 0 under a bare `--plan-from` (measured) and only
+    # refuses it once asked to materialise it.
     doc = two_slice_plan(ALL_ARTEFACTS)
     doc["planPathMode"] = "legacy"
     plan = write_plan(project, doc)
-    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--materialise", "--format", "json", cwd=project
+    )
 
     env = envelope_of(proc)
     assert proc.returncode == 1, env
@@ -449,6 +655,7 @@ def test_a_tokened_plan_with_no_sdk_refuses_and_writes_nothing(project):
         "build",
         "--plan-from",
         str(plan),
+        "--materialise",
         "--board-yaml",
         "board.yaml",
         "--format",
@@ -495,8 +702,8 @@ def test_the_default_invocation_substitutes_an_absolute_project_root(project, tm
     plan = write_plan(project, doc)
 
     proc = run_tan(
-        "build", "--plan-from", str(plan), "--sdk-root", str(sdk), "--format", "json",
-        cwd=project,
+        "build", "--plan-from", str(plan), "--materialise", "--sdk-root", str(sdk),
+        "--format", "json", cwd=project,
     )
 
     env = envelope_of(proc)
@@ -556,7 +763,9 @@ def test_an_unwritable_build_root_is_a_write_failure(project):
     (project / "blocker").write_text("", encoding="utf-8", newline="")
     doc["sharedArtefacts"] = [{"path": "blocker/system_ipc.h", "contents": "x\n"}]
     plan = write_plan(project, doc)
-    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--materialise", "--format", "json", cwd=project
+    )
 
     env = envelope_of(proc)
     assert proc.returncode == 3, env
@@ -568,7 +777,9 @@ def test_an_artefact_escaping_the_build_root_is_refused(project):
     doc = two_slice_plan(ALL_ARTEFACTS)
     doc["sharedArtefacts"] = [{"path": "../escaped.h", "contents": "x\n"}]
     plan = write_plan(project, doc)
-    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--materialise", "--format", "json", cwd=project
+    )
 
     env = envelope_of(proc)
     assert proc.returncode == 3, env
@@ -580,7 +791,9 @@ def test_an_unknown_backend_is_named_and_fails_by_default(project):
     doc = two_slice_plan(ALL_ARTEFACTS)
     doc["slices"][0]["backend"] = "native"
     plan = write_plan(project, doc)
-    proc = run_tan("build", "--plan-from", str(plan), "--format", "json", cwd=project)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project
+    )
 
     env = envelope_of(proc)
     assert proc.returncode == 1, env
@@ -600,6 +813,90 @@ def test_no_plan_and_no_sdk_is_a_coded_envelope_not_a_traceback(project):
     assert [i["code"] for i in env["issues"]] == ["build.plan-unavailable"]
     assert "--sdk-root" in env["issues"][0]["message"]
     assert "Traceback" not in proc.stderr
+
+
+def test_build_resolves_the_sdk_tan_init_pinned_with_no_sdk_root_flag_and_no_env_var(
+    project, monkeypatch
+):
+    # The worst reported CX defect: `tan init` writes `<project>/.alp/sdk-path`
+    # naming the SDK it just pinned, but `tan build` used to jump straight
+    # from `--sdk-root` to the positional (sibling/child/ancestor) walk and
+    # never read that pointer at all -- so a customer running `tan init` then
+    # `tan build` in the SAME directory, with no `--sdk-root` and even with
+    # `ALP_SDK_ROOT` exported, got "no alp-sdk checkout found" with the
+    # checkout sitting right there in `.alp/sdk-path`.
+    monkeypatch.delenv("ALP_SDK_ROOT", raising=False)
+
+    # An SDK checkout that is deliberately NOT a sibling/child/ancestor of
+    # `project` -- the positional walk must be unable to find it any other
+    # way, so a passing assertion proves the `.alp/sdk-path` pin was read.
+    sdk = project.parent / "elsewhere-sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8", newline="")
+
+    alp_dir = project / ".alp"
+    alp_dir.mkdir()
+    (alp_dir / "sdk-path").write_text(
+        json.dumps({"sdkPath": str(sdk)}), encoding="utf-8", newline=""
+    )
+
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build",
+        "--plan-from",
+        str(plan),
+        "--execute",
+        "--board-yaml",
+        "board.yaml",
+        "--format",
+        "json",
+        cwd=project,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    assert env["sdk"]["root"].replace("\\", "/") == str(sdk).replace("\\", "/")
+    assert env["sdk"]["sourceTier"] == "projectPin"
+
+
+def test_alp_sdk_root_env_is_not_a_discovery_tier(project, monkeypatch):
+    # `ALP_SDK_ROOT` is deliberately NOT read back for discovery: the oracle's
+    # `SdkSourceTier` (`crates/tan-core/src/sdk.rs`) is a closed five-value
+    # enum with no slot for it, and `util.rs::resolve_sdk_root` only ever
+    # WRITES that variable into a build slice's env. An earlier version of
+    # this port's ladder invented a sixth `envAlpSdkRoot` tier to read it
+    # back -- reverted, because it changed `sdk.sourceTier`'s wire values to
+    # something no consumer (the vscode extension, `tan sdk current --json`)
+    # knows. The `.alp/sdk-path` project pin (see the test above) is the
+    # tier that makes `tan init && tan build` compose; this proves an
+    # exported `ALP_SDK_ROOT` alone -- no pin, no positional match -- still
+    # resolves nothing.
+    sdk = project.parent / "env-only-sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8", newline="")
+    monkeypatch.setenv("ALP_SDK_ROOT", str(sdk))
+
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan(
+        "build",
+        "--plan-from",
+        str(plan),
+        "--execute",
+        "--board-yaml",
+        "board.yaml",
+        "--format",
+        "json",
+        cwd=project,
+    )
+
+    env = envelope_of(proc)
+    # The build itself still succeeds -- `--plan-from` needs no SDK -- but
+    # `sdk` is OMITTED (never a phantom `envAlpSdkRoot` value), and the
+    # post-build system-manifest emit, which DOES need a resolved root,
+    # reports exactly the "nothing resolved" reason.
+    assert proc.returncode == 0, env
+    assert "sdk" not in env
+    assert "no alp-sdk checkout resolved" in proc.stderr
 
 
 # --- an unresolved ${TOOLCHAIN_ROOT} is never dispatched --------------------
@@ -637,6 +934,7 @@ def test_a_slice_still_naming_toolchain_root_is_routed_not_spawned(
         "build",
         "--plan-from",
         str(plan),
+        "--execute",
         "--board-yaml",
         "board.yaml",
         "--sdk-root",
@@ -676,9 +974,96 @@ def test_the_os_is_never_a_flag(project, flag):
 # --- text mode keeps stdout clean too ---------------------------------------
 
 
-def test_text_mode_puts_nothing_on_stdout(project):
+@pytest.mark.parametrize(
+    "mode",
+    [(), ("--native",), ("--materialise",), ("--execute",)],
+    ids=lambda m: "".join(m) or "plan",
+)
+def test_text_mode_puts_nothing_on_stdout(project, mode):
+    # Every mode: stdout is the envelope channel and text mode has no
+    # envelope, so it must stay empty whatever the run did. `aaa_probe` proves
+    # each recap actually said something -- the plan listing (twice: `--native`
+    # does not override the implied `--plan`), the written artefact paths, and
+    # the slice results.
     plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
-    proc = run_tan("build", "--plan-from", str(plan), cwd=project)
+    proc = run_tan("build", "--plan-from", str(plan), *mode, cwd=project)
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout == "", f"text mode leaked to stdout:\n{proc.stdout}"
     assert "aaa_probe" in proc.stderr
+
+
+# --- an unported oracle flag reads as deferred, never as a typo -------------
+
+
+#: Every flag `tan build` declares in the v0.4.1 oracle that this port does not
+#: implement -- read off `tan.exe build --help`, minus the six the port already
+#: has (`--plan-from --project --board-yaml --sdk-root --format` + the port-only
+#: `--build-root` and `--execute`) and minus the two it now implements
+#: (`--materialise`, `--native`).
+#: `--verbose`/`--quiet`/`--no-color`/`--non-interactive`/`--ci`
+#: are clap GLOBALS in the oracle, declared on its root and propagated; they are
+#: listed here only because this port accepts none of them at its own root
+#: today. If `cli.py` ever grows real root-level handling for them, they must
+#: leave `build_cmd.py` (and this list) or the build-local declaration shadows
+#: it.
+DEFERRED_BUILD_FLAGS = [
+    "--plan",
+    ("--target", "zephyr-conf"),
+    "--all",
+    "--manifest",
+    ("--manifest-from", "manifest.yaml"),
+    "--no-auto-bootstrap",
+    "--pristine",
+    "--verbose",
+    "--quiet",
+    "--no-color",
+    "--non-interactive",
+    "--ci",
+]
+
+
+@pytest.mark.parametrize(
+    "flag", DEFERRED_BUILD_FLAGS, ids=lambda f: (f[0] if isinstance(f, tuple) else f)
+)
+def test_an_unported_oracle_flag_is_refused_as_deferred_not_as_a_typo(project, flag):
+    """`tan build --pristine` used to exit 2 with Click's "No such option",
+    which is indistinguishable from `tan build --pristien`. Every flag the
+    v0.4.1 oracle has and this port does not is DECLARED, so the answer is the
+    same coded refusal `deferred_cmd` gives the seven deferred verbs: exit 1,
+    `cli.command-deferred`, and a message naming the flag, v0.6.0 and the
+    tan-cli#260 URL a caller can grep for.
+
+    Exit 1 is the load-bearing half. Reusing 2 would put "known but deferred"
+    back at the exact exit code the typo case already occupies, which is the
+    distinction this whole treatment exists to make.
+    """
+    argv = flag if isinstance(flag, tuple) else (flag,)
+    proc = run_tan("build", *argv, "--format", "json", cwd=project)
+
+    env = envelope_of(proc)
+    assert proc.returncode == 1, env
+    assert env["command"] == "build"
+    assert [i["code"] for i in env["issues"]] == ["cli.command-deferred"], env["issues"]
+    message = env["issues"][0]["message"]
+    assert argv[0] in message
+    assert "v0.6.0" in message
+    assert "tan-cli/issues/260" in message
+    assert "Traceback" not in proc.stderr
+
+
+def test_a_deferred_flag_does_no_work_before_refusing(project):
+    # The refusal happens before the plan is read, so a run naming one cannot
+    # half-build: nothing on disk, and nothing on stdout in text mode either.
+    plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
+    proc = run_tan("build", "--plan-from", str(plan), "--pristine", cwd=project)
+    assert proc.returncode == 1, proc.stderr
+    assert proc.stdout == "", proc.stdout
+    assert not (project / "build").exists()
+
+
+def test_a_real_typo_still_exits_2(project):
+    # The other half of the distinction: a flag that is NOT a deferred oracle
+    # flag must keep Click's parse error, or "deferred" would just be the new
+    # name for every mistyped option.
+    proc = run_tan("build", "--pristien", "--format", "json", cwd=project)
+    assert proc.returncode == 2, proc.stdout + proc.stderr

@@ -81,9 +81,9 @@ from typing import Any
 import typer
 
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
-from tan.commands.build_cmd import discover_sdk_root
+from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import SDK_MARKER, resolve_sdk_tiered
+from tan.commands.sdk_cmd import SDK_MARKER
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -648,27 +648,45 @@ def _cli_workspace_root(project_arg: str | None) -> Path:
 
 
 def sdk_root_resolves(sdk_root: str | None, workspace_root: Path) -> bool:
-    """Whether `util::resolve_sdk_root` would resolve a checkout -- the guard
-    behind `clean.sdk-root-not-found`.
+    """Whether `build_cmd.resolve_sdk_root_ladder` would resolve a checkout --
+    the guard behind `clean.sdk-root-not-found`.
 
     `--sdk-root` is TERMINAL (I-31): an explicit path without the loader marker
     fails here rather than falling through to a lower tier and cleaning against
-    a checkout the caller never named. Both pointer tiers are best-effort, so a
-    stale pointer falls through instead of locking the user out.
+    a checkout the caller never named -- checked explicitly below because the
+    ladder itself returns a `--sdk-root` value unvalidated (matching the
+    oracle's `resolve_sdk_tiered`, terminal for REPORTING); this gate matches
+    `util::resolve_sdk_root`, terminal AND validated. The project-pin and
+    global-default tiers are best-effort, so a stale pointer falls through
+    instead of locking the user out.
 
-    The discovery tier is `build_cmd.discover_sdk_root` -- `util.rs`'s WIDER
-    candidate set (root, child `alp-sdk`, sibling `alp-sdk`, sibling
-    `alp-sdk-upstream`, then ancestors; first match wins) -- and NOT
-    `resolve_sdk_tiered`'s narrower `discover_workspace_sdk`. The oracle calls
-    both functions in one `clean` run: the wider one gates the command, the
-    narrower one decides the reported `sdk` key. Collapsing them to one would
-    make `tan clean` refuse to run in a `tan bootstrap` workspace, where the
-    checkout is a CHILD of the cwd (tan-cli#218).
+    The ladder's LAST tier is the wide positional walk (root, child `alp-sdk`,
+    sibling `alp-sdk`, sibling `alp-sdk-upstream`, then ancestors; first match
+    wins), but it is reached only when the narrower `resolve_sdk_tiered`
+    discovery tier AHEAD of it answers `None` -- a narrow hit short-circuits.
+    So in a workspace holding BOTH a child `alp-sdk` and a lateral one, what
+    gates this command is the lateral checkout, not the child, and the wide
+    walk never runs (measured against the oracle: `tan clean` there resolves
+    `../alp-sdk` too, tan-cli#263).
+
+    That ordering does not move this boolean: every candidate the narrow tier
+    probes is also one the wide walk probes, so a narrow hit implies a wide
+    hit. What the wide tail still buys is the case the narrow tier cannot
+    answer -- a `tan bootstrap` workspace whose checkout is a CHILD of the cwd,
+    where narrow returns `None` and, without the tail, `tan clean` would refuse
+    to run (tan-cli#218; measured: the oracle resolves `<ws>/alp-sdk` there).
+
+    Note this gate and the REPORTED `sdk` key are still two different
+    resolutions: [`resolve_sdk`][tan.commands.presets_cmd.resolve_sdk] (below)
+    reports through `resolve_sdk_tiered` alone, so a bootstrap-child workspace
+    gates open here while reporting no `sdk` at all.
     """
-    active = resolve_sdk_tiered(sdk_root, workspace_root)
-    if active.path is not None and active.tier != "discovery":
-        return Path(active.path).joinpath(*SDK_MARKER).exists()
-    return discover_sdk_root(workspace_root) is not None
+    resolved, tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    if resolved is None:
+        return False
+    if tier == "sdkRootFlag":
+        return resolved.joinpath(*SDK_MARKER).exists()
+    return True
 
 
 # ---------------------------------------------------------------------------
