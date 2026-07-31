@@ -24,10 +24,22 @@ fn fa_get<'a>(v: &'a Value, k: &str) -> Option<&'a Value> {
 /// invented. So the convention itself PRODUCES the value, routinely, in files
 /// tan reads — this is not malformed input, it is expected input.
 ///
-/// The literal used to be written out at three sites (here,
-/// [`flash_args_has_tbd`], and `commands::image`'s `firmware_path` check). One
-/// definition instead, because the failure mode of three copies is that a
-/// fourth reader is written without one.
+/// The literal used to be written out at four sites (here,
+/// [`flash_args_has_tbd`], `commands::image`'s `firmware_path` check, and
+/// `sdk_catalogue::parse::is_tbd` — which is the copy four comments elsewhere
+/// cite BY NAME as the definition of the convention). One definition instead,
+/// because the failure mode of four copies is a fifth reader written without
+/// one. That is not hypothetical here: `builders::fa_str_checked` WAS that
+/// fifth reader, and it still carried the empty-only filter after the first
+/// pass at #222 fixed [`fa_str`].
+///
+/// Two readers outside the flash path are knowingly NOT routed through this,
+/// because they ask a different question of a different schema rather than
+/// copying this one: `pinmux` drops a `TBD` `e1m_pad` as a sentinel ROW (the
+/// silicon pad has no E1M edge ball at all), and `size::resolve_variant` skips
+/// a `TBD` `silicon_variant` before falling through to a reverse SKU lookup.
+/// Neither plans a flash write. Both compare untrimmed — a smaller separate
+/// bug, not this one.
 pub const PENDING_PLACEHOLDER: &str = "TBD";
 
 /// Whether `s` is the pending-placeholder sentinel rather than a value.
@@ -60,7 +72,12 @@ pub fn flash_args_has_tbd(v: &Value) -> bool {
 /// pending placeholder**.
 ///
 /// The `TBD` clause is the fix for tan-cli#222, and it belongs HERE rather than
-/// in the thirteen call sites. `TBD` is not empty, so the previous
+/// in the twelve call sites this accessor serves. (It is NOT every string read
+/// in the flash path: `plan_swd_probe` takes four fields — `base`,
+/// `jlink_device`, `interface`, `target` — through the strict
+/// `builders::fa_str_checked`, which needed its own answer and got the opposite
+/// one, an error rather than absent. See its doc comment.)
+/// `TBD` is not empty, so the previous
 /// `!s.is_empty()` filter returned it as a real value and every backend
 /// received the literal string `TBD` as a runner name, a build directory, a hex
 /// file, an OpenOCD config path or a `dd` destination. That is the same defect
