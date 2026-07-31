@@ -62,6 +62,26 @@ it and the port loses the only thing that can tell it it has drifted. And
 `contract/` is frozen today by `crates/tan-cli/tests/contract.rs`; if the Rust
 test goes without a Python enforcer, the freeze quietly becomes advisory.
 
+**This milestone is being pulled forward deliberately.** The standing direction
+is to get off Rust as fast as is safe, so the work is sequenced to remove
+Rust's *load-bearing* roles early rather than waiting for the version number:
+
+1. **Out of the release path — at v0.5.0-rc.1.** The RC ships four PyInstaller
+   freezes of `python/` and no cargo build at all (#271). After that tag,
+   nothing customers receive is Rust.
+2. **Out of the correctness path — #272, the one urgent task.** Freeze the
+   oracle's observed behaviour into committed fixtures *while a working binary
+   still exists*. This is the only item that gets harder the longer it waits:
+   once `crates/` is gone, anything never captured is unrecoverable. A frozen
+   fixture is also strictly better than a live oracle, which can itself drift.
+3. **Out of the repo — #269.** Safe once 1 and 2 are done, and gated on
+   answering who enforces `contract/` afterwards.
+
+Issues whose fix lives in `crates/` (#183, #200, #224, #250) were moved off the
+RC for the same reason: `crates/` is frozen, so they are blocked by policy, not
+effort. Each carries a comment saying what survives the port and what dies with
+the oracle.
+
 ## Standing rules
 
 These are here because each one has already cost a round.
