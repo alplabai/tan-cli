@@ -19,7 +19,7 @@
 # inside (alp-sdk-vscode/src/alpCli/vscodeAdapter.ts:288-290).
 #
 #   python -m venv .venv-build
-#   .venv-build/bin/pip install -e . "pyinstaller>=6.10"
+#   .venv-build/bin/pip install -e ".[monitor]" "pyinstaller>=6.10"
 #   PYTHON=.venv-build/bin/python scripts/build_binary.sh
 #
 # `-e .` rather than a hand-listed dependency set: the list drifts. It drifted --
@@ -28,9 +28,28 @@
 # `ModuleNotFoundError: No module named 'click'`. Installing the PACKAGE means
 # the runtime deps come from pyproject.toml, which is also what a customer's
 # `pip install alp-tan` resolves, so a build environment can no longer be
-# quietly richer than the declared one. Extras stay OUT (no `[monitor]`): an
-# extra is optional at runtime by definition, and freezing one in would make the
-# binary disagree with what the wheel promises.
+# quietly richer than the declared one.
+#
+# `[monitor]` IS included, and this line used to say the opposite ("extras stay
+# OUT ... freezing one in would make the binary disagree with what the wheel
+# promises"). That reasoning inverts who can act. An extra is optional for a
+# WHEEL because a wheel user can add it whenever they want; a customer holding a
+# --onefile binary cannot, ever, and `tan monitor` is a command that binary
+# advertises in its own `--help`. Leaving it out ships a dead command --
+# `monitor.pyserial-missing`, whose text has always said "A frozen `tan` binary
+# bundles it at build time, so a binary built without that extra cannot gain it
+# here." Measured BOTH ways on real freezes, since a claim about what
+# PyInstaller bundles is not something to reason about: with the extra,
+# 13805270 B and `monitor.no-port`; without it, 13729615 B and
+# `monitor.pyserial-missing` (Windows x86_64, Python 3.12.10, PyInstaller 6.x).
+# So the lazy in-function `import serial` IS followed when installed and the
+# module is NOT acquired otherwise -- no --hidden-import needed. +75655 B,
+# against 2.69 MB of headroom under artifact_ceilings.env's default ceiling.
+#
+# The two release workflows had drifted apart on exactly this: python-binaries.yml
+# froze `-e ".[monitor]"` while release.yml -- the workflow a `v*` tag actually
+# runs -- froze a bare `.`. Every published asset would have carried the dead
+# command; only the dispatch-only workflow was correct.
 #
 # `jsonschema` is in that list because the PLANNER relocated in (`tan/planner/`,
 # was alp-sdk `scripts/alp_orchestrate/`) and validates every board.yaml against

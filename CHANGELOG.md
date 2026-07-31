@@ -191,6 +191,78 @@ testers install by hand.
   `validate_cmd`'s precedent for its own unported spawn path" -- `validate_cmd`
   uses 1, so the comment cited a precedent for the opposite of what it did.
 
+- **`tan init` could pin a customer to the WRONG SDK, permanently** (#263).
+  `init`, `generate`, `examples` and `renode` were routed through the same
+  SDK-root ladder as the other thirteen commands, whose last tier is the NARROW
+  probe. The oracle carries two ladders, and those four take the WIDE one.
+  Measured against `target/debug/tan.exe`, `HOME`/`USERPROFILE` isolated and
+  `ALP_SDK_ROOT` unset: with a child `<ws>/alp-sdk` and a competing sibling
+  `../alp-sdk`, the oracle resolves the child and the port resolved the sibling;
+  inside an enclosing checkout, the oracle resolves the child and the port
+  resolved the enclosing tree.
+
+  `tan init` is the sharp one, because it WRITES `.alp/sdk-path` -- and that pin
+  then outranks discovery for every later command in that project. A customer
+  running `tan bootstrap` and then `tan init` beside a second checkout was bound
+  to the wrong SDK for good, with nothing in any envelope saying so. Asserted on
+  the FILE, not just the envelope: `.alp/sdk-path`'s `sdkPath` now holds the
+  child in both cases. `build`, `doctor`, `sdk current` and `presets` are
+  byte-identical to before -- their narrow ladder was always right.
+
+  The issue's own prescribed fix -- inverting tier 4 for ALL commands -- was
+  refuted by that measurement and deliberately not applied: it would have
+  changed the thirteen too, tripping `build.sdk-switch-pristine` and deleting
+  build directories. The five regression tests pinning the narrow ladder are
+  untouched, precisely so nobody re-applies it.
+
+- **`tan monitor` would have been a dead command in every published binary.**
+  pyserial is an EXTRA (`[project.optional-dependencies] monitor`), so a frozen
+  build carries it only if the build venv installed `.[monitor]`.
+  `python-binaries.yml` did; `release.yml` -- the workflow a `v*` tag actually
+  runs -- froze a bare `.`. So every asset this tag publishes would have
+  advertised `tan monitor` in its `--help` and then refused to run it with
+  `monitor.pyserial-missing`, whose hint (`pip install "alp-tan[monitor]"`) is
+  the one thing a holder of a `--onefile` binary can never act on.
+
+  Both workflows now freeze `.[monitor]`, and `tests/conformance/test_packaged_binary.py`
+  asserts the frozen artifact reaches pyserial -- by issue code, not exit code,
+  since a runner with no serial hardware exits non-zero either way
+  (`monitor.no-port` is the pass, `monitor.pyserial-missing` the failure).
+
+  Both halves measured on real freezes rather than reasoned about, because a
+  gate that cannot fail is worse than none: with the extra the artifact is
+  13805270 B and answers `monitor.no-port`; without it, 13729615 B and
+  `monitor.pyserial-missing`. So PyInstaller does follow the lazy in-function
+  `import serial` when it is installed, and does not acquire it otherwise -- no
+  `--hidden-import` is needed and the extra genuinely decides the outcome.
+  +75655 B, against 2.69 MB of headroom under the 16500000 B ceiling.
+
+  The rationale in `build_binary.sh` said the opposite ("extras stay OUT ...
+  freezing one in would make the binary disagree with what the wheel
+  promises"), which inverts who can act: a wheel user can add an extra whenever
+  they like, a binary holder cannot.
+
+- **`install.sh` handed musl hosts a binary that cannot exec.** It maps every
+  Linux host to `unknown-linux-gnu` with no libc detection. From v0.5.0 that is
+  the only Linux asset, so on Alpine the failure mode is the bad one: not a
+  checksum mismatch but a bare `not found` from the shell, AFTER the sha256
+  verify has already passed -- so none of the four refusals fires and the
+  script reports success. It also regresses people who worked before, since
+  `latest` still resolves to v0.4.1 and its `tan-x86_64-unknown-linux-musl`
+  asset is genuinely static. Now detected BEFORE the download (`ldd --version`
+  naming musl, or the musl loader directly on images with no `ldd`) and refused
+  with a reason and a pointer at the source install. README's manual-download
+  recipe named the musl asset with the comment "musl = static, any distro";
+  that asset is gone from this release on, and the static claim was never true
+  of a PyInstaller freeze.
+
+- **`tan <cmd> | head` could print a traceback on Windows.** The EPIPE guard in
+  `__main__.py` caught `BrokenPipeError` only -- the POSIX spelling, lifted from
+  the `signal` docs. Windows surfaces the same closed-stdout condition as a
+  plain `OSError` with `errno.EINVAL`, because CPython's Windows layer maps the
+  underlying `ERROR_NO_DATA` to EINVAL rather than EPIPE, so any reader that
+  stops early (`head`, `grep -q`, a closed pager) escaped the guard.
+
 ## [0.4.1] — 2026-07-29
 
 ### Added

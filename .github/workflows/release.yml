@@ -263,6 +263,15 @@ jobs:
       # 15000000 B ceiling scripts/build_binary.sh asserts. Deps come from
       # `pip install .` (pyproject is the one dependency list) rather than a
       # hand-copied set that can drift from it.
+      #
+      # `.[monitor]`, WITH the extra. An extra is optional for a wheel because a
+      # wheel user can add it later; a customer holding a --onefile binary never
+      # can, and `tan monitor` is a command that binary advertises. Omitting it
+      # ships a dead command whose own error text says so
+      # (`monitor.pyserial-missing`: "A frozen `tan` binary bundles it at build
+      # time, so a binary built without that extra cannot gain it here"). Costs
+      # +73392 B measured, against >=1.2 MB of headroom in
+      # python/scripts/artifact_ceilings.env.
       - name: freeze tan (PyInstaller, clean venv)
         if: ${{ !matrix.container }}
         shell: bash
@@ -273,7 +282,7 @@ jobs:
           VENV_PY=.venv-build/bin/python
           [ -x "$VENV_PY" ] || VENV_PY=.venv-build/Scripts/python.exe
           "$VENV_PY" -m pip install --quiet --upgrade pip
-          "$VENV_PY" -m pip install --quiet . "pyinstaller>=6.10"
+          "$VENV_PY" -m pip install --quiet ".[monitor]" "pyinstaller>=6.10"
           PYTHON="$VENV_PY" bash scripts/build_binary.sh
           # pytest AFTER the freeze, never before: the artifact is already built,
           # so this cannot inflate it. tests/conformance/test_packaged_binary.py
@@ -315,7 +324,7 @@ jobs:
           docker run --rm -v "$PWD:/src" -w /src/python "${{ matrix.container }}" bash -euc '
             python -m venv /tmp/venv
             /tmp/venv/bin/pip install --quiet --upgrade pip
-            /tmp/venv/bin/pip install --quiet . "pyinstaller>=6.10"
+            /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
             /tmp/venv/bin/pip install --quiet pytest pyelftools
             /tmp/venv/bin/python -m pytest tests/conformance/test_packaged_binary.py -q

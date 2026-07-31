@@ -178,3 +178,43 @@ def test_the_artifact_carries_its_scaffold_templates(tmp_path):
     assert out.returncode == 0, envelope.get("issues")
     assert len(envelope["data"]["fileChanges"]) >= 6
     assert list(tmp_path.iterdir()) == [], "--preview must not touch disk"
+
+
+def test_the_artifact_carries_pyserial(tmp_path):
+    """`tan monitor` must not be a dead command in a frozen build.
+
+    pyserial is an EXTRA (`[project.optional-dependencies] monitor`), so the
+    freeze only carries it if the build venv installed `.[monitor]` -- and
+    `release.yml`, the workflow a `v*` tag actually runs, froze a bare `.` while
+    `python-binaries.yml` froze the extra. Every published asset would have
+    advertised `tan monitor` in `--help` and then refused to run it, with a hint
+    the holder of a --onefile binary cannot act on.
+
+    Both outcomes here exit non-zero on a runner with no serial hardware, so the
+    return code proves nothing and the ISSUE CODE is the whole signal:
+    `monitor.pyserial-missing` means the extra was dropped;
+    `monitor.no-port` means pyserial loaded and enumerated an empty bus, which
+    is the pass. Deliberately no `--port`: opening a real device is not this
+    test's business, and the enumeration alone touches pyserial.
+    """
+    out = subprocess.run(
+        [str(BINARY), "monitor", "--format", "json"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=str(tmp_path),
+        timeout=30,
+    )
+    envelope = json.loads(out.stdout)
+    codes = [issue["code"] for issue in envelope.get("issues", [])]
+
+    # Same stale-binary escape as above: a `dist/` predating `tan monitor`
+    # reports Click's unknown-subcommand parse error, not a missing extra.
+    if out.returncode == 2 and "cli.parse-error" in codes:
+        pytest.skip("dist/ predates `tan monitor` -- rerun scripts/build_binary.sh")
+
+    assert "monitor.pyserial-missing" not in codes, (
+        "the frozen binary has no pyserial: the build venv installed `.` instead "
+        'of `".[monitor]"`. See python/scripts/build_binary.sh. Issues: '
+        f"{envelope.get('issues')}"
+    )
