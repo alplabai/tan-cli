@@ -5,7 +5,20 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.4.1] — 2026-07-29
+## [0.5.0-rc1] — 2026-07-31
+
+*The first release in which `tan` is a Python program: the planner relocated
+into it, so `tan` now plans AND executes, and the four assets are PyInstaller
+freezes of `python/` rather than cargo builds of `crates/`.*
+
+**Nothing upgrades onto this release; you have to go and get it.**
+`SUPPORTED_CLI_VERSION` in `alp-sdk-vscode` deliberately does NOT move to
+`0.5.0-rc1`, so the extension never reaches an RC at all and keeps using the
+Rust `tan` it already has -- repointing that pin travels with GA (#268). The
+tag also publishes with `prerelease: true` / `make_latest: false`, and both
+installers resolve `latest` through GitHub, which excludes prereleases, so
+`install.sh` and `install.ps1` still install the last stable release. RC
+testers install by hand.
 
 ### Changed
 - **The planner relocated into `tan`, so `tan` now plans AND executes.**
@@ -36,10 +49,42 @@ All notable changes to `tan` are documented here. Format follows
   binding (`tan/planner_root.py`): every `metadata/**` path is a function of the
   resolved `sdk_root`, and importing the planner before a root is bound raises
   instead of silently reading the wrong tree.
-- `jsonschema` is now the fourth runtime dependency. It arrived with the
-  planner, which validates every `board.yaml` against
-  `metadata/schemas/board.schema.json` before it plans anything. The frozen
-  one-file binary measures 12377580 B against the 15000000 B ceiling.
+- **The release assets are PyInstaller `--onefile` freezes of `python/`, and
+  there are FOUR of them, not eight** (#271). The published set is
+  `tan-x86_64-pc-windows-msvc.exe`, `tan-x86_64-apple-darwin`,
+  `tan-aarch64-apple-darwin` and `tan-x86_64-unknown-linux-gnu`. `--onefile` is
+  required rather than preferred: the extension downloads a raw binary to ONE
+  cached path and has no unpack step anywhere in it. The asset NAMES keep the
+  Rust target triples because `alp-sdk-vscode`'s `releaseAssetForTarget`
+  hardcodes them and builds its download URL from them.
+
+  **`tan-aarch64-pc-windows-msvc.exe` and an arm64 Linux asset are NOT
+  published**, and a download of either 404s. PyInstaller cannot
+  cross-compile -- every asset must be frozen on the architecture it runs on
+  -- and adding two more runner types was out of scope for this tag, where on
+  a private repo arm64 minutes are billed and plan-gated. That is a decision,
+  not a platform limit (`windows-11-arm` and `ubuntu-24.04-arm` are current
+  hosted labels), so it can be revisited whenever arm64 assets are wanted;
+  `pip install ./python` is the route until then. There is no `-musl` asset
+  either: PyInstaller's musllinux bootloader carries ELF interpreter
+  `/lib/ld-musl-x86_64.so.1`, so a musl freeze runs ONLY on musl distros --
+  it is not the run-anywhere static binary the Rust `-musl` target produced,
+  and shipping it would have broken every Ubuntu/Debian/Fedora user.
+
+  **The Linux asset is glibc**, frozen in `python:3.12-slim-bullseye` (Debian
+  11, glibc 2.31) -- exactly the floor the retired `cargo-zigbuild`
+  `x86_64-unknown-linux-gnu.2.31` pin targeted, so nothing is lost against the
+  Rust asset. The floor quoted in the release notes is MEASURED over the
+  appended PyInstaller payload (libpython plus the extension modules,
+  enumerated from `.build/tan/PKG-00.toc`) inside the build container, never
+  asserted and never read off the outer ELF: `readelf -V dist/tan` there sees
+  only PyInstaller's vendored bootloader, a container-invariant `GLIBC_2.14`
+  that cannot detect the build image regressing to a newer glibc. The release
+  job fails rather than publish notes quoting a floor nothing measured.
+
+  `alp-sdk-vscode`'s `service.ts` still maps `linux/x64` to the MUSL triple,
+  so the extension cannot download this asset. Deliberate for this tag -- it
+  never reaches an RC anyway -- and repointed with the pin move at GA (#268).
 - **`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace` and
   `support-bundle` are withdrawn from this build, not silently absent.** The
   Python port stubs all seven (`python/tan/commands/deferred_cmd.py`) rather
@@ -53,6 +98,100 @@ All notable changes to `tan` are documented here. Format follows
   extension) can tell "known but deferred" apart from a typo like `tan bulid`
   by the issue code in `--format json`, or by exit 1 vs Typer's exit 2 in
   text mode.
+- `jsonschema` is now the fourth runtime dependency. It arrived with the
+  planner, which validates every `board.yaml` against
+  `metadata/schemas/board.schema.json` before it plans anything. The frozen
+  one-file binary measures 12377580 B against the 15000000 B ceiling.
+
+### Added
+- **`tan build --execute` -- run a plan that came from `--plan-from`.** ADDED
+  BY THIS PORT: v0.4.1 has no such flag, and there `--plan-from` implies
+  `--plan` and outranks `--native`, so a file-supplied plan could not be
+  dispatched at all. Taking a pinned, reviewed plan file and running it
+  reproducibly is a normal hermetic-CI request, so this is a supported
+  capability rather than a parity gap or a test hook. `--execute` implies
+  `--materialise` (nothing can run that was never written) and reports the
+  ORDINARY build shape -- `{schemaVersion, baseDir, slices[], warnings[]}` --
+  with `written` deliberately omitted, being byte-for-byte the pinned plan's
+  own declared artefact paths. A conflicting combination is refused with its
+  own code, never resolved by silent precedence: `--execute --materialise` ->
+  `build.conflicting-flags`, exit 2; `--execute` with a deferred flag ->
+  `cli.command-deferred`, exit 1.
+
+  **`--plan-from` itself still means what it meant in v0.4.1** -- it is a plan
+  SOURCE, not a build trigger. Measured against the shipped `tan 0.4.1-dev`
+  binary rather than inferred: `--plan-from p.json` and
+  `--plan-from p.json --native` both give rc 0 and write 0 files with `data`
+  = the plan, and `--plan-from p.json --materialise` gives rc 0 and 6 files.
+  All three are reproduced exactly, `--native` included. Two earlier revisions
+  of the port each redefined one of those argvs, which would have made a
+  v0.4.1 script that only ever INSPECTED a plan silently begin writing six
+  files into its own tree.
+
+### Fixed
+- **A pending `TBD` placeholder can no longer reach a flasher** (#222). alp-sdk
+  writes `TBD` into a manifest field it has not filled in yet, and every guard
+  on the flash path used to test for EMPTY -- which is the one thing a `TBD`
+  placeholder is not. An unfilled field therefore behaved exactly like a
+  filled one, and whether that ended in a loud refusal or a spawned flasher
+  came down to whether the particular consumer happened to validate against a
+  closed set: `flash_method: TBD` hit the backend registry and failed safely,
+  while `output_artefact`/`firmware_path: TBD` hit nothing at all, resolved to
+  `<build_root>/TBD` and reached a real J-Link write.
+
+  One definition now answers it for the whole path (`flash_plan.is_pending`),
+  shared with the bundle writer so `tan image` and `tan flash` can never
+  disagree about what "unfilled" means. The value is trimmed before comparing
+  -- a YAML `device: "  TBD  "` is the same unfilled field -- but deliberately
+  NOT case-folded and NOT a substring test: `TBD-1234-XYZ` is a plausible part
+  number and `flash_args.build_dir: /opt/TBDtool/x` a plausible path, and
+  refusing either would block a legitimate flash. The two sites differ by
+  consequence, per the per-entry rc convention: an unresolved `TBD` in
+  `flash_args` SKIPS the entry (rc `-1`, never counted as a failure), an
+  unresolved `TBD` artefact FAILS it (rc `> 0`).
+- **`tan validate` in a fresh project answered "not ported yet" (exit 1) where
+  the shipped binary answers `validate.board-yaml-missing` (exit 2).** The
+  not-ported stub for the non-`--offline` spawn path short-circuited ABOVE the
+  missing-`board.yaml` guard, so `tan validate` in an empty directory -- among
+  the first things a brand-new user runs -- answered a different question than
+  the oracle, with a different exit code. The guard now runs first, on both
+  paths, under the existing `validate.board-yaml-missing` code.
+
+  Measured against `target/debug/tan.exe` (`tan 0.4.1-dev`, `--format json`),
+  not inferred from `crates/` and not taken from a report: an empty directory
+  exits **2** `validate.board-yaml-missing` with `data.outcome: "failed"`; a
+  project with `board.yaml` but no SDK root exits **2**
+  `validate.sdk-root-unresolved`. Exit 1 is reachable in the oracle only AFTER
+  a validator actually spawns and returns an unexpected status. The oracle
+  therefore draws a line -- pre-spawn guards at 2, post-spawn failure at 1 --
+  that the stub had flattened.
+
+  An earlier revision of this entry claimed the opposite, and was wrong in both
+  halves: that the oracle returns 1 for these cases, and that moving to 2 would
+  be a considered BREAK for v0.6.0 (#262). Neither was ever measured. For the
+  guard cases 2 is what the oracle already does, so matching it is a
+  compatibility fix. #262 is re-scoped to the one case that is a genuine
+  v0.6.0 decision: `validate.failed` after a real spawn.
+
+  Still divergent, deliberately, and tracked in #262: `board.yaml` present but
+  no SDK root, where the oracle says 2 `validate.sdk-root-unresolved` and this
+  port says 1 `validate.spawn-not-implemented`. Closing it needs the real spawn
+  path. The two genuine internal failures in the same file (an unreadable
+  `board.yaml`, an unexpected exception inside the offline structural checker)
+  are unchanged at exit 5, matching the oracle's offline path exactly.
+
+- **`tan sdk install` / `tan sdk switch` refused at exit 5 (`InternalFailure`),
+  telling CI and the extension that tan had crashed.** Neither is ported; that
+  is a gap, not a crash. Both now exit 1 (`RuntimeFailure`) -- the code every
+  other refusal in `sdk_cmd` already used (`sdk list` without `--online`, a
+  bare `tan sdk`), the code the deferred-verb stubs settled on, and the code
+  the oracle itself returns for a `sdk switch` that cannot resolve (measured:
+  `tan sdk switch 0.0.0-nonexistent --format json` -> rc=1
+  `sdk.path-not-found`). The 5 was justified in-code as "following
+  `validate_cmd`'s precedent for its own unported spawn path" -- `validate_cmd`
+  uses 1, so the comment cited a precedent for the opposite of what it did.
+
+## [0.4.1] — 2026-07-29
 
 ### Added
 - **A CI job that actually runs the commands a customer types.** Until now NO
@@ -1285,52 +1424,6 @@ All notable changes to `tan` are documented here. Format follows
   (PR #369): no `fix`, so nothing lands in `nextSteps` and no `doctor.lldb`
   issue is raised. The resolved executable name is still reported when one is
   found on PATH -- only the verdict and the advice for a miss were wrong.
-
-- **`tan validate` in a fresh project answered "not ported yet" (exit 1) where
-  the shipped binary answers `validate.board-yaml-missing` (exit 2).** The
-  not-ported stub for the non-`--offline` spawn path short-circuited ABOVE the
-  missing-`board.yaml` guard, so `tan validate` in an empty directory -- among
-  the first things a brand-new user runs -- answered a different question than
-  the oracle, with a different exit code. The guard now runs first, on both
-  paths, under the existing `validate.board-yaml-missing` code.
-
-  Measured against `target/debug/tan.exe` (`tan 0.4.1-dev`, `--format json`),
-  not inferred from `crates/` and not taken from a report: an empty directory
-  exits **2** `validate.board-yaml-missing` with `data.outcome: "failed"`; a
-  project with `board.yaml` but no SDK root exits **2**
-  `validate.sdk-root-unresolved`. Exit 1 is reachable in the oracle only AFTER
-  a validator actually spawns and returns an unexpected status. The oracle
-  therefore draws a line -- pre-spawn guards at 2, post-spawn failure at 1 --
-  that the stub had flattened.
-
-  An earlier revision of this entry claimed the opposite, and was wrong in both
-  halves: that the oracle returns 1 for these cases, and that moving to 2 would
-  be a considered BREAK for v0.6.0 (#262). Neither was ever measured. For the
-  guard cases 2 is what the oracle already does, so matching it is a
-  compatibility fix. #262 is re-scoped to the one case that is a genuine
-  v0.6.0 decision: `validate.failed` after a real spawn.
-
-  Still divergent, deliberately, and tracked in #262: `board.yaml` present but
-  no SDK root, where the oracle says 2 `validate.sdk-root-unresolved` and this
-  port says 1 `validate.spawn-not-implemented`. Closing it needs the real spawn
-  path. The two genuine internal failures in the same file (an unreadable
-  `board.yaml`, an unexpected exception inside the offline structural checker)
-  are unchanged at exit 5, matching the oracle's offline path exactly.
-
-- **`tan sdk install` / `tan sdk switch` refused at exit 5 (`InternalFailure`),
-  telling CI and the extension that tan had crashed.** Neither is ported; that
-  is a gap, not a crash. Both now exit 1 (`RuntimeFailure`) -- the code every
-  other refusal in `sdk_cmd` already used (`sdk list` without `--online`, a
-  bare `tan sdk`), the code the deferred-verb stubs settled on, and the code
-  the oracle itself returns for a `sdk switch` that cannot resolve (measured:
-  `tan sdk switch 0.0.0-nonexistent --format json` -> rc=1
-  `sdk.path-not-found`). The 5 was justified in-code as "following
-  `validate_cmd`'s precedent for its own unported spawn path" -- `validate_cmd`
-  uses 1, so the comment cited a precedent for the opposite of what it did.
-
-All notable changes to `tan` are documented here. Format follows
-[Keep a Changelog](https://keepachangelog.com/); versioning is
-[SemVer](https://semver.org/).
 
 ## [0.4.0] — 2026-07-28
 
