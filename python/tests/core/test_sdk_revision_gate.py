@@ -289,3 +289,84 @@ def test_the_refusal_is_an_orchestrator_error_subclass(planner, tmp_path):
 
     with pytest.raises(planner.OrchestratorError):
         planner.load_board_yaml(_fixture_board_yaml(tmp_path), metadata_root=meta)
+
+
+# --------------------------------------------------------------------------
+# revision_known -- the existence half (alp-sdk#1025), synced in for
+# tan-cli#275. Pure, no metadata tree.
+# --------------------------------------------------------------------------
+
+
+def test_revision_known_is_none_when_the_table_has_no_hw_revisions(sc):
+    """None, not False -- an inline board has nothing to check against, and
+    a caller must be able to tell that apart from a genuine miss."""
+    assert sc.revision_known({}, "r2") is None
+    assert sc.revision_known({"hw_revisions": "not-a-map"}, "r2") is None
+    assert sc.revision_known(None, "r2") is None
+
+
+def test_revision_known_is_blind_to_status(sc):
+    """A `status: reserved` revision EXISTS; whether it is buildable is a
+    different question this predicate deliberately does not answer."""
+    table = {"hw_revisions": {"r2": {}, "r3": {"status": "reserved"}}}
+    assert sc.revision_known(table, "r2") is True
+    assert sc.revision_known(table, "r3") is True
+    assert sc.revision_known(table, "r99") is False
+    assert sc.revision_known(table, None) is False
+
+
+def test_an_unknown_som_revision_refuses_through_the_loader(planner, tmp_path):
+    """The #1025 safe half: an hw_rev absent from the family table used to
+    resolve to base-revision routing with a clean exit code -- a
+    wrong-hardware emit. It must refuse, and name what IS available."""
+    path = tmp_path / "unknown-rev-board.yaml"
+    path.write_text(
+        "som:\n"
+        "  sku: E1M-AEN801\n"
+        "  hw_rev: r99\n"
+        "preset: e1m-evk\n"
+        "cores:\n"
+        "  m55_hp:\n"
+        "    app: ./src\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(planner.SdkRevisionUnknown) as excinfo:
+        planner.load_board_yaml(path)
+
+    message = str(excinfo.value)
+    assert "r99" in message
+    assert "E1M-AEN801" in message
+    assert "r2" in message  # the available list, not just the refusal
+
+
+def test_the_unknown_revision_refusal_is_an_orchestrator_error_subclass(planner):
+    assert issubclass(planner.SdkRevisionUnknown, planner.OrchestratorError)
+    assert not issubclass(planner.SdkRevisionUnknown,
+                          planner.SdkRevisionUnsupported)
+
+
+# --------------------------------------------------------------------------
+# jlink_flash_device -- alp-sdk#1057, synced in for tan-cli#275. Without
+# this key in `flash_args`, `tan.core.flash_plan`'s FLOW_D_KEYS consumer
+# hard-refuses and Flow D can never arm on a real AEN board.
+# --------------------------------------------------------------------------
+
+
+def test_an_aen_zephyr_slice_publishes_its_jlink_flash_device(planner, tmp_path):
+    from tan.planner.orchestrator import _slice_flash_recipe
+
+    project = planner.load_board_yaml(_fixture_board_yaml(tmp_path))
+    method, args = _slice_flash_recipe(project.cores["m55_hp"])
+
+    assert method == "zephyr_west_flash"
+    assert args == {"jlink_flash_device": "AE822FA0E5597LS0_M55_HE"}
+
+
+def test_a_slice_whose_variant_publishes_no_profile_keeps_empty_flash_args(planner):
+    """No shape change for every non-AEN slice: an absent profile is a
+    published "unknown", never a value to invent."""
+    from tan.planner.models import Slice
+    from tan.planner.orchestrator import _slice_flash_recipe
+
+    method, args = _slice_flash_recipe(Slice(core_id="m33", os="zephyr"))
+    assert (method, args) == ("zephyr_west_flash", {})
