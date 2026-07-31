@@ -2,8 +2,9 @@
 """`tan.commands.build.manifest`: the post-build `system-manifest.yaml` write
 seam -- `write_post_build_manifest`'s failure branches (pure/no-SDK-needed),
 `resolve_zephyr_artefact`'s default-nested-build-dir resolution,
-`discover_sdk_root`'s candidate ladder, and the tier ORDER of
-`resolve_sdk_root_ladder` that wraps it.
+`discover_sdk_root`'s candidate ladder, and the tier ORDER of the TWO ladders
+that wrap it -- narrow `resolve_sdk_root_ladder` and wide `resolve_sdk_root_wide`,
+pinned against the oracle in the layouts that tell them apart.
 
 The SUCCESS path (a real SDK emit + overlay landing on disk) needs a real
 alp-sdk checkout and is gated on `ALP_SDK_ROOT`, mirroring
@@ -23,7 +24,11 @@ from tan.commands.build.manifest import (
     resolve_zephyr_artefact,
     write_post_build_manifest,
 )
-from tan.commands.build_cmd import discover_sdk_root, resolve_sdk_root_ladder
+from tan.commands.build_cmd import (
+    discover_sdk_root,
+    resolve_sdk_root_ladder,
+    resolve_sdk_root_wide,
+)
 from tan.core.system_manifest import SliceRunResult, parse_system_manifest
 
 
@@ -200,6 +205,65 @@ def test_ladder_sdk_root_flag_is_terminal_and_unvalidated(tmp_path):
         tmp_path / "nope",
         "sdkRootFlag",
     )
+
+
+# --------------------------------------------------------- resolve_sdk_root_wide
+#
+# The SAME layouts against the OTHER ladder -- the one `init`, `generate`,
+# `examples` and `renode` take, whose discovery tier is the wide walk. The oracle
+# resolves the child in every layout where the narrow ladder above resolves the
+# lateral or enclosing checkout; the two blocks are therefore expected to
+# DISAGREE, and a change that makes them agree has broken one of them.
+# Measured the same way: `tan <cmd> --format json` -> `sdk.root` in exactly this
+# layout.
+
+
+def test_wide_ladder_takes_the_bootstrap_child(tmp_path):
+    # tan-cli#218 layout -- both ladders agree here, which is why this case alone
+    # never revealed the split.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+
+    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery")
+
+
+def test_wide_ladder_takes_the_child_over_a_competing_lateral(tmp_path):
+    # Oracle, measured: `<ws>/alp-sdk`. The narrow ladder returns `../alp-sdk`
+    # for this exact layout (see the test of the same shape above). This is the
+    # divergence tan-cli#263 was re-scoped to: `tan init` WRITES its answer to
+    # `.alp/sdk-path`, so the sibling would outrank discovery permanently.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+
+    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery")
+
+
+def test_wide_ladder_takes_the_child_over_an_enclosing_checkout(tmp_path):
+    # Oracle, measured: `<ws>/alp-sdk` -- a project scaffolded INSIDE a checkout
+    # that also bootstrapped its own. The narrow ladder returns the enclosing one.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(tmp_path)
+    _make_sdk(workspace / "alp-sdk")
+
+    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery")
+
+
+def test_wide_ladder_project_pin_outranks_the_child(tmp_path):
+    # Oracle, measured: the pinned path, tier `projectPin`. Widening discovery
+    # must not promote it past the pointer tiers -- a pin that stopped winning
+    # is how `tan init && tan build` starts disagreeing again.
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+    _make_sdk(tmp_path / "pinned")
+    _write_pin(workspace, tmp_path / "pinned")
+
+    assert resolve_sdk_root_wide(None, workspace) == (tmp_path / "pinned", "projectPin")
 
 
 # ------------------------------------------------------ write_post_build_manifest

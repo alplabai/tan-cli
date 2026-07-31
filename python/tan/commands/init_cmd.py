@@ -93,7 +93,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_ladder
+from tan.commands.build_cmd import resolve_sdk_root_wide
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
@@ -362,16 +362,21 @@ class _Sdk:
 
 def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None:
     """`--sdk-root` when given, else `.alp/sdk-path` project pin >
-    machine-global default (`~/.alp/sdk-default`) > discovery near the
-    workspace. No `ALP_SDK_ROOT` tier (tried and reverted -- see
+    machine-global default (`~/.alp/sdk-default`) > the WIDE positional walk.
+    No `ALP_SDK_ROOT` tier (tried and reverted -- see
     `resolve_sdk_root_ladder`'s own docstring).
-    Reuses `build_cmd.resolve_sdk_root_ladder` rather than carrying a second
-    copy of the candidate ladder -- two ladders drift, and `tan build`
-    resolving a different checkout than `tan init` just pinned is the worst
-    possible way to find out (the defect this ladder exists to close)."""
+
+    `build_cmd.resolve_sdk_root_wide`, not the narrow ladder its thirteen
+    sibling commands take (tan-cli#263, measured against the oracle): where a
+    workspace holds both a child `<ws>/alp-sdk` and a competing sibling
+    `../alp-sdk`, the oracle's `init` pins the CHILD. The narrow ladder pinned
+    the sibling -- and `init` does not merely resolve an SDK, it WRITES the
+    answer to `.alp/sdk-path`, which then outranks discovery for every later
+    command in that project. Getting it wrong here binds the wrong checkout
+    permanently, so this one call site is worth a second helper."""
     if sdk_root:
         return _Sdk(Path(sdk_root), sdk_root)
-    found, _tier = resolve_sdk_root_ladder(None, workspace_root)
+    found, _tier = resolve_sdk_root_wide(None, workspace_root)
     return _Sdk(found, posix(found)) if found is not None else None
 
 

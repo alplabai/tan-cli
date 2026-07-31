@@ -50,7 +50,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_ladder
+from tan.commands.build_cmd import resolve_sdk_root_wide
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -301,11 +301,14 @@ def _resolve_sdk(sdk_root: str | None, workspace_root: Path) -> tuple[Path, str,
             return path, sdk_root, "sdkRootFlag"
         return None
     # `.alp/sdk-path` project pin > the machine-global default
-    # (`~/.alp/sdk-default`) > the positional walk (`resolve_sdk_root_ladder`)
-    # -- previously this went straight to the positional walk, silently
-    # ignoring `tan init`'s pin. No `ALP_SDK_ROOT` tier (tried and reverted --
-    # see `resolve_sdk_root_ladder`'s own docstring).
-    found, tier = resolve_sdk_root_ladder(None, workspace_root)
+    # (`~/.alp/sdk-default`) > the WIDE positional walk
+    # (`resolve_sdk_root_wide`) -- previously this went straight to the
+    # positional walk, silently ignoring `tan init`'s pin. Wide, not the narrow
+    # ladder thirteen other commands take: the oracle's `examples` lists the
+    # child `<ws>/alp-sdk`'s catalogue over a competing `../alp-sdk`'s
+    # (tan-cli#263). No `ALP_SDK_ROOT` tier (tried and reverted -- see
+    # `resolve_sdk_root_ladder`'s own docstring).
+    found, tier = resolve_sdk_root_wide(None, workspace_root)
     if found is None:
         return None
     return found, str(found).replace("\\", "/"), tier

@@ -245,15 +245,22 @@ def discover_sdk_root(workspace_root: Path) -> Path | None:
 def resolve_sdk_root_ladder(
     sdk_root_arg: str | None, workspace_root: Path
 ) -> tuple[Path | None, str]:
-    """`(path, sourceTier)` -- the ONE discovery ladder every command that
-    actually reads an SDK checkout shares (`build`, `doctor`, `run`, `flash`,
-    `examples`, `generate`, `renode`, `size`, `clean`, `init`'s pin choice):
+    """`(path, sourceTier)` -- the NARROW of this port's TWO discovery ladders,
+    shared by the thirteen commands the oracle resolves narrowly (`build`,
+    `doctor`, `clean`, `run`, `flash`, `size`, `image`, `kconfig`, `validate`,
+    `presets`, `inspect`, `trace`, `sdk current`). The other four -- `init`,
+    `generate`, `examples`, `renode` -- take [`resolve_sdk_root_wide`], below.
+    The measurement that splits 13 from 4 is the last paragraph here, and is
+    deliberately not repeated there.
+
     `--sdk-root` (terminal, I-31) > the project's own pin (`.alp/sdk-path`,
     written by `tan init` / relocated by `tan bootstrap`) > the machine-global
-    default (`~/.alp/sdk-default`) > the wide positional walk
-    (`discover_sdk_root`, above) -- exactly the Rust oracle's closed
-    `SdkSourceTier` (`crates/tan-core/src/sdk.rs`): `SdkRootFlag`,
-    `ProjectPin`, `GlobalDefault`, `Discovery`, `None`. No sixth tier.
+    default (`~/.alp/sdk-default`) > `resolve_sdk_tiered`'s own NARROW
+    discovery probe > the wide positional walk (`discover_sdk_root`, above) as
+    the tail -- exactly the Rust oracle's closed `SdkSourceTier`
+    (`crates/tan-core/src/sdk.rs`): `SdkRootFlag`, `ProjectPin`,
+    `GlobalDefault`, `Discovery`, `None`. No sixth tier. Both ladders report
+    those same five values; only the discovery tier differs between them.
 
     This is the fix for the worst reported CX defect in this port: `tan init`
     writes `.alp/sdk-path` into the project it just scaffolded, but every
@@ -288,8 +295,9 @@ def resolve_sdk_root_ladder(
     other four would move the SDK root under thirteen commands, and a moved
     root is what `plan_exec.sdk_stamp_action` reads as a switch: every existing
     such workspace would take the `build.sdk-switch-pristine` branch on its
-    next build and lose every slice's build dir. The four wide commands are the
-    real gap and want a separate wide helper, not a change here.
+    next build and lose every slice's build dir. The four wide commands were
+    the real gap; they now have their own helper below, which is why this one
+    stays exactly as it is.
     """
     flag = (sdk_root_arg or "").strip()
     if flag:
@@ -297,6 +305,49 @@ def resolve_sdk_root_ladder(
 
     tiered = resolve_sdk_tiered(None, workspace_root)
     if tiered.path is not None:
+        return Path(tiered.path), tiered.tier
+
+    found = discover_sdk_root(workspace_root)
+    if found is not None:
+        return found, "discovery"
+    return None, "none"
+
+
+def resolve_sdk_root_wide(
+    sdk_root_arg: str | None, workspace_root: Path
+) -> tuple[Path | None, str]:
+    """`(path, sourceTier)` -- the WIDE ladder, for the four commands the oracle
+    routes through `util.rs`'s `resolve_sdk_root`: `init`, `generate`,
+    `examples`, `renode`.
+
+    Same tiers and the same five `SdkSourceTier` values as
+    [`resolve_sdk_root_ladder`] above -- `--sdk-root` > project pin > global
+    default > discovery -- with exactly one difference: the discovery tier is
+    the WIDE positional walk (`discover_sdk_root`) rather than
+    `resolve_sdk_tiered`'s narrow probe, so the CHILD `<ws>/alp-sdk` wins over
+    the lateral `../alp-sdk` and over an enclosing checkout. The measurement
+    behind which command belongs to which ladder lives in that docstring; two
+    copies of it would be two things to keep true.
+
+    `tan init` is why this is a second helper and not a tidy-up waiting to be
+    folded back in (tan-cli#263). In a workspace holding both a child checkout
+    and a competing sibling, the oracle pins the CHILD into `.alp/sdk-path`;
+    the narrow ladder pinned the sibling. That pointer then outranks discovery
+    for every later command in that project, so the wrong SDK is not a
+    one-command wobble -- it is bound permanently, by the command whose whole
+    job was to bind the right one.
+
+    Skipping the narrow discovery tier can never resolve LESS than the narrow
+    ladder would: its candidates (the workspace root itself, `../alp-sdk`, the
+    nearest enclosing checkout) are a subset of the wide walk's, so wherever
+    narrow hits, wide hits too -- it may only pick a nearer checkout.
+    """
+    flag = (sdk_root_arg or "").strip()
+    if flag:
+        return Path(flag), "sdkRootFlag"
+
+    tiered = resolve_sdk_tiered(None, workspace_root)
+    if tiered.path is not None and tiered.tier != "discovery":
         return Path(tiered.path), tiered.tier
 
     found = discover_sdk_root(workspace_root)

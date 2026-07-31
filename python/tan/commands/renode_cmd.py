@@ -79,7 +79,7 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_ladder
+from tan.commands.build_cmd import resolve_sdk_root_wide
 from tan.commands.build_output import ManifestInvalid, ManifestUnavailable, load_manifest
 from tan.commands.doctor_cmd import on_path
 from tan.core.renode_plan import (
@@ -138,14 +138,16 @@ def _resolve_sdk_root_and_tier(
     """`--sdk-root` (TERMINAL -- returned AS TYPED when it has the loader
     script, `None` otherwise, never falling through to a lower tier) > the
     project's own `.alp/sdk-path` pin > the machine-global default
-    (`~/.alp/sdk-default`) > the positional walk
-    (`build_cmd.resolve_sdk_root_ladder`, the shared ladder every
-    `--sdk-root`-reading command now uses). No `ALP_SDK_ROOT` tier (tried
-    and reverted -- see `resolve_sdk_root_ladder`'s own docstring).
+    (`~/.alp/sdk-default`) > the WIDE positional walk
+    (`build_cmd.resolve_sdk_root_wide`) -- wide, not the narrow ladder thirteen
+    other commands take, because the oracle's `renode` reads its platform
+    descriptors out of the child `<ws>/alp-sdk` over a competing `../alp-sdk`
+    (tan-cli#263). No `ALP_SDK_ROOT` tier (tried and reverted -- see
+    `resolve_sdk_root_ladder`'s own docstring).
     """
     if sdk_root_arg is not None:
         return (sdk_root_arg, "sdkRootFlag") if _is_sdk_root(sdk_root_arg) else (None, None)
-    found, tier = resolve_sdk_root_ladder(None, Path(workspace_root))
+    found, tier = resolve_sdk_root_wide(None, Path(workspace_root))
     return (str(found), tier) if found is not None else (None, None)
 
 
