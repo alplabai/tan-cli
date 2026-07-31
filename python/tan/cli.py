@@ -26,6 +26,16 @@ from tan.commands.bootstrap_cmd import bootstrap
 from tan.commands.build_cmd import build
 from tan.commands.clean_cmd import clean
 from tan.commands.debug_config_cmd import debug_config
+from tan.commands.deferred_cmd import (
+    DEFERRED_CONTEXT_SETTINGS,
+    completion,
+    diff,
+    inspect,
+    pinmux,
+    scaffold,
+    support_bundle,
+    trace,
+)
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain
@@ -44,6 +54,7 @@ from tan.commands.run_cmd import run
 from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
 from tan.commands.validate_cmd import validate
+from tan.commands.west_forward_cmd import FORWARD_CONTEXT_SETTINGS, lock, migrate, quality
 from tan.envelope import Envelope, Issue, Project, emit, envelope_emitted
 from tan.exit_codes import ExitCode
 from tan.version import TAN_VERSION
@@ -59,7 +70,9 @@ app = typer.Typer(add_completion=False)
 app.command("bootstrap")(bootstrap)
 app.command("build")(build)
 app.command("clean")(clean)
+app.command("completion", context_settings=DEFERRED_CONTEXT_SETTINGS)(completion)
 app.command("debug-config")(debug_config)
+app.command("diff", context_settings=DEFERRED_CONTEXT_SETTINGS)(diff)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("explain")(explain)
@@ -68,15 +81,23 @@ app.command("flash")(flash)
 app.command("generate")(generate)
 app.command("image")(image)
 app.command("init")(init)
+app.command("inspect", context_settings=DEFERRED_CONTEXT_SETTINGS)(inspect)
 app.command("kconfig")(kconfig)
+app.command("lock", context_settings=FORWARD_CONTEXT_SETTINGS)(lock)
+app.command("migrate", context_settings=FORWARD_CONTEXT_SETTINGS)(migrate)
 app.command("model")(model)
 app.command("monitor")(monitor)
 app.command("new-som")(new_som)
+app.command("pinmux", context_settings=DEFERRED_CONTEXT_SETTINGS)(pinmux)
 app.command("presets")(presets)
+app.command("quality", context_settings=FORWARD_CONTEXT_SETTINGS)(quality)
 app.command("renode")(renode)
 app.command("run")(run)
+app.command("scaffold", context_settings=DEFERRED_CONTEXT_SETTINGS)(scaffold)
 app.command("sdk")(sdk)
 app.command("size")(size)
+app.command("support-bundle", context_settings=DEFERRED_CONTEXT_SETTINGS)(support_bundle)
+app.command("trace", context_settings=DEFERRED_CONTEXT_SETTINGS)(trace)
 app.command("validate")(validate)
 
 #: Every registered subcommand name -- must track the `app.command(...)` calls
@@ -84,10 +105,11 @@ app.command("validate")(validate)
 #: leading global flag across; it is never itself treated as a flag.
 _SUBCOMMAND_NAMES = frozenset(
     {
-        "bootstrap", "build", "clean", "debug-config", "doctor", "examples",
-        "explain", "faultdecode", "flash", "generate", "image", "init",
-        "kconfig", "model", "monitor", "new-som", "presets", "renode", "run",
-        "sdk", "size", "validate",
+        "bootstrap", "build", "clean", "completion", "debug-config", "diff",
+        "doctor", "examples", "explain", "faultdecode", "flash", "generate",
+        "image", "init", "inspect", "kconfig", "lock", "migrate", "model",
+        "monitor", "new-som", "pinmux", "presets", "quality", "renode", "run",
+        "scaffold", "sdk", "size", "support-bundle", "trace", "validate",
     }
 )
 

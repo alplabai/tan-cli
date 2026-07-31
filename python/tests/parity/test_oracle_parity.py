@@ -170,6 +170,44 @@ args:
 
 
 @pytest.mark.skipif(not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
+@pytest.mark.parametrize("verb", ["migrate", "lock", "quality"])
+def test_west_forward_matches_rust(verb, work_dir, tmp_path):
+    """`west_forward_cmd.py`'s three verbs, run inside a real `.west` workspace
+    so `data.westCwd` actually goes through the workspace-walk branch (not just
+    the already-posix `--project` echo) -- the branch where a bare
+    `str(PathLikeObject)` re-renders with the platform separator on Windows
+    and breaks the envelope's platform-identical-path contract. Neither side
+    has a real `west` on PATH here, so both report the same launch-error
+    envelope; that error envelope still carries `data.westCommand`/`westCwd`/
+    `args`, which is exactly what a westCwd or args-capture regression would
+    move.
+    """
+    (work_dir / ".west").mkdir()
+    # `--format json` sits BEFORE the forwarded `--core`/`-b` flags on purpose:
+    # the oracle's clap `WestForwardArgs` (`trailing_var_arg = true`) swallows
+    # everything from the first unrecognised token onward, including a later
+    # `--format` -- so `--format` after `--core` never reaches JSON mode on
+    # the Rust side at all (see `test_json_mode_forwards_interspersed_
+    # unrecognised_flags_verbatim` in test_west_forward_command.py for that
+    # documented divergence). Ordered this way both sides land in JSON mode
+    # and the envelope, including `data.westCwd`/`args`, is directly
+    # comparable.
+    argv = [
+        "--project",
+        str(work_dir),
+        verb,
+        "--format",
+        "json",
+        "--core",
+        "m55_hp",
+        "-b",
+        "some_board",
+    ]
+    result = compare(argv, cwd=work_dir, home=tmp_path / "home")
+    assert result.matches, "\n".join(result.diffs)
+
+
+@pytest.mark.skipif(not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
 @pytest.mark.parametrize(
     "target,server",
     [
