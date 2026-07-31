@@ -366,8 +366,9 @@ def check_prerequisites(
 ) -> tuple[HostPython | None, PrereqFailure | None]:
     """`(interpreter, refusal)` -- exactly one of the two is set.
 
-    The tool LISTS are keyed `posix`/`windows` while the install COMMANDS are
-    keyed `linux`/`macos`/`windows`, so the host is resolved once here and the
+    The tool LISTS are keyed `posix`/`macos`/`windows` (`macos` optional, and
+    absent means `posix`) while the install COMMANDS are keyed
+    `linux`/`macos`/`windows`, so the host is resolved once here and the
     resolved map handed down: no branch can look a tool up in the wrong OS's
     table and hand a macOS user Linux's `apt-get` line.
 
@@ -378,7 +379,7 @@ def check_prerequisites(
     is_windows = host == WINDOWS
     install = facts.install_for_host(host)
     missing = [
-        tool for tool in facts.prerequisites(is_windows) if not _prereq_present(tool, is_windows)
+        tool for tool in facts.prerequisites(host) if not _prereq_present(tool, is_windows)
     ]
     if missing:
         refuse = windows_refusal if is_windows else posix_refusal
