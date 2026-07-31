@@ -238,8 +238,12 @@ def test_missing_git_head_is_no_signal_not_a_hard_error(sdk_root):
 @pytest.mark.skipif(shutil.which("git") is None, reason="git must be on PATH for this test")
 def test_sdk_commit_mismatch_is_refused(sdk_root):
     def git(*args):
+        # `encoding=`, not bare `text=True`: git localises its own messages, so
+        # `check=True` capturing a failure decodes them with the platform locale
+        # and a `UnicodeDecodeError` would replace the real assertion.
         return subprocess.run(
-            ["git", "-C", str(sdk_root), *args], capture_output=True, text=True, check=True
+            ["git", "-C", str(sdk_root), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=True,
         )
 
     git("init", "-q")
@@ -269,8 +273,10 @@ def test_sdk_commit_mismatch_is_refused(sdk_root):
 @pytest.mark.skipif(shutil.which("git") is None, reason="git must be on PATH for this test")
 def test_sdk_commit_match_does_not_refuse(sdk_root):
     def git(*args):
+        # See the sibling above: explicit `encoding=`, never the platform locale.
         return subprocess.run(
-            ["git", "-C", str(sdk_root), *args], capture_output=True, text=True, check=True
+            ["git", "-C", str(sdk_root), *args], capture_output=True, text=True,
+            encoding="utf-8", errors="replace", check=True,
         )
 
     git("init", "-q")

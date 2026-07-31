@@ -324,6 +324,12 @@ def test_sdk_root_pointing_at_a_regular_file(tmp_path):
         cwd=tmp_path,
         capture_output=True,
         text=True,
+        # Explicit, like `run_flash` above: bare `text=True` decodes with the
+        # platform locale (cp1252 on a Windows runner) while Click/Rich emit
+        # UTF-8, and the `timeout=` reader thread then dies on the first
+        # undecodable byte leaving BOTH streams `None`.
+        encoding="utf-8",
+        errors="replace",
         env={**os.environ, "PYTHONPATH": str(PACKAGE_ROOT), "HOME": str(tmp_path),
              "USERPROFILE": str(tmp_path)},
         timeout=180,
@@ -1250,10 +1256,15 @@ def test_rust_absolute_semantics_on_a_rooted_driveless_path():
 def test_zephyr_build_dir_preserves_mixed_separators():
     """The joined path mixes a native `build_root` with a `/`-authored manifest
     artefact, and the result is handed to `west flash --build-dir` verbatim.
-    `Path.parent` would re-render it with the platform separator."""
-    assert zephyr_build_dir("C:/a\\build/c1-zephyr/zephyr/zephyr.elf") == (
-        "C:/a\\build/c1-zephyr" if os.name == "nt" else "C:/a\\build/c1-zephyr/zephyr"
-    )
+    `Path.parent` would re-render it with the platform separator.
+
+    NOT branched on `os.name`: the only `\\` here sits INSIDE one `/`-delimited
+    component (`a\\build`), and every separator `dirname` has to find is a `/`,
+    which `ntpath` and `posixpath` split identically. An earlier version of this
+    test asserted `.../c1-zephyr/zephyr` off Windows on the assumption that
+    POSIX splits this differently -- it does not, and the branch failed on
+    ubuntu/macos while passing here."""
+    assert zephyr_build_dir("C:/a\\build/c1-zephyr/zephyr/zephyr.elf") == "C:/a\\build/c1-zephyr"
     # A signed/merged artefact under `zephyr/` still resolves to the build dir --
     # the PARENT DIRECTORY name decides, never the basename.
     assert zephyr_build_dir("/b/c1/zephyr/zephyr.signed.hex") == "/b/c1"
