@@ -27,6 +27,16 @@ def test_closed_stdout_exits_quietly_instead_of_crashing():
     situation (verified: `tan.exe generate --help | head -n1`); this pins the
     Python port to the same observable behaviour.
 
+    It stayed red on POSIX long after Windows went green, and NOT because the
+    expectation is Windows-specific: the oracle exits 0 there too (measured
+    against tan 0.4.1 linux-musl, whose 4327-byte `--help` was written into a
+    never-read 4 KiB pipe -- a guaranteed EPIPE). The port exited 1 because a
+    `BrokenPipeError` never reaches `tan.__main__`'s `except OSError` on
+    POSIX: Rich's `Console.on_broken_pipe` turns it into `SystemExit(1)`
+    first (and Typer's `_main` would otherwise do the same). Both are
+    handled now -- see `_caused_by_broken_pipe`. So a failure here is a
+    REGRESSION in that guard, not a platform expectation to relax.
+
     Drains stderr on a background thread rather than `Popen.communicate()`:
     `communicate()` also tries to read the now-manually-closed stdout pipe,
     which raises `ValueError: read of closed file` on its own reader thread.

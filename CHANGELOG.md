@@ -256,12 +256,32 @@ testers install by hand.
   that asset is gone from this release on, and the static claim was never true
   of a PyInstaller freeze.
 
-- **`tan <cmd> | head` could print a traceback on Windows.** The EPIPE guard in
-  `__main__.py` caught `BrokenPipeError` only -- the POSIX spelling, lifted from
-  the `signal` docs. Windows surfaces the same closed-stdout condition as a
-  plain `OSError` with `errno.EINVAL`, because CPython's Windows layer maps the
-  underlying `ERROR_NO_DATA` to EINVAL rather than EPIPE, so any reader that
-  stops early (`head`, `grep -q`, a closed pager) escaped the guard.
+- **`tan <cmd> | head` exited 1 on Linux and macOS where the oracle exits 0.**
+  Any reader that stops early (`head`, `grep -q`, a closed pager) closes tan's
+  stdout mid-write. `__main__.py` guarded that, but on POSIX its `except
+  OSError` arm is never reached: Rich's `Console._check_buffer` catches the
+  `BrokenPipeError` and `Console.on_broken_pipe` raises `SystemExit(1)` before
+  it -- and Typer's `_main` carries the same EPIPE-to-`sys.exit(1)` arm behind
+  that. Both raise from INSIDE the block that caught the pipe, so the original
+  error is left on `SystemExit.__context__`; following that chain is what
+  identifies the case. `SystemExit(1)` alone is far too broad to remap (every
+  failed `tan build` raises it), and the alternatives -- Click's
+  `PacifyFlushWrapper` swap, Rich's `console.quiet` -- are private detail of
+  someone else's library that an entrypoint has no business importing.
+
+  Measured, not inferred: `tan 0.4.1` linux-musl writing its 4327-byte `--help`
+  into a never-read 4 KiB pipe (`F_SETPIPE_SZ`, so EPIPE is guaranteed) exits 0
+  with empty stderr; the port exited 1. Verified after: `tan generate --help |
+  head -n1` under `pipefail` returns 0, `tan build` still 1, `tan bogus` still
+  2, `--version` still 0.
+
+  The Windows arm of the same guard (`errno.EINVAL` with `filename is None`,
+  because CPython's Windows layer maps `ERROR_NO_DATA` to EINVAL rather than
+  EPIPE) already existed and is unchanged -- it was factored into
+  `_is_broken_pipe` here, not added. An earlier revision of this entry, and the
+  message on the commit that carried the fix, both described that pre-existing
+  half as the fix and called the defect Windows-only. It is the reverse:
+  Windows was green throughout and POSIX was the broken platform.
 
 ## [0.4.1] — 2026-07-29
 
