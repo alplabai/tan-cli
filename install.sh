@@ -42,7 +42,11 @@ Darwin) os_part="apple-darwin" ;;
 # /lib/ld-musl-x86_64.so.1 and runs ONLY on musl distros. So the Linux asset is
 # built on Debian 11 and named -gnu, and requesting -musl here would 404 on
 # every v0.5.0+ tag. Older (Rust) releases published BOTH, so this also
-# resolves for them -- with that build's measured GLIBC_2.30 floor.
+# resolves for them -- with the Rust build's measured GLIBC_2.30 floor
+# (readelf -V on the shipped binary; its cargo-zigbuild pin target was a
+# different number, 2.31 -- see CHANGELOG 0.4.0, which retracts pairing
+# "2.31 floor" with the pre-fix "GLIBC_2.39 not found" symptom as wrong on
+# both numbers).
 Linux) os_part="unknown-linux-gnu" ;;
 *) echo "install.sh: unsupported OS '$os' -- on Windows use install.ps1" >&2; exit 1 ;;
 esac
@@ -56,9 +60,17 @@ esac
 # musl dynamic loader directly.
 if [ "$os_part" = "unknown-linux-gnu" ]; then
 	is_musl=0
-	if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
-		is_musl=1
+	if command -v ldd >/dev/null 2>&1; then
+		if ldd --version 2>&1 | grep -qi musl; then
+			is_musl=1
+		fi
 	elif ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
+		# Only reached when there is no ldd to ask. The loader-file probe alone
+		# is NOT sufficient on its own: Debian/Ubuntu's musl package (pulled in
+		# by musl-tools, which any host that ever cross-built the -musl target
+		# has) installs /lib/ld-musl-x86_64.so.1 on an otherwise glibc host, and
+		# that host's ldd correctly reports glibc -- so it must never be gated
+		# out by falling through here.
 		is_musl=1
 	fi
 	if [ "$is_musl" = "1" ]; then
@@ -258,4 +270,21 @@ case ":${PATH}:" in
 	fi
 	;;
 esac
-"$dest" --version 2>/dev/null || echo "install.sh: run 'tan --version' to verify (once on PATH)."
+# The sha256 check above proves the BYTES are the ones the release published;
+# it says nothing about whether THIS host can execute them (e.g. a glibc floor
+# the host's libc is below -- the -gnu asset's dynamic loader then fails with
+# a message like `GLIBC_2.xx not found`, on stderr). Capture stdout+stderr
+# rather than discarding it: that line is the single most useful diagnostic a
+# user in this situation can be handed, and reporting exit 0 anyway is a false
+# "installed" for a binary that cannot run. A verified-but-unrunnable binary is
+# removed rather than left at $dest: it is the correct bytes for a host this
+# is NOT, and leaving it on PATH turns every later `tan` invocation into this
+# same opaque failure instead of a clear "not installed".
+if verify_out="$("$dest" --version 2>&1)"; then
+	echo "install.sh: verified: ${verify_out}"
+else
+	echo "install.sh: installed binary failed to run: ${verify_out}" >&2
+	rm -f "$dest"
+	echo "install.sh: removed ${dest} -- install failed. If the message above names a GLIBC symbol, this host's glibc is older than the release floor; install from a checkout instead: git clone https://github.com/${REPO} && pip install ./tan-cli/python" >&2
+	exit 1
+fi
