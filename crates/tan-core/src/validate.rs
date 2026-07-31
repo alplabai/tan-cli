@@ -76,18 +76,88 @@ pub enum ParseError {
     /// The input was not syntactically valid YAML.
     #[error("board.yaml is not valid YAML: {0}")]
     Yaml(#[from] serde_yaml::Error),
+    /// `som:` is present but is not a mapping (e.g. a bare SKU string instead
+    /// of `som:\n  sku: <SKU>`). Byte-identical to the Python port's
+    /// `BoardShapeError` for the same shape — see
+    /// `python/tan/commands/validate_cmd.py:251-256` — and pinned by the
+    /// `validate-offline-schema-violation` contract golden.
+    #[error(
+        "board.yaml is not valid: `som:` must be a mapping carrying a `sku:` key, but a scalar was given ({0}). Write it as:\n  som:\n    sku: <SKU>"
+    )]
+    SomNotMapping(String),
 }
 
 /// Parse board.yaml text into a [`BoardModel`].
 ///
 /// Matches TS `parseBoardModel`: a YAML scalar/null parses to the default
-/// model rather than an error; only true syntax errors fail.
+/// model rather than an error; only true syntax errors fail. Before the
+/// typed parse, hand-checks `som:`'s shape the way Python's
+/// `validate_board_text` does (see `ParseError::SomNotMapping`) — serde's own
+/// type-mismatch error for `som: <scalar>` is a raw passthrough the Python
+/// port never emits, so it has to be caught here rather than left to
+/// `serde_yaml::from_str::<Option<BoardModel>>` below.
 pub fn parse_board_model(text: &str) -> Result<BoardModel, ParseError> {
+    if let Ok(Some(doc)) = serde_yaml::from_str::<Option<serde_yaml::Value>>(text) {
+        if let Some(som) = doc.get("som") {
+            if !som.is_null() && !som.is_mapping() {
+                return Err(ParseError::SomNotMapping(python_repr(som)));
+            }
+        }
+    }
+
     match serde_yaml::from_str::<Option<BoardModel>>(text) {
         Ok(Some(model)) => Ok(model),
         Ok(None) => Ok(BoardModel::default()),
         Err(e) => Err(ParseError::Yaml(e)),
     }
+}
+
+/// Renders a `serde_yaml::Value` scalar the way Python's `repr()` would —
+/// only covers the shapes a mis-typed `som:` can actually take (string,
+/// number, bool, sequence); mappings/null never reach this function (see
+/// `parse_board_model`'s guard).
+fn python_repr(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::Null => "None".to_string(),
+        serde_yaml::Value::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+        serde_yaml::Value::Number(n) => n.to_string(),
+        serde_yaml::Value::String(s) => python_repr_str(s),
+        serde_yaml::Value::Sequence(items) => {
+            let rendered: Vec<String> = items.iter().map(python_repr).collect();
+            format!("[{}]", rendered.join(", "))
+        }
+        serde_yaml::Value::Mapping(_) => "{...}".to_string(),
+        serde_yaml::Value::Tagged(tagged) => python_repr(&tagged.value),
+    }
+}
+
+/// Python `str.__repr__`: single-quoted unless the string carries a `'` and
+/// no `"`, in which case double quotes avoid escaping. Escapes `\`, the
+/// chosen quote, and the common whitespace control chars — the shapes a
+/// hand-typed board.yaml SKU/scalar can realistically carry.
+fn python_repr_str(s: &str) -> String {
+    let quote = if s.contains('\'') && !s.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push(quote);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
 }
 
 /// Local structural validation. Mirrors `validateBoardYamlLocally`:
@@ -407,6 +477,26 @@ fn is_hint_line(line: &str) -> bool {
 mod tests {
     use super::*;
     use crate::model::{Inference, Iot, Som, normalize_board_model};
+
+    #[test]
+    fn scalar_som_message_matches_python_byte_for_byte() {
+        // Pins the exact wording `contract/envelopes/validate-offline-schema-violation`
+        // expects, matching `python/tan/commands/validate_cmd.py:251-256`.
+        let err = parse_board_model("som: E1M-AEN701\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "board.yaml is not valid: `som:` must be a mapping carrying a `sku:` key, \
+             but a scalar was given ('E1M-AEN701'). Write it as:\n  som:\n    sku: <SKU>"
+        );
+    }
+
+    #[test]
+    fn null_som_is_not_a_shape_violation() {
+        // `som is not None` in Python: an explicit `som: null` (or omission)
+        // must still fall through to the typed parse, not SomNotMapping.
+        assert!(parse_board_model("som: null\n").is_ok());
+        assert!(parse_board_model("preset: e1m-evk\n").is_ok());
+    }
 
     #[test]
     fn v1_board_passes_without_errors() {
