@@ -1,0 +1,1 @@
+{"command":"validate","ok":false,"exitCode":2,"project":{"root":".","boardYaml":"./board.yaml"},"data":{"schemaVersion":"1","outcome":"failed","issueCount":1,"commandLine":"","boardYamlPath":"./board.yaml"},"issues":[{"code":"validate.schema-violation","severity":"error","message":"board.yaml is not valid: the document is empty"}]}

@@ -1,0 +1,2996 @@
+{
+  "_meta": "Frozen from alp-sdk's scripts/alp_cli/faultdecode.py (bit tables + a swept sample of decode()/report_to_json()/render_human() outputs). Guards tan/core/faultdecode.py's register-level fidelity without needing a live alp-sdk checkout on disk -- see tests/core/test_faultdecode.py.",
+  "bit_tables": [
+    [
+      "MMFSR",
+      0,
+      "IACCVIOL",
+      "Instruction access violation -- the MPU blocked an instruction fetch (executing from a no-execute / unprivileged region)."
+    ],
+    [
+      "MMFSR",
+      1,
+      "DACCVIOL",
+      "Data access violation -- the MPU blocked a load/store; MMFAR holds the address."
+    ],
+    [
+      "MMFSR",
+      3,
+      "MUNSTKERR",
+      "MemManage fault unstacking on exception return -- the exception frame sits in MPU-protected memory (often a corrupted/overflowed stack)."
+    ],
+    [
+      "MMFSR",
+      4,
+      "MSTKERR",
+      "MemManage fault stacking on exception entry -- the stack pointer points into MPU-protected/invalid memory (a bad or overflowed stack)."
+    ],
+    [
+      "MMFSR",
+      5,
+      "MLSPERR",
+      "MemManage fault during lazy floating-point state preservation."
+    ],
+    [
+      "MMFSR",
+      7,
+      "MMARVALID",
+      "MMFAR holds a valid faulting data address (see below)."
+    ],
+    [
+      "BFSR",
+      8,
+      "IBUSERR",
+      "Instruction bus error -- a prefetch faulted, usually a branch/call through a bad function pointer into unmapped memory."
+    ],
+    [
+      "BFSR",
+      9,
+      "PRECISERR",
+      "Precise data bus error -- a load/store faulted and BFAR holds the exact faulting address (commonly an unclocked/absent peripheral or a bad pointer)."
+    ],
+    [
+      "BFSR",
+      10,
+      "IMPRECISERR",
+      "Imprecise data bus error -- a buffered/late write faulted; the PC has moved on, so BFAR is not reliable (look for an earlier bad store)."
+    ],
+    [
+      "BFSR",
+      11,
+      "UNSTKERR",
+      "Bus fault unstacking on exception return -- a corrupted stack pointer."
+    ],
+    [
+      "BFSR",
+      12,
+      "STKERR",
+      "Bus fault stacking on exception entry -- a bad or overflowed stack pointer."
+    ],
+    [
+      "BFSR",
+      13,
+      "LSPERR",
+      "Bus fault during lazy floating-point state preservation."
+    ],
+    [
+      "BFSR",
+      15,
+      "BFARVALID",
+      "BFAR holds a valid faulting data address (see below)."
+    ],
+    [
+      "UFSR",
+      16,
+      "UNDEFINSTR",
+      "Undefined instruction -- executed a bad/corrupted opcode (often a wild PC or jumping into data)."
+    ],
+    [
+      "UFSR",
+      17,
+      "INVSTATE",
+      "Invalid state -- EPSR.T cleared or illegal IT state, classically a function pointer called without the Thumb bit (bit 0) set."
+    ],
+    [
+      "UFSR",
+      18,
+      "INVPC",
+      "Invalid PC on exception return -- a bad EXC_RETURN or a corrupted stacked PC."
+    ],
+    [
+      "UFSR",
+      19,
+      "NOCP",
+      "No coprocessor -- access to a disabled/absent coprocessor, most often the FPU used before CPACR enables it."
+    ],
+    [
+      "UFSR",
+      20,
+      "STKOF",
+      "Stack overflow -- the hardware stack-limit (PSPLIM/MSPLIM) tripped (ARMv8-M)."
+    ],
+    [
+      "UFSR",
+      24,
+      "UNALIGNED",
+      "Unaligned access -- an unaligned load/store while alignment trapping is on (or an LDM/STM/LDRD that must be aligned)."
+    ],
+    [
+      "UFSR",
+      25,
+      "DIVBYZERO",
+      "Divide by zero -- SDIV/UDIV by zero with DIV_0_TRP enabled."
+    ],
+    [
+      "HFSR",
+      1,
+      "VECTTBL",
+      "Vector-table read fault -- a bus error reading an exception vector."
+    ],
+    [
+      "HFSR",
+      30,
+      "FORCED",
+      "Forced HardFault -- a configurable fault (MemManage/BusFault/UsageFault) was escalated; the real cause is in CFSR above."
+    ],
+    [
+      "HFSR",
+      31,
+      "DEBUGEVT",
+      "Debug event -- a breakpoint/watchpoint fired with no debugger attached."
+    ],
+    [
+      "DFSR",
+      0,
+      "HALTED",
+      "Halt request (debugger single-step / halt)."
+    ],
+    [
+      "DFSR",
+      1,
+      "BKPT",
+      "Breakpoint -- a BKPT instruction or hardware breakpoint."
+    ],
+    [
+      "DFSR",
+      2,
+      "DWTTRAP",
+      "DWT watchpoint / debug-monitor trap."
+    ],
+    [
+      "DFSR",
+      3,
+      "VCATCH",
+      "Vector catch triggered."
+    ],
+    [
+      "DFSR",
+      4,
+      "EXTERNAL",
+      "External debug request (EDBGRQ)."
+    ]
+  ],
+  "decode_cases": [
+    {
+      "cfsr": 1,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000001",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "MMFSR",
+            "name": "IACCVIOL",
+            "bit": 0,
+            "meaning": "Instruction access violation -- the MPU blocked an instruction fetch (executing from a no-execute / unprivileged region)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "MPU instruction access violation -- the core tried to execute from a no-execute / forbidden region (often a corrupted PC or a bad function pointer).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000001  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [MMFSR] IACCVIOL (bit 0): Instruction access violation -- the MPU blocked an instruction fetch (executing from a no-execute / unprivileged region).\n\nMost likely cause:\n  MPU instruction access violation -- the core tried to execute from a no-execute / forbidden region (often a corrupted PC or a bad function pointer)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 1,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000001",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000001  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 1,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000001"
+        },
+        "flags": [
+          {
+            "reg": "DFSR",
+            "name": "HALTED",
+            "bit": 0,
+            "meaning": "Halt request (debugger single-step / halt)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "HALTED set (DFSR): Halt request (debugger single-step / halt).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000001\n\nSet flags:\n  [DFSR] HALTED (bit 0): Halt request (debugger single-step / halt).\n\nMost likely cause:\n  HALTED set (DFSR): Halt request (debugger single-step / halt)."
+    },
+    {
+      "cfsr": 2,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000002",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "MMFSR",
+            "name": "DACCVIOL",
+            "bit": 1,
+            "meaning": "Data access violation -- the MPU blocked a load/store; MMFAR holds the address."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "MPU data access violation -- a load/store hit a region the MPU forbids (wrong permissions, or an unmapped/unprivileged address).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000002  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [MMFSR] DACCVIOL (bit 1): Data access violation -- the MPU blocked a load/store; MMFAR holds the address.\n\nMost likely cause:\n  MPU data access violation -- a load/store hit a region the MPU forbids (wrong permissions, or an unmapped/unprivileged address)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 2,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000002",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "HFSR",
+            "name": "VECTTBL",
+            "bit": 1,
+            "meaning": "Vector-table read fault -- a bus error reading an exception vector."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Vector-table read fault -- a bus error reading an exception vector (VTOR points at bad memory, or the vector table is unmapped).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000002  DFSR=0x00000000\n\nSet flags:\n  [HFSR] VECTTBL (bit 1): Vector-table read fault -- a bus error reading an exception vector.\n\nMost likely cause:\n  Vector-table read fault -- a bus error reading an exception vector (VTOR points at bad memory, or the vector table is unmapped)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 2,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000002"
+        },
+        "flags": [
+          {
+            "reg": "DFSR",
+            "name": "BKPT",
+            "bit": 1,
+            "meaning": "Breakpoint -- a BKPT instruction or hardware breakpoint."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "BKPT set (DFSR): Breakpoint -- a BKPT instruction or hardware breakpoint.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000002\n\nSet flags:\n  [DFSR] BKPT (bit 1): Breakpoint -- a BKPT instruction or hardware breakpoint.\n\nMost likely cause:\n  BKPT set (DFSR): Breakpoint -- a BKPT instruction or hardware breakpoint."
+    },
+    {
+      "cfsr": 4,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000004",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000004  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 4,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000004",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000004  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 4,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000004"
+        },
+        "flags": [
+          {
+            "reg": "DFSR",
+            "name": "DWTTRAP",
+            "bit": 2,
+            "meaning": "DWT watchpoint / debug-monitor trap."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "DWTTRAP set (DFSR): DWT watchpoint / debug-monitor trap.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000004\n\nSet flags:\n  [DFSR] DWTTRAP (bit 2): DWT watchpoint / debug-monitor trap.\n\nMost likely cause:\n  DWTTRAP set (DFSR): DWT watchpoint / debug-monitor trap."
+    },
+    {
+      "cfsr": 8,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000008",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "MMFSR",
+            "name": "MUNSTKERR",
+            "bit": 3,
+            "meaning": "MemManage fault unstacking on exception return -- the exception frame sits in MPU-protected memory (often a corrupted/overflowed stack)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Fault while unstacking on exception return -- the saved exception frame is corrupted (a stack overwrite or a clobbered SP).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000008  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [MMFSR] MUNSTKERR (bit 3): MemManage fault unstacking on exception return -- the exception frame sits in MPU-protected memory (often a corrupted/overflowed stack).\n\nMost likely cause:\n  Fault while unstacking on exception return -- the saved exception frame is corrupted (a stack overwrite or a clobbered SP)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 8,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000008",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000008  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 8,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000008"
+        },
+        "flags": [
+          {
+            "reg": "DFSR",
+            "name": "VCATCH",
+            "bit": 3,
+            "meaning": "Vector catch triggered."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "VCATCH set (DFSR): Vector catch triggered.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000008\n\nSet flags:\n  [DFSR] VCATCH (bit 3): Vector catch triggered.\n\nMost likely cause:\n  VCATCH set (DFSR): Vector catch triggered."
+    },
+    {
+      "cfsr": 16,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000010",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "MMFSR",
+            "name": "MSTKERR",
+            "bit": 4,
+            "meaning": "MemManage fault stacking on exception entry -- the stack pointer points into MPU-protected/invalid memory (a bad or overflowed stack)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Fault while stacking the exception frame on entry -- the stack pointer is bad or overflowed (check SP/PSPLIM and the offending stack's size).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000010  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [MMFSR] MSTKERR (bit 4): MemManage fault stacking on exception entry -- the stack pointer points into MPU-protected/invalid memory (a bad or overflowed stack).\n\nMost likely cause:\n  Fault while stacking the exception frame on entry -- the stack pointer is bad or overflowed (check SP/PSPLIM and the offending stack's size)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 16,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000010",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000010  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 16,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000010"
+        },
+        "flags": [
+          {
+            "reg": "DFSR",
+            "name": "EXTERNAL",
+            "bit": 4,
+            "meaning": "External debug request (EDBGRQ)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "EXTERNAL set (DFSR): External debug request (EDBGRQ).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000010\n\nSet flags:\n  [DFSR] EXTERNAL (bit 4): External debug request (EDBGRQ).\n\nMost likely cause:\n  EXTERNAL set (DFSR): External debug request (EDBGRQ)."
+    },
+    {
+      "cfsr": 32,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000020",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "MMFSR",
+            "name": "MLSPERR",
+            "bit": 5,
+            "meaning": "MemManage fault during lazy floating-point state preservation."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "MLSPERR set (MMFSR): MemManage fault during lazy floating-point state preservation.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000020  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [MMFSR] MLSPERR (bit 5): MemManage fault during lazy floating-point state preservation.\n\nMost likely cause:\n  MLSPERR set (MMFSR): MemManage fault during lazy floating-point state preservation."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 32,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000020",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000020  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 32,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000020"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000020\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 64,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000040",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000040  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 64,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000040",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000040  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 64,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000040"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000040\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 128,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000080",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "MMFSR",
+            "name": "MMARVALID",
+            "bit": 7,
+            "meaning": "MMFAR holds a valid faulting data address (see below)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": true
+        },
+        "root_cause": "MMARVALID set (MMFSR): MMFAR holds a valid faulting data address (see below).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000080  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [MMFSR] MMARVALID (bit 7): MMFAR holds a valid faulting data address (see below).\n\nMost likely cause:\n  MMARVALID set (MMFSR): MMFAR holds a valid faulting data address (see below)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 128,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000080",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000080  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 128,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000080"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000080\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 256,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000100",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "IBUSERR",
+            "bit": 8,
+            "meaning": "Instruction bus error -- a prefetch faulted, usually a branch/call through a bad function pointer into unmapped memory."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Instruction bus fault -- a fetch faulted, typically a branch/call through a bad function pointer into unmapped memory.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000100  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] IBUSERR (bit 8): Instruction bus error -- a prefetch faulted, usually a branch/call through a bad function pointer into unmapped memory.\n\nMost likely cause:\n  Instruction bus fault -- a fetch faulted, typically a branch/call through a bad function pointer into unmapped memory."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 256,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000100",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000100  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 256,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000100"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000100\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 512,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000200",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "PRECISERR",
+            "bit": 9,
+            "meaning": "Precise data bus error -- a load/store faulted and BFAR holds the exact faulting address (commonly an unclocked/absent peripheral or a bad pointer)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Precise data bus fault -- a load/store hit a faulting address, commonly an access to an unclocked/absent peripheral or a bad/dangling pointer.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000200  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] PRECISERR (bit 9): Precise data bus error -- a load/store faulted and BFAR holds the exact faulting address (commonly an unclocked/absent peripheral or a bad pointer).\n\nMost likely cause:\n  Precise data bus fault -- a load/store hit a faulting address, commonly an access to an unclocked/absent peripheral or a bad/dangling pointer."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 512,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000200",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000200  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 512,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000200"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000200\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 1024,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000400",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "IMPRECISERR",
+            "bit": 10,
+            "meaning": "Imprecise data bus error -- a buffered/late write faulted; the PC has moved on, so BFAR is not reliable (look for an earlier bad store)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Imprecise data bus fault -- a buffered write faulted after the CPU moved on, so the PC/BFAR do not pinpoint it. Suspect an earlier bad store; a DSB after suspect writes makes it precise.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000400  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] IMPRECISERR (bit 10): Imprecise data bus error -- a buffered/late write faulted; the PC has moved on, so BFAR is not reliable (look for an earlier bad store).\n\nMost likely cause:\n  Imprecise data bus fault -- a buffered write faulted after the CPU moved on, so the PC/BFAR do not pinpoint it. Suspect an earlier bad store; a DSB after suspect writes makes it precise."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 1024,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000400",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000400  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 1024,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000400"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000400\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 2048,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000800",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "UNSTKERR",
+            "bit": 11,
+            "meaning": "Bus fault unstacking on exception return -- a corrupted stack pointer."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Fault while unstacking on exception return -- the saved exception frame is corrupted (a stack overwrite or a clobbered SP).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000800  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] UNSTKERR (bit 11): Bus fault unstacking on exception return -- a corrupted stack pointer.\n\nMost likely cause:\n  Fault while unstacking on exception return -- the saved exception frame is corrupted (a stack overwrite or a clobbered SP)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 2048,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000800",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000800  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 2048,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000800"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000800\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 4096,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00001000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "STKERR",
+            "bit": 12,
+            "meaning": "Bus fault stacking on exception entry -- a bad or overflowed stack pointer."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Fault while stacking the exception frame on entry -- the stack pointer is bad or overflowed (check SP/PSPLIM and the offending stack's size).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00001000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] STKERR (bit 12): Bus fault stacking on exception entry -- a bad or overflowed stack pointer.\n\nMost likely cause:\n  Fault while stacking the exception frame on entry -- the stack pointer is bad or overflowed (check SP/PSPLIM and the offending stack's size)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 4096,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00001000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00001000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 4096,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00001000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00001000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 8192,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00002000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "LSPERR",
+            "bit": 13,
+            "meaning": "Bus fault during lazy floating-point state preservation."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "LSPERR set (BFSR): Bus fault during lazy floating-point state preservation.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00002000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] LSPERR (bit 13): Bus fault during lazy floating-point state preservation.\n\nMost likely cause:\n  LSPERR set (BFSR): Bus fault during lazy floating-point state preservation."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 8192,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00002000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00002000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 8192,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00002000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00002000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 16384,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00004000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00004000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 16384,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00004000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00004000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 16384,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00004000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00004000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 32768,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00008000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "BFARVALID",
+            "bit": 15,
+            "meaning": "BFAR holds a valid faulting data address (see below)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": true,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "BFARVALID set (BFSR): BFAR holds a valid faulting data address (see below).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00008000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] BFARVALID (bit 15): BFAR holds a valid faulting data address (see below).\n\nMost likely cause:\n  BFARVALID set (BFSR): BFAR holds a valid faulting data address (see below)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 32768,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00008000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00008000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 32768,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00008000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00008000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 65536,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00010000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "UFSR",
+            "name": "UNDEFINSTR",
+            "bit": 16,
+            "meaning": "Undefined instruction -- executed a bad/corrupted opcode (often a wild PC or jumping into data)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Undefined instruction -- a corrupted/wild PC executed a bad opcode, or code was built for a different ISA than the running core.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00010000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [UFSR] UNDEFINSTR (bit 16): Undefined instruction -- executed a bad/corrupted opcode (often a wild PC or jumping into data).\n\nMost likely cause:\n  Undefined instruction -- a corrupted/wild PC executed a bad opcode, or code was built for a different ISA than the running core."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 65536,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00010000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00010000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 65536,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00010000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00010000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 131072,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00020000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "UFSR",
+            "name": "INVSTATE",
+            "bit": 17,
+            "meaning": "Invalid state -- EPSR.T cleared or illegal IT state, classically a function pointer called without the Thumb bit (bit 0) set."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Invalid state (EPSR.T / IT) -- almost always a function pointer called without the Thumb bit (bit 0) set, or a corrupted PSR.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00020000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [UFSR] INVSTATE (bit 17): Invalid state -- EPSR.T cleared or illegal IT state, classically a function pointer called without the Thumb bit (bit 0) set.\n\nMost likely cause:\n  Invalid state (EPSR.T / IT) -- almost always a function pointer called without the Thumb bit (bit 0) set, or a corrupted PSR."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 131072,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00020000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00020000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 131072,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00020000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00020000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 262144,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00040000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "UFSR",
+            "name": "INVPC",
+            "bit": 18,
+            "meaning": "Invalid PC on exception return -- a bad EXC_RETURN or a corrupted stacked PC."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Invalid PC on exception return -- a bad EXC_RETURN value or a corrupted stacked PC (stack overflow / FNC return into a clobbered frame).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00040000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [UFSR] INVPC (bit 18): Invalid PC on exception return -- a bad EXC_RETURN or a corrupted stacked PC.\n\nMost likely cause:\n  Invalid PC on exception return -- a bad EXC_RETURN value or a corrupted stacked PC (stack overflow / FNC return into a clobbered frame)."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 262144,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00040000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00040000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 262144,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00040000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00040000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 524288,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00080000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "UFSR",
+            "name": "NOCP",
+            "bit": 19,
+            "meaning": "No coprocessor -- access to a disabled/absent coprocessor, most often the FPU used before CPACR enables it."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No-coprocessor fault -- code used a coprocessor that is disabled, most often the FPU before CPACR (CP10/CP11) enables it. Enable the FPU in CPACR / Kconfig.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00080000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [UFSR] NOCP (bit 19): No coprocessor -- access to a disabled/absent coprocessor, most often the FPU used before CPACR enables it.\n\nMost likely cause:\n  No-coprocessor fault -- code used a coprocessor that is disabled, most often the FPU before CPACR (CP10/CP11) enables it. Enable the FPU in CPACR / Kconfig."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 524288,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00080000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00080000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 524288,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00080000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00080000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 1048576,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00100000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "UFSR",
+            "name": "STKOF",
+            "bit": 20,
+            "meaning": "Stack overflow -- the hardware stack-limit (PSPLIM/MSPLIM) tripped (ARMv8-M)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Stack overflow: the ARMv8-M stack-limit register (PSPLIM/MSPLIM) tripped. Grow the offending thread/ISR stack or fix unbounded recursion / large stack buffers.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00100000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [UFSR] STKOF (bit 20): Stack overflow -- the hardware stack-limit (PSPLIM/MSPLIM) tripped (ARMv8-M).\n\nMost likely cause:\n  Stack overflow: the ARMv8-M stack-limit register (PSPLIM/MSPLIM) tripped. Grow the offending thread/ISR stack or fix unbounded recursion / large stack buffers."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 1048576,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00100000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00100000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 1048576,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00100000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00100000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 2097152,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00200000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00200000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 2097152,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00200000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00200000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 2097152,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00200000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00200000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 4194304,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00400000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00400000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 4194304,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00400000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00400000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 4194304,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00400000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00400000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 8388608,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00800000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00800000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 8388608,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00800000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00800000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 8388608,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00800000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00800000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 16777216,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x01000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "UFSR",
+            "name": "UNALIGNED",
+            "bit": 24,
+            "meaning": "Unaligned access -- an unaligned load/store while alignment trapping is on (or an LDM/STM/LDRD that must be aligned)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Unaligned access fault -- an unaligned load/store with alignment trapping on (or an LDM/STM/LDRD that requires alignment). Fix the pointer alignment or use packed access.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x01000000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [UFSR] UNALIGNED (bit 24): Unaligned access -- an unaligned load/store while alignment trapping is on (or an LDM/STM/LDRD that must be aligned).\n\nMost likely cause:\n  Unaligned access fault -- an unaligned load/store with alignment trapping on (or an LDM/STM/LDRD that requires alignment). Fix the pointer alignment or use packed access."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 16777216,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x01000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x01000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 16777216,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x01000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x01000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 33554432,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x02000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "UFSR",
+            "name": "DIVBYZERO",
+            "bit": 25,
+            "meaning": "Divide by zero -- SDIV/UDIV by zero with DIV_0_TRP enabled."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Divide by zero -- SDIV/UDIV with a zero divisor and DIV_0_TRP enabled. Guard the divisor or disable the trap.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x02000000  HFSR=0x00000000  DFSR=0x00000000\n\nSet flags:\n  [UFSR] DIVBYZERO (bit 25): Divide by zero -- SDIV/UDIV by zero with DIV_0_TRP enabled.\n\nMost likely cause:\n  Divide by zero -- SDIV/UDIV with a zero divisor and DIV_0_TRP enabled. Guard the divisor or disable the trap."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 33554432,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x02000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x02000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 33554432,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x02000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x02000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 67108864,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x04000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x04000000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 67108864,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x04000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x04000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 67108864,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x04000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x04000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 134217728,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x08000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x08000000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 134217728,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x08000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x08000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 134217728,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x08000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x08000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 268435456,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x10000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x10000000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 268435456,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x10000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x10000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 268435456,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x10000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x10000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 536870912,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x20000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x20000000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 536870912,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x20000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x20000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 536870912,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x20000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x20000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 1073741824,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x40000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x40000000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 1073741824,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x40000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "HFSR",
+            "name": "FORCED",
+            "bit": 30,
+            "meaning": "Forced HardFault -- a configurable fault (MemManage/BusFault/UsageFault) was escalated; the real cause is in CFSR above."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Forced HardFault -- a configurable fault escalated but its own status bits are clear; the escalation usually means faults are disabled (SHCSR) or it faulted at priority -1.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x40000000  DFSR=0x00000000\n\nSet flags:\n  [HFSR] FORCED (bit 30): Forced HardFault -- a configurable fault (MemManage/BusFault/UsageFault) was escalated; the real cause is in CFSR above.\n\nMost likely cause:\n  Forced HardFault -- a configurable fault escalated but its own status bits are clear; the escalation usually means faults are disabled (SHCSR) or it faulted at priority -1."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 1073741824,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x40000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x40000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 2147483648,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x80000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x80000000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 2147483648,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x80000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "HFSR",
+            "name": "DEBUGEVT",
+            "bit": 31,
+            "meaning": "Debug event -- a breakpoint/watchpoint fired with no debugger attached."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Debug event with no debugger attached -- a stray BKPT or a watchpoint firing in a free-running build.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x80000000  DFSR=0x00000000\n\nSet flags:\n  [HFSR] DEBUGEVT (bit 31): Debug event -- a breakpoint/watchpoint fired with no debugger attached.\n\nMost likely cause:\n  Debug event with no debugger attached -- a stray BKPT or a watchpoint firing in a free-running build."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 2147483648,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x80000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x80000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    },
+    {
+      "cfsr": 33280,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": 1073745920,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00008200",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000",
+          "bfar": "0x40001000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "PRECISERR",
+            "bit": 9,
+            "meaning": "Precise data bus error -- a load/store faulted and BFAR holds the exact faulting address (commonly an unclocked/absent peripheral or a bad pointer)."
+          },
+          {
+            "reg": "BFSR",
+            "name": "BFARVALID",
+            "bit": 15,
+            "meaning": "BFAR holds a valid faulting data address (see below)."
+          }
+        ],
+        "addresses": {
+          "bfar": "0x40001000",
+          "bfar_valid": true,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Precise data bus fault at 0x40001000 (BFAR) -- a load/store hit a faulting address, commonly an access to an unclocked/absent peripheral or a bad/dangling pointer.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00008200  HFSR=0x00000000  DFSR=0x00000000  BFAR=0x40001000\n\nSet flags:\n  [BFSR] PRECISERR (bit 9): Precise data bus error -- a load/store faulted and BFAR holds the exact faulting address (commonly an unclocked/absent peripheral or a bad pointer).\n  [BFSR] BFARVALID (bit 15): BFAR holds a valid faulting data address (see below).\n  Faulting address (BFAR): 0x40001000\n\nMost likely cause:\n  Precise data bus fault at 0x40001000 (BFAR) -- a load/store hit a faulting address, commonly an access to an unclocked/absent peripheral or a bad/dangling pointer."
+    },
+    {
+      "cfsr": 512,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": 1073745920,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000200",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000",
+          "bfar": "0x40001000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "PRECISERR",
+            "bit": 9,
+            "meaning": "Precise data bus error -- a load/store faulted and BFAR holds the exact faulting address (commonly an unclocked/absent peripheral or a bad pointer)."
+          }
+        ],
+        "addresses": {
+          "bfar": "0x40001000",
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Precise data bus fault -- a load/store hit a faulting address, commonly an access to an unclocked/absent peripheral or a bad/dangling pointer.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000200  HFSR=0x00000000  DFSR=0x00000000  BFAR=0x40001000\n\nSet flags:\n  [BFSR] PRECISERR (bit 9): Precise data bus error -- a load/store faulted and BFAR holds the exact faulting address (commonly an unclocked/absent peripheral or a bad pointer).\n  Faulting address (BFAR): 0x40001000  (BFARVALID not set -- address may be stale)\n\nMost likely cause:\n  Precise data bus fault -- a load/store hit a faulting address, commonly an access to an unclocked/absent peripheral or a bad/dangling pointer."
+    },
+    {
+      "cfsr": 1048832,
+      "hfsr": 1073741824,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00100100",
+          "hfsr": "0x40000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "IBUSERR",
+            "bit": 8,
+            "meaning": "Instruction bus error -- a prefetch faulted, usually a branch/call through a bad function pointer into unmapped memory."
+          },
+          {
+            "reg": "UFSR",
+            "name": "STKOF",
+            "bit": 20,
+            "meaning": "Stack overflow -- the hardware stack-limit (PSPLIM/MSPLIM) tripped (ARMv8-M)."
+          },
+          {
+            "reg": "HFSR",
+            "name": "FORCED",
+            "bit": 30,
+            "meaning": "Forced HardFault -- a configurable fault (MemManage/BusFault/UsageFault) was escalated; the real cause is in CFSR above."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Stack overflow: the ARMv8-M stack-limit register (PSPLIM/MSPLIM) tripped. Grow the offending thread/ISR stack or fix unbounded recursion / large stack buffers.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00100100  HFSR=0x40000000  DFSR=0x00000000\n\nSet flags:\n  [BFSR] IBUSERR (bit 8): Instruction bus error -- a prefetch faulted, usually a branch/call through a bad function pointer into unmapped memory.\n  [UFSR] STKOF (bit 20): Stack overflow -- the hardware stack-limit (PSPLIM/MSPLIM) tripped (ARMv8-M).\n  [HFSR] FORCED (bit 30): Forced HardFault -- a configurable fault (MemManage/BusFault/UsageFault) was escalated; the real cause is in CFSR above.\n\nMost likely cause:\n  Stack overflow: the ARMv8-M stack-limit register (PSPLIM/MSPLIM) tripped. Grow the offending thread/ISR stack or fix unbounded recursion / large stack buffers."
+    },
+    {
+      "cfsr": 130,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": 536870928,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00000082",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000",
+          "mmfar": "0x20000010"
+        },
+        "flags": [
+          {
+            "reg": "MMFSR",
+            "name": "DACCVIOL",
+            "bit": 1,
+            "meaning": "Data access violation -- the MPU blocked a load/store; MMFAR holds the address."
+          },
+          {
+            "reg": "MMFSR",
+            "name": "MMARVALID",
+            "bit": 7,
+            "meaning": "MMFAR holds a valid faulting data address (see below)."
+          }
+        ],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": "0x20000010",
+          "mmfar_valid": true
+        },
+        "root_cause": "MPU data access violation at 0x20000010 (MMFAR) -- a load/store hit a region the MPU forbids (wrong permissions, or an unmapped/unprivileged address).",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000082  HFSR=0x00000000  DFSR=0x00000000  MMFAR=0x20000010\n\nSet flags:\n  [MMFSR] DACCVIOL (bit 1): Data access violation -- the MPU blocked a load/store; MMFAR holds the address.\n  [MMFSR] MMARVALID (bit 7): MMFAR holds a valid faulting data address (see below).\n  Faulting address (MMFAR): 0x20000010\n\nMost likely cause:\n  MPU data access violation at 0x20000010 (MMFAR) -- a load/store hit a region the MPU forbids (wrong permissions, or an unmapped/unprivileged address)."
+    },
+    {
+      "cfsr": 33280,
+      "hfsr": 1073741824,
+      "dfsr": 0,
+      "bfar": 536875008,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": true,
+        "inputs": {
+          "cfsr": "0x00008200",
+          "hfsr": "0x40000000",
+          "dfsr": "0x00000000",
+          "bfar": "0x20001000"
+        },
+        "flags": [
+          {
+            "reg": "BFSR",
+            "name": "PRECISERR",
+            "bit": 9,
+            "meaning": "Precise data bus error -- a load/store faulted and BFAR holds the exact faulting address (commonly an unclocked/absent peripheral or a bad pointer)."
+          },
+          {
+            "reg": "BFSR",
+            "name": "BFARVALID",
+            "bit": 15,
+            "meaning": "BFAR holds a valid faulting data address (see below)."
+          },
+          {
+            "reg": "HFSR",
+            "name": "FORCED",
+            "bit": 30,
+            "meaning": "Forced HardFault -- a configurable fault (MemManage/BusFault/UsageFault) was escalated; the real cause is in CFSR above."
+          }
+        ],
+        "addresses": {
+          "bfar": "0x20001000",
+          "bfar_valid": true,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "Precise data bus fault at 0x20001000 (BFAR) -- a load/store hit a faulting address, commonly an access to an unclocked/absent peripheral or a bad/dangling pointer.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00008200  HFSR=0x40000000  DFSR=0x00000000  BFAR=0x20001000\n\nSet flags:\n  [BFSR] PRECISERR (bit 9): Precise data bus error -- a load/store faulted and BFAR holds the exact faulting address (commonly an unclocked/absent peripheral or a bad pointer).\n  [BFSR] BFARVALID (bit 15): BFAR holds a valid faulting data address (see below).\n  [HFSR] FORCED (bit 30): Forced HardFault -- a configurable fault (MemManage/BusFault/UsageFault) was escalated; the real cause is in CFSR above.\n  Faulting address (BFAR): 0x20001000\n\nMost likely cause:\n  Precise data bus fault at 0x20001000 (BFAR) -- a load/store hit a faulting address, commonly an access to an unclocked/absent peripheral or a bad/dangling pointer."
+    },
+    {
+      "cfsr": 0,
+      "hfsr": 0,
+      "dfsr": 0,
+      "bfar": null,
+      "mmfar": null,
+      "report_json": {
+        "fault_detected": false,
+        "inputs": {
+          "cfsr": "0x00000000",
+          "hfsr": "0x00000000",
+          "dfsr": "0x00000000"
+        },
+        "flags": [],
+        "addresses": {
+          "bfar": null,
+          "bfar_valid": false,
+          "mmfar": null,
+          "mmfar_valid": false
+        },
+        "root_cause": "No fault status bits are set -- nothing to decode.",
+        "symbols": null
+      },
+      "render_human": "ARM Cortex-M (ARMv8-M) fault decode\n  CFSR=0x00000000  HFSR=0x00000000  DFSR=0x00000000\n\n  No fault flags set.\n  No fault status bits are set -- nothing to decode."
+    }
+  ]
+}

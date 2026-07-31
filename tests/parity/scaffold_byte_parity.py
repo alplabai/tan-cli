@@ -4,11 +4,11 @@
 live `alp-sdk --emit scaffold`.
 
 `tan init`/`tan scaffold` are SDK-free — for a template mapped onto an SDK
-scaffold-catalog id (see `crates/tan-core/src/wizard/vendored/MANIFEST.md`),
-they read a vendored copy of `alp_project.py --emit scaffold --template <id>
---sku <sku>`'s output baked into the binary, instead of shelling the SDK or
-re-deriving its build-integration conventions in Rust. That vendored copy can
-silently drift from the SDK if a future SDK scaffold change is never
+scaffold-catalog id (see `python/tan/templates/vendored/MANIFEST.md`), they
+read a vendored copy of `alp_project.py --emit scaffold --template <id> --sku
+<sku>`'s output baked into the shipped artifact, instead of shelling the SDK
+or re-deriving its build-integration conventions locally. That vendored copy
+can silently drift from the SDK if a future SDK scaffold change is never
 re-vendored -- exactly the RFC #843-style drift ADR-0020 exists to kill for
 the build-plan seam. This script is the tan-cli side of the
 `repository_dispatch` gate ADR-0020 Amendment 1 mandates (see
@@ -16,16 +16,22 @@ the build-plan seam. This script is the tan-cli side of the
 for every vendored (template, sku) pair, re-run the live SDK emit and assert
 byte-identity against the vendored tree.
 
-Unlike seam1_field_diff.py (which hard-requires `--sdk`), this gate is
-optionally self-skipping: `tan-core`'s own `cargo test` byte-parity test
-(`zephyr_app_scaffold_is_byte_exact_for_the_vendored_sku`) already proves the
-vendored tree is internally consistent without an SDK checkout, so a local
-`cargo test`/dev-loop run of this script with no reachable alp-sdk checkout
-is a clean no-op, not a failure. Reachability is checked in this order:
-`--sdk`, then `$ALP_SDK_ROOT`, then an `alp-sdk` checkout next to this
-tan-cli checkout -- but an explicit `--sdk` that does not resolve is a hard
-FAIL, not a fall-through to the other two (tan-cli#172 review, tan-cli#175;
-see `_sdk_checkout.sdk_root_or_exit_code`).
+Defaults to `python/tan/templates/vendored/` -- the tree the shipped Python
+`tan` actually reads. `crates/tan-core/src/wizard/vendored/` is frozen at its
+own permanent vendor point (`docs/ROADMAP.md`'s Standing Rules: the Rust
+`tan` is the retired oracle, never re-vendored again) and is guarded instead
+by `tan-core`'s own SDK-free `cargo test` byte-parity check
+(`zephyr_app_scaffold_is_byte_exact_for_the_vendored_sku`); pass `--vendored
+crates/tan-core/src/wizard/vendored` to point this script at it by hand.
+
+Optionally self-skipping: the vendored tree's own test suite already proves
+it is internally consistent without an SDK checkout, so a local dev-loop run
+of this script with no reachable alp-sdk checkout is a clean no-op, not a
+failure. Reachability is checked in this order: `--sdk`, then
+`$ALP_SDK_ROOT`, then an `alp-sdk` checkout next to this tan-cli checkout --
+but an explicit `--sdk` that does not resolve is a hard FAIL, not a
+fall-through to the other two (tan-cli#172 review, tan-cli#175; see
+`_sdk_checkout.sdk_root_or_exit_code`).
 """
 
 from __future__ import annotations
@@ -41,7 +47,7 @@ from pathlib import Path
 from _sdk_checkout import sdk_root_or_exit_code
 
 VENDORED_ROOT = Path(__file__).resolve().parent.parent.parent / (
-    "crates/tan-core/src/wizard/vendored"
+    "python/tan/templates/vendored"
 )
 
 # Vendored files that `--emit scaffold` never emits at all -- NOT part of the
@@ -177,8 +183,9 @@ def main(argv: list[str] | None = None) -> int:
                               "then an alp-sdk checkout next to this "
                               "tan-cli checkout.")
     parser.add_argument("--vendored", type=Path, default=VENDORED_ROOT,
-                         help="Vendored tree root (default: tan-core's "
-                              "wizard/vendored/ next to this script).")
+                         help="Vendored tree root (default: "
+                              "python/tan/templates/vendored/, the tree the "
+                              "shipped Python tan reads).")
     args = parser.parse_args(argv)
 
     sdk_root, exit_code = sdk_root_or_exit_code(

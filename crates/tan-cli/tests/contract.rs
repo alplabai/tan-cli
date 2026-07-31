@@ -250,6 +250,23 @@ contract_case!(
     validate_offline_schema_violation,
     "validate-offline-schema-violation"
 );
+// The other two `BoardShapeError` shapes `python/tan/commands/validate_cmd.py`
+// raises before it ever reaches the `som:` check above (tan-cli review on
+// 78b1e79): an empty/whitespace/comment-only document, and a document whose
+// top level isn't a mapping at all. Both used to report exit 0 "clean" on the
+// Rust side — silent-failure shape, pinned here so it can't regress quietly.
+contract_case!(
+    validate_offline_empty_document,
+    "validate-offline-empty-document"
+);
+// NOT pinned here: `som: 010` and `som: yes`, whose type resolution diverges
+// between serde_yaml's YAML 1.2 core schema (plain strings `'010'`, `'yes'`)
+// and PyYAML's YAML 1.1 resolver (int `8`, bool `True`). `contract/envelopes/`
+// is SHARED — `python/tests/conformance/test_contract_envelopes.py` runs the
+// same fixtures against the Python binary — so a golden here can only pin
+// behaviour both sides agree on. Pinning one side's output makes the other
+// side's suite red by construction. The divergence is covered by per-side
+// unit tests and tracked in #277.
 contract_case!(sdk_current_no_sdk, "sdk-current-no-sdk");
 contract_case!(sdk_unknown_subcommand, "sdk-unknown-subcommand");
 contract_case!(generate_board_yaml_missing, "generate-board-yaml-missing");

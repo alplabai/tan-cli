@@ -7,6 +7,13 @@ release assets. The **alp-sdk-vscode** extension downloads the matching asset on
 activation, so the tag scheme and asset names are a **stable contract** — change
 them only in lockstep with the extension's `releaseAssetForTarget`.
 
+> **From v0.5.0 the assets are PyInstaller `--onefile` freezes of `python/`**
+> (the Python port), not `cargo` builds of `crates/` — tan-cli#271. The asset
+> NAMES keep the Rust target triples, because the extension hardcodes them.
+> Four assets ship, not eight, and the crates.io publish is gone. Everything
+> below is written for that release; where it describes the retired Rust
+> pipeline it says so explicitly.
+
 ## Tag scheme
 
 ```
@@ -19,22 +26,30 @@ v<major>.<minor>.<patch>-<pre>        e.g. v0.4.0-rc1 pre-release
   `Cargo.toml` (`[workspace.package] version`). The `verify-version` job fails
   the release if they differ, so a mismatched tag never publishes assets. This
   holds for a pre-release too: `v0.4.0-rc1` requires `version = "0.4.0-rc1"`.
+- **That is no longer the version the shipped binary prints.** The assets are
+  frozen from `python/`, whose version lives in `python/tan/version.py`
+  (`TAN_VERSION`) and `python/pyproject.toml`. `verify-version` does not read
+  either, so tag / `Cargo.toml` / Python version can disagree with nothing
+  catching it — reconciling the three is tracked separately (#265). Check all
+  three before tagging.
 
 ### Pre-releases
 
 **The hyphen is the whole signal.** `release.yml` derives both flags from it, so
 they cannot disagree with each other or with the tag:
 
-| Tag | `prerelease` | `make_latest` | crates.io |
-| --- | --- | --- | --- |
-| `v0.4.0` | `false` | `true` | published |
-| `v0.4.0-rc1` | `true` | `false` | **skipped** |
+| Tag | `prerelease` | `make_latest` |
+| --- | --- | --- |
+| `v0.4.0` | `false` | `true` |
+| `v0.4.0-rc1` | `true` | `false` |
 
-The npm shim is skipped for a pre-release too, and that path was the
-sharpest: `npm publish` passes no `--tag`, so npm defaults to the `latest`
-dist-tag -- an unguarded rc would become plain `npm i -g @alplabai/tan` for
-every consumer, and npm unpublish is far more restricted than a crates.io
-yank. The relaxation, when an rc should be installable, is `--tag next`.
+Neither registry publish runs any more, on any tag: `publish_crates` is deleted
+(the assets no longer come from `crates/`, so publishing `alp-tan-cli` would
+ship a different program under the same name) and `publish_npm` is
+`if: ${{ false }}` — `npm-shim/postinstall.js` still resolves two triples this
+release does not publish, and its `NPM_TOKEN` is a classic token on a 2FA
+account, so `npm publish` answers `EOTP`. Both reasons are recorded in
+`release.yml` beside the job.
 
 This is load-bearing rather than cosmetic. Both [`install.sh`](../install.sh)
 and [`install.ps1`](../install.ps1) resolve what `latest` means through GitHub,
@@ -58,13 +73,6 @@ rather than an error. The digest for a given filename genuinely moves between
 tags -- `tan-x86_64-pc-windows-msvc.exe` is `f159c1dc…` at `v0.4.0-rc1` and
 `a80fb5da…` at `v0.4.0` -- so anything that caches or hardcodes a digest is
 wrong by construction.
-
-crates.io is skipped for a pre-release deliberately: a crates.io publish can
-only be **yanked**, never deleted, while a GitHub pre-release can be removed
-outright. Keeping an rc off crates.io keeps it fully retractable, which is the
-reason to cut one at all. (crates.io does accept SemVer pre-release versions,
-and `cargo install` / `^` ranges skip them by default — so this is a
-conservative call, not a forced one.)
 
 Note that `tan sdk list` flags **alp-sdk** draft/pre-releases (tan-cli#122) —
 that is a different release stream from tan's own, and neither protects the
@@ -94,60 +102,51 @@ Plus two non-binary assets, carrying the same build-provenance attestation:
 
 ## Targets published
 
-| VS Code `process.platform` | `process.arch` | Target triple                | Asset name                          |
-| -------------------------- | -------------- | ---------------------------- | ----------------------------------- |
-| `win32`                    | `x64`          | `x86_64-pc-windows-msvc`     | `tan-x86_64-pc-windows-msvc.exe`    |
-| `win32`                    | `arm64`        | `aarch64-pc-windows-msvc`    | `tan-aarch64-pc-windows-msvc.exe`   |
-| `linux`                    | `x64`          | `x86_64-unknown-linux-musl`  | `tan-x86_64-unknown-linux-musl`     |
-| `linux`                    | `arm64`        | `aarch64-unknown-linux-musl` | `tan-aarch64-unknown-linux-musl`    |
-| `darwin`                   | `x64`          | `x86_64-apple-darwin`        | `tan-x86_64-apple-darwin`           |
-| `darwin`                   | `arm64`        | `aarch64-apple-darwin`       | `tan-aarch64-apple-darwin`          |
+**Four** assets, one per build runner:
 
-Windows ships **both** x64 and arm64 assets — the extension picks by
-`process.arch` (`win32`+`x64` vs `win32`+`arm64`). After download on a Unix host
-the extension must `chmod +x` the raw binary.
+| VS Code `process.platform` | `process.arch` | Target triple               | Asset name                       | Built on        |
+| -------------------------- | -------------- | --------------------------- | -------------------------------- | --------------- |
+| `win32`                    | `x64`          | `x86_64-pc-windows-msvc`    | `tan-x86_64-pc-windows-msvc.exe` | `windows-latest` |
+| `darwin`                   | `x64`          | `x86_64-apple-darwin`       | `tan-x86_64-apple-darwin`        | `macos-15-intel` |
+| `darwin`                   | `arm64`        | `aarch64-apple-darwin`      | `tan-aarch64-apple-darwin`       | `macos-15`      |
+| `linux`                    | `x64`          | `x86_64-unknown-linux-gnu`  | `tan-x86_64-unknown-linux-gnu`   | `ubuntu-latest` + `python:3.12-slim-bullseye` |
 
-### Additional Linux assets (glibc)
+After download on a Unix host the consumer must `chmod +x` the raw binary.
 
-Two more assets ship per release. **They are NOT what the extension downloads**
-— they exist for consumers that specifically want a glibc build:
+### Not published (accepted 404)
 
-| Target triple                | Asset name                       |
-| ----------------------------- | --------------------------------- |
-| `x86_64-unknown-linux-gnu`   | `tan-x86_64-unknown-linux-gnu`   |
-| `aarch64-unknown-linux-gnu`  | `tan-aarch64-unknown-linux-gnu`  |
-
-The `-gnu` assets cross-build via `cargo-zigbuild` pinned to
-`x86_64-unknown-linux-gnu.2.31`, so they carry a glibc floor. **That floor is
-the reason the extension maps both Linux targets to `-musl` instead** — a `-musl`
-build is fully static and runs on any distro/libc.
-
-Two numbers here, and they are not the same number:
-
-| | Value | Source |
+| Host | Asset the extension asks for | Status |
 | --- | --- | --- |
-| zigbuild **pin** | `2.31` | `release.yml`'s `--target …-gnu.2.31` |
-| **measured** floor of the shipped v0.3.1 binary | `GLIBC_2.30` | `readelf -V`, plus a live matrix |
+| `win32`/`arm64` | `tan-aarch64-pc-windows-msvc.exe` | not built |
+| `linux`/`arm64` | `tan-aarch64-unknown-linux-musl` | not built |
 
-The pin caps which symbols may be used; the binary happened to need nothing
-above 2.30. Measured behaviour on the v0.3.1 `-gnu` asset: runs fine on
-`ubuntu:24.04` (2.39), `ubuntu:22.04` (2.35) and `debian:11` (2.31); fails on
-`ubuntu:18.04` (2.27) with `version 'GLIBC_2.30' not found`. The `-musl` asset
-ran on all four.
+A PyInstaller freeze **cannot be cross-compiled** — it embeds the interpreter
+it ran under, so each asset must be built on its own architecture. That is the
+constraint; the *reason* those two are absent is that this release builds on
+four runners and adding two more was out of scope. Hosted arm64 runners do
+exist (`windows-11-arm`, `ubuntu-24.04-arm`), and this repo is public, so their
+minutes are not a barrier either. So this is a revisitable decision, not a
+platform limit — do not record it as "there is no runner", and do not record it
+as a billing constraint: an earlier revision of this paragraph said the arm64
+minutes were "billed and plan-gated on a private repo", which stopped being true
+when the repo went public and would have discouraged exactly the revisit this
+paragraph exists to invite.
 
-**Do not repeat the "2.31 floor / `GLIBC_2.39` not found" wording** that
-`alp-sdk-vscode/src/alpCli/service.ts` currently carries — the phenomenon is
-real but both numbers in it are wrong, tracked as alp-sdk-vscode#370. This table
-is the measured version.
-
-**This section previously said the opposite** — that `linux/x64` and
-`linux/arm64` consumed the `-gnu` assets and that the musl assets were "not
-(yet) wired into" `releaseAssetForTarget`. That has not been true since the
-extension repointed to `-musl`. Corrected here rather than left to mislead the
-next reader of the contract; `alp-sdk` documented the same `-gnu`/`-musl`
-mix-up in its own install docs and fixed it in alp-sdk#990.
+`x86_64-unknown-linux-musl` is also gone, and deliberately. A musl freeze is
+dynamically linked against `/lib/ld-musl-x86_64.so.1` (measured in
+PyInstaller's own musllinux wheel: `bootloader/Linux-64bit-intel-musl/run`), so
+it runs **only on musl distros** — it is not the "static, runs on any libc"
+artefact the Rust `-musl` target produced, and shipping it under that name
+would break every Ubuntu/Debian/Fedora consumer.
 
 ### Reference `releaseAssetForTarget` (vscode side)
+
+This is the extension's map **as it stands today**, kept here so the mismatch is
+visible: `linux:x64` still resolves to the `-musl` triple, which this release
+does not publish. Nothing breaks, because `SUPPORTED_CLI_VERSION` is still
+pinned to the last Rust release and the extension therefore never fetches a
+v0.5.0 asset at all. Repointing `linux:x64` to `x86_64-unknown-linux-gnu`
+travels with that pin move (#268), not before it.
 
 ```ts
 function releaseAssetForTarget(platform: NodeJS.Platform, arch: string): string {
@@ -167,26 +166,38 @@ function releaseAssetForTarget(platform: NodeJS.Platform, arch: string): string 
 }
 ```
 
-## glibc floor (the `-gnu` assets)
+## glibc floor (the Linux asset)
 
-`tan-x86_64-unknown-linux-gnu` and `tan-aarch64-unknown-linux-gnu` are
-cross-built with **`cargo-zigbuild`** against a pinned **glibc 2.31** floor
-(`x86_64-unknown-linux-gnu.2.31` / `aarch64-unknown-linux-gnu.2.31`), not the
-ubuntu-latest runner's own glibc (2.39 on ubuntu-24.04, which produces a
-binary that fails with `GLIBC_2.39 not found` on older distros such as Debian
-bookworm/2.36). 2.31 is the floor the retired `alp` CLI's `release-cli-rs.yml`
-pipeline used (issue #6's cited prior art).
+PyInstaller has no equivalent of zigbuild's `--target …-gnu.2.31` pin: a freeze
+inherits the glibc of the machine that froze it. **The old distro is therefore
+the mechanism** — the Linux asset is frozen inside `python:3.12-slim-bullseye`
+(Debian 11, glibc 2.31), which is the same floor the retired zigbuild pin
+targeted. Freezing on bare `ubuntu-latest` would link its 2.39 and reproduce
+`GLIBC_2.39 not found` exactly as before.
 
-Note the distinction drawn in the `-gnu` asset section above: **2.31 is the
-zigbuild pin, not the measured floor.** The shipped v0.3.1 `-gnu` binary needs
-nothing above `GLIBC_2.30` (`readelf -V`), so it runs on Debian 11 and fails
-only below roughly Ubuntu 20.04. The `GLIBC_2.39` figure in this paragraph is
-the counterfactual — what building on the raw runner *without* the pin would
-produce — not what the shipped asset does.
+The floor published in the release notes is **measured, in the build image,
+over the payload**, and how it is measured matters:
+
+| Where you look | What you get | Useful? |
+| --- | --- | --- |
+| `readelf -V` on the shipped onefile | `GLIBC_2.14`, under every image | **No.** That is PyInstaller's vendored bootloader. It is a container-INVARIANT constant — measured identical from bullseye (real floor 2.30) and trixie (real floor 2.38) — so it cannot detect the build image regressing to a newer glibc, which is the only thing the measurement is for. Lower bound only. |
+| the appended payload | the real floor | **Yes.** libpython + the extension modules + their `.so` dependencies, enumerated from `.build/tan/PKG-00.toc` (a plain Python literal listing everything PyInstaller appended) and read with `pyelftools`. |
+
+The build step refuses to emit a number if the scan finds implausibly few
+native files or no `GLIBC_` version at all, and the release job refuses to
+publish notes without one. An unverified floor in the notes is a compatibility
+promise nobody checked — the retired `-gnu` asset asserted 2.31 in a comment
+while its consumers hit `GLIBC_2.39 not found`.
+
+For reference, the retired Rust `-gnu` asset (v0.3.1) measured `GLIBC_2.30`:
+ran on `ubuntu:24.04` (2.39), `ubuntu:22.04` (2.35), `debian:11` (2.31); failed
+on `ubuntu:18.04` (2.27). **Do not repeat the "2.31 floor / `GLIBC_2.39` not
+found" wording** that `alp-sdk-vscode/src/alpCli/service.ts` carries — the
+phenomenon is real, both numbers in it are wrong (alp-sdk-vscode#370).
 
 ## Build provenance
 
-Every release asset (all eight `tan-*` binaries plus `checksums.txt` and
+Every release asset (all four `tan-*` binaries plus `checksums.txt` and
 `envelope-contract.json` — the step's `subject-path` is `assets/*`) carries
 a GitHub **build-provenance attestation**, generated by
 `actions/attest-build-provenance` in the `release` job. Verify a downloaded
@@ -210,25 +221,29 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
 - **Raw binary, not an archive.** The stripped release `tan` is small; a raw
   asset means the downloader fetches one file and (on Unix) `chmod +x`s it — no
   unzip step, no archive-layout assumption.
-- **Eight targets.** The four requested + `aarch64-pc-windows-msvc` (arm64
-  Windows) + `aarch64-unknown-linux-gnu` + the two `-musl` Linux targets (#6).
-  Windows arm64 and macOS x64 cross-compile from their sibling runner via
-  `rustup target add`; all four Linux targets cross-build on ubuntu-latest via
-  `cargo-zigbuild` — no extra runner types, no `gcc-aarch64-linux-gnu` cross
-  linker (zigbuild supplies its own via `zig cc`).
+- **Four targets, one per runner.** A PyInstaller freeze embeds the interpreter
+  it ran under, so there is no cross-build to be had: the runner IS the target.
+  Eight targets were possible while the binary was a `cargo` build (Windows
+  arm64 and macOS x64 cross-compiled via `rustup target add`; every Linux
+  target via `cargo-zigbuild`) and none of that survives the port.
+- **Every asset is executed before it is published.** `cargo build` proved a
+  binary linked; a freeze proves nothing until it runs, so each build leg runs
+  `python/tests/conformance/test_packaged_binary.py` against the artefact it
+  just produced (single file, `--version` inside the extension's 3 s probe
+  budget, `tan init --preview` to prove the `--add-data` scaffold templates
+  survived).
 - **Race-free publish.** Matrix jobs upload artifacts; a single `release` job
   collates and creates the release, so parallel jobs never race on release
   creation.
 - **The GitHub release needs no secrets** — binaries, `checksums.txt`,
   `envelope-contract.json` and the provenance attestation all run on the default
-  `GITHUB_TOKEN`. **The two registry publishes do not**, and this bullet used to
-  say "No secrets" flatly, which is how nobody noticed that neither was
-  configured:
+  `GITHUB_TOKEN`. **No registry publish runs at all any more**, so neither
+  `CARGO_REGISTRY_TOKEN` nor `NPM_TOKEN` is on the release path:
 
-  | Job | Secret | Without it |
+  | Job | State | Consequence |
   |---|---|---|
-  | `publish · crates.io` | `CARGO_REGISTRY_TOKEN` | `cargo install alp-tan-cli` does not resolve |
-  | `publish · npm shim` | `NPM_TOKEN` | `npm i -g @alplabai/tan` does not resolve |
+  | `publish · crates.io` | **deleted** | `cargo install alp-tan-cli` resolves only to the stale Rust program under that name. Do not advertise it. |
+  | `publish · npm shim` | `if: ${{ false }}` | `npm i -g @alplabai/tan` does not resolve (`E404` at every version). |
 
   **Present is not the same as usable.** `NPM_TOKEN` was configured for v0.4.1
   and the job still failed — `npm error code EOTP`, because a classic/publish
@@ -241,10 +256,8 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
 
   Both previously emitted a `::warning::` and exited **0**, so the run summary
   read `publish · crates.io  success` while crates.io answered
-  `crate 'alp-tan-cli' does not exist`. That is what shipped for v0.4.0 (#151).
-  On a FINAL tag a missing secret now **fails the job** and writes the outcome
-  to the run summary; both jobs are `needs: release`, so the GitHub assets are
-  already published and unaffected — the run goes red to tell the truth about
-  the two registry channels, not to withhold the release. Pre-release tags never
-  reach either job (`!contains(github.ref_name, '-')`), so nothing about an rc
-  changes.
+  `crate 'alp-tan-cli' does not exist` — what shipped for v0.4.0 (#151). The
+  lesson survives the deletion: a publish channel that cannot work must fail or
+  be switched off, never report success. Any doc that still offers `cargo
+  install alp-tan-cli` or `npm i -g @alplabai/tan` as an install path is wrong
+  until those jobs come back.

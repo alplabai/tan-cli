@@ -5,6 +5,12 @@
 crates/tan-core/src/wizard/vendored/** text eol=lf
 tests/parity/** text eol=lf
 
+# The Python port's copy of that same tree (it reads its own package data --
+# PyInstaller has no `include_str!`). Same reason, plus one more: the two copies
+# are byte-diffed against each other by `python/tests/core/test_scaffold.py`, so
+# a CRLF conversion of either side alone reds that gate.
+python/tan/templates/vendored/** text eol=lf
+
 # Vendored copy of alp-sdk's `tests/fixtures/kconfig-contract/emit-kconfig.
 # golden.json` (alp-sdk#894), byte-diffed against the pinned alp-sdk checkout
 # by tests/parity/kconfig_fixture_parity.py. Force LF for the same reason as

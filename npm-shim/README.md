@@ -2,10 +2,15 @@
 
 # @alplabai/tan
 
-npm distribution shim for the native Rust **`tan`** CLI (Alp Lab's standalone
-build CLI). Installing this package downloads the platform-specific binary
-from the matching GitHub release and exposes it as the `tan` command — no
-Rust toolchain and no runtime Node dependency required.
+> **This package is not published.** `npm view @alplabai/tan` answers
+> `E404 Not Found` at every version, and `release.yml`'s `publish_npm` job is
+> switched off (it names the two reasons). Nothing below works until it is
+> turned back on — use the install scripts or a release asset instead.
+
+npm distribution shim for the **`tan`** CLI (Alp Lab's standalone build CLI).
+Installing this package downloads the platform-specific binary from the
+matching GitHub release and exposes it as the `tan` command — no runtime Node
+dependency required.
 
 ```bash
 npm install -g @alplabai/tan
@@ -18,9 +23,9 @@ or run it without installing:
 npx @alplabai/tan --version
 ```
 
-For the full command reference and other install channels (`cargo install
-alp-tan-cli`, the install scripts, manual binary download), see the [repo
-README](../README.md).
+For the full command reference and the other install channels (the install
+scripts, a manual binary download, `pip install ./python` from a checkout), see
+the [repo README](../README.md).
 
 ## How it works
 
@@ -32,15 +37,19 @@ README](../README.md).
   triple (not a `.tar.gz`), so there is no archive to extract.
 - `bin/tan.js` forwards `tan …` invocations to that native binary.
 
-Prebuilt targets: **Linux x64/arm64**, **macOS x64/arm64** (Intel + Apple
-Silicon), **Windows x64/arm64** — all six triples the release publishes. Any
-other platform/arch has no prebuilt binary; install via `cargo install
-alp-tan-cli --locked` or build from source instead.
+Prebuilt targets from v0.5.0: **Linux x64** (`-gnu`), **macOS x64/arm64**
+(Intel + Apple Silicon), **Windows x64** — four assets, not six.
+`postinstall.js`'s `TARGETS` map names only those four; `win32/arm64` and
+`linux/arm64` (no asset published for either — a PyInstaller freeze cannot be
+cross-compiled) hit `resolveTarget()`'s "no prebuilt binary" branch and a
+`pip install` pointer instead of a download that would 404. Any platform/arch
+without a prebuilt binary can install from a checkout instead:
+`pip install ./python`.
 
 ## Checksum verification
 
 The `release` workflow publishes a `checksums.txt` (GNU `sha256sum` output)
-alongside the six binaries. `postinstall.js` fetches it from the same release
+alongside the binaries. `postinstall.js` fetches it from the same release
 and verifies the downloaded binary's SHA-256 against the pinned digest
 **before** writing it to disk and `chmod +x`ing it. It **fails closed** — a
 missing `checksums.txt`, a missing entry for the target asset, or a digest
@@ -49,17 +58,25 @@ mismatch aborts the install rather than running an unverified binary.
 
 ## Releasing
 
-1. Bump the version in **both** the workspace `Cargo.toml`
-   (`[workspace.package] version`) and `npm-shim/package.json` to the same
-   value. This is enforced, not just documented: `release.yml`'s
-   `verify-version` job fails the tag if they disagree (`postinstall.js`
-   resolves its download tag from `package.json`'s version alone, so a stale
-   shim version silently fetches the wrong release's binaries).
+1. Bump `TAN_VERSION` in `python/tan/version.py` — the source of truth, and the
+   string the shipped binary actually prints — and `npm-shim/package.json`'s
+   `version` to match it exactly. This is enforced, not just documented:
+   `python/scripts/version_check.py --selftest --tag` (run by `release.yml`'s
+   `verify-version` job) fails the tag if they disagree — `postinstall.js`
+   resolves its download tag from `package.json`'s version alone
+   (`npm-shim/postinstall.js:25`), so a stale shim version silently fetches the
+   wrong release's binaries. `Cargo.toml` is deliberately **not** part of this
+   check any more: it versions the retired Rust crates, not the release
+   assets.
 2. Tag `v<version>` and push. `release.yml`:
-   - builds the six target binaries and attaches them to the GitHub release
+   - freezes the four target binaries and attaches them to the GitHub release
      (`build` + `release` jobs);
-   - publishes `tan-core` then `alp-tan-cli` to crates.io (`publish_crates`);
-   - publishes this package to npm (`publish_npm`).
+   - does **not** publish this package: `publish_npm` is `if: ${{ false }}`.
+     The crates.io job is gone entirely — the assets are no longer built from
+     `crates/`, so publishing `alp-tan-cli` would ship a different program
+     under the same name.
 
-   Each publish job is gated on its token secret (`CARGO_REGISTRY_TOKEN` /
-   `NPM_TOKEN`) and is skipped, not failed, when the secret is unset.
+   Re-enabling `publish_npm` needs both: `postinstall.js`'s target map narrowed
+   to what the release actually publishes, and a working `NPM_TOKEN` (the
+   current one is a classic token on a 2FA account, so `npm publish` answers
+   `EOTP` and waits for an OTP that no unattended job can supply).
