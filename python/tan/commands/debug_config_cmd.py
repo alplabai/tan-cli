@@ -16,14 +16,20 @@ in alp-sdk `metadata/`, and the ones a launch config needs arrive through this
 project's OWN build output (`build/system-manifest.yaml` +
 `<build_dir>/zephyr/runners.yaml`, both written beside the build).
 
-**Nothing here shells the SDK.** Every input is either an argument or a file
-this project's build already wrote under the workspace; the alp-sdk checkout is
-never invoked, never probed for a loader script by this command's own logic, and
-no `sdk` envelope key is emitted (tan-cli#111 follow-up -- see
-`_resolve_project_reporting_fields`). That is the invariant the port spec records
-as I-32 and its anti-pattern #22: giving a command an alp-sdk-checkout
-dependency it deliberately does not have is a silent regression that no gate
-catches. `debug-config` needs nothing from the SDK, so it asks it nothing.
+**Nothing here shells the SDK.** Every input is either an argument, a file
+this project's build already wrote under the workspace, or -- since
+alp-sdk#1026 -- a `metadata/**` file this command reads directly out of a
+resolved SDK checkout (`_fill_debug_probe_identity_from_sdk`, below): a
+best-effort, silent enrichment, exactly like the `board.yaml`/
+`system-manifest.yaml` reads already were. No `alp_project.py`, no
+`alp_orchestrate`, no subprocess of any kind ever runs, and no `sdk` envelope
+key is emitted (tan-cli#111 follow-up -- see
+`_resolve_project_reporting_fields`): the SDK root is resolved and read for
+this one silent enrichment, never reported as a dependency this command
+declares. That is the invariant the port spec records as I-32 and its
+anti-pattern #22: giving a command an alp-sdk-checkout dependency it does not
+declare is a silent regression that no gate catches -- READING metadata files
+is not that; SHELLING the SDK would be.
 
 Every failure path emits a coded envelope. A raw traceback on stdout is
 indistinguishable, to the extension, from tan producing nothing at all -- it
@@ -42,6 +48,8 @@ from typing import Any
 
 import typer
 
+from tan.commands.build_output import resolve_project_context
+from tan.commands.size_cmd import _read_soc, _read_som_preset
 from tan.core.debug_launch import (
     BAREMETAL_MCU,
     JLINK,
@@ -56,6 +64,7 @@ from tan.core.debug_launch import (
     apply_launch_resolution,
     create_launch_draft,
     create_launch_json_write_plan,
+    fill_debug_probe_identity_gaps,
     is_unresolved_placeholder,
     launch_preview_document,
     launch_preview_notes,
@@ -64,6 +73,7 @@ from tan.core.debug_launch import (
 )
 from tan.core.jsonc_splice import pretty_json
 from tan.core.run import native_sim_exe_beside
+from tan.core.size import resolve_variant
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -83,6 +93,12 @@ _MANIFEST_OS = {
 #: The `runners.yaml` runner id a debug server reads its arguments from.
 #: `gdbserver`/`none` have no runner: neither is a Zephyr probe runner.
 _RUNNER_ID = {JLINK: "jlink", OPENOCD: "openocd", PYOCD: "pyocd"}
+
+#: The launch-configuration JSON key the SDK's debug-probe identity
+#: (`variants[].debug`) resolves for a given server -- absent for a server the
+#: identity has no concept of at all (`gdbserver`/`none`, neither of which
+#: `create_launch_draft` ever pairs with a `variants[].debug` field).
+_SERVER_IDENTITY_FIELD = {JLINK: "device", OPENOCD: "configFiles", PYOCD: "targetId"}
 
 #: The Zephyr board target naming the host simulator. Verbatim from
 #: `tan_core::run`. The sibling runnable's swap (`zephyr.elf` ->
@@ -146,39 +162,40 @@ def _to_posix(path: str) -> str:
 
 
 def _resolve_project_reporting_fields(
-    project_arg: str, board_yaml_arg: str | None
-) -> tuple[str, str]:
-    """`(project.root, project.boardYaml)`, both posix -- the two fields this
-    command REPORTS.
+    project_arg: str, board_yaml_arg: str | None, sdk_root_arg: str | None
+) -> tuple[str, str, str | None]:
+    """`(project.root, project.boardYaml, sdk_root)`. The first two, both
+    posix, are the fields this command REPORTS; `sdk_root` is read for the
+    alp-sdk#1026 metadata fallback (`_fill_debug_probe_identity_from_sdk`)
+    below and is NEVER attached to the outgoing envelope.
 
-    tan-cli#170: `debug-config` used to hardcode `board_yaml: None` on every
-    path, even a success with a valid `board.yaml` sitting in the resolved root,
-    while every other command took both from the shared resolver. Bound together
-    here so they cannot disagree on separator style.
+    Delegates to the SAME shared resolver every other command uses
+    (`build_output.resolve_project_context`, port of
+    `util::resolve_cli_project_context`) instead of a hand-rolled duplicate of
+    its workspace/board_yaml computation -- tan-cli#170: `debug-config` used to
+    hardcode `board_yaml: None` on every path, even a success with a valid
+    `board.yaml` sitting in the resolved root, while every other command took
+    both from the shared resolver.
 
-    Deliberately the `_no_sdk_report` half of the Rust resolver: the SDK-root
-    resolution the shared helper also performs is skipped outright rather than
-    performed-and-discarded. `debug-config` never drives an SDK, so resolving one
-    could only add an undeclared `sdk` envelope key as a side effect of a field
-    it merely reports (tan-cli#111 follow-up) -- and skipping it is also what
-    keeps this command free of any SDK-checkout dependency (I-32).
+    Deliberately the `_no_sdk_report` half of the Rust resolver's contract:
+    the shared resolver's `sdk` half IS read here (unlike before alp-sdk#1026),
+    but the caller must never pass it into the `Envelope(...)` call --
+    resolving one could only add an undeclared `sdk` envelope key as a side
+    effect of a field this command otherwise merely reports (tan-cli#111
+    follow-up), and `debug-config` still drives no SDK subprocess of any kind
+    (I-32).
 
     `board.yaml`'s existence is NOT checked HERE, matching
     `project.rs::resolve_board_yaml_path`, which joins the configured relative
     path onto the workspace root unconditionally -- this function only names
     where a `board.yaml` WOULD live. [`_run`]'s caller is the seam that checks
-    (tan-cli#236, `Project.resolved`): the four goldens run in a scratch
-    directory holding no `board.yaml` at all and report a `null`
+    (tan-cli#236, `Project.resolved`): the four hermetic goldens run in a
+    scratch directory holding no `board.yaml` at all and report a `null`
     `project.boardYaml`, not this joined path.
     """
-    workspace_root = _normalise(project_arg)
-    configured = board_yaml_arg or "board.yaml"
-    board_yaml = (
-        configured
-        if os.path.isabs(configured)
-        else os.path.join(workspace_root, configured)
-    )
-    return _to_posix(workspace_root), _to_posix(board_yaml)
+    context = resolve_project_context(project_arg, board_yaml_arg, sdk_root_arg)
+    sdk_root = context.sdk.root if context.sdk is not None else None
+    return context.workspace_root, context.board_yaml, sdk_root
 
 
 def _workspace_relative(workspace_root: str, path: str) -> str:
@@ -355,7 +372,7 @@ def _str_list(value: Any) -> list[str]:
 
 def _resolve_from_build(
     workspace_root: str, target: str, server: str, core: str | None
-) -> tuple[LaunchResolution, list[str]]:
+) -> tuple[LaunchResolution, list[str], str | None]:
     """Everything this project's own build knows about how to debug it: the
     per-core ELF from `build/system-manifest.yaml`, and the probe/tool paths from
     that slice's `runners.yaml` -- the same file `west flash` reads.
@@ -363,14 +380,23 @@ def _resolve_from_build(
     Best-effort throughout. A missing manifest (pre-build), a missing slice, an
     unreadable or reshaped `runners.yaml` each leave the corresponding field
     unresolved instead of failing the command: `debug-config` must still emit its
-    draft before the first build. Returns the resolution plus the runner ids the
-    board registered, for the "this build registers no such runner" note.
+    draft before the first build. Returns the resolution, the runner ids the
+    board registered (for the "this build registers no such runner" note), and
+    the `core_id` of the slice this run actually selected (`None` before a
+    matching slice is found) -- the SAME id `--core` would have named
+    explicitly. alp-sdk#1026's SDK-metadata fallback
+    (`_fill_debug_probe_identity_from_sdk`) needs it to index `jlink_device`
+    (keyed per core) even when the caller passed no `--core` of its own, so a
+    single-core project's ALREADY-built slice still resolves without forcing
+    the user to repeat a core id `tan` already knows.
     """
     resolution = LaunchResolution()
     manifest = _load_yaml(Path(workspace_root, "build", "system-manifest.yaml"))
     slice_ = _select_slice(_slices(manifest), target, core)
     if slice_ is None:
-        return resolution, []
+        return resolution, [], None
+    core_id = slice_.get("core_id")
+    core_id = core_id if isinstance(core_id, str) else None
 
     artefact = _str_or_none(slice_.get("output_artefact"))
     if artefact is not None:
@@ -382,10 +408,10 @@ def _resolve_from_build(
 
     build_dir = _str_or_none(slice_.get("build_dir"))
     if build_dir is None:
-        return resolution, []
+        return resolution, [], core_id
     runners = _load_yaml(Path(build_dir, "zephyr", "runners.yaml"))
     if not isinstance(runners, dict):
-        return resolution, []
+        return resolution, [], core_id
     config = runners.get("config")
     config = config if isinstance(config, dict) else {}
     args = runners.get("args")
@@ -404,7 +430,92 @@ def _resolve_from_build(
         elif server == PYOCD:
             values = _runner_arg_values(args.get(runner), "--target")
             resolution.target_id = values[0] if values else None
-    return resolution, _str_list(runners.get("runners"))
+    return resolution, _str_list(runners.get("runners")), core_id
+
+
+def _sdk_variant_debug_block(sdk_root: str, sku: str) -> dict[str, Any] | None:
+    """The resolved SoC-JSON `variants[].debug` block for `sku`'s SoM preset,
+    or `None` when any step of the walk fails to resolve one.
+
+    Reuses the SAME metadata-layout walk `tan size` drives
+    (`size_cmd._read_som_preset` / `_read_soc`) instead of a second walk of
+    `metadata/socs/**` -- the exact drift alp-sdk#1026 itself is about (a
+    schema with no reader, then two readers that could disagree).
+
+    A forward-only `resolve_variant` match: `sku` is passed as `None`,
+    deliberately disabling the reverse `sku in alp_module_skus` fallback
+    `tan size` itself relies on -- a drifted/`TBD` preset must resolve NO
+    identity rather than possibly a WRONG one that still connects a live debug
+    session to the wrong part (alp-sdk#1026 review finding #7).
+    """
+    metadata_root = os.path.join(sdk_root, "metadata")
+    preset_path = os.path.join(metadata_root, "e1m_modules", f"{sku}.yaml")
+    preset = _read_som_preset(preset_path)
+    if preset is None:
+        return None
+    silicon, silicon_variant = preset
+    parts = silicon.split(":")
+    if len(parts) != 3:
+        return None
+    soc_path = os.path.join(metadata_root, "socs", parts[0], parts[1], f"{parts[2]}.json")
+    variants, _soc_flash_mb, _soc_cores = _read_soc(soc_path)
+    variant = resolve_variant(silicon_variant, None, variants)
+    if variant is None:
+        return None
+    debug = variant.get("debug")
+    return debug if isinstance(debug, dict) else None
+
+
+def _fill_debug_probe_identity_from_sdk(
+    resolution: LaunchResolution,
+    sdk_root: str | None,
+    board_yaml_path: str,
+    core_id: str | None,
+) -> bool:
+    """alp-sdk#1026: fill `resolution`'s remaining `device`/`target_id`/
+    `config_files` gaps from the SDK's published per-variant debug-probe
+    identity (`variants[].debug`, alp-sdk#987), so `tan debug-config` resolves
+    a real J-Link device / pyOCD target before the project has ever been built
+    -- the case [`_resolve_from_build`]'s `runners.yaml` read structurally
+    cannot cover. Port of
+    `crates/tan-cli/src/commands/debug_config.rs::fill_debug_probe_identity_from_sdk`.
+
+    Best-effort throughout, exactly like [`_resolve_from_build`]: a missing
+    `board.yaml`/`som.sku`, no resolved SDK root, a missing/unreadable SoM
+    preset or SoC-JSON file, or a SoC variant that resolves but declares no
+    `debug` block each leave `resolution` exactly as it was -- the caller's
+    existing placeholder note still applies, and nothing here can fail the
+    command.
+
+    Returns whether a `variants[].debug` block was actually found for the
+    resolved SoC variant -- distinct from whether every field this run wanted
+    got filled from it. The caller uses this (alp-sdk#1026 review finding #4)
+    to tell "the SDK publishes an identity for this part, but not a value for
+    the specific field this server needs yet" apart from "no identity was
+    resolvable at all".
+    """
+    if sdk_root is None:
+        return False
+    board = _load_yaml(Path(board_yaml_path))
+    som = board.get("som") if isinstance(board, dict) else None
+    sku = som.get("sku") if isinstance(som, dict) else None
+    if not isinstance(sku, str) or sku == "":
+        return False
+    debug = _sdk_variant_debug_block(sdk_root, sku)
+    if debug is None:
+        return False
+    jlink_device = debug.get("jlink_device")
+    jlink_device = (
+        {k: v for k, v in jlink_device.items() if isinstance(v, str)}
+        if isinstance(jlink_device, dict)
+        else {}
+    )
+    pyocd_target = debug.get("pyocd_target")
+    pyocd_target = pyocd_target if isinstance(pyocd_target, str) else None
+    openocd_config = debug.get("openocd_config")
+    openocd_config = openocd_config if isinstance(openocd_config, str) else None
+    fill_debug_probe_identity_gaps(resolution, core_id, jlink_device, pyocd_target, openocd_config)
+    return True
 
 
 def _resolve_user_svd(workspace_root: str, arg: str) -> str:
@@ -533,6 +644,24 @@ def _legacy_untouched_issue(legacy_name: str) -> Issue:
         "hand-edited is authoritative — so if you filled in real values on "
         "the legacy entry, copy them onto the maintained one and remove the "
         "legacy entry yourself.",
+    )
+
+
+def _sdk_identity_key_absent_issue(field: str) -> Issue:
+    """alp-sdk#1026 review finding #4: emitted when the SDK DID publish a
+    debug-probe identity for this project's SoC variant, but that identity
+    does not (yet) include a value for `field` -- distinct from, and more
+    specific than, the generic "Placeholder fields..." note every unresolved
+    field already gets regardless of why. Severity `info`: this is the
+    schema's own documented stance that an unpopulated key is a published
+    "unknown", not an error and not a bug."""
+    return Issue(
+        "debug-config.sdk-identity-key-absent",
+        "info",
+        f"This SoM's SDK-published debug-probe identity (alp-sdk#987) does not "
+        f"include a value for `{field}` yet, so it stays the placeholder shown "
+        "in `configuration` — an unpopulated key is the correct published "
+        '"unknown" (alp-sdk#1026), never a guess.',
     )
 
 
@@ -704,6 +833,7 @@ def _run(
     preview: bool,
     project_arg: str,
     board_yaml_arg: str | None,
+    sdk_root_arg: str | None,
     quiet: bool,
 ) -> _Outcome:
     """The whole command, as a pure-ish computation returning one outcome.
@@ -726,8 +856,8 @@ def _run(
 
     workspace_root = _normalise(project_arg)
     launch_json_path = os.path.join(workspace_root, ".vscode", "launch.json")
-    project_root, board_yaml = _resolve_project_reporting_fields(
-        project_arg, board_yaml_arg
+    project_root, board_yaml, sdk_root = _resolve_project_reporting_fields(
+        project_arg, board_yaml_arg, sdk_root_arg
     )
     # tan-cli#236, the pair of #170 above: `boardYaml` reported only when a
     # file is really at the resolved path.
@@ -736,8 +866,18 @@ def _run(
     # Fill the `<resolved-...>` placeholders from what this project's own build
     # recorded (#66). Nothing here fails the command: pre-build, or against a
     # Zephyr that reshaped `runners.yaml`, the draft keeps its placeholders.
-    resolution, registered_runners = _resolve_from_build(
+    resolution, registered_runners, build_core_id = _resolve_from_build(
         workspace_root, target, server, core
+    )
+
+    # alp-sdk#1026: whatever the build did NOT already resolve, try the SDK's
+    # published per-variant debug-probe identity next -- `--core` if given,
+    # else the core id the build itself just resolved. See
+    # `_fill_debug_probe_identity_from_sdk`'s own docstring for why `device`
+    # stays the placeholder on a never-built project with no `--core`.
+    identity_core = core or build_core_id
+    identity_debug_block_found = _fill_debug_probe_identity_from_sdk(
+        resolution, sdk_root, board_yaml, identity_core
     )
 
     # `--svd` is the ONLY producer of `resolution.svd` (tan-cli#197): the SDK
@@ -750,6 +890,18 @@ def _run(
             return _internal_failure(generated_at, str(err), launch_json_path)
 
     apply_launch_resolution(draft, resolution)
+
+    # alp-sdk#1026 review finding #4: which server-identity field the SDK
+    # fallback found a block for but could not fill -- checked against the
+    # FINAL draft (after `apply_launch_resolution`), not the pre-resolution
+    # one, or a field the fallback itself just resolved would misreport as
+    # still absent. Advisory about resolution state, so it fires on
+    # `--preview` too, not just a write.
+    identity_issues: list[Issue] = []
+    if identity_debug_block_found:
+        field = _SERVER_IDENTITY_FIELD.get(server)
+        if field is not None and _has_placeholder(draft.get(field)):
+            identity_issues.append(_sdk_identity_key_absent_issue(field))
     notes = _preview_notes_for(draft, registered_runners, server)
     # A non-MCU draft carries no `svdFile` key at all, and
     # `apply_launch_resolution` only replaces keys that already exist -- so a
@@ -798,7 +950,7 @@ def _run(
         # there is. tan-cli#180's preview-side invariant, and what the four
         # `debug-config-preview-*` goldens pin.
         return success(
-            replaced=False, configuration=draft, issues=[], is_preview=True
+            replaced=False, configuration=draft, issues=identity_issues, is_preview=True
         )
 
     # Write mode: merge into .vscode/launch.json.
@@ -850,7 +1002,7 @@ def _run(
             generated_at, target, server, launch_json_path, str(err)
         )
 
-    issues: list[Issue] = []
+    issues: list[Issue] = list(identity_issues)
     if plan.migrated_from is not None:
         issues.append(_migrated_issue(plan.migrated_from, draft.get("name", "")))
     if plan.legacy_entry_present is not None:
@@ -921,7 +1073,7 @@ def debug_config(
     board_yaml: str = typer.Option(
         None, "--board-yaml", metavar="PATH", help="Explicit board.yaml path."
     ),
-    sdk_root: str = typer.Option(  # accepted, not read; see below
+    sdk_root: str = typer.Option(  # read for the alp-sdk#1026 metadata fallback; see below
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
     output_format: str = typer.Option(
@@ -931,12 +1083,15 @@ def debug_config(
 ) -> None:
     """Generate (or preview) a VS Code launch.json debug configuration.
 
-    `--sdk-root` is declared, not consumed: `debug-config` reads only this
-    project's OWN build output (`build/system-manifest.yaml`), never the SDK
-    checkout, matching the module docstring above. clap makes `--sdk-root`
-    `global = true` in Rust regardless, so `tan --sdk-root X debug-config`
-    must not be a parse error -- verified against the oracle (an arbitrary
-    value changes nothing in the envelope).
+    `--sdk-root` is read, but only as a best-effort, silent enrichment
+    (alp-sdk#1026): a resolved checkout's `metadata/**` fills whatever the
+    build itself did not already resolve (`_fill_debug_probe_identity_from_sdk`),
+    but is never shelled and never reported as an `sdk` envelope dependency,
+    matching the module docstring above. clap makes `--sdk-root` `global =
+    true` in Rust regardless, so `tan --sdk-root X debug-config` must not be a
+    parse error even when `X` names no real checkout -- an unresolvable value
+    changes nothing in the envelope (the fallback silently finds nothing),
+    same as the oracle.
     """
     # `--format` is accepted BEFORE the subcommand too (`tan --format json
     # debug-config ...`, which is what the committed goldens invoke and what
@@ -959,6 +1114,7 @@ def debug_config(
             preview=preview,
             project_arg=project or ".",
             board_yaml_arg=board_yaml,
+            sdk_root_arg=sdk_root,
             quiet=quiet,
         )
     except Exception as err:  # noqa: BLE001

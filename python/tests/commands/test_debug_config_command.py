@@ -484,7 +484,7 @@ def test_native_host_resolves_the_native_sim_slice_not_the_first_zephyr_one(tmp_
     root = str(tmp_path).replace("\\", "/")
     write_manifest(tmp_path, MANIFEST_MCU_THEN_NATIVE_SIM.format(root=root))
 
-    resolution, runners = _resolve_from_build(root, NATIVE_HOST, "none", None)
+    resolution, runners, _core_id = _resolve_from_build(root, NATIVE_HOST, "none", None)
 
     assert resolution.executable == (
         "${workspaceFolder}/build/native_sim-zephyr/build/zephyr/zephyr.exe"
@@ -497,8 +497,8 @@ def test_zephyr_mcu_resolution_is_unchanged_by_the_native_host_rule(tmp_path):
     root = str(tmp_path).replace("\\", "/")
     write_manifest(tmp_path, MANIFEST_MCU_THEN_NATIVE_SIM.format(root=root))
 
-    bare, _ = _resolve_from_build(root, ZEPHYR_MCU, JLINK, None)
-    pinned, _ = _resolve_from_build(root, ZEPHYR_MCU, JLINK, "m55_hp")
+    bare, _, _ = _resolve_from_build(root, ZEPHYR_MCU, JLINK, None)
+    pinned, _, _ = _resolve_from_build(root, ZEPHYR_MCU, JLINK, "m55_hp")
 
     expected = "${workspaceFolder}/build/m55_hp-zephyr/build/zephyr/zephyr.elf"
     assert bare.executable == expected and pinned.executable == expected
@@ -515,7 +515,7 @@ def test_a_manifest_with_no_native_sim_slice_resolves_nothing(tmp_path):
         f"  board: alp_e1m_aen701_m55_hp\n  output_artefact: {root}/b/zephyr.elf\n",
     )
 
-    resolution, _ = _resolve_from_build(root, NATIVE_HOST, "none", None)
+    resolution, _, _ = _resolve_from_build(root, NATIVE_HOST, "none", None)
 
     assert resolution.executable is None
 
@@ -529,16 +529,16 @@ def test_a_wrong_schema_major_resolves_nothing_rather_than_being_misread(tmp_pat
         f"  output_artefact: {root}/b/zephyr.elf\n",
     )
 
-    resolution, _ = _resolve_from_build(root, ZEPHYR_MCU, JLINK, None)
+    resolution, _, _ = _resolve_from_build(root, ZEPHYR_MCU, JLINK, None)
 
     assert resolution.executable is None
 
 
 def test_a_missing_manifest_leaves_the_draft_untouched(tmp_path):
     """`debug-config` must still emit its draft before the first build."""
-    resolution, runners = _resolve_from_build(str(tmp_path), ZEPHYR_MCU, JLINK, None)
+    resolution, runners, core_id = _resolve_from_build(str(tmp_path), ZEPHYR_MCU, JLINK, None)
 
-    assert resolution == LaunchResolution() and runners == []
+    assert resolution == LaunchResolution() and runners == [] and core_id is None
 
 
 def test_runners_yaml_fills_the_device_and_gdb_a_build_can_answer(tmp_path):
@@ -560,16 +560,19 @@ def test_runners_yaml_fills_the_device_and_gdb_a_build_can_answer(tmp_path):
         encoding="utf-8",
     )
 
-    resolution, runners = _resolve_from_build(root, ZEPHYR_MCU, JLINK, None)
+    resolution, runners, core_id = _resolve_from_build(root, ZEPHYR_MCU, JLINK, None)
 
     assert resolution.device == "AE822F4M55_HP"
     assert resolution.gdb_path == "/zephyr-sdk/arm-zephyr-eabi-gdb"
     assert runners == ["jlink", "openocd"]
+    assert core_id == "m55_hp"
 
     # …and a server the board never registered keeps its placeholder AND says so.
     from tan.commands.debug_config_cmd import _preview_notes_for
 
-    pyocd_resolution, pyocd_runners = _resolve_from_build(root, ZEPHYR_MCU, "pyocd", None)
+    pyocd_resolution, pyocd_runners, _pyocd_core_id = _resolve_from_build(
+        root, ZEPHYR_MCU, "pyocd", None
+    )
     draft = create_launch_draft(ZEPHYR_MCU, "pyocd", None)
     apply_launch_resolution(draft, pyocd_resolution)
     assert draft["targetId"] == "<resolved-target-id>"

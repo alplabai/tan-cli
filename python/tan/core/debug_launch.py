@@ -262,6 +262,41 @@ class LaunchResolution:
     svd: str | None = None
 
 
+def fill_debug_probe_identity_gaps(
+    resolution: LaunchResolution,
+    core_id: str | None,
+    jlink_device: dict[str, str],
+    pyocd_target: str | None,
+    openocd_config: str | None,
+) -> None:
+    """Fill ``resolution``'s ``device``/``target_id``/``config_files`` gaps from
+    the SDK's published per-variant debug-probe identity (``variants[].debug``,
+    alp-sdk#987 / alp-sdk#1026) -- the same three fields a real build's
+    ``runners.yaml`` resolves, sourced instead from the SoC-JSON metadata that
+    exists whether or not the project has been built yet. Port of
+    ``tan_core::debug_launch::fill_debug_probe_identity_gaps``.
+
+    **Fill-the-gap only, never override**: each field is written ONLY when
+    ``resolution`` does not already carry a value for it. A real build's own
+    resolution (Zephyr's own ``runners.yaml``, generated for THIS board) is
+    strictly more specific than the SDK's generic per-variant identity and
+    always wins where both exist.
+
+    **No fabrication**: ``jlink_device`` is keyed by core id, so ``device``
+    resolves only when ``core_id`` is not ``None`` AND that exact key is
+    present -- there is no "the only entry" or "the first entry" guess.
+    ``target_id``/``config_files`` resolve only when the corresponding SDK key
+    is itself present; an absent ``openocd_config`` leaves ``config_files``
+    empty, which is the correct published "unknown", not a bug.
+    """
+    if resolution.device is None:
+        resolution.device = jlink_device.get(core_id) if core_id is not None else None
+    if resolution.target_id is None:
+        resolution.target_id = pyocd_target
+    if not resolution.config_files and openocd_config is not None:
+        resolution.config_files = [openocd_config]
+
+
 def apply_launch_resolution(draft: dict[str, Any], resolution: LaunchResolution) -> None:
     """Overwrite a draft's placeholders with what ``resolution`` knows, in place.
 
