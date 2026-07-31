@@ -171,6 +171,11 @@ Internal. Each is here because it has already cost a round.
   A dirty or differently-reffed `alp-sdk` produces confident nonsense in both
   directions.
 - **Never edit `crates/` or `contract/`** — frozen.
+- **A frozen tree is measured at its own freeze vendor point; a shipped
+  Python surface is measured at `PINNED_SDK_TAG`.** Every parity gate has to
+  pick one of the two — never compare a frozen tree against a moving pin.
+  That is what makes the freeze absolute rather than something each pin bump
+  re-negotiates.
 - **LF is the convention.** Check both `git diff --numstat` and
   `--ignore-cr-at-eol`; a CRLF-only diff is invisible to one of them.
 - **No exit codes behind pipes.** `cmd | tail` reports `tail`'s status.

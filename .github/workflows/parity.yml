@@ -131,9 +131,44 @@ env:
   # READMEs, so this bump is NOT a lone one-line edit -- see the release commit.
   #
   # Re-bump on every alp-sdk change this repo's parity gate should track, and
-  # re-run all four locally first: this pin drives all of them, and the scaffold
-  # one cannot be checked on Windows.
-  PINNED_SDK_TAG: v0.14.0
+  # re-run all three CI-wired byte-parity gates locally first (kconfig-fixture,
+  # toolchain-lock, scaffold): this pin drives all of them, and the scaffold
+  # one cannot be checked on Windows. `bootstrap_manifest_parity.py` is a manual
+  # tool only (see the note below) and this pin does not drive it.
+  #
+  # v0.14.0 -> v0.15.0-rc1: alp-sdk#1057 (`jlink_flash_device` -> `flash_args`)
+  # already lived in `python/tan/planner/` (tan-cli#275's re-sync target
+  # 0f3cefbe, an alp-sdk `dev` commit past v0.14.0), so every
+  # `test_planner_emit_parity.py::test_every_mode_is_byte_identical` case was
+  # comparing tan's planner against a STALE live oracle that had not caught up
+  # yet -- 72 identical failures on PR #252, all naming the same
+  # `system-manifest` `flash_args` line. v0.15.0-rc1 contains #1057 (and #1025/
+  # #1054, also already carried); moving the pin onto it removes the staleness
+  # rather than papering over the diff.
+  #
+  # Re-verified all gates locally against this tag: kconfig-fixture and
+  # toolchain-lock PASS unchanged (neither vendored file moved between
+  # `0f3cefbe` and v0.15.0-rc1). Two gates needed re-scoping first, per
+  # `docs/ROADMAP.md`'s Standing Rule that a frozen tree is measured at its
+  # OWN freeze vendor point while a shipped Python surface is measured at
+  # this pin:
+  #
+  # - scaffold byte-parity now defaults to `python/tan/templates/vendored/`
+  #   (`scaffold_byte_parity.py`'s own default) -- the tree the shipped
+  #   Python `tan` actually reads. It WAS re-vendored to v0.15.0-rc1 (see
+  #   that tree's `MANIFEST.md`) and PASSES. `crates/tan-core/src/wizard/
+  #   vendored/` stays frozen at v0.14.0 and is no longer this gate's
+  #   concern -- its own SDK-free `cargo test` guards it at that point.
+  # - bootstrap-manifest byte-parity is REMOVED (see the seam1 job below):
+  #   the shipped Python `tan` carries no vendored copy of
+  #   `metadata/bootstrap.json` to diff -- `tan.core.bootstrap` reads it
+  #   live off the bound SDK root. `contract/fixtures/bootstrap/
+  #   manifest.json` now serves only the frozen Rust oracle, guarded at its
+  #   own freeze point by `manifest.rs`'s own `cargo test`
+  #   (`the_fallback_matches_the_real_manifest_field_for_field`).
+  #   `tests/parity/bootstrap_manifest_parity.py` itself survives as a
+  #   manual diagnostic tool (see its module doc), not run in CI.
+  PINNED_SDK_TAG: v0.15.0-rc1
 
 jobs:
   seam1-plan-shape:
@@ -293,15 +328,16 @@ jobs:
         run: python3 tests/parity/kconfig_fixture_parity.py --sdk alp-sdk
 
       # `tan bootstrap` reads the SDK's metadata/bootstrap.json (alp-sdk#917)
-      # and falls back to hand-ported constants for an SDK without one.
-      # alp-sdk's own check_bootstrap_manifest.py polices its two shell
-      # scripts against that manifest but cannot see this checkout, so this
-      # is the tan-side half of that gate. PINNED_SDK_TAG is now past #917
-      # (and #928), so this step byte-diffs for real -- same milestone the
-      # kconfig step passed once its pin moved past #897.
-      - name: bootstrap manifest byte-parity (vendored vs. pinned alp-sdk)
-        if: ${{ !inputs.python_only }}
-        run: python3 tests/parity/bootstrap_manifest_parity.py --sdk alp-sdk
+      # live off the bound SDK root -- no baked-in copy of it ships, so there
+      # is no vendored artefact left for a byte-parity step to guard here.
+      # (The Rust oracle's `crates/tan-core/src/bootstrap/manifest.rs` DOES
+      # carry one, frozen alongside it at `contract/fixtures/bootstrap/
+      # manifest.json` -- `docs/ROADMAP.md`'s crates/contract freeze -- and
+      # that fixture is still guarded, at its own freeze point, by
+      # `manifest.rs`'s own `cargo test` (`the_fallback_matches_the_real_
+      # manifest_field_for_field`).) See `tests/parity/
+      # bootstrap_manifest_parity.py`'s module doc for why the script itself
+      # is kept as a manual tool rather than deleted.
 
       # `tan doctor`'s zephyrSdk check (tan-cli#160) prints a hand-ported copy
       # of alp-sdk's metadata/toolchains.json zephyrSdk.version
@@ -314,12 +350,15 @@ jobs:
         if: ${{ !inputs.python_only }}
         run: python3 tests/parity/toolchain_lock_parity.py --sdk alp-sdk
 
-      # Vendored wizard scaffold tree vs. the pinned alp-sdk's live
+      # `python/tan/templates/vendored/` (the script's default -- the tree
+      # the shipped Python `tan` reads) vs. the pinned alp-sdk's live
       # `--emit scaffold`. Reuses this job's alp-sdk checkout + emit deps (same
       # as the kconfig step above) rather than a second clone. The vendored tree
       # is captured at this exact pin, so a re-vendor that drifts from the SDK
       # fails here instead of shipping silently (the drift that hid the stale
-      # `minimal` README before this gate ran in CI).
+      # `minimal` README before this gate ran in CI). `crates/tan-core/src/
+      # wizard/vendored/` (the frozen Rust oracle's own copy) is measured only
+      # by its own SDK-free `cargo test`, not by this step.
       - name: scaffold byte-parity (vendored tree vs. pinned alp-sdk --emit scaffold)
         if: ${{ !inputs.python_only }}
         run: python3 tests/parity/scaffold_byte_parity.py --sdk alp-sdk

@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Scaffold planning: the vendored-tree byte parity gate, and the two string
+"""Scaffold planning: the vendored-tree LF-only guard, and the two string
 transforms that decide what lands in a customer's `board.yaml`.
 
-The load-bearing case is ``test_the_vendored_tree_is_byte_identical_to_the_rust_one``.
-`tan/templates/vendored/` is a SECOND copy of `crates/tan-core/src/wizard/
-vendored/` -- the Rust bakes its copy in with `include_str!`, this port reads
-its own -- and the upstream parity script (`tests/parity/
-scaffold_byte_parity.py`) only ever compares the RUST copy to the SDK. So a
-re-vendor that refreshes one language and not the other is invisible to every
-other gate in either repo: two `tan` binaries, same version, scaffolding
-different bytes. This is the only thing that catches it.
+`tan/templates/vendored/` tracks `PINNED_SDK_TAG` (see its own
+`MANIFEST.md`) and is measured against a live SDK by
+`tests/parity/scaffold_byte_parity.py`, not against `crates/tan-core/src/
+wizard/vendored/` -- that tree is frozen at its own permanent vendor point
+(`docs/ROADMAP.md`'s Standing Rules) and the two are expected to diverge.
 """
 from pathlib import Path
 
@@ -32,38 +29,16 @@ from tan.core.scaffold import (
 )
 from tan.templates import VENDORED_ROOT
 
-#: The Rust crate's copy of the same trees. Read-only, and OUTSIDE `python/` --
-#: which is the point: this test exists to compare the two languages.
-RUST_VENDORED_ROOT = (
-    Path(__file__).resolve().parents[3] / "crates" / "tan-core" / "src" / "wizard" / "vendored"
-)
-
 
 def files_under(root: Path):
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
-@pytest.mark.skipif(
-    not RUST_VENDORED_ROOT.is_dir(),
-    reason="Rust crate tree absent (a python-only distribution); nothing to diff against",
-)
-def test_the_vendored_tree_is_byte_identical_to_the_rust_one():
-    ours = files_under(VENDORED_ROOT)
-    theirs = files_under(RUST_VENDORED_ROOT)
-
-    assert sorted(ours) == sorted(theirs), (
-        "the two vendored trees no longer hold the same files -- re-vendor BOTH "
-        "by re-running the SDK emit (see tan/templates/vendored/MANIFEST.md), "
-        "never by hand-editing one"
-    )
-    drifted = [name for name, content in ours.items() if theirs[name] != content]
-    assert drifted == [], f"vendored content drifted between Rust and Python: {drifted}"
-
-
 def test_the_vendored_tree_is_lf_only():
-    """These bytes are written to the customer's files verbatim and byte-compared
-    above. A Windows checkout with `autocrlf=true` and no `.gitattributes` entry
-    for this path rewrites every one of them."""
+    """These bytes are written to the customer's files verbatim, and are
+    byte-compared against a live SDK emit by `scaffold_byte_parity.py`. A
+    Windows checkout with `autocrlf=true` and no `.gitattributes` entry for
+    this path rewrites every one of them."""
     crlf = [name for name, content in files_under(VENDORED_ROOT).items() if b"\r\n" in content]
     assert crlf == [], f"CRLF crept into the vendored tree: {crlf}"
 

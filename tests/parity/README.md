@@ -153,21 +153,29 @@ skipped on dispatch runs, which deliberately ignore the pin.
 
 ## Scaffold byte-parity (alp-sdk#864)
 
-`scaffold_byte_parity.py` is the equivalent gate for the wizard's *vendored*
-templates (`crates/tan-core/src/wizard/vendored/`, see that directory's
-`MANIFEST.md`): for every vendored (template, sku) pair it re-runs a live
+`scaffold_byte_parity.py` is the equivalent gate for the *vendored* scaffold
+templates: for every vendored (template, sku) pair it re-runs a live
 `alp_project.py --emit scaffold` and asserts byte-identity against the
 vendored tree, so a future SDK scaffold change that isn't re-vendored fails
 loudly instead of silently drifting (the same class of drift seam 1 guards
-against for build-plans). Unlike `seam1_field_diff.py`, it is optionally
-self-skipping — no reachable alp-sdk checkout (`--sdk` / `$ALP_SDK_ROOT` / a
-sibling `alp-sdk` checkout) is a clean no-op, not a failure, since
-`tan-core`'s own `cargo test` already covers the vendored tree's internal
-consistency. Wired into `.github/workflows/parity.yml` as a `scaffold byte-parity`
-step inside the `seam1-plan-shape` job — it reuses that job's pinned alp-sdk
-checkout + emit deps (same as `kconfig_fixture_parity.py`) rather than cloning a
-second time, so a re-vendor that drifts from the pinned SDK's `--emit scaffold`
-fails CI instead of shipping silently.
+against for build-plans).
+
+**It defaults to `python/tan/templates/vendored/` — the tree the shipped
+binary actually reads.** That is the point of the default: this gate measures
+a surface that tracks `PINNED_SDK_TAG`, so it must point at the tree that
+moves with the pin. The Rust wizard's copy at
+`crates/tan-core/src/wizard/vendored/` is frozen at its own v0.14.0 vendor
+point (`docs/ROADMAP.md`'s crates/contract freeze) and keeps its own SDK-free
+`cargo test` for internal consistency; pass `--vendored crates/tan-core/src/
+wizard/vendored` with a v0.14.0 checkout to check it by hand.
+
+Unlike `seam1_field_diff.py`, it is optionally self-skipping — no reachable
+alp-sdk checkout (`--sdk` / `$ALP_SDK_ROOT` / a sibling `alp-sdk` checkout) is
+a clean no-op, not a failure. Wired into `.github/workflows/parity.yml` as a
+`scaffold byte-parity` step inside the `seam1-plan-shape` job — it reuses that
+job's pinned alp-sdk checkout + emit deps (same as `kconfig_fixture_parity.py`)
+rather than cloning a second time, so a re-vendor that drifts from the pinned
+SDK's `--emit scaffold` fails CI instead of shipping silently.
 
 ```
 python3 tests/parity/scaffold_byte_parity.py --sdk /path/to/an/alp-sdk/checkout
@@ -222,12 +230,29 @@ hand-ported fallback constants (the path taken against any SDK predating
 #917) equal this fixture field-for-field, so re-vendoring a changed manifest
 fails that test until the constants are updated too.
 
-Self-skips with no reachable alp-sdk checkout, like the two gates above.
-The current `PINNED_SDK_TAG` is well past alp-sdk#917 — it sits at #967, which
-together with #961 rewrote `manualInstallHints.windows.note` from one sentence
-to five elements and bumped `zephyr.version` to v4.4.1 — so the gate byte-diffs
-for real; the NOTICE-and-pass branch only fires for an older ref used locally
-(one predating #917). A byte MISMATCH always fails regardless of the pin.
+**This script is no longer a CI gate.** It was removed from
+`.github/workflows/parity.yml` when the pin moved to v0.15.0-rc1, because it
+measured a frozen fixture against a moving pin — a comparison that can only
+ever fail. `contract/fixtures/bootstrap/manifest.json` is frozen at the
+v0.14.0 vendor point alongside `crates/tan-core/src/bootstrap/manifest.rs`
+(`docs/ROADMAP.md`'s crates/contract freeze), and per that document's Standing
+Rules a frozen tree is measured at its OWN freeze vendor point, not at
+`PINNED_SDK_TAG`. The frozen fixture keeps its real gate: `manifest.rs`'s
+`the_fallback_matches_the_real_manifest_field_for_field` cargo test, which
+asserts the hand-ported fallback constants equal the fixture field-for-field.
+The Python side has the mirror of that check —
+`python/tests/commands/test_bootstrap_command.py::test_the_fallback_constants_match_the_real_manifest_field_for_field`
+— reading the same frozen fixture, and it runs in `python/tests`.
+
+There is no shipped Python vendored copy for this to guard: `tan/core/
+bootstrap.py` reads `metadata/bootstrap.json` LIVE off the bound SDK root, so
+nothing in the released artefact can drift from it.
+
+The script is kept as a manual tool, not deleted. Pointed at `--sdk` = the
+v0.14.0 checkout it re-verifies the frozen fixture has not bit-rotted (`MATCH`,
+exit 0); pointed at anything newer it reports what alp-sdk's bootstrap facts
+have moved on to, and a `DIFFERS` there is EXPECTED rather than a re-vendor
+prompt — re-vendoring `contract/` would violate the freeze.
 
 ```
 python3 tests/parity/bootstrap_manifest_parity.py --sdk /path/to/an/alp-sdk/checkout
