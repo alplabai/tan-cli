@@ -79,10 +79,10 @@ pub use debug_launch::{
 };
 pub use diff::{DiffEntry, DiffKind, collect_diff_entries, prune_nulls};
 pub use flash::{
-    BackendKind, FlashBackendMeta, FlashInputs, FlashKind, FlashPlan, FlashTarget, ToolGate,
-    backend_for, jlink_commander_script, plan_baremetal_cmake_flash, plan_flash_targets,
-    plan_swd_probe, plan_xspi_flashwriter, plan_yocto_wic, plan_zephyr_west_flash, registry_keys,
-    resolve_artefact_path, tool_gate,
+    BackendKind, FlashBackendMeta, FlashInputs, FlashKind, FlashPlan, FlashTarget,
+    PENDING_PLACEHOLDER, ToolGate, backend_for, is_pending_placeholder, jlink_commander_script,
+    plan_baremetal_cmake_flash, plan_flash_targets, plan_swd_probe, plan_xspi_flashwriter,
+    plan_yocto_wic, plan_zephyr_west_flash, registry_keys, resolve_artefact_path, tool_gate,
 };
 pub use host_env::{
     HostEnvProbe, ZEPHYR_SDK_HOSTS, ZEPHYR_SDK_INSTALL_VERSION, host_environment_checks,

@@ -28,7 +28,7 @@ mod builders;
 mod registry;
 mod storage;
 
-pub use args::flash_args_has_tbd;
+pub use args::{PENDING_PLACEHOLDER, flash_args_has_tbd, is_pending_placeholder};
 pub use builders::{
     jlink_commander_script, plan_baremetal_cmake_flash, plan_swd_probe, plan_zephyr_west_flash,
 };

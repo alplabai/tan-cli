@@ -8,7 +8,9 @@ use std::path::Path;
 
 use serde_yaml::Value;
 
-use super::args::{fa_bool_checked, fa_int_checked, fa_str};
+use super::args::{
+    PENDING_PLACEHOLDER, fa_bool_checked, fa_int_checked, fa_str, is_pending_placeholder,
+};
 use super::registry::{FlashInputs, FlashPlan};
 
 const DEFAULT_BASE: &str = "0x08000000";
@@ -39,6 +41,11 @@ fn fa_raw<'a>(v: &'a Value, k: &str) -> Option<&'a Value> {
 /// back into a string (hex for an address field, decimal otherwise); and
 /// hard-errors on any other shape (bool/mapping/sequence) instead of
 /// defaulting.
+///
+/// It also hard-errors on the pending placeholder (#222), which is the one
+/// place this family and the tolerant [`fa_str`] deliberately disagree: there
+/// `TBD` reads as absent because the callers' defaults are safe, here it must
+/// not, because "the default is dangerous" is this accessor's whole premise.
 fn fa_str_checked(v: &Value, k: &str, as_hex_address: bool) -> Result<Option<String>, String> {
     let Some(raw) = fa_raw(v, k) else {
         return Ok(None);
@@ -47,6 +54,21 @@ fn fa_str_checked(v: &Value, k: &str, as_hex_address: bool) -> Result<Option<Str
         return Ok(None);
     }
     if let Some(s) = raw.as_str() {
+        // #222: the pending placeholder is an ERROR here, not "absent". This
+        // accessor exists precisely for the fields where a silent fallback to a
+        // baked-in default is dangerous, so reading an unfilled `jlink_device`
+        // as absent would flash with `DEFAULT_JLINK_DEVICE` and an unfilled
+        // `base` would program at `DEFAULT_BASE` — while the manifest was
+        // saying "not yet known". The tolerant `fa_str` reads it as absent
+        // because its callers' defaults are safe; the strict `_checked` family
+        // (`fa_bool_checked`/`fa_int_checked` already do this) refuses.
+        if is_pending_placeholder(s) {
+            return Err(format!(
+                "flash_args.{k} is still the {PENDING_PLACEHOLDER} placeholder -- the hardware \
+                 configuration for this field has not been filled in yet, and this plans a real \
+                 flash write. Fill it in in the SDK manifest."
+            ));
+        }
         return Ok((!s.is_empty()).then(|| s.to_string()));
     }
     if let Some(n) = raw.as_u64() {
@@ -842,5 +864,72 @@ mod tests {
         let inp = inputs(art, &fa, false);
         let plan = plan_baremetal_cmake_flash(&inp).unwrap();
         assert!(plan.argv.windows(2).any(|w| w[0] == "-j" && w[1] == "4"));
+    }
+
+    /// tan-cli#222, the half the `fa_str` fix does not reach. `plan_swd_probe`
+    /// reads FOUR fields through `fa_str_checked`, a second accessor whose
+    /// string branch carried the same empty-only filter — so `TBD` survived it
+    /// and a real flasher was planned against the literal placeholder.
+    ///
+    /// `TBD` is an ERROR here, not "absent", because that is what the strict
+    /// accessor is for: these are the fields whose doc comment says a silent
+    /// fallback to a baked-in default is dangerous. Reading `jlink_device: TBD`
+    /// as absent would flash a GD32G553 with `DEFAULT_JLINK_DEVICE`, and
+    /// `base: TBD` as absent would program real silicon at `DEFAULT_BASE` —
+    /// both while the manifest was saying "not yet known". The sibling
+    /// `fa_bool_checked`/`fa_int_checked` already hard-error on a present `TBD`;
+    /// this makes the string member of the family agree with them.
+    #[test]
+    fn a_pending_placeholder_never_reaches_a_spawned_probe_command() {
+        let art = Path::new("/b/build/app.bin");
+
+        // The starkest one: no validator stands behind `jlink_device`, so the
+        // literal went straight into `JLinkExe -device TBD` with
+        // `planning_only: false`.
+        let fa = yaml_val("jlink_device: TBD");
+        let err = plan_swd_probe(&inputs(art, &fa, true), |_| true)
+            .expect_err("TBD is not a J-Link device name");
+        assert!(
+            err.contains("jlink_device"),
+            "must name the unfilled field: {err}"
+        );
+
+        // `interface`/`target` are worse than unvalidated: `validate_identifier`
+        // ACCEPTS `TBD` (plain alphanumeric), and being non-empty it also
+        // suppressed the "are required" refusal — so the run planned
+        // `openocd -f interface/TBD.cfg -f target/TBD.cfg`.
+        for key in ["interface", "target"] {
+            let fa = yaml_val(&format!("{key}: TBD\nuse_openocd: true"));
+            let err = plan_swd_probe(&inputs(art, &fa, true), |_| true)
+                .expect_err("TBD is not an OpenOCD config name");
+            assert!(err.contains(key), "must name the unfilled field: {err}");
+            assert!(
+                !err.contains("TBD.cfg"),
+                "must not report the placeholder as an attempted config path: {err}"
+            );
+        }
+
+        // `base` was already refused, but by `validate_address` happening to
+        // reject a non-hex charset rather than by the accessor. Pin that it is
+        // now the unfilled-field error, naming the field to fill in.
+        let fa = yaml_val("base: TBD");
+        let err = plan_swd_probe(&inputs(art, &fa, true), |_| true)
+            .expect_err("TBD is not a flash base address");
+        assert!(err.contains("base"), "must name the unfilled field: {err}");
+
+        // Trimmed, like every other reader of the sentinel.
+        let fa = yaml_val("jlink_device: ' TBD '");
+        assert!(plan_swd_probe(&inputs(art, &fa, true), |_| true).is_err());
+
+        // A value that merely CONTAINS the letters is still a value: over-
+        // matching here would refuse real J-Link device names.
+        let fa = yaml_val("jlink_device: TBD-1");
+        let plan =
+            plan_swd_probe(&inputs(art, &fa, true), |_| true).expect("TBD-1 is a real device name");
+        assert!(
+            plan.argv
+                .windows(2)
+                .any(|w| w[0] == "-device" && w[1] == "TBD-1")
+        );
     }
 }
