@@ -259,21 +259,14 @@ contract_case!(
     validate_offline_empty_document,
     "validate-offline-empty-document"
 );
-// `som: 010` / `som: yes` — pins `validate.rs`'s `python_repr` output for the
-// two scalar shapes whose type resolution is a known, tracked (not fixed
-// here) divergence between serde_yaml's YAML 1.2 core schema and PyYAML's
-// YAML 1.1 resolver: PyYAML resolves `010` to the int 8 and `yes` to the bool
-// True, serde_yaml resolves both to plain strings. This locks in the CURRENT
-// Rust output as a regression gate, not a claim that it matches Python for
-// these two inputs.
-contract_case!(
-    validate_offline_som_scalar_leading_zero,
-    "validate-offline-som-scalar-leading-zero"
-);
-contract_case!(
-    validate_offline_som_scalar_yes,
-    "validate-offline-som-scalar-yes"
-);
+// NOT pinned here: `som: 010` and `som: yes`, whose type resolution diverges
+// between serde_yaml's YAML 1.2 core schema (plain strings `'010'`, `'yes'`)
+// and PyYAML's YAML 1.1 resolver (int `8`, bool `True`). `contract/envelopes/`
+// is SHARED — `python/tests/conformance/test_contract_envelopes.py` runs the
+// same fixtures against the Python binary — so a golden here can only pin
+// behaviour both sides agree on. Pinning one side's output makes the other
+// side's suite red by construction. The divergence is covered by per-side
+// unit tests and tracked in #277.
 contract_case!(sdk_current_no_sdk, "sdk-current-no-sdk");
 contract_case!(sdk_unknown_subcommand, "sdk-unknown-subcommand");
 contract_case!(generate_board_yaml_missing, "generate-board-yaml-missing");
