@@ -9,22 +9,35 @@ from an un-revendored SDK change.
 
 ## Source
 
-- **Current vendor point (all templates):** commit
-  `cdfe13684e362c75f6df2b190ec1c3e736c48731` — alp-sdk#1016, which rewrote the
-  `Customer workflow:` header in every example `board.yaml` from "copy this
-  directory … and `west build`" to "`tan init --from-example
-  <category>/<name>` … and `tan build`" (ADR-0020: tan is the whole command
-  surface). Six `board.yaml` files moved — `diagnostics`, `minimal` and
-  `sensor`, each for both SKUs; `edge-ai` and `iot` were unaffected because
-  their headers do not carry that line. Comment-only: no schema, core or
-  peripheral content changed. This is also `parity.yml`'s `PINNED_SDK_TAG`.
+- **Current vendor point (all templates):** **`v0.14.0`** (`ef79eab0`) — the
+  release tag, re-vendored for tan v0.4.1. Seven `README.md` files moved
+  (`diagnostics`, `minimal` and `sensor` for both SKUs, plus `iot`/E1M-AEN801),
+  and NOTHING else: all 40 changed lines differ only by the doc-version link
+  `blob/v0.13.0/` → `blob/v0.14.0/`, verified line-for-line. No schema, core,
+  peripheral or `board.yaml` content changed. `edge-ai` is untouched for both
+  SKUs because its README carries no version-pinned links at all.
+  - Re-vendored by re-running the live emit through
+    `tests/parity/scaffold_byte_parity.py`'s OWN `emit_live_scaffold`, so the
+    bytes written are by construction the bytes that gate compares against —
+    not a hand-substitution that happens to match. Run from WSL: the emit needs
+    a Linux host, and the gate cannot be checked on Windows at all.
+  - Prior vendor point: `cdfe13684e362c75f6df2b190ec1c3e736c48731` —
+    alp-sdk#1016, which rewrote the `Customer workflow:` header in every example
+    `board.yaml` from "copy this directory … and `west build`" to "`tan init
+    --from-example <category>/<name>` … and `tan build`" (ADR-0020: tan is the
+    whole command surface). Six `board.yaml` files moved; comment-only.
+  - This is also `parity.yml`'s `PINNED_SDK_TAG`, and that pin drives all FOUR
+    parity gates — bumping it re-vendors this tree, the bootstrap manifest
+    fixture, the toolchain lock and the kconfig golden together, or the gates
+    go red. They are one atomic unit, not four independent bumps.
   - Re-vendored by re-running the emit, not by editing these files. A
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
 - Repo: `alplabai/alp-sdk`
-- Ref: `v0.13.0` (release tag — `git checkout v0.13.0` reproduces the exact
+- Ref: `v0.14.0` (release tag — `git checkout v0.14.0` reproduces the exact
   pinned commit; `dev`'s tip does not)
-- Commit: **v0.13.0 (`93ef5726`)** — `minimal` was re-vendored at this commit
+- Commit: **v0.14.0 (`ef79eab0`)** — the seven READMEs above. History below.
+- Previous: **v0.13.0 (`93ef5726`)** — `minimal` was re-vendored at this commit
   (only its `README.md` doc-version link changed, `v0.11.1` -> `v0.13.0`; the
   scaffold content itself is unchanged since the `a0849e10` vendor point
   below). `sensor` and `edge-ai` were vendored fresh at this same commit --
