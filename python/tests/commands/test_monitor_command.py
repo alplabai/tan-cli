@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import pytest
 import typer
@@ -142,7 +143,7 @@ def test_frozen_interpreter_spawns_a_path_python_not_sys_executable(monkeypatch)
         app, ["--port", "COM7", "--baud", "9600", "--format", "json"]
     )
     assert result.exit_code == 0, result.stdout
-    assert captured["argv"][0] == monitor_cmd._planner_python()
+    assert captured["argv"][0] == monitor_cmd._planner_python(str(Path.cwd()), None)
     assert captured["argv"][0] != sys.executable
 
 
