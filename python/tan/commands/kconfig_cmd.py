@@ -218,7 +218,7 @@ def _fail(
         emit(
             Envelope(
                 "kconfig",
-                Project(root=root, board_yaml=board_path),
+                Project.resolved(root, board_path),
                 _empty_data(core),
                 [Issue(code, "error", message)],
                 exit_code,
@@ -512,7 +512,7 @@ def kconfig(
         emit(
             Envelope(
                 "kconfig",
-                Project(root=root, board_yaml=board_path),
+                Project.resolved(root, board_path),
                 data,
                 [],
                 ExitCode.SUCCESS,

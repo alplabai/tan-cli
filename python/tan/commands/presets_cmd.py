@@ -604,7 +604,7 @@ def presets(
         emit(
             Envelope(
                 "presets",
-                Project(root=root, board_yaml=board_path),
+                Project.resolved(root, board_path),
                 {
                     "schemaVersion": DATA_SCHEMA_VERSION,
                     # `null`, not omitted, when unresolved: the wizard reads this

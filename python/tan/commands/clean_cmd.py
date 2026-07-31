@@ -731,7 +731,8 @@ def _run(
     """The whole command as a computation returning one outcome. Nothing here
     emits or exits; [`clean`] does both exactly once."""
     workspace_root, board_yaml = resolve_project_paths(project_arg, board_yaml_arg)
-    project = Project(root=workspace_root, board_yaml=board_yaml)
+    # tan-cli#236: `boardYaml` reported only when the file really exists.
+    project = Project.resolved(workspace_root, board_yaml)
     resolved_sdk = resolve_sdk(sdk_root_arg, workspace_root)
     sdk = SdkInfo(resolved_sdk[0], resolved_sdk[1]) if resolved_sdk else None
 

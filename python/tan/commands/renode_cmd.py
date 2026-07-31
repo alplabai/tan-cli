@@ -364,10 +364,9 @@ def _run(
     `(exit_code, data, issues, text_lines, sdk, project)`."""
     app_path = _normalize_join(cwd, app_path_arg)
     board_yaml_path = os.path.join(app_path, "board.yaml")
-    project = Project(
-        root=app_path,
-        board_yaml=board_yaml_path if os.path.isfile(board_yaml_path) else None,
-    )
+    # tan-cli#236: routed through the shared seam, though this site already
+    # existence-checked by hand.
+    project = Project.resolved(app_path, board_yaml_path)
 
     build_root = _resolve_root_arg(build_root_arg, cwd, os.path.join(app_path, "build"))
     log_path = _resolve_root_arg(log_arg, cwd, os.path.join(build_root, "renode.log"))

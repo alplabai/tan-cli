@@ -163,11 +163,13 @@ def _resolve_project_reporting_fields(
     it merely reports (tan-cli#111 follow-up) -- and skipping it is also what
     keeps this command free of any SDK-checkout dependency (I-32).
 
-    `board.yaml`'s existence is NOT checked, matching
+    `board.yaml`'s existence is NOT checked HERE, matching
     `project.rs::resolve_board_yaml_path`, which joins the configured relative
-    path onto the workspace root unconditionally. That is why the four goldens
-    report `__WORKDIR__/board.yaml` from a scratch directory holding no
-    `board.yaml` at all: the field names where one WOULD live.
+    path onto the workspace root unconditionally -- this function only names
+    where a `board.yaml` WOULD live. [`_run`]'s caller is the seam that checks
+    (tan-cli#236, `Project.resolved`): the four goldens run in a scratch
+    directory holding no `board.yaml` at all and report a `null`
+    `project.boardYaml`, not this joined path.
     """
     workspace_root = _normalise(project_arg)
     configured = board_yaml_arg or "board.yaml"
@@ -727,7 +729,9 @@ def _run(
     project_root, board_yaml = _resolve_project_reporting_fields(
         project_arg, board_yaml_arg
     )
-    project = Project(root=project_root, board_yaml=board_yaml)
+    # tan-cli#236, the pair of #170 above: `boardYaml` reported only when a
+    # file is really at the resolved path.
+    project = Project.resolved(project_root, board_yaml)
 
     # Fill the `<resolved-...>` placeholders from what this project's own build
     # recorded (#66). Nothing here fails the command: pre-build, or against a

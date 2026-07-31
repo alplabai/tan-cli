@@ -1103,9 +1103,13 @@ def doctor(
     # Forward slashes -- the established envelope contract on this seam
     # (`build_cmd.build`, `flash_cmd._resolve_project`), not the native
     # separators `str(Path(...))` would emit on Windows.
-    project = Project(
-        root=_abs_posix(str(workspace_root)),
-        board_yaml=_abs_posix(board_yaml) if board_yaml is not None else None,
+    #
+    # tan-cli#236: `boardYaml` reported only when the file really exists. An
+    # explicit `--board-yaml` skips the `is_file()` discovery guard above, so
+    # without this it could still name a path nothing sits at.
+    project = Project.resolved(
+        _abs_posix(str(workspace_root)),
+        _abs_posix(board_yaml) if board_yaml is not None else None,
     )
 
     try:

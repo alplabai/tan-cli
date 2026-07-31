@@ -1472,7 +1472,9 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     flags = {"no_pip": no_pip, "no_west": no_west, "print_env": print_env}
 
     root, board_path = resolve_project_paths(project, board_yaml)
-    reported_project = Project(root=root, board_yaml=board_path)
+    # tan-cli#236: `board_yaml` is reported only when a file is really there --
+    # `board_path` names where one WOULD live regardless.
+    reported_project = Project.resolved(root, board_path)
 
     active = resolve_sdk_tiered(sdk_root_flag, Path(root))
     resolved = active.path if active.path and Path(active.path).joinpath(*SDK_MARKER).exists() else None
@@ -1635,7 +1637,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 # downstream may keep naming a location the checkout vacated.
                 root = _rebase(root, old_root, sdk_root)
                 board_path = _rebase(board_path, old_root, sdk_root)
-                reported_project = Project(root=root, board_yaml=board_path)
+                reported_project = Project.resolved(root, board_path)
                 _write_global_sdk_pointer(sdk_root)
 
     # Host gate: refuse ONLY a project whose every in-play core is Yocto, on a

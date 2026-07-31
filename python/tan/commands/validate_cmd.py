@@ -402,12 +402,17 @@ def _emit(
             "outcome": outcome,
             "issueCount": len(issues),
             "commandLine": "",
+            # `data.boardYamlPath` is UNTOUCHED by tan-cli#236 -- it names where
+            # tan looked even on the missing-board refusal below; only
+            # `project.boardYaml` (Rust's starkest instance of the bug: the
+            # refusal one line below says the file does not exist, in the same
+            # envelope that used to still name it) is existence-filtered.
             "boardYamlPath": board_path,
         }
         emit(
             Envelope(
                 "validate",
-                Project(root=root, board_yaml=board_path),
+                Project.resolved(root, board_path),
                 data,
                 issues,
                 exit_code,

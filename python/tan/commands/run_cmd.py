@@ -380,7 +380,9 @@ def run(
     sdk_root_for_stamp = (
         str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
     )
-    project_obj = Project(root=build_root, board_yaml=board_yaml)
+    # tan-cli#236: `boardYaml` reported only when the file really exists -- an
+    # explicit `--board-yaml` skips the `is_file()` discovery guard above.
+    project_obj = Project.resolved(build_root, board_yaml)
 
     try:
         exit_code, data, issues, text_lines = _run(

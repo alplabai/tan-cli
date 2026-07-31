@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Machine-readable result envelope. JSON mode writes exactly one to stdout."""
 import json
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,6 +25,33 @@ class Project:
 
     def as_dict(self) -> dict[str, Any]:
         return {"root": self.root, "boardYaml": self.board_yaml}
+
+    @staticmethod
+    def resolved(root: str | None, board_yaml: str | None) -> "Project":
+        """The `project` block for a RESOLVED project -- the one seam every
+        command that reports a real (as opposed to hardcoded-None) `board_yaml`
+        should build it through (tan-cli#236, #170; mirrors the Rust CLI's
+        `Project::from_context` in `crates/tan-cli/src/envelope.rs`).
+
+        `board_yaml` is reported only when a file is really there. The doc has
+        always read "if found"; before this fix, every call site cloned a
+        resolver's `<root>/board.yaml` straight through regardless of whether
+        anything was there, so a consumer that opened it got ENOENT. `null` is
+        not a new value here -- it is what the field already carries wherever
+        resolution finds nothing.
+
+        `root` passes through untouched -- tan-cli#236 rules a
+        directory-is-not-a-project question explicitly out of scope.
+
+        Deliberately NOT pushed into the resolvers that compute `board_yaml`
+        (`resolve_project_paths`, `resolve_project_context`, ...): several
+        commands need that unfiltered path precisely when the file is absent --
+        a "no board.yaml at `<path>`" refusal message, in particular -- so
+        nulling it at the resolver would strip the path out of the very message
+        that names it. Reporting is the seam; the resolver is not.
+        """
+        exists = board_yaml is not None and os.path.exists(board_yaml)
+        return Project(root=root, board_yaml=board_yaml if exists else None)
 
 
 @dataclass(frozen=True)

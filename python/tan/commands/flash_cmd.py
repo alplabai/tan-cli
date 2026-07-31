@@ -186,10 +186,10 @@ def workspace_root(project: str | None = None) -> str:
 def _resolve_project(root: str, board_yaml: str | None) -> Project:
     """`(project.root, project.boardYaml)`, both posix.
 
-    `board.yaml`'s existence is NOT checked, matching
-    `project.rs::resolve_board_yaml_path`, which joins the configured relative
-    path onto the workspace root unconditionally -- the field names where one
-    WOULD live. Verified: the oracle reports `<cwd>/board.yaml` from a scratch
+    `board.yaml`'s existence is NOT checked by the join below, matching
+    `project.rs::resolve_board_yaml_path` -- it names where one WOULD live. The
+    `Project.resolved` call at the end is the seam that checks (tan-cli#236):
+    `project.boardYaml` is `null`, not this joined path, from a scratch
     directory holding no `board.yaml` at all.
 
     Every step is wrapped: `os.path.abspath` calls `getcwd()` for a relative
@@ -205,8 +205,8 @@ def _resolve_project(root: str, board_yaml: str | None) -> Project:
         )
     except (OSError, ValueError):
         return Project(root=None, board_yaml=None)
-    return Project(
-        root=resolved_root.replace("\\", "/"), board_yaml=resolved.replace("\\", "/")
+    return Project.resolved(
+        resolved_root.replace("\\", "/"), resolved.replace("\\", "/")
     )
 
 

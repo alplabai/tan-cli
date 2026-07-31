@@ -61,15 +61,17 @@ class ProjectContext:
 
     #: `project.root` -- posix, absolute.
     workspace_root: str
-    #: `project.boardYaml` -- posix, absolute. Existence is NOT checked, matching
-    #: `project.rs::resolve_board_yaml_path`: the field names where one WOULD be.
+    #: The RESOLVER's own answer -- posix, absolute, joined onto `workspace_root`
+    #: unconditionally, matching `project.rs::resolve_board_yaml_path`: the
+    #: field names where one WOULD be. Existence is NOT checked here; `project()`
+    #: below is the seam that checks it (tan-cli#236).
     board_yaml: str
     #: The envelope's `sdk` block, or `None` when nothing resolved (absent, never
     #: `null`).
     sdk: SdkInfo | None
 
     def project(self) -> Project:
-        return Project(root=self.workspace_root, board_yaml=self.board_yaml)
+        return Project.resolved(self.workspace_root, self.board_yaml)
 
 
 def resolve_project_context(

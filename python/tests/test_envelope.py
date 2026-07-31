@@ -5,6 +5,30 @@ from tan.envelope import Envelope, Issue, Project, SdkInfo
 from tan.exit_codes import ExitCode
 
 
+def test_project_resolved_nulls_a_board_yaml_that_does_not_exist(tmp_path):
+    """tan-cli#236: `Project.resolved` must report `null`, not the joined path,
+    when nothing is really at it -- the shared seam every command with a real
+    (resolver-derived) `board_yaml` should route through."""
+    project = Project.resolved(str(tmp_path), str(tmp_path / "board.yaml"))
+    assert project.root == str(tmp_path)
+    assert project.board_yaml is None
+
+
+def test_project_resolved_keeps_a_board_yaml_that_exists(tmp_path):
+    board = tmp_path / "board.yaml"
+    board.write_text("", encoding="utf-8")
+    project = Project.resolved(str(tmp_path), str(board))
+    assert project.board_yaml == str(board)
+
+
+def test_project_resolved_passes_root_through_untouched():
+    """tan-cli#236 rules a directory-is-not-a-project question explicitly out
+    of scope -- only `board_yaml` is existence-filtered."""
+    project = Project.resolved("/does/not/exist", None)
+    assert project.root == "/does/not/exist"
+    assert project.board_yaml is None
+
+
 def test_sdk_key_is_absent_when_none_not_null():
     """Absent, never null -- this is what keeps the contract goldens byte-identical."""
     env = Envelope("test", Project(root="/p", board_yaml=None), 1, [], ExitCode.SUCCESS)

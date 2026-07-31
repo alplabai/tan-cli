@@ -791,6 +791,12 @@ def generate(
     # reflects back what the caller typed, which is what keeps the conformance
     # golden reproducible on any machine (`project.root == "."`,
     # `boardYaml == "board.yaml"`).
+    #
+    # tan-cli#236: NOT built via `Project.resolved` -- that would existence-check
+    # this as-given string against the real cwd, which is wrong the moment
+    # `--project` differs from it (the resolved `board_path` below, not this
+    # string, is what must be checked). `reported` is corrected in place, right
+    # below, at the one guard where the two can disagree.
     reported = Project(
         root=project if project else ".",
         board_yaml=board_yaml if board_yaml else "board.yaml",
@@ -829,6 +835,11 @@ def generate(
         board_path = _resolve_board_path(board_yaml, workspace_root)
 
         if not board_path.exists():
+            # tan-cli#236: the refusal below says the file does not exist, so
+            # the SAME envelope's `project.boardYaml` must not still name it
+            # (Rust's own starkest instance of this bug -- see
+            # `crates/tan-cli/src/commands/generate.rs`).
+            reported = Project(root=reported.root, board_yaml=None)
             raise GenerateError(
                 "generate.board-yaml-missing",
                 "board.yaml path could not be resolved or the file does not exist.",

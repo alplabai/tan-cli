@@ -1137,7 +1137,10 @@ def build(
     sdk_root_for_stamp = (
         str(normalize_path(workspace_root / sdk_root)) if sdk_root is not None else None
     )
-    project = Project(root=build_root, board_yaml=board_yaml)
+    # tan-cli#236: `boardYaml` reported only when the file really exists --
+    # `board_yaml` itself stays unfiltered for `_build` below, which needs the
+    # unconditional path.
+    project = Project.resolved(build_root, board_yaml)
 
     try:
         exit_code, data, issues = _build(
