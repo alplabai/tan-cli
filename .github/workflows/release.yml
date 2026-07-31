@@ -96,8 +96,28 @@ jobs:
     permissions:
       contents: read
 
+  # ci.yml is Rust-only (its own header comment says so); python/tests never
+  # ran on a release tag before this job, so v0.5.0-rc.1 could ship with the
+  # entire Python port failing. `python_only: true` is what actually confines
+  # parity.yml's `workflow_call` run to the `python-tests` job —
+  # seam1-plan-shape/seam2/first-blink read that input (negated) in their
+  # `if:`, not `github.event_name`: inside a called workflow `github` is the
+  # CALLER's context (this file's own `push` trigger), so
+  # `github.event_name != 'workflow_call'` is always true and cannot gate
+  # anything — an explicit input is the only way this caller can tell
+  # parity.yml which jobs to skip. seam1/seam2/first-blink already gate every
+  # commit on `main` as tan-cli's own PR check, so a release tag (cut from an
+  # already-green commit) gains nothing re-running them here; see parity.yml's
+  # `workflow_call:` comment.
+  python-gates:
+    uses: ./.github/workflows/parity.yml
+    with:
+      python_only: true
+    permissions:
+      contents: read
+
   build:
-    needs: [verify-version, gates]
+    needs: [verify-version, gates, python-gates]
     strategy:
       fail-fast: false
       matrix:

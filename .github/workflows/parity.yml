@@ -24,6 +24,14 @@
 name: parity
 
 on:
+  # Direct pushes to `main` (an admin merge, a hotfix, a back-merge) open no PR,
+  # so without this the three jobs below never ran on those commits at all --
+  # and release.yml's `python-gates` call then skipped them a SECOND time, on
+  # the belief they already had. `ci.yml` has always carried
+  # `push: branches: [main]` for the Rust gates; this is the Python side of the
+  # same guarantee, and it is what makes the `python_only` comment below true.
+  push:
+    branches: [main]
   pull_request:
   # ADR-0020's cross-repo trigger. alp-sdk fires this on every push that touches
   # its contract surface, and the payload carries the SHA to test against --
@@ -40,6 +48,44 @@ on:
   # body on every send. Do not "tidy" it onto a feature branch only.
   repository_dispatch:
     types: [alp-sdk-planner-change]
+  # release.yml's `python-gates` job calls this workflow so a release tag is
+  # gated on the Python suite too, not just ci.yml's Rust jobs -- a release tag
+  # can be cut from any green-on-main commit, and until this existed the Python
+  # port (python/tests) had no vote on whether `v0.5.0-rc.1` ships. See the
+  # `python-tests` job below for the collected-test counts and the condition
+  # they were measured under -- they move with the worktree and the SDK pin, so
+  # they are not repeated here. Deliberately reuses this workflow rather than
+  # duplicating python-tests into release.yml: PINNED_SDK_TAG + the alp-sdk
+  # checkout steps live here. seam1/seam2/first-blink are gated on the
+  # `python_only` input below -- with the `push: branches: [main]` trigger
+  # above they now genuinely run on every commit that LANDS on `main`, by PR or
+  # by direct push, so re-running them for a tag cut from `main` would add
+  # matrix minutes and no coverage; python-tests is the one job a release has
+  # never run before, so it is the one this trigger adds.
+  #
+  # The residual assumption, stated rather than hidden: a tag cut from a commit
+  # that is NOT on `main` gets no seam1/seam2/first-blink vote. release.yml:90
+  # refuses that same assumption for the Rust gates and re-runs ci.yml
+  # unconditionally. Tag from `main` and the two agree; tag from anywhere else
+  # and the Python side is deliberately the weaker of the two. If tags ever get
+  # cut off-main, delete the `python_only` skip rather than re-deriving this.
+  #
+  # `github.event_name != 'workflow_call'` looks like the obvious guard for
+  # "skip on workflow_call" but is wrong for a REUSABLE workflow: inside a
+  # called workflow, the `github` context is the CALLER's, not the callee's --
+  # `github.event_name` here is release.yml's own trigger (`push`), never
+  # `workflow_call` itself. That expression is therefore always true and never
+  # suppresses anything; a release tag would run seam1/seam2/first-blink in
+  # full regardless. The actual signal has to travel as an explicit input.
+  workflow_call:
+    inputs:
+      # Set true only by release.yml's `python-gates` job. Absent (null, which
+      # is falsy) on both `pull_request` and `repository_dispatch`, so those
+      # two paths are unaffected by this input's existence.
+      python_only:
+        description: "Run only python-tests (release.yml's python-gates call); skip seam1/seam2/first-blink, which the push+pull_request triggers already run on every commit that lands on main."
+        type: boolean
+        default: false
 
 env:
   # Fallback alp-sdk ref for a plain `pull_request` run (no dispatch payload).
@@ -71,6 +117,14 @@ env:
 jobs:
   seam1-plan-shape:
     name: "seam1 -- plan-shape parity"
+    # Skipped only when release.yml's `python-gates` job passes
+    # `python_only: true` -- see the trigger's own comment above for why
+    # `github.event_name != 'workflow_call'` cannot express this (it is always
+    # true inside a called workflow, so it never actually gated anything).
+    # The `push`/`pull_request` triggers above run this on every commit that
+    # lands on `main`, so a tag cut from `main` gains nothing re-running it --
+    # see the trigger comment for the off-main tag case that leaves open.
+    if: ${{ !inputs.python_only }}
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
@@ -267,9 +321,19 @@ jobs:
       # see its comment for why blocking on that question is the wrong shape.
       #
       # Deliberately NOT the full `python/tests` suite here (ports + parity,
-      # minutes not seconds, needs its own alp-sdk checkout) -- that suite runs
-      # in NO workflow today, full stop; this step only arms the
-      # always-must-run gates subset that was silently unwired everywhere.
+      # minutes not seconds, needs its own alp-sdk checkout) -- that now runs
+      # in the `python-tests` job further down this file, which deliberately
+      # `--ignore=tests/gates`: this JOB already arms all five gate files (8
+      # collected tests) across the three steps below -- four of them in this
+      # step against the FROZEN audit commit, `test_jlink_aen_device_freshness`
+      # live and blocking in its own step, and `test_planner_relocation_freshness`
+      # additionally live and warn-only on `repository_dispatch`. Each is bound
+      # to the ref that makes its verdict mean something.
+      # Running them again in `python-tests` against PINNED_SDK_TAG -- a THIRD,
+      # uncoordinated ref that can legitimately sit on either side of the audit
+      # commit -- would reintroduce a false positive, not add coverage. This
+      # step's job is only to arm the always-must-run gates subset that was
+      # silently unwired everywhere before it existed.
       - name: python/tests/gates (dependency, issue-code, hardware-fact, planner self-consistency)
         working-directory: python
         env:
@@ -346,6 +410,10 @@ jobs:
   # ubuntu-latest runner in-job. The blocker had expired.
   seam2:
     name: "seam2 -- materialise + real build + Renode smoke"
+    # Skipped only under release.yml's `python_only: true` call -- see
+    # seam1-plan-shape's `if:` comment above for why `github.event_name`
+    # cannot express this.
+    if: ${{ !inputs.python_only }}
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
@@ -660,6 +728,10 @@ jobs:
   # init -> build, in that order, on a machine that starts with none of it.
   first-blink:
     name: "first blink -- tan bootstrap -> init -> build"
+    # Skipped only under release.yml's `python_only: true` call -- see
+    # seam1-plan-shape's `if:` comment above for why `github.event_name`
+    # cannot express this.
+    if: ${{ !inputs.python_only }}
     runs-on: ubuntu-latest
     steps:
       - name: checkout tan-cli
@@ -854,3 +926,128 @@ jobs:
             /tmp/first-blink-doctor-after.json
             /tmp/first-blink-build.log
           if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # `python/tests` ran on NO CI machine at all before this job (see the collect
+  # counts a few lines down -- collection depends on ALP_SDK_ROOT and
+  # --ignore=tests/gates; this job runs with both bound). `ci.yml` runs the
+  # four cargo gates plus cross-platform build/MSRV checks only -- grep for
+  # `pytest` in that file returns zero hits -- and BEFORE d9a22c0 no slice of
+  # `python/tests` ran in any workflow at all. `git show --stat d9a22c0` is
+  # insertions-only (87/0 on this file): it CREATED the gate step rather than
+  # narrowing an existing one. SINCE d9a22c0/ecab9da, `tests/gates` is the only
+  # slice any workflow invokes (the five gate files armed by seam1
+  # above). Every OTHER test in the port -- unit, command, oracle-parity,
+  # planner byte-parity, INCLUDING the flash-path refusals standing between a
+  # customer and an unrecoverable MRAM write -- merged with zero gate value: a
+  # regression in any of them could not turn CI red.
+  #
+  # Wired with BOTH oracles armed, not the bare interpreter alone, because a
+  # job that leaves most of its tests silently skipped reports green having
+  # checked nothing -- worse than no job:
+  #   * `ALP_SDK_ROOT` -- this job's own alp-sdk checkout, the same
+  #     PINNED_SDK_TAG seam1/seam2 already use, so the planner/conformance
+  #     suites execute instead of self-skipping. Also changes what pytest
+  #     COLLECTS, not just what runs: several suites parametrize over the
+  #     checkout's own `metadata/**`/`examples/**`, so an unset root
+  #     under-collects too.
+  #
+  #     NO absolute collected count is recorded here, deliberately. One prior
+  #     revision of this comment cited a single figure that stopped matching
+  #     either input; the figures that replaced IT then moved by 26 within a
+  #     single session. An absolute here rots every time either tree moves, so
+  #     only the stable facts are kept: binding `ALP_SDK_ROOT` strictly
+  #     INCREASES collection, and `--ignore=tests/gates` removes exactly 8
+  #     tests (the five gate files) -- the one figure that does not rot,
+  #     because it depends on this repo alone. Need an absolute? Measure it:
+  #     `python -m pytest --collect-only -q` from `python/`. Do not write the
+  #     answer back into this comment.
+  #   * a locally built Rust `tan` -- `tests/parity/oracle.py::rust_binary()`
+  #     auto-discovers `target/{release,debug}/tan{.exe}`, so building it here
+  #     is enough; no `TAN_RUST_BINARY` needed for this job's own checkout.
+  #
+  # `--ignore=tests/gates`: NOT because those tests don't matter, but because
+  # they already run, correctly, in seam1 above -- all five files, each bound
+  # to the specific ref that makes its verdict mean something: the frozen audit
+  # commit for four of them, the live checkout for
+  # `test_jlink_aen_device_freshness`, plus a live warn-only re-run of
+  # `test_planner_relocation_freshness` on dispatch. Running them again here
+  # against a THIRD, uncoordinated ref would reintroduce the exact
+  # false-positive d9a22c0/ecab9da exists to prevent (PINNED_SDK_TAG can sit on
+  # either side of the audit commit with no guarantee the two agree).
+  #
+  # No Zephyr SDK / west workspace / Renode here -- that stays seam2/
+  # first-blink's job. `native_sim` e2e and the west-real-build parity cases
+  # already self-skip, loudly, with a named reason when the toolchain is
+  # absent (see their own docstrings); this job proves that skip still fires
+  # for the right reason on all three platforms, not that it never fires.
+  #
+  # The `monitor` extra is installed, not left absent: without pyserial,
+  # `_run_monitor`'s own `import serial` precheck (tan/commands/monitor_cmd.py)
+  # raises before six `test_monitor_command.py` cases ever reach the
+  # miniterm-spawn/exit-code behaviour they name, so every one of them fails as
+  # `monitor.pyserial-missing` instead. Installing the extra is cheaper than
+  # rewriting those cases to skip, and it is the only way any of `tan
+  # monitor`'s non-hardware-gated logic gets checked in CI at all.
+  #
+  # Matrix mirrors ci.yml's own Rust `test` job for the same reason it gives:
+  # `tan`'s path handling (os.pathsep env append, `.venv` discovery, `.exe`
+  # suffixes) differs per host, and the Python port re-implements exactly that
+  # handling -- untested on two of three platforms is not a smaller risk here
+  # than it is for the Rust side.
+  python-tests:
+    name: "python -- pytest across python/ (${{ matrix.os }})"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: checkout tan-cli
+        uses: actions/checkout@v4
+        with:
+          # Same rule as every other job in this file -- see seam1's comment.
+          ref: ${{ github.event_name == 'repository_dispatch' && 'dev' || '' }}
+
+      - name: resolve alp-sdk ref
+        id: sdk_ref
+        shell: bash
+        run: |
+          ref='${{ github.event.client_payload.sdk_ref || env.PINNED_SDK_TAG }}'
+          echo "ref=${ref}" >> "$GITHUB_OUTPUT"
+
+      - name: clone alp-sdk
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.sdk_ref.outputs.ref }}
+          path: alp-sdk
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          rustflags: "" # keep parity with ci.yml's local-gate rationale
+
+      - name: install alp-tan[monitor] + pytest
+        shell: bash
+        working-directory: python
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -e ".[monitor]" pytest
+
+      # Auto-discovered by tests/parity/oracle.py off target/{release,debug}/
+      # tan{.exe} -- no TAN_RUST_BINARY needed for this job's own build.
+      - name: build the Rust tan (parity oracle)
+        run: cargo build --locked --bin tan
+
+      - name: pytest (python/tests, excluding tests/gates -- see seam1 above)
+        shell: bash
+        working-directory: python
+        env:
+          ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
+        run: python -m pytest -q --ignore=tests/gates

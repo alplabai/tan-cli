@@ -13,3 +13,8 @@ __pycache__/
 /python/.venv-build/
 python/build/
 python/*.egg-info/
+# `tan doctor` support bundles. Written into the repo root by design, but they
+# snapshot the DEVELOPER's machine -- one already carried a literal
+# `C:\Users\<name>` home path. This is a public repo; they must never be
+# committable by a stray `git add -A`.
+/.alp-support/
