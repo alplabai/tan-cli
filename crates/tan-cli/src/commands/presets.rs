@@ -122,10 +122,7 @@ pub fn run(g: &GlobalArgs) -> CommandRun {
     } else {
         presets_text(&data, g)
     };
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
     let json = g.is_json().then(|| {
         Envelope::new("presets", project, data, issues, ExitCode::Success.code()).to_json()
     });

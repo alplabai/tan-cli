@@ -451,6 +451,54 @@ pub fn resolve_sdk_root(g: &GlobalArgs, workspace_root: &Path) -> Option<PathBuf
     discovered
 }
 
+/// Read `sku`'s SoM preset and its resolved silicon's SoC-JSON document, both
+/// under `<metadata_root>` (`<sdk_root>/metadata`): `e1m_modules/<sku>.yaml`
+/// -> `silicon` (`vendor:family:part`) -> `socs/<vendor>/<family>/<part>.json`.
+///
+/// Shared by `tan size`'s budget resolution and `tan debug-config`'s SDK
+/// debug-probe-identity fallback (alp-sdk#1026 review finding #2) so this
+/// metadata-layout walk lives in exactly ONE place — a second copy that could
+/// silently drift from this one on a `silicon`-triple or metadata-layout
+/// change is the exact RFC #843 shape #1026 itself is about.
+///
+/// Deliberately returns the RAW preset + SoC document rather than an already-
+/// `resolve_variant`'d `SocVariant`: the two callers want different match
+/// policies. `tan size` allows the `sku` reverse-fallback (a stale/`TBD`
+/// `silicon_variant` still gets *a* budget); `tan debug-config` must not (a
+/// drifted preset would still connect a J-Link session to the WRONG part,
+/// silently — alp-sdk#1026 review finding #7), so it calls `resolve_variant`
+/// with `sku: None` to disable that branch. Each caller also reads different
+/// top-level SoC fields (`variants`, or `soc_flash_mb`/`cores`), which a
+/// pre-resolved `SocVariant` alone could not carry.
+///
+/// Best-effort: any missing/unreadable file, malformed YAML/JSON, or a `sku`
+/// whose preset names no 3-part `silicon` resolves to `None`.
+pub fn read_sdk_som_and_soc(
+    metadata_root: &Path,
+    sku: &str,
+) -> Option<(tan_core::SomPreset, serde_json::Value)> {
+    let preset_path = metadata_root
+        .join("e1m_modules")
+        .join(format!("{sku}.yaml"));
+    let preset_text = std::fs::read_to_string(&preset_path).ok()?;
+    let preset = tan_core::parse_som_preset(&preset_text).ok()?;
+    if preset.silicon.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = preset.silicon.split(':').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let soc_path = metadata_root
+        .join("socs")
+        .join(parts[0])
+        .join(parts[1])
+        .join(format!("{}.json", parts[2]));
+    let soc_text = std::fs::read_to_string(&soc_path).ok()?;
+    let soc: serde_json::Value = serde_json::from_str(&soc_text).ok()?;
+    Some((preset, soc))
+}
+
 /// Report the SDK root + tier a [`resolve_sdk_root`] branch actually returned,
 /// to [`crate::sdk_report`] — never a fresh resolution (see that module: this
 /// is the branch that already ran, not a second lookup).

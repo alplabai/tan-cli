@@ -84,10 +84,7 @@ struct Notice {
 /// `tan image` entry.
 pub fn run(g: &GlobalArgs, args: &ImageArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 

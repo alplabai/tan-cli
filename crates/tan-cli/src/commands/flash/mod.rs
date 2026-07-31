@@ -70,10 +70,7 @@ struct FlashData {
 /// `tan flash` entry.
 pub fn run(g: &GlobalArgs, args: &FlashArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     // SDK root is required (faithful: the Python `find_sdk_root() is None` die).
     let sdk_root = match resolve_sdk_root(g, &cli_workspace_root(g)) {

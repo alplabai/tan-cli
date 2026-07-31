@@ -74,8 +74,8 @@ pub use debug::{
 };
 pub use debug_launch::{
     LaunchJsonWritePlan, LaunchResolution, apply_launch_resolution, create_launch_draft,
-    create_launch_json_write_plan, is_unresolved_placeholder, launch_preview_document,
-    launch_preview_notes,
+    create_launch_json_write_plan, fill_debug_probe_identity_gaps, is_unresolved_placeholder,
+    launch_preview_document, launch_preview_notes, sdk_identity_overwrites,
 };
 pub use diff::{DiffEntry, DiffKind, collect_diff_entries, prune_nulls};
 pub use flash::{
@@ -142,9 +142,10 @@ pub use sdk_catalogue::{
     parse_soc_spec, parse_som_preset,
 };
 pub use size::{
-    MemoryBudget, SliceSize, SocVariant, WARN_FRACTION, build_size_report, classify, core_token,
-    footprint_total, human_bytes, over_budget_rows, parse_berkeley_size, region_cell, region_json,
-    render_table_lines, resolve_budget, resolve_variant, round1, unknown_budget_rows,
+    MemoryBudget, SliceSize, SocVariant, SocVariantDebug, WARN_FRACTION, build_size_report,
+    classify, core_token, footprint_total, human_bytes, over_budget_rows, parse_berkeley_size,
+    region_cell, region_json, render_table_lines, resolve_budget, resolve_variant, round1,
+    unknown_budget_rows,
 };
 pub use validate::{
     Outcome, ParseError, Severity, ValidationIssue, ValidationResult, ValidatorExecution,

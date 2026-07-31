@@ -292,6 +292,27 @@ contract_case!(
     debug_config_preview_native_host,
     "debug-config-preview-native-host"
 );
+// alp-sdk#1026 review finding #6: the other three goldens above ship no
+// `board.yaml`/`sdk/`, so `fill_debug_probe_identity_from_sdk` returns early
+// on every one of them and this PR's own work is invisible to this suite --
+// green here proves nothing broke, not that the new resolution reaches the
+// wire. This case ships a synthetic `sdk/` (`copy_fixture_inputs` copies
+// subtrees recursively for exactly this) so `configuration.device` pins the
+// real resolved `"Cortex-M55"`, not `"<resolved-device>"`.
+//
+// SECOND, INDEPENDENT REASON THIS CASE MUST KEEP ITS ROOT `board.yaml`
+// (tan-cli#236): it is the ONLY golden whose scratch directory has one, so it
+// is the only one pinning `project.boardYaml` NON-null. Every other case here
+// pins the null direction. Drop the fixture — or move it under a subdirectory —
+// and a regression that nulls the field for everyone passes this whole suite
+// green, because the four `debug-config-preview-*` siblings and both
+// `presets-*` cases EXPECT null and would keep expecting it. Proved by
+// mutation: forcing `Project::from_context_with`'s filter to reject
+// unconditionally reds this case and no other golden.
+contract_case!(
+    debug_config_preview_zephyr_mcu_sdk_identity,
+    "debug-config-preview-zephyr-mcu-sdk-identity"
+);
 
 /// Not a golden-diff case: `tan --version`'s first stdout line is its own
 /// small contract (the vscode extension parses it to gate feature
