@@ -75,7 +75,7 @@ version number.)
 # Resolve latest ONCE (or set TAG=vX.Y.Z yourself), same redirect install.sh follows.
 TAG=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
   https://github.com/alplabai/tan-cli/releases/latest | sed 's#.*/tag/##')
-ASSET=tan-x86_64-unknown-linux-musl   # swap for your platform; musl = static, any distro
+ASSET=tan-x86_64-unknown-linux-gnu   # swap for your platform; gnu, not musl -- see docs/release-contract.md's glibc floor (a PyInstaller freeze can't produce a static musl artefact; the floor is measured per-release, published in that release's notes)
 BASE=https://github.com/alplabai/tan-cli/releases/download/$TAG
 
 # macOS has shasum, not sha256sum -- pick whichever is present.
