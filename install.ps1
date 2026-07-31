@@ -99,7 +99,24 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("tan-" + [Guid]::NewGuid().ToString
 $sumsTmp = "$tmp.checksums.txt"
 Write-Host "install.ps1: downloading tan ($archPart, $Version)..."
 try {
-	Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+	# The transport error a 404 throws here says only THAT the fetch failed,
+	# never why -- and a 404 for an asset that was never published looks
+	# identical to a network/proxy outage otherwise. Name the one cause this
+	# script can actually know (there is no Windows arm64 asset, ever, from
+	# v0.5.0 -- a PyInstaller freeze cannot be cross-compiled, and this release
+	# builds on four runners, not six) and point at the source install; guess
+	# at nothing else. Mirrors install.sh's equivalent case for linux/arm64.
+	try {
+		Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+	} catch {
+		Write-Host "install.ps1: download failed: $url" -ForegroundColor Red
+		if ($archPart -eq "aarch64") {
+			Write-Error "install.ps1: there is no prebuilt Windows arm64 asset from v0.5.0 onward. The binary is a frozen build that must be produced on the architecture it runs on, and the release builds no Windows arm64 leg. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
+		} else {
+			Write-Error "install.ps1: if this is a 404 rather than a network failure, check which assets $Version actually publishes: https://github.com/$repo/releases"
+		}
+		exit 1
+	}
 
 	# -----------------------------------------------------------------------
 	# Verify what landed against the checksums.txt published in the SAME release.

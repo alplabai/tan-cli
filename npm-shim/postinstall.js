@@ -25,28 +25,33 @@ const REPO = "alplabai/tan-cli";
 const TAG = `v${pkg.version}`;
 const BINARY_DIR = path.join(__dirname, "binary");
 
-// The platform -> triple table, and it must equal the one in
-// docs/release-contract.md's "Targets published" section, which install.sh and
-// the VS Code extension's releaseAssetForTarget also follow.
+// The platform -> triple table, and it must equal the "Targets published"
+// table in docs/release-contract.md, which install.sh also follows.
 //
-// LINUX IS musl, NOT gnu. This table said `-gnu` for both Linux arches while
-// install.sh (`Linux) os_part="unknown-linux-musl"`) and the extension
-// (`service.ts`'s TARGETS) said musl -- and the comment here claimed all three
-// agreed. They did not, and the cost was real: the `-gnu` assets carry a glibc
-// floor (measured `GLIBC_2.29 not found` on Debian 10; the frozen Python assets
-// have the same floor from their bundled CPython), so `npm i -g @alplabai/tan`
-// on Alpine or any other musl distro downloaded a binary that cannot execute at
-// all, and on older glibc distros one that fails on the floor. The musl asset is
-// statically linked and runs on any distro, which is exactly why the other two
-// consumers chose it.
+// From v0.5.0 the release is a PyInstaller freeze of `python/`, not a `cargo`
+// build, and that flips the Linux answer: LINUX IS gnu, NOT musl. The Rust
+// releases published a genuinely static `-musl` asset that ran on any distro,
+// which is why this table (and install.sh, and the VS Code extension) used to
+// map Linux there. PyInstaller cannot produce that artefact -- its musllinux
+// bootloader is dynamically linked against /lib/ld-musl-x86_64.so.1 and runs
+// ONLY on musl distros -- so the Python-era release ships only `-gnu`, frozen
+// in `python:3.12-slim-bullseye` (glibc 2.31), and a `-musl` entry here would
+// 404 on every v0.5.0+ tag while being wrong for the Ubuntu/Debian/Fedora hosts
+// that asked for it.
+//
+// win32/arm64 and linux/arm64 are OMITTED entirely, not mapped to a triple
+// that 404s: PyInstaller cannot cross-compile (every asset must be frozen on
+// the architecture it runs on), and this release freezes on four runners, not
+// six. A host in neither list hits `resolveTarget()`'s "no prebuilt binary"
+// branch below -- one clear message and a `pip install` fallback, not a raw
+// HTTP 404 mid-download.
 //
 // npm-shim/test/libc-mapping.test.js pins this table against the contract doc
-// and install.sh, because the drift -- not the wrong value -- was the bug.
+// and install.sh, because the drift -- not the wrong value -- was the bug both
+// times.
 const TARGETS = {
   "win32/x64": "x86_64-pc-windows-msvc",
-  "win32/arm64": "aarch64-pc-windows-msvc",
-  "linux/x64": "x86_64-unknown-linux-musl",
-  "linux/arm64": "aarch64-unknown-linux-musl",
+  "linux/x64": "x86_64-unknown-linux-gnu",
   "darwin/x64": "x86_64-apple-darwin",
   "darwin/arm64": "aarch64-apple-darwin",
 };
@@ -63,7 +68,7 @@ function resolveTarget() {
         // binaries are PyInstaller freezes of the Python package (`alp-tan` on
         // PyPI), so there is no crate at this version to build from source. The
         // pip path needs no prebuilt asset for this platform at all -- it is the
-        // real answer for a host the eight-asset matrix does not cover.
+        // real answer for a host this release's four-asset matrix does not cover.
         `Install from PyPI instead: pip install alp-tan (needs Python 3.12+; see https://github.com/${REPO}).`,
     );
   }

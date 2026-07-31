@@ -6,6 +6,14 @@
 // the three were identical. A musl host therefore downloaded a glibc binary that
 // cannot execute, and the comment sent the next reader looking somewhere else.
 //
+// From v0.5.0 the correct answer REVERSED: the release assets are PyInstaller
+// freezes, not `cargo` builds, and PyInstaller cannot produce the static,
+// any-distro artefact the retired Rust `-musl` target did -- its musllinux
+// bootloader is dynamically linked against /lib/ld-musl-x86_64.so.1 and runs
+// only on musl distros. So Linux is `-gnu` again (see postinstall.js's
+// `TARGETS` comment), and the assertions below were updated to match rather
+// than quietly stop testing the invariant.
+//
 // THE DRIFT IS THE BUG, so fixing the value without pinning it just resets the
 // clock. `docs/release-contract.md`'s "Targets published" table is the source of
 // truth (it is the document all three consumers cite), so these tests compare the
@@ -61,34 +69,40 @@ test("the shim serves exactly the contract's platform -> triple mapping", () => 
   assert.deepEqual(TARGETS, expected);
 });
 
-test("both Linux arches resolve to musl, never gnu", () => {
+test("linux/x64 resolves to gnu, never musl", () => {
   // Stated separately from the table comparison because this is the invariant
-  // with a failure mode: a `-gnu` asset carries a glibc floor and does not
-  // execute on a musl distro at all. If the contract doc is ever edited to say
-  // `-gnu` here, THIS test fails rather than silently following it.
-  assert.equal(TARGETS["linux/x64"], "x86_64-unknown-linux-musl");
-  assert.equal(TARGETS["linux/arm64"], "aarch64-unknown-linux-musl");
+  // with a failure mode: a PyInstaller `-musl` freeze is dynamically linked
+  // against /lib/ld-musl-x86_64.so.1 and is not the static, any-distro
+  // artefact the retired Rust `-musl` target was -- and the Python-era release
+  // does not even publish one, so naming it here would 404. If the contract
+  // doc is ever edited to say `-musl` here, THIS test fails rather than
+  // silently following it.
+  assert.equal(TARGETS["linux/x64"], "x86_64-unknown-linux-gnu");
+  assert.equal(
+    TARGETS["linux/arm64"],
+    undefined,
+    "linux/arm64 is not published from v0.5.0 -- it must not be in TARGETS at all, so resolveTarget() gives its pip-install fallback instead of a 404",
+  );
   for (const [key, triple] of Object.entries(TARGETS)) {
-    assert.ok(!triple.includes("linux-gnu"), `${key} must not serve a -gnu asset: ${triple}`);
+    assert.ok(!triple.includes("musl"), `${key} must not serve a -musl asset: ${triple}`);
   }
 });
 
-test("install.sh maps Linux to the same musl target as the shim", () => {
+test("install.sh maps Linux to the same gnu target as the shim", () => {
   const script = fs.readFileSync(path.join(REPO_ROOT, "install.sh"), "utf8");
 
   // install.sh composes `tan-${arch_part}-${os_part}`, so its Linux os_part is
   // the whole libc decision.
-  assert.match(script, /Linux\)\s*os_part="unknown-linux-musl"/);
+  assert.match(script, /Linux\)\s*os_part="unknown-linux-gnu"/);
   assert.ok(
-    !/os_part="unknown-linux-gnu"/.test(script),
-    "install.sh must not compose a -gnu asset name",
+    !/os_part="unknown-linux-musl"/.test(script),
+    "install.sh must not compose a -musl asset name",
   );
-  for (const arch of ["aarch64", "x86_64"]) {
-    assert.ok(
-      TARGETS[`linux/${arch === "aarch64" ? "arm64" : "x64"}`] === `${arch}-unknown-linux-musl`,
-      `shim and install.sh disagree for linux/${arch}`,
-    );
-  }
+  assert.equal(
+    TARGETS["linux/x64"],
+    "x86_64-unknown-linux-gnu",
+    "shim and install.sh disagree for linux/x64",
+  );
 });
 
 test("every asset the shim can name is one the release actually publishes", () => {

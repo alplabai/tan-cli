@@ -3,17 +3,25 @@
 # Build (and self-verify) the eight release assets from the PYTHON package.
 #
 # `workflow_dispatch` ONLY, and it creates NO release and uploads NOTHING to a
-# tag: this workflow exists to PROVE the eight assets can be produced from
+# tag: this workflow exists to PROVE all eight targets CAN be produced from
 # `python/`, not to publish them. Cutting a release stays release.yml's job and
-# the maintainer's call. Fold this build job into release.yml when the Python
-# port is the shipped artifact -- `docs/python-release-feasibility.md` carries
-# the exact edits, including the `verify-version` change (that job greps
-# `^version = ` out of Cargo.toml, which a Python-versioned tag never moves).
+# the maintainer's call -- and release.yml already ships the Python port, from
+# v0.5.0, but only FOUR of these eight assets: adding the
+# `aarch64-pc-windows-msvc` and Linux-arm64 runner legs was out of scope for
+# that tag (a scope decision, not a platform limit -- see release.yml's
+# header). Fold the missing two legs into release.yml's `build` matrix if/when
+# arm64 assets are wanted; `docs/python-release-feasibility.md` carries the
+# exact edits. `release.yml`'s `verify-version` job already reads
+# `TAN_VERSION` via `python/scripts/version_check.py` rather than grepping
+# `^version = ` out of Cargo.toml, so that half of the fold is done.
 #
 # Why one job per asset instead of release.yml's three runners: `cargo` cross-
 # compiles, PyInstaller CANNOT. It freezes the interpreter it is RUNNING, so
 # every asset must be built on its own OS+arch. Eight assets, eight native
-# hosts (all eight labels are available to private repos as of 2026-07).
+# hosts (all eight labels are available on this PUBLIC repo -- an earlier
+# revision of this comment said "private repos", which stopped being true when
+# the repo went public, the same correction release.yml's own header and
+# docs/release-contract.md already carry for the two unpublished arm64 assets).
 #
 # The two `-gnu` jobs build inside `python:3.12-slim-bullseye` (Debian 11,
 # glibc 2.31) to match the floor release.yml's cargo-zigbuild pins with

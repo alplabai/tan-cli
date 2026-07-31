@@ -38,11 +38,13 @@ the [repo README](../README.md).
 - `bin/tan.js` forwards `tan …` invocations to that native binary.
 
 Prebuilt targets from v0.5.0: **Linux x64** (`-gnu`), **macOS x64/arm64**
-(Intel + Apple Silicon), **Windows x64** — four assets, not six. `postinstall.js`
-still maps `win32/arm64` and `linux/arm64` to triples the release no longer
-publishes, so those two hosts 404 during postinstall; that map has to be
-narrowed before this package is published again. Any platform/arch without a
-prebuilt binary can install from a checkout instead: `pip install ./python`.
+(Intel + Apple Silicon), **Windows x64** — four assets, not six.
+`postinstall.js`'s `TARGETS` map names only those four; `win32/arm64` and
+`linux/arm64` (no asset published for either — a PyInstaller freeze cannot be
+cross-compiled) hit `resolveTarget()`'s "no prebuilt binary" branch and a
+`pip install` pointer instead of a download that would 404. Any platform/arch
+without a prebuilt binary can install from a checkout instead:
+`pip install ./python`.
 
 ## Checksum verification
 
@@ -56,12 +58,16 @@ mismatch aborts the install rather than running an unverified binary.
 
 ## Releasing
 
-1. Bump the version in **both** the workspace `Cargo.toml`
-   (`[workspace.package] version`) and `npm-shim/package.json` to the same
-   value. This is enforced, not just documented: `release.yml`'s
-   `verify-version` job fails the tag if they disagree (`postinstall.js`
-   resolves its download tag from `package.json`'s version alone, so a stale
-   shim version silently fetches the wrong release's binaries).
+1. Bump `TAN_VERSION` in `python/tan/version.py` — the source of truth, and the
+   string the shipped binary actually prints — and `npm-shim/package.json`'s
+   `version` to match it exactly. This is enforced, not just documented:
+   `python/scripts/version_check.py --selftest --tag` (run by `release.yml`'s
+   `verify-version` job) fails the tag if they disagree — `postinstall.js`
+   resolves its download tag from `package.json`'s version alone
+   (`npm-shim/postinstall.js:25`), so a stale shim version silently fetches the
+   wrong release's binaries. `Cargo.toml` is deliberately **not** part of this
+   check any more: it versions the retired Rust crates, not the release
+   assets.
 2. Tag `v<version>` and push. `release.yml`:
    - freezes the four target binaries and attaches them to the GitHub release
      (`build` + `release` jobs);

@@ -136,11 +136,13 @@ jobs:
         run: python -m pytest tests -q
 
   # The npm shim's platform -> asset table is DATA in a postinstall script, so
-  # nothing compiled it, tested it, or noticed when it drifted: it served the
-  # `-gnu` assets while install.sh and the VS Code extension both served `-musl`,
-  # which made `npm i -g @alplabai/tan` on a musl distro download a binary that
-  # cannot execute -- and the comment beside it claimed all three agreed. The
-  # value is fixed; this job is what keeps the three from separating again.
+  # nothing compiled it, tested it, or noticed when it drifted. It has drifted
+  # in BOTH directions: it once served `-gnu` while install.sh and the VS Code
+  # extension served `-musl` (a musl host downloaded a binary that could not
+  # execute), and from v0.5.0 the correct answer reversed -- PyInstaller cannot
+  # produce the static `-musl` artefact the retired Rust target did, so Linux is
+  # `-gnu` again. This job is what keeps the shim, install.sh and the contract
+  # doc from separating, whichever direction is currently correct.
   # Node's own test runner, so there is nothing to install.
   shim:
     runs-on: ubuntu-latest
