@@ -1722,7 +1722,11 @@ project_root.mkdir()
 board = project_root / "board.yaml"
 board.write_text(BOARD.read_text(encoding="utf-8"), encoding="utf-8")
 
-plan = _acquire_plan(None, str(SDK), str(board))
+# `_acquire_plan` returns `(source text, parsed plan)` -- the text comes back so
+# `--plan` can echo it verbatim rather than re-serialising a `BuildPlan`, which
+# would silently drop the forward-compat keys a newer SDK adds. This probe wants
+# only the parsed plan.
+_plan_text, plan = _acquire_plan(None, str(SDK), str(board))
 plan, _demotions = apply_plan_token_substitution(
     plan, board_yaml_path=str(board), exec_base=str(project_root),
     sdk_root=str(SDK), python="python3", toolchain_root=None)
