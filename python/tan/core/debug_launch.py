@@ -346,6 +346,92 @@ def apply_launch_resolution(draft: dict[str, Any], resolution: LaunchResolution)
                 del draft[key]
 
 
+def sdk_identity_overwrites(
+    existing_content: str | None, draft: dict[str, Any], filled_fields: list[str]
+) -> list[tuple[str, str, str]]:
+    """Whether writing ``draft`` (already ``apply_launch_resolution``'d) over
+    ``existing_content`` would REPLACE an already-concrete value on any of
+    ``filled_fields`` -- the exact launch-configuration JSON keys a caller's
+    own resolution just populated from a source that is not a real build. Port
+    of ``tan_core::debug_launch::sdk_identity_overwrites``.
+
+    alp-sdk#1026 review finding #1: [`_merge_value`]'s only protection against
+    clobbering a customer's hand-filled value is that the INCOMING value is
+    unresolved (a ``<...>`` placeholder) -- by design, since a value resolved
+    from a real build is supposed to overwrite unconditionally (see
+    [`_merge_configuration`]'s doc comment). The SDK's published debug-probe
+    identity (alp-sdk#987) resolves a device/target id/config PRE-build, so
+    its values are never placeholders either -- reaching that same
+    unconditional-overwrite branch for a source with materially less
+    confidence than an actual build, silently. This function does not change
+    that overwrite (a customer's real, in-repo launch.json is still allowed to
+    go stale the same way it always could against a real build), it only lets
+    the caller SAY so, the same way ``LaunchJsonWritePlan.comments_dropped``
+    discloses a lossy write instead of hiding it behind ``ok: true``.
+
+    Returns ``(field, existing, incoming)`` for each field this write is about
+    to change from a concrete existing value to a DIFFERENT concrete one;
+    empty when nothing concrete would be lost (no matching entry, the existing
+    field is itself unresolved/absent, or the two values already agree).
+    Matches the SAME entry [`create_launch_json_write_plan`] would merge into
+    (current name, else its legacy counterpart) so this can never flag a field
+    on an unrelated configuration.
+    """
+    out: list[tuple[str, str, str]] = []
+    if not filled_fields:
+        return out
+    try:
+        name = _configuration_name(draft)
+        document = _parse_launch_json_or_default(existing_content)
+    except DebugConfigError:
+        return out
+    configs = document.get("configurations")
+    if not isinstance(configs, list):
+        return out
+    existing_entry = next(
+        (c for c in configs if isinstance(c, dict) and c.get("name") == name), None
+    )
+    if existing_entry is None:
+        legacy = _legacy_name(name)
+        if legacy is not None:
+            existing_entry = next(
+                (c for c in configs if isinstance(c, dict) and c.get("name") == legacy),
+                None,
+            )
+    if existing_entry is None:
+        return out
+    for field in filled_fields:
+        if field not in existing_entry or field not in draft:
+            continue
+        existing_val = existing_entry[field]
+        incoming_val = draft[field]
+        if _value_is_concrete(existing_val) and existing_val != incoming_val:
+            out.append((field, _display_value(existing_val), _display_value(incoming_val)))
+    return out
+
+
+def _value_is_concrete(value: Any) -> bool:
+    """Whether ``value`` is a real, non-placeholder value a customer could
+    have hand-filled -- mirrors the exact condition [`_merge_value`] treats as
+    worth protecting (a string that isn't a ``<...>`` token; an array that
+    isn't empty and isn't entirely placeholders)."""
+    if isinstance(value, str):
+        return not is_unresolved_placeholder(value)
+    if isinstance(value, list):
+        return len(value) > 0 and not all(_is_unresolved(v) for v in value)
+    return False
+
+
+def _display_value(value: Any) -> str:
+    """Render a JSON value for an issue message: a string unquoted, anything
+    else (an array, for ``configFiles``) via its normal compact JSON
+    rendering -- matching serde_json::Value's ``Display`` impl, which
+    ``sdk_identity_overwrites`` mirrors."""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, separators=(",", ":"))
+
+
 def launch_preview_notes() -> list[str]:
     """The static advisory notes attached to a launch preview (TS
     ``createLaunchPreview``)."""

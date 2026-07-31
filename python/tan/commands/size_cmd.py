@@ -51,6 +51,7 @@ from tan.commands.build_output import (
     ManifestUnavailable,
     ProjectContext,
     load_manifest,
+    read_sdk_som_and_soc,
     resolve_app_base,
     resolve_build_root,
     resolve_metadata_sdk_root,
@@ -329,22 +330,10 @@ def _resolve_slice_budget(
     preset_path = os.path.join(metadata_root, "e1m_modules", f"{sku}.yaml")
     if not _is_file(preset_path):
         return budget_note_only(f"no SoM preset for {sku}")
-    preset = _read_som_preset(preset_path)
-    if preset is None:
+    walked = read_sdk_som_and_soc(metadata_root, sku)
+    if walked is None:
         return budget_note_only(f"unreadable SoM preset for {sku}")
-    silicon, silicon_variant = preset
-
-    variants: list[dict] = []
-    soc_flash_mb: float | None = None
-    soc_cores: list[tuple[str, float | None]] = []
-    if silicon:
-        parts = silicon.split(":")
-        if len(parts) == 3:
-            variants, soc_flash_mb, soc_cores = _read_soc(
-                os.path.join(
-                    metadata_root, "socs", parts[0], parts[1], f"{parts[2]}.json"
-                )
-            )
+    _silicon, silicon_variant, variants, soc_flash_mb, soc_cores = walked
 
     variant = resolve_variant(silicon_variant, sku, variants)
     mram_mb = None if variant is None else _as_f64(variant.get("mram_mb"))

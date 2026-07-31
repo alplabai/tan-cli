@@ -24,6 +24,7 @@ from tan.core.debug_launch import (
     apply_launch_resolution,
     create_launch_draft,
     create_launch_json_write_plan,
+    fill_debug_probe_identity_gaps,
     strip_jsonc,
 )
 
@@ -578,6 +579,171 @@ def test_runners_yaml_fills_the_device_and_gdb_a_build_can_answer(tmp_path):
     assert draft["targetId"] == "<resolved-target-id>"
     notes = _preview_notes_for(draft, pyocd_runners, "pyocd")
     assert any('runners.yaml: ["jlink", "openocd"]' in n for n in notes)
+
+
+def test_fill_debug_probe_identity_gaps_fills_an_unresolved_draft():
+    """The pre-build gap-fill this function exists for: no build has run
+    (`resolution` is fully unresolved), so metadata identity fills all three
+    fields. Port of `debug_launch.rs`'s test of the same name."""
+    resolution = LaunchResolution()
+    jlink_device = {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+    fill_debug_probe_identity_gaps(
+        resolution,
+        "m55_hp",
+        jlink_device,
+        "AE302F80F55D5AE",
+        None,  # alp-sdk#987: no SoC family publishes openocd_config yet.
+    )
+    assert resolution.device == "Cortex-M55"
+    assert resolution.target_id == "AE302F80F55D5AE"
+    assert resolution.config_files == [], (
+        "an absent openocd_config must stay the published unknown, never a guess"
+    )
+
+
+def test_fill_debug_probe_identity_gaps_never_overrides_an_already_resolved_field():
+    """A real build's own resolution always wins: metadata must not overwrite
+    a `device` `runners.yaml` already resolved, even if it disagrees."""
+    resolution = LaunchResolution(
+        device="Cortex-M55",
+        target_id="already-resolved",
+        config_files=["already/resolved.cfg"],
+    )
+    jlink_device = {"m55_hp": "SDK-DEVICE"}
+    fill_debug_probe_identity_gaps(
+        resolution, "m55_hp", jlink_device, "sdk-target", "sdk.cfg"
+    )
+    assert resolution.device == "Cortex-M55"
+    assert resolution.target_id == "already-resolved"
+    assert resolution.config_files == ["already/resolved.cfg"]
+
+
+def test_fill_debug_probe_identity_gaps_never_guesses_a_device_without_a_matching_core_id():
+    """`jlink_device` is keyed by core id: no `core_id` (or a core id the map
+    doesn't carry) must resolve nothing rather than guess "the only entry"."""
+    jlink_device = {"m55_hp": "Cortex-M55"}
+
+    no_core = LaunchResolution()
+    fill_debug_probe_identity_gaps(no_core, None, jlink_device, None, None)
+    assert no_core.device is None
+
+    wrong_core = LaunchResolution()
+    fill_debug_probe_identity_gaps(wrong_core, "m55_he", jlink_device, None, None)
+    assert wrong_core.device is None, (
+        "a core id absent from the map must not fall back to the only entry"
+    )
+
+
+#: The E1M-AEN801 SoM preset + Alif Ensemble E8 SoC JSON fixture the
+#: alp-sdk#1026 debug-config tests write under `<root>/sdk/metadata/**` --
+#: identical to `contract/envelopes/debug-config-preview-zephyr-mcu-sdk-identity`'s
+#: fixture, reused here for the write-path/no-core cases that fixture doesn't
+#: reach (a hermetic conformance golden never writes to a customer's file).
+def write_sdk_fixture(root):
+    sdk = Path(root, "sdk")
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    som_dir = sdk / "metadata" / "e1m_modules"
+    som_dir.mkdir(parents=True)
+    (som_dir / "E1M-AEN801.yaml").write_text(
+        "schema_version: 1\nsku: E1M-AEN801\nsilicon: alif:ensemble:e8\n"
+        "silicon_variant: AE822FA0E5597LS0\n",
+        encoding="utf-8",
+    )
+    soc_dir = sdk / "metadata" / "socs" / "alif" / "ensemble"
+    soc_dir.mkdir(parents=True)
+    (soc_dir / "e8.json").write_text(
+        """{
+            "soc_spec_version": 1,
+            "ref": "alif:ensemble:e8",
+            "vendor": "Alif Semiconductor",
+            "family": "Ensemble",
+            "part": "E8",
+            "variants": [
+                {
+                    "order_code": "AE822FA0E5597LS0",
+                    "debug": {
+                        "pyocd_target": "AE822FA0E5597LS0",
+                        "jlink_device": {"m55_hp": "Cortex-M55", "m55_he": "Cortex-M55"}
+                    }
+                }
+            ]
+        }""",
+        encoding="utf-8",
+    )
+
+
+def test_jlink_device_stays_the_placeholder_with_no_core_and_no_build(tmp_path):
+    """alp-sdk#1026 review finding #3: `jlink_device` is keyed BY core id, so
+    on a project that has never been built AND passes no `--core`,
+    `identity_core` is `None` and `device` must stay the placeholder -- there
+    is no core to index the map with, and no "only entry" guess."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    write_sdk_fixture(tmp_path)
+
+    env = envelope(
+        run_cli(
+            tmp_path,
+            "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+            "--sdk-root", "./sdk", "--preview", "--format", "json",
+        )
+    )
+    assert env["exitCode"] == 0
+    assert env["data"]["configuration"]["device"] == "<resolved-device>"
+
+
+def test_write_discloses_when_sdk_identity_overwrites_a_hand_filled_device(tmp_path):
+    """alp-sdk#1026 review finding #1 (data loss): a WRITE, not a preview -- a
+    customer's `.vscode/launch.json` already holds a concrete, hand-filled
+    `device`; the SDK's generic `jlink_device` identity resolves and REPLACES
+    it, same as a real build's resolution always has -- but this run must
+    disclose that in `issues[]`, not report `ok: true` / `issues: []` as if
+    nothing happened."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    vscode_dir = launch_json(tmp_path).parent
+    vscode_dir.mkdir()
+    launch_json(tmp_path).write_text(
+        """{
+            "version": "0.2.0",
+            "configurations": [
+                {
+                    "name": "Alp: Zephyr Debug (J-Link)",
+                    "type": "cortex-debug",
+                    "request": "launch",
+                    "servertype": "jlink",
+                    "device": "AE822FA0E5597LS0_M55_HE"
+                }
+            ]
+        }""",
+        encoding="utf-8",
+    )
+    write_sdk_fixture(tmp_path)
+
+    env = envelope(
+        run_cli(
+            tmp_path,
+            "--target-kind", ZEPHYR_MCU, "--server", JLINK, "--core", "m55_hp",
+            "--sdk-root", "./sdk", "--format", "json",
+        )
+    )
+    assert env["exitCode"] == 0
+
+    # The overwrite happened (matches a real build's own resolution behaviour
+    # -- unchanged by this fix).
+    assert env["data"]["configuration"]["device"] == "Cortex-M55"
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk["configurations"][0]["device"] == "Cortex-M55"
+
+    # …and it was DISCLOSED, not silent.
+    overwrite_issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.sdk-identity-overwrite"), None
+    )
+    assert overwrite_issue is not None, f"no overwrite issue in {env['issues']!r}"
+    assert overwrite_issue["severity"] == "info"
+    assert "AE822FA0E5597LS0_M55_HE" in overwrite_issue["message"]
+    assert "Cortex-M55" in overwrite_issue["message"]
 
 
 def test_an_all_placeholder_config_files_list_keeps_a_hand_added_second_entry():

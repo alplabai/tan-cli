@@ -134,6 +134,46 @@ def resolve_metadata_sdk_root(
     return found
 
 
+def read_sdk_som_and_soc(
+    metadata_root: str, sku: str
+) -> tuple[str, str | None, list[dict], float | None, list[tuple[str, float | None]]] | None:
+    """`(silicon, silicon_variant, variants, soc_flash_mb, soc_cores)` for
+    `sku`'s SoM preset + SoC JSON under `<sdk>/metadata` -- port of the ONE
+    metadata-layout walk `util::read_sdk_som_and_soc` performs on the Rust
+    side: `metadata/e1m_modules/<sku>.yaml` -> `silicon.split(':')` ->
+    `metadata/socs/<vendor>/<family>/<part>.json`. `None` when the SoM preset
+    itself cannot be read (missing, unreadable, wrong `schema_version`).
+
+    `tan size` and `tan debug-config` both resolve a SoC variant off this same
+    walk and must call ONE reader, not two that could disagree -- a schema
+    with no reader, then two readers that could quietly diverge, is the exact
+    drift alp-sdk#1026 itself is about. Leaf parsing stays
+    `size_cmd._read_som_preset`/`_read_soc`; this only sequences them. A
+    caller wanting a FINER "file missing" vs "file unreadable" split (`tan
+    size`'s two different budget notes) still does its own existence check on
+    `<metadata_root>/e1m_modules/<sku>.yaml` before calling this.
+
+    Imported locally, not at module level: `size_cmd` already imports this
+    module for `resolve_project_context`/`resolve_metadata_sdk_root`, so a
+    top-level import the other way would cycle.
+    """
+    from tan.commands.size_cmd import _read_soc, _read_som_preset  # noqa: PLC0415
+
+    preset_path = os.path.join(metadata_root, "e1m_modules", f"{sku}.yaml")
+    preset = _read_som_preset(preset_path)
+    if preset is None:
+        return None
+    silicon, silicon_variant = preset
+    if not silicon:
+        return silicon, silicon_variant, [], None, []
+    parts = silicon.split(":")
+    if len(parts) != 3:
+        return silicon, silicon_variant, [], None, []
+    soc_path = os.path.join(metadata_root, "socs", parts[0], parts[1], f"{parts[2]}.json")
+    variants, soc_flash_mb, soc_cores = _read_soc(soc_path)
+    return silicon, silicon_variant, variants, soc_flash_mb, soc_cores
+
+
 def resolve_app_base(app_path: str | None, workspace_root: str) -> str:
     """The directory whose `build/` is the default build root.
 

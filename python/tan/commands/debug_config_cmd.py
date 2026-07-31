@@ -48,8 +48,7 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_output import resolve_project_context
-from tan.commands.size_cmd import _read_soc, _read_som_preset
+from tan.commands.build_output import read_sdk_som_and_soc, resolve_project_context
 from tan.core.debug_launch import (
     BAREMETAL_MCU,
     JLINK,
@@ -70,6 +69,7 @@ from tan.core.debug_launch import (
     launch_preview_notes,
     parse_server_kind,
     parse_target_kind,
+    sdk_identity_overwrites,
 )
 from tan.core.jsonc_splice import pretty_json
 from tan.core.run import native_sim_exe_beside
@@ -151,14 +151,6 @@ def _normalise(path: str) -> str:
     that does not exist yet still resolves -- `resolve()` would rewrite both.
     """
     return os.path.abspath(path)
-
-
-def _to_posix(path: str) -> str:
-    """Forward slashes always. Mirrors `tan_core::project::to_posix`: every field
-    in the extension/CLI handshake must be platform-identical, and #170's own
-    follow-up was `project.root` and `project.boardYaml` shipping DIFFERENT
-    separators inside the same object on Windows."""
-    return path.replace("\\", "/")
 
 
 def _resolve_project_reporting_fields(
@@ -437,10 +429,9 @@ def _sdk_variant_debug_block(sdk_root: str, sku: str) -> dict[str, Any] | None:
     """The resolved SoC-JSON `variants[].debug` block for `sku`'s SoM preset,
     or `None` when any step of the walk fails to resolve one.
 
-    Reuses the SAME metadata-layout walk `tan size` drives
-    (`size_cmd._read_som_preset` / `_read_soc`) instead of a second walk of
-    `metadata/socs/**` -- the exact drift alp-sdk#1026 itself is about (a
-    schema with no reader, then two readers that could disagree).
+    The metadata-layout walk itself is `build_output.read_sdk_som_and_soc` --
+    the ONE reader `tan size` also drives, not a second one that could
+    disagree (the exact drift alp-sdk#1026 itself is about).
 
     A forward-only `resolve_variant` match: `sku` is passed as `None`,
     deliberately disabling the reverse `sku in alp_module_skus` fallback
@@ -449,16 +440,10 @@ def _sdk_variant_debug_block(sdk_root: str, sku: str) -> dict[str, Any] | None:
     session to the wrong part (alp-sdk#1026 review finding #7).
     """
     metadata_root = os.path.join(sdk_root, "metadata")
-    preset_path = os.path.join(metadata_root, "e1m_modules", f"{sku}.yaml")
-    preset = _read_som_preset(preset_path)
-    if preset is None:
+    walked = read_sdk_som_and_soc(metadata_root, sku)
+    if walked is None:
         return None
-    silicon, silicon_variant = preset
-    parts = silicon.split(":")
-    if len(parts) != 3:
-        return None
-    soc_path = os.path.join(metadata_root, "socs", parts[0], parts[1], f"{parts[2]}.json")
-    variants, _soc_flash_mb, _soc_cores = _read_soc(soc_path)
+    _silicon, silicon_variant, variants, _soc_flash_mb, _soc_cores = walked
     variant = resolve_variant(silicon_variant, None, variants)
     if variant is None:
         return None
@@ -662,6 +647,28 @@ def _sdk_identity_key_absent_issue(field: str) -> Issue:
         f"include a value for `{field}` yet, so it stays the placeholder shown "
         "in `configuration` — an unpopulated key is the correct published "
         '"unknown" (alp-sdk#1026), never a guess.',
+    )
+
+
+def _sdk_identity_overwrite_issue(field: str, existing_value: str, incoming_value: str) -> Issue:
+    """alp-sdk#1026 review finding #1: emitted whenever the SDK's published
+    debug-probe identity (not a real build) just replaced a concrete existing
+    value on the entry this run wrote. Severity `info`, same reasoning as its
+    three siblings above: the overwrite itself is not new or wrong (a value
+    resolved from a real build already overwrote unconditionally, by design --
+    see `tan.core.debug_launch._merge_configuration`'s doc comment) but a tool
+    that replaces a customer's own value at `exit 0` with `issues: []` has
+    told them nothing happened."""
+    return Issue(
+        "debug-config.sdk-identity-overwrite",
+        "info",
+        f'This write replaced the existing `{field}` value "{existing_value}" with '
+        f'"{incoming_value}", resolved from the SDK\'s published debug-probe identity '
+        "(alp-sdk#987) rather than from a real build. If "
+        f'"{existing_value}" was a value you filled in on purpose — e.g. a J-Link '
+        "flash-unlock device profile more specific than the generic attach device "
+        "the SDK publishes — restore it in .vscode/launch.json; a value tan itself "
+        "resolves from a real build will overwrite it again the same way.",
     )
 
 
@@ -876,9 +883,28 @@ def _run(
     # `_fill_debug_probe_identity_from_sdk`'s own docstring for why `device`
     # stays the placeholder on a never-built project with no `--core`.
     identity_core = core or build_core_id
+    # Snapshot of what the BUILD (not the SDK) resolved, taken before the SDK
+    # fallback runs, so `sdk_filled_json_fields` below can name exactly the
+    # fields the SDK fallback itself just populated -- never a field a real
+    # build's `runners.yaml` already resolved (that overwrite is pre-existing,
+    # intended behaviour per `_merge_configuration`'s own doc comment, not
+    # something this disclosure is scoped to cover).
+    device_before_identity = resolution.device
+    target_id_before_identity = resolution.target_id
+    config_files_empty_before_identity = not resolution.config_files
     identity_debug_block_found = _fill_debug_probe_identity_from_sdk(
         resolution, sdk_root, board_yaml, identity_core
     )
+    # Which launch-configuration JSON keys the SDK fallback (not a real build)
+    # just populated -- the ONLY fields `sdk_identity_overwrites` below is
+    # allowed to flag (alp-sdk#1026 review finding #1).
+    sdk_filled_json_fields: list[str] = []
+    if device_before_identity is None and resolution.device is not None:
+        sdk_filled_json_fields.append("device")
+    if target_id_before_identity is None and resolution.target_id is not None:
+        sdk_filled_json_fields.append("targetId")
+    if config_files_empty_before_identity and resolution.config_files:
+        sdk_filled_json_fields.append("configFiles")
 
     # `--svd` is the ONLY producer of `resolution.svd` (tan-cli#197): the SDK
     # ships no SVD, so without the flag the field is structurally always absent
@@ -985,6 +1011,13 @@ def _run(
                 cwd_launch_path,
             )
 
+    # alp-sdk#1026 review finding #1: compute this BEFORE the write, against
+    # the file as it stood -- `create_launch_json_write_plan` below already
+    # performs the same overwrite (that part of its behaviour is intentional,
+    # see `_merge_configuration`'s own doc comment), this only detects it so
+    # it can be disclosed.
+    overwrites = sdk_identity_overwrites(existing, draft, sdk_filled_json_fields)
+
     try:
         plan = create_launch_json_write_plan(existing, draft)
     except DebugConfigError as err:
@@ -1009,6 +1042,15 @@ def _run(
         issues.append(_legacy_untouched_issue(plan.legacy_entry_present))
     if plan.comments_dropped:
         issues.append(_comments_dropped_issue())
+    # alp-sdk#1026 review finding #1: this write just replaced a concrete
+    # existing value with one resolved from the SDK's published debug-probe
+    # identity rather than a real build -- say so, the same way a dropped
+    # comment is disclosed rather than left for the customer to notice by
+    # diffing the file themselves.
+    for field, existing_value, incoming_value in overwrites:
+        issues.append(
+            _sdk_identity_overwrite_issue(field, existing_value, incoming_value)
+        )
 
     return success(
         replaced=plan.replaced,
