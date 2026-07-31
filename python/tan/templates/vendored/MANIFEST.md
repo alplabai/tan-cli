@@ -9,13 +9,56 @@ from an un-revendored SDK change.
 
 ## Source
 
-- **Current vendor point (all templates):** **`v0.14.0`** (`ef79eab0`) — the
-  release tag, re-vendored for tan v0.4.1. Seven `README.md` files moved
-  (`diagnostics`, `minimal` and `sensor` for both SKUs, plus `iot`/E1M-AEN801),
-  and NOTHING else: all 40 changed lines differ only by the doc-version link
-  `blob/v0.13.0/` → `blob/v0.14.0/`, verified line-for-line. No schema, core,
-  peripheral or `board.yaml` content changed. `edge-ai` is untouched for both
-  SKUs because its README carries no version-pinned links at all.
+- **Current vendor point (all templates):** **`v0.15.0-rc1`** (`996937ac`) —
+  the release tag, re-vendored to match `parity.yml`'s `PINNED_SDK_TAG` move
+  off `v0.14.0`. Same seven `README.md` files as the v0.14.0 bump below and
+  NOTHING else: every changed line differs only by the doc-version link
+  `blob/v0.14.0/` → `blob/v0.15.0/` (the SDK's own doc-link renderer drops the
+  `-rc1` suffix; verified line-for-line, `git diff | grep -vc
+  "v0\.1[45]\.0"` returns 0). No schema, core, peripheral or `board.yaml`
+  content changed — in particular alp-sdk#1068 (`CONFIG_USE_DT_CODE_PARTITION`
+  in the AEN board `_defconfig`) touches none of `--emit scaffold`'s output;
+  `edge-ai` (whose README carries no version-pinned links) diffed clean at 0/8
+  files, confirming it. No `PINNED_SDK_COMMIT`/`PINNED_HASHES` re-audit was
+  needed either: `scripts/alp_orchestrate/` is byte-identical between
+  `0f3cefbe` (the planner's last audit point) and this tag.
+  - Re-vendored by re-running the live emit through
+    `tests/parity/scaffold_byte_parity.py`'s OWN `discover_vendored_matrix` +
+    `emit_live_scaffold`, writing each changed path with `newline="\n"` — the
+    same throwaway-driver shape as the v0.14.0 bump below, run on Windows
+    (Python 3.12.10; the "needs WSL" note two bumps below was already
+    superseded — see that entry).
+  - **Diverges from `crates/tan-core/src/wizard/vendored/` on purpose.**
+    `crates/` is frozen (`docs/ROADMAP.md`'s Standing Rules — the Rust `tan` is
+    the retired oracle, not touched again) and stays pinned at `v0.14.0`
+    (`ef79eab0`); this tree is the one a Python `tan` binary actually reads, so
+    it tracks `PINNED_SDK_TAG` and the Rust tree does not. That makes
+    `python/tests/core/test_scaffold.py::test_the_vendored_tree_is_byte_identical_to_the_rust_one`
+    fail on the same seven files this bump touched — an expected, permanent
+    consequence of the freeze, not a re-vendor bug. That test predates the
+    freeze decision and asserted a lockstep the two trees can no longer keep;
+    it is not this bump's call to loosen it.
+  - This is also `parity.yml`'s `PINNED_SDK_TAG`, and that pin drives all FOUR
+    parity gates — bumping it re-vendors this tree, the bootstrap manifest
+    fixture, the toolchain lock and the kconfig golden together, or the gates
+    go red. They are one atomic unit, not four independent bumps. (The
+    toolchain lock and kconfig fixture needed no byte change this round — see
+    each gate's own re-run notes; only this tree and the bootstrap manifest
+    fixture had real drift.)
+  - Re-vendored by re-running the emit, not by editing these files. A
+    hand-edit that happens to match today is a copy that drifts tomorrow;
+    the point of this tree is that it is generated.
+- Repo: `alplabai/alp-sdk`
+- Ref: `v0.15.0-rc1` (release tag — `git checkout v0.15.0-rc1` reproduces the
+  exact pinned commit; `dev`'s tip does not)
+- Commit: **v0.15.0-rc1 (`996937ac`)** — the seven READMEs above. History below.
+- Previous: **v0.14.0 (`ef79eab0`)** — the release tag, re-vendored for tan
+  v0.4.1. Seven `README.md` files moved (`diagnostics`, `minimal` and `sensor`
+  for both SKUs, plus `iot`/E1M-AEN801), and NOTHING else: all 40 changed
+  lines differ only by the doc-version link `blob/v0.13.0/` → `blob/v0.14.0/`,
+  verified line-for-line. No schema, core, peripheral or `board.yaml` content
+  changed. `edge-ai` is untouched for both SKUs because its README carries no
+  version-pinned links at all.
   - Re-vendored by re-running the live emit through
     `tests/parity/scaffold_byte_parity.py`'s OWN `emit_live_scaffold`, so the
     bytes written are by construction the bytes that gate compares against —
@@ -26,17 +69,6 @@ from an un-revendored SDK change.
     `board.yaml` from "copy this directory … and `west build`" to "`tan init
     --from-example <category>/<name>` … and `tan build`" (ADR-0020: tan is the
     whole command surface). Six `board.yaml` files moved; comment-only.
-  - This is also `parity.yml`'s `PINNED_SDK_TAG`, and that pin drives all FOUR
-    parity gates — bumping it re-vendors this tree, the bootstrap manifest
-    fixture, the toolchain lock and the kconfig golden together, or the gates
-    go red. They are one atomic unit, not four independent bumps.
-  - Re-vendored by re-running the emit, not by editing these files. A
-    hand-edit that happens to match today is a copy that drifts tomorrow;
-    the point of this tree is that it is generated.
-- Repo: `alplabai/alp-sdk`
-- Ref: `v0.14.0` (release tag — `git checkout v0.14.0` reproduces the exact
-  pinned commit; `dev`'s tip does not)
-- Commit: **v0.14.0 (`ef79eab0`)** — the seven READMEs above. History below.
 - Previous: **v0.13.0 (`93ef5726`)** — `minimal` was re-vendored at this commit
   (only its `README.md` doc-version link changed, `v0.11.1` -> `v0.13.0`; the
   scaffold content itself is unchanged since the `a0849e10` vendor point
