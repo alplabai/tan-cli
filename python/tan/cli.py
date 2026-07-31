@@ -28,6 +28,7 @@ from tan.commands.clean_cmd import clean
 from tan.commands.debug_config_cmd import debug_config
 from tan.commands.deferred_cmd import (
     DEFERRED_CONTEXT_SETTINGS,
+    DEFERRED_VERBS,
     completion,
     diff,
     inspect,
@@ -272,7 +273,32 @@ def _emit_help_envelope(argv: list[str]) -> int:
 #: the subcommand name for them (clap's `global = true`). Grow this as each
 #: command is taught to; see `root` for why an unlisted command must REFUSE the
 #: pre-subcommand position rather than silently ignore it.
-_HONOURS_ROOT_FORMAT = frozenset({"debug-config", "flash", "image", "size"})
+#:
+#: The non-deferred four (`debug-config`/`flash`/`image`/`size`) and
+#: `faultdecode` are hand-listed here -- each command's own module is where its
+#: `ctx.obj["format"]` read lives, so there is no shared list to derive them
+#: from the way the deferred seven have `deferred_cmd.DEFERRED_VERBS`.
+#: `faultdecode` was verified against the oracle the same way (measured:
+#: `target/debug/tan.exe --format json faultdecode --cfsr 0x8200` reaches the
+#: command rather than erroring on `--format`'s position) and its own module
+#: (`faultdecode_cmd.py:resolved_format`) already reads `ctx.obj`; this entry
+#: was the missing wire-up.
+#:
+#: The seven `deferred_cmd.py` stubs are DERIVED from `DEFERRED_VERBS` rather
+#: than retyped here -- a third hardcoded copy of the same seven names is
+#: exactly the drift this set exists to prevent (an eighth stub added to
+#: `deferred_cmd.py` without a matching edit here would otherwise pass every
+#: test while silently regressing to exit 2 for the new verb). Verified
+#: against the oracle (`target/debug/tan.exe`): `tan --format json scaffold`
+#: (and the other six) all reach the real command rather than erroring on
+#: `--format`'s position -- clap's `--format` is genuinely global, so a stub
+#: that refuses it pre-command would hand the JSON caller most likely to check
+#: for the deferral's issue code the exact typo-shaped exit-2 `cli.parse-error`
+#: that module exists to eliminate. Each stub reads `ctx.obj["format"]` (see
+#: `deferred_cmd.py`).
+_HONOURS_ROOT_FORMAT = frozenset(
+    {"debug-config", "flash", "image", "size", "faultdecode", *DEFERRED_VERBS}
+)
 
 
 @app.callback(invoke_without_command=True)
@@ -284,6 +310,19 @@ def root(
     ),
 ) -> None:
     """tan CLI -- board configuration, generation, and project tooling."""
+    if output_format is not None and output_format not in ("text", "json"):
+        # clap validates `--format`'s VALUE eagerly, ahead of everything else
+        # in this callback -- measured: `tan --format bogus`, `tan --format
+        # bogus --version`, and `tan --format "" build` (an empty value counts
+        # as invalid: clap says "a value is required for '--format <FORMAT>'
+        # but none was supplied") all exit 2 on the value itself, never
+        # reaching `--version` or the bare-invocation check below. Without this,
+        # a root-position `--format ""` silently defaulted to text mode for
+        # every command in `_HONOURS_ROOT_FORMAT` (rc 1, diverging from the
+        # oracle's rc 2) instead of being refused here. `ctx.fail()` gives the
+        # same Click UsageError shape (exit 2) every other CLI mistake here
+        # already gets.
+        ctx.fail(f"'{output_format}' is not one of 'text', 'json'")
     # Rust's `--format` is `global = true`, so clap accepts it on EITHER side of
     # the subcommand name; four committed goldens invoke `tan --format json
     # debug-config ...`. Click gives the group only what precedes the subcommand,

@@ -38,6 +38,42 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   Re-measure before changing any of this. Do not infer the oracle's behaviour
   from a report, a docstring, or ``crates/`` -- run the binary.
 
+  **The wire string itself, ``validate.spawn-not-implemented``, has no oracle
+  counterpart -- decided KEEP, not renamed.** The oracle has no "not ported"
+  state at all; the closest thing it emits is ``validate.failed``. Measured
+  the FULL validator-exit-status -> outcome map against ``target/debug/tan.exe``
+  with a contrived SDK (``scripts/alp_project.py`` marker +
+  ``scripts/validate_board_yaml.py`` exiting a chosen code), ``board.yaml``
+  present, ``--sdk-root`` pointed at it, no ``--offline``:
+
+  =============== =============================== ===
+  validator exit   outcome                          rc
+  =============== =============================== ===
+  0                clean                            0
+  1                schema-violation                 2
+  2                missing-preset                    2
+  3                hardware-revision                2
+  5, 77            failed                            1
+  =============== =============================== ===
+
+  So ``validate.failed`` is specifically the "anything outside the 0-3 range
+  the resolver maps by number" case -- NOT every non-clean status, and in
+  particular not exit 2 or 3, which have their own named outcomes. A reader
+  must not infer "any nonzero -> failed" from this docstring. That is a
+  DIFFERENT failure shape from this port's: the oracle spawned and got back
+  nonsense, this port never spawns at all.
+  Reusing ``validate.failed`` here would conflate "we attempted validation
+  and the subprocess misbehaved" with "this code path does not exist yet"
+  under one string, which is a worse signal for the same reason the exit-code
+  choice above is. ``validate.spawn-not-implemented`` is therefore kept as a
+  deliberate, PORT-ONLY code: it is not in ``contract/issue-codes.json``
+  (nothing there mentions ``validate.*`` at all) and no v0.4.1 consumer has
+  ever seen it, since v0.4.1 is the Rust CLI and this spelling exists only in
+  this port. It becomes dead code the moment the real spawn path lands
+  (tan-cli#262) and this branch is deleted in favour of actually spawning, at
+  which point the resulting failures naturally become ``validate.failed``
+  like the oracle's.
+
 **A wrong-shaped board.yaml is the USER's problem, not a tan crash.** The Rust
 carries a comment earned the hard way: routing a malformed file through
 ``InternalFailure`` (exit 5) "told CI/the extension this was a tan crash" and

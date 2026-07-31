@@ -34,10 +34,19 @@ v0.6.0" -- so a caller that wants to special-case the situation needs exactly
 one code to match, not seven near-duplicates that could drift. This code is
 NOT in `contract/issue-codes.json`: nothing consumes it with `===` today (no
 different than `cli.parse-error`/`envelope.serialize-failed`, the two other
-command-agnostic codes `tan.envelope`/`tan.cli` already emit unregistered),
-and `contract/` is the frozen wire registry for codes a real consumer already
-binds to -- registering a code for a stub that performs no work would be
-premature. Promote it there the moment a real consumer starts matching it.
+command-agnostic codes `tan.envelope`/`tan.cli` already emit unregistered).
+`contract/` is frozen on this branch, so it cannot be edited here regardless
+of status -- but the registry's own `_comment` defines `status: "reserved"`
+as exactly this pre-consumer state (the spelling exists at the emission site,
+but nobody matches it with `===` yet), which is what `cli.command-deferred`
+already is today, not the premature case the earlier wording claimed.
+FOLLOW-UP: once `contract/` is open for edits again, register
+`cli.command-deferred` there as `"status": "reserved"` with
+`"emittedBy": "python/tan/commands/deferred_cmd.py"` and a `"literal"` entry
+(a `reserved` row needs both, per the other `reserved` rows already in the
+file, and `crates/tan-cli/tests/contract.rs`'s `frozen_issue_codes` gates the
+emission site actually matching them) -- not straight to `frozen`, since no
+consumer binds to it yet.
 """
 from __future__ import annotations
 
@@ -58,6 +67,21 @@ DEFERRED_ISSUE_URL = "https://github.com/alplabai/tan-cli/issues/260"
 #: discards) anything, so a caller's existing flags/positionals never turn
 #: into a SEPARATE parse-error ahead of the deferral message.
 DEFERRED_CONTEXT_SETTINGS = {"ignore_unknown_options": True, "allow_extra_args": True}
+
+#: The canonical list of verbs this module stubs -- the single source both
+#: `tan.cli._HONOURS_ROOT_FORMAT` and `tests/commands/test_deferred_commands.py`
+#: derive from, instead of each retyping the same seven names (a THIRD and
+#: FOURTH copy respectively; the individual `_make_stub("...")` calls at the
+#: bottom of this module are the first, unavoidable one).
+DEFERRED_VERBS = (
+    "scaffold",
+    "completion",
+    "diff",
+    "pinmux",
+    "inspect",
+    "trace",
+    "support-bundle",
+)
 
 
 def _deferred_message(name: str) -> str:
@@ -86,9 +110,15 @@ def _run_deferred(name: str, output_format: str) -> None:
             )
         )
     else:
-        # stdout is the envelope channel in json mode only; text mode has no
-        # such contract, so the refusal goes to stderr like every other
-        # command's text-mode error line.
+        # This function's own contract: text mode writes only to stderr, like
+        # every other command's text-mode error line. Whether stdout also ends
+        # up carrying a JSON envelope is decided one layer up, by `main`'s
+        # textual `_wants_json(argv)` scan -- e.g. `tan --format json scaffold
+        # --format text` resolves to text mode HERE (this branch runs) but
+        # `main` still sees "json" in argv and synthesizes a mislabelled
+        # `cli.parse-error` envelope on stdout for the nonzero exit (measured;
+        # pre-existing, shared with flash/size/image -- a `main`-level defect,
+        # not this function's to fix).
         typer.echo(f"{name}: {message}", err=True)
     raise typer.Exit(int(ExitCode.RUNTIME_FAILURE))
 
@@ -103,13 +133,30 @@ def _make_stub(name: str):
     """
 
     def command(
+        ctx: typer.Context,
         args: list[str] = typer.Argument(None, metavar="ARGS..."),
         output_format: str = typer.Option(
-            "text", "--format", metavar="FORMAT", help="Output format: text or json."
+            None, "--format", metavar="FORMAT", help="Output format: text or json."
         ),
     ) -> None:
         del args  # accepted and ignored -- see DEFERRED_CONTEXT_SETTINGS above
-        _run_deferred(name, output_format)
+        # `--format` is accepted BEFORE the subcommand too (`tan --format json
+        # scaffold`, which the oracle's `global = true` clap flag allows and
+        # which `_HONOURS_ROOT_FORMAT` in cli.py lists all seven of these verbs
+        # under) -- the root callback records it on `ctx.obj` and this option
+        # overrides it when repeated after the verb name. Mirrors
+        # `debug_config_cmd.py:debug_config`'s `resolved_format` line.
+        #
+        # `is not None`, not a bare `or`: an explicit `--format ""` must reach
+        # `_run_deferred`'s validation and exit 2, matching the oracle
+        # (measured: `tan scaffold --format ""` -> rc 2, "a value is required
+        # for '--format <FORMAT>'"). A plain `output_format or ...` treats ""
+        # as absent and silently falls back to "text" -- rc 1 -- which is the
+        # divergence this port used to have.
+        resolved_format = (
+            output_format if output_format is not None else (ctx.obj or {}).get("format") or "text"
+        )
+        _run_deferred(name, resolved_format)
 
     command.__doc__ = (
         f"Deferred to v0.6.0, not yet ported to this build ({DEFERRED_ISSUE_URL})."
