@@ -201,6 +201,46 @@ pub fn optional_libs_block(facts: &BootstrapFacts, host: HostOs) -> Vec<String> 
         }
         None => lines.push("  (OS not auto-detected; see docs/testing.md)".to_string()),
     }
+
+    // `manualInstallHints.posix.note` (tan-cli#230). alp-sdk v0.14.0 added the
+    // POSIX twin of the Windows key rendered above; before it, `manualInstallHints`
+    // carried only `windows`, so no Linux/macOS customer ever saw a manual-install
+    // hint — the Zephyr SDK being a separate `west sdk install` included. The data
+    // existed and was inert.
+    //
+    // Shape, heading and position all come from the oracle rather than from here
+    // (`v0.14.0:scripts/bootstrap.sh`, immediately before `Bootstrap complete.`):
+    //
+    //     case "${OS_LABEL}" in
+    //         linux|macos)
+    //             echo
+    //             info "NOT auto-installed (manual, one-time):"
+    //             for line in "${MANUAL_INSTALL_POSIX_NOTE[@]}"; do echo "  ${line}"; done
+    //             ;;
+    //     esac
+    //
+    // So: a blank line, the same heading the Windows arm above uses, then one
+    // two-space-indented line per element. It lands AFTER the optional-native-libs
+    // section because the oracle prints it after (:594 vs :638).
+    //
+    // `Linux | MacOs` ONLY, matching that `case` exactly — NOT `HostOs::Other`,
+    // and not a git-bash invocation on native Windows, which the oracle's own
+    // comment calls the unsupported combo its file header already points at WSL2
+    // or bootstrap.ps1. The Windows arm returned early far above, so this is
+    // unreachable there anyway; the match is written out rather than assumed so
+    // `Other` cannot start rendering a POSIX-specific fact by accident.
+    if matches!(host, HostOs::Linux | HostOs::MacOs) {
+        if let Some(manual) = facts
+            .manual_install_hints
+            .posix
+            .as_ref()
+            .filter(|m| !m.note.is_empty())
+        {
+            lines.push(String::new());
+            lines.push("bootstrap: NOT auto-installed (manual, one-time):".to_string());
+            lines.extend(manual.note.iter().map(|line| format!("  {line}")));
+        }
+    }
     lines
 }
 
@@ -446,14 +486,106 @@ bootstrap: Optional native libraries unlock the Yocto-side backends:
   libssl-dev        -> alp_hash_* / alp_aead_* / alp_random_bytes
 
   sudo apt-get install -y libmosquitto-dev libasound2-dev libssl-dev pkg-config";
+
+        // The nativeLibHints section is byte-pinned above. What follows it since
+        // alp-sdk v0.14.0 is the `manualInstallHints.posix` block (#230), and its
+        // SHAPE is pinned here rather than its content: three ~500-600 char note
+        // elements retyped into this test would be exactly the hand-copy that
+        // desyncs silently, which this module's own header warns about. Content
+        // byte-parity is already gated where it belongs -- against the vendored
+        // fixture, in `the_fallback_matches_the_real_manifest_field_for_field`
+        // and `tests/parity/bootstrap_manifest_parity.py`.
+        //
+        // So: blank line, the SAME heading the Windows arm uses, then one
+        // two-space-indented line per element in order, and nothing else. Matches
+        // `v0.14.0:scripts/bootstrap.sh`'s `linux|macos` case.
+        let manual_tail = |facts: &BootstrapFacts| -> Vec<String> {
+            let note = &facts
+                .manual_install_hints
+                .posix
+                .as_ref()
+                .expect("the vendored manifest declares manualInstallHints.posix")
+                .note;
+            let mut want = vec![
+                String::new(),
+                "bootstrap: NOT auto-installed (manual, one-time):".to_string(),
+            ];
+            want.extend(note.iter().map(|l| format!("  {l}")));
+            want
+        };
+
+        for (label, facts) in [
+            ("manifest", manifest_facts()),
+            ("fallback", fallback_facts((3, 10))),
+        ] {
+            let rendered = optional_libs_block(&facts, HostOs::Linux);
+            let split = rendered.len() - manual_tail(&facts).len();
+            assert_eq!(
+                rendered[..split].join("\n"),
+                expected,
+                "{label} native libs"
+            );
+            assert_eq!(rendered[split..], manual_tail(&facts)[..], "{label} manual");
+        }
+
+        // And the two sources must render IDENTICAL bytes end to end -- the claim
+        // the old single-`expected` compare made, now covering the posix block
+        // too. This is what would red if `fallback_facts` gained the field with
+        // different text.
         assert_eq!(
-            optional_libs_block(&manifest_facts(), HostOs::Linux).join("\n"),
-            expected
+            optional_libs_block(&manifest_facts(), HostOs::Linux),
+            optional_libs_block(&fallback_facts((3, 10)), HostOs::Linux)
         );
-        // The fallback constants must render the same bytes as the manifest.
-        assert_eq!(
-            optional_libs_block(&fallback_facts((3, 10)), HostOs::Linux).join("\n"),
-            expected
+    }
+
+    /// #230's host gate, which is `linux|macos` and NOT "anything that is not
+    /// Windows". `HostOs::Other` is a host tan could not identify; handing it a
+    /// hint whose every sentence is Linux/macOS-specific (`apt-get`, `brew`,
+    /// `bootstrap.sh`) would be inventing a fact about a host we know nothing
+    /// about. The oracle's own `case` is `linux|macos)` with no default arm, and
+    /// its comment says the unsupported combos get neither section.
+    #[test]
+    fn posix_manual_hints_render_on_linux_and_macos_only() {
+        let facts = manifest_facts();
+        let heading = "bootstrap: NOT auto-installed (manual, one-time):";
+
+        for host in [HostOs::Linux, HostOs::MacOs] {
+            let block = optional_libs_block(&facts, host);
+            assert!(
+                block.iter().any(|l| l == heading),
+                "{host:?} must render the manual-install block: {block:?}"
+            );
+        }
+
+        let other = optional_libs_block(&facts, HostOs::Other);
+        assert!(
+            !other.iter().any(|l| l == heading),
+            "an unidentified host must not be handed Linux/macOS-specific install \
+             advice: {other:?}"
+        );
+    }
+
+    /// An SDK predating alp-sdk v0.14.0 declares no `manualInstallHints.posix`,
+    /// and must render exactly what it always did — nothing extra. The `Option`
+    /// exists for this, and the tolerant read is what keeps those SDKs from
+    /// becoming a hard `ValidationFailure` through auto-bootstrap.
+    #[test]
+    fn an_sdk_without_posix_manual_hints_renders_no_extra_block() {
+        let mut legacy = manifest_facts();
+        legacy.manual_install_hints.posix = None;
+        let block = optional_libs_block(&legacy, HostOs::Linux);
+        assert!(
+            !block
+                .iter()
+                .any(|l| l.contains("NOT auto-installed (manual, one-time)")),
+            "{block:?}"
+        );
+        // And it is still the full nativeLibHints section, not a truncated one.
+        assert!(
+            block
+                .iter()
+                .any(|l| l.contains("Optional native libraries unlock")),
+            "{block:?}"
         );
     }
 
@@ -553,6 +685,12 @@ bootstrap: Optional native libraries unlock the Yocto-side backends:
         let mut facts = manifest_facts();
         facts.hint_linux.note = vec!["one line only".to_string()];
         facts.hint_linux.command = None;
+        // No `manualInstallHints.posix`, which keeps this test on the
+        // nativeLibHints arm it is about AND covers the pre-v0.14.0 SDK: an
+        // absent `posix` key renders NOTHING extra, so the exhaustive compare
+        // below is still four lines. That is the legacy path (#230) — the field
+        // is `Option` precisely so those SDKs keep their old output.
+        facts.manual_install_hints.posix = None;
         assert_eq!(
             optional_libs_block(&facts, HostOs::Linux),
             vec![

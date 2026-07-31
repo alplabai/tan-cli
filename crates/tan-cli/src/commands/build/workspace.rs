@@ -303,10 +303,7 @@ pub fn run(g: &GlobalArgs, subcommand: &str, passthrough: &[String]) -> CommandR
         west_cwd: run_cwd.clone(),
         args: passthrough.to_vec(),
     };
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     if g.is_json() {
         let mut cmd = Command::new(&west_bin);

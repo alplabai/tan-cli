@@ -94,10 +94,7 @@ fn to_cli_issues(outcome: Outcome, issues: &[tan_core::ValidationIssue]) -> Vec<
 fn run_spawn(g: &GlobalArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
 
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     // Guard 1: board.yaml must resolve and exist.
     let board_path = match &context.board_yaml_path {
@@ -289,9 +286,17 @@ fn resolve_offline_board_path(g: &GlobalArgs) -> PathBuf {
 fn run_offline(g: &GlobalArgs) -> CommandRun {
     let board_path = resolve_offline_board_path(g);
     let board_str = board_path.to_string_lossy().to_string();
+    // tan-cli#236, same shape as `generate::run`: the refusal below fires on
+    // `!board_path.exists()`, so reporting the path here put "the file does not
+    // exist" and a path to that file in one envelope. `board_str` is still
+    // handed to `offline_failure` — the MESSAGE must keep naming where tan
+    // looked; it is the machine-readable field that must not claim a file.
+    //
+    // Not reachable through `Project::from_context`: like `generate`, this path
+    // reports the as-given strings so the goldens stay machine-independent.
     let project = Project {
         root: g.project.clone().or_else(|| Some(".".to_string())),
-        board_yaml: Some(board_str.clone()),
+        board_yaml: board_path.exists().then(|| board_str.clone()),
     };
 
     if !board_path.exists() {
@@ -510,6 +515,48 @@ mod tests {
         let json = run.json.expect("json envelope in --format json");
         assert!(json.contains("\"code\":\"validate.schema-violation\""));
         assert!(!json.contains("internal-failure"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// tan-cli#236: the refusal and the `project` block are built one line
+    /// apart from the same `board_path`, so this envelope used to say "the file
+    /// does not exist" while `project.boardYaml` named that file. No golden
+    /// covers validate's missing-board case — both `validate-offline-*`
+    /// fixtures ship a real `board.yaml` — so this is the only thing standing
+    /// under that site.
+    #[test]
+    fn offline_missing_board_yaml_reports_a_null_board_yaml_but_still_names_the_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "tan-validate-offline-absent-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!dir.join("board.yaml").exists());
+
+        let g = global(
+            Some(dir.to_string_lossy().as_ref()),
+            None,
+            crate::cli::Format::Json,
+        );
+        let run = run_offline(&g);
+        assert_eq!(run.exit, ExitCode::ValidationFailure);
+        let envelope: serde_json::Value =
+            serde_json::from_str(&run.json.expect("json envelope")).unwrap();
+        assert!(
+            envelope["project"]["boardYaml"].is_null(),
+            "the same envelope refuses because the file is absent: {envelope}"
+        );
+        // The path must NOT vanish from the human-readable side — that is the
+        // whole reason the fix lives at the reporting seam and not in the
+        // resolver every message reads from.
+        assert!(
+            envelope["data"]["boardYamlPath"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("board.yaml")),
+            "the user must still learn where tan looked: {envelope}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

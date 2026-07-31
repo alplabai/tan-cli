@@ -28,10 +28,7 @@ use crate::util::resolve_cli_project_context;
 /// invoke the SDK's `--emit kconfig`, and wrap its JSON in the envelope.
 pub fn run(g: &GlobalArgs, args: &KconfigArgs) -> CommandRun {
     let context = resolve_cli_project_context(g);
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     // Setup-class check #1: no SDK checkout resolved. `invoke_sdk_emit` would
     // also catch this (further down, mid-spawn), but only with exit 1 — for

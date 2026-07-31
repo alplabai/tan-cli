@@ -168,33 +168,36 @@ cargo install --path crates/tan-cli --locked
 
 ### Package managers
 
-> [!WARNING]
-> **Neither package-manager path resolves yet.** The release workflow's
-> crates.io and npm publish jobs have never run with a token, so no version of
-> `alp-tan-cli` exists on crates.io and no version of `@alplabai/tan` exists on
-> npm — both jobs reported success while publishing nothing
-> ([#151](https://github.com/alplabai/tan-cli/issues/151)). Use the release
-> binaries above, or build from source. The commands below are the contract
-> these channels will honour once the tokens are configured; they are documented
-> now so the naming does not change under anyone later.
-
-**crates.io** (Rust **1.86+**, edition 2024) — the published crate is named
-`alp-tan-cli` (`tan`/`tan-cli` were already taken on crates.io by an unrelated
-project); the installed binary is still `tan`:
+**crates.io** — **works** as of `v0.4.1`. Rust **1.86+**, edition 2024. The
+published crate is named `alp-tan-cli` (`tan`/`tan-cli` were already taken on
+crates.io by an unrelated project); the installed binary is still `tan`:
 
 ```sh
 cargo install alp-tan-cli --locked
 tan --version
 ```
 
-**npm** — a shim that downloads the matching platform binary on install (see
-[`npm-shim/`](npm-shim/)); no Rust toolchain needed:
+**npm — does not resolve. Do not use these commands yet.**
 
-```sh
-npm install -g @alplabai/tan
-# or run without installing:
-npx @alplabai/tan --version
-```
+> [!WARNING]
+> `@alplabai/tan` **does not exist on the npm registry at any version.**
+> `npm install -g @alplabai/tan` and `npx @alplabai/tan` both fail with
+> `404 Not Found`. The v0.4.1 publish job failed with `npm error code EOTP` —
+> the configured `NPM_TOKEN` requires an interactive one-time password, which no
+> CI run can supply, so it needs replacing with an npm **automation** token
+> ([#233](https://github.com/alplabai/tan-cli/issues/233)). Use a release binary
+> above, the installer, or crates.io.
+>
+> The commands are recorded here only so the package naming does not change
+> under anyone later:
+>
+> ```sh
+> npm install -g @alplabai/tan   # 404 today
+> npx @alplabai/tan --version    # 404 today
+> ```
+>
+> The shim downloads the matching platform binary on install (see
+> [`npm-shim/`](npm-shim/)); no Rust toolchain needed.
 
 `tan` needs an **alp-sdk checkout** to plan against. It is found, in order, from
 `--sdk-root <path>`, the `.alp/sdk-path` pointer `tan sdk switch` writes, or an

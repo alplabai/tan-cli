@@ -100,10 +100,7 @@ pub(super) fn native_build_outcome(g: &GlobalArgs, args: &BuildArgs) -> NativeBu
         }
     }
 
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
 
     let plan = match acquire_plan(&context, args) {
         Ok(plan) => plan,

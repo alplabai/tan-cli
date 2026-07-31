@@ -128,6 +128,25 @@ testers install by hand.
   v0.4.1 script that only ever INSPECTED a plan silently begin writing six
   files into its own tree.
 
+- **`tan debug-config` now resolves a real J-Link device / pyOCD target id
+  from the SDK's published debug-probe identity, before the project has ever
+  been built** (alp-sdk#1026). alp-sdk#987 shipped `variants[].debug.
+  {pyocd_target, jlink_device, jlink_flash_device, openocd_config}` across 13
+  Alif Ensemble variants with a schema, a gate and tests, and no reader
+  anywhere — every generated `launch.json` kept the literal `<resolved-
+  device>` / `<resolved-target-id>` placeholders #987 was filed to replace.
+  `device` resolves from `jlink_device[<core id>]` (the `--core` flag, or the
+  core a prior build already resolved); `targetId` resolves from the scalar
+  `pyocd_target` with no core or build needed at all. A real build's own
+  `runners.yaml` resolution still wins wherever it exists; this is a fallback
+  for the field(s) it did not already resolve. `openocd_config` is absent
+  from every published SoC family today, and stays the existing placeholder —
+  the schema's own stance that an unpopulated key is a published "unknown" is
+  never overridden with a guess. New `debug-config.sdk-identity-key-absent`
+  (reserved) issue names that case explicitly instead of relying only on the
+  generic "still needs resolution" note, which used to name `device` even for
+  a server whose draft carries no such key.
+
 ### Fixed
 - **A pending `TBD` placeholder can no longer reach a flasher** (#222). alp-sdk
   writes `TBD` into a manifest field it has not filled in yet, and every guard
@@ -282,6 +301,97 @@ testers install by hand.
   message on the commit that carried the fix, both described that pre-existing
   half as the fix and called the defect Windows-only. It is the reverse:
   Windows was green throughout and POSIX was the broken platform.
+
+- **`project.boardYaml` now agrees with the filesystem in both directions**
+  (#236, #170). The field's own contract has always read "if found", and the
+  code returned a path either way: twenty commands each cloned
+  `context.board_yaml_path` straight into the envelope, and the resolver builds
+  `<root>/board.yaml` unconditionally — so a run in a directory with no
+  `board.yaml` reported one, and a consumer that opened it got ENOENT. #170 is
+  the same field failing the other way; its fix routed `debug-config` through
+  that shared resolver, which without this would have traded a hardcoded `null`
+  for a path to a file that need not exist.
+
+  Both ends are fixed at the reporting seam — a new `Project::from_context`
+  (plus `from_debug_context`, which reuses the `board_yaml_exists` flag
+  `doctor`/`inspect`/`support-bundle` already carry) that all twenty sites now
+  route through. Deliberately NOT in `resolve_project_context`:
+  `board_yaml_path` is the path commands ACT on, and several need it precisely
+  when the file is absent — `doctor`'s `read_board_model`, `validate`'s
+  "does not exist" refusal, and `create_debug_workspace_context`, which mirrors
+  the TypeScript side by carrying the path and a separate existence flag.
+  Emptying it there would have stripped the path out of every "no board.yaml at
+  `<path>`" message.
+
+  Two further sites build the block by hand and were the starkest instances:
+  `generate` and `validate --offline` each reported the path one line above the
+  refusal that says the file does not exist. Both now report `null` and keep
+  naming the path in the message.
+
+  **Wire change (reporting only).** Seven golden envelopes move
+  `project.boardYaml` from a path to `null` — the four `debug-config-preview-*`
+  cases, both `presets-*` cases, and `generate-board-yaml-missing`, every one of
+  which runs in a scratch directory that provably has no `board.yaml`. Nothing
+  in `alp-sdk-vscode` reads the field; its only declaration
+  (`src/alpCli/models.ts`) is already `string | null`. `project.root` is
+  untouched — #236 rules that question explicitly out of scope.
+
+- **`tan build --pristine` now reports the slices it did not wipe** (#183).
+  `--pristine` has three paths that correctly decline the wipe, and all three
+  were silent: the slice carries an explicit `-d`/`--build-dir` (west wrote
+  somewhere tan cannot know), the plan cwd does not normalise under `build/`
+  (the wipe target could hold files the build never created), or the build dir
+  has no `CMakeCache.txt` (never configured, nothing to wipe). The run then
+  exited 0 having done an incremental build the user had explicitly asked not
+  to have — so a stale artefact sent them debugging the artefact, not the flag,
+  and the command had told them it handled it. Each suppressed slice now emits
+  `build.pristine-skipped` (severity `warning`, registered `reserved`) naming
+  the slice and which of the three reasons applied, plus a `note:` line in text
+  mode.
+
+  The decision is one pure function, `tan_core::plan_exec::pristine_suppression`,
+  with one emit site placed **outside** the two-guard block in
+  `crates/tan-cli/src/commands/build/execute/mod.rs` — a message written into
+  either guard could not have seen the other, and neither could have seen the
+  third path, which sits inside both. That third path is also the only one a
+  stock plan reaches: `write_sdk_stamp` itself `create_dir_all`s `<cwd>/build`
+  to write `.tan-sdk-root`, so after any prior slice the directory exists
+  holding nothing but tan's stamp, and every subsequent `--pristine` declined
+  silently. The two named in the issue require a hand-written plan.
+
+  No suppression changed. All three remain exactly as `#163` mutation-proved
+  them; only the silence is gone.
+
+- **A write could silently replace a hand-filled `.vscode/launch.json` value**
+  with one resolved from the SDK's identity above, at `exit 0` with
+  `issues: []` (alp-sdk#1026 review). The overwrite itself is the same,
+  by-design behaviour a value resolved from a real build has always had; the
+  defect was that it was undisclosed for this new source. A write that
+  replaces a concrete existing `device`/`targetId`/`configFiles` value now
+  emits a new `debug-config.sdk-identity-overwrite` (reserved) issue naming
+  the old and new values.
+
+- **Linux and macOS now see the manual-install hints the SDK provides for them**
+  (#230). alp-sdk v0.14.0 added `manualInstallHints.posix.note` — the POSIX twin
+  of the Windows key `tan bootstrap` already printed — and tan did not read it, so
+  the data existed and was inert. Three facts reached no POSIX customer: that the
+  Zephyr SDK is a separate, manual `west sdk install` (with the exact invocation),
+  that the Arm GNU Toolchain is a separate install needed by three opt-in paths,
+  and why `west sdk install` may print a `could not find a 'file' executable`
+  warning that is harmless. The same class as 7-Zip being prose-only before #204,
+  one file over.
+
+  Shape, heading and position come from the oracle rather than from tan:
+  `v0.14.0:scripts/bootstrap.sh` prints these under `NOT auto-installed (manual,
+  one-time):` for `linux|macos` only, after the optional-native-libs section. The
+  host gate is `Linux | MacOs` and deliberately **not** "anything that is not
+  Windows" — `HostOs::Other` is a host tan could not identify, and every sentence
+  in the note is Linux/macOS-specific.
+
+  An SDK that declares no `manualInstallHints.posix` (every release before
+  v0.14.0) renders exactly what it always did. The field is `Option` for that
+  reason: a required field would turn each of those SDKs into a hard
+  `ValidationFailure` that `tan build` inherits through auto-bootstrap.
 
 ## [0.4.1] — 2026-07-29
 
@@ -439,6 +549,36 @@ testers install by hand.
   the scripts is alp-sdk#1038's decision.
 
 ### Fixed
+- **`tan bootstrap --print-env` wrote to stderr, so the one thing it exists to
+  produce could not be captured** (#227). Both obvious ways of consuming it
+  produced nothing, and neither errored:
+  ```sh
+  eval "$(tan bootstrap --print-env)"                  # evaluated ""
+  tan bootstrap --print-env > env.sh && . ./env.sh     # sourced ""
+  ```
+  `sh -n` on the empty file passed too — an empty file is a valid shell script
+  — so even a check that the emitted block *parses* could report green having
+  read nothing. That is exactly what `getting-started.yml`'s own `--print-env`
+  step (#216) did: it passed while asserting nothing at all, and its uploaded
+  `gs-print-env.sh` artefact was empty.
+  The block now goes to **stdout**, and it is the only text output in tan that
+  does. Sending text to stderr so `--format json` owns stdout outright is the
+  right rule and every other command keeps it — but `--print-env` is not a
+  report *about* a run, it is the run's product: a shell fragment whose whole
+  purpose is to be consumed, in a CLI whose every other machine-readable
+  surface is `--format json`. `--print-env`'s help text now says so.
+  JSON mode is unchanged: the envelope remains the only thing on stdout there,
+  and it already carries every path the block renders (`data.zephyrBase`,
+  `data.venvDir`), so a JSON consumer never needed the shell spelling.
+  Printed at the `--print-env` short-circuit rather than through `emit`,
+  because `emit`'s two channels *are* the two streams (`json` → stdout, `text`
+  → stderr) and threading a third through `CommandRun` would touch all 174 of
+  its construction sites to serve one flag; `text` is returned empty so the
+  block is never also written to stderr. Verified: stdout 480 bytes, stderr 0.
+  Two permanent gates, in the places that were fooled: the #217 regression
+  suite now reads the block off stdout and asserts stderr is empty in both
+  modes, and `getting-started.yml`'s step uses a plain pipe again (no `2>&1`),
+  so a return to stderr empties the capture and fails the size check.
 - **`tan bootstrap` reported cwd-relative paths in `data.*` and `--print-env`
   while `project.root` in the same envelope was absolute** (#217). Every path
   the command reports is derived from `--sdk-root`, and the flag's spelling

@@ -77,10 +77,7 @@ pub fn run(g: &GlobalArgs, args: &InspectArgs) -> CommandRun {
         }
     }
 
-    let project_env = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project_env = Project::from_debug_context(&context);
     let text = if g.is_json() {
         Vec::new()
     } else {

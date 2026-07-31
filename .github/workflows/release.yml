@@ -583,40 +583,9 @@ jobs:
   # alp-tan`, the name python/pyproject.toml already reserves) is a separate
   # decision and deliberately not smuggled in here.
 
-  # ---------------------------------------------------------------------------
-  # OFF. `if: ${{ false }}` — this job is skipped, not failed, on every tag.
-  #
-  # Two independent reasons, either one sufficient:
-  #
-  #  1. The shim resolves its asset URLs per host from `npm-shim/postinstall.js`
-  #     (`TAG = v${pkg.version}`), and its map (postinstall.js:45-51) names
-  #     LINUX AS MUSL — `linux/x64` -> x86_64-unknown-linux-musl — while this
-  #     tag's only Linux asset is `-gnu` (see the header). So THREE of the
-  #     map's six entries name assets this tag does not publish, not two:
-  #     `win32/arm64` -> aarch64-pc-windows-msvc, `linux/x64` ->
-  #     x86_64-unknown-linux-musl, and `linux/arm64` ->
-  #     aarch64-unknown-linux-musl. Publishing the shim against a
-  #     partial asset set turns `npm i -g @alplabai/tan` into a 404 at
-  #     POSTINSTALL time on those three hosts, which is worse than not
-  #     publishing it.
-  #  2. #233: NPM_TOKEN is a classic publish token on a 2FA account, so
-  #     `npm publish` answers `EOTP` and demands an interactive OTP. It cannot
-  #     succeed unattended regardless of (1).
-  #
-  # Nothing depends on it: `npm view @alplabai/tan` is `E404 Not Found` -- the
-  # package has never been published at any version -- and alp-sdk-vscode never
-  # reaches for npm (it downloads raw release assets; grep src/alpCli/*.ts for
-  # `@alplabai/tan` returns nothing). README already warns that neither
-  # package-manager install path resolves.
-  #
-  # Everything below is left intact and working so re-enabling is a one-line
-  # change once the shim's map matches the published asset set and the token is
-  # fixed.
-  #
   # npm shim — `npm i -g @alplabai/tan` / `npx @alplabai/tan`. One release tag
   # scheme (v*), one workflow. Gated on NPM_TOKEN; on a FINAL tag a missing
-  # token FAILS rather than skipping, mirroring the crates.io job this file
-  # used to carry (#151).
+  # token FAILS rather than skipping, mirroring the crates.io job above (#151).
   #
   # A pre-release tag is skipped here too, and this path was the sharpest of the
   # three: `npm publish` below passes no `--tag`, so npm defaults the release to
@@ -632,8 +601,7 @@ jobs:
   publish_npm:
     name: publish · npm shim
     needs: release
-    # Was: startsWith(github.ref,'refs/tags/') && !contains(github.ref_name,'-')
-    if: ${{ false }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -641,8 +609,38 @@ jobs:
     defaults:
       run:
         working-directory: npm-shim
+    # What this job actually DID, for `release_gate` to compare against what was
+    # declared (#237). Deliberately OBSERVED rather than re-derived from
+    # `NPM_PUBLISH_ENABLED`: re-reading the declaration would make the gate
+    # circular — it would assert the declaration equals itself and pass even if
+    # the job had done the opposite. `published=true` is written only AFTER
+    # `npm publish` returns, and `false` only by the branch that declines.
+    #
+    # Two step ids because exactly one of them runs; a skipped step contributes
+    # nothing, so the `||` picks whichever fired.
+    outputs:
+      published: ${{ steps.published.outputs.published || steps.declined.outputs.published }}
     env:
       NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Publishing is OPT-IN, off by default. Set the repository VARIABLE
+      # `TAN_NPM_PUBLISH` to `true` to arm it (Settings -> Secrets and variables
+      # -> Actions -> Variables). A variable, not a secret: the value is not
+      # sensitive, and a secret that gates behaviour is invisible in the UI.
+      #
+      # WHY off (#233): v0.4.1's publish failed with `npm error code EOTP` --
+      # `NPM_TOKEN` is a classic/publish token on a 2FA account, so `npm publish`
+      # demands an interactive one-time password no CI run can answer. Only an
+      # npm AUTOMATION (or granular) token is exempt. That is an account-side
+      # fix, so the failure recurs on every final tag until it is made.
+      #
+      # A permanently-red job on the release workflow is worse than no job. It is
+      # the mirror of a gate that cannot fail: a job that can only fail teaches
+      # everyone to stop reading the one board where ignoring red is least
+      # affordable. So this is gated OFF rather than left red -- and the OFF path
+      # is LOUD (see `npm publishing is disabled` below), because the other
+      # failure this repo spent the week removing is a channel that quietly
+      # reports success while shipping nothing (#151).
+      NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -650,29 +648,206 @@ jobs:
           node-version: "24"
           registry-url: https://registry.npmjs.org
 
+      # Runs whether or not publishing is armed. The shim is still a shipped
+      # artefact of this repo, and a shim that stops packing is worth catching
+      # while it is cheap rather than on the day the token is fixed.
       - name: Pack (smoke — confirm the shim packs with its bin + postinstall)
         run: |
           npm pack --dry-run
           node -e "const p=require('./package.json'); if(!p.bin||!p.bin.tan) throw new Error('shim missing bin.tan')"
+
+      # The OFF path, and it says so out loud in the run summary rather than
+      # passing silently. Exits 0: not publishing is the DECISION here, not a
+      # failure, and the release itself is unaffected.
+      - name: npm publishing is disabled
+        id: declined
+        if: ${{ env.NPM_PUBLISH_ENABLED != 'true' }}
+        run: |
+          echo "published=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### npm: NOT PUBLISHED — deliberately disabled"
+            echo
+            echo "\`@alplabai/tan@${GITHUB_REF_NAME#v}\` was **not** published. The shim packed cleanly; publishing is gated off."
+            echo
+            echo "Reason: the configured \`NPM_TOKEN\` requires an interactive one-time password (\`npm error code EOTP\`), which no CI run can supply. It needs replacing with an npm **automation** token — see [#233](https://github.com/alplabai/tan-cli/issues/233)."
+            echo
+            echo "To arm this job once that is done, set the repository variable \`TAN_NPM_PUBLISH\` to \`true\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice::npm publish is gated off (TAN_NPM_PUBLISH is not 'true'). @alplabai/tan was NOT published for this tag; see #233."
 
       # Same rule as the crates.io job, and for the same reason: this job only
       # runs on a final tag, so a missing token means the release advertises
       # `npm i -g @alplabai/tan` for a package that does not exist. v0.4.0 did
       # (#151). The pack smoke above still runs first, so a genuinely broken
       # shim is reported as a broken shim rather than as a missing secret.
+      # The three ARMED steps below all carry the same gate. Left individually
+      # conditional rather than split into a second job, so the token refusal,
+      # the publish and the outcome record stay next to the pack smoke they
+      # belong with.
       - name: Refuse to "publish" with no token
-        if: ${{ env.NPM_TOKEN == '' }}
+        if: ${{ env.NPM_PUBLISH_ENABLED == 'true' && env.NPM_TOKEN == '' }}
         run: |
           echo "### npm: NOT PUBLISHED" >> "$GITHUB_STEP_SUMMARY"
           echo "\`NPM_TOKEN\` is not set, so \`npm i -g @alplabai/tan\` will not resolve for this release. The shim packed cleanly." >> "$GITHUB_STEP_SUMMARY"
-          echo "::error::NPM_TOKEN is not set. A FINAL release must not report a successful npm publish it did not perform (#151). Add the secret, or drop the npm install path from the docs and this job."
+          echo "::error::NPM_TOKEN is not set, but TAN_NPM_PUBLISH is 'true'. A FINAL release must not report a successful npm publish it did not perform (#151). Add the secret, or unset TAN_NPM_PUBLISH."
           exit 1
 
       - name: Publish to npm
+        if: ${{ env.NPM_PUBLISH_ENABLED == 'true' }}
         run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
+      # Reached only if `npm publish` above returned 0 -- a failure fails the job
+      # before this runs, so `published=true` is an observation, not a claim.
       - name: Record the npm outcome
+        id: published
+        if: ${{ env.NPM_PUBLISH_ENABLED == 'true' }}
         run: |
+          echo "published=true" >> "$GITHUB_OUTPUT"
           echo "### npm: published \`@alplabai/tan@${GITHUB_REF_NAME#v}\`" >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  # #237: a tag must not be able to skip its own publishes silently.
+  #
+  # v0.4.1 proved it could. One flaky unit test failed `gates`, so `build`,
+  # `release` and both publish jobs were marked SKIPPED, and the tag existed --
+  # immutably -- with no Release, no assets, and `releases/latest` still pointing
+  # at the previous version. The only signal was a red check on a run nobody was
+  # necessarily watching. `skipped` is the right semantic for a conditional job
+  # and the wrong one for the publish leg of a tag, because a tag is a commitment:
+  # the version number is spent and `install.sh` resolves it the moment a Release
+  # appears.
+  #
+  # This is NOT an exemption list. An exemption list grows -- npm today, some
+  # future channel tomorrow -- and every addition is a place the invariant quietly
+  # stops covering something. The invariant is DECLARATION-RELATIVE instead, the
+  # same mechanism #219 used for issue codes: declare the intent, then assert the
+  # outcome against the declaration.
+  #
+  #   1. HARD, unconditional: a pushed `v*` tag MUST produce a Release with its
+  #      assets. Nothing legitimately skips that, rc or final.
+  #   2. PER CHANNEL: the outcome must match the channel's declared intent.
+  #      crates.io has no gate variable, so its intent is "always". npm's intent
+  #      is `TAN_NPM_PUBLISH`; unset means it must decline and exit 0, armed means
+  #      it must publish or fail.
+  #
+  # So a disarmed npm channel is not an exemption -- it SATISFIES the invariant,
+  # because declaration and outcome agree. And arming it changes the declaration,
+  # after which this gate demands a publish with no edit here. That is also why
+  # this cannot re-create the permanently-red board #239 removed.
+  release_gate:
+    name: release outcome matches intent
+    needs: [release, publish_npm]
+    # `always()`, or a skipped dependency skips the gate too and the whole point
+    # is lost. Tag-only: this workflow has no other trigger today, but the guard
+    # makes the scope explicit rather than inherited.
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: assert the release and every channel matched its declared intent
+        shell: bash
+        env:
+          RELEASE_RESULT: ${{ needs.release.result }}
+          NPM_RESULT: ${{ needs.publish_npm.result }}
+          NPM_PUBLISHED: ${{ needs.publish_npm.outputs.published }}
+          NPM_DECLARED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}
+        run: |
+          set -euo pipefail
+          fail=0
+          note() { echo "$1" >> "$GITHUB_STEP_SUMMARY"; }
+          bad() { echo "::error::$1"; note "- FAIL: $1"; fail=1; }
+
+          note "### Release outcome vs declared intent"
+          note ""
+          note "| leg | declared | result | published |"
+          note "|---|---|---|---|"
+          note "| release | always | \`${RELEASE_RESULT}\` | - |"
+          note "| npm | \`TAN_NPM_PUBLISH=${NPM_DECLARED}\` | \`${NPM_RESULT}\` | \`${NPM_PUBLISHED:-<none>}\` |"
+          note ""
+
+          # 1. Unconditional. A tag with no Release behind it is the v0.4.1 state.
+          if [ "$RELEASE_RESULT" != "success" ]; then
+            bad "no GitHub Release was published for ${GITHUB_REF_NAME} (release job: ${RELEASE_RESULT}). A pushed tag must always produce a Release with its assets; the tag is now spent with nothing behind it."
+          fi
+
+          # A prerelease tag (a hyphen in the version) declares that the registry
+          # channels do not run at all, which is what their own `if:` encodes. Both
+          # being `skipped` is then the CORRECT outcome, so stop here.
+          case "${GITHUB_REF_NAME}" in
+            *-*)
+              note "Prerelease tag: registry channels declared not-run, both \`skipped\` as expected."
+              [ "$fail" -eq 0 ] || exit 1
+              echo "prerelease: release asserted, registry channels correctly skipped."
+              exit 0
+              ;;
+          esac
+
+          # 2b. npm against its declaration. The job must not have FAILED either
+          # way -- a disarmed channel still has to exit 0 having said so.
+          if [ "$NPM_RESULT" != "success" ]; then
+            bad "the npm job did not complete cleanly (job: ${NPM_RESULT}). Disarmed it must report NOT PUBLISHED and exit 0; armed it must publish."
+          # The job succeeded, so `published` MUST be one of the two values it
+          # writes. Anything else means the outputs wiring between `publish_npm`
+          # and this gate is broken, and the comparisons below would be reading
+          # nothing.
+          #
+          # This is the one hole `always()` + a declaration check cannot close by
+          # itself. An unresolvable `needs.publish_npm.outputs.published` --
+          # renamed step id, removed `outputs:` block, a context GitHub does not
+          # populate -- evaluates to the EMPTY STRING; it does not error. And ''
+          # satisfies `!= "true"`, which is the disarmed-expected branch, which is
+          # the state tan is in today. So a broken wiring would pass GREEN on every
+          # disarmed tag and only surface at ARMING time, reported as "npm did not
+          # publish" when npm may have published fine and the gate is describing
+          # its own broken input. Arming is the moment this gate most needs to be
+          # trustworthy; it must not be the moment it starts lying.
+          #
+          # A gate that reads an empty input and reports "matched declared intent"
+          # is #151's silent success one level up, which is what this job exists to
+          # remove.
+          #
+          # STRUCTURAL PRECONDITION -- do not merge the publish jobs.
+          #
+          # "Empty means the wiring is broken" is only true because each channel is
+          # a SEPARATE JOB with its own `needs: release`. A failed `release` or a
+          # failed `publish_crates` cannot blank npm's self-report, because npm's
+          # job either ran and reported, or was skipped and is caught by the
+          # `NPM_RESULT` check above. So an empty `published` from a job that
+          # reports `success` really does mean the outputs wiring is broken, and
+          # nothing else.
+          #
+          # Collapse the channels into ordered STEPS of one job -- the obvious
+          # refactor, for speed or for a shared checkout -- and that stops holding:
+          # an earlier step failing aborts the job before the later channel's
+          # reporting step runs, its output comes back empty for a reason that has
+          # nothing to do with wiring, and this check fires a FALSE "wiring is
+          # broken" beside the true error.
+          #
+          # Not hypothetical. alp-sdk-vscode ported this gate, merged its four
+          # publish legs into one job's steps, and hit exactly that: a Marketplace
+          # failure aborted before the Open VSX steps, and their port reported a
+          # broken wiring next to the real failure -- misdiagnosing the one scenario
+          # the gate was built for.
+          #
+          # There is no test that catches this: the assertion still passes on every
+          # green tag, and only lies on a failing one. Hence the comment.
+          #
+          # Kept in the SAME elif chain rather than a separate `case`, so a broken
+          # wiring reports exactly one cause: a garbage value would otherwise also
+          # trip a declaration comparison it has nothing to compare against.
+          elif [ "$NPM_PUBLISHED" != "true" ] && [ "$NPM_PUBLISHED" != "false" ]; then
+            bad "the npm job reported published='${NPM_PUBLISHED:-<empty>}', which is neither true nor false. The outputs wiring between publish_npm and this gate is broken, so the declaration checks are comparing against nothing. Check publish_npm's \`outputs:\` block and the \`declined\`/\`published\` step ids."
+          elif [ "$NPM_DECLARED" = "true" ] && [ "$NPM_PUBLISHED" != "true" ]; then
+            bad "TAN_NPM_PUBLISH is 'true' but the npm job did not publish (published=${NPM_PUBLISHED:-<none>}). An armed channel that ships nothing is the silent-success failure #151 removed."
+          elif [ "$NPM_DECLARED" != "true" ] && [ "$NPM_PUBLISHED" = "true" ]; then
+            bad "npm published while TAN_NPM_PUBLISH is not 'true'. The channel shipped something nobody declared."
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            note ""
+            note "This tag did NOT ship as declared. See the annotations above."
+            exit 1
+          fi
+          note "All legs matched their declared intent."
+          echo "release + every channel matched its declared intent."

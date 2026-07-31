@@ -157,10 +157,7 @@ pub fn run(g: &GlobalArgs, args: &PinmuxArgs) -> CommandRun {
             data.pads.len()
         )]
     };
-    let project = Project {
-        root: context.workspace_root.clone(),
-        board_yaml: context.board_yaml_path.clone(),
-    };
+    let project = Project::from_context(&context);
     let json = g
         .is_json()
         .then(|| Envelope::new("pinmux", project, data, issues, exit.code()).to_json());

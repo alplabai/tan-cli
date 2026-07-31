@@ -241,7 +241,16 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
   | `publish · crates.io` | **deleted** | `cargo install alp-tan-cli` resolves only to the stale Rust program under that name. Do not advertise it. |
   | `publish · npm shim` | `if: ${{ false }}` | `npm i -g @alplabai/tan` does not resolve (`E404` at every version). |
 
-  Both jobs once emitted a `::warning::` and exited **0**, so the run summary
+  **Present is not the same as usable.** `NPM_TOKEN` was configured for v0.4.1
+  and the job still failed — `npm error code EOTP`, because a classic/publish
+  token on a 2FA account makes `npm publish` demand an interactive one-time
+  password no CI run can answer. Only an npm **automation** token (or a granular
+  token) is exempt. The missing-secret refusal above cannot catch this: the token
+  is there, so the job proceeds and fails at the registry, after signing a
+  provenance statement into the public transparency log for a version that never
+  published (#233).
+
+  Both previously emitted a `::warning::` and exited **0**, so the run summary
   read `publish · crates.io  success` while crates.io answered
   `crate 'alp-tan-cli' does not exist` — what shipped for v0.4.0 (#151). The
   lesson survives the deletion: a publish channel that cannot work must fail or

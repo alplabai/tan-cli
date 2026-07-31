@@ -1,0 +1,12 @@
+debug-config
+--target-kind
+zephyr-mcu
+--server
+jlink
+--core
+m55_hp
+--sdk-root
+./sdk
+--preview
+--format
+json
