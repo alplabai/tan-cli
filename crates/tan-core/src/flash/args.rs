@@ -38,8 +38,9 @@ fn fa_get<'a>(v: &'a Value, k: &str) -> Option<&'a Value> {
 /// copying this one: `pinmux` drops a `TBD` `e1m_pad` as a sentinel ROW (the
 /// silicon pad has no E1M edge ball at all), and `size::resolve_variant` skips
 /// a `TBD` `silicon_variant` before falling through to a reverse SKU lookup.
-/// Neither plans a flash write. Both compare untrimmed — a smaller separate
-/// bug, not this one.
+/// Neither plans a flash write. Both compare untrimmed — tracked as #276, which
+/// also carries the question of whether this constant belongs somewhere more
+/// neutral than the flash backend it happens to sit in.
 pub const PENDING_PLACEHOLDER: &str = "TBD";
 
 /// Whether `s` is the pending-placeholder sentinel rather than a value.

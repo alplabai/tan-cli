@@ -68,8 +68,9 @@ All notable changes to `tan` are documented here. Format follows
   a `TBD` `e1m_pad` as a sentinel row (that silicon pad has no E1M edge ball),
   and `size::resolve_variant` skips a `TBD` `silicon_variant` before its reverse
   SKU lookup. Different schemas, different questions, and neither plans a flash
-  write. Both compare untrimmed, so `' TBD '` slips past them — a smaller
-  separate bug, filed rather than folded in here.
+  write. Both compare untrimmed, so `' TBD '` slips past them — filed as #276
+  rather than folded in here, along with the open question of whether
+  `PENDING_PLACEHOLDER` should live somewhere more neutral than `flash::args`.
 
   Every `fa_str` call site was audited for whether "absent" is safe there. Each
   is either already protected by a closed-set check that `TBD` also failed
