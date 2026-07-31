@@ -655,7 +655,7 @@ def _resolve_sdk_root(
 
     `reported` is the string to put in the envelope's `sdk.root`: for
     `sdkRootFlag` it is the flag's raw text, NOT `str(path)` -- pathlib
-    silently drops a trailing separator (`E:/GitHub/alp-sdk/` in, `.../alp-sdk`
+    silently drops a trailing separator (`/srv/alp-sdk/` in, `/srv/alp-sdk`
     out), which the oracle does not do. Every other tier reports `str(path)`;
     those come from a pinned/discovered path, not user-typed argv, so there is
     no trailing-separator input to preserve.

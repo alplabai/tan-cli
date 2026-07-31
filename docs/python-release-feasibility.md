@@ -525,7 +525,7 @@ meant to break.
 
 ### 3.4a Re-run against `design/tan-python-port` — still not green
 
-Re-run with `ALP_SDK_ROOT=E:/GitHub/alp-sdk/.claude/worktrees/tan-python-port`
+Re-run with `ALP_SDK_ROOT` bound to a checkout of `design/tan-python-port`
 (`ac903335`, "Merge origin/main into design/tan-python-port", 0 commits behind
 main): **`25 failed, 1715 passed, 209 skipped in 848.80s`** — the same 25 as
 against public main, all
