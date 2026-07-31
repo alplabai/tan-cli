@@ -46,6 +46,22 @@ class SdkRevisionUnsupported(OrchestratorError):
     """
 
 
+class SdkRevisionUnknown(OrchestratorError):
+    """The requested hw_rev is not a key in its resolved `hw_revisions:` table.
+
+    Distinct from `SdkRevisionUnsupported`: that one names a revision that
+    exists but whose declared SDK range excludes the running SDK.  This one
+    names a revision that doesn't exist at all -- there is no range to
+    compare against, so reporting it as out-of-range would name the wrong
+    cause.  A subclass (not a flag) for the same reason as
+    `SdkRevisionUnsupported`, and with the same tan-side caveat: alp-sdk's
+    `scripts/validate_board_yaml.py` maps exactly this failure to its own
+    exit code, but that script has no tan counterpart, so here the subclass
+    buys `except OrchestratorError` compatibility only (alp-sdk #1025, the
+    existence-only half).
+    """
+
+
 _E1M_I2C_BUS_RE = re.compile(r"^e1m(?:_x)?_i2c([0-9]+)$")
 
 
@@ -120,6 +136,16 @@ class Slice:
     # its console.  Consumed by the console emitter for `diagnostics.
     # sim_console:` (issue #686).
     hw_console: bool = True
+    # SEGGER J-Link **part-number flash-device** profile for this slice's
+    # SoC variant (soc-spec-v1 `variants[].debug.jlink_flash_device`) --
+    # unlocks the built-in Alif MRAM loader (Flow D), distinct from the
+    # generic attach/debug `jlink_device` profile.  A resolved SoC-variant
+    # fact, like `hw_console` above, NOT customer-overridable; None when
+    # the variant publishes no such profile -- a published "unknown", not
+    # a gap to guess at (see soc-spec-v1.schema.json's `jlink_flash_device`
+    # description).  Consumed by `_slice_flash_recipe`'s `zephyr` branch to
+    # arm the direct-flash path in `flash_args`.
+    jlink_flash_device: Optional[str] = None
 
     # Populated by Orchestrator.fan_out:
     build_dir: Optional[Path] = None

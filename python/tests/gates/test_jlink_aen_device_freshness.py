@@ -12,28 +12,39 @@ SDK checkout silently advises the wrong part number, with no test going red.
 
 Without `ALP_SDK_ROOT` there is no oracle to compare against, so the gate
 SKIPS -- visibly, naming the missing env var, never a silent pass.
+
+The root is resolved through `tests.conftest.sdk_root()` AT MODULE IMPORT
+TIME, and that is load-bearing, not style: the autouse
+`_scrub_sdk_discovery_env` fixture deletes `ALP_SDK_ROOT` from the process
+environment before every test function, so an `os.environ` read inside the
+body skips on EVERY run -- including runs with the variable exported. This
+gate did exactly that and so had never once compared a value; its sibling
+`test_planner_relocation_freshness.py` had the same defect, and that is how
+`tan/planner/` drifted eleven alp-sdk commits unnoticed (tan-cli#275).
 """
 
 from __future__ import annotations
 
-import os
 import pathlib
 
 import pytest
 
 from tan.commands import doctor_cmd
+from tests.conftest import sdk_root
+
+#: Resolved at import time -- see the module docstring on why that matters.
+SDK: pathlib.Path | None = sdk_root()
 
 
 def _sdk_root() -> str:
-    raw = os.environ.get("ALP_SDK_ROOT")
-    if not raw:
+    if SDK is None:
         pytest.skip(
             "ALP_SDK_ROOT is not set -- no bound alp-sdk checkout to compare "
             "doctor_cmd.JLINK_AEN_DEVICE against, so this staleness gate cannot "
             "run. This is a SKIP about the missing root, not a pass: set "
             "ALP_SDK_ROOT to a real alp-sdk checkout to actually exercise the gate."
         )
-    return raw
+    return str(SDK)
 
 
 def test_jlink_aen_device_fallback_matches_the_bound_sdk_metadata():
