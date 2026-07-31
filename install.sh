@@ -47,6 +47,27 @@ Linux) os_part="unknown-linux-gnu" ;;
 *) echo "install.sh: unsupported OS '$os' -- on Windows use install.ps1" >&2; exit 1 ;;
 esac
 
+# musl hosts (Alpine and similar) cannot run the -gnu binary above AT ALL --
+# not a checksum failure, a bare "not found" from the shell AFTER the sha256
+# verify below already passed, so none of that section's four refusals ever
+# fires and the script reports success. Catch it here instead, before any
+# download: `ldd --version` names musl on the first line where glibc's ldd
+# names itself; some minimal images have no ldd at all, so also check for the
+# musl dynamic loader directly.
+if [ "$os_part" = "unknown-linux-gnu" ]; then
+	is_musl=0
+	if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
+		is_musl=1
+	elif ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then
+		is_musl=1
+	fi
+	if [ "$is_musl" = "1" ]; then
+		echo "install.sh: this host's libc is musl (e.g. Alpine) -- no Linux asset is published for it. From v0.5.0 the binary is a PyInstaller freeze, which cannot produce the static musl artefact older Rust releases did; the only Linux asset now is -unknown-linux-gnu, and it cannot exec on a musl host." >&2
+		echo "install.sh: refusing to install. Install from a checkout instead: git clone https://github.com/${REPO} && pip install ./tan-cli/python" >&2
+		exit 1
+	fi
+fi
+
 # host arch -> rust target arch part
 arch="$(uname -m)"
 case "$arch" in
