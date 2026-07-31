@@ -160,6 +160,66 @@ def test_text_and_json_formats_are_unchanged(tmp_path, monkeypatch):
     assert envelope["data"]["outcome"] == "clean"
 
 
+def test_validate_without_offline_is_runtime_failure_not_internal(tmp_path, monkeypatch):
+    """A `tan validate` without `--offline`, on a project whose board.yaml
+    EXISTS, cannot produce a real verdict -- the spawn path is not ported yet
+    -- but that is not a tan bug, so it must not exit 5.
+
+    Exit 1 here is a deliberate DEFERRAL (tan-cli#262), NOT a match to the
+    oracle. An earlier revision of this docstring claimed the oracle returns 1
+    for this case; that was never measured, and it is false. Measured on
+    `tan 0.4.1-dev` with `--format json`: board.yaml present but no SDK root
+    exits **2** `validate.sdk-root-unresolved`. Closing that gap needs the real
+    spawn path, which is what #262 tracks. What IS aligned with the oracle is
+    the missing-board.yaml guard -- see the test below."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som:\n  sku: E1M-AEN701\npreset: e1m-evk\n")
+    result = runner.invoke(app, ["validate", "--format", "json"])
+    assert result.exit_code == int(ExitCode.RUNTIME_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert envelope["exitCode"] == int(ExitCode.RUNTIME_FAILURE)
+    assert [i["code"] for i in envelope["issues"]] == ["validate.spawn-not-implemented"]
+
+
+def test_missing_board_yaml_is_validation_failure_on_both_paths(tmp_path, monkeypatch):
+    """An empty directory reports `validate.board-yaml-missing` at exit 2
+    whether or not `--offline` was passed: the guard runs BEFORE the not-ported
+    stub can short-circuit.
+
+    Measured on the oracle (`tan 0.4.1-dev`, `--format json`) in an empty dir:
+    exit 2, `validate.board-yaml-missing`, `data.outcome == "failed"`. Until
+    #262 the non-offline path answered "not ported yet" at exit 1 here -- which
+    is the very first thing a brand-new user sees from `tan validate`, and the
+    one place a gratuitous divergence is most expensive."""
+    monkeypatch.chdir(tmp_path)
+    for args in (
+        ["validate", "--format", "json"],
+        ["validate", "--offline", "--format", "json"],
+    ):
+        result = runner.invoke(app, args)
+        assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), (args, result.output)
+        envelope = json.loads(result.output)
+        assert envelope["exitCode"] == int(ExitCode.VALIDATION_FAILURE)
+        assert envelope["data"]["outcome"] == "failed"
+        assert [i["code"] for i in envelope["issues"]] == ["validate.board-yaml-missing"]
+
+
+def test_validate_offline_unreadable_board_yaml_is_still_internal_failure(tmp_path, monkeypatch):
+    """A genuine internal failure -- board.yaml exists but cannot be read --
+    is a real tan-can't-cope case, not a validation verdict, and must stay at
+    exit 5. Mirrors the oracle's own offline path
+    (`crates/tan-cli/src/commands/validate.rs::run_offline`), which reports
+    the identical situation as `InternalFailure`."""
+    monkeypatch.chdir(tmp_path)
+    # A directory named `board.yaml` exists() but is not readable as text.
+    (tmp_path / "board.yaml").mkdir()
+    result = runner.invoke(app, ["validate", "--offline", "--format", "json"])
+    assert result.exit_code == int(ExitCode.INTERNAL_FAILURE), result.output
+    envelope = json.loads(result.output)
+    assert envelope["exitCode"] == int(ExitCode.INTERNAL_FAILURE)
+    assert [i["code"] for i in envelope["issues"]] == ["validate.internal-failure"]
+
+
 def test_unknown_format_is_rejected_and_lists_all_four_choices(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     _write(tmp_path, "som:\n  sku: E1M-AEN701\n")

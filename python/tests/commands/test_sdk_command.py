@@ -363,9 +363,15 @@ def test_list_refuses_without_online_and_touches_no_network(tmp_path, isolated_h
 def test_install_and_switch_refuse_loudly_rather_than_half_working(tmp_path, isolated_home, verb):
     """A partial `switch` writes the active-SDK pointer but skips the
     `.west/config` reconciliation, reporting success while `west` keeps
-    resolving the old SDK -- tan-cli #62, re-introduced invisibly."""
+    resolving the old SDK -- tan-cli #62, re-introduced invisibly.
+
+    Exit 1, not 5. This asserted 5 until #262, matching a `_run_not_ported`
+    docstring whose stated precedent (`validate_cmd`) actually uses 1. Exit 1
+    is what every sibling refusal in `sdk_cmd` uses, what `deferred_cmd`'s
+    stubs use, and what the oracle itself returns for a `sdk switch` that
+    cannot resolve (`sdk.path-not-found`, measured). 5 means "tan crashed"."""
     proc = run_tan("sdk", verb, "v0.14.0", "--format", "json", cwd=tmp_path)
-    assert proc.returncode == 5
+    assert proc.returncode == 1
     env = envelope(proc)
     assert env["ok"] is False
     assert env["issues"][0]["code"] == "sdk.not-ported"

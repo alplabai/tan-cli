@@ -735,11 +735,24 @@ def _run_list(*, json_mode: bool, online: bool) -> None:
 def _run_not_ported(*, json_mode: bool, subcommand: str, data: dict[str, Any]) -> None:
     """`install` / `switch` -- refused outright rather than half-implemented.
 
-    Exit 5 (`InternalFailure`), following `validate_cmd`'s precedent for its own
-    unported spawn path: this is a gap in tan, not a mistake the user made, and
-    2 would be rendered as a warning by a consumer that should be seeing a hard
-    stop. The payload keeps each verb's real key set so a consumer reading
-    `data.sdkPath`/`data.version` still finds them.
+    Exit 1 (`RuntimeFailure`) -- the same code every other refusal in this
+    module already uses (`sdk list` without `--online`, a bare `tan sdk`) and
+    the same one the deferred-verb stubs in `deferred_cmd` settled on.
+
+    This was exit 5 (`InternalFailure`) until #262, on a docstring that
+    justified it as "following `validate_cmd`'s precedent for its own unported
+    spawn path". That citation was backwards: `validate_cmd` uses exit 1, and
+    its module docstring says exit 5 would wrongly tell CI/the extension this
+    is a tan crash. The comment argued for the opposite of what the code did.
+
+    Measured, not inferred -- the oracle's own `sdk switch` failure is exit 1:
+    `tan sdk switch 0.0.0-nonexistent --format json` -> rc=1,
+    `sdk.path-not-found`. Nothing under `contract/` pins a 5 here.
+
+    5 stays reserved for a genuine tan crash; 2 would be rendered as a warning
+    by a consumer that should be seeing a hard stop. The payload keeps each
+    verb's real key set so a consumer reading `data.sdkPath`/`data.version`
+    still finds them.
     """
     _fail(
         json_mode=json_mode,
@@ -755,7 +768,7 @@ def _run_not_ported(*, json_mode: bool, subcommand: str, data: dict[str, Any]) -
             f"sdk {subcommand}: not available in this build of tan.",
             "Use `--sdk-root <path>` to point a command at a checkout directly.",
         ],
-        exit_code=ExitCode.INTERNAL_FAILURE,
+        exit_code=ExitCode.RUNTIME_FAILURE,
     )
 
 
