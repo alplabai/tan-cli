@@ -10,9 +10,9 @@ executes it — it is the single executor and the user command surface for
 building, flashing, and inspecting Alp Lab E1M / E1M-X firmware.
 
 `bootstrap` / `build` / `run` / `size` / `image` / `flash` / `clean` / `renode`
-are native Rust — `bootstrap` included, so there is no `bash` dependency and
-native Windows is a first-class host. Only `migrate` / `lock` / `quality` still
-forward to `west alp-*`, and
+run directly in `tan` — `bootstrap` included, so there is no `bash` dependency
+and native Windows is a first-class host. Only `migrate` / `lock` / `quality`
+still forward to `west alp-*`, and
 `model` / `monitor` / `new-som` / `faultdecode` to the SDK `alp` CLI. Licensed
 **Apache-2.0** (see [`LICENSE`](LICENSE); the SPDX identifier is also set in each
 `Cargo.toml` and source header).
@@ -225,7 +225,8 @@ tan run --flash                       # build, then run (host) or program (hardw
 west) alongside debug readiness for the selected target/server. `tan doctor
 --build --fix` goes further, resolving the OS set from `board.yaml` and
 diagnosing (and repairing what it can) a build environment that is not ready;
-`--fix` requires `--build`. `tan completion --shell zsh` emits a completion
+`--fix` requires `--build`. `tan completion --shell zsh` is deferred in this
+build (see Commands below) and exits 1 rather than emitting a completion
 script.
 
 `bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; it
@@ -264,11 +265,16 @@ foreign content either.
 
 | Area | Commands |
 | --- | --- |
-| **Project** | `init` · `scaffold` · `examples` · `explain` · `presets` · `pinmux` |
-| **Configure & verify** | `validate` · `generate` · `diff` · `inspect` · `trace` · `doctor` · `debug-config` · `support-bundle` · `kconfig` |
-| **Build & run** (native) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
-| **Environment** (native) | `bootstrap` · `sdk` · `completion` |
+| **Project** | `init` · `scaffold`† · `examples` · `explain` · `presets` · `pinmux`† |
+| **Configure & verify** | `validate` · `generate` · `diff`† · `inspect`† · `trace`† · `doctor` · `debug-config` · `support-bundle`† · `kconfig` |
+| **Build & run** (direct) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
+| **Environment** (direct) | `bootstrap` · `sdk` · `completion`† |
 | **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `model` · `monitor` · `new-som` · `faultdecode` → `python -m alp_cli` |
+
+† Deferred to v0.6.0 (tan-cli#260): a working command in the Rust CLI
+(tan-cli v0.4.1), but the Python port shipping this release stubs it —
+exits 1, with the issue code `cli.command-deferred` in `--format json`;
+text mode prints only the deferral message.
 
 `tan <command> --help` for flags. Global flags apply to every command:
 
@@ -278,8 +284,8 @@ foreign content either.
 | `--board-yaml <PATH>` | Explicit `board.yaml`, overriding project resolution. |
 | `--sdk-root <PATH>` | alp-sdk checkout to plan against. |
 | `--format json` | Machine-readable envelope instead of text. |
-| `--non-interactive` | Never prompt. A command with a documented default takes it (`init` scaffolds `zephyr-app` into `.`); one without fails naming the missing flag (`scaffold` needs `--name`). Applied unasked when stdin or stderr is not a terminal — piped, redirected, or a CI runner (#187). |
-| `--ci` | Implies `--non-interactive` and disables color. |
+| `--non-interactive` | Not implemented in this build. Only `build --non-interactive` is even accepted, and it is itself deferred (tan-cli#260); no command changes behaviour for it yet. In the Rust CLI: never prompt, a command with a documented default takes it, one without fails naming the missing flag; applied unasked when stdin or stderr is not a terminal (#187). |
+| `--ci` | Not implemented as a global flag in this build; `size --ci` is the one live exception, and only as an alias for `--no-color` there (`size` never prompts). In the Rust CLI: implies `--non-interactive` and disables color everywhere. |
 | `--quiet` / `--verbose` / `--no-color` | Output volume and styling. |
 
 `--format json` emits the stable envelope

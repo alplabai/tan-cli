@@ -36,6 +36,19 @@
   planner, which validates every `board.yaml` against
   `metadata/schemas/board.schema.json` before it plans anything. The frozen
   one-file binary measures 12377580 B against the 15000000 B ceiling.
+- **`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace` and
+  `support-bundle` are withdrawn from this build, not silently absent.** The
+  Python port stubs all seven (`python/tan/commands/deferred_cmd.py`) rather
+  than porting them yet: each parses its real argv (any positional/flags are
+  accepted, never rejected) and then exits `RUNTIME_FAILURE` (1) naming
+  `tan-cli#260`, in both `--format json` and text mode; the shared issue code
+  `cli.command-deferred` is carried in the JSON envelope only -- text mode
+  prints just the deferral message and the issue URL. That is deliberately
+  louder than Typer's own unknown-command `UsageError` (exit 2,
+  `cli.parse-error`) would have been for an absent verb -- a caller (or the
+  extension) can tell "known but deferred" apart from a typo like `tan bulid`
+  by the issue code in `--format json`, or by exit 1 vs Typer's exit 2 in
+  text mode.
 
 ### Added
 - **A CI job that actually runs the commands a customer types.** Until now NO
