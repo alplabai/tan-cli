@@ -46,6 +46,27 @@ into the SAME board.yaml `plan_template_files` already planned -- see
 `tan.core.scaffold.splice_companion_cores`. `--from-example` ignores both
 `--som` and `--cores`: the example ships its own board.yaml.
 
+**`--template`'s id space is NOT the SDK's example catalog.** `TEMPLATE_IDS`
+(`tan.core.scaffold`) is tan's own curated, vendored subset -- six starter
+templates, five of which map onto five entries of the broader SDK catalog
+(`metadata/templates/catalog-v1.json`, alp-sdk) under DIFFERENT ids (its
+`minimal`/`sensor`/`iot`/`edge-ai`/`diagnostics` are this file's
+`zephyr-app`/`sensor-starter`/`iot-starter`/`edge-ai-starter`/
+`board-diagnostics`); `minimal-app` has no catalog counterpart at all, and the
+catalog's `peripheral`/`multicore-rpmsg`/`gateway` entries have no `--template`
+counterpart here -- reach them (and any other SDK example) with
+`--from-example` instead, which copies the example's own tree verbatim
+(I-32: no vendoring needed, but an SDK checkout is). Deliberately different
+vocabularies, not a bug to "fix" by renaming one to match the other. The
+`--template` help STRING is the one place this port knowingly diverges from
+the oracle's own wording (tan-cli#1): the oracle's clap help is silent on the
+catalog split, and a customer hitting it (e.g. trying `--template peripheral`)
+gets no pointer to `--from-example` -- so the help text here says more than
+`crates/tan-cli/src/cli.rs`'s does, on purpose, tracked, and pinned by
+`test_help_distinguishes_template_ids_from_the_sdk_example_catalog`. This is
+NOT the same claim as the paragraph below: that one is about which FLAGS are
+listed at all, not about every flag's help wording matching byte-for-byte.
+
 **`--all`, `--target`, `--verbose`, `--quiet`, `--no-color` are accepted and
 genuinely IGNORED here -- matching the oracle, not merely tolerated.** Every
 one is a member of clap's `GlobalArgs` (`global = true`), so the real `tan
@@ -56,9 +77,11 @@ literals, never in `init`'s own logic -- unlike `doctor`/`clean`, `init` calls
 neither `style::render_report` nor `Theme::from_args`). Rejecting them here
 would NOT be more honest, it would be wrong: it would make this port refuse
 an argv the shipped binary accepts. Declared visible (not `hidden=True`,
-unlike `clean_cmd.clean`'s equivalent block) so `tan init --help`'s TEXT
-matches the oracle's too -- docs/cli.md tabulates all five as `tan init`
-flags, and a hidden option renders identically to a missing one there.
+unlike `clean_cmd.clean`'s equivalent block) so `tan init --help` LISTS all
+five, matching the oracle -- docs/cli.md tabulates all five as `tan init`
+flags, and a hidden option renders identically to a missing one there. (Their
+own help STRINGS are still free to be tan's plain-English wording rather than
+clap's doc-comment text; only their presence is the contract.)
 """
 
 from __future__ import annotations
@@ -70,7 +93,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import discover_sdk_root
+from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
@@ -134,10 +157,21 @@ class InitError(Exception):
 
 @dataclass
 class _Outcome:
-    """A completed (non-error) run: preview, overwrite-guard refusal, or write."""
+    """A completed (non-error) run: preview, overwrite-guard refusal, or write.
+
+    `destination` and `project_root` are DELIBERATELY two different fields:
+    `destination` is where the caller pointed tan (`--destination`/`--project`,
+    unchanged by `--name`) and is what the JSON envelope's `project.root` /
+    `data.destination` pin -- `project_root` is `destination` + the resolved
+    `--name` subdirectory, i.e. where files actually landed. Text mode's
+    "created" line must report `project_root`: reporting `destination` there
+    (tan-cli#4) told an operator running `--name blink-e2e` that tan had
+    created `proj` when it had actually created `proj/blink-e2e`.
+    """
 
     template_id: str
     destination: str
+    project_root: str
     preview: bool
     file_changes: list[FileChange]
     files: list[PlannedFile]
@@ -235,12 +269,23 @@ def _emit_outcome(json_mode: bool, outcome: _Outcome) -> None:
         )
     elif outcome.preview:
         _stderr(f"init: preview for template '{outcome.template_id}'")
+        for issue in outcome.issues:
+            _stderr(f"init: {issue.message}")
         _stderr(scaffold_tree_preview(outcome.files).rstrip("\n"))
-    elif outcome.issues:
+    elif outcome.exit_code != ExitCode.SUCCESS:
+        # Refused (the overwrite guard): nothing was written, so there is no
+        # "created" line to print, only the issue(s) that explain why.
         for issue in outcome.issues:
             _stderr(f"init: {issue.message}")
     else:
-        _stderr(f"init: created '{outcome.destination}' from template '{outcome.template_id}'")
+        # A successful write may still carry a warning (e.g.
+        # `init.example-missing-board-yaml`) -- print it, then the "created"
+        # line: files DID land, so unlike the refusal branch above this must
+        # never suppress it.
+        for issue in outcome.issues:
+            _stderr(f"init: {issue.message}")
+        # `project_root`, not `destination`: see `_Outcome`'s docstring.
+        _stderr(f"init: created '{outcome.project_root}' from template '{outcome.template_id}'")
         _stderr(f"  written: {len(outcome.written)}, unchanged: {len(outcome.unchanged)}")
     raise typer.Exit(int(outcome.exit_code))
 
@@ -284,6 +329,21 @@ def _resolve_name(name: str | None) -> str:
     )
 
 
+def _join_display(dest: str, name: str) -> str:
+    """Mirror `PathBuf::from(dest).join(name)`'s `.display()` text
+    (`from_example.rs:70-74`): literal string concatenation with the native
+    separator, never pathlib's silent drop of a leading `.` component. This is
+    for the TEXT-mode "created" line only -- `project_root` (the `Path`) still
+    does the real filesystem work; `pathlib.Path(".") / "my-app"` normalises
+    away the `.`, so `--name my-app` in `.` would otherwise print `'my-app'`
+    where the oracle prints `'./my-app'` (`'.\\my-app'` on Windows)."""
+    if not name:
+        return dest
+    if dest.endswith(("/", "\\")):
+        return f"{dest}{name}"
+    return f"{dest}{os.sep}{name}"
+
+
 @dataclass(frozen=True)
 class _Sdk:
     """A resolved alp-sdk checkout: the `path` to use, and the `display` string
@@ -301,13 +361,17 @@ class _Sdk:
 
 
 def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None:
-    """`--sdk-root` when given, else discovery near the workspace. Reuses
-    `build_cmd.discover_sdk_root` rather than carrying a second copy of the
-    candidate ladder -- two ladders drift, and `tan build` resolving a different
-    checkout than `tan init` pinned is the worst possible way to find out."""
+    """`--sdk-root` when given, else `.alp/sdk-path` project pin >
+    machine-global default (`~/.alp/sdk-default`) > discovery near the
+    workspace. No `ALP_SDK_ROOT` tier (tried and reverted -- see
+    `resolve_sdk_root_ladder`'s own docstring).
+    Reuses `build_cmd.resolve_sdk_root_ladder` rather than carrying a second
+    copy of the candidate ladder -- two ladders drift, and `tan build`
+    resolving a different checkout than `tan init` just pinned is the worst
+    possible way to find out (the defect this ladder exists to close)."""
     if sdk_root:
         return _Sdk(Path(sdk_root), sdk_root)
-    found = discover_sdk_root(workspace_root)
+    found, _tier = resolve_sdk_root_ladder(None, workspace_root)
     return _Sdk(found, posix(found)) if found is not None else None
 
 
@@ -414,14 +478,23 @@ def _apply_cores(
 
 
 def _apply_board_yaml_override(
-    files: list[PlannedFile], subject_label: str, board_yaml_path: str | None
+    files: list[PlannedFile],
+    subject_label: str,
+    board_yaml_path: str | None,
+    *,
+    allow_add: bool = False,
 ) -> list[PlannedFile]:
     """Honor `--board-yaml`: swap the planned board.yaml for the caller's file
     verbatim -- this lets Alp Studio adopt `tan init` as its project render.
     Shared by the template and `--from-example` paths (mirrors `init/mod.rs`
-    step 5b and `init/from_example.rs`'s identical block). A plan with no
-    board.yaml to override (none exists today) is a hard error rather than a
-    silent no-op that would drop the caller's file."""
+    step 5b and `init/from_example.rs`'s identical block).
+
+    `allow_add` (set only on the `--from-example` path) lets this ADD the
+    caller's file as the project's board.yaml when the example plans none --
+    the real escape hatch the `init.example-missing-board-yaml` warning names.
+    Every registered TEMPLATE plans its own board.yaml, so a plan with none on
+    the template path is still a hard error rather than a silent no-op that
+    would drop the caller's file."""
     if board_yaml_path is None:
         return files
     try:
@@ -434,6 +507,8 @@ def _apply_board_yaml_override(
             ExitCode.VALIDATION_FAILURE,
         ) from err
     if not any(f.relative_path == "board.yaml" for f in files):
+        if allow_add:
+            return [*files, PlannedFile("board.yaml", content)]
         raise InitError(
             "init.board-yaml-unsupported",
             f"--board-yaml was given but {subject_label} has no board.yaml to override.",
@@ -533,6 +608,7 @@ def _finish(
     template_id: str,
     destination: str,
     project_root: Path,
+    project_root_display: str,
     files: list[PlannedFile],
     *,
     preview: bool,
@@ -545,15 +621,23 @@ def _finish(
         # Before the overwrite guard, deliberately: a preview touches no disk,
         # so there is nothing to guard, and guarding it turned a read-only
         # question into a failure on any project with local edits.
-        return _Outcome(template_id, destination, True, changes, files)
+        return _Outcome(
+            template_id=template_id,
+            destination=destination,
+            project_root=project_root_display,
+            preview=True,
+            file_changes=changes,
+            files=files,
+        )
 
     if any(c.kind == "update" for c in changes) and not force:
         return _Outcome(
-            template_id,
-            destination,
-            False,
-            changes,
-            files,
+            template_id=template_id,
+            destination=destination,
+            project_root=project_root_display,
+            preview=False,
+            file_changes=changes,
+            files=files,
             issues=[
                 Issue(
                     "init.would-overwrite",
@@ -585,11 +669,12 @@ def _finish(
         ) from err
 
     return _Outcome(
-        template_id,
-        destination,
-        False,
-        changes,
-        files,
+        template_id=template_id,
+        destination=destination,
+        project_root=project_root_display,
+        preview=False,
+        file_changes=changes,
+        files=files,
         written=result.written,
         unchanged=result.unchanged,
         sdk_pinned=_pin_sdk(project_root, sdk),
@@ -627,7 +712,12 @@ def init(
         None,
         "--template",
         metavar="ID",
-        help=f"Project template: {', '.join(TEMPLATE_IDS)}.",
+        help=(
+            f"Project template: {', '.join(TEMPLATE_IDS)}. tan's own curated "
+            f"starter set -- a different, smaller id space than the SDK's "
+            f"example catalog; use --from-example for any other SDK example "
+            f"(e.g. peripheral-io/gpio-button-led for a button+LED starter)."
+        ),
     ),
     from_example: str = typer.Option(
         None,
@@ -715,9 +805,14 @@ def init(
         # `--name` set.
         dest = destination if destination else (project if project else ".")
         resolved_name = _resolve_name(name)
-        # String-joined, not `Path(".") / name`: pathlib normalises `.` away,
-        # and the destination is echoed back verbatim in the envelope.
+        # `project_root` (the `Path`) does the real filesystem work, so it goes
+        # through pathlib; `project_root_display` is the TEXT-mode "created"
+        # line's own literal string join (`_join_display`), because pathlib's
+        # `Path(dest) / name` silently drops a leading `.` from `dest` that the
+        # oracle's `PathBuf::join` keeps (`tan-cli` review, scaffold-cx#5). The
+        # destination itself is echoed back verbatim (unjoined) in the envelope.
         project_root = Path(dest) / resolved_name if resolved_name else Path(dest)
+        project_root_display = _join_display(dest, resolved_name)
 
         workspace_root = Path(os.path.abspath(project)) if project else Path.cwd()
         resolved_sdk = _resolve_sdk_root(sdk_root, workspace_root)
@@ -732,17 +827,43 @@ def init(
             template_id, files = _plan_from_template(template, som, cores)
             subject_label = f"template '{template_id}'"
 
-        files = _apply_board_yaml_override(files, subject_label, board_yaml)
+        files = _apply_board_yaml_override(
+            files, subject_label, board_yaml, allow_add=from_example is not None
+        )
+
+        # `tan build` discovers a project's board.yaml at its root; an example
+        # tree with none would otherwise succeed here and only fail two
+        # commands later at `tan build` ("no board.yaml found"). WARN at
+        # scaffold time instead of refusing the copy outright: 57 of 66
+        # examples/aen/* (raw west/twister examples, not meant for the `tan
+        # build` flow) have no board.yaml, and refusing `tan init
+        # --from-example` for nearly the whole AEN family is worse than
+        # scaffolding something that still needs one. `--board-yaml` (above,
+        # `allow_add=True` on this path) is the real fix, so it never fires
+        # when one was given. Every registered TEMPLATE plans its own
+        # board.yaml (tan.core.scaffold), so this can only trip on
+        # --from-example.
+        missing_board_yaml_issue = None
+        if from_example is not None and not any(f.relative_path == "board.yaml" for f in files):
+            missing_board_yaml_issue = Issue(
+                "init.example-missing-board-yaml",
+                "warning",
+                f"{subject_label} has no board.yaml, so `tan build` will not "
+                f"find a board to build here; pass --board-yaml to add one.",
+            )
 
         outcome = _finish(
             template_id,
             dest,
             project_root,
+            project_root_display,
             files,
             preview=preview,
             force=force,
             sdk=resolved_sdk,
         )
+        if missing_board_yaml_issue is not None:
+            outcome.issues.append(missing_board_yaml_issue)
     except InitError as err:
         _emit_error(json_mode, err)
         return

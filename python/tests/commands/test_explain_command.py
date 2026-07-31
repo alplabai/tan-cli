@@ -387,11 +387,48 @@ def test_an_unexpected_exception_is_still_an_envelope(monkeypatch):
     assert "ValueError: boom" in doc["issues"][0]["message"]
 
 
+def test_positional_template_id_works_like_the_option():
+    """`tan explain minimal-app` used to fail with a Click "unexpected extra
+    argument(s)" usage error -- the positional this port now accepts as
+    shorthand for `--template` (a port-only convenience; the oracle has no
+    positional here, see `explain()`'s docstring)."""
+    result = runner.invoke(app, ["explain", "minimal-app", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["data"]["selector"] == {"kind": "project-template", "value": "minimal-app"}
+
+
+def test_positional_and_option_together_is_a_conflict_not_a_silent_pick():
+    """scaffold-cx review, Finding 3: giving both the positional template id and
+    `--template` used to silently keep `--template` and drop the positional --
+    the accepted-but-ignored-input class this port keeps re-introducing (and
+    strictly more permissive than the oracle, whose `ExplainArgs` has no
+    positional at all). Both values must be named in a coded error instead."""
+    result = runner.invoke(
+        app, ["explain", "minimal-app", "--template", "sensor-starter", "--format", "json"]
+    )
+    assert result.exit_code == 1
+    doc = json.loads(result.stdout)
+    assert doc["ok"] is False
+    issue = doc["issues"][0]
+    assert issue["code"] == "explain.positional-template-conflict"
+    assert "minimal-app" in issue["message"]
+    assert "sensor-starter" in issue["message"]
+
+
+def test_positional_alone_is_shorthand_for_template():
+    result = runner.invoke(app, ["explain", "sensor-starter", "--format", "json"])
+    assert result.exit_code == 0
+    doc = json.loads(result.stdout)
+    assert doc["data"]["selector"]["value"] == "sensor-starter"
+
+
 def test_every_emitted_issue_code_is_namespaced_to_explain():
     """Mirrors Rust's `every_emitted_issue_code_is_registered`: the extension
     keys behaviour off these strings, so a typo'd namespace is silent."""
     codes = {
         "explain.ambiguous-selector",
+        "explain.positional-template-conflict",
         "explain.template-unknown",
         "explain.target-unknown",
         "explain.template-unreadable",

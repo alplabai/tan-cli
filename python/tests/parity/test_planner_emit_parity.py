@@ -79,6 +79,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import sdk_root
+
 # The project-scoped emit modes `tan.planner` owns. `kconfig` is excluded (see
 # the module docstring); the other seven need nothing but `metadata/**`.
 MODES = (
@@ -92,15 +94,7 @@ MODES = (
 )
 
 
-def _sdk_root() -> Path | None:
-    for var in ("ALP_SDK_PARITY_ROOT", "ALP_SDK_ROOT"):
-        raw = os.environ.get(var)
-        if raw and (Path(raw) / "scripts" / "alp_project.py").is_file():
-            return Path(raw).resolve()
-    return None
-
-
-SDK = _sdk_root()
+SDK = sdk_root()
 HAS_UPSTREAM = SDK is not None and (
     SDK / "scripts" / "alp_orchestrate" / "__init__.py"
 ).is_file()
@@ -352,9 +346,33 @@ _SCAFFOLD_CASES = (
     ("examples/peripheral-io/i2c-master/board.yaml", "sensor", "E1M-V2N101"),
     ("examples/ai/cold-chain-monitor/board.yaml", "edge-ai", "E1M-V2N101"),
 )
+#: Known, judged divergences from the oracle, keyed by template id -- NOT port
+#: bugs, so not silently fixed to match. `peripheral` (gpio-button-led onto
+#: E1M-V2N101): the oracle's own `_substitute_readme_pins`
+#: (`scripts/alp_template.py`) does a bare `ALP_<old> -> ALP_<new>` token swap
+#: and leaves any trailing `(index N)` parenthetical untouched, so it renames
+#: `ALP_E1M_GPIO_PWM3` -> `ALP_E1M_X_GPIO_PWM5` but keeps the source family's
+#: "(index 29)" verbatim -- numerically wrong for the target family:
+#: `e1m_x_pinout.h`'s PWM0..7 starts at index 36, so `ALP_E1M_X_GPIO_PWM5` is
+#: index 41, not 29. `tan.planner.template._substitute_readme_pins` drops the
+#: stale parenthetical on a cross-family rename instead of carrying the wrong
+#: number forward -- a deliberate correctness improvement over the oracle,
+#: not a reproduction of its behaviour.
+_SCAFFOLD_XFAILS = {
+    "peripheral": pytest.mark.xfail(
+        strict=True,
+        reason="tan drops a stale per-family '(index N)' README parenthetical "
+               "on a cross-family pin rename that the oracle leaves in place "
+               "wrong; see _SCAFFOLD_XFAILS docstring above."),
+}
+_SCAFFOLD_PARAMS = [
+    pytest.param(*case, marks=_SCAFFOLD_XFAILS[case[1]])
+    if case[1] in _SCAFFOLD_XFAILS else case
+    for case in _SCAFFOLD_CASES
+]
 
 
-@pytest.mark.parametrize("board_rel,template,sku", _SCAFFOLD_CASES,
+@pytest.mark.parametrize("board_rel,template,sku", _SCAFFOLD_PARAMS,
                          ids=[c[1] for c in _SCAFFOLD_CASES])
 def test_the_scaffold_mode_agrees_on_stdout_through_argv(board_rel, template, sku):
     """`--emit scaffold --template <id> --sku <SKU>`, both front doors, as bytes.

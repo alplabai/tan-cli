@@ -187,6 +187,33 @@ def test_text_mode_writes_nothing_to_stdout(tmp_path):
     assert "preview for template 'minimal-app'" in proc.stderr
 
 
+def test_text_mode_created_line_reports_the_nested_path_not_just_the_destination(tmp_path):
+    """tan-cli#4: with `--name`, the "created" line used to echo the bare
+    `--destination` (here `.`) even though files landed under `my-app/` --
+    telling an operator tan had created a directory it had not."""
+    proc = run_tan(
+        "init", "--template", "minimal-app", "--name", "my-app", cwd=tmp_path
+    )
+
+    assert proc.returncode == 0
+    created_line = next(line for line in proc.stderr.splitlines() if "created" in line)
+    assert "my-app" in created_line, created_line
+    assert created_line != "init: created '.' from template 'minimal-app'", created_line
+
+
+def test_text_mode_created_line_keeps_the_dot_destination_like_the_oracle(tmp_path):
+    """scaffold-cx review, Finding 5: the port used to render the "created"
+    line from `pathlib.Path(".") / name`, and pathlib silently drops a leading
+    `.` component -- printing `'my-app'` where the oracle's `PathBuf::join`
+    (`from_example.rs:70-74`, `.display()`) prints `'./my-app'`
+    (`'.\\my-app'` on Windows). Assert the exact, separator-aware string."""
+    proc = run_tan("init", "--template", "minimal-app", "--name", "my-app", cwd=tmp_path)
+
+    assert proc.returncode == 0
+    created_line = next(line for line in proc.stderr.splitlines() if "created" in line)
+    assert f"created '.{os.sep}my-app'" in created_line, created_line
+
+
 # ---------------------------------------------------------------------------
 # Every failure is a coded issue (the port's recurring bug class)
 # ---------------------------------------------------------------------------
@@ -209,6 +236,26 @@ def test_unknown_template_is_a_validation_failure(tmp_path):
     assert env["data"]["templateId"] == ""
     assert env["data"]["destination"] == ""
     assert list(tmp_path.iterdir()) == []
+
+
+def test_help_distinguishes_template_ids_from_the_sdk_example_catalog(tmp_path):
+    """tan-cli#1: `--template` and the SDK's `metadata/templates/catalog-v1.json`
+    are two different id vocabularies (`zephyr-app` vs. `minimal`, and the
+    catalog's `peripheral`/`multicore-rpmsg`/`gateway` have no `--template`
+    counterpart at all) -- deliberately, not a bug to unify by renaming one to
+    match the other. The help text must say so and point at --from-example."""
+    proc = run_tan("init", "--help", cwd=tmp_path)
+    # Rich wraps the boxed help text at terminal width, splitting words across
+    # lines and box-bounded rows -- normalise both away before substring checks.
+    # Both bar characters, not just the ASCII one: Rich draws the box with
+    # U+2502 `│`, so at a narrow terminal width "curated starter set" wraps to
+    # `curated │ │ starter set` and an ASCII-only strip leaves the assertion
+    # failing on terminal width alone -- green on a wide dev console, red in CI.
+    text = " ".join(proc.stdout.replace("|", " ").replace("│", " ").split())
+
+    assert proc.returncode == 0
+    assert "--from-example" in text
+    assert "curated starter set" in text
 
 
 def test_conflicting_files_refuse_without_force_and_write_nothing(tmp_path):
@@ -596,3 +643,62 @@ def test_from_example_traversal_is_refused(tmp_path):
         env = envelope(proc)
         assert proc.returncode == 2, src
         assert issue(env)["code"] == "init.invalid-example", src
+
+
+def test_from_example_with_no_board_yaml_warns_and_still_scaffolds(tmp_path):
+    """tan-cli#3 / scaffold-cx review: an example with no board.yaml anywhere in
+    its tree (a real SDK shape -- 57 of 66 examples/aen/* are raw west/twister
+    examples, no board.yaml) used to scaffold fine and only fail two commands
+    later at `tan build` ("no board.yaml found"). Refusing the copy outright
+    made `tan init --from-example` unusable for nearly the whole AEN family,
+    which is worse than the original defect -- so this WARNS at scaffold time
+    (a `severity: "warning"` issue) and still writes every file, exit 0."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "aen" / "no-board-yaml-example"
+    example.mkdir(parents=True)
+    (example / "CMakeLists.txt").write_text("# no board.yaml here\n", encoding="utf-8")
+    (example / "prj.conf").write_text("CONFIG_ASSERT=y\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init", "--from-example", "aen/no-board-yaml-example", "--sdk-root", "./sdk",
+        "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0
+    assert issue(env)["code"] == "init.example-missing-board-yaml"
+    assert issue(env)["severity"] == "warning"
+    assert sorted(env["data"]["written"]) == ["CMakeLists.txt", "prj.conf"]
+    assert (tmp_path / "CMakeLists.txt").exists()
+    assert (tmp_path / "prj.conf").exists()
+
+
+def test_from_example_with_no_board_yaml_and_board_yaml_flag_adds_it(tmp_path):
+    """`--board-yaml` is the guard's real escape hatch on the `--from-example`
+    path (`allow_add=True`): an example with no board.yaml to override gets the
+    caller's file ADDED as its board.yaml, rather than the dead-end
+    `init.board-yaml-unsupported` this used to raise even though the warning
+    told the operator to pass exactly this flag."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    example = sdk / "examples" / "aen" / "no-board-yaml-example"
+    example.mkdir(parents=True)
+    (example / "CMakeLists.txt").write_text("# no board.yaml here\n", encoding="utf-8")
+    custom = tmp_path / "custom.yaml"
+    custom.write_text("som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n", encoding="utf-8")
+
+    proc = run_tan(
+        "init", "--from-example", "aen/no-board-yaml-example", "--sdk-root", "./sdk",
+        "--board-yaml", "custom.yaml", "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0
+    assert env["issues"] == []
+    assert sorted(env["data"]["written"]) == ["CMakeLists.txt", "board.yaml"]
+    assert (tmp_path / "board.yaml").read_text(encoding="utf-8") == custom.read_text(
+        encoding="utf-8"
+    )

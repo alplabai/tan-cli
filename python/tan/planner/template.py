@@ -800,6 +800,12 @@ _ALP_SDK_ROOT_GUESS_RE = re.compile(
     r"    get_filename_component\(ALP_SDK_ROOT \$\{CMAKE_CURRENT_SOURCE_DIR\}(?:/\.\.)+ ABSOLUTE\)\n"
     r"endif\(\)"
 )
+# `cold-chain-monitor`'s own shape: no ALP_SDK_ROOT resolution at all, just a
+# hardcoded in-tree-relative path straight to `alp_project.py` (worse than the
+# guess above -- no override is even possible).
+_HARDCODED_ALP_PROJECT_PY_RE = re.compile(
+    r"\$\{CMAKE_CURRENT_SOURCE_DIR\}(?:/\.\.)+/scripts/alp_project\.py"
+)
 # Anything that only resolves against a real alp-sdk checkout, i.e. that a
 # scaffold copied OUT of the SDK tree cannot satisfy unless ALP_SDK_ROOT has
 # been rewritten into a hard requirement: the shared `cmake/alp.cmake`
@@ -832,14 +838,19 @@ def _scaffold_cmakelists(text: str) -> str:
     """Replace an in-tree-relative ALP_SDK_ROOT guess with a hard
     requirement.
 
-    Every example that consumes the SDK carries exactly one shape today
-    -- the `if(DEFINED ENV{ALP_SDK_ROOT}) ... else()
-    get_filename_component(...)` guess, immediately above
-    `include(${ALP_SDK_ROOT}/cmake/alp.cmake)`. The guess resolves only
-    for the in-tree example; a scaffold a customer unpacks elsewhere
-    needs the value supplied, so it becomes a FATAL_ERROR-if-unset
-    block. The include line itself already names `${ALP_SDK_ROOT}` and
-    needs no rewriting.
+    Two shapes exist across the catalog's example CMakeLists.txt files
+    today: the `if(DEFINED ENV{ALP_SDK_ROOT}) ... else()
+    get_filename_component(...)` guess most examples carry immediately
+    above `include(${ALP_SDK_ROOT}/cmake/alp.cmake)`, and
+    `cold-chain-monitor`'s own hardcoded
+    `${CMAKE_CURRENT_SOURCE_DIR}/../../../scripts/alp_project.py` call
+    with no ALP_SDK_ROOT resolution at all (worse: no override is even
+    possible). Both resolve only for the in-tree example; a scaffold a
+    customer unpacks elsewhere needs the value supplied, so each becomes
+    a FATAL_ERROR-if-unset block -- the guess shape's `include()` line
+    already names `${ALP_SDK_ROOT}` and needs no further rewriting, the
+    hardcoded shape's path is rewritten to `${ALP_SDK_ROOT}/scripts/
+    alp_project.py` alongside inserting the block.
 
     A CMakeLists.txt with no SDK-root-dependent line at all (e.g.
     multicore-rpmsg's `linux/CMakeLists.txt`) is legitimately returned
@@ -854,6 +865,12 @@ def _scaffold_cmakelists(text: str) -> str:
         return new_text
     if _ALP_SDK_ROOT_REQUIRED_BLOCK in text:
         return text  # already hardened (idempotent)
+    if _HARDCODED_ALP_PROJECT_PY_RE.search(text):
+        text = _HARDCODED_ALP_PROJECT_PY_RE.sub(
+            "${ALP_SDK_ROOT}/scripts/alp_project.py", text)
+        return text.replace(
+            "execute_process(\n",
+            _ALP_SDK_ROOT_REQUIRED_BLOCK + "\n\nexecute_process(\n", 1)
     dependent = _SDK_ROOT_DEPENDENT_RE.search(text)
     if dependent:
         raise TemplateError(
