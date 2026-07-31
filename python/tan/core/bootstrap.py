@@ -931,7 +931,10 @@ def python_too_old(
 
 
 def python_floor_skew_warning(
-    manifest_floor: tuple[int, int], effective_floor: tuple[int, int], source: str
+    manifest_floor: tuple[int, int],
+    effective_floor: tuple[int, int],
+    source: str,
+    from_manifest: bool = True,
 ) -> tuple[str, str] | None:
     """`(code suffix, message)` when the two declared floors disagree, else
     `None`.
@@ -942,20 +945,41 @@ def python_floor_skew_warning(
     defect differently is the drift this port keeps hitting. Fires on a
     SUCCESSFUL run too: the host is fine, the manifest is not, and the fix
     belongs in `metadata/bootstrap.json` rather than on the customer's machine.
+
+    `from_manifest=False` (pass `facts.from_manifest`) means `manifest_floor`
+    never actually came from a read `metadata/bootstrap.json` -- this SDK
+    predates it (`load_facts`'s `_manifest_absent_floor` branch) -- and is
+    instead tan's own frozen fallback constant standing in. Claiming alp-sdk's
+    manifest "declares" that number, and telling the customer to edit it, would
+    send them to a file bootstrap never read.
     """
     if manifest_floor >= effective_floor:
         return None
+    if from_manifest:
+        claim = (
+            f"alp-sdk's {BOOTSTRAP_MANIFEST_REL_PATH} declares pythonMinVersion "
+            f"{manifest_floor[0]}.{manifest_floor[1]}"
+        )
+        fix = (
+            f" Raise `prerequisites.pythonMinVersion` to "
+            f"{effective_floor[0]}.{effective_floor[1]} in alp-sdk's "
+            f"{BOOTSTRAP_MANIFEST_REL_PATH} (and re-run its "
+            f"scripts/check_bootstrap_manifest.py drift gate)."
+        )
+    else:
+        claim = (
+            f"this SDK checkout has no {BOOTSTRAP_MANIFEST_REL_PATH} to declare a floor, "
+            f"so tan's own built-in floor {manifest_floor[0]}.{manifest_floor[1]} is "
+            f"standing in"
+        )
+        fix = " Update this SDK checkout to a version that ships that manifest."
     return (
         "python-floor-skew",
-        f"alp-sdk's {BOOTSTRAP_MANIFEST_REL_PATH} declares pythonMinVersion "
-        f"{manifest_floor[0]}.{manifest_floor[1]}, but the build's effective floor is "
+        f"{claim}, but the build's effective floor is "
         f"{effective_floor[0]}.{effective_floor[1]} (from {source}). bootstrap enforces "
         f"the higher, effective floor, so a host this manifest would have accepted is "
-        f"refused here rather than failing later inside Zephyr's CMake configure. Raise "
-        f"`prerequisites.pythonMinVersion` to "
-        f"{effective_floor[0]}.{effective_floor[1]} in alp-sdk's "
-        f"{BOOTSTRAP_MANIFEST_REL_PATH} (and re-run its "
-        f"scripts/check_bootstrap_manifest.py drift gate).",
+        f"refused here rather than failing later inside Zephyr's CMake configure."
+        f"{fix}",
     )
 
 

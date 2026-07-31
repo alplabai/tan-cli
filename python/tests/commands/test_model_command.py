@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
+import shutil
 from pathlib import Path
 
 import pytest
@@ -31,16 +31,24 @@ import typer
 from typer.testing import CliRunner
 
 from tan.commands import model_cmd
-from tan.commands.model_cmd import _planner_python, model
+from tan.commands.model_cmd import model
 
 app = typer.Typer(add_completion=False)
 app.command("model")(model)
 
 runner = CliRunner()
 
-_HAS_PYTHON = subprocess.run(
-    [_planner_python(), "--version"], capture_output=True, check=False
-).returncode == 0
+# The bare-PATH-name fallback `_planner_python` returns when no west-capable
+# workspace `.venv` resolves for the args a given test actually passes --
+# `str(tmp_path)` / a from-scratch fake SDK, per test, never `os.getcwd()` /
+# `None`. Gating on `_planner_python(os.getcwd(), None)` at import time
+# probes DIFFERENT args than the command under test ever receives: the two
+# can each resolve a different `.venv` (or none), so the gate could
+# green-light a run whose real interpreter is absent, or skip a run whose
+# real interpreter is fine. `shutil.which` makes the gate what it was written
+# for -- whether the bare PATH fallback name is reachable at all -- without
+# guessing at a `_find_workspace_venv` walk this module doesn't control.
+_HAS_PYTHON = shutil.which("python" if os.name == "nt" else "python3") is not None
 
 
 def envelope(result):
@@ -229,7 +237,7 @@ def test_a_driver_that_reports_fewer_results_than_requested_is_an_internal_failu
         tmp_path,
         "models:\n  - name: mymodel\n    source: source.tflite\n",
     )
-    monkeypatch.setattr(model_cmd, "_python_too_old", lambda python: None)
+    monkeypatch.setattr(model_cmd, "_python_too_old", lambda python, floor: None)
     monkeypatch.setattr(model_cmd, "_run_driver", lambda *a, **k: {"results": []})
     result = runner.invoke(
         app,

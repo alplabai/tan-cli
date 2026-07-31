@@ -1300,10 +1300,11 @@ def load_facts(sdk_root: str) -> BootstrapFacts:
 
 def _manifest_absent_floor() -> tuple[int, int]:
     """The floor `fallback_facts` records for an SDK with no manifest -- doctor's
-    own `FALLBACK_PYTHON_FLOOR`, imported rather than re-spelled, which is the
-    same 3.10 as `crate::util::MIN_PYTHON`. The EFFECTIVE floor is still resolved
-    from this by `resolve_python_floor`, so a legacy SDK gets the same
-    Zephyr-aware verdict a current one does."""
+    own `FALLBACK_PYTHON_FLOOR`, imported rather than re-spelled (see its doc
+    comment: it mirrors the Rust oracle's frozen `crate::util::MIN_PYTHON`, not
+    the manifest, and the two can drift). The EFFECTIVE floor is still resolved
+    from this by `resolve_python_floor`, so a legacy SDK with no manifest at all
+    gets the same Zephyr-aware verdict a current one does."""
     return FALLBACK_PYTHON_FLOOR
 
 
@@ -1656,7 +1657,9 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         log.warn("yocto-host", yocto_mixed_warning())
 
     floor = resolve_python_floor(facts)
-    skew = python_floor_skew_warning(floor.manifest, floor.effective, floor.source)
+    skew = python_floor_skew_warning(
+        floor.manifest, floor.effective, floor.source, from_manifest=facts.from_manifest
+    )
     if skew is not None:
         log.warn(*skew)
 

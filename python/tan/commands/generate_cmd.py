@@ -91,8 +91,8 @@ import typer
 # which interpreter name the SDK's own scripts run under -- a PATH name, never
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
 from tan import planner_emit
-from tan.commands.build_cmd import _planner_python, discover_sdk_root
-from tan.commands.doctor_cmd import probe
+from tan.commands.build_cmd import _planner_python, resolve_sdk_root_ladder
+from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 
@@ -201,16 +201,6 @@ CORE_SCOPABLE_TARGETS = (
     "west-libraries",
     "hw-info-h",
 )
-
-#: The floor the SDK's own scripts need -- they use `@dataclass(slots=True)`.
-#: I-24: the same 3.10 that `metadata/bootstrap.json` and
-#: `crate::util::MIN_PYTHON` declare, and the same number
-#: `doctor_cmd.FALLBACK_PYTHON_FLOOR` carries -- bump one, grep for the other.
-#: Kept separate rather than shared because they answer different questions:
-#: that one is the floor assumed when no bootstrap manifest resolves, this one
-#: is the floor the SPAWNED interpreter must clear. Refusing here turns the
-#: SDK's cryptic `dataclass()` TypeError into something actionable.
-MIN_PYTHON = (3, 10)
 
 #: Seconds a single `alp_project.py` emit may take. Generous: a cold emit
 #: imports the whole orchestrator package and reads every metadata file for the
@@ -449,13 +439,18 @@ def _overlay_would_overwrite(
     return destination.exists()
 
 
-def _python_too_old(python: str) -> str | None:
+def _python_too_old(python: str, floor: tuple[int, int]) -> str | None:
     """A message when `python` is below the SDK's floor, else `None`.
 
-    `None` also covers "could not tell" -- a missing or broken interpreter is a
-    different failure the real spawn surfaces on its own, and blocking on an
-    unknown would refuse a perfectly good host. Bounded by `probe`'s timeout,
-    which is why this reuses it rather than spawning by hand.
+    `floor` is the resolved SDK's OWN declared floor -- they use
+    `@dataclass(slots=True)`, so `resolve_manifest_python_floor` (I-24) reads
+    `<sdk>/metadata/bootstrap.json`'s `pythonMinVersion` live rather than a
+    second hardcoded 3.10 that could drift from the manifest's, or from
+    `model_cmd`'s own copy. `None` also covers "could not tell" -- a missing or
+    broken interpreter is a different failure the real spawn surfaces on its
+    own, and blocking on an unknown would refuse a perfectly good host. Bounded
+    by `probe`'s timeout, which is why this reuses it rather than spawning by
+    hand.
     """
     out = probe([python, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"])
     if out is None:
@@ -464,11 +459,11 @@ def _python_too_old(python: str) -> str | None:
         major, minor = (int(part) for part in out.strip().splitlines()[-1].split(".")[:2])
     except (IndexError, ValueError):
         return None
-    if (major, minor) >= MIN_PYTHON:
+    if (major, minor) >= floor:
         return None
     return (
         f"Python {major}.{minor} found at `{python}`, but alp-sdk requires Python "
-        f"{MIN_PYTHON[0]}.{MIN_PYTHON[1]}+. Put a newer `python` first on PATH "
+        f"{floor[0]}.{floor[1]}+. Put a newer `python` first on PATH "
         "(VS Code users can instead set alpSdk.pythonPath)."
     )
 
@@ -644,11 +639,18 @@ def _resolve_board_path(board_yaml: str | None, workspace_root: Path) -> Path:
 def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> Path | None:
     """`--sdk-root` is TERMINAL: an explicit path that is not an SDK checkout
     fails loudly here rather than silently falling through to discovery and
-    generating against a different checkout than the caller named (I-31)."""
+    generating against a different checkout than the caller named (I-31).
+
+    Without `--sdk-root`: `.alp/sdk-path` project pin > the machine-global
+    default (`~/.alp/sdk-default`) > the positional walk
+    (`resolve_sdk_root_ladder`). No `ALP_SDK_ROOT` tier (tried and reverted --
+    see `resolve_sdk_root_ladder`'s own docstring).
+    """
     if sdk_root:
         candidate = Path(sdk_root)
         return candidate if (candidate / "scripts" / "alp_project.py").is_file() else None
-    return discover_sdk_root(workspace_root)
+    found, _tier = resolve_sdk_root_ladder(None, workspace_root)
+    return found
 
 
 def _finish(
@@ -868,8 +870,11 @@ def generate(
         # cost it a subprocess to find out.
         python = ""
         if "subprocess" in engine.values():
-            python = _planner_python()
-            if (too_old := _python_too_old(python)) is not None:
+            python = _planner_python(
+                str(workspace_root), str(resolved_sdk) if resolved_sdk else None
+            )
+            floor, _floor_source = resolve_manifest_python_floor(str(resolved_sdk))
+            if (too_old := _python_too_old(python, floor)) is not None:
                 raise GenerateError(
                     "generate.python-too-old", too_old, ExitCode.RUNTIME_FAILURE
                 )

@@ -143,6 +143,70 @@ def test_no_skew_check_when_the_two_floors_agree():
 
 
 # --------------------------------------------------------------------------
+# _load_manifest -- the provenance verdict, as DATA
+#
+# `manifest_is_real` used to be re-derived by `_collect` sniffing
+# `source.startswith("facts from alp-sdk")` -- a prefix match against
+# `_load_manifest`'s own f-string, silently flippable by a future reword with
+# nothing to catch it. `ManifestLoad.is_real` is now set once, at the read,
+# and these pin the three provenances a caller can see.
+# --------------------------------------------------------------------------
+
+
+def _write_bootstrap_json(root: Path, prerequisites: dict) -> Path:
+    path = root / "metadata" / "bootstrap.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"prerequisites": prerequisites}), encoding="utf-8")
+    return path
+
+
+def test_load_manifest_resolves_and_declares_the_python_floor(tmp_path):
+    _write_bootstrap_json(
+        tmp_path,
+        {"posix": ["git", "cmake", "python3", "ninja"], "pythonMinVersion": "3.10"},
+    )
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is True
+    assert loaded.error is None
+    assert loaded.source.startswith("facts from alp-sdk")
+    assert loaded.facts["pythonMinVersion"] == "3.10"
+
+
+def test_load_manifest_resolves_but_omits_the_python_floor(tmp_path):
+    """The manifest itself is real -- `is_real` must still say so -- even though
+    `pythonMinVersion` is absent and `_manifest_floor_from_facts` falls back to
+    `FALLBACK_PYTHON_FLOOR` for the NUMBER. Provenance and the floor value are
+    two different questions."""
+    _write_bootstrap_json(tmp_path, {"posix": ["git", "cmake", "python3", "ninja"]})
+    loaded = doctor_cmd._load_manifest(str(tmp_path))
+    assert loaded.is_real is True
+    assert loaded.error is None
+    assert "pythonMinVersion" not in loaded.facts
+    assert doctor_cmd._manifest_floor_from_facts(loaded.facts) == doctor_cmd.FALLBACK_PYTHON_FLOOR
+
+
+def test_load_manifest_with_no_sdk_resolved_is_not_real():
+    loaded = doctor_cmd._load_manifest(None)
+    assert loaded.is_real is False
+    assert loaded.error is None
+    assert "fallback" in loaded.source
+    assert loaded.facts["pythonMinVersion"] == "3.10"
+
+
+def test_collect_reports_no_manifest_read_when_none_resolves(tmp_path, monkeypatch):
+    """The end-to-end wire: with no `metadata/bootstrap.json` under `sdk_root`,
+    `pythonFloor` (when it fires) must say the manifest was never consulted --
+    the exact case `manifest_is_real=False` exists for. `ZEPHYR_BASE` is cleared
+    so the built-in Zephyr floor (3.12), which already outranks the fallback
+    manifest floor (3.10), is what makes the skew fire deterministically."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    checks = doctor_cmd._collect(str(tmp_path))
+    skew = next((c for c in checks if c.name == "pythonFloor"), None)
+    assert skew is not None
+    assert "no alp-sdk metadata/bootstrap.json was read" in skew.detail
+
+
+# --------------------------------------------------------------------------
 # Prerequisites, west
 # --------------------------------------------------------------------------
 

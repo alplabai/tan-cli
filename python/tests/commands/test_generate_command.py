@@ -338,7 +338,7 @@ def test_a_failing_emit_reports_the_sdk_stderr_and_exit_3(tmp_path, monkeypatch,
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
 
     code = _call_generate(
         target="cmake-args", sdk_root=str(sdk), output_format="json"
@@ -367,7 +367,7 @@ def test_a_successful_emit_reports_the_relative_written_path(tmp_path, monkeypat
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     assert _call_generate(target="cmake-args", sdk_root=str(sdk), output_format="json") == 0
     env = json.loads(capsys.readouterr().out.strip())
     # Workspace-RELATIVE, never the absolute host path the envelope would
@@ -554,7 +554,7 @@ def test_output_redirects_the_emit_and_is_reported_verbatim(
     `written[]` reports that path rather than the default one."""
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
 
     code = _call_generate(
@@ -580,7 +580,7 @@ def test_output_writes_a_file_and_never_puts_its_contents_on_stdout(
     documents to parse, and it renders nothing at all."""
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
 
     _call_generate(
         target="zephyr-conf",
@@ -717,7 +717,7 @@ def test_the_engine_split_is_reported_per_target(tmp_path, monkeypatch, capsys):
     relocated emit from a spawned one without guessing."""
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     _stub_in_process(monkeypatch)
 
     assert _call_generate(sdk_root=str(sdk), all_targets=True,
@@ -758,7 +758,7 @@ def test_a_fallback_to_spawning_is_reported_not_silent(
 ):
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     _stub_in_process(monkeypatch, available=False)
 
     assert _call_generate(target="zephyr-conf", core="m55_hp",
@@ -781,7 +781,7 @@ def test_the_fallback_notice_never_displaces_a_target_failure(
         encoding="utf-8",
     )
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     _stub_in_process(monkeypatch, available=False)
 
     assert _call_generate(target="cmake-args", sdk_root=str(sdk),
@@ -798,7 +798,7 @@ def test_pinning_the_subprocess_engine_is_a_choice_not_a_fallback(
     and nothing else -- warning about a path the caller asked for is noise."""
     project, sdk = _project_with_echo_sdk(tmp_path)
     monkeypatch.chdir(project)
-    monkeypatch.setattr(generate_cmd, "_planner_python", lambda: sys.executable)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
     _stub_in_process(monkeypatch)  # available, and deliberately not used
     monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
 

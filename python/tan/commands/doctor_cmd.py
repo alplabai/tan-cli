@@ -5,7 +5,8 @@ Every check here answers a question some customer already lost an afternoon to.
 Two of them exist because the answer used to be a confident, wrong "Pass".
 
 **The Python floor is not what the manifest says it is.**
-`metadata/bootstrap.json` declares `prerequisites.pythonMinVersion: "3.10"`.
+`metadata/bootstrap.json` declares `prerequisites.pythonMinVersion` (read live
+below, currently `"3.10"` on alp-sdk's `dev`), while separately
 Zephyr's `cmake/modules/python.cmake` sets `PYTHON_MINIMUM_REQUIRED 3.12`. And
 the Rust oracle's POSIX bootstrap branch was explicit that it "cannot fail on
 version" (`crates/tan-cli/src/commands/bootstrap/steps.rs:230-234`). Ubuntu 22.04
@@ -87,7 +88,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import _abs_posix, discover_sdk_root
+from tan.commands.build_cmd import _abs_posix, resolve_sdk_root_ladder
 from tan.core.bootstrap import parse_west_zephyr_pin, parse_zephyr_version_file
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -100,7 +101,20 @@ from tan.exit_codes import ExitCode
 ZEPHYR_PYTHON_FLOOR = (3, 12)
 
 #: The floor `metadata/bootstrap.json` is assumed to declare when no manifest
-#: resolves -- mirrors `crate::util::MIN_PYTHON`, which is the same 3.10.
+#: resolves at all -- used ONLY as the `manifest_floor` input to `max()` below,
+#: never as a verdict by itself. It mirrors `crate::util::MIN_PYTHON`
+#: (`crates/tan-cli/src/util.rs`), which is frozen at 3.10 and does NOT track
+#: `metadata/bootstrap.json` -- that Rust constant and the manifest's declared
+#: `pythonMinVersion` are two independently-edited numbers, not one fact, and
+#: they can and do drift apart (the manifest is mid-raise to 3.12 as of this
+#: writing; the oracle constant is not). The manifest is the authority: when it
+#: resolves AND declares `pythonMinVersion`, that number is read live and this
+#: constant is not consulted for the verdict -- but a manifest that resolves
+#: while omitting the key still falls back to this same constant (see
+#: `resolve_manifest_python_floor`/`_collect` below), so this is not a
+#: no-manifest-only fallback. `ZEPHYR_PYTHON_FLOOR` above still composes with
+#: it via `max()` either way, so a resolvable SDK checkout with the key present
+#: never depends on this value being current.
 FALLBACK_PYTHON_FLOOR = (3, 10)
 
 #: Seconds any single probe may take before it is killed. Generous enough for a
@@ -404,7 +418,10 @@ def python_check(
 
 
 def python_floor_skew_check(
-    manifest_floor: tuple[int, int], effective_floor: tuple[int, int], effective_source: str
+    manifest_floor: tuple[int, int],
+    effective_floor: tuple[int, int],
+    effective_source: str,
+    manifest_is_real: bool = True,
 ) -> Check | None:
     """`pythonFloor` -- the two declared floors disagree.
 
@@ -413,6 +430,16 @@ def python_floor_skew_check(
     trust, so while the skew stands the two sources disagree about which hosts
     are supported. Saying which number came from which file is the whole value:
     the fix belongs in `metadata/bootstrap.json`, not on the customer's machine.
+
+    `manifest_is_real` is `False` when `manifest_floor` never actually came from
+    a read `metadata/bootstrap.json` -- no SDK resolved, or this SDK predates
+    the manifest -- and is instead tan's own `FALLBACK_PYTHON_FLOOR` standing
+    in. Callers pass `_load_manifest`'s own `ManifestLoad.is_real` verdict
+    straight through -- never re-derived from `ManifestLoad.source`'s prose, so
+    a future rewording of that message cannot silently flip which branch below
+    fires. Misreporting that number as "alp-sdk's metadata/bootstrap.json
+    declares" sends the customer to edit a file that was never consulted, so
+    the wording and the fix both change for this case.
 
     `tan bootstrap` enforces the SAME effective floor this reports -- it calls
     `zephyr_python_floor` below with the same argument (see
@@ -424,18 +451,33 @@ def python_floor_skew_check(
     """
     if manifest_floor >= effective_floor:
         return None
+    if manifest_is_real:
+        claim = f"alp-sdk's metadata/bootstrap.json declares pythonMinVersion {_fmt(manifest_floor)}"
+        fix = (
+            f"Raise `prerequisites.pythonMinVersion` to {_fmt(effective_floor)} in "
+            f"alp-sdk's metadata/bootstrap.json (and re-run its "
+            f"scripts/check_bootstrap_manifest.py drift gate)."
+        )
+    else:
+        claim = (
+            f"no alp-sdk metadata/bootstrap.json was read (no SDK checkout resolved, "
+            f"or this SDK predates it), so tan's own built-in floor {_fmt(manifest_floor)} "
+            f"is standing in"
+        )
+        fix = (
+            "Resolve or pin an alp-sdk checkout (`tan sdk switch <version|path>`) so its "
+            "own metadata/bootstrap.json pythonMinVersion is read instead of tan's "
+            "built-in floor."
+        )
     return Check(
         "pythonFloor",
         "warn",
-        f"alp-sdk's metadata/bootstrap.json declares pythonMinVersion "
-        f"{_fmt(manifest_floor)}, but the build's effective floor is "
+        f"{claim}, but the build's effective floor is "
         f"{_fmt(effective_floor)} (from {effective_source}). Both `tan doctor` and "
         f"`tan bootstrap` enforce the higher, effective floor, so a host this "
         f"manifest would have accepted is refused up front rather than failing "
         f"later at Zephyr's CMake configure.",
-        f"Raise `prerequisites.pythonMinVersion` to {_fmt(effective_floor)} in "
-        f"alp-sdk's metadata/bootstrap.json (and re-run its "
-        f"scripts/check_bootstrap_manifest.py drift gate).",
+        fix,
     )
 
 
@@ -788,9 +830,27 @@ def _probe_host_python(floor: tuple[int, int]) -> tuple[str, tuple[int, int]] | 
     return first_that_ran
 
 
-def _load_manifest(sdk_root: str | None) -> tuple[dict, str, str | None]:
-    """`(prerequisites facts, provenance, error)` from
-    `<sdk>/metadata/bootstrap.json`.
+@dataclass(frozen=True)
+class ManifestLoad:
+    """The result of resolving `<sdk>/metadata/bootstrap.json`.
+
+    `is_real` is the provenance verdict as DATA, set exactly once, at the one
+    return that actually read and parsed a manifest -- never re-derived by a
+    caller sniffing `source`'s prose. `source` is still carried for display
+    (the message names WHICH file or fallback), but nothing downstream may
+    infer `is_real` from it: that used to be `source.startswith("facts from
+    alp-sdk")`, which silently flips the verdict the moment this docstring's
+    or `source`'s wording changes, with nothing to catch it.
+    """
+
+    facts: dict
+    source: str
+    error: str | None
+    is_real: bool
+
+
+def _load_manifest(sdk_root: str | None) -> ManifestLoad:
+    """Resolve the prerequisites facts from `<sdk>/metadata/bootstrap.json`.
 
     A missing or malformed manifest is a WARNING with documented fallbacks, not
     a refusal: doctor's whole job is to run on a host where things are wrong,
@@ -804,30 +864,60 @@ def _load_manifest(sdk_root: str | None) -> tuple[dict, str, str | None]:
         "install": {},
     }
     if sdk_root is None:
-        return fallback, "tan's built-in fallback list (no alp-sdk checkout resolved)", None
+        return ManifestLoad(
+            fallback,
+            "tan's built-in fallback list (no alp-sdk checkout resolved)",
+            None,
+            is_real=False,
+        )
     path = Path(sdk_root) / "metadata" / "bootstrap.json"
     text = _read_text(path)
     if text is None:
-        return (
+        return ManifestLoad(
             fallback,
             "tan's built-in fallback list",
             f"could not read {path}",
+            is_real=False,
         )
     try:
         facts = json.loads(text)
     except ValueError as err:
-        return fallback, "tan's built-in fallback list", f"{path} is not valid JSON: {err}"
+        return ManifestLoad(
+            fallback, "tan's built-in fallback list", f"{path} is not valid JSON: {err}", is_real=False
+        )
     prerequisites = facts.get("prerequisites")
     if not isinstance(prerequisites, dict):
-        return (
+        return ManifestLoad(
             fallback,
             "tan's built-in fallback list",
             f"{path} has no `prerequisites` object",
+            is_real=False,
         )
     west = facts.get("west")
     if isinstance(west, dict):
         prerequisites = {**prerequisites, "_pipSpec": west.get("pipSpec")}
-    return prerequisites, f"facts from alp-sdk {path}", None
+    return ManifestLoad(prerequisites, f"facts from alp-sdk {path}", None, is_real=True)
+
+
+def _manifest_floor_from_facts(facts: dict) -> tuple[int, int]:
+    """The `pythonMinVersion` `facts` declares, or `FALLBACK_PYTHON_FLOOR` when
+    absent/unparseable -- shared by `_collect` and `resolve_manifest_python_floor`
+    so the two never parse the same field two different ways."""
+    return _parse_two(str(facts.get("pythonMinVersion") or "")) or FALLBACK_PYTHON_FLOOR
+
+
+def resolve_manifest_python_floor(sdk_root: str | None) -> tuple[tuple[int, int], str]:
+    """`(floor, provenance)` for the SDK's OWN declared Python floor --
+    `<sdk>/metadata/bootstrap.json`'s `prerequisites.pythonMinVersion` -- for
+    callers gating a SPAWNED SDK interpreter (`generate`/`model`) rather than a
+    Zephyr build, so they want this floor, not `_collect`'s Zephyr-composed
+    effective one. The ONE reader: before this, `generate_cmd` and `model_cmd`
+    each carried their own hardcoded `MIN_PYTHON = (3, 10)`, a floor that could
+    drift from the manifest's -- and from each other's -- without either
+    command noticing.
+    """
+    loaded = _load_manifest(sdk_root)
+    return _manifest_floor_from_facts(loaded.facts), loaded.source
 
 
 def _collect(sdk_root: str | None, build: bool = False) -> list[Check]:
@@ -842,22 +932,21 @@ def _collect(sdk_root: str | None, build: bool = False) -> list[Check]:
     """
     checks: list[Check] = []
 
-    facts, source, manifest_error = _load_manifest(sdk_root)
-    if manifest_error is not None:
+    loaded = _load_manifest(sdk_root)
+    facts, source = loaded.facts, loaded.source
+    if loaded.error is not None:
         checks.append(
             Check(
                 "bootstrapManifest",
                 "warn",
-                f"metadata/bootstrap.json rejected: {manifest_error}. Falling back to "
+                f"metadata/bootstrap.json rejected: {loaded.error}. Falling back to "
                 f"tan's built-in prerequisite list, which may not match this SDK.",
                 "Update `tan` or pin an SDK whose metadata/bootstrap.json this "
                 "version understands; `tan bootstrap` will refuse outright until then.",
             )
         )
 
-    manifest_floor = _parse_two(str(facts.get("pythonMinVersion") or "")) or (
-        FALLBACK_PYTHON_FLOOR
-    )
+    manifest_floor = _manifest_floor_from_facts(facts)
     zephyr_floor, zephyr_source = zephyr_python_floor(os.environ.get("ZEPHYR_BASE"))
     # The EFFECTIVE floor: the highest anything in the build chain enforces. The
     # manifest is not the authority here -- it is one of two claimants.
@@ -871,7 +960,12 @@ def _collect(sdk_root: str | None, build: bool = False) -> list[Check]:
     checks.append(
         python_check(_probe_host_python(effective_floor), effective_floor, effective_source)
     )
-    skew = python_floor_skew_check(manifest_floor, effective_floor, effective_source)
+    skew = python_floor_skew_check(
+        manifest_floor,
+        effective_floor,
+        effective_source,
+        manifest_is_real=loaded.is_real,
+    )
     if skew is not None:
         checks.append(skew)
 
@@ -997,15 +1091,15 @@ def doctor(
         board_yaml = os.path.join(str(workspace_root), board_yaml)
     if board_yaml is None and (workspace_root / "board.yaml").is_file():
         board_yaml = str(workspace_root / "board.yaml")
-    explicit_sdk = sdk_root is not None
-    if sdk_root is None:
-        found = discover_sdk_root(workspace_root)
-        sdk_root = str(found) if found else None
-    sdk = (
-        SdkInfo(sdk_root, "sdkRootFlag" if explicit_sdk else "discovery")
-        if sdk_root is not None
-        else None
-    )
+    # `--sdk-root` > `.alp/sdk-path` project pin > machine-global default >
+    # the positional walk (`resolve_sdk_root_ladder`) -- no `ALP_SDK_ROOT`
+    # tier (tried and reverted -- see `resolve_sdk_root_ladder`'s own
+    # docstring). Previously this skipped straight from `--sdk-root` to the
+    # positional walk, silently ignoring `tan init`'s own pointer in the same
+    # directory.
+    resolved_sdk_root, sdk_tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
+    sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Forward slashes -- the established envelope contract on this seam
     # (`build_cmd.build`, `flash_cmd._resolve_project`), not the native
     # separators `str(Path(...))` would emit on Windows.
