@@ -140,6 +140,18 @@ boot_order: []
     ),
     ("flash-args-tbd-mapping", _helper("swd_probe", "{mode: TBD, device: TBD}"), []),
     ("flash-args-tbd-bare-string", _helper("swd_probe", "TBD"), ["--dry-run"]),
+    # No `output_artefact`/`firmware_path: TBD` case here, and that is NOT an
+    # oversight -- see #222. The two `flash_args` cases above ARE diffed because
+    # both sides skip; the ARTEFACT sibling is a deliberate divergence. The
+    # shipped Rust has the alp-sdk hole (`flash/mod.rs:307`'s
+    # `.filter(|s| !s.is_empty())`, and `TBD` is not empty): run the oracle on a
+    # helper with `firmware_path: TBD` and it reports `status: ok`, exit 0, and
+    # `would run JLinkExe ... -CommanderScript <generated.jlink>` whose script
+    # `loadfile`s `<build_root>\TBD` -- i.e. on a host with a real J-Link it
+    # spawns a flasher against a placeholder. The port REFUSES that (a failed
+    # entry, under `--dry-run` too), so diffing it here would only ever go red.
+    # Pinned in `tests/commands/test_flash_command.py` instead, with an
+    # audit-hook proof that nothing is spawned. Do not "restore parity".
     # ── the strict flash_args accessors ─────────────────────────────────────
     ("quoted-bool-is-refused", _slice("zephyr_west_flash", '{erase: "true"}'), ["--dry-run"]),
     ("quoted-int-is-refused", _slice("swd_probe", '{jlink_speed: "8000"}'), ["--dry-run"]),
