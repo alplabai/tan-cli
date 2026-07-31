@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -704,6 +705,17 @@ def test_a_failed_state_file_unlink_is_an_error_and_exit_1(tmp_path, monkeypatch
     proj = make_project(tmp_path)
     isolate(monkeypatch, tmp_path, proj)
     state = proj / ".alp-build-state.json"
+    # The state file must be the ONLY removal left to fail, so take the build
+    # tree out of the plan first (it reports `absent`, no issue). The two
+    # blockers below are not equally precise: Windows' open handle stops that
+    # one file, where POSIX has no per-file equivalent and a read-only PARENT
+    # stops every unlink in `proj` -- including the `rmdir` that finishes
+    # `build/`, which `clean` then reports as a SECOND, warning-severity
+    # `clean.remove-failed`. That report is correct (two removals failed, two
+    # issues, and the envelope must never claim a directory it left behind was
+    # removed -- see the test below), but it is not what this pins, and it made
+    # this test pass on Windows and fail on Linux.
+    shutil.rmtree(proj / "build")
 
     if WINDOWS:
         handle = state.open("rb")  # an open handle blocks unlink
@@ -712,7 +724,6 @@ def test_a_failed_state_file_unlink_is_an_error_and_exit_1(tmp_path, monkeypatch
         finally:
             handle.close()
     else:
-        # A read-only PARENT is what blocks an unlink on POSIX.
         os.chmod(proj, stat.S_IRUSR | stat.S_IXUSR)
         try:
             result = runner.invoke(app, ["clean", "--format", "json"])
