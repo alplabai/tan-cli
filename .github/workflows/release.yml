@@ -45,10 +45,14 @@
 #   every asset must be frozen on its own architecture (build_binary.sh:36).
 #   The reason is NOT "no arm64 runner exists" — `windows-11-arm` and
 #   `ubuntu-24.04-arm` are current hosted labels — it is that adding two more
-#   runner types was out of scope for this tag, and on a PRIVATE repo arm64
-#   minutes are billed and plan-gated. Recorded precisely because a wrong
-#   reason is what stops anyone revisiting: the blocker is a decision, not a
-#   platform limit, and it can be revisited whenever arm64 assets are wanted.
+#   runner types was out of scope for this tag. Nor is it billing: this repo is
+#   PUBLIC (`gh repo view alplabai/tan-cli --json isPrivate` → false), so arm64
+#   minutes are not a barrier. An earlier revision of this comment said they
+#   were "billed and plan-gated on a PRIVATE repo" — true once, false now, and
+#   exactly the kind of stale reason this block warns about. Recorded precisely
+#   because a wrong reason is what stops anyone revisiting: the blocker is a
+#   decision, not a platform limit, and it can be revisited whenever arm64
+#   assets are wanted.
 #
 #   The LINUX asset is `-gnu`, and that name is deliberate. It is frozen in
 #   python:3.12-slim-bullseye (Debian 11, glibc 2.31), so it IS a glibc binary;

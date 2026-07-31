@@ -61,10 +61,10 @@ testers install by hand.
   **`tan-aarch64-pc-windows-msvc.exe` and an arm64 Linux asset are NOT
   published**, and a download of either 404s. PyInstaller cannot
   cross-compile -- every asset must be frozen on the architecture it runs on
-  -- and adding two more runner types was out of scope for this tag, where on
-  a private repo arm64 minutes are billed and plan-gated. That is a decision,
-  not a platform limit (`windows-11-arm` and `ubuntu-24.04-arm` are current
-  hosted labels), so it can be revisited whenever arm64 assets are wanted;
+  -- and adding two more runner types was out of scope for this tag. That is a
+  decision, not a platform limit (`windows-11-arm` and `ubuntu-24.04-arm` are
+  current hosted labels, and this repo is public, so arm64 minutes are not a
+  barrier either), so it can be revisited whenever arm64 assets are wanted;
   `pip install ./python` is the route until then. There is no `-musl` asset
   either: PyInstaller's musllinux bootloader carries ELF interpreter
   `/lib/ld-musl-x86_64.so.1`, so a musl freeze runs ONLY on musl distros --

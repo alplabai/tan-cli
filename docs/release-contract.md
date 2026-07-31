@@ -124,9 +124,13 @@ A PyInstaller freeze **cannot be cross-compiled** — it embeds the interpreter
 it ran under, so each asset must be built on its own architecture. That is the
 constraint; the *reason* those two are absent is that this release builds on
 four runners and adding two more was out of scope. Hosted arm64 runners do
-exist (`windows-11-arm`, `ubuntu-24.04-arm`); on a private repo they are billed
-and plan-gated. So this is a revisitable decision, not a platform limit — do
-not record it as "there is no runner".
+exist (`windows-11-arm`, `ubuntu-24.04-arm`), and this repo is public, so their
+minutes are not a barrier either. So this is a revisitable decision, not a
+platform limit — do not record it as "there is no runner", and do not record it
+as a billing constraint: an earlier revision of this paragraph said the arm64
+minutes were "billed and plan-gated on a private repo", which stopped being true
+when the repo went public and would have discouraged exactly the revisit this
+paragraph exists to invite.
 
 `x86_64-unknown-linux-musl` is also gone, and deliberately. A musl freeze is
 dynamically linked against `/lib/ld-musl-x86_64.so.1` (measured in
