@@ -576,12 +576,62 @@ def test_from_example_copies_the_tree_and_retargets_the_som(tmp_path):
     # SoM's vendor) is dropped rather than carried onto the new SKU.
     assert "  sku: E1M-V2N101\n" in board
     assert "aligned comment" not in board
-    # `--sdk-root ./sdk` is recorded VERBATIM, not normalised to `sdk`: the Rust
-    # returns an explicit `--sdk-root` as-is, and both binaries write this same
-    # pointer file.
-    assert env["data"]["sdkPinned"] == "./sdk"
+    # `--sdk-root ./sdk` is recorded as an ABSOLUTE path, anchored against the
+    # cwd `init` actually ran from (tan-cli#263) -- not the literal `./sdk` the
+    # caller typed. A relative pointer read back from a LATER invocation, whose
+    # cwd is the project directory itself rather than this one, silently misses
+    # (that is the maintainer's exact repro: `--sdk-root .\alp-sdk` from the
+    # parent, then `tan sdk current` from inside the new project).
+    expected_sdk = (tmp_path / "sdk").as_posix()
+    assert env["data"]["sdkPinned"] == expected_sdk
     pointer = json.loads((tmp_path / "copy" / ".alp" / "sdk-path").read_text(encoding="utf-8"))
-    assert pointer["sdkPath"] == "./sdk"
+    assert pointer["sdkPath"] == expected_sdk
+
+
+def test_a_relative_sdk_root_pin_survives_being_read_back_from_inside_the_project(tmp_path):
+    """tan-cli#263, the maintainer's exact repro: `tan init --sdk-root
+    .\\alp-sdk --destination .\\blink` run from a parent directory, then a
+    LATER command run from inside the new project itself. Before this fix the
+    pin stored `.\\alp-sdk` verbatim; read back from `blink/`'s own cwd that
+    resolved to `blink/alp-sdk` (nothing there), so `tan sdk current` silently
+    fell through to `discovery` -- `ok: true`, `issues: []`, and whichever SDK
+    discovery happened to find from that directory, which need not be the one
+    `--sdk-root` named.
+    """
+    sdk = tmp_path / "alp-sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (sdk / "metadata").mkdir()
+    # A developer's real `~/.alp/sdk-default` must not decide this -- it
+    # outranks `discovery` but not `projectPin`, so leaving it unisolated
+    # would only mask a regression, not cause a false pass; isolated anyway to
+    # match `test_sdk_command.py`'s `isolated_home` convention.
+    home = tmp_path / "home"
+    home.mkdir()
+    isolated_env = {"HOME": str(home), "USERPROFILE": str(home)}
+
+    init_proc = run_tan(
+        "init",
+        "--template",
+        "minimal-app",
+        "--sdk-root",
+        "./alp-sdk",
+        "--destination",
+        "./blink",
+        "--format",
+        "json",
+        cwd=tmp_path,
+        env_extra=isolated_env,
+    )
+    assert envelope(init_proc)["ok"] is True
+
+    current_proc = run_tan(
+        "sdk", "current", "--format", "json", cwd=tmp_path / "blink", env_extra=isolated_env
+    )
+    env = envelope(current_proc)
+    assert env["data"]["sourceTier"] == "projectPin"
+    assert env["data"]["sdkPath"] == sdk.as_posix()
+    assert env["issues"] == []
 
 
 @pytest.mark.parametrize(
@@ -624,9 +674,10 @@ def test_an_out_of_range_source_date_epoch_still_pins_the_sdk(epoch, tmp_path):
     env = envelope(proc)
 
     assert proc.returncode == 0, env["issues"]
-    assert env["data"]["sdkPinned"] == "./sdk"
+    expected_sdk = (tmp_path / "sdk").as_posix()
+    assert env["data"]["sdkPinned"] == expected_sdk
     pointer = json.loads((tmp_path / "app" / ".alp" / "sdk-path").read_text(encoding="utf-8"))
-    assert pointer["sdkPath"] == "./sdk"
+    assert pointer["sdkPath"] == expected_sdk
     # Shape, not value: an out-of-range epoch falls back to the wall clock.
     time.strptime(pointer["updatedAt"], "%Y-%m-%dT%H:%M:%SZ")
 

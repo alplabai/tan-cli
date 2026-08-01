@@ -80,6 +80,7 @@ from typing import Any
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide
+from tan.commands.sdk_cmd import project_pin_issue
 from tan.commands.build_output import ManifestInvalid, ManifestUnavailable, load_manifest
 from tan.commands.doctor_cmd import on_path
 from tan.core.renode_plan import (
@@ -134,7 +135,7 @@ def _is_sdk_root(path: str) -> bool:
 
 def _resolve_sdk_root_and_tier(
     sdk_root_arg: str | None, workspace_root: str
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     """`--sdk-root` (TERMINAL -- returned AS TYPED when it has the loader
     script, `None` otherwise, never falling through to a lower tier) > the
     project's own `.alp/sdk-path` pin > the machine-global default
@@ -144,11 +145,16 @@ def _resolve_sdk_root_and_tier(
     descriptors out of the child `<ws>/alp-sdk` over a competing `../alp-sdk`
     (tan-cli#263). No `ALP_SDK_ROOT` tier (tried and reverted -- see
     `resolve_sdk_root_ladder`'s own docstring).
+
+    Third element (tan-cli#263 review): the broken project pin carried through
+    from `resolve_sdk_root_wide`, `None` on the `--sdk-root` branch.
     """
     if sdk_root_arg is not None:
-        return (sdk_root_arg, "sdkRootFlag") if _is_sdk_root(sdk_root_arg) else (None, None)
-    found, tier = resolve_sdk_root_wide(None, Path(workspace_root))
-    return (str(found), tier) if found is not None else (None, None)
+        return (
+            (sdk_root_arg, "sdkRootFlag", None) if _is_sdk_root(sdk_root_arg) else (None, None, None)
+        )
+    found, tier, broken_pin = resolve_sdk_root_wide(None, Path(workspace_root))
+    return (str(found), tier, broken_pin) if found is not None else (None, None, broken_pin)
 
 
 def _data(**overrides: Any) -> dict[str, Any]:
@@ -388,7 +394,7 @@ def _run(
     # (the GLOBAL flag) -- NOT `app_path`. See the module docstring for why
     # these two deliberately diverge in the oracle.
     workspace_root = os.path.join(cwd, project_arg) if project_arg else cwd
-    sdk_root, sdk_tier = _resolve_sdk_root_and_tier(sdk_root_arg, workspace_root)
+    sdk_root, sdk_tier, sdk_broken_pin = _resolve_sdk_root_and_tier(sdk_root_arg, workspace_root)
     if sdk_root is None:
         return fail("renode.sdk-root-not-found", "Cannot locate alp-sdk root.")
     sdk = SdkInfo(sdk_root, sdk_tier or "none")
@@ -457,6 +463,9 @@ def _run(
 
     issues: list[Issue] = []
     text: list[str] = []
+    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier or "none")
+    if pin_issue is not None:
+        issues.append(pin_issue)
     if image_bundle_arg is not None:
         msg = (
             f"renode: --image-bundle {image_bundle_arg} accepted but unused by the "

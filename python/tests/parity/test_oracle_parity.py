@@ -21,6 +21,7 @@ case that starts genuinely passing then reports XPASS and FAILS the run, which
 forces the one-line promotion instead of letting a landed command sit
 mis-classified as "not ported" forever.
 """
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -302,6 +303,63 @@ def test_generate_matches_rust_with_a_resolvable_sdk(tmp_path):
         if r_out.get(key) != p_out.get(key):
             diffs.append(f"{key}: rust={r_out.get(key)!r} python={p_out.get(key)!r}")
     assert not diffs, "\n".join(diffs)
+
+
+@pytest.mark.skipif(not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
+def test_init_sdk_root_flag_pin_is_a_known_divergence_from_the_oracle(tmp_path):
+    """tan-cli#263 review: `init --sdk-root <relative>` is a DELIBERATE,
+    permanent divergence from the oracle, not an uncovered port bug -- proven
+    here rather than left implicit by the fact that no other case in this
+    file ever passes `--sdk-root` to `init` (`test_generate_matches_rust_with_
+    a_resolvable_sdk` above scaffolds with a bare `tan init`, and only hands
+    `--sdk-root` to the later `generate` call).
+
+    The oracle's `resolve_sdk_root` (`crates/tan-cli/src/util.rs`) returns an
+    explicit `--sdk-root` AS TYPED, and `init/from_example.rs::pin_resolved_
+    sdk` writes that string verbatim into `.alp/sdk-path`: a relative flag
+    survives into the PERSISTED pointer file un-anchored. Read back later by a
+    different invocation (a different cwd -- typically `tan sdk current` run
+    from inside the project `init` just created), that pointer silently
+    resolves to the wrong directory or nowhere at all: the maintainer's exact
+    repro. `crates/` is frozen (`docs/ROADMAP.md`'s standing rule -- "Never
+    edit crates/ or contract/"), so the fix lands only on the Python side:
+    `init_cmd._resolve_sdk_root` anchors the flag to an absolute path before
+    either using or persisting it. `test_init_command.py`'s
+    `test_a_relative_sdk_root_pin_survives_being_read_back_from_inside_the_
+    project` pins the corrected (Python-only) behaviour end to end; this test
+    is the other half -- proving the two implementations really do disagree on
+    the identical input, following the exclude-and-pin convention
+    `test_flash_oracle_parity.py` already uses for a case that would always
+    read red.
+    """
+    home = tmp_path / "home"
+    sides: dict[str, tuple[int, dict]] = {}
+    pins: dict[str, str] = {}
+    for name, command in (("rust", [RUST]), ("python", python_command())):
+        sdk_dir = tmp_path / f"{name}-sdk"
+        (sdk_dir / "scripts").mkdir(parents=True)
+        (sdk_dir / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+        work = tmp_path / name
+        work.mkdir()
+        sides[name] = _run(
+            command,
+            ["init", "--template", "minimal-app", "--sdk-root", f"../{name}-sdk", "--format", "json"],
+            work,
+            home,
+        )
+        pointer = work / ".alp" / "sdk-path"
+        pins[name] = json.loads(pointer.read_text(encoding="utf-8"))["sdkPath"] if pointer.exists() else "<no pointer written>"
+
+    (r_code, r_out), (p_code, p_out) = sides["rust"], sides["python"]
+    assert r_code == 0, f"rust tan init failed: {r_out}"
+    assert p_code == 0, f"python tan init failed: {p_out}"
+
+    # The divergence itself: the oracle keeps the flag verbatim; the port
+    # anchors it. If this ever starts matching, `init`'s own docstring and
+    # `test_init_command.py`'s pin need re-deriving, not just this assertion.
+    assert pins["rust"] == "../rust-sdk", pins
+    assert pins["python"] == (tmp_path / "python-sdk").as_posix(), pins
+    assert pins["rust"] != pins["python"]
 
 
 # --- the harness must be able to go red ------------------------------------

@@ -57,6 +57,7 @@ from tan.commands.build_output import (
     resolve_metadata_sdk_root,
     resolve_project_context,
 )
+from tan.commands.sdk_cmd import project_pin_issue
 from tan.core.pending import is_pending_placeholder
 from tan.core.size import (
     MemoryBudget,
@@ -502,6 +503,10 @@ def _run(
     text: list[str] = []
     issues: list[Issue] = []
     exit_code = ExitCode.SUCCESS
+
+    pin_issue = project_pin_issue(context.broken_project_pin, context.sdk_source_tier)
+    if pin_issue is not None:
+        issues.append(pin_issue)
 
     if not json_mode:
         text.extend(render_table_lines(rows, _use_color(no_color, ci)))

@@ -147,7 +147,13 @@ def write_post_build_manifest(
         # moment a project pin or machine-global default was in play.
         from tan.commands.build_cmd import resolve_sdk_root_ladder
 
-        discovered, _tier = resolve_sdk_root_ladder(
+        # `_broken_pin` unused: this fallback only fires for a caller that
+        # passed no `sdk_root` at all (test-only, per the docstring above) --
+        # the real `tan build` path already resolved (and, since tan-cli#263
+        # review, already reported) the project pin at its own call site
+        # before ever reaching here, and `PostBuildManifest` has no issues
+        # channel to carry a second copy through.
+        discovered, _tier, _broken_pin = resolve_sdk_root_ladder(
             None, Path(effective_board_yaml).parent
         )
         effective_sdk_root = str(discovered) if discovered else None

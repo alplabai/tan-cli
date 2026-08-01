@@ -94,7 +94,7 @@ from tan.commands.build.token_substitution import (
     apply_plan_token_substitution,
 )
 from tan.commands.deferred_cmd import DEFERRED_ISSUE_CODE, DEFERRED_ISSUE_URL
-from tan.commands.sdk_cmd import resolve_sdk_tiered
+from tan.commands.sdk_cmd import project_pin_issue, resolve_sdk_tiered
 from tan.core.bootstrap import VenvLayout, venv_layout
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
@@ -386,8 +386,9 @@ def discover_sdk_root(workspace_root: Path) -> Path | None:
 
 def resolve_sdk_root_ladder(
     sdk_root_arg: str | None, workspace_root: Path
-) -> tuple[Path | None, str]:
-    """`(path, sourceTier)` -- the NARROW of this port's TWO discovery ladders,
+) -> tuple[Path | None, str, str | None]:
+    """`(path, sourceTier, brokenProjectPin)` -- the NARROW of this port's TWO
+    discovery ladders,
     shared by the thirteen commands the oracle resolves narrowly (`build`,
     `doctor`, `clean`, `run`, `flash`, `size`, `image`, `kconfig`, `validate`,
     `presets`, `inspect`, `trace`, `sdk current`). The other four -- `init`,
@@ -440,27 +441,38 @@ def resolve_sdk_root_ladder(
     next build and lose every slice's build dir. The four wide commands were
     the real gap; they now have their own helper below, which is why this one
     stays exactly as it is.
+
+    The third element (tan-cli#263 review) is `ActiveSdk.broken_project_pin`
+    carried straight through: the raw `.alp/sdk-path` target when that file
+    exists but its target failed the loader check, `None` otherwise -- even
+    when a LOWER tier (global default, discovery, or nothing) is what this
+    call actually returns. `sdk_cmd.project_pin_issue` turns it into the
+    shared `sdk.project-pin-unresolved` warning; every caller here should
+    surface it, not just `sdk current` -- `tan build` is the one that matters
+    most, since it is the command that silently builds against whichever SDK
+    the pin's fallthrough landed on.
     """
     flag = (sdk_root_arg or "").strip()
     if flag:
-        return Path(flag), "sdkRootFlag"
+        return Path(flag), "sdkRootFlag", None
 
     tiered = resolve_sdk_tiered(None, workspace_root)
     if tiered.path is not None:
-        return Path(tiered.path), tiered.tier
+        return Path(tiered.path), tiered.tier, tiered.broken_project_pin
 
     found = discover_sdk_root(workspace_root)
     if found is not None:
-        return found, "discovery"
-    return None, "none"
+        return found, "discovery", tiered.broken_project_pin
+    return None, "none", tiered.broken_project_pin
 
 
 def resolve_sdk_root_wide(
     sdk_root_arg: str | None, workspace_root: Path
-) -> tuple[Path | None, str]:
-    """`(path, sourceTier)` -- the WIDE ladder, for the four commands the oracle
-    routes through `util.rs`'s `resolve_sdk_root`: `init`, `generate`,
-    `examples`, `renode`.
+) -> tuple[Path | None, str, str | None]:
+    """`(path, sourceTier, brokenProjectPin)` -- the WIDE ladder, for the four
+    commands the oracle routes through `util.rs`'s `resolve_sdk_root`: `init`,
+    `generate`, `examples`, `renode`. `brokenProjectPin` is
+    [`resolve_sdk_root_ladder`]'s own third element, same meaning.
 
     Same tiers and the same five `SdkSourceTier` values as
     [`resolve_sdk_root_ladder`] above -- `--sdk-root` > project pin > global
@@ -486,16 +498,16 @@ def resolve_sdk_root_wide(
     """
     flag = (sdk_root_arg or "").strip()
     if flag:
-        return Path(flag), "sdkRootFlag"
+        return Path(flag), "sdkRootFlag", None
 
     tiered = resolve_sdk_tiered(None, workspace_root)
     if tiered.path is not None and tiered.tier != "discovery":
-        return Path(tiered.path), tiered.tier
+        return Path(tiered.path), tiered.tier, tiered.broken_project_pin
 
     found = discover_sdk_root(workspace_root)
     if found is not None:
-        return found, "discovery"
-    return None, "none"
+        return found, "discovery", tiered.broken_project_pin
+    return None, "none", tiered.broken_project_pin
 
 
 def _has_west(venv: Path, layout: VenvLayout) -> bool:
@@ -1366,7 +1378,7 @@ def build(
     # previously this skipped straight from `--sdk-root` to the positional
     # walk, so `tan init`'s own pointer went unread the moment `tan build` ran
     # in the same directory.
-    resolved_sdk_root, sdk_tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the
@@ -1417,6 +1429,14 @@ def build(
         exit_code = ExitCode.INTERNAL_FAILURE
         data = None
         issues = [Issue("build.internal-failure", "error", f"{type(err).__name__}: {err}")]
+
+    # tan-cli#263 review: `tan build` is the command a silently-missed
+    # `.alp/sdk-path` pin hurts most -- it builds against whichever tier the
+    # ladder fell through to and says nothing, where `sdk current` alone only
+    # helps someone already suspicious enough to run it.
+    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
+    if pin_issue is not None:
+        issues = [pin_issue, *issues]
 
     if json_mode:
         emit(Envelope("build", project, data, issues, exit_code, sdk=sdk))

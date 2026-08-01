@@ -143,12 +143,16 @@ def test_tier_order_is_flag_then_pin_then_global_then_discovery(tmp_path, isolat
 
 def test_a_stale_pointer_falls_through_instead_of_locking_the_user_out(tmp_path, isolated_home):
     """Both pointer tiers are best-effort: a pointer whose target is gone must
-    not win, or one deleted directory breaks every command."""
+    not win, or one deleted directory breaks every command. tan-cli#263: the
+    fallthrough must not be SILENT about it, though -- the rejected pin's own
+    target survives on `broken_project_pin` no matter which lower tier answers,
+    so a caller can still say a pin existed and did not resolve."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     write_pointer(workspace / ".alp" / "sdk-path", tmp_path / "deleted-checkout")
     active = resolve_sdk_tiered(None, workspace)
     assert (active.tier, active.path) == ("none", None)
+    assert active.broken_project_pin == str(tmp_path / "deleted-checkout")
 
 
 @pytest.mark.parametrize(
@@ -347,6 +351,37 @@ def test_current_with_no_sdk_omits_the_sdk_key(tmp_path, isolated_home):
     assert "sdk" not in env, "absent, never null"
     assert env["data"]["sdkPath"] is None
     assert env["data"]["sourceTier"] == "none"
+
+
+def test_current_names_an_unresolvable_project_pin_instead_of_reporting_it_silently(
+    tmp_path, isolated_home
+):
+    """tan-cli#263: the maintainer's exact repro was a workspace whose
+    `.alp/sdk-path` named an unreachable checkout resolving `ok: true`,
+    `issues: []`, with `sourceTier` silently one tier lower -- indistinguishable
+    from a workspace that was never pinned. A discovered fallback still
+    resolves SOMETHING here; the point is that resolving something must not
+    erase the fact that the pin itself was rejected."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    broken_target = tmp_path / "does-not-exist"
+    write_pointer(workspace / ".alp" / "sdk-path", broken_target)
+    make_sdk_root(workspace.parent / "alp-sdk")
+
+    env = envelope(run_tan("sdk", "current", "--format", "json", cwd=workspace))
+    assert env["ok"] is True
+    assert env["data"]["sourceTier"] == "discovery"
+    assert env["issues"] == [
+        {
+            "code": "sdk.project-pin-unresolved",
+            "severity": "warning",
+            "message": (
+                f'.alp/sdk-path names "{broken_target}", which does not resolve '
+                f"to an alp-sdk checkout from the current directory -- falling "
+                f"through to the discovery tier instead."
+            ),
+        }
+    ]
 
 
 def test_list_refuses_without_online_and_touches_no_network(tmp_path, isolated_home):

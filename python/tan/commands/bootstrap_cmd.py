@@ -67,7 +67,7 @@ from tan.commands.doctor_cmd import (
     zephyr_python_floor,
 )
 from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
-from tan.commands.sdk_cmd import SDK_MARKER, _home_alp_dir, resolve_sdk_tiered
+from tan.commands.sdk_cmd import SDK_MARKER, _home_alp_dir, project_pin_issue, resolve_sdk_tiered
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_REL_PATH,
     DEFAULT_WORKSPACE_DIR_NAME,
@@ -1693,6 +1693,13 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         )
     sdk_root = resolved
     sdk = SdkInfo(sdk_root, active.tier)
+    # tan-cli#263 review: `bootstrap` sets up a whole venv/west workspace
+    # against whichever checkout this resolved -- a silently-missed
+    # `.alp/sdk-path` pin belongs on the same two SUCCESS paths below
+    # (`--print-env`, and the full run) as every other non-fatal notice this
+    # command reports; not `log.warn`, which always prefixes `bootstrap.` and
+    # would misname this shared code.
+    pin_issue = project_pin_issue(active.broken_project_pin, active.tier)
 
     # `west init -l <alp-sdk>` always makes the topdir the checkout's PARENT and
     # alp-sdk itself the manifest repo, which is what registers the `alp-*`
@@ -1777,7 +1784,12 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         text = print_env_block(
             facts, paths.tokens(), facts.venv_bin_dir(is_windows), is_windows
         )
-        return Outcome(ExitCode.SUCCESS, payload(), [], text), reported_project, sdk
+        print_env_issues = [pin_issue] if pin_issue is not None else []
+        return (
+            Outcome(ExitCode.SUCCESS, payload(), print_env_issues, text),
+            reported_project,
+            sdk,
+        )
 
     # Workspace-parent guard, BEFORE any write below, so a refusal leaves
     # nothing on disk. A `$ZEPHYR_BASE` workspace about to be ADOPTED repoints
@@ -2131,8 +2143,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         )
     )
     exit_code = ExitCode.SUCCESS if ok else ExitCode.RUNTIME_FAILURE
+    bootstrap_issues = log.take_issues(escalate_blocking=not ok)
+    if pin_issue is not None:
+        bootstrap_issues = [pin_issue, *bootstrap_issues]
     return (
-        Outcome(exit_code, planned_payload(), log.take_issues(escalate_blocking=not ok), text),
+        Outcome(exit_code, planned_payload(), bootstrap_issues, text),
         reported_project,
         sdk,
     )
