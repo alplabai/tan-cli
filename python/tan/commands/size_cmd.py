@@ -79,6 +79,7 @@ from tan.core.system_manifest import (
     slice_elf_candidates,
     slice_footprint_dirs,
 )
+from tan.env import no_color_requested
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -406,7 +407,7 @@ def _measure_slice(
 def _use_color(no_color: bool, ci: bool) -> bool:
     """`Theme::from_args`: human text goes to stderr, so the TTY probe is against
     stderr."""
-    if no_color or ci or os.environ.get("NO_COLOR") is not None:
+    if no_color or ci or no_color_requested():
         return False
     try:
         return sys.stderr.isatty()
