@@ -53,11 +53,29 @@ closes it for the CLASS, by asserting every `.py` file under `tan/planner/`
 is named in one of PINNED_HASHES, HAND_PORT_SOURCES, or
 EXEMPT_FROM_RELOCATION_TRACKING, so a future hand-port with none of the three
 has nowhere to hide.
+
+tan-cli#296: PINNED_HASHES and HAND_PORT_HASHES are two audits of two
+different things, pinned at two different alp-sdk commits (PINNED_SDK_COMMIT
+and HAND_PORT_PINNED_SDK_COMMIT). For a while `parity.yml` bound a single
+alp-sdk checkout and pointed both tests at it, so the hand-port test was
+silently measured against PINNED_SDK_COMMIT's tree -- a plan-shape-parity
+commit, not the one HAND_PORT_HASHES was actually audited against -- and its
+failures reported drift that was really just the wrong oracle. Per
+`docs/ROADMAP.md`'s Standing Rule ("a frozen tree is measured at its own
+freeze vendor point; a shipped Python surface is measured at PINNED_SDK_TAG"),
+two audits with two pins need two checkouts. `test_hand_ported_planner_
+modules_match_their_pinned_sdk_source` now reads its own root from
+`ALP_SDK_HAND_PORT_ROOT`, never `ALP_SDK_ROOT`/`ALP_SDK_PARITY_ROOT` (which
+stay the relocated-planner test's root, pinned at PINNED_SDK_COMMIT). Unlike
+that test, a missing `ALP_SDK_HAND_PORT_ROOT` FAILS this gate rather than
+skipping it -- see `_hand_port_sdk_root()`'s own docstring for why a second
+silent skip is the same defect the module docstring above already names.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import pathlib
 
 import pytest
@@ -164,6 +182,50 @@ def _sdk_root() -> pathlib.Path:
     return SDK
 
 
+#: The env var carrying a checkout pinned at HAND_PORT_PINNED_SDK_COMMIT.
+#: Deliberately its OWN name -- NOT ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT, which
+#: `sdk_root()` above reads and which stay pinned to the DIFFERENT
+#: PINNED_SDK_COMMIT. Reusing either here is the tan-cli#296 bug: two audits
+#: of two different alp-sdk states sharing one checkout.
+HAND_PORT_SDK_ROOT_ENV = "ALP_SDK_HAND_PORT_ROOT"
+
+
+def _resolve_hand_port_sdk_root() -> pathlib.Path | None:
+    """Same check `tests.conftest.sdk_root()` makes, for HAND_PORT_SDK_ROOT_ENV
+    alone -- see the module docstring's tan-cli#296 note for why this cannot
+    just be a second name added to that function's own env-var list."""
+    raw = os.environ.get(HAND_PORT_SDK_ROOT_ENV)
+    if raw and (pathlib.Path(raw) / "scripts" / "alp_project.py").is_file():
+        return pathlib.Path(raw).resolve()
+    return None
+
+
+#: Resolved at import time, same reasoning as `SDK` above.
+HAND_PORT_SDK: pathlib.Path | None = _resolve_hand_port_sdk_root()
+
+
+def _hand_port_sdk_root() -> pathlib.Path:
+    if HAND_PORT_SDK is None:
+        # Deliberately `pytest.fail`, not `pytest.skip`, and deliberately NOT
+        # a fallback to `_sdk_root()` (ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT, the
+        # relocated-planner root, pinned at the DIFFERENT PINNED_SDK_COMMIT).
+        # Either of those would reproduce a defect this gate has already
+        # lived through once: a silent skip (tan-cli#275, this whole file's
+        # reason for existing) or a silent wrong-root comparison
+        # (tan-cli#296, the bug that sent this test's failure through CI
+        # naming the wrong tree). A gate that cannot fail loudly is not a
+        # gate.
+        pytest.fail(
+            f"{HAND_PORT_SDK_ROOT_ENV} is not set (or does not point at a "
+            "real alp-sdk checkout) -- no oracle to compare the "
+            "HAND-PORTED tan/planner/ modules against. Bind "
+            f"{HAND_PORT_SDK_ROOT_ENV} to an alp-sdk checkout at "
+            f"HAND_PORT_PINNED_SDK_COMMIT ({HAND_PORT_PINNED_SDK_COMMIT}).",
+            pytrace=False,
+        )
+    return HAND_PORT_SDK
+
+
 def test_relocated_planner_modules_match_the_pinned_sdk_audit():
     orchestrate = _sdk_root() / "scripts" / "alp_orchestrate"
     drifted: list[str] = []
@@ -211,9 +273,11 @@ def test_hand_ported_planner_modules_match_their_pinned_sdk_source():
     Same shape as `test_relocated_planner_modules_match_the_pinned_sdk_audit`
     above, but keyed by the alp-sdk-relative source path rather than a
     `scripts/alp_orchestrate/`-relative name -- these nine files live all over
-    alp-sdk's `scripts/` tree, not in one directory.
+    alp-sdk's `scripts/` tree, not in one directory. Reads its OWN root
+    (`_hand_port_sdk_root()`, ALP_SDK_HAND_PORT_ROOT) rather than `_sdk_root()`
+    -- see the module docstring's tan-cli#296 note.
     """
-    root = _sdk_root()
+    root = _hand_port_sdk_root()
     drifted: list[str] = []
     for rel_path, pinned_hash in HAND_PORT_HASHES.items():
         upstream = root / rel_path

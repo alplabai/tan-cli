@@ -407,6 +407,47 @@ jobs:
           ref: ${{ steps.planner_audit.outputs.commit }}
           path: alp-sdk-planner-audit
 
+      # tan-cli#296: the gate file carries a SECOND pin, HAND_PORT_PINNED_SDK_COMMIT,
+      # for a DIFFERENT audit (the hand-ported `tan/planner/` modules, e.g.
+      # `zephyr_board.py` <- `scripts/gen_zephyr_board.py`) at a DIFFERENT alp-sdk
+      # commit than PINNED_SDK_COMMIT above. Binding both audits to the SAME
+      # checkout (`alp-sdk-planner-audit`) is exactly the bug this step exists to
+      # not repeat: `test_hand_ported_planner_modules_match_their_pinned_sdk_source`
+      # reddened on PR #296 comparing HAND_PORT_HASHES (audited at v0.15.0-rc1,
+      # 996937ac) against `alp-sdk-planner-audit`'s tree (PINNED_SDK_COMMIT,
+      # 0f3cefbe -- an OLDER alp-sdk `dev` commit), reporting drift that was
+      # really just the wrong oracle. Two audits, two pins, two checkouts -- see
+      # docs/ROADMAP.md's Standing Rule and the gate file's own tan-cli#296 note.
+      - name: resolve hand-port audit commit (from the gate's own pin)
+        id: hand_port_audit
+        shell: bash
+        run: |
+          set -euo pipefail
+          # ANCHORED at line start, same reason as the `resolve planner audit
+          # commit` step above: an unanchored pattern also matches
+          # `PINNED_SDK_COMMIT = "..."` (this file declares BOTH pins), so it
+          # would return two SHAs and die on `Invalid format '<sha>'` three
+          # steps later with nothing naming the cause.
+          gate=python/tests/gates/test_planner_relocation_freshness.py
+          commit=$(grep -oE '^HAND_PORT_PINNED_SDK_COMMIT = "[0-9a-f]{40}"' "$gate" \
+              | grep -oE '[0-9a-f]{40}')
+          # Exactly one, or say so here rather than emitting a malformed output
+          # that fails three steps later with nothing naming the cause.
+          n=$(printf '%s\n' "$commit" | grep -c .)
+          if [ "$n" -ne 1 ]; then
+            echo "::error::expected exactly ONE ^HAND_PORT_PINNED_SDK_COMMIT in ${gate}, found ${n}: ${commit}"
+            exit 1
+          fi
+          echo "commit=${commit}" >> "$GITHUB_OUTPUT"
+          echo "::notice::hand-port-relocation-freshness audited against alp-sdk ${commit}"
+
+      - name: clone alp-sdk at the hand-port audit commit
+        uses: actions/checkout@v4
+        with:
+          repository: alplabai/alp-sdk
+          ref: ${{ steps.hand_port_audit.outputs.commit }}
+          path: alp-sdk-hand-port-audit
+
       # `python/tests/gates/` (dependency-declaration, frozen issue-codes,
       # hardware-facts allowlist, planner-relocation self-consistency) does not
       # run in ANY CI workflow today. The freshness gate in particular
@@ -426,12 +467,26 @@ jobs:
       # commit since the last audit) is a separate, warn-only step below --
       # see its comment for why blocking on that question is the wrong shape.
       #
+      # ALP_SDK_HAND_PORT_ROOT is bound alongside it, to the SEPARATE
+      # `alp-sdk-hand-port-audit` checkout resolved above (HAND_PORT_PINNED_SDK_COMMIT,
+      # not PINNED_SDK_COMMIT) -- tan-cli#296. Before this, only ALP_SDK_ROOT was
+      # bound here, so `test_hand_ported_planner_modules_match_their_pinned_sdk_source`
+      # read the SAME `alp-sdk-planner-audit` tree the relocated-planner test
+      # above reads, even though HAND_PORT_HASHES is pinned at a DIFFERENT alp-sdk
+      # commit -- two audits sharing one root, which is what actually reddened
+      # PR #296 (a real hash mismatch against the wrong tree, not real drift).
+      # The gate file itself now refuses to fall back from one root to the other
+      # (`_hand_port_sdk_root()` fails loudly rather than reusing `_sdk_root()`),
+      # so leaving ALP_SDK_HAND_PORT_ROOT unbound here would no longer silently
+      # mis-measure the hand-port test -- it would hard-fail it instead, which is
+      # exactly why this line has to be here and not merely nice to have.
+      #
       # Deliberately NOT the full `python/tests` suite here (ports + parity,
       # minutes not seconds, needs its own alp-sdk checkout) -- that now runs
       # in the `python-tests` job further down this file, which deliberately
       # `--ignore=tests/gates`: this JOB already arms all five gate files (8
       # collected tests) across the three steps below -- four of them in this
-      # step against the FROZEN audit commit, `test_jlink_aen_device_freshness`
+      # step against the FROZEN audit commit(s), `test_jlink_aen_device_freshness`
       # live and blocking in its own step, and `test_planner_relocation_freshness`
       # additionally live and warn-only on `repository_dispatch`. Each is bound
       # to the ref that makes its verdict mean something.
@@ -444,6 +499,7 @@ jobs:
         working-directory: python
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk-planner-audit
+          ALP_SDK_HAND_PORT_ROOT: ${{ github.workspace }}/alp-sdk-hand-port-audit
         run: python3 -m pytest tests/gates -q --deselect tests/gates/test_jlink_aen_device_freshness.py
 
       # test_jlink_aen_device_freshness asks a question the FROZEN audit checkout
@@ -481,6 +537,18 @@ jobs:
       # run trains everyone to ignore it, which is worse than not having it.
       # `repository_dispatch` is the case this exists for: alp-sdk just moved,
       # and `sdk_ref` is the SHA it moved to.
+      #
+      # Scoped to `::test_relocated_planner_modules_match_the_pinned_sdk_audit`
+      # ONLY (tan-cli#296) -- this step binds ONLY `ALP_SDK_ROOT` (to `alp-sdk`,
+      # PINNED_SDK_TAG/the dispatched ref), which is the correct oracle for that
+      # one test but not for its sibling
+      # `test_hand_ported_planner_modules_match_their_pinned_sdk_source`, which
+      # now requires its own `ALP_SDK_HAND_PORT_ROOT` and fails loudly without
+      # it. Running the whole file here would make the hand-port test fail on
+      # EVERY dispatch for a reason unrelated to live drift (its dedicated root
+      # is deliberately not bound in this step), which is exactly the
+      # cry-wolf failure mode this step's own comment above rejects for
+      # PINNED_SDK_TAG.
       - name: planner relocation freshness vs live alp-sdk (alarm, warn only)
         if: github.event_name == 'repository_dispatch'
         continue-on-error: true
@@ -489,7 +557,7 @@ jobs:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
         run: |
           set +e
-          python3 -m pytest tests/gates/test_planner_relocation_freshness.py -q
+          python3 -m pytest tests/gates/test_planner_relocation_freshness.py::test_relocated_planner_modules_match_the_pinned_sdk_audit -q
           rc=$?
           set -e
           if [ "$rc" -ne 0 ]; then
