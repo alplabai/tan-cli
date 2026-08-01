@@ -103,6 +103,7 @@ from tan.core.bootstrap import (
     reported_missing,
 )
 from tan.core.timestamp import generated_at_iso
+from tan.core.venv import west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -599,11 +600,35 @@ def _posix_venv_capable(argv: list[str]) -> bool:
     (tan-cli#161). `python -m venv --help` cannot tell -- argparse answers
     before `ensurepip` is ever touched -- so this probes the real
     dependency: `import ensurepip`, which fails fast on the Debian/Ubuntu
-    split where `python3-venv` is a separate, unmet package. Mirrors
-    `crate::util::python_venv_capable`'s probed command, reusing THIS file's
-    own `probe()` rather than a second subprocess wrapper.
+    split where `python3-venv` is a separate, unmet package.
+
+    Fails OPEN, not closed (tan-cli#294 review): `True` both when the probe
+    ran and exited 0, AND when it could not be launched at all (bogus argv,
+    spawn failure, signal death) -- mirrors `crate::util::
+    python_venv_capable`'s `.output().map(|out| out.status.success())
+    .unwrap_or(true)` verdict, not only its probed command; the real `python
+    -m venv` a moment later surfaces its own error if something is genuinely
+    wrong. Only a probe that actually RAN and exited non-zero refuses the
+    host.
+
+    NOT built on this file's own `probe()`: `probe()` collapses "ran and
+    exited non-zero" and "could not run at all" to the same `None`, and
+    those two outcomes need OPPOSITE verdicts here.
     """
-    return probe([*argv, "-c", "import ensurepip"]) is not None
+    try:
+        result = subprocess.run(
+            [*argv, "-c", "import ensurepip"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return True
+    return result.returncode == 0
 
 
 def west_check(
@@ -1104,17 +1129,18 @@ def home_path_check(home: str | None) -> Check:
 #
 # `westResolved` (the venv-resolved `west` binary's own presence) and the
 # EXISTING `zephyrWorkspace` check's severity are OUT of scope here --
-# tan-cli#290, which needs the shared venv/west-workspace module tan-cli#289
-# is building. `workspace`/`zephyrVersion` below are sourced from THIS
-# port's own `_resolve_west_workspace_dir`, which covers the project-tree
-# walk and the SDK-derived layout (the common, canonical alp-sdk#782 case)
-# but NOT the `$ZEPHYR_BASE`-derived, manifest-verified fallback step --
-# that step shares its manifest-matching machinery with the venv/workspace
-# resolver tan-cli#289 is building, and porting it a second time here risks
-# two resolvers disagreeing the moment one changes. A host relying SOLELY on
-# a manually-exported `$ZEPHYR_BASE` outside both a project tree and the
-# SDK-derived layout is therefore not resolved by `workspace`/`zephyrVersion`
-# below -- tracked at tan-cli#289/#290, not silently shipped as complete.
+# tan-cli#290. `workspace`/`zephyrVersion` below are sourced from the SHARED
+# `tan.core.venv.west_workspace_dir` (tan-cli#294 review) -- ALL THREE of its
+# steps, including the `$ZEPHYR_BASE`-derived, manifest-verified fallback. A
+# fourth, partial copy of the same search (this module's own retired
+# `_resolve_west_workspace_dir`) previously covered only the project-tree
+# walk and the SDK-derived layout, so a host relying SOLELY on a manually
+# exported `$ZEPHYR_BASE` outside both a project tree and `<sdk-parent>`
+# reported a false `workspace` Fail -- "no Zephyr workspace -- run `tan
+# bootstrap`" -- that would have the customer bootstrap a SECOND workspace.
+# Importing the one shared resolver closes that gap and retires the fourth
+# copy in the same change; see `tan.core.venv.west_workspace_dir`'s own
+# docstring for why the search lives there and not here.
 # ---------------------------------------------------------------------------
 
 
@@ -1147,19 +1173,38 @@ def sdk_check(sdk_root: str | None, project_scope: str | None) -> Check:
     )
 
 
-def board_yaml_preflight_check(present: bool) -> Check:
+def board_yaml_preflight_check(present: bool, project_selected: bool) -> Check:
     """`boardYaml` -- mirrors `build_preflight_checks`'s check of the same
-    name. NOT a duplicate of a debug-report `boardYaml` check (this port has
-    not built the debug half -- see the module docstring), so this is the
-    only `boardYaml` check in this file and it is never dropped.
+    name, PLUS the project-selection awareness the Rust oracle's debug
+    report has and this port's copy used to lack (tan-cli#294 review,
+    reintroducing #100(b)): `tan bootstrap` prints `tan doctor` as the very
+    next command, run from the SDK checkout root it just set up -- which has
+    no `board.yaml` and needs none. Failing there made the first command a
+    new customer types report `1 failed` and exit 4 for a non-problem.
+
+    `project_selected` is True only when `--project` or `--board-yaml` was
+    actually given (mirrors `crates/tan-cli/src/commands/doctor.rs::
+    project_selected` -- with neither flag the resolved path is a guess at
+    the cwd, not a request) and is only read when `present` is False.
+
+    NOT a duplicate of a debug-report `boardYaml` check (this port has not
+    built the debug half -- see the module docstring), so this is the only
+    `boardYaml` check in this file and it is never dropped.
     """
     if present:
         return Check("boardYaml", "pass", "board.yaml found")
+    if project_selected:
+        return Check(
+            "boardYaml",
+            "fail",
+            "board.yaml not found -- run `tan init` or pass `--board-yaml <path>`",
+            "tan init",
+        )
     return Check(
         "boardYaml",
-        "fail",
-        "board.yaml not found -- run `tan init` or pass `--board-yaml <path>`",
-        "tan init",
+        "warn",
+        "no project selected -- no board.yaml found",
+        "Select a project with `--project <dir>` (or `--board-yaml <path>`) to check one.",
     )
 
 
@@ -1358,42 +1403,6 @@ def _python_candidates() -> list[list[str]]:
     return [["python3"], ["python"]]
 
 
-def _resolve_west_workspace_dir(start: str, sdk_root: str | None) -> str | None:
-    """The west workspace topdir -- the directory holding `.west/` -- mirroring
-    `west_workspace_dir` (`crates/tan-cli/src/commands/build/workspace.rs`)
-    steps 1 and 3 ONLY: the project tree walked upward from `start`, then the
-    SDK-derived layouts (`<sdk-parent>`, the canonical alp-sdk#782 layout, and
-    the legacy `<sdk-parent>/zephyrproject`).
-
-    Step 2 (`$ZEPHYR_BASE/..`, manifest-verified against the SDK) is
-    deliberately NOT ported here -- see the `workspace`/`zephyrVersion`
-    checks' module-level comment for why (it shares its manifest-matching
-    machinery with the venv/west-workspace resolver tan-cli#289 is building,
-    and a second copy risks the two disagreeing the moment one changes).
-    Never raises: an unreadable directory along the walk is "nothing found
-    there", not a doctor crash.
-    """
-    directory: Path | None = Path(start)
-    while directory is not None:
-        try:
-            if (directory / ".west").is_dir():
-                return str(directory)
-        except OSError:
-            pass
-        parent = directory.parent
-        directory = parent if parent != directory else None
-
-    if sdk_root is not None:
-        parent = Path(sdk_root).parent
-        for workspace in (parent, parent / "zephyrproject"):
-            try:
-                if (workspace / ".west").is_dir():
-                    return str(workspace)
-            except OSError:
-                continue
-    return None
-
-
 #: `platform.machine()` -> the Zephyr-SDK-release arch token
 #: (`tan_core::host_env::ZEPHYR_SDK_HOSTS`'s spelling). Values seen in
 #: practice: Windows `AMD64`/`ARM64`, macOS `x86_64`/`arm64`, Linux
@@ -1408,24 +1417,47 @@ _ARCH_TAGS = {
 }
 
 
+def _macos_rosetta_translated() -> bool:
+    """`True` when THIS process's Python interpreter is an x86_64 binary
+    running under Rosetta on Apple silicon -- `sysctl -n
+    sysctl.proc_translated` == 1. Mirrors
+    `tan_core::host_env::arch_for_proc_translated`'s macOS probe
+    (`crates/tan-cli/src/commands/doctor.rs:601-611`) via the `sysctl` CLI
+    rather than a `ctypes` binding to the same `sysctlbyname` FFI -- this
+    module's probes are all subprocess-based, and the sysctl is a stable
+    macOS command-line surface. `probe()` (and so this) returns `False` on a
+    pre-Big-Sur host where the sysctl does not exist -- the compiled arch is
+    already correct there, matching Rust's `rc == 0 && translated == 1`.
+    """
+    return (probe(["sysctl", "-n", "sysctl.proc_translated"]) or "").strip() == "1"
+
+
 def _host_os_arch_tags() -> tuple[str, str]:
     """`(os, arch)` in `tan_core::host_env::ZEPHYR_SDK_HOSTS`'s tokens, read
-    from `platform.system()`/`platform.machine()`.
+    from `platform.system()`/`platform.machine()`, corrected for Rosetta.
 
     Unlike the Rust oracle, this does NOT detect Windows-on-ARM x64 emulation
-    (`IsWow64Process2`) or macOS Rosetta translation
-    (`sysctl.proc_translated`): tan's Python port runs under whatever
-    interpreter is already installed rather than a separately-compiled
-    per-arch binary, so `platform.machine()` reflects the INTERPRETER's real
-    architecture in the overwhelming majority of cases (a user who installed
-    an x86_64 Python on Windows-on-ARM, where Python.org has shipped a native
-    ARM64 installer for some time, is the one host this can under-report --
-    tracked, not silently claimed complete).
+    (`IsWow64Process2`): tan's Python port runs under whatever interpreter is
+    already installed rather than a separately-compiled per-arch binary, so
+    `platform.machine()` reflects the INTERPRETER's real architecture in the
+    overwhelming majority of cases (a user who installed an x86_64 Python on
+    Windows-on-ARM, where Python.org has shipped a native ARM64 installer for
+    some time, is the one host this can under-report -- tracked, not silently
+    claimed complete).
+
+    macOS IS corrected (tan-cli#294 review): the opposite direction is common
+    there and worse. Rosetta silently runs the far more widely distributed
+    x86_64 Python build on Apple silicon, so `platform.machine()` alone
+    reported `macos-x86_64` -- a FALSE HARD REFUSAL
+    (`zephyr_sdk_host_check`'s `Fail`, exit 4, "build on a Linux host") on
+    hardware the pinned SDK serves natively as `macos-aarch64`.
     """
     system = platform.system().lower()
     host_os = {"windows": "windows", "darwin": "macos", "linux": "linux"}.get(system, system)
     machine = platform.machine().lower()
     arch = _ARCH_TAGS.get(machine, machine)
+    if host_os == "macos" and arch == "x86_64" and _macos_rosetta_translated():
+        arch = "aarch64"
     return host_os, arch
 
 
@@ -1708,6 +1740,15 @@ def _collect(
     file's own test suite) keeps working unchanged; those checks then simply
     report against "no board.yaml"/"no workspace resolved from `.`", which is
     an honest verdict, not a skipped one.
+
+    `boardYaml`'s severity needs one more fact: whether a project was
+    actually SELECTED (`--project`/`--board-yaml` given), not merely whether
+    the guessed path exists (tan-cli#294 review). `board_yaml` doubles as
+    that signal here: the only way it is non-`None` while its file does NOT
+    exist is an explicitly-given `--board-yaml` (`doctor()`'s own
+    auto-discovery only ever sets it to a path that already `is_file()`), so
+    `board_yaml is not None` is a safe proxy for "explicitly given" exactly
+    where it matters -- the branch where `present` is False.
     """
     checks: list[Check] = []
 
@@ -1715,14 +1756,21 @@ def _collect(
     # mirroring Rust's `prepend_doctor_checks(..., probe_build_preflight(...))`:
     # "can a build even start" outranks every host-tool probe below.
     checks.append(sdk_check(sdk_root, project_scope))
+    project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
     checks.append(
-        board_yaml_preflight_check(board_yaml is not None and Path(board_yaml).is_file())
+        board_yaml_preflight_check(
+            board_yaml is not None and Path(board_yaml).is_file(), project_selected
+        )
     )
-    workspace_dir = _resolve_west_workspace_dir(workspace_root, sdk_root)
-    checks.append(workspace_preflight_check(workspace_dir))
-    if workspace_dir is not None:
+    workspace_path = west_workspace_dir(
+        workspace_root, Path(sdk_root) if sdk_root is not None else None
+    )
+    checks.append(
+        workspace_preflight_check(str(workspace_path) if workspace_path is not None else None)
+    )
+    if workspace_path is not None:
         workspace_version = None
-        version_body = _read_text(Path(workspace_dir) / "zephyr" / "VERSION")
+        version_body = _read_text(workspace_path / "zephyr" / "VERSION")
         if version_body is not None:
             workspace_version = parse_zephyr_version_file(version_body)
         sdk_pin_for_workspace = None

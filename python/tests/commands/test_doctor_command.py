@@ -971,6 +971,39 @@ def test_zephyr_sdk_host_check_names_wsl2_for_windows_on_arm_and_a_different_rem
     assert "Linux host" in intel_mac.fix
 
 
+def test_macos_rosetta_translated_reads_the_sysctl_probe(monkeypatch):
+    monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "1\n")
+    assert doctor_cmd._macos_rosetta_translated() is True
+
+    monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "0\n")
+    assert doctor_cmd._macos_rosetta_translated() is False
+
+    monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: None)
+    assert doctor_cmd._macos_rosetta_translated() is False
+
+
+def test_host_os_arch_tags_corrects_x86_64_to_aarch64_under_rosetta(monkeypatch):
+    """tan-cli#294 review: an Apple-silicon Mac running an x86_64 Python
+    reports `macos-x86_64` from `platform.machine()` alone -- a FALSE hard
+    refusal (`zephyrSdkAvailableForHost` fail, exit 4, "build on a Linux
+    host") on a host the pinned SDK fully serves as `macos-aarch64`.
+    Rosetta's own sysctl corrects it."""
+    monkeypatch.setattr(doctor_cmd.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(doctor_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "1\n")
+    assert doctor_cmd._host_os_arch_tags() == ("macos", "aarch64")
+
+
+def test_host_os_arch_tags_leaves_a_native_intel_mac_alone(monkeypatch):
+    """The other state of the same probe: a REAL Intel Mac (not translated)
+    must still report `macos-x86_64` -- the unserved host this check is
+    supposed to fail."""
+    monkeypatch.setattr(doctor_cmd.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(doctor_cmd.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(doctor_cmd, "probe", lambda *a, **k: "0\n")
+    assert doctor_cmd._host_os_arch_tags() == ("macos", "x86_64")
+
+
 def test_long_paths_check_distinguishes_enabled_disabled_and_unknown():
     on = doctor_cmd.long_paths_check(True)
     assert on.status == "pass"
@@ -1038,37 +1071,59 @@ def test_sdk_check_names_the_project_scoped_switch_when_a_project_scope_is_given
     assert check.fix == "tan --project examples/uart-echo sdk switch <path>"
 
 
-def test_board_yaml_preflight_check_distinguishes_present_from_absent():
-    assert doctor_cmd.board_yaml_preflight_check(True).status == "pass"
-    absent = doctor_cmd.board_yaml_preflight_check(False)
-    assert absent.status == "fail"
-    assert "tan init" in absent.detail
+def test_board_yaml_preflight_check_passes_when_present_regardless_of_selection():
+    assert doctor_cmd.board_yaml_preflight_check(True, project_selected=False).status == "pass"
+    assert doctor_cmd.board_yaml_preflight_check(True, project_selected=True).status == "pass"
 
 
-def test_resolve_west_workspace_dir_finds_a_dot_west_walking_up_the_project_tree(tmp_path):
+def test_board_yaml_preflight_check_warns_with_no_project_selected():
+    """#100(b): plain `tan doctor` run from a freshly bootstrapped SDK
+    checkout root -- no `--project`/`--board-yaml` given -- must not refuse
+    the host over a board.yaml nobody asked about."""
+    check = doctor_cmd.board_yaml_preflight_check(False, project_selected=False)
+    assert check.status == "warn"
+    assert "tan init" not in check.detail
+
+
+def test_board_yaml_preflight_check_fails_when_a_project_was_explicitly_selected():
+    check = doctor_cmd.board_yaml_preflight_check(False, project_selected=True)
+    assert check.status == "fail"
+    assert "tan init" in check.detail
+
+
+def test_collect_resolves_a_dot_west_walking_up_the_project_tree(tmp_path):
     workspace = tmp_path / "workspace"
     (workspace / ".west").mkdir(parents=True)
     app = workspace / "app" / "nested"
     app.mkdir(parents=True)
-    assert doctor_cmd._resolve_west_workspace_dir(str(app), None) == str(workspace)
+    checks = doctor_cmd._collect(None, workspace_root=str(app))
+    check = next(c for c in checks if c.name == "workspace")
+    assert check.status == "pass"
+    assert str(workspace) in check.detail
 
 
-def test_resolve_west_workspace_dir_falls_back_to_the_sdk_derived_layout(tmp_path):
-    """The canonical alp-sdk#782 layout: the workspace topdir is the SDK
-    checkout's OWN parent directory."""
-    workspace = tmp_path / "workspace"
-    sdk = workspace / "alp-sdk"
-    sdk.mkdir(parents=True)
+def test_collect_resolves_the_workspace_from_a_bare_zephyr_base_with_no_sdk_root(
+    monkeypatch, tmp_path
+):
+    """tan-cli#294 review: a host whose ONLY Zephyr workspace is a manually
+    exported `$ZEPHYR_BASE` outside both the project tree and any SDK-derived
+    layout -- step 2 of the shared `tan.core.venv.west_workspace_dir` search,
+    which this port's own retired `_resolve_west_workspace_dir` omitted, so
+    `workspace` reported a false Fail telling the customer to bootstrap a
+    SECOND workspace."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    workspace = tmp_path / "manual-workspace"
+    zephyr = workspace / "zephyr"
+    zephyr.mkdir(parents=True)
     (workspace / ".west").mkdir()
+    monkeypatch.setenv("ZEPHYR_BASE", str(zephyr))
+
     outside = tmp_path / "elsewhere"
     outside.mkdir()
-    assert doctor_cmd._resolve_west_workspace_dir(str(outside), str(sdk)) == str(workspace)
-
-
-def test_resolve_west_workspace_dir_returns_none_when_nothing_resolves(tmp_path):
-    nowhere = tmp_path / "nowhere"
-    nowhere.mkdir()
-    assert doctor_cmd._resolve_west_workspace_dir(str(nowhere), None) is None
+    checks = doctor_cmd._collect(None, workspace_root=str(outside))
+    check = next(c for c in checks if c.name == "workspace")
+    assert check.status == "pass", check.detail
+    assert str(workspace) in check.detail
 
 
 def test_workspace_preflight_check_distinguishes_resolved_from_absent():
@@ -1095,26 +1150,60 @@ def test_zephyr_version_preflight_check_is_skipped_when_unknown():
 
 
 def test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host(
-    tmp_path,
+    tmp_path, monkeypatch
 ):
     """The regression tan-cli#100 names: before this, a host with no SDK
-    selected, no board.yaml and no Zephyr workspace reported `0 failed` on
-    every other check -- these four now report the gap themselves, and lead
-    the check list (`nextSteps` follows check order)."""
+    selected and no Zephyr workspace reported `0 failed` on every other
+    check -- these now report the gap themselves, and lead the check list
+    (`nextSteps` follows check order).
+
+    `boardYaml` is asserted separately (tan-cli#294 review): this bare
+    `_collect` call with no `--project`/`--board-yaml` given is EXACTLY the
+    #100(b) shape -- the checkout root `tan bootstrap` tells the customer to
+    run `tan doctor` from next -- so `boardYaml` must Warn here, not Fail.
+    The retired version of this test asserted the Fail as if it were
+    correct, which is why it shipped; see
+    `test_collect_reports_board_yaml_as_fail_only_when_a_project_was_selected`
+    for both states.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
     checks = doctor_cmd._collect(None, board_yaml=None, workspace_root=str(tmp_path))
     names = [c.name for c in checks]
     assert names[0] == "sdk"
     assert names[1] == "boardYaml"
     assert names[2] == "workspace"
     assert next(c for c in checks if c.name == "sdk").status == "fail"
-    assert next(c for c in checks if c.name == "boardYaml").status == "fail"
     assert next(c for c in checks if c.name == "workspace").status == "fail"
 
 
-def test_collect_resolves_a_real_workspace_and_matching_zephyr_version(tmp_path):
+def test_collect_reports_board_yaml_as_fail_only_when_a_project_was_selected(
+    tmp_path, monkeypatch
+):
+    """The two-state pair the single-state version above let ship broken
+    (tan-cli#294 review): the SAME missing board.yaml at the SAME
+    bootstrapped checkout root warns with no project selected, and fails
+    once a project is explicitly named -- mirrors the Rust oracle's
+    `plain_doctor_does_not_fail_at_a_checkout_root_with_no_project_selected`
+    (`crates/tan-cli/src/commands/doctor.rs:1848`)."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    unselected = doctor_cmd._collect(None, board_yaml=None, workspace_root=str(tmp_path))
+    assert next(c for c in unselected if c.name == "boardYaml").status == "warn"
+
+    selected = doctor_cmd._collect(
+        None, board_yaml=None, project_scope=str(tmp_path), workspace_root=str(tmp_path)
+    )
+    assert next(c for c in selected if c.name == "boardYaml").status == "fail"
+
+
+def test_collect_resolves_a_real_workspace_and_matching_zephyr_version(tmp_path, monkeypatch):
     """The other host state: an SDK resolved, a board.yaml present, a
     workspace resolved with a Zephyr matching the SDK's pin -- all four
     Pass."""
+    # Isolate from a developer/CI shell's own `$ZEPHYR_BASE`: the shared
+    # resolver now consults it (step 2) before falling back to this SDK's
+    # own `<sdk-parent>` layout (step 3), which is the resolution path this
+    # test actually means to exercise.
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
     sdk_root = tmp_path / "workspace" / "alp-sdk"
     sdk_root.mkdir(parents=True)
     (sdk_root / "west.yml").write_text(
@@ -1150,6 +1239,17 @@ def test_posix_venv_capable_distinguishes_a_working_probe_from_a_failing_one():
     assert working is True
     broken = doctor_cmd._posix_venv_capable([sys.executable, "-c", "import sys; sys.exit(1)"])
     assert broken is False
+
+
+def test_posix_venv_capable_fails_open_when_the_probe_cannot_launch():
+    """tan-cli#294 review: `probe()` collapses "ran and exited non-zero" and
+    "could not run at all" to the same `None`, and this must NOT collapse
+    them the same way -- an inconclusive answer (the probe never launched)
+    must not refuse the host; only a probe that actually ran and exited
+    non-zero does. Mirrors Rust's `venv_capable_fails_open_when_the_probe_
+    cannot_launch` (`crates/tan-cli/src/util.rs:721`)."""
+    unlaunchable = doctor_cmd._posix_venv_capable(["tan-cli-no-such-interpreter-xyz"])
+    assert unlaunchable is True
 
 
 def test_prerequisites_check_distinguishes_a_clean_host_from_a_venv_unusable_one():
