@@ -679,46 +679,82 @@ def _posix_venv_capable(argv: list[str]) -> bool:
 
 
 def west_check(
-    found: str | None, version: tuple[int, int] | None, floor: tuple[int, int] | None
+    found: str | None,
+    version: tuple[int, int] | None,
+    floor: tuple[int, int] | None,
+    resolved: str | None = None,
 ) -> Check:
-    """`west` -- present on BARE PATH, and at the manifest's floor.
+    """`west` -- present on BARE PATH, or resolvable through the SAME
+    resolver `westResolved` uses (`tan.core.venv.west_program`).
 
-    `Warn`, never `Fail`, when absent (tan-cli#299): the premise that used to
-    justify a hard Fail here -- "west is how every slice of every plan is
-    executed, so without it nothing builds" -- became false in tan-cli#289.
-    `tan.core.venv.west_program`'s workspace-venv resolution is what
-    `build/execute.py` and `flash_cmd.py` actually spawn, precisely so a
-    non-activated venv still builds. This is not a dirty-host edge case: `tan
-    bootstrap` deliberately does NOT put `west` on PATH (its own next-steps
-    text tells the user to activate the venv afterwards), so bare-PATH-lacks-
-    west-but-the-venv-has-it is the DEFAULT state of every fresh install, not
-    an unusual one -- this probe only ever sees bare PATH, so it cannot tell
-    a genuinely-unbuildable host from that ordinary one. Measured end-to-end
-    on the published v0.5.0-rc2 binary: straight after a successful
-    bootstrap, with `west` off PATH, `tan build` still produced real ELFs
-    through the resolved venv `west`, while `tan doctor` reported
-    `westResolved` (the venv-aware verdict, right above this check -- see
-    `west_resolved_check`) PASS and this check's OLD `fail` as the sole
-    failure -- exiting 4 on a host that, provably, builds. Mirrors the Rust
-    oracle's own severity for the identical probe: `crate::build_readiness::
-    BUILD_BLOCKING` deliberately excludes `west` for this exact reason
-    (`crates/tan-core/src/build_readiness.rs`'s own doc comment: "the
-    venv-aware verdict is the preflight's `westResolved` check, which the
-    same report already carries"). Only WARN on an old or unreadable version
-    too -- west is forward-compatible in practice and refusing a host on a
-    version string we could not parse is a worse failure than letting the
-    real invocation report its own.
+    **Now consults the resolver (tan-cli#299 second half).** This docstring
+    used to argue the opposite:
+
+        Does NOT assert that the venv resolved one: this check cannot see
+        what `westResolved` found... Name the authority instead of
+        predicting its answer.
+
+    That was deliberate at the time: `found` (bare PATH) was this check's
+    ONLY signal, so a hard `fail` here on the default post-bootstrap state --
+    `tan bootstrap` deliberately does NOT put `west` on PATH; its own
+    next-steps text tells the user to activate the venv afterwards -- was a
+    false, exit-4 refusal of a host that provably builds. Measured on the
+    published v0.5.0-rc2 binary: `tan build` produced real ELFs through the
+    resolved venv `west` while this check alone reported the host broken.
+    Downgrading that `fail` to `warn` (this file's other, earlier change on
+    this branch) fixed the exit code, but the warning still fires on every
+    correctly-bootstrapped host's very first `tan doctor` -- and a warning
+    that fires on every correct install trains users to ignore warnings,
+    which is the same defect as the false `fail`, one severity down
+    (hkngln, tan-cli#299).
+
+    So this now takes `resolved`: the SAME absolute venv path `westResolved`
+    already computed via `tan.core.venv.west_program` -- never a second,
+    independent probe of its own (`tool_in_venv` already confirmed that file
+    exists before `westResolved` ever saw it) -- and reports `pass`, naming
+    it, when bare PATH lacks `west` but the resolver found one. A bare-PATH
+    probe that cannot see the venv was never a second opinion; it was a
+    worse one. It now defers to the real one instead of contradicting it.
+
+    **Still never the FAIL owner.** When `resolved` is ALSO `None` -- west
+    absent from PATH and unresolvable anywhere -- this stays `warn`, not
+    `fail`. That severity belongs to `westResolved` alone (below), by
+    tan-cli#123's one-version-per-check contract applied to severity: making
+    both checks fatal on the same absent-everywhere fact is the two-owners
+    bug tan-cli#123 closed, and reintroducing it is exactly what let west
+    absent everywhere exit 0 the one time this branch made BOTH checks
+    non-fatal at once, before `west_resolved_check` was raised back to
+    `fail`. Keeping `west` a `warn` even in that state is what lets
+    `westResolved` be the sole, unambiguous reason `tan doctor` exits 4 on a
+    genuinely unbuildable host.
+
+    Only WARN on an old or unreadable version too -- west is forward-
+    compatible in practice and refusing a host on a version string we could
+    not parse is a worse failure than letting the real invocation report its
+    own.
     """
     if found is None:
+        if resolved is not None:
+            return Check(
+                "west",
+                "pass",
+                f"`west` is not on bare PATH, but resolves through the workspace "
+                f"venv: {resolved} -- the same binary `westResolved` above "
+                f"reports, and the one a real build actually spawns. This is the "
+                f"default state right after `tan bootstrap`, which deliberately "
+                f"does not put `west` on PATH; activating the venv (its "
+                f"`bin`/`Scripts` directory holds the `west` launcher) would "
+                f"additionally put it on bare PATH, for tools that spawn it "
+                f"directly rather than through tan.",
+            )
         return Check(
             "west",
             "warn",
-            # Does NOT assert that the venv resolved one: this check cannot see
-            # what `westResolved` found, and asserting it was wrong in exactly
-            # the state that matters -- west absent everywhere, where this text
-            # claimed slices "actually resolve it through the venv" while
-            # `westResolved` reported the opposite. Name the authority instead
-            # of predicting its answer.
+            # Does NOT assert that the venv resolved one: `resolved` above
+            # already covers that case with a `pass`, so reaching here means
+            # it is genuinely `None` too -- PATH absence on its own, with
+            # nothing for the resolver to find either. Name the authority
+            # instead of predicting its answer.
             "`west` is not on bare PATH. `westResolved` above is the check that "
             "answers whether a build slice can run -- it reports the binary one "
             "would actually execute. PATH absence on its own is the normal state "
@@ -1758,8 +1794,8 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
     ALL of them, never `HOME or USERPROFILE`.
 
     Under Git Bash/MSYS on Windows, `HOME` is a POSIX-translated path
-    (`/c/Users/caner`) while the real Zephyr SDK sits under the native
-    `%USERPROFILE%` (`C:\\Users\\caner\\zephyr-sdk-1.0.1`). `or`ing the two
+    (`/c/Users/dev`) while the real Zephyr SDK sits under the native
+    `%USERPROFILE%` (`C:\\Users\\dev\\zephyr-sdk-1.0.1`). `or`ing the two
     picks whichever is set first and silently drops the other -- proven on a
     real host: that host HAS the SDK and `_zephyr_sdk_detected()` still
     returned `False`, a hard doctor FAIL worse than the false PASS #286
@@ -2165,7 +2201,21 @@ def _collect(
 
     west_exe = on_path("west")
     west_version = _parse_two(probe(["west", "--version"]) or "") if west_exe else None
-    checks.append(west_check(west_exe, west_version, _parse_two(str(facts.get("_pipSpec") or ""))))
+    # tan-cli#299 second half: feed `west_check` the SAME resolved venv path
+    # `westResolved` above already computed (`resolved_west`) -- never a
+    # second, independent probe -- so "absent from bare PATH, present in the
+    # resolved venv" (the default post-bootstrap state) reports `pass`
+    # instead of a permanent warn. Only passed when it is a real venv
+    # binary (an absolute path); `west_program`'s bare-`"west"` fallback
+    # carries no information `west_exe` above does not already have.
+    checks.append(
+        west_check(
+            west_exe,
+            west_version,
+            _parse_two(str(facts.get("_pipSpec") or "")),
+            resolved_west if os.path.isabs(resolved_west) else None,
+        )
+    )
 
     # Unconditional -- not gated on `build` or a resolved board.yaml/SDK. See
     # `zephyr_sdk_check`'s docstring (tan-cli#286).

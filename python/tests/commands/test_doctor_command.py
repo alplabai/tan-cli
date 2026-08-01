@@ -271,44 +271,62 @@ def test_missing_prerequisites_carry_the_frozen_code_and_the_install_commands():
 
 
 def test_west_on_bare_path_the_activated_venv_state_passes():
-    """The ACTIVATED state of tan-cli#299's mandatory two-state proof: the
-    workspace venv has been sourced into this shell, so bare PATH sees
-    `west` too. This is the EXCEPTIONAL state, not the default one -- the
-    next test covers the state every fresh install actually starts in."""
+    """STATE 1 of tan-cli#299's four required states: the workspace venv has
+    been sourced into this shell, so bare PATH sees `west` too. Unaffected by
+    the tan-cli#299 second-half fix below -- `resolved` is not even consulted
+    once `found` is not `None`."""
     check = doctor_cmd.west_check(found="west", version=(1, 5), floor=(1, 4))
     assert check.status == "pass"
 
 
 def test_west_below_the_manifest_floor_warns_and_names_both_versions():
+    """STATE 4 (part 1): a parseable-but-too-old version, on bare PATH.
+    Unaffected by the tan-cli#299 second-half fix -- `resolved` is not
+    consulted once `found` is not `None`."""
     check = doctor_cmd.west_check(found="west", version=(0, 13), floor=(0, 14))
     assert check.status == "warn"
     assert "0.13" in check.detail and "0.14" in check.detail
 
 
-def test_west_absent_from_bare_path_is_the_default_post_bootstrap_state_and_warns_not_fails():
-    """tan-cli#299: the DEFAULT state of the mandatory two-state proof, not an
-    edge case -- `tan bootstrap` deliberately does not put `west` on PATH (its
-    own next-steps text tells the user to activate the venv afterwards), so
-    THIS is what every fresh install sees first, not the activated state the
-    previous test covers. Measured end-to-end on the published v0.5.0-rc2
-    binary, straight after a successful bootstrap, `west` off PATH: `tan
-    build` still built real ELFs through the resolved venv `west`, while `tan
-    doctor` reported `westResolved` pass and this check's OLD `fail` as the
-    sole failure, exiting 4 on a host that, provably, builds.
+def test_west_absent_from_bare_path_but_resolved_in_the_venv_passes():
+    """STATE 2 (tan-cli#299 second half): the DEFAULT state of every correct
+    fresh install -- `tan bootstrap` deliberately does not put `west` on PATH
+    (its own next-steps text tells the user to activate the venv afterwards).
+    `west_check` now consults the SAME resolver `westResolved` uses
+    (`tan.core.venv.west_program`) and reports `pass`, naming the resolved
+    path, instead of the permanent `warn` a bare-PATH-only probe could not
+    avoid. A warning that fires on every correct install trains users to
+    ignore warnings -- the same defect as the false `fail` this replaced,
+    one severity down."""
+    check = doctor_cmd.west_check(
+        found=None, version=None, floor=(0, 14), resolved="/ws/.venv/bin/west"
+    )
+    assert check.status == "pass"
+    assert "/ws/.venv/bin/west" in check.detail
+    assert check.fix is None
+    assert doctor_cmd.exit_code_for([check]) == doctor_cmd.ExitCode.SUCCESS
 
-    `west_check` only ever sees bare PATH, so its Fail used to be the sole
-    reason `tan doctor` exited 4 on a host `westResolved` (the venv-aware
-    verdict, computed separately) confirmed builds fine -- exactly the false
-    refusal tan-cli#289 made possible: `tan.core.venv.west_program`, not bare
-    PATH, is what a real build spawns. `Warn`, never `Fail`, mirrors the Rust
-    oracle's own severity for this identical probe (`crate::build_readiness::
-    BUILD_BLOCKING` deliberately excludes `west`)."""
-    check = doctor_cmd.west_check(found=None, version=None, floor=(0, 14))
+
+def test_west_absent_from_bare_path_and_unresolvable_anywhere_still_warns_not_fails():
+    """STATE 3, the one that must NOT regress: west absent from PATH AND
+    unresolvable through the venv resolver either (`resolved=None`) -- a
+    genuinely unbuildable host. `west` itself still only WARNs here: FAIL is
+    `west_resolved_check`'s job alone (tan-cli#123's one-version-per-check
+    contract applied to severity -- see `test_the_two_west_checks_split_the_
+    question_and_only_one_can_be_fatal` and `test_collect_exit_code_over_
+    two_REAL_trees_venv_with_west_and_without` for the check that actually
+    fails this state and owns the exit code). Making BOTH checks non-fatal
+    on this exact state is the regression tan-cli#299's own first attempt
+    shipped: west absent everywhere produced two warns and exited 0."""
+    check = doctor_cmd.west_check(found=None, version=None, floor=(0, 14), resolved=None)
     assert check.status == "warn"
     assert doctor_cmd.exit_code_for([check]) == doctor_cmd.ExitCode.SUCCESS
 
 
 def test_west_present_but_unparseable_version_is_a_warning_not_a_crash():
+    """STATE 4 (part 2): found on bare PATH but `--version` unparseable.
+    Unaffected by the tan-cli#299 second-half fix -- `resolved` is not
+    consulted once `found` is not `None`."""
     check = doctor_cmd.west_check(found="west", version=None, floor=(0, 14))
     assert check.status == "warn"
 
@@ -363,34 +381,57 @@ def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_pa
     have = _tree("have", with_west=True)
     lack = _tree("lack", with_west=False)
 
-    def _fatal(ws: Path) -> tuple[str, int]:
+    def _run(ws: Path) -> tuple[list[doctor_cmd.Check], int]:
         checks = doctor_cmd._collect(None, workspace_root=str(ws))
-        by_name = {c.name: c.status for c in checks}
-        return by_name.get("westResolved", "?"), int(doctor_cmd.exit_code_for(checks))
+        return checks, int(doctor_cmd.exit_code_for(checks))
 
     # STATE 1 -- the DEFAULT post-bootstrap state. Builds work; must not refuse.
-    resolved, _ = _fatal(have)
-    assert resolved == "pass", "venv holds a west: westResolved must pass"
+    checks, _ = _run(have)
+    by_name = {c.name: c.status for c in checks}
+    assert by_name.get("westResolved") == "pass", "venv holds a west: westResolved must pass"
+    # tan-cli#299 second half, at `_collect` level: `west` (bare-PATH-only)
+    # must ALSO pass here, fed the same resolved venv path, not warn forever
+    # on the default state every correct install starts in.
+    assert by_name.get("west") == "pass", "west must consult the same resolved venv path"
+    assert not any(i.code == "doctor.west" for i in doctor_cmd.checks_to_issues(checks)), (
+        "a passing `west` check must not surface as an issue at all"
+    )
 
     # STATE 2 -- nothing anywhere. No slice can run; must refuse.
-    resolved, code = _fatal(lack)
-    assert resolved == "fail", "no west anywhere: westResolved must FAIL"
+    checks, code = _run(lack)
+    by_name = {c.name: c.status for c in checks}
+    assert by_name.get("westResolved") == "fail", "no west anywhere: westResolved must FAIL"
     assert code == 4, "a host where no build slice can run must not exit 0"
+    # The regression tan-cli#299's first attempt shipped: both checks warning
+    # here (and NEITHER failing) is exactly what let this exit 0.
+    assert by_name.get("west") == "warn", "west stays a warn -- westResolved alone is fatal"
+    # The failing ENVELOPE, not just the check objects -- the same assembly
+    # `doctor_cmd.doctor` calls (`checks_to_issues`), mirroring the
+    # `{ok, exitCode, issues}` shape `alp-sdk-vscode` actually consumes.
+    issues = doctor_cmd.checks_to_issues(checks)
+    assert any(
+        i.code == "doctor.westResolved" and i.severity == "error" for i in issues
+    ), issues
 
 
 def test_the_two_west_checks_split_the_question_and_only_one_can_be_fatal():
-    """`west` = "is it on bare PATH", never fatal. `westResolved` = "can a slice
-    run at all", fatal when not. tan-cli#123's one-version-per-check contract,
-    applied to severity: exactly one of them owns the exit code.
+    """`west` = "is it on bare PATH, or resolvable through the same resolver
+    `westResolved` uses" -- never fatal either way (tan-cli#299 second half).
+    `westResolved` = "can a slice run at all", fatal when not. tan-cli#123's
+    one-version-per-check contract, applied to severity: exactly one of them
+    can ever own the exit code.
 
     Both states, not one twice -- a single-state test is what let five
     "refuses a host that works" defects ship green out of this file.
     """
     # DEFAULT post-bootstrap state: venv has west, PATH does not. Builds work.
-    assert doctor_cmd.west_check(None, None, None).status == "warn"
+    # `west` now PASSES here too (tan-cli#299 second half) -- fed the same
+    # resolved path `westResolved` reports, never a second bare-PATH re-probe.
+    assert doctor_cmd.west_check(None, None, None, "/ws/.venv/bin/west").status == "pass"
     assert doctor_cmd.west_resolved_check("/ws/.venv/bin/west", (1, 5)).status == "pass"
 
-    # ABSENT state: nothing anywhere. Builds cannot work.
+    # ABSENT state: nothing anywhere. Builds cannot work. `west` still only
+    # WARNs -- FAIL stays `westResolved`'s alone.
     assert doctor_cmd.west_check(None, None, None).status == "warn"
     assert doctor_cmd.west_resolved_check(None, None).status == "fail"
 
@@ -429,14 +470,21 @@ def test_collect_reports_west_resolved_unconditionally(tmp_path):
 def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     """tan-cli#123's exact bug, reproduced then guarded: a workspace venv
     holds `west`, PATH is scrubbed empty so a bare lookup CANNOT possibly
-    answer -- `west` (bare-PATH-only) must WARN (tan-cli#299: never fail --
-    this state, PATH-lacks-it-but-the-venv-has-it, is exactly what let a
-    working host exit 4), and `westResolved` must still resolve and report a
-    version, proving it came from the venv binary, never a bare-PATH
-    re-probe. Break `west_resolved_check`'s wiring in `_collect` (e.g. feed
-    it `on_path("west")` instead of `tan.core.venv.west_program`'s result)
-    and this goes red: `westResolved` would report the same `warn`/absent
-    verdict `west` does, with PATH scrubbed.
+    answer -- `westResolved` must still resolve and report a version, proving
+    it came from the venv binary, never a bare-PATH re-probe. Break
+    `west_resolved_check`'s wiring in `_collect` (e.g. feed it
+    `on_path("west")` instead of `tan.core.venv.west_program`'s result) and
+    this goes red: `westResolved` would report the same absent verdict `west`
+    (bare-PATH-only) does, with PATH scrubbed.
+
+    Also STATE 2 of tan-cli#299's second half, run through the REAL envelope
+    a `tan doctor --format json` process emits (`doctor_cmd.doctor`'s own
+    `checks_to_issues`/`exit_code_for`, not a hand-built `Check`): `west`
+    must now PASS here too -- fed the SAME resolved venv path `westResolved`
+    reports -- naming it, and it must not surface as a `doctor.west` issue
+    at any severity in `data.issues`. Before this fix, this exact state (the
+    default one every correct install starts in) reported `west` as a
+    permanent `warn`.
     """
     layout = venv_layout(os.name == "nt")
     bin_dir = tmp_path / ".venv" / layout.bin_dir
@@ -464,7 +512,6 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     envelope = json.loads(proc.stdout)
     checks = {c["name"]: c for c in envelope["data"]["checks"]}
 
-    assert checks["west"]["status"] == "warn", checks["west"]
     resolved = checks["westResolved"]
     assert resolved["status"] == "pass", resolved
     if os.name == "nt":
@@ -472,6 +519,12 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     else:
         expected = "99.98"
     assert expected in resolved["detail"], resolved["detail"]
+
+    # tan-cli#299 second half.
+    west = checks["west"]
+    assert west["status"] == "pass", west
+    assert str(west_path) in west["detail"], west["detail"]
+    assert not any(i["code"] == "doctor.west" for i in envelope["issues"]), envelope["issues"]
 
 
 # --------------------------------------------------------------------------
@@ -688,9 +741,9 @@ def test_zephyr_sdk_detected_by_scanning_home_with_no_env_var_set(tmp_path, monk
 
 def test_zephyr_sdk_detected_via_msys_home_split_from_windows_userprofile(tmp_path, monkeypatch):
     """Finding 2, tan-cli#286 second pass -- reproduced on a real host: Git
-    Bash/MSYS sets `HOME` to a POSIX-translated path (`/c/Users/caner`) that is
+    Bash/MSYS sets `HOME` to a POSIX-translated path (`/c/Users/dev`) that is
     real but has no SDK under it, while the actual Zephyr SDK sits under the
-    native `%USERPROFILE%` (`C:\\Users\\caner\\zephyr-sdk-1.0.1`). The old
+    native `%USERPROFILE%` (`C:\\Users\\dev\\zephyr-sdk-1.0.1`). The old
     `HOME or USERPROFILE` picked `HOME` (set first) and never scanned
     `USERPROFILE` at all, so a host that HAS the SDK reported `False`. Both
     must be scanned."""
