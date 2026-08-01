@@ -269,8 +269,8 @@ class Log:
         return issues
 
 
-def _eprint(line: str) -> None:
-    """stderr, never stdout, and never raising.
+def _write_line(line: str, stream) -> None:
+    """Write one line, never raising.
 
     A `UnicodeEncodeError` is a real possibility: the POSIX next-steps block
     carries `⏳ / 🟡 / ✅` verbatim from the oracle, and a console on a legacy
@@ -278,12 +278,36 @@ def _eprint(line: str) -> None:
     the command over one is not.
     """
     try:
-        print(line, file=sys.stderr)
+        print(line, file=stream)
     except (UnicodeEncodeError, OSError):
         try:
-            print(line.encode("ascii", "replace").decode("ascii"), file=sys.stderr)
+            print(line.encode("ascii", "replace").decode("ascii"), file=stream)
         except OSError:
             pass
+
+
+def _eprint(line: str) -> None:
+    """stderr, never stdout. Every human line this command prints goes here, so
+    stdout stays free for the `--format json` envelope -- except `--print-env`,
+    which is the one deliberate exception (`_outprint`)."""
+    _write_line(line, sys.stderr)
+
+
+def _outprint(line: str) -> None:
+    """stdout -- ONLY for `--print-env`, whose entire contract is redirection.
+
+    `tan bootstrap --print-env > env.sh`, or the `| tee` the getting-started job
+    runs, capture STDOUT. Emitting the `export`/`source` block on stderr like
+    every other human line leaves the redirect target EMPTY while the block
+    still appears on the terminal, so it reads as working and silently writes
+    nothing -- and `sh -n` passes on an empty file, because an empty shell
+    script is a valid one. That combination is what had the CI step assert
+    nothing at all while reporting green (tan-cli#296).
+
+    Text mode only. Under `--format json` stdout carries exactly one envelope
+    and this is never reached.
+    """
+    _write_line(line, sys.stdout)
 
 
 # ---------------------------------------------------------------------------
@@ -2425,6 +2449,13 @@ def bootstrap(
                 "bootstrap", reported, outcome.data, outcome.issues, outcome.exit_code, sdk=sdk
             )
         )
+    elif print_env:
+        # STDOUT, not stderr. This block is meant to be redirected --
+        # `tan bootstrap --print-env > env.sh` -- so on stderr the redirect
+        # target is empty while the lines still appear on the terminal: it
+        # looks like it worked and wrote nothing. See `_outprint`.
+        for line in outcome.text:
+            _outprint(line)
     else:
         for line in outcome.text:
             _eprint(line)
