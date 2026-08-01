@@ -578,7 +578,9 @@ def test_collect_reports_zephyr_sdk_under_build_too():
 
 
 # --------------------------------------------------------------------------
-# zephyrWorkspace -- unconditional now, and a pin mismatch FAILS (tan-cli#290)
+# zephyrWorkspace -- unconditional (tan-cli#290), Warn-only (tan-cli#295):
+# a version-mismatch verdict is `zephyrVersion`'s Fail to report, not this
+# check's -- see the two-check `_collect` regression below.
 # --------------------------------------------------------------------------
 
 
@@ -587,32 +589,18 @@ def test_zephyr_workspace_warns_when_the_dir_is_not_a_zephyr_checkout():
     this check's whole remaining reason to exist. Advisory: a `.west`
     workspace mid-`west update` is a legitimate, working-in-progress state,
     not a proven blocker."""
-    check = doctor_cmd.zephyr_workspace_check("/ws", None, None)
+    check = doctor_cmd.zephyr_workspace_check("/ws", None)
     assert check.status == "warn"
     assert "VERSION" in check.detail
 
 
-def test_zephyr_workspace_passes_with_no_sdk_pin_to_compare():
-    check = doctor_cmd.zephyr_workspace_check("/ws", "4.4.0", None)
+def test_zephyr_workspace_passes_whenever_version_is_readable():
+    """No Fail branch (tan-cli#295 review): this check only answers whether
+    the resolved workspace looks like a Zephyr checkout at all, regardless
+    of whether its version matches the SDK's pin."""
+    check = doctor_cmd.zephyr_workspace_check("/ws", "4.4.0")
     assert check.status == "pass"
     assert "4.4.0" in check.detail
-
-
-def test_zephyr_workspace_fails_on_a_pin_mismatch():
-    """tan-cli#290, reversing this check's own prior premise: Rust treats
-    this exact fact -- a resolved workspace's Zephyr differing from the
-    SDK's pin -- as a hard Fail (`crates/tan-core/src/preflight.rs:118-145`,
-    tan-cli#98/#159), the alp-sdk#855 v4.4.0->v4.4.1 incident where a
-    drifted checkout reported `0 failed` and the next build broke. Warn was
-    the exact silent-pass shape that incident is."""
-    check = doctor_cmd.zephyr_workspace_check("/ws", "4.3.0", "4.4.1")
-    assert check.status == "fail"
-    assert "4.3.0" in check.detail and "4.4.1" in check.detail
-
-
-def test_zephyr_workspace_passes_on_a_matching_pin():
-    check = doctor_cmd.zephyr_workspace_check("/ws", "4.4.1", "4.4.1")
-    assert check.status == "pass"
 
 
 def test_zephyr_workspace_now_runs_unconditionally_not_only_under_build(tmp_path):
@@ -1312,6 +1300,49 @@ def test_collect_resolves_a_real_workspace_and_matching_zephyr_version(tmp_path,
     for name in ("sdk", "boardYaml", "workspace", "zephyrVersion", "zephyrWorkspace"):
         check = next(c for c in checks if c.name == name)
         assert check.status == "pass", f"{name}: {check.detail}"
+
+
+def test_collect_does_not_double_report_a_zephyr_version_mismatch(tmp_path, monkeypatch):
+    """Regression, tan-cli#295 review: on a Zephyr-4.4.0-vs-`v4.4.1`-pin
+    host, `zephyrWorkspace` used to report the identical fact `zephyrVersion`
+    already Fails on, from the same two resolved inputs, under a second
+    issue code (`doctor.zephyrWorkspace` alongside `doctor.zephyrVersion`)
+    with a second `nextSteps` entry for the same `tan bootstrap` remedy.
+    Scoped to these two checks and to `nextSteps` entries that actually
+    mention bootstrap -- not `summary.fail`/`nextSteps` as a whole -- so this
+    stays independent of whatever else a bare test host does or does not
+    have on PATH. This must fail pre-fix and pass post-fix."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk_root = tmp_path / "workspace" / "alp-sdk"
+    sdk_root.mkdir(parents=True)
+    (sdk_root / "west.yml").write_text(
+        "manifest:\n  projects:\n    - name: zephyr\n      revision: v4.4.1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "workspace" / ".west").mkdir()
+    zephyr = tmp_path / "workspace" / "zephyr"
+    zephyr.mkdir()
+    (zephyr / "VERSION").write_text(
+        "VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = 0\n", encoding="utf-8"
+    )
+    board_yaml = tmp_path / "app" / "board.yaml"
+    board_yaml.parent.mkdir(parents=True)
+    board_yaml.write_text("", encoding="utf-8")
+
+    checks = doctor_cmd._collect(
+        str(sdk_root), board_yaml=str(board_yaml), workspace_root=str(tmp_path / "app")
+    )
+    version = next(c for c in checks if c.name == "zephyrVersion")
+    workspace = next(c for c in checks if c.name == "zephyrWorkspace")
+    assert version.status == "fail"
+    assert workspace.status == "pass"
+
+    # `zephyrVersion`'s own fix earns exactly one `nextSteps` entry -- not the
+    # extra "Run `tan bootstrap` to refresh the workspace." the removed
+    # `zephyrWorkspace` Fail used to add for the identical remedy.
+    steps = doctor_cmd.next_steps(checks)
+    assert steps.count(version.fix) == 1, steps
+    assert "Run `tan bootstrap` to refresh the workspace." not in steps
 
 
 # --------------------------------------------------------------------------

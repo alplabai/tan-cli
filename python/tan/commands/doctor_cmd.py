@@ -804,15 +804,12 @@ def seven_zip_check(found: bool) -> Check:
     )
 
 
-def zephyr_workspace_check(
-    workspace_dir: str, version_text: str | None, sdk_pin: str | None
-) -> Check:
+def zephyr_workspace_check(workspace_dir: str, version_text: str | None) -> Check:
     """`zephyrWorkspace` -- unconditional now, not `--build`-only
     (tan-cli#290): does the RESOLVED workspace's `zephyr/` subtree actually
-    look like a Zephyr checkout, and does its version match alp-sdk's
-    `west.yml` pin?
+    look like a Zephyr checkout at all?
 
-    `workspace_dir`/`version_text`/`sdk_pin` are the SAME
+    `workspace_dir`/`version_text` are the SAME
     `tan.core.venv.west_workspace_dir`-resolved facts `workspace`/
     `zephyrVersion` above already compute -- not a second, independent
     `$ZEPHYR_BASE` env-var read, which was tan-cli#294's own complaint about
@@ -823,18 +820,24 @@ def zephyr_workspace_check(
     duplication this file's `boardYaml` handling (mirroring the Rust oracle)
     already refuses to do -- so there is no "unresolved" branch here at all.
 
-    **`Fail`, not `Warn`, on a version mismatch** (tan-cli#290, reversing this
-    check's own prior premise): Rust treats exactly this fact -- a resolved
-    workspace's Zephyr differing from the SDK's pin -- as a hard Fail
-    (`crates/tan-core/src/preflight.rs:118-145`, tan-cli#98/#159), the
+    **No Fail branch (tan-cli#295 review, reversing tan-cli#290's own
+    addition of one).** A version-mismatch Fail was added to mirror Rust's
+    `crates/tan-core/src/preflight.rs:118-145` (tan-cli#98/#159, the
     alp-sdk#855 v4.4.0->v4.4.1 incident, where a drifted checkout reported
-    `11 passed, 6 warnings, 0 failed` and the very next build broke.
-    `zephyr_version_preflight_check` above already reports this identical
-    fact, from these identical inputs, at Fail severity -- this branch stays
-    IN STEP with it rather than contradicting it under a second name: a
-    consumer reading either check alone must never see a different verdict
-    for the same host state, which is the silent-pass shape #290 exists to
-    close.
+    `11 passed, 6 warnings, 0 failed` and the very next build broke) -- but
+    `zephyr_version_preflight_check` above already reports that identical
+    fact, from these identical two inputs (`workspace_version`/`sdk_pin`), at
+    Fail severity. This check's would-be Fail condition was a strict SUBSET
+    of that one, so it could never fire without `zephyrVersion` having
+    already reported it under a different code: measured on a drifted host,
+    `summary.fail` came out 5 instead of 4, both `doctor.zephyrVersion` and
+    `doctor.zephyrWorkspace` present, and two `nextSteps` strings for the one
+    `tan bootstrap` remedy. Removed rather than kept "in step" with it --
+    Rust's own `crates/tan-cli/src/commands/doctor.rs` drops its comparable
+    `boardYaml` duplicate for the identical reason ("emitting both would
+    report one fact twice"), and `grep -rn "zephyrWorkspace" crates/` is
+    empty: there is no Rust oracle row here for a version-mismatch Fail to
+    stay parallel with.
 
     An unreadable `zephyr/VERSION` stays `Warn`: neither the Rust oracle nor
     `zephyr_version_preflight_check` above (which silently SKIPS rather than
@@ -852,14 +855,6 @@ def zephyr_workspace_check(
             f"workspace at `{workspace_dir}` does not look like a Zephyr checkout "
             f"(no readable zephyr/VERSION file).",
             "Run `tan bootstrap`, or point the workspace at a real Zephyr checkout.",
-        )
-    if sdk_pin is not None and version_text != sdk_pin:
-        return Check(
-            "zephyrWorkspace",
-            "fail",
-            f"Zephyr {version_text} at `{workspace_dir}` does not match alp-sdk's "
-            f"pinned {sdk_pin} (from west.yml).",
-            "Run `tan bootstrap` to refresh the workspace.",
         )
     return Check(
         "zephyrWorkspace", "pass", f"Zephyr {version_text} at `{workspace_dir}`."
@@ -1857,11 +1852,7 @@ def _collect(
         # facts -- see `zephyr_workspace_check`'s docstring for why it still
         # earns its own check beside `zephyrVersion` rather than being
         # dropped as a duplicate.
-        checks.append(
-            zephyr_workspace_check(
-                str(workspace_path), workspace_version, sdk_pin_for_workspace
-            )
-        )
+        checks.append(zephyr_workspace_check(str(workspace_path), workspace_version))
 
     # tan-cli#294 finding 1: host-environment checks -- also unconditional
     # HOST facts (no board.yaml/workspace/SDK needed). See their docstrings.
