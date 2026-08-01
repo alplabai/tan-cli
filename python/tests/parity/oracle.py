@@ -82,6 +82,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from . import oracle_fixtures
 
@@ -102,6 +103,52 @@ VERSION_RE = re.compile(r"tan \d+\.\d+\.\d+\S*\Z")
 ENVELOPE = "envelope"
 VERSION = "version"
 PLAN = "plan"
+
+#: Envelope fields that carry a filesystem path and so need separator
+#: normalisation before a cross-platform diff. Verbatim from ``PATH_KEYS`` in
+#: ``crates/tan-cli/tests/contract.rs`` (frozen) -- the same set
+#: ``tests/conformance/test_contract_envelopes.py`` already mirrors for the
+#: identical reason, stated there in that Rust source's own words: "CI runs
+#: this suite on ubuntu/windows/macos runners, and
+#: `PathBuf::to_string_lossy()` renders `./board.yaml` as `.\\board.yaml` on
+#: Windows." A frozen fixture captured on Windows (``oracle_fixtures.
+#: CAPTURE_PLATFORM``) carries exactly that native rendering in these
+#: fields; a live run on a different platform renders the same value with
+#: `/`. Normalising here is NOT the blanket separator-flattening a case like
+#: ``test_clean_parity.py`` correctly refuses (see that module's own
+#: platform gate) -- it is scoped to the exact keys the frozen Rust contract
+#: test already treats as separator-INSENSITIVE, so it cannot launder a
+#: real divergence sitting in an unlisted field (``issues[].message``, or
+#: `clean`'s own ``buildRoot`` -- deliberately absent from both this set and
+#: the Rust one).
+PATH_KEYS = frozenset(
+    {
+        "root",
+        "boardYaml",
+        "boardYamlPath",
+        "destination",
+        "relativePath",
+        "sdkPath",
+        "sdkPinned",
+        "written",
+        "unchanged",
+        "launchJsonPath",
+    }
+)
+
+
+def normalise_path_separators(value: Any, key: str | None = None) -> Any:
+    """Recursively ``\\`` -> ``/`` on :data:`PATH_KEYS` fields only -- see
+    that constant's own docstring. ``key`` is the enclosing object field
+    name; a list inherits its own key, so every string in ``written: [...]``
+    is still recognised."""
+    if isinstance(value, str):
+        return value.replace("\\", "/") if key in PATH_KEYS else value
+    if isinstance(value, list):
+        return [normalise_path_separators(item, key) for item in value]
+    if isinstance(value, dict):
+        return {k: normalise_path_separators(v, k) for k, v in value.items()}
+    return value
 
 #: Top-level build-plan keys retained by ``narrow_plan``. NOT "the keys Rust
 #: emits" -- Rust emits the SDK's JSON verbatim (see the module docstring) --
@@ -334,6 +381,12 @@ def compare(
     r_code, r_out = rust_run(argv, cwd, home, scrub_roots=roots)
     p_code, p_out = _run(python or python_command(), argv, cwd, home)
     p_out = oracle_fixtures.scrub(p_out, *roots)
+    # Scoped to PATH_KEYS, on BOTH sides, before the diff -- see that
+    # constant's own docstring. A no-op whenever the two sides already agree
+    # (including every case on the capture platform itself, where both are
+    # already native-Windows `\`), so this never masks a real divergence.
+    r_out = normalise_path_separators(r_out)
+    p_out = normalise_path_separators(p_out)
 
     diffs: list[str] = []
     if r_code != p_code:

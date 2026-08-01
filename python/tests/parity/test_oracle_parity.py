@@ -41,6 +41,7 @@ from .oracle import (
     compare,
     missing_for_live,
     narrow_plan,
+    normalise_path_separators,
     python_command,
     rust_binary,
     rust_run,
@@ -344,6 +345,13 @@ def test_generate_matches_rust_with_a_resolvable_sdk(tmp_path):
     if r_code != p_code:
         diffs.append(f"exit code: rust={r_code} python={p_code}")
     p_out = {**p_out, "data": {k: v for k, v in p_out.get("data", {}).items() if k != "engine"}}
+    # `data.written` is in `oracle.PATH_KEYS`: the frozen rust side renders
+    # it with THIS fixture's capture-host separators (`oracle_fixtures.
+    # CAPTURE_PLATFORM`), and a replay on a different platform (`parity.yml`'s
+    # python-tests job runs ubuntu/windows/macos) would otherwise diff two
+    # platforms' own, both-correct renderings -- not a port defect.
+    r_out = normalise_path_separators(r_out)
+    p_out = normalise_path_separators(p_out)
     for key in sorted(set(r_out) | set(p_out)):
         if r_out.get(key) != p_out.get(key):
             diffs.append(f"{key}: rust={r_out.get(key)!r} python={p_out.get(key)!r}")

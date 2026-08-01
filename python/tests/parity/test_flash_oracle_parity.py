@@ -20,17 +20,53 @@ rather than byte-for-byte; both are called out on the case that covers them.
 """
 import os
 import shutil
+import sys
 
 import pytest
 
+from . import oracle_fixtures
 from .oracle import ENVELOPE, compare, missing_for_live, rust_binary, rust_run
 
 RUST = rust_binary()
+WINDOWS = os.name == "nt"
 
 pytestmark = pytest.mark.skipif(
     missing_for_live(RUST),
     reason="TAN_PARITY_LIVE=1 needs a Rust tan; set TAN_RUST_BINARY",
 )
+
+
+def _skip_unless_capture_platform() -> None:
+    """`flash`'s envelope carries `data.buildRoot` rendered with THIS
+    fixture's capture-host separators (``\\`` on ``oracle_fixtures.
+    CAPTURE_PLATFORM`` = win32) -- the same class of cross-platform mismatch
+    `test_clean_parity.py`'s own platform gate exists for; see that module
+    for the full reasoning.
+
+    Not folded into ``oracle.compare()``'s ``PATH_KEYS`` normalisation:
+    ``buildRoot`` is not in that set (verbatim from the FROZEN ``crates/
+    tan-cli/tests/contract.rs``, which never covered ``flash`` -- ``contract/
+    README.md`` states outright that no committed envelope fixture does), so
+    there is no cross-language precedent establishing that its separator
+    style is not part of what a `flash` case establishes. Skip is the
+    conservative choice, matching `clean`'s.
+
+    Fires for 60 of this file's 61 captured cases (measured against the
+    committed fixture) -- effectively the whole file, on a non-capture
+    platform. Not narrowed further to the one exempt case
+    (`sdk-root-invalid`, refused before any build root resolves): unlike
+    `clean`'s four genuinely portable `*-text` cases, one case out of 61 is
+    not worth a second static predicate to claw back, and skipping it too
+    costs nothing beyond what this whole suite already lost when `crates/`
+    gets deleted -- it is a real, if small, coverage gap, not a false pass.
+    """
+    if not oracle_fixtures.LIVE and not WINDOWS:
+        pytest.skip(
+            f"fixture captured on {oracle_fixtures.CAPTURE_PLATFORM} carries "
+            f"native path separators in `data.buildRoot`; this replay host "
+            f"is {sys.platform!r} -- cross-platform separator diffs are not "
+            "a port defect (see oracle_fixtures.CAPTURE_PLATFORM)"
+        )
 
 #: A manifest with one Zephyr slice whose `flash_method`/`flash_args` the case
 #: substitutes. `status: ok` so it is not refused before dispatch.
@@ -386,6 +422,7 @@ def work_dir(tmp_path_factory):
 
 @pytest.mark.parametrize("case_id, manifest, extra", CASES, ids=[c[0] for c in CASES])
 def test_flash_matches_the_rust_oracle(case_id, manifest, extra, work_dir):
+    _skip_unless_capture_platform()
     if manifest is not None:
         (work_dir / "build" / "system-manifest.yaml").write_text(
             manifest, encoding="utf-8", newline=""
@@ -419,6 +456,7 @@ def test_a_real_spawn_diffs_including_the_captured_failure_tail(work_dir):
     """
     if shutil.which("dd") is None:
         pytest.skip("no `dd` on PATH; nothing to spawn")
+    _skip_unless_capture_platform()
     (work_dir / "build" / "system-manifest.yaml").write_text(
         _slice("yocto_wic", "{target: /dev/sdb}"), encoding="utf-8", newline=""
     )
@@ -455,6 +493,7 @@ SUBDIR_CASES = [
 
 @pytest.mark.parametrize("case_id, extra", SUBDIR_CASES, ids=[c[0] for c in SUBDIR_CASES])
 def test_workspace_root_and_app_path_are_separate_anchors(case_id, extra, tmp_path_factory):
+    _skip_unless_capture_platform()
     root = tmp_path_factory.mktemp("flash-subdir")
     (root / "app" / "build").mkdir(parents=True)
     # The SDK sits beside the CWD, which is what `discover_sdk_root` probes --
@@ -475,6 +514,7 @@ def test_format_json_before_the_subcommand_is_accepted(work_dir):
     side of the subcommand name. Refusing the pre-subcommand position on THIS
     command would mean a customer's flash silently does not run, so `flash` is in
     `cli._HONOURS_ROOT_FORMAT`."""
+    _skip_unless_capture_platform()
     (work_dir / "build" / "system-manifest.yaml").write_text(
         _slice("swd_probe"), encoding="utf-8", newline=""
     )
@@ -542,6 +582,7 @@ MESSAGE_ONLY_DIVERGENT = [
     ids=[c[0] for c in MESSAGE_ONLY_DIVERGENT],
 )
 def test_manifest_shape_errors_agree_on_code_and_exit(case_id, manifest, extra, code, work_dir):
+    _skip_unless_capture_platform()
     (work_dir / "build" / "system-manifest.yaml").write_text(
         manifest, encoding="utf-8", newline=""
     )

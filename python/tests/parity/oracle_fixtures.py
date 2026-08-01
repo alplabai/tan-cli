@@ -58,6 +58,21 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "oracle_fixtures"
 LIVE = os.environ.get("TAN_PARITY_LIVE") == "1"
 CAPTURE = LIVE and os.environ.get("TAN_PARITY_CAPTURE") == "1"
 
+#: The OS every fixture in this store was captured on -- ``oracle_fixtures/
+#: PROVENANCE.txt``'s own ``platform:`` line, mirrored here as data rather
+#: than left for each call site to hardcode separately. A frozen answer is
+#: only a valid oracle for a REPLAY on this same OS: a captured envelope can
+#: carry this host's native path separators (``buildRoot``, per-slice paths,
+#: ...), and comparing that against a DIFFERENT platform's live output diffs
+#: the two platforms' genuinely different -- and both correct -- behaviour,
+#: not a port defect. Not applied automatically by :func:`resolve` -- most
+#: fixtures carry no host-shaped data at all (an issue code, a bool, a
+#: version string) and stay portable everywhere; a call site whose compared
+#: surface DOES carry native separators opts in itself (see
+#: ``test_clean_parity.py`` for the worked example) rather than every fixture
+#: silently losing non-Windows coverage.
+CAPTURE_PLATFORM = "win32"
+
 #: Per-node call counter, so a test that calls :func:`resolve` more than once
 #: gets one key per call, in call order. Reset is never needed: a fresh
 #: ``PYTEST_CURRENT_TEST`` value is a fresh dict key.
