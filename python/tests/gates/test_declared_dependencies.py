@@ -47,6 +47,8 @@ IMPORT_TO_DIST = {
     "jsonschema": "jsonschema",
     "click": "click",
     "serial": "pyserial",
+    "truststore": "truststore",
+    "certifi": "certifi",
 }
 
 #: Vendored customer scaffolds are template DATA, not part of tan's own runtime

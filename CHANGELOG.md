@@ -37,6 +37,24 @@ green CI run on a clean runner. Every defect below was invisible to both.*
   standing in is no longer indistinguishable from a wrong answer. Comparison is
   `normcase`d -- without it, the same directory in different case reported
   itself as unselected (#301).
+- **The macOS release asset shipped with no CA trust anchors at all.** A
+  PyInstaller freeze bundles its own `ssl` but no CA bundle and does not fall
+  back to the platform trust store, so every `urllib` HTTPS call in `sdk list
+  --online` failed `CERTIFICATE_VERIFY_FAILED` on the published
+  `tan-aarch64-apple-darwin` v0.5.0-rc2 asset -- measured on real macOS arm64
+  hardware, where `curl`, a browser and system `python3` all verified the same
+  endpoint fine in the same minute. `tan/net.py` now builds every request's
+  `SSLContext` through `truststore` (verifies via the OS's own trust store, so
+  a real corporate CA installed in the machine's keychain keeps working) and
+  falls back to `certifi`'s bundled CA list only if `truststore` is absent or
+  its platform verifier fails. The failure text also stopped asserting *"This
+  is usually a TLS-intercepting proxy or a corporate CA"* as the cause with no
+  evidence for it -- there was neither on the reporting host, and the same
+  confident wording would have sent a customer on a genuinely proxied network
+  hunting in the wrong place too. `scripts/verify_binary.sh` gains a fifth
+  proof that the freeze actually bundles both mechanisms, since no unit test
+  can catch this: a source-tree run has the developer's own trust, and the bug
+  is invisible until the frozen artifact runs (#304, release-blocker).
 
 ### Known
 

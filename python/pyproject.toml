@@ -96,7 +96,29 @@ requires-python = ">=3.12"
 # descending from `typer._click.core.Command`, and a `SystemExit`-raising
 # `UsageError`) goes away from an in-range version -- so a version bump here is
 # a decision, not a drift.
-dependencies = ["typer>=0.26,<0.28", "rich>=13", "pyyaml>=6", "jsonschema>=4.18", "click>=8.1"]
+#
+# `truststore` and `certifi` are REQUIRED, not optional, and both are new
+# (tan-cli#304): a PyInstaller `--onefile` freeze bundles its own `ssl` but no
+# CA bundle and does not fall back to the platform trust store, so a frozen
+# `tan` had ZERO trust anchors -- every `urllib` HTTPS call in `sdk_cmd.py`
+# failed `CERTIFICATE_VERIFY_FAILED` even on a host where `curl`/a browser/
+# system `python3` verified the same endpoint fine. `truststore` is preferred
+# (verifies through the OS's own trust store, so a real corporate CA installed
+# in the machine's keychain still works -- `certifi`'s fixed public-CA list
+# alone would trade that failure for a different one); `certifi`'s bundled
+# `cacert.pem` is the floor `tan/net.py` falls back to if `truststore` is
+# absent or its platform verifier fails. Both are module-scope imports inside
+# `tan/net.py`, so both must be REQUIRED per the reasoning right below this
+# comment.
+dependencies = [
+  "typer>=0.26,<0.28",
+  "rich>=13",
+  "pyyaml>=6",
+  "jsonschema>=4.18",
+  "click>=8.1",
+  "truststore>=0.9",
+  "certifi>=2024.2.2",
+]
 
 # `pyserial` is OPTIONAL, not required: only `tan monitor` needs it, and a serial
 # console is not worth adding to every install of a build tool. `monitor_cmd`

@@ -35,6 +35,7 @@ import pytest
 from tan.commands.sdk_cmd import (
     _fetch_releases,
     check_sdk_readiness,
+    describe_network_error,
     discover_workspace_sdk,
     parse_remote_sdk_releases,
     parse_sdk_version_yaml,
@@ -311,6 +312,21 @@ def test_a_dead_network_returns_a_message_never_an_exception(
     releases, error = _fetch_releases()
     assert releases == []
     assert error is not None and expect_in_message in error
+
+
+def test_the_tls_hint_does_not_assert_a_proxy_with_no_evidence_for_one():
+    """#304: the frozen v0.5.0-rc2 macOS asset hit `CERTIFICATE_VERIFY_FAILED`
+    with no proxy and no corporate CA anywhere on the host -- the real cause
+    was the freeze shipping with zero CA trust anchors (`tan/net.py`). The old
+    text opened "This is USUALLY a TLS-intercepting proxy or a corporate CA",
+    asserting one specific cause with nothing to back it; on a locked-down
+    network that also hides a REAL proxy misconfiguration by sending the one
+    population likely to have one down the wrong path too. This message must
+    name the alternative instead of asserting a single cause."""
+    message = describe_network_error("certificate verify failed")
+    assert "usually" not in message.lower()
+    assert "corporate CA" in message
+    assert "trust" in message.lower() and ("load" in message.lower() or "ca" in message.lower())
 
 
 # ── envelopes, driven as a real process ──────────────────────────────────────
