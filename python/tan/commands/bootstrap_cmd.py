@@ -1055,28 +1055,31 @@ def default_relocation_target(
     return None
 
 
-def workspace_guard_refusal(workspace_dir: Path, target: Path) -> str:
-    """Names `tan bootstrap --workspace <path>` explicitly, not a bare
-    `--workspace <path>`: this same refusal is inherited by `tan build` and
-    `tan doctor --build --fix`, neither of which has a `--workspace` of its
-    own.
+def workspace_guard_target_occupied_refusal(workspace_dir: Path, target: Path) -> str:
+    """tan-cli#302: the ONE case the workspace-parent guard still refuses.
 
-    Never says "re-run interactively". The Rust oracle
-    (`crates/tan-cli/src/commands/bootstrap/relocate.rs`'s `interactive`
-    branch) prompts via `inquire` on a real TTY and falls through to wording
-    like this only when it is not one; this port takes NO input on this
-    decision on ANY run, TTY or not (see the "NO PROMPT, ever, in this port"
-    note at the guard's call site in `_run`). Telling an already-interactive
-    customer to re-run interactively sent them looking for a prompt this port
-    was never going to show them (tan-cli#284) -- the fix is the wording, not
-    adding the prompt this port deliberately does not have.
+    A dirty parent with no `--workspace` given now RELOCATES the checkout into
+    `target` (`default_relocation_target`'s own `alp-workspace` choice)
+    automatically rather than refusing and naming that same path back to the
+    customer -- see the "tan-cli#302" note at the guard's call site in `_run`
+    for why. That auto-relocation needs somewhere EMPTY to land, though:
+    `target` already existing and already holding content of its own (a
+    previous attempt's partial venv is the realistic case, per
+    `rollback_relocation_after`'s own docstring) is the same "write into a
+    directory without asking" hazard the guard exists to prevent in the first
+    place, just one level deeper. This refusal is what still catches that one.
+
+    Never says "re-run interactively", for the same reason tan-cli#284 settled
+    on that wording originally: this port takes NO input on this decision on
+    ANY run, TTY or not.
     """
     return (
         f"{_native(workspace_dir)} holds more than this checkout, and is not itself an "
-        f"existing west workspace; refusing to write the west workspace "
-        f"(zephyr/modules/.west/venv) there without asking. Run `tan bootstrap --workspace "
-        f"<path>` (for example {_native(target)}) to move the checkout there, or clone "
-        f"alp-sdk into a dedicated directory yourself."
+        f"existing west workspace; tan would ordinarily move the checkout into "
+        f"{_native(target)} automatically, but that directory already exists and already "
+        f"holds content of its own, so tan is not going to write into it without asking. "
+        f"Run `tan bootstrap --workspace <path>` with an empty destination, or clear out "
+        f"{_native(target)} yourself and re-run."
     )
 
 
@@ -1839,19 +1842,41 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             sdk,
         )
 
-    # Workspace-parent guard, BEFORE any write below, so a refusal leaves
-    # nothing on disk. A `$ZEPHYR_BASE` workspace about to be ADOPTED repoints
-    # the write target away from `repo_root`'s parent entirely -- a dirty parent
-    # is not a problem when nothing is going to be written there. An explicit
+    # Workspace-parent guard, BEFORE any write below, so a refusal -- the one
+    # case that still is one, see below -- leaves nothing on disk. A
+    # `$ZEPHYR_BASE` workspace about to be ADOPTED repoints the write target
+    # away from `repo_root`'s parent entirely -- a dirty parent is not a
+    # problem when nothing is going to be written there. An explicit
     # `--workspace` answers the question outright regardless.
+    #
+    # tan-cli#302: a dirty parent with no `--workspace` given now RELOCATES
+    # the checkout into `default_relocation_target`'s own `alp-workspace`
+    # choice instead of refusing. The refusal this replaced named that exact
+    # path back to the customer ("run `tan bootstrap --workspace <path>` --
+    # for example <target>"), and the condition that trips it is tan's own
+    # binary sitting beside a freshly cloned alp-sdk: the documented
+    # quickstart (download `tan.exe`, clone `alp-sdk` beside it, run `tan
+    # bootstrap`) followed LITERALLY, making the first command in the product
+    # fail a customer for doing exactly what they were told. Typing back a
+    # path tan already computed is strictly more work than tan just doing it.
+    # (An alternative shape -- excluding tan's own binary from the "holds more
+    # than this checkout" test -- was considered and rejected: it only helps
+    # the customer whose directory is otherwise empty, and a stray `README` or
+    # `.gitignore` beside the clone puts them right back in the refusal.)
+    # `target` is used exactly as an explicit `--workspace <target>` would be
+    # from here on: the enclosing-`.west` check just below, the relocation
+    # itself further down, and its rollback on a later failure
+    # (`rollback_relocation_after`) are all the SAME code, shared with that
+    # path unchanged -- so tan-cli#284's invariant (refuse or relocate BEFORE
+    # writing anything; never leave a half-moved checkout) covers this
+    # auto-relocation exactly as it already covers an explicit one.
     #
     # NO PROMPT, ever, in this port: a prompt needs a human at a console, and
     # every caller that reaches here without `--workspace` gets the
-    # non-interactive refusal. `--format json` says so explicitly; a piped or
+    # non-interactive outcome -- a relocation now, rather than a refusal, but
+    # still no question asked. `--format json` says so explicitly; a piped or
     # redirected stdin says so just as loudly, and the oracle hung forever on
-    # exactly that before the terminal term was added. Refusing names both
-    # remedies, so nothing is unreachable -- it only costs the interactive
-    # convenience of answering "yes" in place.
+    # exactly that before the terminal term was added.
     guard_applies = workspace_override is not None or not _zephyr_base_will_adopt(
         pin, paths.repo_root
     )
@@ -1862,22 +1887,30 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             target = default_relocation_target(
                 paths.repo_root, paths.workspace_dir, facts.venv_dir_name
             )
-            if target is not None:
+            if target is not None and _list_entries(target):
+                # The one case that still refuses (tan-cli#302): `target` --
+                # the directory the auto-relocation below would move the
+                # checkout INTO -- already exists and already holds content of
+                # its own. Auto-relocating there anyway would be the exact
+                # "wrote into a directory without asking" hazard this guard
+                # exists to prevent, one level down. An ABSENT or genuinely
+                # EMPTY `target` (the ordinary case) falls straight through to
+                # the relocation instead.
                 return (
                     _refusal(
                         ExitCode.VALIDATION_FAILURE,
                         "workspace-guard",
-                        [workspace_guard_refusal(paths.workspace_dir, target)],
+                        [workspace_guard_target_occupied_refusal(paths.workspace_dir, target)],
                         payload(),
                     ),
                     reported_project,
                     sdk,
                 )
         # tan-cli#284: whichever directory is about to become the west topdir
-        # -- `target` when relocating (an explicit `--workspace`, since that
-        # path never consults `default_relocation_target` above), else the
-        # checkout's own already-clean parent -- probe its ancestors for an
-        # ENCLOSING `.west` before the first mutation below. `west init -l`
+        # -- `target` whenever a relocation is happening (an explicit
+        # `--workspace`, or the tan-cli#302 auto-relocation just above), else
+        # the checkout's own already-clean parent -- probe its ancestors for
+        # an ENCLOSING `.west` before the first mutation below. `west init -l`
         # would hit exactly this and abort; caught here, refusing leaves
         # nothing on disk, whereas discovering it after `relocate_checkout` /
         # `_write_global_sdk_pointer` below leaves the checkout moved and the

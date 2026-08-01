@@ -666,13 +666,63 @@ def test_workspace_is_validated_before_anything_touches_the_disk(value, fragment
         resolve_workspace_target(value, os.getcwd())
 
 
-def test_the_workspace_parent_guard_refuses_and_leaves_nothing_on_disk(tmp_path):
-    """`west init -l` forces the topdir to be the checkout's PARENT, so a clone
-    into `~/Downloads` sprays zephyr/modules/.west/venv there where no
-    `.gitignore` can reach it."""
-    sdk = make_sdk(tmp_path)
+def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(tmp_path):
+    """tan-cli#302: the documented quickstart -- download `tan.exe`, clone
+    `alp-sdk` beside it, run `tan bootstrap` -- makes tan's OWN binary the
+    "other content" that used to trip this guard, turning the FIRST command in
+    the product into a refusal for following the install instructions
+    literally. The refusal even NAMED `<parent>/alp-workspace` as the fix
+    (`default_relocation_target`'s own choice); this proves tan now performs
+    that move itself, saying so plainly, rather than asking for it back."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
     (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
-    before = sorted(p.name for p in sdk.parent.iterdir())
+    target = sdk.parent / "alp-workspace"
+    new_sdk = target / sdk.name
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0
+    codes_seen = codes(env)
+    assert "bootstrap.workspace-guard" not in codes_seen
+    assert "bootstrap.workspace-relocated" in codes_seen
+    message = next(i["message"] for i in env["issues"] if i["code"] == "bootstrap.workspace-relocated")
+    assert bootstrap_cmd._native(str(sdk)) in message
+    assert bootstrap_cmd._native(str(new_sdk)) in message
+    # The checkout really moved: gone from the old location, present (with its
+    # own content) at the new one; `unrelated.txt` is untouched, still the
+    # only other thing in the original parent.
+    assert not sdk.exists()
+    assert (new_sdk / "scripts" / "alp_project.py").is_file()
+    assert (sdk.parent / "unrelated.txt").exists()
+    assert sorted(p.name for p in sdk.parent.iterdir()) == ["alp-workspace", "unrelated.txt"]
+    # The envelope's own paths agree with where the checkout actually ended up
+    # (tan-cli#284's review majors, re-applying to the auto-relocated case).
+    assert env["data"]["sdkRoot"] == bootstrap_cmd._native(str(new_sdk))
+    assert env["data"]["workspaceDir"] == bootstrap_cmd._native(str(target))
+    # tan-cli#185 (shared with the explicit `--workspace` path): the global
+    # default SDK now points at the new location.
+    pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
+    assert pointer.exists()
+    assert json.loads(pointer.read_text(encoding="utf-8"))["sdkPath"] == str(new_sdk)
+
+
+def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_path):
+    """tan-cli#302 non-negotiable: auto-relocating into
+    `default_relocation_target`'s own `alp-workspace` choice is safe only into
+    an EMPTY (or absent) directory -- silently writing into one that already
+    holds something would be the exact "wrote into a directory without asking"
+    hazard the parent guard exists to prevent, one level down. The realistic
+    trigger is a previous attempt's partial venv, left behind by
+    `rollback_relocation_after` on a retry (its own docstring: "left on disk...
+    delete it by hand if you do not want it"); reproduced directly here rather
+    than via a real failing venv."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    target = sdk.parent / "alp-workspace"
+    (target / "leftover").mkdir(parents=True)
 
     proc = run_tan(
         "bootstrap", "--no-west", "--no-pip", "--format", "json",
@@ -682,11 +732,14 @@ def test_the_workspace_parent_guard_refuses_and_leaves_nothing_on_disk(tmp_path)
     assert proc.returncode == 2
     assert codes(env) == ["bootstrap.workspace-guard"]
     message = env["issues"][0]["message"]
-    # Names BOTH remedies: this refusal is inherited by `tan build` and `tan
-    # doctor --build --fix`, neither of which has a `--workspace` of its own.
+    assert "already exists" in message
+    assert bootstrap_cmd._native(str(target)) in message
     assert "tan bootstrap --workspace <path>" in message
-    assert "dedicated directory" in message
-    assert sorted(p.name for p in sdk.parent.iterdir()) == before
+    # Nothing was moved: the checkout is exactly where it started, and the
+    # pre-existing `alp-workspace/leftover` was not written into.
+    assert sdk.exists()
+    assert (target / "leftover").is_dir()
+    assert not (target / sdk.name).exists()
     # tan-cli#284: the stale "re-run interactively" advice is gone -- this
     # port never prompts, on any run, TTY or not.
     assert "interactively" not in message
@@ -787,10 +840,21 @@ def test_the_enclosing_west_guard_does_not_fire_when_the_topdir_reuses_its_own_w
 
     `--dry-run`, not `--no-west`: this keeps the rest of the run hermetic
     (nothing spawned) while still exercising the guard exactly as a real run
-    would reach it -- the guard itself does not consult `dry_run`."""
+    would reach it -- the guard itself does not consult `dry_run`.
+
+    The topdir's own `.west` carries a `config` (not just a bare directory):
+    since tan-cli#302, a bare `.west` with no `config` is NOT `dot_west_is_
+    workspace` to the parent guard (`default_relocation_target`), so it reads
+    as ordinary dirty content and the guard would auto-relocate the checkout
+    one directory deeper -- a different scenario from the one under test
+    here, which is specifically the reuse path leaving `intended_topdir`
+    unmoved."""
     sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
     (tmp_path / ".west").mkdir()  # an ancestor of sdk.parent (the topdir)
     (sdk.parent / ".west").mkdir()  # the topdir's OWN -- triggers reuse, not init
+    (sdk.parent / ".west" / "config").write_text(
+        "[manifest]\npath = alp-sdk\n", encoding="utf-8"
+    )
 
     proc = run_tan(
         "bootstrap", "--dry-run", "--format", "json",
