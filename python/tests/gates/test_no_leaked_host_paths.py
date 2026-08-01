@@ -100,7 +100,12 @@ LEAKS: tuple[tuple[re.Pattern[str], str], ...] = (
         # shipped a colleague's `/Users/<name>/...` checkout path in six
         # committed plan fixtures and this pattern, having only ever checked
         # the Windows drive-letter form, said nothing.
-        re.compile(r"(?:/home/|[A-Za-z]:[\\/]Users[\\/]|/Users/)([^\\/\s\"'`,)]+)"),
+        # `:` is excluded from the captured name so prose can end a sentence on
+        # a path -- `/c/Users/dev: real, empty` captured `dev:`, which is not
+        # `dev`, so PLACEHOLDER_HOMES could not clear it and this gate flagged
+        # the very placeholder its own failure message recommends. A check that
+        # rejects its sanctioned answer is one a developer switches off.
+        re.compile(r"(?:/home/|[A-Za-z]:[\\/]Users[\\/]|/Users/)([^\\/\s\"'`,):]+)"),
         "a home directory naming a real account",
     ),
 )
