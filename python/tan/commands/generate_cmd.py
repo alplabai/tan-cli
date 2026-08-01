@@ -92,7 +92,7 @@ import typer
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
 from tan import planner_emit
 from tan.commands.build_cmd import _planner_python, resolve_sdk_root_wide
-from tan.commands.sdk_cmd import project_pin_issue
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, project_pin_issue
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -852,8 +852,12 @@ def generate(
         if resolved is None:
             raise GenerateError(
                 "generate.sdk-root-unresolved",
-                "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk "
-                "switch <version|path>`, or place the project near an alp-sdk checkout.",
+                # `tan sdk switch` refuses in this build (tan-cli#305) -- kept
+                # the two mechanisms that actually work here (`--sdk-root`,
+                # placing the project near a checkout) and swapped the third
+                # for NO_SDK_NEXT_STEPS's honest "how to get one at all".
+                "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+                f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
                 ExitCode.VALIDATION_FAILURE,
             )
         resolved_sdk, sdk_tier, sdk_reported, sdk_broken_pin = resolved
