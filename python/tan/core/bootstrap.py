@@ -981,8 +981,15 @@ def python_floor_skew_warning(
     `tan.commands.doctor_cmd.python_floor_skew_check` -- doctor raises the same
     verdict as `doctor.pythonFloor`, and two commands describing one manifest
     defect differently is the drift this port keeps hitting. Fires on a
-    SUCCESSFUL run too: the host is fine, the manifest is not, and the fix
-    belongs in `metadata/bootstrap.json` rather than on the customer's machine.
+    SUCCESSFUL run too: the host is fine and the two declared floors disagree.
+
+    It does NOT follow that the fix belongs in `metadata/bootstrap.json` -- this
+    docstring used to say so, and the remedy below used to act on it. Raising
+    `prerequisites.pythonMinVersion` was tried and REVERTED (alp-sdk#1078): the
+    key is host-universal while this floor is Zephyr's, so raising it refuses a
+    3.10/3.11 host for a Yocto-only or metadata-only project that builds today.
+    The skew is deliberate; the message says so and points the customer at the
+    only thing that actually helps them (tan-cli#300).
 
     `from_manifest=False` (pass `facts.from_manifest`) means `manifest_floor`
     never actually came from a read `metadata/bootstrap.json` -- this SDK

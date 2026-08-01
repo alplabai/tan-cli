@@ -318,12 +318,87 @@ def test_west_present_but_unparseable_version_is_a_warning_not_a_crash():
 # --------------------------------------------------------------------------
 
 
-def test_west_resolved_warns_when_nothing_resolves():
-    """The refusing state: neither the workspace venv nor PATH has a `west`
-    to run."""
+def test_west_resolved_FAILS_when_nothing_resolves_anywhere():
+    """No venv west, no PATH west: NO build slice can run, so this is the check
+    that fails and owns the exit code.
+
+    It was a Warn, on the premise that `west` (bare PATH) "already fails
+    outright on a totally-absent west". tan-cli#299 removed that Fail and
+    falsified the premise. Measured on a real host with `west.exe` renamed out
+    of the venv and off PATH, both checks Warned and `tan doctor` exited **0**
+    on a machine where nothing could build -- a false refusal traded for a
+    false pass. This test is the one that would have caught it.
+    """
     check = doctor_cmd.west_resolved_check(None, None)
-    assert check.status == "warn"
+    assert check.status == "fail"
     assert check.fix == "tan bootstrap"
+
+
+def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_path, monkeypatch):
+    """The proof the unit tests below cannot give: two actual host states, run
+    through `_collect` + `exit_code_for`, asserting the EXIT CODE.
+
+    `west_check(found=None)` is ONE input covering three different host states
+    (venv has west / venv lacks it / no venv at all). A test that calls the
+    check twice with the same argument is two inputs, not two states, and it is
+    exactly what let five "refuses a host that works" defects ship green out of
+    this file. The state that actually shipped broken -- venv lacks it too --
+    was constructed by no fixture at all.
+
+    So: build two real trees, differing only in whether the venv holds a west,
+    keep PATH scrubbed in both, and assert 0 vs 4.
+    """
+    def _tree(name: str, *, with_west: bool) -> Path:
+        ws = tmp_path / name
+        (ws / ".west").mkdir(parents=True)
+        bin_dir = ws / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+        bin_dir.mkdir(parents=True)
+        if with_west:
+            (bin_dir / ("west.exe" if os.name == "nt" else "west")).write_text("", encoding="utf-8")
+        return ws
+
+    # west is on NEITHER PATH in both states -- that is the constant under test.
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+
+    have = _tree("have", with_west=True)
+    lack = _tree("lack", with_west=False)
+
+    def _fatal(ws: Path) -> tuple[str, int]:
+        checks = doctor_cmd._collect(None, workspace_root=str(ws))
+        by_name = {c.name: c.status for c in checks}
+        return by_name.get("westResolved", "?"), int(doctor_cmd.exit_code_for(checks))
+
+    # STATE 1 -- the DEFAULT post-bootstrap state. Builds work; must not refuse.
+    resolved, _ = _fatal(have)
+    assert resolved == "pass", "venv holds a west: westResolved must pass"
+
+    # STATE 2 -- nothing anywhere. No slice can run; must refuse.
+    resolved, code = _fatal(lack)
+    assert resolved == "fail", "no west anywhere: westResolved must FAIL"
+    assert code == 4, "a host where no build slice can run must not exit 0"
+
+
+def test_the_two_west_checks_split_the_question_and_only_one_can_be_fatal():
+    """`west` = "is it on bare PATH", never fatal. `westResolved` = "can a slice
+    run at all", fatal when not. tan-cli#123's one-version-per-check contract,
+    applied to severity: exactly one of them owns the exit code.
+
+    Both states, not one twice -- a single-state test is what let five
+    "refuses a host that works" defects ship green out of this file.
+    """
+    # DEFAULT post-bootstrap state: venv has west, PATH does not. Builds work.
+    assert doctor_cmd.west_check(None, None, None).status == "warn"
+    assert doctor_cmd.west_resolved_check("/ws/.venv/bin/west", (1, 5)).status == "pass"
+
+    # ABSENT state: nothing anywhere. Builds cannot work.
+    assert doctor_cmd.west_check(None, None, None).status == "warn"
+    assert doctor_cmd.west_resolved_check(None, None).status == "fail"
+
+    # `west`'s text must not predict what `westResolved` found -- asserting the
+    # venv resolved one was wrong in exactly the absent state.
+    detail = doctor_cmd.west_check(None, None, None).detail
+    assert "actually resolves it through the workspace venv" not in detail
+    assert "westResolved" in detail
 
 
 def test_west_resolved_passes_and_names_the_resolved_binary_and_version():

@@ -5,6 +5,45 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+*Found by running the published `v0.5.0-rc2` binary end to end on a real
+Windows host -- fresh and dirty -- rather than testing the source or trusting a
+green CI run on a clean runner. Every defect below was invisible to both.*
+
+### Fixed
+
+- **`tan doctor` exited 4 on every fresh install.** `tan bootstrap` succeeds and
+  deliberately leaves `west` off PATH (its own next-steps block says to activate
+  the venv afterwards), so "west in the venv, absent from PATH" is not an edge
+  case -- it is the guaranteed post-bootstrap state, and the same state a
+  GUI-launched VS Code is always in. `west`'s Fail claimed "every build slice is
+  executed through it", which the build log disproved in the same workspace:
+  west resolved from the venv and the build produced a real ARM ELF while
+  `doctor` called the host broken (#299).
+- **`westResolved` now FAILS when west resolves nowhere.** Splitting the pair
+  above exposed that its Warn had rested on `west` failing first, so with both
+  warning a host where NO slice could run exited **0**. `west` answers "is it on
+  bare PATH" and is never fatal; `westResolved` answers "can a slice run at all"
+  and owns the exit code. Caught by the e2e, not by the tests.
+- **`doctor` and `bootstrap` stopped telling users to raise
+  `prerequisites.pythonMinVersion`** -- the change alp-sdk#1078 tried and
+  reverted, because that key is host-universal while the floor is Zephyr's, so
+  raising it refuses a 3.10/3.11 host for a Yocto-only project that builds
+  today. `bootstrap` emitted it *while refusing*, making it the last line a
+  blocked user read (#300).
+- **The `sdk` check names the tier it resolved through**, and a cwd checkout it
+  did not select, so a report describing a different SDK than the one you are
+  standing in is no longer indistinguishable from a wrong answer. Comparison is
+  `normcase`d -- without it, the same directory in different case reported
+  itself as unselected (#301).
+
+### Known
+
+- `tan bootstrap` still refuses the documented quickstart layout (`tan.exe` and
+  `alp-sdk/` in one directory) with "holds more than this checkout", and the
+  remedy it offers moves the user's checkout (#302).
+
 ## [0.5.0-rc2] — 2026-08-01
 
 *Everything the maintainer's first real `v0.5.0-rc1` run turned up, plus what

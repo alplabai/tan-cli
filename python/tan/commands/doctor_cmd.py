@@ -683,9 +683,16 @@ def west_check(
         return Check(
             "west",
             "warn",
-            "`west` is not on bare PATH -- every build slice actually resolves it "
-            "through the workspace venv instead (see `westResolved` above), which "
-            "is the normal state before that venv is activated in this shell.",
+            # Does NOT assert that the venv resolved one: this check cannot see
+            # what `westResolved` found, and asserting it was wrong in exactly
+            # the state that matters -- west absent everywhere, where this text
+            # claimed slices "actually resolve it through the venv" while
+            # `westResolved` reported the opposite. Name the authority instead
+            # of predicting its answer.
+            "`west` is not on bare PATH. `westResolved` above is the check that "
+            "answers whether a build slice can run -- it reports the binary one "
+            "would actually execute. PATH absence on its own is the normal state "
+            "before the workspace venv is activated in this shell.",
             "If `westResolved` above also could not resolve one, run `tan "
             "bootstrap`; otherwise activate the workspace venv (its `bin`/`Scripts` "
             "directory holds the `west` launcher) so tools invoked directly find it "
@@ -727,17 +734,33 @@ def west_resolved_check(found: str | None, version: tuple[int, int] | None) -> C
     `sdk`/`workspace` beside it (`crates/tan-cli/src/commands/doctor.rs:1828`
     asserts all three together in the plain fold).
 
-    `Warn`, not `Fail`, mirroring Rust's severity for `west_available`: `west`
-    above already fails outright on a totally-absent west, so this is the
-    narrower, additive fact that the SPECIFIC binary a build would run is (or
-    is not) present.
+    **FAIL when west resolves nowhere.** This used to be a Warn, justified by
+    "`west` above already fails outright on a totally-absent west, so this is
+    the narrower, additive fact". tan-cli#299 removed that Fail -- correctly,
+    because bare PATH is the wrong question -- and thereby falsified the
+    premise this severity rested on. Measured on a real host with `west.exe`
+    renamed out of the venv and absent from PATH:
+
+        westResolved  warn   west not resolved through the workspace venv or PATH
+        west          warn   ... every build slice actually resolves it through the venv
+        12 passed, 4 warning(s), 0 failed.        EXIT=0
+
+    Exit 0 on a host where nothing can execute a single slice, and `west`'s
+    text asserting the venv resolves it while THIS check says it does not. A
+    false refusal was traded for a false pass, which is the worse of the two.
+
+    So the pair now splits cleanly: `west` answers "is it on bare PATH" and is
+    never fatal (an unactivated venv is the normal post-bootstrap state);
+    `westResolved` answers "can a build slice run at all" and is fatal when the
+    answer is no. Exactly one of them owns the exit code, which is tan-cli#123's
+    one-version-per-check contract applied to severity.
     """
     if found is None:
         return Check(
             "westResolved",
-            "warn",
-            "west not resolved through the workspace venv or PATH -- run "
-            "`tan bootstrap` to create the workspace venv.",
+            "fail",
+            "west resolved neither through the workspace venv nor PATH -- no build "
+            "slice can be executed. Run `tan bootstrap` to create the workspace venv.",
             "tan bootstrap",
         )
     if version is None:
@@ -1887,7 +1910,19 @@ def _collect(
     unselected_candidate: str | None = None
     if sdk_root is not None and sdk_tier not in (None, "discovery", "none"):
         candidate = discover_sdk_root(Path(workspace_root))
-        if candidate is not None and _abs_posix(str(candidate)) != _abs_posix(sdk_root):
+        # `normcase` BOTH sides. `_abs_posix` is `abspath` + slash-swap and
+        # deliberately does not resolve, so on Windows the SAME directory
+        # spelled with different case -- a `~/.alp/sdk-default` written from a
+        # differently-cased `tan sdk switch`, or a differing drive-letter case
+        # -- compared unequal and the report told the user to select the SDK
+        # that was already selected:
+        #     alp-sdk at ...\ws\ALP-SDK (globalDefault; a checkout at
+        #     ...\ws\alp-sdk was not selected -- pass --sdk-root ... to use it)
+        # A report that lies is the defect class #301 exists to close, so it
+        # must not be reintroduced by the fix for it. No-op on POSIX.
+        if candidate is not None and os.path.normcase(
+            _abs_posix(str(candidate))
+        ) != os.path.normcase(_abs_posix(sdk_root)):
             unselected_candidate = str(candidate)
     checks.append(sdk_check(sdk_root, project_scope, sdk_tier, unselected_candidate))
     project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
