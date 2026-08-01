@@ -172,14 +172,18 @@ jobs:
         include:
           - os: windows-latest
             asset: tan-x86_64-pc-windows-msvc.exe
+            ext: .exe
           # Same two macOS labels release.yml uses (macOS 13 is retired, 14 is
           # deprecated) -- keeps the Intel/Apple-silicon pair comparable.
           - os: macos-15-intel
             asset: tan-x86_64-apple-darwin
+            ext: ""
           - os: macos-15
             asset: tan-aarch64-apple-darwin
+            ext: ""
           - os: ubuntu-latest
             asset: tan-x86_64-unknown-linux-gnu
+            ext: ""
             container: python:3.12-slim-bullseye
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
@@ -236,13 +240,31 @@ jobs:
       # without $ZEPHYR_BASE. See clean_host_smoke.py's module docstring for
       # the full contract; it is the CONSUMER of build_binary.sh's dist/tan
       # (or dist/tan.exe), never a rebuild of it.
+      #
+      # `matrix.ext` picks the exact name, NOT `[ -f python/dist/tan ] ||
+      # BIN=python/dist/tan.exe` (what this used to be): this step's `shell:`
+      # is Git Bash/MSYS on the Windows runner, and MSYS's `[ -f ]` reports
+      # TRUE for an extension-less name whenever a same-stem `.exe` exists --
+      # it resolves the PE lookup transparently, the same way `CreateProcess`
+      # would. So `[ -f "python/dist/tan" ]` was true with ONLY `tan.exe` on
+      # disk, the `||` fallback never ran, and the extension-less path was
+      # handed to `clean_host_smoke.py`, whose `Path.is_file()` has no such
+      # magic and correctly reported it missing (tan-cli#303 CI finding). The
+      # matrix already knows the platform at schedule time -- deriving the
+      # name from it is exact and shell-independent; release.yml uses the
+      # same `matrix.ext` field for the same reason.
       - name: clean-host smoke (--version / doctor / sdk list --online / bootstrap --dry-run)
         shell: bash
+        env:
+          TAN_BIN: python/dist/tan${{ matrix.ext }}
         run: |
           set -euo pipefail
-          BIN="python/dist/tan"
-          [ -f "$BIN" ] || BIN="python/dist/tan.exe"
-          python python/scripts/clean_host_smoke.py --tan "$BIN"
+          if [ ! -f "$TAN_BIN" ]; then
+            echo "::error::expected the freeze at ${TAN_BIN} (matrix ext '${{ matrix.ext }}') but it is missing. Checked only that exact name -- not a [ -f tan ] || [ -f tan.exe ] probe, which MSYS/Git-Bash cannot answer correctly (see the comment above this step)."
+            ls -la python/dist || echo "python/dist does not exist at all -- the freeze step above did not run or did not produce it."
+            exit 1
+          fi
+          python python/scripts/clean_host_smoke.py --tan "$TAN_BIN"
 
   # POST-PUBLISH confirmation: downloads the asset `install.sh`/`install.ps1`
   # actually fetch and runs the identical smoke test against those exact
