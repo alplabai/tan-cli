@@ -95,7 +95,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import _abs_posix, resolve_sdk_root_ladder
+from tan.commands.build_cmd import _abs_posix, discover_sdk_root, resolve_sdk_root_ladder
 from tan.commands.sdk_cmd import parse_sdk_version_yaml, project_pin_issue
 from tan.core.bootstrap import (
     MissingPrerequisite,
@@ -487,8 +487,19 @@ def python_floor_skew_check(
     Reported rather than silently reconciled. A host that satisfies the higher
     floor is fine TODAY, but the manifest is the number a customer will read and
     trust, so while the skew stands the two sources disagree about which hosts
-    are supported. Saying which number came from which file is the whole value:
-    the fix belongs in `metadata/bootstrap.json`, not on the customer's machine.
+    are supported. Saying which number came from which file is the whole value.
+
+    **Not fixed by raising the manifest (tan-cli#300).** That was tried and
+    reverted -- alp-sdk#1078: `crates/tan-core/src/build_readiness.rs:401`
+    pushes the Python check BEFORE any `os_set` branch ("EVERY backend's
+    build-plan emission runs `alp_project.py` ... not just Zephyr's"), so
+    raising the shared `pythonMinVersion` key would refuse a Yocto-only or
+    metadata-only project, on a host that builds it fine today, over a floor
+    that project never needs -- and the raised floor is unreachable via the
+    manifest's own remedy (`sudo apt-get install -y python3`) on the Ubuntu
+    22.04 hosts the docs recommend. The skew is real and known, and scoped to
+    Zephyr; the fix for a Zephyr build on a below-floor host is a newer
+    interpreter on THAT host (see `hostPython` above), not a manifest edit.
 
     `manifest_is_real` is `False` when `manifest_floor` never actually came from
     a read `metadata/bootstrap.json` -- no SDK resolved, or this SDK predates
@@ -513,9 +524,12 @@ def python_floor_skew_check(
     if manifest_is_real:
         claim = f"alp-sdk's metadata/bootstrap.json declares pythonMinVersion {_fmt(manifest_floor)}"
         fix = (
-            f"Raise `prerequisites.pythonMinVersion` to {_fmt(effective_floor)} in "
-            f"alp-sdk's metadata/bootstrap.json (and re-run its "
-            f"scripts/check_bootstrap_manifest.py drift gate)."
+            f"Known, Zephyr-scoped skew (alp-sdk#1078) -- raising "
+            f"`prerequisites.pythonMinVersion` to {_fmt(effective_floor)} was tried "
+            f"and reverted, because that key also gates Yocto-only and "
+            f"metadata-only projects, which do not need it. Building for Zephyr on "
+            f"a host below {_fmt(effective_floor)} needs a newer interpreter -- see "
+            f"the `hostPython` check above."
         )
     else:
         claim = (
@@ -637,21 +651,45 @@ def _posix_venv_capable(argv: list[str]) -> bool:
 def west_check(
     found: str | None, version: tuple[int, int] | None, floor: tuple[int, int] | None
 ) -> Check:
-    """`west` -- present, and at the manifest's floor.
+    """`west` -- present on BARE PATH, and at the manifest's floor.
 
-    `Fail` when absent: `west` is how every slice of every plan is executed, so
-    without it nothing builds. Only WARN on an old or unreadable version -- west
-    is forward-compatible in practice and refusing a host on a version string we
-    could not parse is a worse failure than letting the real invocation report
-    its own.
+    `Warn`, never `Fail`, when absent (tan-cli#299): the premise that used to
+    justify a hard Fail here -- "west is how every slice of every plan is
+    executed, so without it nothing builds" -- became false in tan-cli#289.
+    `tan.core.venv.west_program`'s workspace-venv resolution is what
+    `build/execute.py` and `flash_cmd.py` actually spawn, precisely so a
+    non-activated venv still builds. This is not a dirty-host edge case: `tan
+    bootstrap` deliberately does NOT put `west` on PATH (its own next-steps
+    text tells the user to activate the venv afterwards), so bare-PATH-lacks-
+    west-but-the-venv-has-it is the DEFAULT state of every fresh install, not
+    an unusual one -- this probe only ever sees bare PATH, so it cannot tell
+    a genuinely-unbuildable host from that ordinary one. Measured end-to-end
+    on the published v0.5.0-rc2 binary: straight after a successful
+    bootstrap, with `west` off PATH, `tan build` still produced real ELFs
+    through the resolved venv `west`, while `tan doctor` reported
+    `westResolved` (the venv-aware verdict, right above this check -- see
+    `west_resolved_check`) PASS and this check's OLD `fail` as the sole
+    failure -- exiting 4 on a host that, provably, builds. Mirrors the Rust
+    oracle's own severity for the identical probe: `crate::build_readiness::
+    BUILD_BLOCKING` deliberately excludes `west` for this exact reason
+    (`crates/tan-core/src/build_readiness.rs`'s own doc comment: "the
+    venv-aware verdict is the preflight's `westResolved` check, which the
+    same report already carries"). Only WARN on an old or unreadable version
+    too -- west is forward-compatible in practice and refusing a host on a
+    version string we could not parse is a worse failure than letting the
+    real invocation report its own.
     """
     if found is None:
         return Check(
             "west",
-            "fail",
-            "`west` is not on PATH; every build slice is executed through it.",
-            "Run `tan bootstrap`, or activate the workspace venv it created "
-            "(its `bin`/`Scripts` directory holds the `west` launcher).",
+            "warn",
+            "`west` is not on bare PATH -- every build slice actually resolves it "
+            "through the workspace venv instead (see `westResolved` above), which "
+            "is the normal state before that venv is activated in this shell.",
+            "If `westResolved` above also could not resolve one, run `tan "
+            "bootstrap`; otherwise activate the workspace venv (its `bin`/`Scripts` "
+            "directory holds the `west` launcher) so tools invoked directly find it "
+            "too.",
         )
     if version is None:
         return Check(
@@ -1183,7 +1221,12 @@ def home_path_check(home: str | None) -> Check:
 # ---------------------------------------------------------------------------
 
 
-def sdk_check(sdk_root: str | None, project_scope: str | None) -> Check:
+def sdk_check(
+    sdk_root: str | None,
+    project_scope: str | None,
+    tier: str | None = None,
+    unselected_candidate: str | None = None,
+) -> Check:
     """`sdk` -- is an alp-sdk checkout resolved at all? Mirrors
     `tan_core::preflight::build_preflight_checks`'s `sdk` check.
 
@@ -1192,9 +1235,34 @@ def sdk_check(sdk_root: str | None, project_scope: str | None) -> Check:
     `tan sdk switch` writes is scoped to `--project`, so a bare
     `tan sdk switch <path>` from a `tan --project <p> doctor` run reports
     success and changes nothing about THIS invocation (tan-cli#101).
+
+    `tier`/`unselected_candidate` (tan-cli#301) -- a reported host named THREE
+    different roots in one report (a leftover `globalDefault`, a stale
+    `$ZEPHYR_BASE` workspace, and the checkout the user was actually standing
+    in, which appeared nowhere), and `tan doctor`/`tan bootstrap` disagreed
+    about which SDK a bare invocation meant. `GlobalDefault` outranking
+    `Discovery` is deliberate (tan-cli#263 made pins absolute on purpose) --
+    NO behaviour change here, only visibility: `tier` is the `SdkSourceTier`
+    wire spelling (`sdkRootFlag`/`projectPin`/`globalDefault`/`discovery`)
+    that answered, reported alongside the root the same way `tan sdk
+    current`'s envelope already pairs `sdkPath` with `sourceTier`.
+    `unselected_candidate` is a DIFFERENT checkout discoverable from cwd that
+    a higher tier outranked (`None` when the winning tier already IS
+    discovery, or nothing else resolves there) -- named explicitly, with how
+    to select it, so a plausible checkout sitting right there does not read
+    as unconsidered.
     """
     if sdk_root is not None:
-        return Check("sdk", "pass", f"alp-sdk at {sdk_root}")
+        detail = f"alp-sdk at {sdk_root}"
+        if tier is not None:
+            detail += f" ({tier}"
+            if unselected_candidate is not None:
+                detail += (
+                    f"; a checkout at {unselected_candidate} was not selected -- "
+                    f"pass --sdk-root {unselected_candidate} to use it"
+                )
+            detail += ")"
+        return Check("sdk", "pass", detail)
     if project_scope is not None:
         fix = f"tan --project {project_scope} sdk switch <path>"
         return Check(
@@ -1763,6 +1831,7 @@ def _collect(
     board_yaml: str | None = None,
     project_scope: str | None = None,
     workspace_root: str = ".",
+    sdk_tier: str | None = None,
 ) -> list[Check]:
     """Every probe, in report order. Nothing here may raise -- see the module
     docstring; `probe`/`on_path`/`_read_text` are the only three ways this
@@ -1793,13 +1862,34 @@ def _collect(
     auto-discovery only ever sets it to a path that already `is_file()`), so
     `board_yaml is not None` is a safe proxy for "explicitly given" exactly
     where it matters -- the branch where `present` is False.
+
+    `sdk_tier` -- the `SdkSourceTier` `resolve_sdk_root_ladder` answered
+    `sdk_root` with, threaded through so `sdk_check` (tan-cli#301) can name
+    it. Optional/defaulted for the same reason every other parameter here is:
+    every existing direct caller keeps working, reporting `sdk` with no tier
+    parenthetical rather than a guessed one.
     """
     checks: list[Check] = []
 
     # tan-cli#294 finding 2: build-environment preflight -- LEADS the report,
     # mirroring Rust's `prepend_doctor_checks(..., probe_build_preflight(...))`:
     # "can a build even start" outranks every host-tool probe below.
-    checks.append(sdk_check(sdk_root, project_scope))
+    #
+    # tan-cli#301: a checkout discoverable from cwd that a HIGHER tier
+    # outranked is surfaced too, but ONLY the discovery `sdk_check` itself
+    # would have used were nothing above it configured (`discover_sdk_root`,
+    # the WIDE walk `resolve_sdk_root_ladder`'s own tail already falls back
+    # to) -- reusing that exact helper instead of a second, hand-rolled scan
+    # is what keeps this a report-only addition: it can only ever name a
+    # candidate the ladder itself already knows how to reach, never invent
+    # one of its own. Skipped when the winning tier already IS discovery (or
+    # nothing): there is nothing "unselected" left to name.
+    unselected_candidate: str | None = None
+    if sdk_root is not None and sdk_tier not in (None, "discovery", "none"):
+        candidate = discover_sdk_root(Path(workspace_root))
+        if candidate is not None and _abs_posix(str(candidate)) != _abs_posix(sdk_root):
+            unselected_candidate = str(candidate)
+    checks.append(sdk_check(sdk_root, project_scope, sdk_tier, unselected_candidate))
     project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
     checks.append(
         board_yaml_preflight_check(
@@ -2066,6 +2156,7 @@ def doctor(
             board_yaml=board_yaml,
             project_scope=project_scope,
             workspace_root=str(workspace_root),
+            sdk_tier=sdk_tier,
         )
         exit_code = exit_code_for(checks)
         issues = checks_to_issues(checks)

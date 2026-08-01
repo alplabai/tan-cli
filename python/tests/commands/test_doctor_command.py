@@ -154,7 +154,8 @@ def test_zephyr_floor_survives_an_unreadable_cmake_file(tmp_path):
 
 def test_the_manifest_declaring_a_lower_floor_is_itself_reported():
     """`doctor` must not silently paper over the skew: it says which floor is
-    which, so the fix lands in the manifest rather than in the customer."""
+    which, and where the ACTUAL fix belongs (a newer host interpreter, not
+    the manifest -- tan-cli#300)."""
     check = doctor_cmd.python_floor_skew_check(
         manifest_floor=(3, 10), effective_floor=(3, 12), effective_source="zephyr python.cmake"
     )
@@ -162,6 +163,21 @@ def test_the_manifest_declaring_a_lower_floor_is_itself_reported():
     assert check.status == "warn"
     assert "3.10" in check.detail and "3.12" in check.detail
     assert "metadata/bootstrap.json" in check.detail
+
+
+def test_the_skew_fix_points_at_the_reverted_alp_sdk_change_not_a_manifest_raise():
+    """tan-cli#300: raising `prerequisites.pythonMinVersion` was tried and
+    reverted (alp-sdk#1078) -- it gates EVERY backend, not just Zephyr's, so
+    it would refuse a Yocto-only/metadata-only host that builds today. The
+    `fix` text must send the reader to a real interpreter, not back to the
+    manifest edit that was already rejected."""
+    check = doctor_cmd.python_floor_skew_check(
+        manifest_floor=(3, 10), effective_floor=(3, 12), effective_source="zephyr python.cmake"
+    )
+    assert check is not None
+    assert "alp-sdk#1078" in (check.fix or "")
+    assert "tried and reverted" in (check.fix or "")
+    assert "Raise `prerequisites.pythonMinVersion`" not in (check.fix or "")
 
 
 def test_no_skew_check_when_the_two_floors_agree():
@@ -254,14 +270,42 @@ def test_missing_prerequisites_carry_the_frozen_code_and_the_install_commands():
     assert "sudo apt-get install -y ninja-build" in (check.fix or "")
 
 
+def test_west_on_bare_path_the_activated_venv_state_passes():
+    """The ACTIVATED state of tan-cli#299's mandatory two-state proof: the
+    workspace venv has been sourced into this shell, so bare PATH sees
+    `west` too. This is the EXCEPTIONAL state, not the default one -- the
+    next test covers the state every fresh install actually starts in."""
+    check = doctor_cmd.west_check(found="west", version=(1, 5), floor=(1, 4))
+    assert check.status == "pass"
+
+
 def test_west_below_the_manifest_floor_warns_and_names_both_versions():
     check = doctor_cmd.west_check(found="west", version=(0, 13), floor=(0, 14))
     assert check.status == "warn"
     assert "0.13" in check.detail and "0.14" in check.detail
 
 
-def test_west_absent_fails():
-    assert doctor_cmd.west_check(found=None, version=None, floor=(0, 14)).status == "fail"
+def test_west_absent_from_bare_path_is_the_default_post_bootstrap_state_and_warns_not_fails():
+    """tan-cli#299: the DEFAULT state of the mandatory two-state proof, not an
+    edge case -- `tan bootstrap` deliberately does not put `west` on PATH (its
+    own next-steps text tells the user to activate the venv afterwards), so
+    THIS is what every fresh install sees first, not the activated state the
+    previous test covers. Measured end-to-end on the published v0.5.0-rc2
+    binary, straight after a successful bootstrap, `west` off PATH: `tan
+    build` still built real ELFs through the resolved venv `west`, while `tan
+    doctor` reported `westResolved` pass and this check's OLD `fail` as the
+    sole failure, exiting 4 on a host that, provably, builds.
+
+    `west_check` only ever sees bare PATH, so its Fail used to be the sole
+    reason `tan doctor` exited 4 on a host `westResolved` (the venv-aware
+    verdict, computed separately) confirmed builds fine -- exactly the false
+    refusal tan-cli#289 made possible: `tan.core.venv.west_program`, not bare
+    PATH, is what a real build spawns. `Warn`, never `Fail`, mirrors the Rust
+    oracle's own severity for this identical probe (`crate::build_readiness::
+    BUILD_BLOCKING` deliberately excludes `west`)."""
+    check = doctor_cmd.west_check(found=None, version=None, floor=(0, 14))
+    assert check.status == "warn"
+    assert doctor_cmd.exit_code_for([check]) == doctor_cmd.ExitCode.SUCCESS
 
 
 def test_west_present_but_unparseable_version_is_a_warning_not_a_crash():
@@ -310,13 +354,14 @@ def test_collect_reports_west_resolved_unconditionally(tmp_path):
 def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     """tan-cli#123's exact bug, reproduced then guarded: a workspace venv
     holds `west`, PATH is scrubbed empty so a bare lookup CANNOT possibly
-    answer -- `west` (bare-PATH-only) must fail, and `westResolved` must
-    still resolve and report a version, proving it came from the venv
-    binary, never a bare-PATH re-probe. Break `west_resolved_check`'s wiring
-    in `_collect` (e.g. feed it `on_path("west")` instead of
-    `tan.core.venv.west_program`'s result) and this goes red: `westResolved`
-    would report the same `warn`/absent verdict `west` does, with PATH
-    scrubbed.
+    answer -- `west` (bare-PATH-only) must WARN (tan-cli#299: never fail --
+    this state, PATH-lacks-it-but-the-venv-has-it, is exactly what let a
+    working host exit 4), and `westResolved` must still resolve and report a
+    version, proving it came from the venv binary, never a bare-PATH
+    re-probe. Break `west_resolved_check`'s wiring in `_collect` (e.g. feed
+    it `on_path("west")` instead of `tan.core.venv.west_program`'s result)
+    and this goes red: `westResolved` would report the same `warn`/absent
+    verdict `west` does, with PATH scrubbed.
     """
     layout = venv_layout(os.name == "nt")
     bin_dir = tmp_path / ".venv" / layout.bin_dir
@@ -344,7 +389,7 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     envelope = json.loads(proc.stdout)
     checks = {c["name"]: c for c in envelope["data"]["checks"]}
 
-    assert checks["west"]["status"] == "fail", checks["west"]
+    assert checks["west"]["status"] == "warn", checks["west"]
     resolved = checks["westResolved"]
     assert resolved["status"] == "pass", resolved
     if os.name == "nt":
@@ -1142,6 +1187,99 @@ def test_sdk_check_names_the_project_scoped_switch_when_a_project_scope_is_given
     assert "tan --project examples/uart-echo sdk switch <path>" in check.detail
     assert "--sdk-root" in check.detail
     assert check.fix == "tan --project examples/uart-echo sdk switch <path>"
+
+
+# --------------------------------------------------------------------------
+# tan-cli#301 -- `sdk` names the winning TIER, and an unselected cwd
+# candidate a higher tier outranked. No behaviour change: the tier ladder
+# itself (GlobalDefault > Discovery, tan-cli#263's absolute pins) is untouched.
+# --------------------------------------------------------------------------
+
+
+def test_sdk_check_with_no_tier_given_keeps_the_old_bare_detail():
+    """Every existing direct caller (no `tier` passed) must see byte-identical
+    output -- this is a report-only addition."""
+    check = doctor_cmd.sdk_check("/opt/alp-sdk", project_scope=None)
+    assert check.detail == "alp-sdk at /opt/alp-sdk"
+
+
+def test_sdk_check_reports_the_tier_alongside_the_root():
+    check = doctor_cmd.sdk_check("/opt/alp-sdk", project_scope=None, tier="globalDefault")
+    assert check.status == "pass"
+    assert "alp-sdk at /opt/alp-sdk" in check.detail
+    assert "globalDefault" in check.detail
+
+
+def test_sdk_check_names_an_unselected_candidate_and_how_to_select_it():
+    check = doctor_cmd.sdk_check(
+        "/opt/alp-sdk",
+        project_scope=None,
+        tier="globalDefault",
+        unselected_candidate="/home/dev/project/alp-sdk",
+    )
+    assert "was not selected" in check.detail
+    assert "/home/dev/project/alp-sdk" in check.detail
+    assert "--sdk-root /home/dev/project/alp-sdk" in check.detail
+
+
+def _make_sdk_root(path: Path) -> Path:
+    (path / "scripts").mkdir(parents=True, exist_ok=True)
+    (path / "scripts" / "alp_project.py").write_text("", encoding="utf-8", newline="")
+    return path
+
+
+def _write_global_default_pointer(target: Path) -> None:
+    """`~/.alp/sdk-default` -- `HOME`/`USERPROFILE` are already repointed at
+    an isolated tmp dir by the autouse `conftest._scrub_sdk_discovery_env`
+    fixture, so this cannot touch a developer's real global default."""
+    home = Path(os.environ["USERPROFILE" if os.name == "nt" else "HOME"])
+    pointer = home / ".alp" / "sdk-default"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(
+        json.dumps({"sdkPath": str(target), "updatedAt": "1970-01-01T00:00:00Z"}),
+        encoding="utf-8",
+        newline="",
+    )
+
+
+def test_collect_names_the_global_default_tier_and_the_unselected_child_checkout(tmp_path):
+    """tan-cli#301's exact reported shape: a global-default alp-sdk wins over
+    a checkout the user was standing IN (a CHILD of the workspace root), and
+    the report used to say nothing about either fact -- three roots, one
+    report, no way to tell which is which. `resolve_sdk_root_ladder` still
+    picks the SAME globalDefault (no behaviour change); only `sdk`'s own
+    detail changes."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    child_sdk = _make_sdk_root(workspace / "alp-sdk")
+    global_sdk = _make_sdk_root(tmp_path / "elsewhere" / "alp-sdk")
+    _write_global_default_pointer(global_sdk)
+
+    resolved_root, tier, broken_pin = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    assert tier == "globalDefault"
+    assert str(resolved_root) == str(global_sdk)
+    assert broken_pin is None
+
+    checks = doctor_cmd._collect(
+        str(resolved_root), workspace_root=str(workspace), sdk_tier=tier
+    )
+    sdk = next(c for c in checks if c.name == "sdk")
+    assert sdk.status == "pass"
+    assert "globalDefault" in sdk.detail
+    assert str(child_sdk) in sdk.detail
+    assert "was not selected" in sdk.detail
+    assert f"--sdk-root {child_sdk}" in sdk.detail
+
+
+def test_collect_names_no_unselected_candidate_when_discovery_itself_answered(tmp_path):
+    """The tier that resolved IS discovery -- there is no "unselected"
+    candidate to name; a bolder discovery walk finding the SAME checkout
+    again must not read as a second, ignored one."""
+    workspace = tmp_path / "ws"
+    sdk = _make_sdk_root(workspace)
+    checks = doctor_cmd._collect(str(sdk), workspace_root=str(workspace), sdk_tier="discovery")
+    check = next(c for c in checks if c.name == "sdk")
+    assert "was not selected" not in check.detail
 
 
 def test_board_yaml_preflight_check_passes_when_present_regardless_of_selection():
