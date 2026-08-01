@@ -83,6 +83,7 @@ from tan.core.bootstrap import (
     PrereqFailure,
     Tokens,
     capture_tail,
+    completion_verdict,
     decide_workspace_reuse,
     detect_host_os,
     die,
@@ -99,6 +100,7 @@ from tan.core.bootstrap import (
     posix_venv_unusable,
     print_env_block,
     python_candidates,
+    python_ceiling_warning,
     python_floor_skew_warning,
     python_too_old,
     reported_missing,
@@ -111,6 +113,7 @@ from tan.core.bootstrap import (
     yocto_gate,
     yocto_mixed_warning,
     yocto_only_refusal,
+    zephyr_requirements_hint,
 )
 from tan.core.scaffold import sdk_pointer_json
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -178,6 +181,20 @@ def _same_directory(a: Path, b: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
+#: The `pip_phase` warning codes after which the workspace cannot do what it
+#: was bootstrapped for (tan-cli#220 / tan-cli#285), ported from the Rust
+#: oracle's `WORKSPACE_BLOCKING`
+#: (`crates/tan-cli/src/commands/bootstrap/steps.rs`). Each phase stays
+#: non-fatal on its own -- the run continues and the workspace stays on disk
+#: -- but `completion_verdict` refuses to call a run that hit one of these
+#: `complete.` (unless `--allow-partial`).
+#:
+#: `pip-upgrade` is deliberately ABSENT, matching the oracle: it upgrades
+#: pip/wheel themselves, and the pip that was already there still installs
+#: packages -- the one genuinely cosmetic member of the phase.
+WORKSPACE_BLOCKING: tuple[str, ...] = ("zephyr-requirements", "sdk-extras", "editable-install")
+
+
 class Log:
     """Progress reporter. Text mode streams live to stderr (pip/west take
     minutes, so a summary at the end would look like a hang); JSON mode stays
@@ -204,10 +221,41 @@ class Log:
         self.line(message)
         self.warnings.append((code, message))
 
-    def take_issues(self) -> list[Issue]:
-        """Drain the recorded warnings as `warning`-severity issues. Draining is
-        idempotent -- no double-reporting on a second call."""
-        issues = [Issue(f"bootstrap.{code}", "warning", msg) for code, msg in self.warnings]
+    def blocking(self) -> list[str]:
+        """The recorded warning codes that mean the WORKSPACE IS NOT USABLE,
+        in the order they were raised (tan-cli#220 / tan-cli#285) -- see
+        `WORKSPACE_BLOCKING`. Empty when the run only hit cosmetic problems.
+
+        Derived from `WORKSPACE_BLOCKING` membership rather than a per-call
+        `degraded=` flag: a flag is opt-in at every call site, so a future
+        warn that SHOULD block defaults to not blocking unless its author
+        remembers to say so -- the same fail-open shape as the defect this
+        mechanism exists to close. One data set, consulted here, cannot drift
+        from itself.
+        """
+        return [code for code, _ in self.warnings if code in WORKSPACE_BLOCKING]
+
+    def take_issues(self, *, escalate_blocking: bool = False) -> list[Issue]:
+        """Drain the recorded warnings as envelope issues. Draining is
+        idempotent -- no double-reporting on a second call.
+
+        `escalate_blocking` promotes the `WORKSPACE_BLOCKING` codes to
+        `severity: "error"` -- set when they actually blocked the verdict,
+        i.e. the run refused to report success over them (tan-cli#285): an
+        envelope that exits non-zero while every issue in it says `warning`
+        invites a consumer to treat the whole thing as advisory. Under
+        `--allow-partial` they stay `warning`, because the customer was told
+        and chose to proceed, and an `error` on a run that exits 0 is its own
+        kind of lie.
+        """
+        issues = [
+            Issue(
+                f"bootstrap.{code}",
+                "error" if escalate_blocking and code in WORKSPACE_BLOCKING else "warning",
+                msg,
+            )
+            for code, msg in self.warnings
+        ]
         self.warnings = []
         return issues
 
@@ -574,6 +622,37 @@ def _venv_has_usable_pip(venv: VenvBin, runner: Runner) -> bool:
     return probe([str(venv.python), "-m", "pip", "--version"], timeout=PROBE_TIMEOUT_S) is not None
 
 
+def _venv_python_version(
+    venv: VenvBin, runner: Runner, fallback: tuple[int, int]
+) -> tuple[int, int]:
+    """The version `venv.python` actually resolves to, probed directly.
+
+    NOT `host_python.version`: that only describes the interpreter that
+    CREATED the venv, and pip installs run inside the venv's OWN interpreter
+    -- which can be a different one on a REUSED venv (built on 3.14 last
+    week; the host now resolves 3.12 first on PATH, or the reverse). Probing
+    `host_python.version` for the ceiling check is a proxy that can both
+    warn spuriously (a 3.12-built venv on a 3.14-default host) and miss the
+    real case entirely (a 3.14-built venv on a host now defaulting to 3.12,
+    tan-cli#285).
+
+    `fallback` (the host's version) covers `--dry-run`, where nothing was
+    actually written to disk to probe, and any other spawn failure: the real
+    pip install a moment later surfaces its own error if the venv is
+    genuinely broken, so an inconclusive probe here should not invent a
+    ceiling warning that may not even apply.
+    """
+    if runner.dry_run:
+        return fallback
+    out = probe(
+        [str(venv.python), "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+        timeout=PROBE_TIMEOUT_S,
+    )
+    if out is None:
+        return fallback
+    return _parse_two_dotted(out) or fallback
+
+
 def ensure_venv(
     ws: Workspace, log: Log, runner: Runner, host: HostPython
 ) -> tuple[VenvBin | None, str | None]:
@@ -732,9 +811,20 @@ def west_phase(
     return None
 
 
-def pip_phase(ws: Workspace, venv: VenvBin, log: Log, runner: Runner) -> None:
+def pip_phase(ws: Workspace, venv: VenvBin, log: Log, runner: Runner, host: str) -> None:
     """The Python dependency installs, all into the SAME venv and all NON-FATAL
-    (a recorded warn each), matching both scripts."""
+    on their own (a recorded warn each) -- but three of the four are
+    `WORKSPACE_BLOCKING` (tan-cli#220 / tan-cli#285): the run continues and
+    the workspace stays on disk, yet it must not be reported `bootstrap:
+    complete.` / exit 0 over one, unless `--allow-partial`. Matches both
+    scripts only in that each phase itself stays non-fatal; the closing
+    VERDICT no longer does -- see `WORKSPACE_BLOCKING`'s own docstring.
+
+    `host` is the caller's already-detected `detect_host_os(sys.platform)`,
+    threaded through rather than re-read here, so the OS this function gates
+    its remediation hint on can never disagree with the one every other
+    branch of `_run` already used.
+    """
     requirements = ws.workspace_dir / ws.facts.zephyr_requirements_path
     # Conditional on the file EXISTING, matching the oracle -- which also means a
     # `--dry-run` over a workspace `west update` has not populated yet omits this
@@ -743,18 +833,26 @@ def pip_phase(ws: Workspace, venv: VenvBin, log: Log, runner: Runner) -> None:
     if _is_file(requirements):
         log.line("Installing Zephyr Python requirements into the venv")
         argv = [str(venv.python), "-m", "pip", "install", "-q", "-r", str(requirements)]
-        if runner.run(argv) is not None:
+        detail = runner.run(argv)
+        if detail is not None:
             # Non-fatal, but "check manually" told the reader nothing. Measured
             # on a stock ubuntu-24.04 runner the failure is `hidapi` building
             # from source, needing pkg-config + the libusb-1.0 headers -- and
             # the workspace still LOOKS complete afterwards, so it surfaces far
-            # from the cause.
+            # from the cause. The remedy is OS-gated (tan-cli#285): the Linux
+            # `apt-get` line was printed unconditionally before, including on
+            # Windows, where it is both unactionable and wrong about the cause
+            # (an MSVC linker failure, not a missing header). `detail` -- the
+            # captured pip tail in JSON mode, `""` in text mode where the
+            # child's own log already streamed -- is appended so the hint's
+            # "look in the captured pip output" names something that is
+            # actually THERE, not off-screen (tan-cli#285).
+            tail = f" Captured output: {detail}" if detail else ""
             log.warn(
                 "zephyr-requirements",
                 "Zephyr requirements install reported a problem -- the venv is "
-                "incomplete and a later `tan init`/`tan build` may fail. On Linux this "
-                "is usually `hidapi` needing native headers: `sudo apt-get install -y "
-                "pkg-config libusb-1.0-0-dev libudev-dev`, then re-run `tan bootstrap`.",
+                f"incomplete and a later `tan init`/`tan build` may fail. "
+                f"{zephyr_requirements_hint(host)}{tail}",
             )
 
     # SDK-side extras: alp_project.py needs jsonschema; the MCUboot dev-key
@@ -928,14 +1026,87 @@ def workspace_guard_refusal(workspace_dir: Path, target: Path) -> str:
     """Names `tan bootstrap --workspace <path>` explicitly, not a bare
     `--workspace <path>`: this same refusal is inherited by `tan build` and
     `tan doctor --build --fix`, neither of which has a `--workspace` of its
-    own."""
+    own.
+
+    Never says "re-run interactively". The Rust oracle
+    (`crates/tan-cli/src/commands/bootstrap/relocate.rs`'s `interactive`
+    branch) prompts via `inquire` on a real TTY and falls through to wording
+    like this only when it is not one; this port takes NO input on this
+    decision on ANY run, TTY or not (see the "NO PROMPT, ever, in this port"
+    note at the guard's call site in `_run`). Telling an already-interactive
+    customer to re-run interactively sent them looking for a prompt this port
+    was never going to show them (tan-cli#284) -- the fix is the wording, not
+    adding the prompt this port deliberately does not have.
+    """
     return (
         f"{_native(workspace_dir)} holds more than this checkout, and is not itself an "
         f"existing west workspace; refusing to write the west workspace "
-        f"(zephyr/modules/.west/venv) there without asking. Re-run interactively to move "
-        f"the checkout into {_native(target)}, run `tan bootstrap --workspace <path>`, or "
-        f"clone alp-sdk into a dedicated directory."
+        f"(zephyr/modules/.west/venv) there without asking. Run `tan bootstrap --workspace "
+        f"<path>` (for example {_native(target)}) to move the checkout there, or clone "
+        f"alp-sdk into a dedicated directory yourself."
     )
+
+
+def enclosing_west_workspace_refusal(intended_topdir: Path, ancestor: Path) -> str:
+    """`bootstrap.enclosing-west-workspace`: refused BEFORE the checkout is
+    moved or the global default SDK is repointed (tan-cli#284).
+
+    `west init -l` walks from the topdir upward looking for an existing
+    `.west` and aborts the instant it finds one -- even when the topdir
+    ITSELF is clean, which is exactly what let the workspace-parent guard
+    (above) wave a run through only for `west init -l` to fail one step later
+    with `"already initialized in {ancestor}, aborting."` By then the
+    checkout had already been relocated and `~/.alp/sdk-default` already
+    repointed at a workspace that was never going to exist -- neither
+    mutation is rolled back by `west` failing on its own. An enclosing `.west`
+    is a static filesystem fact, so it is knowable -- and checked here --
+    before either mutation runs.
+
+    Deliberately does NOT repeat west's own remedy ("remove this directory"):
+    that `.west` may belong to a workspace the operator still depends on, and
+    a command that has not looked inside it has no business suggesting its
+    deletion.
+    """
+    return (
+        f"{_native(ancestor)} already holds a west workspace (its own `.west` directory), "
+        f"and west refuses to nest a second workspace inside one it finds above the topdir "
+        f"-- initialising a workspace at {_native(intended_topdir)} would fail with "
+        f'"already initialized in {_native(ancestor)}, aborting." That other workspace may '
+        f"still be in use; do not remove it on west's say-so. Point `tan bootstrap "
+        f"--workspace <path>` somewhere outside {_native(ancestor)} instead."
+    )
+
+
+def find_enclosing_west(start: Path) -> Path | None:
+    """Walk from `start`'s PARENT upward -- never `start` itself, whose own
+    `.west` is the ordinary "already initialised, reuse" case `west_phase`
+    already handles by skipping straight to `west update` -- looking for a
+    `.west` directory. `west init -l` performs exactly this walk from the
+    topdir upward (`west.util.west_topdir`) and aborts the moment it finds
+    one, so this predicts that outcome without spawning `west` at all.
+
+    Directory PRESENCE only, matching west's own check (no `config`-file
+    requirement the way `default_relocation_target`'s `dot_west_is_workspace`
+    applies for its own, different purpose): west aborts on a bare `.west/`
+    just the same, so a looser probe here would miss real refusals.
+
+    `None` when nothing is found, or a directory along the way cannot even be
+    probed: a permissions error tells this walk nothing, and the real problem
+    -- if there is one -- surfaces naturally the first time `west` itself
+    tries.
+    """
+    current = start.parent
+    while True:
+        try:
+            found = (current / ".west").is_dir()
+        except OSError:
+            found = False
+        if found:
+            return current
+        parent = current.parent
+        if parent == current:
+            return None
+        current = parent
 
 
 def relocate_checkout(repo_root: Path, target_parent: Path) -> tuple[Path | None, str | None]:
@@ -1447,6 +1618,26 @@ def _select_workspace(
     return WorkspacePlan(clear_zephyr_base=True)
 
 
+@dataclass(frozen=True)
+class RelocationUndo:
+    """Everything `rollback_relocation_after` needs to put a checkout
+    relocation back exactly as it was (tan-cli#284), snapshotted immediately
+    BEFORE this run's relocation mutated any of it -- never re-derived later,
+    because e.g. re-deriving `workspace_dir` as `repo_root.parent` is wrong
+    for a `--workspace` run over an ADOPTED `$ZEPHYR_BASE` topdir."""
+
+    #: The checkout's location before this run moved it.
+    old_root: str
+    #: `~/.alp/sdk-default`'s bytes before this run overwrote it; `None` when
+    #: it did not exist yet (the common first-bootstrap-ever case).
+    previous_pointer: bytes | None
+    #: The envelope `project` this run would have reported had it never
+    #: relocated anything.
+    project: Project
+    workspace_dir: Path
+    venv_dir: Path
+
+
 def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see below
     *,
     project: str | None,
@@ -1455,6 +1646,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     no_pip: bool,
     no_west: bool,
     print_env: bool,
+    allow_partial: bool,
     workspace: str | None,
     dry_run: bool,
     json_mode: bool,
@@ -1536,6 +1728,13 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     def payload(**extra: object) -> dict[str, object]:
         return _data(args=flags, sdk_root=sdk_root, paths=paths, facts=facts, pin=pin, **extra)
 
+    # Set below, only if THIS run relocates the checkout. A step after the
+    # relocation (`ensure_venv` / `west_phase`) that later turns out to be
+    # the fallible one rolls this back rather than leaving the checkout moved
+    # and the global default repointed for a bootstrap that never finished
+    # (tan-cli#284).
+    relocation_undo: RelocationUndo | None = None
+
     # `--workspace` is validated + absolutised HERE, before anything else
     # touches it: this relocates a customer's checkout, so an empty value or an
     # ambiguous drive-relative one must never resolve to a guess.
@@ -1613,12 +1812,57 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     reported_project,
                     sdk,
                 )
+        # tan-cli#284: whichever directory is about to become the west topdir
+        # -- `target` when relocating (an explicit `--workspace`, since that
+        # path never consults `default_relocation_target` above), else the
+        # checkout's own already-clean parent -- probe its ancestors for an
+        # ENCLOSING `.west` before the first mutation below. `west init -l`
+        # would hit exactly this and abort; caught here, refusing leaves
+        # nothing on disk, whereas discovering it after `relocate_checkout` /
+        # `_write_global_sdk_pointer` below leaves the checkout moved and the
+        # global default SDK repointed at a workspace that will never exist,
+        # neither of which `west` failing rolls back.
+        #
+        # Gated on `west init -l` actually running THIS run: `--no-west`
+        # skips it entirely, and a topdir that already holds its OWN `.west`
+        # takes `west_phase`'s "already initialised" branch, which runs only
+        # `west update` -- never `west init -l`, so its ancestor-upward walk
+        # (the only thing that could ever hit an enclosing `.west`) never
+        # happens either way. Without this gate the check over-refused both:
+        # a `--no-west` run with an unrelated ancestor workspace, and a
+        # perfectly reusable topdir that merely happened to sit under one.
+        intended_topdir = target if target is not None else paths.workspace_dir
+        if not no_west and not _is_dir(intended_topdir / ".west"):
+            enclosing = find_enclosing_west(intended_topdir)
+            if enclosing is not None:
+                return (
+                    _refusal(
+                        ExitCode.VALIDATION_FAILURE,
+                        "enclosing-west-workspace",
+                        [enclosing_west_workspace_refusal(intended_topdir, enclosing)],
+                        payload(),
+                    ),
+                    reported_project,
+                    sdk,
+                )
         if target is not None:
             new_root, error = relocate_checkout(paths.repo_root, target)
             if error is not None:
                 return _fatal(error, payload(), []), reported_project, sdk
             if new_root is not None and str(new_root) != str(paths.repo_root):
                 old_root = sdk_root
+                # Snapshotted BEFORE anything below is mutated (tan-cli#284):
+                # a later rollback restores exactly these values rather than
+                # RE-DERIVING them (e.g. `workspace_dir` as `repo_root.parent`
+                # is wrong for a `--workspace` run over an ADOPTED
+                # `$ZEPHYR_BASE` topdir -- see `rollback_relocation_after`).
+                undo = RelocationUndo(
+                    old_root=old_root,
+                    previous_pointer=_read_global_sdk_pointer(),
+                    project=reported_project,
+                    workspace_dir=paths.workspace_dir,
+                    venv_dir=paths.venv_dir,
+                )
                 paths.repo_root = new_root
                 paths.workspace_dir = target
                 paths.venv_dir = target / facts.venv_dir_name
@@ -1638,6 +1882,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 root = _rebase(root, old_root, sdk_root)
                 board_path = _rebase(board_path, old_root, sdk_root)
                 reported_project = Project.resolved(root, board_path)
+                relocation_undo = undo
                 _write_global_sdk_pointer(sdk_root)
 
     # Host gate: refuse ONLY a project whose every in-play core is Yocto, on a
@@ -1727,11 +1972,65 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     def planned_payload(**extra: object) -> dict[str, object]:
         return payload(planned=runner.planned if dry_run else None, **extra)
 
+    def rollback_relocation_after(step: str) -> None:
+        """When THIS run relocated the checkout and `step` (a later, genuinely
+        fallible step) is the one that actually failed, undo the relocation
+        rather than leaving the checkout moved and the global default SDK
+        repointed for a bootstrap that never finished (tan-cli#284). Reported
+        HONESTLY, not silently: the earlier `workspace-relocated` warning
+        already drained into this run's issues stays, and this adds a second
+        one saying what actually happened to the undo -- never asserting the
+        checkout moved back when `_undo_relocation` reports it did not. No-op
+        when this run never relocated anything.
+        """
+        nonlocal sdk_root, sdk, reported_project
+        if relocation_undo is None:
+            return
+        moved_to = paths.repo_root
+        undo_error = _undo_relocation(
+            relocation_undo.old_root, moved_to, relocation_undo.previous_pointer
+        )
+        if undo_error is None:
+            # The checkout itself is back; anything the failed step already
+            # created UNDER the vacated target (a partial venv/west checkout
+            # lives beside the checkout, not inside it, so moving the
+            # checkout back does not remove it) is left on disk -- named
+            # honestly rather than asserting "nothing from this run is in
+            # effect", which was true of the checkout and the pointer but
+            # never of whatever `step` had already written.
+            log.warn(
+                "workspace-relocation-rolled-back",
+                f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
+                f"moved it back to {_native(relocation_undo.old_root)} and restored the "
+                f"previous default SDK. Anything {step} already created under "
+                f"{_native(moved_to)} (a partial venv/west checkout) was left on disk -- "
+                f"delete {_native(moved_to)} by hand if you do not want it.",
+            )
+            paths.repo_root = Path(relocation_undo.old_root)
+            paths.workspace_dir = relocation_undo.workspace_dir
+            paths.venv_dir = relocation_undo.venv_dir
+            sdk_root = relocation_undo.old_root
+            sdk = SdkInfo(sdk_root, active.tier)
+            reported_project = relocation_undo.project
+        else:
+            # The move-back itself refused or failed (e.g. the vacated path
+            # was recreated in the meantime) -- the checkout is still at
+            # `moved_to`, and NOTHING here may claim otherwise.
+            log.warn(
+                "workspace-relocation-rolled-back",
+                f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
+                f"could NOT move it back to {_native(relocation_undo.old_root)} "
+                f"({undo_error}); the checkout is still at {_native(moved_to)} and the "
+                f"default SDK still points there. Move it back by hand, then run `tan "
+                f"sdk switch --global {_native(relocation_undo.old_root)}`.",
+            )
+
     # The venv backs BOTH later phases, so it is created when either will run.
     venv: VenvBin | None = None
     if not (no_west and no_pip):
         venv, error = ensure_venv(ws, log, runner, host_python)
         if error is not None:
+            rollback_relocation_after("the workspace venv setup")
             return (
                 _fatal(error, planned_payload(), log.take_issues()),
                 reported_project,
@@ -1774,6 +2073,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             )
         error = west_phase(ws, venv, log, runner, plan.reuse)
         if error is not None:
+            rollback_relocation_after("`west init`/`west update`")
             return (
                 _fatal(error, planned_payload(), log.take_issues()),
                 reported_project,
@@ -1790,7 +2090,22 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     if no_pip:
         log.line("Skipping pip installs (--no-pip)")
     elif venv is not None:
-        pip_phase(ws, venv, log, runner)
+        # A floor alone cannot say "too new for the ecosystem" (tan-cli#285):
+        # a WARN, never a refusal -- see `python_ceiling_warning`'s own
+        # docstring for why a hard ceiling here would be its own defect,
+        # symmetric to the floor bug this port already fixed. Probes the
+        # VENV's own interpreter, not `host_python.version` -- a REUSED venv
+        # can be running a different Python than whatever the host resolves
+        # today, and pip installs run inside the venv's interpreter, never
+        # the host's. Placed here, right before the pip phase that could
+        # actually hit it, rather than up front: skipped entirely when
+        # `--no-pip` means nothing is about to be installed anyway.
+        ceiling = python_ceiling_warning(
+            _venv_python_version(venv, runner, host_python.version), _native(paths.venv_dir)
+        )
+        if ceiling is not None:
+            log.warn(*ceiling)
+        pip_phase(ws, venv, log, runner, host)
 
     # NOTE: this does NOT install the Zephyr SDK (the cross toolchains). Real
     # silicon targets need it -- run `west sdk install` from the workspace once.
@@ -1800,14 +2115,24 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # Deliberately NOT the oracles' "Bootstrap complete." -- `doctor`'s
     # bootstrap-fix check folds this exact line into its detail, and tan's own
     # house prefix is what reads correctly there. The only reworded line.
-    text.append("bootstrap: complete.")
+    #
+    # Gated on which `WORKSPACE_BLOCKING` codes actually fired (tan-cli#220 /
+    # tan-cli#285), ported from the Rust oracle's `verdict()`: `complete.` +
+    # exit 0 must never follow a step that already said the venv is
+    # incomplete, unless `--allow-partial` was passed. The workspace is still
+    # real and usable either way, so `next_steps_block` below is printed
+    # regardless.
+    blocking = log.blocking()
+    closing_lines, ok = completion_verdict(blocking, allow_partial)
+    text.extend(closing_lines)
     text.extend(
         next_steps_block(
             facts, paths.tokens(), _native(paths.venv_dir), venv_bin_dir, is_windows
         )
     )
+    exit_code = ExitCode.SUCCESS if ok else ExitCode.RUNTIME_FAILURE
     return (
-        Outcome(ExitCode.SUCCESS, planned_payload(), log.take_issues(), text),
+        Outcome(exit_code, planned_payload(), log.take_issues(escalate_blocking=not ok), text),
         reported_project,
         sdk,
     )
@@ -1847,6 +2172,60 @@ def _write_global_sdk_pointer(sdk_root: str) -> None:
         pass
 
 
+def _read_global_sdk_pointer() -> bytes | None:
+    """`~/.alp/sdk-default`'s current bytes, or `None` when absent.
+
+    Snapshotted immediately BEFORE a relocation overwrites it (tan-cli#284),
+    so a later rollback can put back exactly what was there -- `None` restores
+    "absent", not an empty file, which matters for the common case of a first
+    bootstrap ever run on the machine, before any pointer existed at all.
+    Best-effort, like the write it guards: a snapshot that could not be taken
+    degrades the rollback, not this read.
+    """
+    try:
+        pointer = _home_alp_dir() / "sdk-default"
+        return pointer.read_bytes() if pointer.is_file() else None
+    except Exception:  # noqa: BLE001 -- best-effort, like _write_global_sdk_pointer
+        return None
+
+
+def _undo_relocation(
+    old_root: str, current_repo_root: Path, previous_pointer: bytes | None
+) -> str | None:
+    """Rollback of a relocation THIS run performed, for when a step after it
+    -- `ensure_venv` or `west_phase` -- turns out to be the fallible one
+    after all (tan-cli#284): move the checkout back to where it was, and
+    restore (or remove) the global default-SDK pointer this run overwrote.
+
+    Returns `None` when the checkout was actually moved back AND the pointer
+    restored; otherwise a short string naming what could not be undone. The
+    caller (`rollback_relocation_after`) uses this to tell the customer the
+    TRUTH about where the checkout ended up, rather than asserting it moved
+    back when `relocate_checkout` refused -- e.g. because the vacated path
+    was recreated in the meantime, which `relocate_checkout`'s own
+    already-exists guard reports as an error, not a silent no-op.
+
+    The pointer restore is attempted only after a successful move-back: a
+    pointer pointed at a checkout that did NOT actually move back would be
+    worse than leaving it alone.
+    """
+    _new_root, move_error = relocate_checkout(current_repo_root, Path(old_root).parent)
+    if move_error is not None:
+        return move_error
+    try:
+        pointer = _home_alp_dir() / "sdk-default"
+        if previous_pointer is None:
+            pointer.unlink(missing_ok=True)
+        else:
+            pointer.write_bytes(previous_pointer)
+    except OSError as err:
+        return (
+            f"the checkout moved back, but the default SDK pointer could not be "
+            f"restored: {err}"
+        )
+    return None
+
+
 def bootstrap(
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
@@ -1861,6 +2240,16 @@ def bootstrap(
     no_west: bool = typer.Option(False, "--no-west", help="Skip the west init/update step."),
     print_env: bool = typer.Option(
         False, "--print-env", help="Print the environment-variable lines and exit."
+    ),
+    allow_partial: bool = typer.Option(
+        False,
+        "--allow-partial",
+        help=(
+            "Report success even when a dependency install failed and the workspace "
+            "cannot build (tan-cli#220). The failures are still printed and still "
+            "reported as issues -- this only changes the verdict, for the case where "
+            "the missing packages are ones you know you do not need."
+        ),
     ),
     workspace: str = typer.Option(
         None,
@@ -1900,6 +2289,7 @@ def bootstrap(
             no_pip=no_pip,
             no_west=no_west,
             print_env=print_env,
+            allow_partial=allow_partial,
             workspace=workspace,
             dry_run=dry_run,
             json_mode=json_mode,

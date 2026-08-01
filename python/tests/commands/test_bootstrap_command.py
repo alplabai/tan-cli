@@ -30,7 +30,7 @@ from pathlib import Path
 
 import pytest
 
-from tan.commands import doctor_cmd
+from tan.commands import bootstrap_cmd, doctor_cmd
 from tan.commands.bootstrap_cmd import (
     HostPython,
     PythonFloor,
@@ -55,6 +55,7 @@ from tan.core.bootstrap import (
     BootstrapManifestError,
     Tokens,
     capture_tail,
+    completion_verdict,
     decide_workspace_reuse,
     detect_host_os,
     die,
@@ -71,6 +72,7 @@ from tan.core.bootstrap import (
     posix_refusal,
     posix_venv_unusable,
     print_env_block,
+    python_ceiling_warning,
     python_floor_skew_warning,
     python_too_old,
     reported_missing,
@@ -80,7 +82,9 @@ from tan.core.bootstrap import (
     windows_python_not_runnable,
     windows_refusal,
     yocto_gate,
+    zephyr_requirements_hint,
 )
+from tan.exit_codes import ExitCode
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -611,6 +615,198 @@ def test_the_workspace_parent_guard_refuses_and_leaves_nothing_on_disk(tmp_path)
     assert "tan bootstrap --workspace <path>" in message
     assert "dedicated directory" in message
     assert sorted(p.name for p in sdk.parent.iterdir()) == before
+    # tan-cli#284: the stale "re-run interactively" advice is gone -- this
+    # port never prompts, on any run, TTY or not.
+    assert "interactively" not in message
+
+
+def test_find_enclosing_west_walks_ancestors_never_the_start_itself(tmp_path):
+    """`west init -l` aborts the instant an ancestor `.west` turns up while
+    walking UP from the topdir -- but the topdir's OWN `.west` is the ordinary
+    "already initialised, reuse" case `west_phase` handles separately, so the
+    walk must never flag that one."""
+    root = tmp_path / "a" / "b" / "c"
+    root.mkdir(parents=True)
+    assert bootstrap_cmd.find_enclosing_west(root) is None
+
+    (root / ".west").mkdir()
+    assert bootstrap_cmd.find_enclosing_west(root) is None  # the start itself: not "enclosing"
+
+    (tmp_path / "a" / ".west").mkdir()
+    assert bootstrap_cmd.find_enclosing_west(root) == tmp_path / "a"
+
+
+def test_an_enclosing_west_workspace_refuses_before_any_mutation(tmp_path):
+    """tan-cli#284: an unrelated west workspace ABOVE the intended topdir makes
+    `west init -l` abort with "already initialized in <dir>, aborting" --
+    knowable up front, so it must refuse before touching anything, exactly
+    like the dirty-parent guard just above.
+
+    NOT `--no-west`: this scenario is only real on a run where `west init -l`
+    would actually execute -- see the over-refusal regression test below for
+    the case where it would not."""
+    sdk = make_sdk(tmp_path)
+    (tmp_path / ".west").mkdir()  # an ancestor of sdk.parent, the intended topdir
+    before = sorted(p.name for p in sdk.parent.iterdir())
+
+    proc = run_tan(
+        "bootstrap", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 2
+    assert codes(env) == ["bootstrap.enclosing-west-workspace"]
+    message = env["issues"][0]["message"]
+    assert "already initialized in" in message
+    assert str(tmp_path) in message
+    # West's own remedy ("remove this directory") is never repeated: that
+    # workspace may still be in use.
+    assert "do not remove it" in message
+    assert sorted(p.name for p in sdk.parent.iterdir()) == before
+    pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
+    assert not pointer.exists()
+
+
+def test_an_enclosing_west_workspace_refuses_even_under_an_explicit_workspace(tmp_path):
+    """The explicit `--workspace <path>` branch never consults
+    `default_relocation_target` (an override answers the dirty-parent question
+    outright) -- tan-cli#284 was filed against exactly this path, where
+    nothing checked for an ENCLOSING `.west` before relocating."""
+    sdk = make_sdk(tmp_path)
+    outer = tmp_path / "outer"
+    (outer / ".west").mkdir(parents=True)
+    target = outer / "inner" / "ws"
+
+    proc = run_tan(
+        "bootstrap", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), "--workspace", str(target), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 2
+    assert codes(env) == ["bootstrap.enclosing-west-workspace"]
+    assert "already initialized in" in env["issues"][0]["message"]
+    assert sdk.exists()
+    assert not target.exists()
+    pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
+    assert not pointer.exists()
+
+
+def test_the_enclosing_west_guard_does_not_fire_when_west_init_will_not_run(tmp_path):
+    """tan-cli#284 over-refusal, now fixed: the guard predicts what a REAL
+    `west init -l` would hit, so it must not fire on a run where `west init
+    -l` never executes -- `--no-west` skips it outright."""
+    sdk = make_sdk(tmp_path)
+    (tmp_path / ".west").mkdir()  # an ancestor of sdk.parent (the topdir)
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert "bootstrap.enclosing-west-workspace" not in codes(env)
+
+
+def test_the_enclosing_west_guard_does_not_fire_when_the_topdir_reuses_its_own_west(tmp_path):
+    """tan-cli#284 over-refusal, now fixed: a topdir that already holds its
+    OWN `.west` takes `west_phase`'s "already initialised" branch, which runs
+    only `west update` -- never `west init -l` -- so an ancestor `.west`
+    further up (which only `west init -l`'s topdir-upward walk would ever
+    reach) must not refuse it either.
+
+    `--dry-run`, not `--no-west`: this keeps the rest of the run hermetic
+    (nothing spawned) while still exercising the guard exactly as a real run
+    would reach it -- the guard itself does not consult `dry_run`."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (tmp_path / ".west").mkdir()  # an ancestor of sdk.parent (the topdir)
+    (sdk.parent / ".west").mkdir()  # the topdir's OWN -- triggers reuse, not init
+
+    proc = run_tan(
+        "bootstrap", "--dry-run", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert "bootstrap.enclosing-west-workspace" not in codes(env)
+
+
+def test_a_relocation_is_rolled_back_when_a_later_step_fails(tmp_path):
+    """tan-cli#284: relocating the checkout and repointing the global default
+    SDK are never rolled back by `west`/venv creation failing on their own --
+    a fallible step AFTER a successful relocation must undo both, not leave
+    the checkout moved and the default SDK pointed at a workspace that was
+    never finished."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    # Blocks `python -m venv` from creating the venv directory: a real,
+    # deterministic, network-free failure of the first fallible step after
+    # the relocation.
+    (workspace / ".venv").write_text("not a directory", encoding="utf-8")
+
+    proc = run_tan(
+        "bootstrap", "--format", "json",
+        "--sdk-root", str(sdk), "--workspace", str(workspace), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode != 0
+    issue_codes = codes(env)
+    assert "bootstrap.workspace-relocated" in issue_codes
+    assert "bootstrap.workspace-relocation-rolled-back" in issue_codes
+    assert "bootstrap.failed" in issue_codes
+    # The checkout is back where it started, not left under `workspace`.
+    assert sdk.exists()
+    assert not (workspace / sdk.name).exists()
+    # The global default SDK pointer is restored to "absent" (nothing existed
+    # before this run).
+    pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
+    assert not pointer.exists()
+    # tan-cli#284 majors: nothing reported in the envelope may still name the
+    # vacated `elsewhere` location once the rollback succeeded -- `data.*`
+    # paths and `project.root` must agree with where the checkout actually
+    # ended up, not a stale value from mid-run or a re-derived guess.
+    assert "elsewhere" not in (env["project"]["root"] or "")
+    assert "elsewhere" not in env["data"]["workspaceDir"]
+    assert "elsewhere" not in env["data"]["venvDir"]
+    assert "elsewhere" not in env["data"]["sdkRoot"]
+    assert env["data"]["sdkRoot"] == bootstrap_cmd._native(str(sdk))
+    assert env["data"]["workspaceDir"] == bootstrap_cmd._native(str(sdk.parent))
+    # The rollback message itself must not overclaim: it moved the checkout
+    # back, but anything the failed step already created under `elsewhere`
+    # (here, the blocking `.venv` file) is left on disk, named honestly
+    # rather than asserted away.
+    rollback_message = next(
+        i["message"] for i in env["issues"] if i["code"] == "bootstrap.workspace-relocation-rolled-back"
+    )
+    assert "nothing from this run is in effect" not in rollback_message
+    assert "moved it back" in rollback_message
+
+
+def test_a_blocked_rollback_reports_the_checkout_as_still_relocated(tmp_path):
+    """tan-cli#284 blocker: `_undo_relocation` used to discard
+    `relocate_checkout`'s own `(new_root, error)` return, so a move-back that
+    REFUSES -- because the vacated original path was recreated in the
+    meantime -- was invisible to the caller, which then asserted the checkout
+    was moved back regardless. Reproduced directly against `_undo_relocation`,
+    the same way the review that found this proved it: recreate the vacated
+    path before the rollback runs, and check the return value, not a printed
+    claim."""
+    old_root = tmp_path / "ws" / "alp-sdk"
+    old_root.parent.mkdir(parents=True)
+    moved_to = tmp_path / "elsewhere" / "alp-sdk"
+    moved_to.parent.mkdir(parents=True)
+    moved_to.mkdir()
+    (moved_to / "marker").write_text("x", encoding="utf-8")
+    # The vacated original path was recreated (e.g. by a retry) before the
+    # rollback ran.
+    old_root.mkdir()
+
+    error = bootstrap_cmd._undo_relocation(str(old_root), moved_to, None)
+
+    assert error is not None
+    assert "already exists" in error
+    # Nothing was moved: the checkout is still exactly where the failed run
+    # left it, not half-migrated or silently vanished.
+    assert moved_to.is_dir()
+    assert (moved_to / "marker").exists()
 
 
 def test_a_yocto_only_project_is_refused_off_linux_and_a_mixed_one_only_warns(tmp_path):
@@ -1258,3 +1454,232 @@ def test_a_relocated_checkout_rebases_only_paths_that_were_under_it():
     # A sibling whose name merely STARTS with the old root must not be rebased.
     assert _rebase("/old/alp-sdk-other", "/old/alp-sdk", "/new") == "/old/alp-sdk-other"
     assert _rebase(None, "/a", "/b") is None
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#285: exit 0 with a knowingly incomplete venv; the Python floor with
+# no ceiling; the hidapi remediation hint naming the wrong OS.
+# ---------------------------------------------------------------------------
+
+
+def test_completion_verdict_matches_the_rust_oracles_wording_and_escape_hatch():
+    """Ported from the Rust oracle's `verdict()`
+    (`crates/tan-cli/src/commands/bootstrap/mod.rs`), not re-derived
+    (tan-cli#220 / tan-cli#285): the wording, the named failures and the
+    `--allow-partial` escape hatch are the ALREADY-SHIPPED, ALREADY TAGGED
+    (`CHANGELOG.md` `[0.5.0-rc1]`) contract -- a second, independently-worded
+    rule for the same decision is exactly how this port's closing line and
+    its escape hatch would drift from the one already-integrated consumers
+    expect."""
+    lines, ok = completion_verdict([], False)
+    assert lines == ["bootstrap: complete."] and ok is True
+    lines, ok = completion_verdict([], True)
+    assert lines == ["bootstrap: complete."] and ok is True
+
+    lines, ok = completion_verdict(["zephyr-requirements"], False)
+    assert ok is False
+    joined = "\n".join(lines)
+    assert "bootstrap: complete." not in joined
+    assert "INCOMPLETE" in joined
+    assert "zephyr-requirements" in joined
+    assert "--allow-partial" in joined
+
+    # Every blocking warning is named, not just the first -- a customer
+    # fixing one and re-running should not discover the next one at a time.
+    lines, _ok = completion_verdict(["zephyr-requirements", "sdk-extras"], False)
+    joined = "\n".join(lines)
+    assert "zephyr-requirements" in joined and "sdk-extras" in joined
+
+    # The escape still reports success -- and still says what is missing, so
+    # `--allow-partial` is an informed choice rather than a mute override.
+    lines, ok = completion_verdict(["sdk-extras"], True)
+    assert ok is True
+    joined = "\n".join(lines)
+    assert "bootstrap: complete." in joined
+    assert "sdk-extras" in joined
+
+
+def test_python_ceiling_warns_without_ever_refusing_a_newer_host():
+    """The floor refuses (a GUARANTEED failure downstream in Zephyr's CMake);
+    the ceiling only ever warns -- a hard refusal here would block a host that
+    was going to bootstrap a perfectly complete venv, the same defect class the
+    floor fix exists to close, mirrored onto the other edge. Lowering
+    `PYTHON_CEILING_KNOWN_GOOD` to the actually-measured value does not change
+    that: it only widens which hosts get told, never which ones can proceed."""
+    from tan.core.bootstrap import PYTHON_CEILING_KNOWN_GOOD
+
+    # (3, 12): what CI actually pins and measures -- not a guessed value.
+    assert PYTHON_CEILING_KNOWN_GOOD == (3, 12)
+
+    assert python_ceiling_warning(PYTHON_CEILING_KNOWN_GOOD, "/ws/.venv") is None
+    older = (PYTHON_CEILING_KNOWN_GOOD[0], PYTHON_CEILING_KNOWN_GOOD[1] - 1)
+    assert python_ceiling_warning(older, "/ws/.venv") is None
+
+    newer = (PYTHON_CEILING_KNOWN_GOOD[0], PYTHON_CEILING_KNOWN_GOOD[1] + 1)
+    result = python_ceiling_warning(newer, "/ws/.venv")
+    assert result is not None
+    code, message = result
+    assert code == "python-newer-than-verified"
+    assert f"{newer[0]}.{newer[1]}" in message
+    assert "hidapi" in message
+    assert "Not refused" in message
+    # The remedy must be one that actually works: a REUSED venv keeps the
+    # interpreter that created it, so "install another Python 3" alone does
+    # nothing -- the message must point at deleting the venv (there is no
+    # --recreate-venv) and, on Windows, choosing the interpreter explicitly.
+    assert "/ws/.venv" in message
+    assert "delete" in message
+    assert "no --recreate-venv" in message
+    assert "installing another Python 3 alongside this one does nothing" in message
+    assert "Windows" in message
+
+
+def test_venv_python_version_probes_the_real_interpreter_not_the_host(tmp_path):
+    """`ensure_venv` may REUSE an existing venv built by a different
+    interpreter than whatever `host_python` resolves today; pip installs run
+    inside the VENV's own interpreter, so the ceiling check must probe that
+    one, not `host_python.version` (tan-cli#285)."""
+    venv = bootstrap_cmd.VenvBin(Path(sys.executable), Path(sys.executable), "bin")
+    runner = bootstrap_cmd.Runner(json=True)
+    probed = bootstrap_cmd._venv_python_version(venv, runner, fallback=(1, 0))
+    assert probed == tuple(sys.version_info[:2])
+
+    # Falls back when the probe cannot even be spawned -- a venv that does
+    # not exist on disk (or, in real use, a genuinely broken one; the real
+    # pip install a moment later surfaces its own error).
+    missing = bootstrap_cmd.VenvBin(tmp_path / "nope", tmp_path / "nope", "bin")
+    assert bootstrap_cmd._venv_python_version(missing, runner, fallback=(9, 9)) == (9, 9)
+
+    # `--dry-run`: nothing was actually written to disk to probe.
+    dry = bootstrap_cmd.Runner(json=True, dry_run=True)
+    assert bootstrap_cmd._venv_python_version(venv, dry, fallback=(9, 9)) == (9, 9)
+
+
+def test_zephyr_requirements_hint_is_gated_on_the_real_host():
+    """The Windows hint names the MSVC linker error actually measured
+    (`LNK1104`) and never the Linux `apt-get` line; the Linux hint stays what
+    was verified on a stock ubuntu-24.04 runner. Neither host gets the other's
+    unactionable, misdirecting command."""
+    windows = zephyr_requirements_hint(WINDOWS)
+    assert "LNK1104" in windows
+    assert "apt-get" not in windows
+
+    linux = zephyr_requirements_hint(LINUX)
+    assert "apt-get" in linux
+    assert "LNK1104" not in linux
+
+    # macOS/other: no GUESSED package name -- that would just repeat the
+    # wrong-OS defect against a different OS.
+    other = zephyr_requirements_hint(MACOS)
+    assert "apt-get" not in other
+    assert "LNK1104" not in other
+
+
+@pytest.mark.parametrize(
+    ("forced_host", "expect_fragment", "forbid_fragment"),
+    [
+        (WINDOWS, "LNK1104", "apt-get"),
+        (LINUX, "apt-get", "LNK1104"),
+    ],
+)
+def test_a_pip_phase_problem_blocks_complete_and_the_zero_exit(
+    monkeypatch, tmp_path, forced_host, expect_fragment, forbid_fragment
+):
+    """The reported defect, reproduced without a real pip/network install: the
+    Zephyr requirements step reports a problem (hidapi's wheel build, as
+    measured), and the run must not print `bootstrap: complete.` or exit 0 --
+    and the warning must carry THIS host's remedy, not always Linux's.
+
+    The issue must also be `severity: "error"`, not `"warning"` (tan-cli#285):
+    an envelope that exits non-zero while every issue in it says `warning`
+    invites a consumer to treat the whole thing as advisory."""
+    outcome = _run_with_a_blocked_zephyr_requirements_install(
+        monkeypatch, tmp_path, forced_host, allow_partial=False
+    )
+
+    assert outcome.exit_code == ExitCode.RUNTIME_FAILURE
+    assert not any(line == "bootstrap: complete." for line in outcome.text)
+    assert any("INCOMPLETE" in line for line in outcome.text)
+    problems = [i for i in outcome.issues if i.code == "bootstrap.zephyr-requirements"]
+    assert len(problems) == 1
+    assert problems[0].severity == "error"
+    assert expect_fragment in problems[0].message
+    assert forbid_fragment not in problems[0].message
+    assert "the venv is incomplete" in problems[0].message
+    # tan-cli#285: the captured pip tail rides along in the SAME message, so
+    # "look in the captured pip output" (the hint's own wording) names
+    # something actually present, including in `--format json` where there
+    # is no terminal output to look back at.
+    assert "Captured output:" in problems[0].message
+
+
+def test_allow_partial_reports_success_but_keeps_the_issue_a_warning(monkeypatch, tmp_path):
+    """`--allow-partial` is an informed choice, not a mute override (tan-cli
+    #220 / #285): the run reports success, but the issue stays `warning` (the
+    customer was told and chose to proceed) and the closing text still names
+    what did not install."""
+    outcome = _run_with_a_blocked_zephyr_requirements_install(
+        monkeypatch, tmp_path, WINDOWS, allow_partial=True
+    )
+
+    assert outcome.exit_code == ExitCode.SUCCESS
+    assert any(line == "bootstrap: complete." for line in outcome.text)
+    assert any("zephyr-requirements" in line for line in outcome.text)
+    problems = [i for i in outcome.issues if i.code == "bootstrap.zephyr-requirements"]
+    assert len(problems) == 1
+    assert problems[0].severity == "warning"
+
+
+def _run_with_a_blocked_zephyr_requirements_install(
+    monkeypatch, tmp_path, forced_host, *, allow_partial: bool
+):
+    """Shared setup: a hermetic `_run` where the Zephyr requirements pip
+    install reports a failure (hidapi's wheel build, as measured), without a
+    real pip/network install."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    workspace_dir = sdk.parent
+    facts = parse_bootstrap_manifest(REAL_MANIFEST)
+    requirements = workspace_dir / facts.zephyr_requirements_path
+    # The captured tail now rides along in the issue message (tan-cli#285),
+    # so it must actually vary by host like a real failure would -- a fixture
+    # that always names the Windows linker error would make the Linux case's
+    # "never LNK1104" assertion fail on the appended tail, not the hint.
+    captured_detail = (
+        "LINK : fatal error LNK1104: cannot open file 'python314.lib'"
+        if forced_host == WINDOWS
+        else "error: pkg-config package 'libusb-1.0 >= 1.0.9' not found"
+    )
+
+    def fake_run(self, argv, cwd=None):  # noqa: ARG001 -- matches Runner.run's shape
+        if "-r" in argv and str(requirements) in argv:
+            return captured_detail
+        if "venv" in argv:
+            # Stand in for a real `west update` having fetched the Zephyr tree
+            # (skipped here via `--no-west`) -- just the one file `pip_phase`
+            # reads. Created lazily, on the FIRST spawned command, which is
+            # always after the workspace-parent guard's directory-listing
+            # check: creating it up front would add an extra top-level entry
+            # under the workspace dir and trip that guard instead.
+            requirements.parent.mkdir(parents=True, exist_ok=True)
+            requirements.write_text("hidapi\n", encoding="utf-8")
+        return None
+
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", fake_run)
+    monkeypatch.setattr(bootstrap_cmd, "detect_host_os", lambda _platform: forced_host)
+    monkeypatch.setattr(
+        bootstrap_cmd, "probe_host_python", lambda _floor: HostPython((sys.executable,), (3, 12))
+    )
+
+    outcome, _project, _sdk_info = bootstrap_cmd._run(
+        project=str(workspace_dir),
+        board_yaml=None,
+        sdk_root_flag=str(sdk),
+        no_pip=False,
+        no_west=True,
+        print_env=False,
+        allow_partial=allow_partial,
+        workspace=None,
+        dry_run=False,
+        json_mode=True,
+    )
+    return outcome
