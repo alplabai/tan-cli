@@ -56,7 +56,8 @@ def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
 
       1. a `.venv` in the project tree, searched from `start` upward;
       2. the workspace venv derived from `$ZEPHYR_BASE`
-         (`<ZEPHYR_BASE>/../.venv`);
+         (`<ZEPHYR_BASE>/../.venv`), manifest-guarded against `sdk_root` (see
+         `_zephyr_base_venv`, tan-cli#292 consequence 2);
       3. the SDK's canonical `<sdk-parent>/.venv` (post-alp-sdk#782) or the
          legacy `<sdk-parent>/zephyrproject/.venv`.
 
@@ -72,8 +73,8 @@ def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
 
     zephyr_base = os.environ.get("ZEPHYR_BASE")
     if zephyr_base:
-        candidate = Path(zephyr_base).parent / ".venv"
-        if _resolve_layout(candidate) is not None:
+        candidate = _zephyr_base_venv(Path(zephyr_base), sdk_root)
+        if candidate is not None:
             return candidate
 
     if sdk_root is not None:
@@ -84,6 +85,41 @@ def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
                 return candidate
 
     return None
+
+
+def _zephyr_base_venv(zephyr_base: Path, sdk_root: str | None) -> Path | None:
+    """Step 2 of `find_workspace_venv`: `zephyr_base`'s PARENT's `.venv`, but
+    only when it is both west-capable AND (when `sdk_root` resolved) its
+    workspace manifest is verifiably alp-sdk's -- port of the SAME guard
+    `_zephyr_base_workspace` already applies to the topdir search
+    (tan-cli#61), which this venv search lacked (tan-cli#292 consequence 2,
+    kept consistent with the tan-cli#301 fix one layer up: both now source
+    "which Zephyr/venv" from the RESOLVED workspace rather than a bare
+    `$ZEPHYR_BASE` read).
+
+    Without this, a stale exported `$ZEPHYR_BASE` naming an unrelated Zephyr
+    workspace shadowed the canonical `<sdk-parent>/.venv` (step 3) even when
+    the caller passed an explicit `--sdk-root` -- reproduced against the
+    published v0.5.0-rc2 asset on a clean host with no alp-sdk checkout
+    anywhere (tan-cli#278). `sdk_root` absent means there is nothing to
+    verify against, so the old unconditional accept stands, exactly as
+    `_zephyr_base_workspace` does.
+    """
+    workspace = zephyr_base.parent
+    candidate = workspace / ".venv"
+    if _resolve_layout(candidate) is None:
+        return None
+    if sdk_root is not None:
+        # Lazy for the same reason `_zephyr_base_workspace` is lazy: `tan.
+        # commands.bootstrap_cmd` pulls in typer + the whole bootstrap
+        # command surface, and this `tan.core` module must not depend on it
+        # at import time -- only this one, rarely-taken branch ($ZEPHYR_BASE
+        # set AND an sdk_root resolved) ever needs the manifest check at all.
+        from tan.commands.bootstrap_cmd import _manifest_points_at  # noqa: PLC0415
+
+        if not _manifest_points_at(workspace, Path(sdk_root)):
+            return None
+    return candidate
 
 
 def venv_bin_dir(start: str, sdk_root: str | None) -> Path | None:
