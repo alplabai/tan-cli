@@ -22,6 +22,7 @@ byte-identical; the four that did not are each pinned here with the reason:
 The install steps are exercised through `--dry-run`, which records the argv it
 WOULD have spawned; `test_a_dry_run_writes_nothing` is what keeps that honest.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -1608,6 +1609,77 @@ def test_parse_workspace_sdk_record_returns_none_for_anything_unusable(text):
     """Unreadable is `None`, the SAME as no record at all -- never a mismatch
     WARNING against a checkout `doctor` cannot even name."""
     assert parse_workspace_sdk_record(text) is None
+
+
+def test_record_workspace_sdk_writes_the_full_venv_provenance_stamp(tmp_path):
+    """`bootstrap_cmd.record_workspace_sdk` -- the IO wrapper around
+    `workspace_sdk_record_json` -- hashes the requirements file it is handed
+    and writes every field, given all of them."""
+    topdir = tmp_path / "ws"
+    topdir.mkdir()
+    requirements = topdir / "zephyr" / "scripts" / "requirements-base.txt"
+    requirements.parent.mkdir(parents=True)
+    # `newline=""`: a hash is of RAW BYTES, and `write_text`'s platform
+    # newline translation (`\n` -> `\r\n` on Windows) would otherwise make
+    # the fixture's on-disk bytes -- and so its hash -- host-dependent.
+    requirements.write_text("west>=0.14.0\n", encoding="utf-8", newline="")
+
+    bootstrap_cmd.record_workspace_sdk(
+        topdir,
+        str(topdir / "alp-sdk"),
+        venv_dir_name=".venv",
+        venv_layout="bin",
+        requirements_path=requirements,
+    )
+
+    record = parse_workspace_sdk_record(
+        (topdir / ".west" / "tan-workspace-sdk").read_text(encoding="utf-8")
+    )
+    assert record.sdk_path == str(topdir / "alp-sdk")
+    assert record.venv_dir_name == ".venv"
+    assert record.venv_layout == "bin"
+    assert record.requirements_digest == hashlib.sha256(b"west>=0.14.0\n").hexdigest()
+
+
+def test_record_workspace_sdk_omits_the_digest_when_the_requirements_file_is_unreadable(
+    tmp_path,
+):
+    """A caller can hand `record_workspace_sdk` a path that (yet) does not
+    exist -- e.g. `--no-pip`, or a Zephyr module that never shipped a
+    requirements file at that path -- and the sdkPath half of the record must
+    still be written; the digest is simply absent, never a fabricated one."""
+    topdir = tmp_path / "ws"
+    topdir.mkdir()
+
+    bootstrap_cmd.record_workspace_sdk(
+        topdir,
+        str(topdir / "alp-sdk"),
+        venv_dir_name=".venv",
+        venv_layout="bin",
+        requirements_path=topdir / "zephyr" / "does-not-exist.txt",
+    )
+
+    record = parse_workspace_sdk_record(
+        (topdir / ".west" / "tan-workspace-sdk").read_text(encoding="utf-8")
+    )
+    assert record.sdk_path == str(topdir / "alp-sdk")
+    assert record.requirements_digest is None
+
+
+def test_record_workspace_sdk_still_writes_the_bare_record_with_no_venv_args(tmp_path):
+    """Backward-compatible call shape: a caller passing only `(topdir,
+    sdk_root)` -- there is none left in this tree, but the signature must not
+    force every future one to compute a hash it may not have -- still writes
+    a usable record."""
+    topdir = tmp_path / "ws"
+    topdir.mkdir()
+
+    bootstrap_cmd.record_workspace_sdk(topdir, str(topdir / "alp-sdk"))
+
+    record = parse_workspace_sdk_record(
+        (topdir / ".west" / "tan-workspace-sdk").read_text(encoding="utf-8")
+    )
+    assert record == WorkspaceSdkRecord(sdk_path=str(topdir / "alp-sdk"))
 
 
 def test_the_printed_blocks_keep_their_load_bearing_whitespace():

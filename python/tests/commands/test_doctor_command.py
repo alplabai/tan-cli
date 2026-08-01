@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 from tan.commands import doctor_cmd
-from tan.core.bootstrap import venv_layout
+from tan.core.bootstrap import venv_layout, workspace_sdk_record_json
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``.
@@ -472,6 +472,133 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     else:
         expected = "99.98"
     assert expected in resolved["detail"], resolved["detail"]
+
+
+# --------------------------------------------------------------------------
+# venvProvenance (tan-cli#292 consequences 1 and 3): the resolved venv's
+# tan-written record must name the SAME SDK this report resolved against.
+# --------------------------------------------------------------------------
+
+
+def _plant_venv_with_record(venv_dir: Path, record_json: str | None) -> None:
+    """A west-capable `.venv` at `venv_dir`, with `record_json` (if given)
+    written as its sibling `.west/tan-workspace-sdk` -- the exact on-disk
+    shape `bootstrap_cmd.record_workspace_sdk` produces, one level up from
+    the venv itself."""
+    layout = venv_layout(os.name == "nt")
+    bin_dir = venv_dir / layout.bin_dir
+    bin_dir.mkdir(parents=True)
+    (bin_dir / layout.west).write_text("", encoding="utf-8")
+    if record_json is not None:
+        record_dir = venv_dir.parent / ".west"
+        record_dir.mkdir(parents=True, exist_ok=True)
+        (record_dir / "tan-workspace-sdk").write_text(record_json, encoding="utf-8")
+
+
+def test_venv_provenance_warns_when_the_record_names_a_different_sdk(tmp_path, monkeypatch):
+    """Consequence 3 (`tan sdk switch` leaves the venv behind): the resolved
+    venv's own record still names the SDK that last populated it, not the
+    one this report resolved against."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    old_sdk = tmp_path / "sdk-v1"
+    old_sdk.mkdir()
+    new_sdk = tmp_path / "sdk-v2"
+    new_sdk.mkdir()
+    workspace = tmp_path / "ws"
+    _plant_venv_with_record(
+        workspace / ".venv", workspace_sdk_record_json(str(old_sdk))
+    )
+
+    checks = doctor_cmd._collect(str(new_sdk), workspace_root=str(workspace))
+    check = next(c for c in checks if c.name == "venvProvenance")
+    assert check.status == "warn", check.detail
+    assert str(old_sdk) in check.detail
+    assert str(new_sdk) in check.detail
+    assert check.fix == "tan bootstrap"
+
+
+def test_venv_provenance_passes_when_the_record_matches_the_resolved_sdk(tmp_path, monkeypatch):
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk = tmp_path / "alp-sdk"
+    sdk.mkdir()
+    workspace = tmp_path / "ws"
+    _plant_venv_with_record(
+        workspace / ".venv", workspace_sdk_record_json(str(sdk))
+    )
+
+    checks = doctor_cmd._collect(str(sdk), workspace_root=str(workspace))
+    check = next(c for c in checks if c.name == "venvProvenance")
+    assert check.status == "pass", check.detail
+
+
+def test_venv_provenance_catches_a_neighbouring_tan_bootstrapped_projects_venv(
+    tmp_path, monkeypatch
+):
+    """Consequence 1 (a neighbouring project's venv wins the upward walk):
+    reproduced with the neighbour ITSELF tan-bootstrapped -- for a different
+    SDK -- so it carries a record `venvProvenance` can actually compare
+    against. A neighbour with no tan record at all (a bare `west init`, the
+    #278 shape) is the documented, still-open gap this mechanism does not
+    close; see `venv_provenance_check`'s docstring."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    other_sdk = tmp_path / "other-project" / "alp-sdk"
+    other_sdk.mkdir(parents=True)
+    # The neighbour's venv sits ABOVE the customer's own project in the tree,
+    # so `find_workspace_venv`'s upward walk from the project reaches it
+    # before any SDK-derived candidate.
+    neighbour_root = tmp_path / "other-project"
+    _plant_venv_with_record(
+        neighbour_root / ".venv",
+        workspace_sdk_record_json(str(other_sdk)),
+    )
+    project = neighbour_root / "nested" / "my-app"
+    project.mkdir(parents=True)
+
+    my_sdk = tmp_path / "my-sdk"
+    my_sdk.mkdir()
+    checks = doctor_cmd._collect(str(my_sdk), workspace_root=str(project))
+    check = next(c for c in checks if c.name == "venvProvenance")
+    assert check.status == "warn", check.detail
+    assert str(other_sdk) in check.detail
+
+
+def test_venv_provenance_emits_no_check_on_a_record_less_bootstrap_sh_workspace(
+    tmp_path, monkeypatch
+):
+    """A workspace alp-sdk's own `bootstrap.sh` set up writes no tan record
+    at all (`crates/tan-cli/src/venv.rs:25-27`) -- `venvProvenance` must not
+    invent a verdict against a checkout it was never told about."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk = tmp_path / "alp-sdk"
+    sdk.mkdir()
+    workspace = tmp_path / "ws"
+    _plant_venv_with_record(workspace / ".venv", None)  # west-capable, no record
+
+    checks = doctor_cmd._collect(str(sdk), workspace_root=str(workspace))
+    assert not any(c.name == "venvProvenance" for c in checks)
+
+
+def test_venv_provenance_emits_no_check_when_no_venv_resolves(tmp_path, monkeypatch):
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk = tmp_path / "alp-sdk"
+    sdk.mkdir()
+    empty = tmp_path / "elsewhere"
+    empty.mkdir()
+
+    checks = doctor_cmd._collect(str(sdk), workspace_root=str(empty))
+    assert not any(c.name == "venvProvenance" for c in checks)
+
+
+def test_venv_provenance_check_unit_covers_the_no_sdk_root_case():
+    """`_collect` never has "a record but no `sdk_root`" to feed the check in
+    practice (the record's OWN existence implies bootstrap ran against SOME
+    resolvable SDK), but `venv_provenance_check` is exercised directly here
+    for the branch: nothing to compare against, so `None`, never a fabricated
+    verdict."""
+    record = doctor_cmd.WorkspaceSdkRecord(sdk_path="/ws/alp-sdk")
+    assert doctor_cmd.venv_provenance_check(record, None) is None
+    assert doctor_cmd.venv_provenance_check(None, "/ws/alp-sdk") is None
+    assert doctor_cmd.venv_provenance_check(None, None) is None
 
 
 # --------------------------------------------------------------------------

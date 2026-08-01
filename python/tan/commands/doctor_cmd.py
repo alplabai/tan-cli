@@ -114,13 +114,15 @@ from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, parse_sdk_version_yaml, proj
 from tan.core.bootstrap import (
     MissingPrerequisite,
     PrereqFailure,
+    WorkspaceSdkRecord,
     parse_west_zephyr_pin,
+    parse_workspace_sdk_record,
     parse_zephyr_version_file,
     posix_venv_unusable,
     reported_missing,
 )
 from tan.core.timestamp import generated_at_iso
-from tan.core.venv import west_program, west_workspace_dir
+from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -1417,6 +1419,57 @@ def zephyr_version_preflight_check(
 
 
 # ---------------------------------------------------------------------------
+# Venv provenance (tan-cli#292 consequences 1 and 3).
+# ---------------------------------------------------------------------------
+
+
+def venv_provenance_check(record: WorkspaceSdkRecord | None, sdk_root: str | None) -> Check | None:
+    """`venvProvenance` -- does the RESOLVED workspace venv's tan-written
+    record (`<topdir>/.west/tan-workspace-sdk`, tan-cli#292) name the SAME SDK
+    this report resolved against? Catches two of #292's three consequences:
+    `tan sdk switch` leaving the venv behind (consequence 3 -- the record
+    still names the SDK that last populated it), and a neighbouring project's
+    venv winning `find_workspace_venv`'s upward walk when that venv is ITSELF
+    tan-bootstrapped, just for a different SDK (consequence 1 -- its own
+    record then names a project this report was never asked about). Both
+    otherwise surface only later, as a Zephyr build failing on a
+    wrong-version package that names the SYMPTOM, not the cause.
+
+    **A WARNING, not a re-resolution (tan-cli#292 rc3 scope).** The record is
+    not yet the resolver's primary source -- `tan build` still uses whatever
+    `find_workspace_venv`'s search resolved; this only tells the customer
+    that venv's packages may not match BEFORE a build fails on it. Consequence
+    1's upward-walk case is caught only when the neighbouring venv carries its
+    OWN record; one populated by a bare `west update` with no tan involvement
+    anywhere still resolves silently -- the same gap `west_workspace_dir`'s
+    `$ZEPHYR_BASE` manifest guard cannot close for an unrelated tree with no
+    alp-sdk manifest to check against either. The full record-primary
+    resolver the issue also proposes is out of scope for this fix; see the
+    issue for the follow-up.
+
+    `None` (no check emitted, matching `zephyr_version_preflight_check`'s own
+    skip) when there is nothing to compare: no venv resolved, it carries no
+    record at all -- a workspace bootstrapped by alp-sdk's own `bootstrap.sh`
+    writes none (`crates/tan-cli/src/venv.rs:25-27`), and neither does a tan
+    predating tan-cli#292 -- or no `sdk_root` resolved to compare against.
+    """
+    if record is None or sdk_root is None:
+        return None
+    if os.path.normcase(_abs_posix(record.sdk_path)) == os.path.normcase(_abs_posix(sdk_root)):
+        return Check(
+            "venvProvenance", "pass", f"workspace venv populated for the active SDK ({record.sdk_path})"
+        )
+    return Check(
+        "venvProvenance",
+        "warn",
+        f"workspace venv was populated for a different SDK ({record.sdk_path}) than the "
+        f"one currently selected ({sdk_root}) -- Zephyr packages installed into it may not "
+        "match; run `tan bootstrap` to resync the venv",
+        "tan bootstrap",
+    )
+
+
+# ---------------------------------------------------------------------------
 # SDK provenance (tan-cli#294 finding 5; no numbered GH issue -- the Rust
 # doc comment cites "conformance Issue 4 + 6").
 # ---------------------------------------------------------------------------
@@ -1898,11 +1951,14 @@ def _collect(
 
     `board_yaml`/`project_scope`/`workspace_root` feed the tan-cli#294/#290
     build-environment preflight (`sdk`/`boardYaml`/`workspace`/
-    `westResolved`/`zephyrVersion`/`zephyrWorkspace`) -- all default so every
-    existing direct caller (this file's own test suite) keeps working
-    unchanged; those checks then simply report against "no board.yaml"/"no
-    workspace resolved from `.`", which is an honest verdict, not a skipped
-    one.
+    `westResolved`/`venvProvenance`/`zephyrVersion`/`zephyrWorkspace`) -- all
+    default so every existing direct caller (this file's own test suite)
+    keeps working unchanged; those checks then simply report against "no
+    board.yaml"/"no workspace resolved from `.`", which is an honest verdict,
+    not a skipped one. `venvProvenance` (tan-cli#292) is the exception that
+    proves the rule: it emits NO check at all (not even against "no board.yaml")
+    when the resolved venv carries no provenance record, which is the common
+    case for a workspace alp-sdk's own `bootstrap.sh` set up.
 
     `boardYaml`'s severity needs one more fact: whether a project was
     actually SELECTED (`--project`/`--board-yaml` given), not merely whether
@@ -1984,6 +2040,20 @@ def _collect(
         else None
     )
     checks.append(west_resolved_check(west_resolved_exe, west_resolved_version))
+
+    # tan-cli#292: `venvProvenance`, right beside `westResolved` -- it is a
+    # verdict on the SAME resolved venv (`find_workspace_venv`, the search
+    # `west_program` itself resolves `west` through), just reading its
+    # tan-written provenance record instead of probing the binary.
+    venv_path = find_workspace_venv(workspace_root, sdk_root)
+    venv_record: WorkspaceSdkRecord | None = None
+    if venv_path is not None:
+        record_text = _read_text(venv_path.parent / ".west" / "tan-workspace-sdk")
+        if record_text is not None:
+            venv_record = parse_workspace_sdk_record(record_text)
+    provenance_check = venv_provenance_check(venv_record, sdk_root)
+    if provenance_check is not None:
+        checks.append(provenance_check)
 
     if workspace_path is not None:
         workspace_version = None
