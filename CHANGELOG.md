@@ -5,7 +5,7 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0-rc3] — 2026-08-01
 
 *Found by running the published `v0.5.0-rc2` binary end to end on a real
 Windows host -- fresh and dirty -- rather than testing the source or trusting a
