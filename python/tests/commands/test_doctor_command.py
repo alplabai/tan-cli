@@ -1467,10 +1467,16 @@ def test_hostpython_and_zephyrworkspace_name_the_same_tree_over_a_stale_zephyr_b
     # Same tree: the resolved workspace's own topdir names both.
     assert str(workspace) in zephyr_workspace.detail
     assert str(workspace) in host_python.detail
-    assert "3.11" in host_python.detail
+    # Anchor on the FLOOR phrase, never on a bare `"3.14" not in detail`. This
+    # detail also carries the INTERPRETER's version (`Python 3.14 (`py -3`)
+    # meets the effective floor 3.11 (...)`), and CI's Windows runner really is
+    # on 3.14 -- a bare substring search cannot tell "the stray tree's floor
+    # leaked" from "the host happens to run that version", and asserted the
+    # latter while claiming the former.
+    assert "effective floor 3.11" in host_python.detail
+    assert "effective floor 3.14" not in host_python.detail
     # Never the stray tree `$ZEPHYR_BASE` points at.
     assert str(stray) not in host_python.detail
-    assert "3.14" not in host_python.detail
 
     # 3.11 > the (3, 10) fallback manifest floor (no `sdk_root` resolved), so
     # `pythonFloor` fires -- and must cite the same resolved tree too.
@@ -1500,7 +1506,11 @@ def test_collect_python_floor_source_falls_back_to_zephyr_base_when_no_workspace
 
     host_python = next(c for c in checks if c.name == "hostPython")
     assert str(stray) in host_python.detail
-    assert "3.13" in host_python.detail
+    # `effective floor 3.13`, not a bare `"3.13" in detail` -- the detail also
+    # carries the interpreter's own version, so the bare form would pass on a
+    # host running 3.13 even if the floor were read from entirely the wrong
+    # place. That is a FALSE PASS, and this test's whole job is provenance.
+    assert "effective floor 3.13" in host_python.detail
 
 
 def test_collect_python_floor_source_falls_back_to_the_built_in_pin_when_neither_resolves(
@@ -1516,7 +1526,8 @@ def test_collect_python_floor_source_falls_back_to_the_built_in_pin_when_neither
     host_python = next(c for c in checks if c.name == "hostPython")
     assert "tan's built-in pin" in host_python.detail
     assert "no $ZEPHYR_BASE workspace" in host_python.detail
-    assert f"{doctor_cmd.ZEPHYR_PYTHON_FLOOR[0]}.{doctor_cmd.ZEPHYR_PYTHON_FLOOR[1]}" in host_python.detail
+    pin = f"{doctor_cmd.ZEPHYR_PYTHON_FLOOR[0]}.{doctor_cmd.ZEPHYR_PYTHON_FLOOR[1]}"
+    assert f"effective floor {pin}" in host_python.detail
 
 
 def test_workspace_preflight_check_distinguishes_resolved_from_absent():
