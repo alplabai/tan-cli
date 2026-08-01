@@ -998,11 +998,21 @@ def python_floor_skew_warning(
             f"alp-sdk's {BOOTSTRAP_MANIFEST_REL_PATH} declares pythonMinVersion "
             f"{manifest_floor[0]}.{manifest_floor[1]}"
         )
+        # NOT "raise pythonMinVersion in the manifest". That was tried and
+        # REVERTED (alp-sdk#1078): the key is host-universal, and
+        # `build_readiness.rs:401` checks Python BEFORE any `os_set` branch, so
+        # raising it refuses a 3.10/3.11 host for a Yocto-only or metadata-only
+        # project that builds today -- and 3.12 is unreachable via the remedy
+        # the manifest itself offers (`sudo apt-get install -y python3`) on the
+        # Ubuntu 22.04 hosts the docs recommend. This warning fires while
+        # bootstrap is REFUSING, so it is the last line a blocked user reads and
+        # the likeliest thing they act on; it has to name something that helps
+        # them, not an SDK edit that would make things worse (tan-cli#300).
         fix = (
-            f" Raise `prerequisites.pythonMinVersion` to "
-            f"{effective_floor[0]}.{effective_floor[1]} in alp-sdk's "
-            f"{BOOTSTRAP_MANIFEST_REL_PATH} (and re-run its "
-            f"scripts/check_bootstrap_manifest.py drift gate)."
+            f" The skew is known and deliberately unresolved (alp-sdk#1078): the "
+            f"manifest key is host-universal while this floor is Zephyr's. Nothing "
+            f"to change in alp-sdk -- put a Python "
+            f"{effective_floor[0]}.{effective_floor[1]} or newer on the build path."
         )
     else:
         claim = (

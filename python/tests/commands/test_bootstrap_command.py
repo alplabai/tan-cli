@@ -334,6 +334,29 @@ def test_the_skew_warning_matches_doctors_pythonfloor_check_on_both_numbers():
     assert doctor_cmd.python_floor_skew_check((3, 12), (3, 12), "x") is None
 
 
+def test_neither_side_tells_the_user_to_raise_the_manifest_floor():
+    """tan-cli#300. Raising `prerequisites.pythonMinVersion` was tried and
+    REVERTED (alp-sdk#1078): the key is host-universal while this floor is
+    Zephyr's, so raising it refuses a 3.10/3.11 host for a Yocto-only project
+    that builds today.
+
+    This is asserted because nothing asserted it before, which is exactly why
+    the advice shipped in v0.5.0-rc2 -- and why it shipped on the path that
+    matters most: `bootstrap` emits this WHILE REFUSING, so it is the last line
+    a blocked user reads.
+    """
+    _, message = python_floor_skew_warning((3, 10), (3, 12), "zephyr python.cmake")
+    check = doctor_cmd.python_floor_skew_check((3, 10), (3, 12), "zephyr python.cmake")
+
+    # `doctor` splits its prose across `detail` and `fix`; `bootstrap` has one
+    # string. Read whatever the user actually sees, not one field of it.
+    doctor_text = f"{check.detail} {check.fix or ''}"
+
+    for text, where in ((message, "bootstrap"), (doctor_text, "doctor")):
+        assert "Raise `prerequisites.pythonMinVersion`" not in text, where
+        assert "alp-sdk#1078" in text, where
+
+
 def test_the_skew_warning_reaches_the_wire_even_on_a_successful_run(tmp_path):
     """The host is fine; the manifest is not. Reported on success too, or the
     fix never lands in `metadata/bootstrap.json`."""
