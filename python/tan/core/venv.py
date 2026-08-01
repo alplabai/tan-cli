@@ -78,6 +78,77 @@ def venv_bin_dir(start: str, sdk_root: str | None) -> Path | None:
     return venv / venv_layout(os.name == "nt").bin_dir
 
 
+def west_workspace_dir(start: str, sdk_root: Path | None) -> Path | None:
+    """Port of `workspace.rs::west_workspace_dir`: the directory holding
+    `.west/` that a `west alp-*` extension command -- and `tan flash`'s
+    spawned children (tan-cli#289/#61) -- must run from. Discovered only from
+    a workspace manifest, never the app dir alone. Checked in order: the
+    project tree upward, `$ZEPHYR_BASE/..` (manifest-verified against
+    `sdk_root` when one resolved), then the SDK-derived layouts
+    (`<sdk-parent>` and the legacy `<sdk-parent>/zephyrproject`). `None` when
+    nothing resolves -- the caller then keeps the old app-dir cwd, matching
+    the oracle exactly.
+
+    **Moved here from `tan.commands.west_forward_cmd` (tan-cli#289 review).**
+    `flash_cmd.py` needed the SAME resolver `west_forward_cmd.py` already
+    had -- a second copy risked the two disagreeing the moment one changed,
+    the exact class of bug `find_workspace_venv` (above) already exists to
+    avoid. `west_forward_cmd` keeps a `_west_workspace_dir` alias bound to
+    this function for its own call site and its existing tests; a THIRD,
+    partial copy still lives in `tan.commands.doctor_cmd._resolve_
+    west_workspace_dir` and is a follow-up, not retired here.
+    """
+
+    def is_workspace(d: Path) -> bool:
+        return (d / ".west").is_dir()
+
+    directory: Path | None = Path(start)
+    while directory is not None:
+        if is_workspace(directory):
+            return directory
+        parent = directory.parent
+        directory = parent if parent != directory else None
+
+    zephyr_base = os.environ.get("ZEPHYR_BASE")
+    if zephyr_base:
+        found = _zephyr_base_workspace(Path(zephyr_base), sdk_root)
+        if found is not None:
+            return found
+
+    if sdk_root is not None:
+        parent = sdk_root.parent
+        for workspace in (parent, parent / "zephyrproject"):
+            if is_workspace(workspace):
+                return workspace
+
+    return None
+
+
+def _zephyr_base_workspace(zephyr_base: Path, sdk_root: Path | None) -> Path | None:
+    """Step 2 of `west_workspace_dir`: port of `workspace.rs::zephyr_base_workspace`.
+    `zephyr_base`'s PARENT, but only when it is both a west workspace AND (when
+    `sdk_root` resolved) its manifest is verifiably alp-sdk's -- a stock/unrelated
+    Zephyr checkout's parent is a west workspace by the bare `.west`-dir test
+    alone, yet carries no alp-sdk extension commands at all. `sdk_root` absent
+    means there is nothing to verify against, so the old unconditional accept
+    stands rather than refusing a workspace this call can't check.
+    """
+    workspace = zephyr_base.parent
+    if not (workspace / ".west").is_dir():
+        return None
+    if sdk_root is not None:
+        # Lazy, deliberately: `tan.commands.bootstrap_cmd` is a `tan.commands`
+        # module (pulls in typer + the whole bootstrap command surface), and
+        # this `tan.core` module must not depend on it at import time -- only
+        # this one, rarely-taken branch ($ZEPHYR_BASE set AND an sdk_root
+        # resolved) ever needs the manifest check at all.
+        from tan.commands.bootstrap_cmd import _manifest_points_at  # noqa: PLC0415
+
+        if not _manifest_points_at(workspace, sdk_root):
+            return None
+    return workspace
+
+
 def tool_in_venv(bin_dir: Path, tool: str) -> str | None:
     """Resolve `tool` INSIDE an already-located venv bin dir, mirroring
     Rust's `tool_in_venv`: returns its absolute path when it is really a file

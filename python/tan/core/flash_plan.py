@@ -1240,7 +1240,13 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
       resolves it from `flash_args.atoc_map` (an `app-package-map.txt` path)
       via `parse_atoc_start_address` when the manifest supplies that instead
       of a baked-in address, so a customer's manifest never has to hardcode a
-      value that changes every build.
+      value that changes every build. `atoc` itself is read here VERBATIM --
+      this module has no filesystem access to resolve it against -- so
+      `tan.commands.flash_cmd` also anchors it on `build_root`/`sdk_root`
+      (`resolve_artefact_path`, the same resolver `output_artefact`/
+      `atoc_map` use) before this function ever sees it; a caller that skips
+      that step hands this function a path relative to WHATEVER the eventual
+      spawn's cwd turns out to be, not the build root.
 
     Optional, mramxip-only:
 

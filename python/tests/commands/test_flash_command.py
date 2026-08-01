@@ -423,17 +423,29 @@ boot_order: []
     assert payload["data"]["entries"][0]["status"] == "failed"
 
 
-def test_a_confirmed_flow_d_entry_fails_contained_when_no_tool_resolves(tmp_path):
+def test_a_confirmed_flow_d_entry_fails_contained_when_no_tool_resolves(tmp_path, monkeypatch):
     """A confirmed Flow D entry must fail as an ENVELOPE, not kill the process.
 
     **`PATH` is scrubbed deliberately, and that is a hardware-safety requirement,
     not tidiness.** This manifest carries `confirm: true` and the test runs
-    WITHOUT `--dry-run`, so with a J-Link on the inherited `PATH` tan would
-    genuinely spawn Commander with `si SWD / connect / loadbin ... 0x80010000 /
-    loadbin ... 0x8057F5B0 / RSetType 2 / r / g` -- i.e. connect to whatever board
-    is attached, attempt an MRAM write, and pin-reset it, from `pytest`. The
+    WITHOUT `--dry-run`, so with a J-Link resolvable tan would genuinely spawn
+    Commander with `si SWD / connect / loadbin ... 0x80010000 / loadbin ...
+    0x8057F5B0 / RSetType 2 / r / g` -- i.e. connect to whatever board is
+    attached, attempt an MRAM write, and pin-reset it, from `pytest`. The
     maintainer's bench has a probe wired to a live AEN EVK. No test in this file
-    may ever inherit `PATH` on a confirmed, non-dry-run flash path.
+    may ever be able to reach a real spawn on a confirmed, non-dry-run flash path.
+
+    **`venv_bin_dir` is pinned to `None` explicitly, not merely left to PATH=""
+    (tan-cli#289 review).** tan-cli#289 widened the tool gate to PATH **or**
+    the resolved workspace venv, and `venv_bin_dir` walks from `tmp_path`
+    upward to the filesystem root looking for a west-capable `.venv` -- an
+    ancestor `.venv` that also happens to provide `JLinkExe` would make this
+    "PATH=''" guard alone insufficient, and PATH cannot rule that out (there is
+    no env-var override for venv resolution). Pinned the same way
+    `test_build_planner_python.py:74-84` pins `find_workspace_venv` to `None`.
+    `subprocess.run` is ALSO stubbed to raise -- belt and suspenders: even if
+    the tool gate somehow passed, this makes an actual spawn structurally
+    impossible rather than merely host-dependent-unlikely.
 
     The original version of this test also asserted a false premise: it claimed
     `mkstemp` raises when `TMPDIR`/`TEMP`/`TMP` point at a nonexistent directory,
@@ -443,32 +455,49 @@ def test_a_confirmed_flow_d_entry_fails_contained_when_no_tool_resolves(tmp_path
     the assertion now rests on the tool gate, which is what actually fires.
     """
     missing = str(tmp_path / "no" / "such" / "dir")
-    manifest = f"""schema_version: 1
-hw_info: {{sku: S}}
+    monkeypatch.setenv("TMPDIR", missing)
+    monkeypatch.setenv("TEMP", missing)
+    monkeypatch.setenv("TMP", missing)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+
+    def _must_not_spawn(*_a, **_k):
+        raise AssertionError(
+            "a confirmed, non-dry-run Flow D entry attempted to spawn a "
+            "process -- the maintainer's bench has a probe on a live AEN EVK"
+        )
+
+    monkeypatch.setattr(flash_cmd.subprocess, "run", _must_not_spawn)
+
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    manifest = """schema_version: 1
+hw_info: {sku: S}
 slices:
-- {{core_id: c1, os: zephyr, output_artefact: a.bin, status: ok,
+- {core_id: c1, os: zephyr, output_artefact: a.bin, status: ok,
    flash_method: alif_mram_jlink,
-   flash_args: {{jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
-                atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true}}}}
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                atoc: atoc.bin, atoc_address: "0x8057F5B0", confirm: true}}
 helper_mcus: []
 boot_order: []
 """
-    exit_code, out, _ = run_flash(
-        tmp_path,
-        "--format",
-        "json",
-        # PATH="" so NOTHING can resolve: no JLinkExe, no west, no cmake. This is
-        # the guard that stops a confirmed, non-dry-run Flow D entry reaching real
-        # hardware from the test suite. Do not remove it.
-        env={"TMPDIR": missing, "TEMP": missing, "TMP": missing, "PATH": ""},
-        manifest=manifest,
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        manifest, encoding="utf-8", newline=""
     )
-    payload = envelope(out)
+
+    exit_code, data, issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
     assert exit_code == 1
-    assert codes(payload) == ["flash.entry-failed"]
+    assert [issue.code for issue in issues] == ["flash.entry-failed"]
     # And prove no burn was even attempted: the entry died at the TOOL GATE,
     # before any Commander script was written or spawned.
-    message = payload["data"]["entries"][0]["message"]
+    message = data["entries"][0]["message"]
     assert "on PATH; none found" in message, message
 
 
@@ -1686,17 +1715,142 @@ def test_flash_tool_gate_still_fails_when_neither_path_nor_the_venv_has_west(
 ):
     """The negative control: with no venv at all (and PATH scrubbed), the
     required-tool gate must still refuse -- `_tool_available`'s venv fallback
-    must never make a genuinely absent tool look present."""
+    must never make a genuinely absent tool look present.
+
+    **Pinned in-process (tan-cli#289 review), not left to `tmp_path` having no
+    ancestor `.venv`.** That is the exact hazard `test_build_planner_python.py:
+    74-84` documents and defends against for `find_workspace_venv` --
+    `venv_bin_dir` walks from `tmp_path` all the way to the filesystem root,
+    so a developer machine with a `.venv` anywhere above the OS temp dir would
+    red (or worse, silently pass for the wrong reason) this test. Unlike the
+    positive control at `test_flash_resolves_west_from_the_workspace_venv_and_
+    runs_from_its_topdir`, this manifest's `zephyr_west_flash` entry is NOT
+    confirm-gated -- an ancestor venv that resolved here would make this test
+    really spawn `west flash` against `OK_SLICE`. `subprocess.run` is stubbed
+    to make that structurally impossible rather than merely unlikely, mirroring
+    the positive control's own stub.
+    """
     monkeypatch.delenv("ZEPHYR_BASE", raising=False)
     empty_path = tmp_path / "empty-path"
     empty_path.mkdir()
     monkeypatch.setenv("PATH", str(empty_path))
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
 
-    exit_code, out, _ = run_flash(tmp_path, "--format", "json")
-    payload = envelope(out)
+    def _must_not_spawn(*_a, **_k):
+        raise AssertionError("the tool gate must refuse before any spawn is attempted")
+
+    monkeypatch.setattr(flash_cmd.subprocess, "run", _must_not_spawn)
+
+    (tmp_path / "build").mkdir()
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (tmp_path / "build" / "system-manifest.yaml").write_text(
+        OK_SLICE, encoding="utf-8", newline=""
+    )
+
+    exit_code, data, _issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(tmp_path / "sdk"),
+        board_yaml=None, core=None, helper=None, dry_run=False,
+        skip_missing_tools=False, capture=True, cwd=str(tmp_path),
+    )
+
     assert exit_code == 1
-    assert payload["data"]["entries"][0]["status"] == "failed"
-    assert "west" in payload["data"]["entries"][0]["message"]
+    assert data["entries"][0]["status"] == "failed"
+    assert "west" in data["entries"][0]["message"]
+
+
+# ── Flow D atoc resolution is cwd-independent (tan-cli#289 follow-up) ───────
+
+
+def test_flow_d_atoc_is_resolved_against_build_root_not_the_spawn_cwd(tmp_path, monkeypatch):
+    """`flash_args.atoc` is the one MRAM-write input `plan_alif_mram_jlink`
+    used to read straight off `flash_args` with NO resolution at all -- it
+    goes verbatim into the J-Link Commander script's `loadbin`/`verifybin`
+    lines, unlike `atoc_map` (`_resolve_flow_d_atoc_address`) and
+    `output_artefact` (`resolve_artefact_path` in `_flash_entry`), which both
+    already were.
+
+    tan-cli#289 set the flash child's `cwd` to the west workspace topdir, a
+    directory that need not hold the manifest's relative `atoc` at all --
+    five of this repo's own fixtures spell it `atoc: atoc.bin`. This test
+    puts the REAL `atoc.bin` under `build_root` and gives the child a west
+    workspace topdir that is a SEPARATE directory holding no `atoc.bin` of
+    its own, so a Commander script that (pre-fix) named the bare relative
+    string would resolve, if at all, against the WRONG base at spawn time --
+    proving the fix by asserting the script instead names the absolute,
+    build-root-resolved file the user meant.
+
+    `subprocess.run` is stubbed -- this is a confirmed, non-dry-run Flow D
+    write, and no board is reserved here; nothing may reach a real J-Link.
+    """
+    work = tmp_path
+    (work / "build").mkdir()
+    (work / "sdk" / "scripts").mkdir(parents=True)
+    (work / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+
+    real_atoc = work / "build" / "atoc.bin"
+    real_atoc.write_bytes(b"real-atoc-bytes")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: c1, os: zephyr, output_artefact: a.bin, status: ok,
+   flash_method: alif_mram_jlink,
+   flash_args: {jlink_flash_device: PART_PROFILE, atoc: atoc.bin,
+                atoc_address: "0x8057F5B0", confirm: true}}
+helper_mcus: []
+boot_order: []
+"""
+    (work / "build" / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+
+    # A west workspace topdir DIFFERENT from `work`, and holding no `atoc.bin`
+    # of its own -- matching #61's own test setup above, so a Commander
+    # script that resolved `atoc` against this cwd instead of `build_root`
+    # would name a file that plainly does not exist there.
+    workspace_dir = work / "zephyrproject"
+    (workspace_dir / ".west").mkdir(parents=True)
+
+    fake_tools = work / "faketools"
+    fake_tools.mkdir()
+    jlink_path = fake_tools / "JLinkExe"
+    jlink_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(jlink_path, 0o755)
+    monkeypatch.setenv("PATH", str(fake_tools))
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    monkeypatch.setattr(flash_cmd, "venv_bin_dir", lambda *_a, **_k: None)
+
+    scripts: list[str] = []
+
+    def _fake_run(argv, **kwargs):
+        scripts.append(Path(argv[-1]).read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(list(argv), 0, stdout="", stderr="")
+
+    monkeypatch.setattr(flash_cmd.subprocess, "run", _fake_run)
+
+    exit_code, data, _issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(work / "sdk"), board_yaml=None,
+        core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=True,
+        cwd=str(work),
+    )
+
+    assert exit_code == 0, data
+    assert data["entries"][0]["status"] == "ok", data
+    assert len(scripts) == 1, scripts
+    script = scripts[0]
+    # Not a plain string-equality check against `real_atoc`: `_abs_join`
+    # deliberately preserves `app_path`'s own `.` component (see its own
+    # docstring), so the resolved path is textually `<work>\.\build\atoc.bin`,
+    # not pathlib's normalised `<work>\build\atoc.bin` -- both name the SAME
+    # file, which `samefile` is what actually proves.
+    loadbin_line = next(line for line in script.splitlines() if line.startswith("loadbin "))
+    written_path, written_addr = loadbin_line.split()[1:3]
+    assert written_addr == "0x8057F5B0", script
+    assert Path(written_path).is_absolute(), script
+    assert Path(written_path).samefile(real_atoc), script
+    assert f"verifybin {written_path} 0x8057F5B0" in script, script
+    # The un-resolved relative spelling must not survive into the script at all.
+    assert "loadbin atoc.bin " not in script, script
 
 
 def test_is_pending_is_the_one_definition_shared_with_the_bundle_writer():
