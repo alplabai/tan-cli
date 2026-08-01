@@ -263,8 +263,32 @@ jobs:
           # that reports success is precisely the silent-pass shape this gate
           # exists to catch, so any warning-or-worse issue fails it HERE, where
           # the diagnosis is one line long.
+          # ONE code is exempt, and only this one. `bootstrap.python-floor-skew`
+          # reports that alp-sdk's `metadata/bootstrap.json` declares
+          # `pythonMinVersion 3.10` while the pinned Zephyr's
+          # `cmake/modules/python.cmake` sets `PYTHON_MINIMUM_REQUIRED 3.12`.
+          # That warning is CORRECT and it is about the SDK's manifest, not
+          # about the environment this job just built -- the workspace is fine.
+          # It is deliberately unresolved (alp-sdk#1078): raising the shared key
+          # would make `tan doctor --build` refuse a 3.10/3.11 host for a
+          # Yocto-only project, because `build_readiness.rs:401` checks Python
+          # BEFORE any `os_set` branch, and 3.12 is unreachable via the remedy
+          # tan echoes back (`sudo apt-get install -y python3`) on the Ubuntu
+          # 22.04 hosts the docs recommend.
+          #
+          # It surfaces here for the first time because tan-cli#278 swapped the
+          # PYTHON tan into this job; the Rust tan never made this check. Exempt
+          # by CODE, never by severity -- any other warning still fails, which
+          # is the whole point of this gate.
+          EXPECTED_WARNINGS = {"bootstrap.python-floor-skew"}
           issues = e.get("issues") or []
-          bad = [i for i in issues if i.get("severity") in ("warning", "error")]
+          bad = [i for i in issues
+                 if i.get("severity") in ("warning", "error")
+                 and i.get("code") not in EXPECTED_WARNINGS]
+          for i in issues:
+              if i.get("code") in EXPECTED_WARNINGS:
+                  print("::notice::expected, exempt:", i.get("code"),
+                        "--", i.get("message"))
           if bad:
               print("::error::tan bootstrap exited 0 but reported",
                     len(bad), "warning/error issue(s) -- the environment it just "
