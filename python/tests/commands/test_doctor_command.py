@@ -34,6 +34,7 @@ from pathlib import Path
 import pytest
 
 from tan.commands import doctor_cmd
+from tan.core.bootstrap import venv_layout
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``.
@@ -269,6 +270,91 @@ def test_west_present_but_unparseable_version_is_a_warning_not_a_crash():
 
 
 # --------------------------------------------------------------------------
+# westResolved -- tan-cli#123/#290: the venv-resolved west, not bare PATH
+# --------------------------------------------------------------------------
+
+
+def test_west_resolved_warns_when_nothing_resolves():
+    """The refusing state: neither the workspace venv nor PATH has a `west`
+    to run."""
+    check = doctor_cmd.west_resolved_check(None, None)
+    assert check.status == "warn"
+    assert check.fix == "tan bootstrap"
+
+
+def test_west_resolved_passes_and_names_the_resolved_binary_and_version():
+    """The working-but-unusual state `west` (bare-PATH-only) cannot see: a
+    resolved venv binary, off PATH entirely."""
+    check = doctor_cmd.west_resolved_check("/ws/.venv/bin/west", (1, 5))
+    assert check.status == "pass"
+    assert "1.5" in check.detail
+    assert "/ws/.venv/bin/west" in check.detail
+
+
+def test_west_resolved_still_passes_with_no_readable_version():
+    check = doctor_cmd.west_resolved_check("/ws/.venv/bin/west", None)
+    assert check.status == "pass"
+    assert "/ws/.venv/bin/west" in check.detail
+
+
+def test_collect_reports_west_resolved_unconditionally(tmp_path):
+    """tan-cli#290: unlike the old `zephyrWorkspace`, `westResolved` was
+    never `--build`-gated in the first place -- confirm both modes carry it,
+    mirroring `crates/tan-cli/src/commands/doctor.rs:1828`'s assertion that
+    `sdk`/`workspace`/`westResolved` all land in the plain fold together."""
+    for build in (False, True):
+        names = {c.name for c in doctor_cmd._collect(None, build=build, workspace_root=str(tmp_path))}
+        assert "westResolved" in names, (build, names)
+
+
+def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
+    """tan-cli#123's exact bug, reproduced then guarded: a workspace venv
+    holds `west`, PATH is scrubbed empty so a bare lookup CANNOT possibly
+    answer -- `west` (bare-PATH-only) must fail, and `westResolved` must
+    still resolve and report a version, proving it came from the venv
+    binary, never a bare-PATH re-probe. Break `west_resolved_check`'s wiring
+    in `_collect` (e.g. feed it `on_path("west")` instead of
+    `tan.core.venv.west_program`'s result) and this goes red: `westResolved`
+    would report the same `warn`/absent verdict `west` does, with PATH
+    scrubbed.
+    """
+    layout = venv_layout(os.name == "nt")
+    bin_dir = tmp_path / ".venv" / layout.bin_dir
+    bin_dir.mkdir(parents=True)
+    west_path = bin_dir / layout.west
+    if os.name == "nt":
+        # A real, spawnable PE binary under the exact required name -- a text
+        # file named `west.exe` is not executable at all, and this test's own
+        # `scrub_path=True` proved (by breaking it first) that a bare copy of
+        # `python.exe` is NOT self-contained: with PATH empty it cannot find
+        # its own `python3*.dll`/`vcruntime*.dll` via the app-directory search
+        # and dies with STATUS_DLL_NOT_FOUND before printing anything. Copying
+        # every DLL that sits beside the real interpreter alongside the
+        # renamed copy closes that gap; `--version` then runs the copied
+        # interpreter's own, always-parseable banner.
+        interpreter_dir = Path(sys.executable).parent
+        for dll in interpreter_dir.glob("*.dll"):
+            shutil.copy(dll, bin_dir / dll.name)
+        shutil.copy(sys.executable, west_path)
+    else:
+        west_path.write_text("#!/bin/sh\necho 'West version: v99.98.97'\n", encoding="utf-8")
+        os.chmod(west_path, 0o755)
+
+    proc = run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True)
+    envelope = json.loads(proc.stdout)
+    checks = {c["name"]: c for c in envelope["data"]["checks"]}
+
+    assert checks["west"]["status"] == "fail", checks["west"]
+    resolved = checks["westResolved"]
+    assert resolved["status"] == "pass", resolved
+    if os.name == "nt":
+        expected = ".".join(sys.version.split()[0].split(".")[:2])
+    else:
+        expected = "99.98"
+    assert expected in resolved["detail"], resolved["detail"]
+
+
+# --------------------------------------------------------------------------
 # zephyrSdk (tan-cli#286) -- the port had NO such check at all; the Rust
 # oracle's `zephyrSdk` (crates/tan-cli/src/commands/doctor.rs::
 # append_zephyr_sdk_toolchain, tan-cli#160) is unconditional in plain
@@ -492,66 +578,65 @@ def test_collect_reports_zephyr_sdk_under_build_too():
 
 
 # --------------------------------------------------------------------------
-# --build: zephyrWorkspace
+# zephyrWorkspace -- unconditional now, and a pin mismatch FAILS (tan-cli#290)
 # --------------------------------------------------------------------------
 
 
-def test_zephyr_workspace_warns_with_no_zephyr_base():
-    check = doctor_cmd.zephyr_workspace_check(None, None, None)
-    assert check.status == "warn"
-    assert "ZEPHYR_BASE" in check.detail
-
-
 def test_zephyr_workspace_warns_when_the_dir_is_not_a_zephyr_checkout():
-    check = doctor_cmd.zephyr_workspace_check("/nope", None, None)
+    """The one fact `zephyrVersion` cannot see at all (it silently skips) --
+    this check's whole remaining reason to exist. Advisory: a `.west`
+    workspace mid-`west update` is a legitimate, working-in-progress state,
+    not a proven blocker."""
+    check = doctor_cmd.zephyr_workspace_check("/ws", None, None)
     assert check.status == "warn"
     assert "VERSION" in check.detail
 
 
 def test_zephyr_workspace_passes_with_no_sdk_pin_to_compare():
-    check = doctor_cmd.zephyr_workspace_check("/zephyrproject/zephyr", "4.4.0", None)
+    check = doctor_cmd.zephyr_workspace_check("/ws", "4.4.0", None)
     assert check.status == "pass"
     assert "4.4.0" in check.detail
 
 
-def test_zephyr_workspace_warns_on_a_pin_mismatch():
-    check = doctor_cmd.zephyr_workspace_check("/zephyrproject/zephyr", "4.3.0", "4.4.1")
-    assert check.status == "warn"
+def test_zephyr_workspace_fails_on_a_pin_mismatch():
+    """tan-cli#290, reversing this check's own prior premise: Rust treats
+    this exact fact -- a resolved workspace's Zephyr differing from the
+    SDK's pin -- as a hard Fail (`crates/tan-core/src/preflight.rs:118-145`,
+    tan-cli#98/#159), the alp-sdk#855 v4.4.0->v4.4.1 incident where a
+    drifted checkout reported `0 failed` and the next build broke. Warn was
+    the exact silent-pass shape that incident is."""
+    check = doctor_cmd.zephyr_workspace_check("/ws", "4.3.0", "4.4.1")
+    assert check.status == "fail"
     assert "4.3.0" in check.detail and "4.4.1" in check.detail
 
 
 def test_zephyr_workspace_passes_on_a_matching_pin():
-    check = doctor_cmd.zephyr_workspace_check("/zephyrproject/zephyr", "4.4.1", "4.4.1")
+    check = doctor_cmd.zephyr_workspace_check("/ws", "4.4.1", "4.4.1")
     assert check.status == "pass"
 
 
-def test_build_flag_adds_zephyr_workspace_to_the_check_list_plain_doctor_lacks(tmp_path):
-    plain = run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True)
-    built = run_tan("doctor", "--build", "--format", "json", cwd=tmp_path, scrub_path=True)
-    plain_env = json.loads(plain.stdout)
-    built_env = json.loads(built.stdout)
-
-    plain_names = {c["name"] for c in plain_env["data"]["checks"]}
-    built_names = {c["name"] for c in built_env["data"]["checks"]}
-    assert "zephyrWorkspace" not in plain_names
-    assert "zephyrWorkspace" in built_names
-    assert built_names - plain_names == {"zephyrWorkspace"}
-
-
-def test_build_flag_reads_a_real_zephyr_base(tmp_path):
+def test_zephyr_workspace_now_runs_unconditionally_not_only_under_build(tmp_path):
+    """tan-cli#290: the last of tan-cli#294's `--build`-gated checks folds
+    into plain `tan doctor` -- ADR 0021 Lane 1 P0a runs PLAIN doctor as the
+    very first command a customer types, and gating this fact behind
+    `--build` left it invisible there. `--build` is accepted and forwarded
+    (both `alp-sdk-vscode` call sites still pass it) but no longer changes
+    the check-name set. A resolvable workspace is required to observe the
+    check at all -- see `zephyr_workspace_check`'s "no unresolved branch"
+    docstring note -- so this plants one directly at `workspace_root` (step
+    1 of `tan.core.venv.west_workspace_dir`'s search).
+    """
+    (tmp_path / ".west").mkdir()
     zephyr = tmp_path / "zephyr"
     zephyr.mkdir()
     (zephyr / "VERSION").write_text(
         "VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = 1\n", encoding="utf-8"
     )
-    proc = run_tan(
-        "doctor", "--build", "--format", "json", cwd=tmp_path, scrub_path=True,
-        env_extra={"ZEPHYR_BASE": str(zephyr)},
-    )
-    env = json.loads(proc.stdout)
-    check = next(c for c in env["data"]["checks"] if c["name"] == "zephyrWorkspace")
-    assert check["status"] == "pass"
-    assert "4.4.1" in check["detail"]
+    for build in (False, True):
+        names = {
+            c.name for c in doctor_cmd._collect(None, build=build, workspace_root=str(tmp_path))
+        }
+        assert "zephyrWorkspace" in names, (build, names)
 
 
 # --------------------------------------------------------------------------
@@ -1197,8 +1282,9 @@ def test_collect_reports_board_yaml_as_fail_only_when_a_project_was_selected(
 
 def test_collect_resolves_a_real_workspace_and_matching_zephyr_version(tmp_path, monkeypatch):
     """The other host state: an SDK resolved, a board.yaml present, a
-    workspace resolved with a Zephyr matching the SDK's pin -- all four
-    Pass."""
+    workspace resolved with a Zephyr matching the SDK's pin -- `zephyrVersion`
+    and `zephyrWorkspace` (tan-cli#290, both sourced from these same resolved
+    facts) agree, and all five Pass."""
     # Isolate from a developer/CI shell's own `$ZEPHYR_BASE`: the shared
     # resolver now consults it (step 2) before falling back to this SDK's
     # own `<sdk-parent>` layout (step 3), which is the resolution path this
@@ -1223,7 +1309,7 @@ def test_collect_resolves_a_real_workspace_and_matching_zephyr_version(tmp_path,
     checks = doctor_cmd._collect(
         str(sdk_root), board_yaml=str(board_yaml), workspace_root=str(tmp_path / "app")
     )
-    for name in ("sdk", "boardYaml", "workspace", "zephyrVersion"):
+    for name in ("sdk", "boardYaml", "workspace", "zephyrVersion", "zephyrWorkspace"):
         check = next(c for c in checks if c.name == name)
         assert check.status == "pass", f"{name}: {check.detail}"
 

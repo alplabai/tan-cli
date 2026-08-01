@@ -53,28 +53,31 @@ verdict is worse than none. The envelope keys that survive --
 `data.summary.{pass,warn,fail}` and `data.checks[]` -- are the ones
 `alp-sdk-vscode` actually reads (`src/debug.ts`, `src/toolchain.ts`).
 
-**`--build` is accepted, real, and additive -- not the Rust oracle's second,
-disjoint check vocabulary.** Measured against a real `tan.exe`, plain `tan
-doctor` and `tan doctor --build` run two almost entirely different check
-lists (debug-readiness vs. zephyr/yocto/baremetal build-readiness -- compare
-`tan doctor`'s `workspaceRoot`/`codeLLDBExtension`/`lldb` against `tan doctor
---build`'s `git`/`cmake`/`ninja`/`dtc`/`gperf`/`vendorToolchain`/...). Byte-
-parity with BOTH of those lists is a second command's worth of new checks,
-not a flag gap -- and this port's own check list -- `hostPython`/
-`hostPrerequisites`/`west`/`zephyrSdk`/`setools`/`jlink`, plus (tan-cli#294)
-`sdk`/`boardYaml`/`workspace`/`zephyrVersion`/`zephyrSdkAvailableForHost`/
-`longPaths`/`homePath`/`sdkProvenance` -- is ALREADY build/flash-oriented by
-design (see above), unlike the Rust oracle's PLAIN `doctor`. So `--build`
-here means what it says on this port's own terms: it turns on ONE extra,
-genuinely-probed check plain `tan doctor` does not run -- `zephyrWorkspace`,
-whether `$ZEPHYR_BASE` resolves to a real Zephyr checkout matching alp-sdk's
-`west.yml` pin -- rather than either silently doing nothing (the
-anti-pattern this whole command exists to avoid) or re-deriving the
-oracle's second, disjoint vocabulary from scratch. Both `alp-sdk-vscode`
-call sites (`["doctor", "--build"]`, `["doctor", "--build", "--fix"]`) still
-run this port's normal checks PLUS `zephyrWorkspace`. Every OTHER tan-cli#294
-check runs in BOTH modes -- they are host/build-environment facts needing no
-`--build` flag to justify them, exactly like `zephyrSdk` above.
+**`--build` is accepted, real, and now (tan-cli#290) a no-op vs. plain `tan
+doctor` -- not the Rust oracle's second, disjoint check vocabulary.**
+Measured against a real `tan.exe`, plain `tan doctor` and `tan doctor
+--build` run two almost entirely different check lists (debug-readiness vs.
+zephyr/yocto/baremetal build-readiness -- compare `tan doctor`'s
+`workspaceRoot`/`codeLLDBExtension`/`lldb` against `tan doctor --build`'s
+`git`/`cmake`/`ninja`/`dtc`/`gperf`/`vendorToolchain`/...). Byte-parity with
+BOTH of those lists is a second command's worth of new checks, not a flag
+gap -- and this port's own check list -- `hostPython`/`hostPrerequisites`/
+`west`/`zephyrSdk`/`setools`/`jlink`, plus (tan-cli#294) `sdk`/`boardYaml`/
+`workspace`/`zephyrVersion`/`zephyrSdkAvailableForHost`/`longPaths`/
+`homePath`/`sdkProvenance`, plus (tan-cli#290) `westResolved`/
+`zephyrWorkspace` -- is ALREADY build/flash-oriented by design (see above),
+unlike the Rust oracle's PLAIN `doctor`. `zephyrWorkspace` -- whether the
+RESOLVED workspace's Zephyr matches alp-sdk's `west.yml` pin -- used to be
+the ONE check this flag gated; ADR 0021 Lane 1 P0a runs PLAIN `tan doctor`
+as the very first command a customer types, before `--build` is ever named,
+so gating it there left the exact alp-sdk#855 v4.4.0->v4.4.1 drift invisible
+on that first run. It is unconditional now, alongside every other
+tan-cli#294/#290 fact -- `--build` therefore changes nothing about this
+port's check-name set any more. The flag stays accepted rather than
+removed: both `alp-sdk-vscode` call sites (`["doctor", "--build"]`,
+`["doctor", "--build", "--fix"]`) still pass it, and a flag a caller already
+relies on does not need to keep doing something to still be worth accepting
+without error.
 
 `--fix` is a separate, NOT-yet-ported flag gap (it is not part of this one):
 the oracle's `--build --fix` auto-repairs a missing Zephyr workspace by
@@ -103,7 +106,7 @@ from tan.core.bootstrap import (
     reported_missing,
 )
 from tan.core.timestamp import generated_at_iso
-from tan.core.venv import west_workspace_dir
+from tan.core.venv import west_program, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -670,6 +673,40 @@ def west_check(
     return Check("west", "pass", f"west {_fmt(version)} ({found}).")
 
 
+def west_resolved_check(found: str | None, version: tuple[int, int] | None) -> Check:
+    """`westResolved` -- is `west` resolved through the WORKSPACE VENV
+    (`tan.core.venv.west_program`), not bare PATH (tan-cli#123/#290)?
+
+    Distinct from `west` above, which probes `on_path("west")` ONLY: on a
+    host where the workspace venv holds `west` but PATH does not -- the
+    normal GUI-launched-editor state, `tan.core.venv`'s own module
+    docstring -- `west` reports failing while a real build succeeds through
+    the venv binary. `westResolved` verifies the SAME binary a build would
+    actually run, and `version` (when probed) MUST come from that identical
+    resolution -- never a second, bare-PATH re-probe. Mirrors
+    `tan_core::preflight::build_preflight_checks`'s `westResolved`
+    (`west_available`) check, unconditional in BOTH doctor modes exactly like
+    `sdk`/`workspace` beside it (`crates/tan-cli/src/commands/doctor.rs:1828`
+    asserts all three together in the plain fold).
+
+    `Warn`, not `Fail`, mirroring Rust's severity for `west_available`: `west`
+    above already fails outright on a totally-absent west, so this is the
+    narrower, additive fact that the SPECIFIC binary a build would run is (or
+    is not) present.
+    """
+    if found is None:
+        return Check(
+            "westResolved",
+            "warn",
+            "west not resolved through the workspace venv or PATH -- run "
+            "`tan bootstrap` to create the workspace venv.",
+            "tan bootstrap",
+        )
+    if version is None:
+        return Check("westResolved", "pass", f"west resolved: {found}.")
+    return Check("westResolved", "pass", f"west {_fmt(version)} resolved: {found}.")
+
+
 def zephyr_sdk_install_command() -> str:
     """The exact `west sdk install` invocation the `zephyrSdk` check's `fix`
     names -- the ONE place it is assembled, mirroring
@@ -768,59 +805,64 @@ def seven_zip_check(found: bool) -> Check:
 
 
 def zephyr_workspace_check(
-    zephyr_base: str | None, version_text: str | None, sdk_pin: str | None
+    workspace_dir: str, version_text: str | None, sdk_pin: str | None
 ) -> Check:
-    """`zephyrWorkspace` -- `--build`-only: does `$ZEPHYR_BASE` actually
-    resolve to a Zephyr checkout, and does its version match what alp-sdk's
-    own `west.yml` pins?
+    """`zephyrWorkspace` -- unconditional now, not `--build`-only
+    (tan-cli#290): does the RESOLVED workspace's `zephyr/` subtree actually
+    look like a Zephyr checkout, and does its version match alp-sdk's
+    `west.yml` pin?
 
-    `hostPrerequisites`/`west` only check that the TOOLS needed to build are
-    on PATH -- neither confirms a Zephyr tree is actually there to build
-    against, or that it is the right one. `--build` exists to dig one level
-    deeper than plain `tan doctor` does (see the module docstring); this is
-    that extra level.
+    `workspace_dir`/`version_text`/`sdk_pin` are the SAME
+    `tan.core.venv.west_workspace_dir`-resolved facts `workspace`/
+    `zephyrVersion` above already compute -- not a second, independent
+    `$ZEPHYR_BASE` env-var read, which was tan-cli#294's own complaint about
+    this check ("probes an env var, not the resolved topdir"). Callers only
+    reach this once a workspace has actually resolved: `workspace` above
+    already fails outright on a totally-absent one, and re-warning that same
+    absence here under a second name would be exactly the one-fact-twice
+    duplication this file's `boardYaml` handling (mirroring the Rust oracle)
+    already refuses to do -- so there is no "unresolved" branch here at all.
 
-    WARN, never FAIL -- but the premise for that has CHANGED (tan-cli#294):
-    it used to be "every other check already fails outright when a
-    workspace is entirely absent", naming `hostPrerequisites`/`west` -- which
-    was never true, those two fail on missing TOOLS, not a missing
-    workspace. Now `workspace` above genuinely does fail outright on a
-    totally-absent Zephyr workspace (for the common case its own resolver
-    covers -- see its docstring for the one narrower gap), so a customer
-    already sees a hard blocker before this check ever contributes anything.
-    What THIS check still adds past that is narrower: `$ZEPHYR_BASE`
-    resolving to something that does not look like a Zephyr checkout at all,
-    or one whose version does not match the SDK's pin. Whether THAT narrower
-    case should also be a Fail is tan-cli#290's call (it needs the same
-    venv/west-workspace module tan-cli#289 is building), not this port's --
-    this docstring only keeps the premise honest, it does not change the
-    severity.
+    **`Fail`, not `Warn`, on a version mismatch** (tan-cli#290, reversing this
+    check's own prior premise): Rust treats exactly this fact -- a resolved
+    workspace's Zephyr differing from the SDK's pin -- as a hard Fail
+    (`crates/tan-core/src/preflight.rs:118-145`, tan-cli#98/#159), the
+    alp-sdk#855 v4.4.0->v4.4.1 incident, where a drifted checkout reported
+    `11 passed, 6 warnings, 0 failed` and the very next build broke.
+    `zephyr_version_preflight_check` above already reports this identical
+    fact, from these identical inputs, at Fail severity -- this branch stays
+    IN STEP with it rather than contradicting it under a second name: a
+    consumer reading either check alone must never see a different verdict
+    for the same host state, which is the silent-pass shape #290 exists to
+    close.
+
+    An unreadable `zephyr/VERSION` stays `Warn`: neither the Rust oracle nor
+    `zephyr_version_preflight_check` above (which silently SKIPS rather than
+    fails when the version is unknown -- "don't nag when this cannot
+    actually be verified") treats this as more than that, and a resolved
+    `.west` workspace mid-`west update` -- `zephyr/` not yet cloned -- is a
+    legitimate, working-in-progress host state, not a proven blocker. This is
+    the one fact `zephyrVersion` cannot see at all (it skips outright), so it
+    is this check's whole remaining reason to exist.
     """
-    if zephyr_base is None:
-        return Check(
-            "zephyrWorkspace",
-            "warn",
-            "no $ZEPHYR_BASE Zephyr workspace resolved.",
-            "Run `tan bootstrap` to create one.",
-        )
     if version_text is None:
         return Check(
             "zephyrWorkspace",
             "warn",
-            f"$ZEPHYR_BASE=`{zephyr_base}` does not look like a Zephyr checkout "
-            f"(no readable VERSION file).",
-            "Run `tan bootstrap`, or point $ZEPHYR_BASE at a real Zephyr checkout.",
+            f"workspace at `{workspace_dir}` does not look like a Zephyr checkout "
+            f"(no readable zephyr/VERSION file).",
+            "Run `tan bootstrap`, or point the workspace at a real Zephyr checkout.",
         )
     if sdk_pin is not None and version_text != sdk_pin:
         return Check(
             "zephyrWorkspace",
-            "warn",
-            f"Zephyr {version_text} at $ZEPHYR_BASE=`{zephyr_base}` does not match "
-            f"alp-sdk's pinned {sdk_pin} (from west.yml).",
-            "Run `tan bootstrap` to reuse or refresh a matching workspace.",
+            "fail",
+            f"Zephyr {version_text} at `{workspace_dir}` does not match alp-sdk's "
+            f"pinned {sdk_pin} (from west.yml).",
+            "Run `tan bootstrap` to refresh the workspace.",
         )
     return Check(
-        "zephyrWorkspace", "pass", f"Zephyr {version_text} at $ZEPHYR_BASE=`{zephyr_base}`."
+        "zephyrWorkspace", "pass", f"Zephyr {version_text} at `{workspace_dir}`."
     )
 
 
@@ -1127,20 +1169,22 @@ def home_path_check(home: str | None) -> Check:
 # gap this closes: "probed nothing about the build environment and printed
 # byte-identical output across four materially different host states."
 #
-# `westResolved` (the venv-resolved `west` binary's own presence) and the
-# EXISTING `zephyrWorkspace` check's severity are OUT of scope here --
-# tan-cli#290. `workspace`/`zephyrVersion` below are sourced from the SHARED
-# `tan.core.venv.west_workspace_dir` (tan-cli#294 review) -- ALL THREE of its
-# steps, including the `$ZEPHYR_BASE`-derived, manifest-verified fallback. A
-# fourth, partial copy of the same search (this module's own retired
-# `_resolve_west_workspace_dir`) previously covered only the project-tree
-# walk and the SDK-derived layout, so a host relying SOLELY on a manually
-# exported `$ZEPHYR_BASE` outside both a project tree and `<sdk-parent>`
-# reported a false `workspace` Fail -- "no Zephyr workspace -- run `tan
-# bootstrap`" -- that would have the customer bootstrap a SECOND workspace.
-# Importing the one shared resolver closes that gap and retires the fourth
-# copy in the same change; see `tan.core.venv.west_workspace_dir`'s own
-# docstring for why the search lives there and not here.
+# `westResolved` (the venv-resolved `west` binary's own presence, tan-cli#123
+# reintroduced) and `zephyrWorkspace`'s severity/gating are now IN scope here
+# too (tan-cli#290) -- see `west_resolved_check`/`zephyr_workspace_check`'s
+# own docstrings. `workspace`/`zephyrVersion`/`zephyrWorkspace` below are all
+# sourced from the SHARED `tan.core.venv.west_workspace_dir` (tan-cli#294
+# review) -- ALL THREE of its steps, including the `$ZEPHYR_BASE`-derived,
+# manifest-verified fallback. A fourth, partial copy of the same search
+# (this module's own retired `_resolve_west_workspace_dir`) previously
+# covered only the project-tree walk and the SDK-derived layout, so a host
+# relying SOLELY on a manually exported `$ZEPHYR_BASE` outside both a
+# project tree and `<sdk-parent>` reported a false `workspace` Fail -- "no
+# Zephyr workspace -- run `tan bootstrap`" -- that would have the customer
+# bootstrap a SECOND workspace. Importing the one shared resolver closed
+# that gap and retired the fourth copy one commit before this one; see
+# `tan.core.venv.west_workspace_dir`'s own docstring for why the search
+# lives there and not here.
 # ---------------------------------------------------------------------------
 
 
@@ -1729,17 +1773,22 @@ def _collect(
     docstring; `probe`/`on_path`/`_read_text` are the only three ways this
     module touches the outside world and none of them can.
 
-    `build` (`--build`) appends `zephyrWorkspace` on top of the checks plain
-    `tan doctor` already runs -- see `zephyr_workspace_check`'s doc comment
-    for why that one check, and only that one, is gated on the flag rather
-    than always running.
+    `build` (`--build`) is accepted and forwarded from `doctor()` but no
+    longer changes anything here (tan-cli#290): `zephyrWorkspace`, the last
+    check it used to gate, now runs unconditionally alongside `workspace`/
+    `zephyrVersion` -- see `zephyr_workspace_check`'s docstring for why. Kept
+    as a parameter rather than dropped so every existing direct caller (this
+    file's own test suite, and the CLI's own forwarding call) keeps working
+    unchanged; `alp-sdk-vscode`'s `["doctor", "--build"]` call sites keep
+    working too, they just no longer see a different check list.
 
-    `board_yaml`/`project_scope`/`workspace_root` feed the tan-cli#294
-    finding-2 build-environment preflight (`sdk`/`boardYaml`/`workspace`/
-    `zephyrVersion`) -- all default so every existing direct caller (this
-    file's own test suite) keeps working unchanged; those checks then simply
-    report against "no board.yaml"/"no workspace resolved from `.`", which is
-    an honest verdict, not a skipped one.
+    `board_yaml`/`project_scope`/`workspace_root` feed the tan-cli#294/#290
+    build-environment preflight (`sdk`/`boardYaml`/`workspace`/
+    `westResolved`/`zephyrVersion`/`zephyrWorkspace`) -- all default so every
+    existing direct caller (this file's own test suite) keeps working
+    unchanged; those checks then simply report against "no board.yaml"/"no
+    workspace resolved from `.`", which is an honest verdict, not a skipped
+    one.
 
     `boardYaml`'s severity needs one more fact: whether a project was
     actually SELECTED (`--project`/`--board-yaml` given), not merely whether
@@ -1768,6 +1817,27 @@ def _collect(
     checks.append(
         workspace_preflight_check(str(workspace_path) if workspace_path is not None else None)
     )
+
+    # tan-cli#290: `westResolved`, right after `workspace` -- the same order
+    # Rust's `build_preflight_checks` uses (`sdk`, `boardYaml`, `workspace`,
+    # `westResolved`, `zephyrVersion`). The resolved binary is the SAME one
+    # `tan build` would spawn (`tan.core.venv.west_program`): an absolute
+    # venv path is trusted directly (`find_workspace_venv` already confirmed
+    # it exists), a bare `"west"` fallback is re-checked against PATH, never
+    # the reverse -- so a `westResolved` version can never be attributed to a
+    # different binary than the one that answered it (tan-cli#123's exact
+    # bug, reintroduced by the port and closed here).
+    resolved_west = west_program(workspace_root, sdk_root)
+    west_resolved_exe = (
+        resolved_west if os.path.isabs(resolved_west) else on_path(resolved_west)
+    )
+    west_resolved_version = (
+        _parse_two(probe([west_resolved_exe, "--version"]) or "")
+        if west_resolved_exe is not None
+        else None
+    )
+    checks.append(west_resolved_check(west_resolved_exe, west_resolved_version))
+
     if workspace_path is not None:
         workspace_version = None
         version_body = _read_text(workspace_path / "zephyr" / "VERSION")
@@ -1783,6 +1853,15 @@ def _collect(
         )
         if zephyr_version_check is not None:
             checks.append(zephyr_version_check)
+        # tan-cli#290: unconditional now, sourced from these SAME resolved
+        # facts -- see `zephyr_workspace_check`'s docstring for why it still
+        # earns its own check beside `zephyrVersion` rather than being
+        # dropped as a duplicate.
+        checks.append(
+            zephyr_workspace_check(
+                str(workspace_path), workspace_version, sdk_pin_for_workspace
+            )
+        )
 
     # tan-cli#294 finding 1: host-environment checks -- also unconditional
     # HOST facts (no board.yaml/workspace/SDK needed). See their docstrings.
@@ -1870,20 +1949,6 @@ def _collect(
     if os.name == "nt" and not zephyr_sdk_ok:
         checks.append(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
 
-    if build:
-        zephyr_base = os.environ.get("ZEPHYR_BASE")
-        version_text = None
-        if zephyr_base:
-            body = _read_text(Path(zephyr_base) / "VERSION")
-            if body is not None:
-                version_text = parse_zephyr_version_file(body)
-        sdk_pin = None
-        if sdk_root is not None:
-            west_yml = _read_text(Path(sdk_root) / "west.yml")
-            if west_yml is not None:
-                sdk_pin = parse_west_zephyr_pin(west_yml)
-        checks.append(zephyr_workspace_check(zephyr_base, version_text, sdk_pin))
-
     checks.append(
         setools_check(
             os.environ.get("SETOOLS_DIR"),
@@ -1945,7 +2010,9 @@ def doctor(
     build: bool = typer.Option(
         False,
         "--build",
-        help="Also run the build-readiness check (zephyrWorkspace: is $ZEPHYR_BASE a real, SDK-matching Zephyr checkout).",
+        help="Accepted for compatibility (tan-cli#290): zephyrWorkspace, the check "
+        "this used to gate, now runs unconditionally, so this flag no longer "
+        "changes the check list.",
     ),
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
