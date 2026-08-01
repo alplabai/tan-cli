@@ -151,27 +151,43 @@ jobs:
       # Frozen via `python/scripts/build_binary.sh` -- the SAME script
       # release.yml's Linux leg runs -- NOT `cargo build --bin tan` (tan-cli#278).
       # The release assets are PyInstaller --onefile freezes of `python/`, not
-      # cargo builds of `crates/` (tan-cli#271): v0.5.0-rc1's first tag published
-      # ZERO assets because `python:3.12-slim-bullseye` (release.yml's freeze
-      # image) lacks `binutils`, PyInstaller refuses without `objdump`, and this
-      # job's old `cargo build` smoke test never touched that path at all. The
-      # steps below mirror release.yml's Linux build leg (venv, `.[monitor]`,
-      # `pyinstaller>=6.10`, the binutils install), swapping the frozen binary in
-      # at the same path install.sh chose, same as before.
-      - name: binutils (PyInstaller shells out to objdump on Linux; release.yml's freeze image lacks it)
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq --no-install-recommends binutils
-
-      - name: freeze tan from this checkout (python/scripts/build_binary.sh) and swap it in
-        working-directory: python
+      # cargo builds of `crates/` (tan-cli#271).
+      #
+      # Built INSIDE `python:3.12-slim-bullseye`, via `docker run`, exactly like
+      # release.yml's Linux leg -- NOT against the bare-runner `actions/
+      # setup-python` interpreter this step used before (tan-cli#296). That
+      # interpreter is a different BUILD of CPython, not just a different
+      # version: measured on this job, `/opt/hostedtoolcache/Python/3.12.13/
+      # x64/lib/libpython3.12.so.1.0` froze a 28485720 B `dist/tan` (ceiling
+      # 16500000) from the SAME source that freezes to 14042352 B inside this
+      # container (artifact_ceilings.env's own x86_64-unknown-linux-gnu
+      # measurement). No new dependency and no new import produced that --
+      # PyInstaller bundles the interpreter it runs under, and a hosted-runner
+      # CPython build carries more into the freeze than slim-bullseye's does.
+      # Building the SAME artifact release.yml ships, instead of a differently
+      # -built lookalike, is also what tan-cli#278 asked this job to do in the
+      # first place ("getting-started.yml smoke-tests the RUST tan, so 'first
+      # blink' and 'first install' never exercise the shipped freeze").
+      #
+      # `docker run` here, not a job-level `container:`, for the same reason
+      # release.yml uses it: every step before and after this one (install.sh,
+      # `tan bootstrap`, `west`, `tan build`) needs the host runner, and
+      # `actions/checkout`/`upload-artifact` need the host's bundled Node.
+      # binutils is installed INSIDE the container (PyInstaller shells out to
+      # `objdump` on Linux and slim-bullseye lacks it) rather than on the host,
+      # since the host no longer runs PyInstaller at all.
+      - name: freeze tan from this checkout in python:3.12-slim-bullseye (python/scripts/build_binary.sh) and swap it in
         run: |
           set -euo pipefail
-          python -m venv .venv-build
-          .venv-build/bin/python -m pip install --quiet --upgrade pip
-          .venv-build/bin/python -m pip install --quiet ".[monitor]" "pyinstaller>=6.10"
-          PYTHON=.venv-build/bin/python bash scripts/build_binary.sh
-          install -m 0755 dist/tan "$HOME/.local/bin/tan"
+          docker run --rm -v "$PWD/python:/src" -w /src python:3.12-slim-bullseye bash -euc '
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends binutils
+            python -m venv /tmp/venv
+            /tmp/venv/bin/pip install --quiet --upgrade pip
+            /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+            PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
+          '
+          install -m 0755 python/dist/tan "$HOME/.local/bin/tan"
           command -v tan
           tan --version
 
