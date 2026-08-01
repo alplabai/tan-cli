@@ -1412,6 +1412,113 @@ def test_collect_resolves_the_workspace_from_a_bare_zephyr_base_with_no_sdk_root
     assert str(workspace) in check.detail
 
 
+# --------------------------------------------------------------------------
+# tan-cli#301, second half: `hostPython`/`pythonFloor` must read the SAME
+# resolved workspace `zephyrWorkspace` reports, not an independent
+# `$ZEPHYR_BASE` re-read -- else one report can cite two different Zephyrs.
+# --------------------------------------------------------------------------
+
+
+def _plant_zephyr_tree(zephyr_dir: Path, python_floor: str, patchlevel: int = 1) -> None:
+    """A minimal `<zephyr_dir>/{VERSION,cmake/modules/python.cmake}` -- the two
+    files `zephyrWorkspace` and `zephyr_python_floor` each read."""
+    zephyr_dir.mkdir(parents=True, exist_ok=True)
+    (zephyr_dir / "VERSION").write_text(
+        f"VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = {patchlevel}\n",
+        encoding="utf-8",
+    )
+    modules = zephyr_dir / "cmake" / "modules"
+    modules.mkdir(parents=True)
+    (modules / "python.cmake").write_text(
+        f"set(PYTHON_MINIMUM_REQUIRED {python_floor})\n", encoding="utf-8"
+    )
+
+
+def test_hostpython_and_zephyrworkspace_name_the_same_tree_over_a_stale_zephyr_base(
+    tmp_path, monkeypatch
+):
+    """Reproduces the issue's own shape measured on a real host: a genuine
+    resolved workspace (`.west` + `zephyr/`), and a stale exported
+    `$ZEPHYR_BASE` pointing at an unrelated, un-workspaced tree with a
+    materially different floor. Before this fix, `hostPython`/`pythonFloor`
+    read `$ZEPHYR_BASE` regardless of the resolved workspace `zephyrWorkspace`
+    itself reports -- one report, two different Zephyrs.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+
+    workspace = tmp_path / "alp-workspace"
+    (workspace / ".west").mkdir(parents=True)
+    _plant_zephyr_tree(workspace / "zephyr", "3.11")
+
+    # An un-workspaced (no `.west` at its parent), unrelated tree -- exactly
+    # the "stray-zephyrproject" shape from the issue -- with a DIFFERENT
+    # floor, so a report reading it instead of the resolved workspace is
+    # provably wrong, not merely differently-worded.
+    stray = tmp_path / "dirty" / "stray-zephyrproject" / "zephyr"
+    _plant_zephyr_tree(stray, "3.14")
+    monkeypatch.setenv("ZEPHYR_BASE", str(stray))
+
+    checks = doctor_cmd._collect(None, workspace_root=str(workspace))
+    zephyr_workspace = next(c for c in checks if c.name == "zephyrWorkspace")
+    host_python = next(c for c in checks if c.name == "hostPython")
+    python_floor = next((c for c in checks if c.name == "pythonFloor"), None)
+
+    assert zephyr_workspace.status == "pass", zephyr_workspace.detail
+    # Same tree: the resolved workspace's own topdir names both.
+    assert str(workspace) in zephyr_workspace.detail
+    assert str(workspace) in host_python.detail
+    assert "3.11" in host_python.detail
+    # Never the stray tree `$ZEPHYR_BASE` points at.
+    assert str(stray) not in host_python.detail
+    assert "3.14" not in host_python.detail
+
+    # 3.11 > the (3, 10) fallback manifest floor (no `sdk_root` resolved), so
+    # `pythonFloor` fires -- and must cite the same resolved tree too.
+    assert python_floor is not None, "expected pythonFloor: workspace floor 3.11 > fallback 3.10"
+    assert str(workspace) in python_floor.detail
+    assert str(stray) not in python_floor.detail
+
+
+def test_collect_python_floor_source_falls_back_to_zephyr_base_when_no_workspace_resolves(
+    tmp_path, monkeypatch
+):
+    """State 2 of 3: no `.west` workspace resolves anywhere (the stray tree's
+    parent has no `.west`, and no `sdk_root` is given), so `zephyr_python_floor`
+    falls back to a literal `$ZEPHYR_BASE` read -- and that source, not the
+    workspace one, is what `hostPython` must name here."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    stray = tmp_path / "dirty" / "stray-zephyrproject" / "zephyr"
+    _plant_zephyr_tree(stray, "3.13")
+    monkeypatch.setenv("ZEPHYR_BASE", str(stray))
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    checks = doctor_cmd._collect(None, workspace_root=str(outside))
+
+    workspace_check = next(c for c in checks if c.name == "workspace")
+    assert workspace_check.status == "fail", workspace_check.detail  # nothing resolved
+
+    host_python = next(c for c in checks if c.name == "hostPython")
+    assert str(stray) in host_python.detail
+    assert "3.13" in host_python.detail
+
+
+def test_collect_python_floor_source_falls_back_to_the_built_in_pin_when_neither_resolves(
+    tmp_path, monkeypatch
+):
+    """State 3 of 3: no workspace resolves and `$ZEPHYR_BASE` is unset --
+    `zephyr_python_floor` lands on `ZEPHYR_PYTHON_FLOOR`, and says so."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    checks = doctor_cmd._collect(None, workspace_root=str(outside))
+
+    host_python = next(c for c in checks if c.name == "hostPython")
+    assert "tan's built-in pin" in host_python.detail
+    assert "no $ZEPHYR_BASE workspace" in host_python.detail
+    assert f"{doctor_cmd.ZEPHYR_PYTHON_FLOOR[0]}.{doctor_cmd.ZEPHYR_PYTHON_FLOOR[1]}" in host_python.detail
+
+
 def test_workspace_preflight_check_distinguishes_resolved_from_absent():
     assert doctor_cmd.workspace_preflight_check("/ws").status == "pass"
     absent = doctor_cmd.workspace_preflight_check(None)

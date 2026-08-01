@@ -18,6 +18,20 @@ Zephyr's -- and where the two disagree that disagreement is itself reported
 (`pythonFloor`), naming which is which, so the fix lands in the manifest instead
 of in the customer.
 
+**"Zephyr's" used to mean whatever `$ZEPHYR_BASE` pointed at, not the
+workspace the report was actually about (tan-cli#301).** `zephyrWorkspace`
+(tan-cli#290) reads the RESOLVED west topdir (`west_workspace_dir`); until now
+`hostPython`/`pythonFloor` independently re-read `$ZEPHYR_BASE`, which is
+extremely commonly stale -- Zephyr's own docs, and this command's own
+`tan bootstrap` next-steps block, both tell a customer to export it. One
+report could then name two different Zephyrs: `zephyrWorkspace` passing
+against the real workspace while `hostPython`'s floor, and the interpreter it
+demanded, came from an unrelated tree the customer was not building against.
+`_collect` now feeds `zephyr_python_floor` the SAME resolved `workspace_path`
+`zephyrWorkspace` reports, falling back to a literal `$ZEPHYR_BASE` read only
+when no workspace resolves at all, and to `ZEPHYR_PYTHON_FLOOR` when neither
+does -- see `zephyr_python_floor`'s docstring for the three-way split.
+
 `tan bootstrap` now enforces the same effective floor on BOTH platforms, by
 calling `zephyr_python_floor` below rather than re-deriving it -- see
 `tan.commands.bootstrap_cmd.resolve_python_floor`. Keep that the ONE reader: a
@@ -332,6 +346,18 @@ def zephyr_python_floor(zephyr_base: str | None) -> tuple[tuple[int, int], str]:
     stale floor here reintroduces exactly the silent gap this command exists to
     close. `ZEPHYR_PYTHON_FLOOR` is the fallback for a host with no workspace
     yet, which is every host at `tan bootstrap` time.
+
+    `zephyr_base` is a plain path in, not necessarily `$ZEPHYR_BASE` itself --
+    THIS function has no opinion on where it came from, only `_collect` (this
+    module's `hostPython`/`pythonFloor` caller) does. As of tan-cli#301,
+    `_collect` passes the resolved workspace's `zephyr/` subtree -- the SAME
+    `tan.core.venv.west_workspace_dir` result `zephyrWorkspace` reports -- when
+    one resolved, a literal `$ZEPHYR_BASE` read only when no workspace resolved
+    at all, and `None` (landing on `ZEPHYR_PYTHON_FLOOR` below) when neither
+    does; that is the three-way split the resulting `source` string names. The
+    OTHER caller, `tan.commands.bootstrap_cmd.resolve_python_floor`, still
+    passes a literal `$ZEPHYR_BASE` read directly -- `tan bootstrap` runs before
+    any workspace can have resolved, so there is nothing else for it to prefer.
     """
     if zephyr_base:
         path = Path(zephyr_base) / "cmake" / "modules" / "python.cmake"
@@ -2004,7 +2030,21 @@ def _collect(
         )
 
     manifest_floor = _manifest_floor_from_facts(facts)
-    zephyr_floor, zephyr_source = zephyr_python_floor(os.environ.get("ZEPHYR_BASE"))
+    # tan-cli#301 (second half): read the SAME resolved workspace `zephyrWorkspace`
+    # reports above (`workspace_path`, from the shared `west_workspace_dir`) --
+    # NOT a second, independent `$ZEPHYR_BASE` read. A stale exported
+    # `$ZEPHYR_BASE` is common (Zephyr's own docs, and this command's own `tan
+    # bootstrap` next-steps block, both tell a customer to export it), and
+    # reading it here regardless of the resolved workspace is how one report
+    # ended up citing two different Zephyrs. `$ZEPHYR_BASE` is consulted only as
+    # `zephyr_python_floor`'s fallback, when no workspace resolved at all --
+    # mirroring #290's fix for `zephyrWorkspace` itself.
+    zephyr_source_base = (
+        str(workspace_path / "zephyr")
+        if workspace_path is not None
+        else os.environ.get("ZEPHYR_BASE")
+    )
+    zephyr_floor, zephyr_source = zephyr_python_floor(zephyr_source_base)
     # The EFFECTIVE floor: the highest anything in the build chain enforces. The
     # manifest is not the authority here -- it is one of two claimants.
     effective_floor = max(manifest_floor, zephyr_floor)
