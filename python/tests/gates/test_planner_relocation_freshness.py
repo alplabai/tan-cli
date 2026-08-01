@@ -66,10 +66,21 @@ freeze vendor point; a shipped Python surface is measured at PINNED_SDK_TAG"),
 two audits with two pins need two checkouts. `test_hand_ported_planner_
 modules_match_their_pinned_sdk_source` now reads its own root from
 `ALP_SDK_HAND_PORT_ROOT`, never `ALP_SDK_ROOT`/`ALP_SDK_PARITY_ROOT` (which
-stay the relocated-planner test's root, pinned at PINNED_SDK_COMMIT). Unlike
-that test, a missing `ALP_SDK_HAND_PORT_ROOT` FAILS this gate rather than
-skipping it -- see `_hand_port_sdk_root()`'s own docstring for why a second
-silent skip is the same defect the module docstring above already names.
+stay the relocated-planner test's root, pinned at PINNED_SDK_COMMIT).
+
+Like that test, a missing `ALP_SDK_HAND_PORT_ROOT` SKIPS rather than fails --
+a run that never bound this root (ci.yml's `python` job, a local `pytest
+tests/`, a contributor's checkout) is not set up to do this audit, not
+broken, and must not go red for it. tan-cli#308 first made this branch
+`pytest.fail` instead, on the reasoning that an invisible skip is how #275
+drifted eleven commits unnoticed -- and that took ci.yml's `python` job down
+with it, since it runs the whole suite with neither root bound. The
+enforcement #308 wanted belongs where the root IS actually bound:
+`parity.yml`'s seam1 job, the one place both roots are ever set, asserts BY
+NODE ID that neither freshness test skipped there (see that job's
+`python/tests/gates` step) -- so a skip in the job meant to run the audit is
+still a hard CI failure, and this branch can go back to skipping everywhere
+else without reopening #275.
 """
 
 from __future__ import annotations
@@ -206,22 +217,30 @@ HAND_PORT_SDK: pathlib.Path | None = _resolve_hand_port_sdk_root()
 
 def _hand_port_sdk_root() -> pathlib.Path:
     if HAND_PORT_SDK is None:
-        # Deliberately `pytest.fail`, not `pytest.skip`, and deliberately NOT
-        # a fallback to `_sdk_root()` (ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT, the
-        # relocated-planner root, pinned at the DIFFERENT PINNED_SDK_COMMIT).
-        # Either of those would reproduce a defect this gate has already
-        # lived through once: a silent skip (tan-cli#275, this whole file's
-        # reason for existing) or a silent wrong-root comparison
-        # (tan-cli#296, the bug that sent this test's failure through CI
-        # naming the wrong tree). A gate that cannot fail loudly is not a
-        # gate.
-        pytest.fail(
+        # Skip, not fail -- same shape as `_sdk_root()` above, same reason: a
+        # run that never bound this root (ci.yml's `python` job, a local
+        # `pytest tests/`) is not "set up to do this audit", not broken.
+        # tan-cli#308 made this branch `pytest.fail` instead, on the theory
+        # that a skip here is how #275 drifted silently -- and that took
+        # ci.yml's unbound `python` job down with it. The enforcement #308
+        # wanted belongs where the root IS bound: `parity.yml`'s seam1 job
+        # asserts BY NODE ID that this test did not skip there (see that
+        # job's `python/tests/gates` step), so THIS branch can go back to
+        # skipping without reopening #275 -- the one job meant to run the
+        # audit can no longer silently no-op it.
+        #
+        # Still deliberately NOT a fallback to `_sdk_root()`
+        # (ALP_SDK_ROOT/ALP_SDK_PARITY_ROOT, the relocated-planner root,
+        # pinned at the DIFFERENT PINNED_SDK_COMMIT) -- that is the
+        # tan-cli#296 bug: two audits, two pins, sharing one checkout.
+        pytest.skip(
             f"{HAND_PORT_SDK_ROOT_ENV} is not set (or does not point at a "
-            "real alp-sdk checkout) -- no oracle to compare the "
-            "HAND-PORTED tan/planner/ modules against. Bind "
-            f"{HAND_PORT_SDK_ROOT_ENV} to an alp-sdk checkout at "
-            f"HAND_PORT_PINNED_SDK_COMMIT ({HAND_PORT_PINNED_SDK_COMMIT}).",
-            pytrace=False,
+            "real alp-sdk checkout) -- no bound alp-sdk checkout to compare "
+            "the HAND-PORTED tan/planner/ modules against, so this "
+            "staleness gate cannot run. This is a SKIP about the missing "
+            f"root, not a pass: set {HAND_PORT_SDK_ROOT_ENV} to an alp-sdk "
+            f"checkout at HAND_PORT_PINNED_SDK_COMMIT "
+            f"({HAND_PORT_PINNED_SDK_COMMIT}) to actually exercise the gate."
         )
     return HAND_PORT_SDK
 

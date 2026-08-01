@@ -475,11 +475,14 @@ jobs:
       # above reads, even though HAND_PORT_HASHES is pinned at a DIFFERENT alp-sdk
       # commit -- two audits sharing one root, which is what actually reddened
       # PR #296 (a real hash mismatch against the wrong tree, not real drift).
-      # The gate file itself now refuses to fall back from one root to the other
-      # (`_hand_port_sdk_root()` fails loudly rather than reusing `_sdk_root()`),
-      # so leaving ALP_SDK_HAND_PORT_ROOT unbound here would no longer silently
-      # mis-measure the hand-port test -- it would hard-fail it instead, which is
-      # exactly why this line has to be here and not merely nice to have.
+      # The gate file itself never falls back from one root to the other
+      # (`_hand_port_sdk_root()` skips rather than reusing `_sdk_root()`), so
+      # leaving ALP_SDK_HAND_PORT_ROOT unbound here would silently mis-measure
+      # the hand-port test the OLD way, not fail it -- it would just SKIP, same
+      # as any other unbound run. The node-id PASSED assertion in the step
+      # below (tan-cli#308) is what turns that silent skip into a hard failure
+      # of THIS job specifically, which is exactly why this line has to be
+      # here and not merely nice to have.
       #
       # Deliberately NOT the full `python/tests` suite here (ports + parity,
       # minutes not seconds, needs its own alp-sdk checkout) -- that now runs
@@ -500,7 +503,30 @@ jobs:
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk-planner-audit
           ALP_SDK_HAND_PORT_ROOT: ${{ github.workspace }}/alp-sdk-hand-port-audit
-        run: python3 -m pytest tests/gates -q --deselect tests/gates/test_jlink_aen_device_freshness.py
+        run: |
+          set -euo pipefail
+          python3 -m pytest tests/gates -v --deselect tests/gates/test_jlink_aen_device_freshness.py | tee /tmp/gates.log
+          # Both roots above are bound in THIS job -- the one place this whole
+          # workflow arms them -- so neither freshness test in
+          # test_planner_relocation_freshness.py has an excuse to skip here. A
+          # skip does not fail pytest's exit code (only a FAIL does), so the
+          # `set -e`/pipefail above is not itself the enforcement -- it would
+          # let an invisible skip straight through green, which is the exact
+          # tan-cli#275 defect this gate file exists to prevent, one job
+          # later. `-v` prints "<nodeid> PASSED"/"SKIPPED" per test; assert
+          # PASSED by full node id rather than trusting the summary count, so
+          # a skip here is a hard job failure rather than a silent no-op
+          # (tan-cli#308: an earlier revision made the test's unbound branch
+          # itself hard-fail instead, which broke ci.yml's `python` job --
+          # see that test's own comment for why the enforcement belongs here,
+          # not there).
+          for t in test_relocated_planner_modules_match_the_pinned_sdk_audit \
+                   test_hand_ported_planner_modules_match_their_pinned_sdk_source; do
+            if ! grep -qF "test_planner_relocation_freshness.py::${t} PASSED" /tmp/gates.log; then
+              echo "::error::${t} did not PASS in this job -- both ALP_SDK_ROOT and ALP_SDK_HAND_PORT_ROOT are bound here, so a SKIP means the oracle checkout this job cloned did not resolve (or the test regressed to fail-open), not an absent root."
+              exit 1
+            fi
+          done
 
       # test_jlink_aen_device_freshness asks a question the FROZEN audit checkout
       # cannot answer: does tan's JLINK_AEN_DEVICE fallback still agree with the
