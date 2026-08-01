@@ -30,6 +30,17 @@ the fix for an SDK its own resolver could not find. The
 five the same way as the original three: against the shared
 `assert_no_refused_subcommand_named` invariant, not a pin on the exact
 replacement wording.
+
+Second follow-up: three more sites in `bootstrap_cmd.py`'s workspace-
+relocation and rollback-failure messages named `tan sdk switch --global` as
+the way to repoint/undo the global default-SDK pointer (`~/.alp/sdk-
+default`) -- same defect, a different flow (informing/recovering, not
+onboarding). Those three tests below reuse `test_bootstrap_command.py`'s own
+fixtures (`make_sdk`/`run_tan`/`envelope`/`codes`, and a direct `_run` call
+for the one failure mode no filesystem trick reaches through a real
+subprocess) rather than re-deriving that harness here -- the same
+cross-module import `test_build_streaming.py` already uses against
+`test_build_command.py`.
 """
 import json
 import os
@@ -41,9 +52,11 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from tan.commands import doctor_cmd, generate_cmd, kconfig_cmd, model_cmd, new_som_cmd, sdk_cmd
+from tan.commands import bootstrap_cmd, doctor_cmd, generate_cmd, kconfig_cmd, model_cmd, new_som_cmd, sdk_cmd
+from tan.commands.bootstrap_cmd import HostPython
 from tan.commands.build.token_substitution import TokenSubstitutionError, apply_plan_token_substitution
 from tan.core.build_plan import parse_build_plan
+from tests.commands.test_bootstrap_command import PRESENT_TOOL, codes, envelope, make_sdk, run_tan
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -197,6 +210,137 @@ def test_token_substitution_sdk_root_unresolved_never_recommends_a_refused_subco
         )
     assert excinfo.value.code == "build.sdk-root-unresolved"
     assert_no_refused_subcommand_named(excinfo.value.message)
+
+
+# ── bootstrap: workspace-relocation + rollback-failure messages ─────────────
+
+
+def test_workspace_relocated_note_never_recommends_a_refused_subcommand(tmp_path):
+    """bootstrap_cmd.py:2083's own success note -- "here is how to change
+    your default SDK later" -- used to name `tan sdk switch --global`. Not a
+    recovery message (nothing is broken here), but the same dead end: the
+    command it named refuses in this build."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    # Other content beside the checkout is what makes the auto-relocation
+    # guard fire at all (`test_the_workspace_parent_guard_relocates_into_
+    # alp_workspace_automatically`'s own setup, mirrored here): a topdir
+    # holding nothing but the checkout needs no relocating.
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0
+    message = next(
+        i["message"] for i in env["issues"] if i["code"] == "bootstrap.workspace-relocated"
+    )
+    assert_no_refused_subcommand_named(message)
+    # The real mechanism is named instead: the pointer file itself.
+    assert "sdk-default" in message
+
+
+def test_relocation_rollback_pointer_restore_failure_never_recommends_a_refused_subcommand(
+    tmp_path,
+):
+    """bootstrap_cmd.py:2172 -- the checkout moved back after a later step
+    failed, but the pointer restore that follows it did not, so the default
+    SDK may still name the vacated path. Forces that exact failure with a
+    pre-existing DIRECTORY at `~/.alp/sdk-default`: `_undo_relocation`'s
+    `unlink`/`write_bytes` then raises `OSError` instead of degrading
+    silently -- cross-platform, unlike a chmod-based permission-denied
+    repro (the same reasoning `test_a_successful_move_back_with_a_failed_
+    pointer_restore_is_not_reported_as_still_relocated` gives for avoiding
+    chmod, applied through a real subprocess instead of a monkeypatch)."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    # Blocks `python -m venv` from creating the venv directory: the same
+    # real, deterministic, network-free failure
+    # `test_a_relocation_is_rolled_back_when_a_later_step_fails` uses.
+    (workspace / ".venv").write_text("not a directory", encoding="utf-8")
+    home = tmp_path / "fake-home"  # `run_tan` derives this from `cwd.parent`
+    (home / ".alp" / "sdk-default").mkdir(parents=True)
+
+    proc = run_tan(
+        "bootstrap", "--format", "json",
+        "--sdk-root", str(sdk), "--workspace", str(workspace), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode != 0
+    issue_codes = codes(env)
+    assert "bootstrap.workspace-relocated" in issue_codes
+    assert "bootstrap.workspace-relocation-rolled-back" in issue_codes
+    message = next(
+        i["message"] for i in env["issues"]
+        if i["code"] == "bootstrap.workspace-relocation-rolled-back"
+    )
+    # Proves this hit the moved-back-but-pointer-stuck branch (2172), not the
+    # clean-restore one beside it (unchanged, untouched by this sweep).
+    assert "could not be restored" in message
+    assert_no_refused_subcommand_named(message)
+    assert "sdk-default" in message
+
+
+def test_relocation_rollback_move_back_refused_never_recommends_a_refused_subcommand(
+    tmp_path, monkeypatch
+):
+    """bootstrap_cmd.py:2192 -- the worst of the three: the move-back itself
+    refused (the vacated original path was recreated in the meantime,
+    `relocate_checkout`'s own already-exists guard), so the checkout is
+    STILL at the relocated path and the default SDK still points there.
+    Simulates the recreation with a `relocate_checkout` wrapper that
+    recreates the vacated path only on the SECOND call (the rollback's own
+    move-back attempt) -- the same race `test_a_blocked_rollback_reports_
+    the_checkout_as_still_relocated` reproduces against `_undo_relocation`
+    directly; this drives it through the real `_run` message-building code
+    instead, which a monkeypatch-free real subprocess cannot reach (nothing
+    in a single synchronous run recreates the vacated path on its own)."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    workspace = tmp_path / "elsewhere"
+    workspace.mkdir()
+    (workspace / ".venv").write_text("not a directory", encoding="utf-8")
+
+    real_relocate = bootstrap_cmd.relocate_checkout
+    calls = {"n": 0}
+
+    def flaky_relocate(repo_root, target_parent):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            (target_parent / repo_root.name).mkdir(parents=True)
+        return real_relocate(repo_root, target_parent)
+
+    monkeypatch.setattr(bootstrap_cmd, "relocate_checkout", flaky_relocate)
+    monkeypatch.setattr(
+        bootstrap_cmd, "probe_host_python", lambda _floor: HostPython((sys.executable,), (3, 12))
+    )
+    monkeypatch.setenv("HOME", str(tmp_path / "fake-home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "fake-home"))
+
+    outcome, _project, _sdk_info = bootstrap_cmd._run(
+        project=str(sdk.parent),
+        board_yaml=None,
+        sdk_root_flag=str(sdk),
+        no_pip=False,
+        no_west=True,
+        print_env=False,
+        allow_partial=False,
+        workspace=str(workspace),
+        dry_run=False,
+        json_mode=True,
+    )
+    assert calls["n"] == 2  # both the relocation AND the rollback's move-back ran
+    issue_codes = [i.code for i in outcome.issues]
+    assert "bootstrap.workspace-relocation-rolled-back" in issue_codes
+    message = next(
+        i.message for i in outcome.issues
+        if i.code == "bootstrap.workspace-relocation-rolled-back"
+    )
+    # Proves this hit the still-relocated branch (2192), not the
+    # moved-back-but-pointer-stuck one above.
+    assert "could NOT move it back" in message
+    assert_no_refused_subcommand_named(message)
+    assert "sdk-default" in message
 
 
 # ── end to end: the real dead end, reproduced against a live subprocess ─────

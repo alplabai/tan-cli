@@ -226,6 +226,36 @@ def _pointer_target(pointer: Path) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def global_default_pointer_fix_hint(native_path: str) -> str:
+    """How to fix -- or safely clear -- an already-written `~/.alp/sdk-
+    default` pointer by hand, given its OS-native absolute path (the caller's
+    to compute: `_home_alp_dir() / "sdk-default"`, rendered through whatever
+    this-platform-separator helper it already has -- `bootstrap_cmd._native`
+    for its callers).
+
+    `_pointer_target` above degrades every read failure on this exact file
+    (missing, invalid JSON, list-shaped, no `sdkPath`) to `None`, and every
+    tier resolver (`resolve_sdk_tiered`) then falls through to the next tier
+    on that -- so DELETING the file is always a safe recovery, never a step
+    backwards; hand-editing its `"sdkPath"` field is the targeted fix when
+    the caller knows what it should say instead.
+
+    Shared so a caller describing this by hand cannot drift from what
+    `_pointer_target` actually reads. `bootstrap_cmd`'s workspace-relocation
+    and rollback-failure messages are why this exists (tan-cli#305 follow-
+    up): they used to send a user -- sometimes one already in a broken,
+    checkout-moved-but-rollback-incomplete state -- to `tan sdk switch
+    --global`, which refuses outright in this build. Naming the pointer file
+    directly, not the command, is also honest about the mechanism `switch`
+    itself would use once ported, so this will not go stale the moment that
+    disposition changes.
+    """
+    return (
+        f'delete {native_path} (tan falls through to the next SDK it can '
+        f'resolve), or edit its `"sdkPath"` field by hand'
+    )
+
+
 # ── readiness (tan_core::sdk::check_sdk_readiness) ──────────────────────────
 
 

@@ -72,6 +72,7 @@ from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     SDK_MARKER,
     _home_alp_dir,
+    global_default_pointer_fix_hint,
     project_pin_issue,
     resolve_sdk_tiered,
 )
@@ -2080,7 +2081,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 f"{_native(sdk_root)} so the west workspace "
                 f"(zephyr/modules/.west/venv) stays out of "
                 f"{_native(Path(old_root).parent)}, and set it as your default SDK "
-                f"(`tan sdk switch --global` to change) (tan-cli#185)",
+                # `tan sdk switch --global` refuses in this build (tan-cli#305) --
+                # naming the pointer mechanism itself instead of a subcommand
+                # keeps this true even once that changes.
+                f"(to change later: {global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))}) "
+                f"(tan-cli#185)",
             )
             # The project may live INSIDE the checkout, so rebase any
             # reported path under the OLD root onto the new one -- nothing
@@ -2169,9 +2174,10 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     "workspace-relocation-rolled-back",
                     f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
                     f"moved it back to {_native(relocation_undo.old_root)}, but "
-                    f"{undo.detail}. Run `tan sdk switch --global "
-                    f"{_native(relocation_undo.old_root)}` to repoint the default SDK "
-                    f"yourself.",
+                    f"{undo.detail}. The default SDK pointer may still name the "
+                    f"vacated path -- "
+                    f"{global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))} "
+                    f"(to point at {_native(relocation_undo.old_root)}).",
                 )
             paths.repo_root = Path(relocation_undo.old_root)
             paths.workspace_dir = relocation_undo.workspace_dir
@@ -2188,8 +2194,9 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
                 f"could NOT move it back to {_native(relocation_undo.old_root)} "
                 f"({undo.detail}); the checkout is still at {_native(moved_to)} and the "
-                f"default SDK still points there. Move it back by hand, then run `tan "
-                f"sdk switch --global {_native(relocation_undo.old_root)}`.",
+                f"default SDK still points there. Move it back by hand, then "
+                f"{global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))} "
+                f"(to point at {_native(relocation_undo.old_root)}).",
             )
 
     # The venv backs BOTH later phases, so it is created when either will run.
