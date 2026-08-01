@@ -297,19 +297,37 @@ def test_generate_matches_rust_with_a_resolvable_sdk(tmp_path):
     concept -- Rust has no spawn-the-SDK escape hatch to report, so it never
     emits this key at all, on any input. Every other key, including `sdk`
     itself, is compared whole.
+
+    `GENERATE_SDK` IS among the scrubbed roots (unlike the note this
+    docstring used to carry): that reasoning held only while both sides
+    spawned live in the same run, where `sdk.root` was necessarily the same
+    literal string on both sides regardless of whether it was scrubbed. Once
+    the rust side is a FROZEN fixture (tan-cli#272), it carries whatever path
+    string the capture host's checkout happened to sit at -- and a replay
+    host (CI, a different machine, even a second checkout of the same ref at
+    a different path) resolves `GENERATE_SDK` to a different string, so an
+    unscrubbed `sdk.root` would diff on every host but the one that captured
+    it. Scrubbed here with the exact mechanism `work`/`home` already use
+    (`oracle_fixtures.scrub`), position-keyed so a replay host's differently
+    spelled but equivalent path still lands on the same placeholder token.
     """
     home = tmp_path / "home"
 
     def _run_side(name: str, work: Path, argv: list[str]) -> tuple[int, dict]:
-        # `GENERATE_SDK` itself is not among the scrubbed roots: it is the
-        # SAME external checkout path for both sides (unlike `work`/`home`,
-        # which differ by construction), so it is not what makes this case
-        # non-portable across a capture host and a replay host. Whoever
-        # captures this fixture on a fresh SDK checkout location should widen
-        # `scrub_roots` if that ever bites.
+        # Both sides scrubbed with the SAME root tuple, in the SAME order --
+        # rust via `rust_run`'s own `scrub_roots` (applied at capture time for
+        # a frozen fixture, or at call time when TAN_PARITY_LIVE=1), python
+        # via an explicit `oracle_fixtures.scrub` call here. Before tan-cli#272
+        # froze the rust side, the python side went through `compare()`, which
+        # scrubs unconditionally -- this bespoke helper predates that and
+        # never scrubbed the python side at all, comparing a scrubbed string
+        # against an unscrubbed one for every field a scratch path could
+        # appear in.
+        roots = (work, home, GENERATE_SDK)
         if name == "rust":
-            return rust_run(argv, work, home, scrub_roots=(work, home))
-        return _run(python_command(), argv, work, home)
+            return rust_run(argv, work, home, scrub_roots=roots)
+        code, out = _run(python_command(), argv, work, home)
+        return code, oracle_fixtures.scrub(out, *roots)
 
     sides: dict[str, tuple[int, dict]] = {}
     for name in ("rust", "python"):
@@ -420,6 +438,29 @@ def test_init_sdk_root_flag_pin_is_a_known_divergence_from_the_oracle(tmp_path):
 REAL_PLAN_FIXTURES = sorted((REPO_ROOT / "tests" / "parity" / "oracle").glob("*.build-plan.json"))
 
 
+def _embedded_sdk_root(plan_path: Path) -> str | None:
+    """The alp-sdk checkout path baked into a committed plan fixture's own
+    ``env.ALP_SDK_ROOT`` (every slice of every one of the six fixtures carries
+    the same literal value -- whichever checkout the fixture was captured
+    against), or ``None`` if a fixture ever lacks it.
+
+    This is a THIRD root neither ``cwd`` nor ``home`` cover: the fixture file
+    is copied verbatim into the scratch dir and relayed unsubstituted by a
+    bare ``--plan-from`` (`generate_cmd.py`'s module docstring on why Rust's
+    ``--plan`` substitutes nothing), so whatever machine captured
+    `tests/parity/oracle/*.build-plan.json` leaks straight through unless this
+    is ALSO scrubbed. Discovered the hard way: an unscrubbed capture of these
+    two tests put a real developer's checkout path into this file's own
+    committed JSON.
+    """
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    for slice_ in plan.get("slices", []):
+        root = (slice_.get("env") or {}).get("ALP_SDK_ROOT")
+        if root:
+            return root
+    return None
+
+
 @LIVE_GATE
 @pytest.mark.skipif(not REAL_PLAN_FIXTURES, reason="no committed build-plan fixtures found")
 @pytest.mark.parametrize("plan_path", REAL_PLAN_FIXTURES, ids=lambda p: p.stem)
@@ -428,11 +469,13 @@ def test_plan_from_shows_the_plan_and_writes_nothing(plan_path, work_dir, tmp_pa
     SDK is never invoked (unlike bare `--plan`, still xfail above), so it IS
     ported, and it writes nothing to disk either side."""
     shutil.copy(plan_path, work_dir / "plan.json")
+    extra = _embedded_sdk_root(plan_path)
     result = compare(
         ["build", "--plan-from", "plan.json", "--format", "json"],
         cwd=work_dir,
         surface=ENVELOPE,
         home=tmp_path / "home",
+        extra_scrub_roots=(extra,) if extra else (),
     )
     assert result.matches, "\n".join(result.diffs)
     assert not (work_dir / "build").exists(), "a bare --plan-from must write nothing"
@@ -448,11 +491,13 @@ def test_plan_from_with_materialise_writes_every_artefact(work_dir, tmp_path):
     fixture qualitatively (a different plan, a different artefact count)."""
     plan_path = REPO_ROOT / "tests" / "parity" / "oracle" / "multicore_rpmsg-v2n.build-plan.json"
     shutil.copy(plan_path, work_dir / "plan.json")
+    extra = _embedded_sdk_root(plan_path)
     result = compare(
         ["build", "--plan-from", "plan.json", "--materialise", "--format", "json"],
         cwd=work_dir,
         surface=ENVELOPE,
         home=tmp_path / "home",
+        extra_scrub_roots=(extra,) if extra else (),
     )
     assert result.matches, "\n".join(result.diffs)
     written = sorted(p.relative_to(work_dir).as_posix() for p in (work_dir / "build").rglob("*") if p.is_file())
@@ -476,10 +521,18 @@ def test_validate_board_yaml_missing_guard_matches_the_oracle_at_exit_2(work_dir
     committed conformance fixtures for that spelling) versus an absolute path
     on the oracle -- an already-decided, unrelated divergence this case must
     not paper over by asserting more than tan-cli#272 measured.
+
+    `scrub_roots=(work_dir, home)`, not `()`: the assertions below only ever
+    read the issue CODE, but the frozen fixture still stores the oracle's
+    WHOLE envelope regardless of what this test looks at, and the oracle's
+    absolute-path `project.root`/`data.boardYamlPath` (the very divergence
+    named above) land straight into the committed JSON unscrubbed otherwise --
+    which is exactly how a real capture-host path reached this file. Scrubbing
+    costs nothing here: the assertions never inspect those fields either way.
     """
     home = tmp_path / "home"
     argv = ["validate", "--format", "json"]
-    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=())
+    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=(work_dir, home))
     p_code, p_out = _run(python_command(), argv, work_dir, home)
     assert r_code == p_code == 2
     assert [i["code"] for i in r_out["issues"]] == ["validate.board-yaml-missing"]
@@ -496,11 +549,16 @@ def test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle(work_dir, t
     same exclude-and-pin convention `test_init_sdk_root_flag_pin_is_a_known_
     divergence_from_the_oracle` above uses, rather than asserted as parity
     that does not exist.
+
+    `scrub_roots=(work_dir, home)`: see the sibling `test_validate_board_
+    yaml_missing_guard_matches_the_oracle_at_exit_2` above for why an empty
+    tuple here still leaks -- this case's own `boardYamlPath`/`project.root`
+    carry the same absolute `work_dir` the oracle reports its guard against.
     """
     home = tmp_path / "home"
     (work_dir / "board.yaml").write_text("schema_version: 1\n", encoding="utf-8")
     argv = ["validate", "--format", "json"]
-    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=())
+    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=(work_dir, home))
     p_code, p_out = _run(python_command(), argv, work_dir, home)
     assert (r_code, [i["code"] for i in r_out["issues"]]) == (2, ["validate.sdk-root-unresolved"])
     assert (p_code, [i["code"] for i in p_out["issues"]]) == (1, ["validate.spawn-not-implemented"])
@@ -517,10 +575,15 @@ def test_sdk_switch_unresolvable_version_is_a_known_divergence_from_the_oracle(w
     `sdk.not-ported`. Both happen to exit 1, so only the issue code is the
     real divergence; pinned rather than silently narrowed to "exit code
     only", which would hide that coincidence going away.
+
+    `scrub_roots=(work_dir, home)`: the refusal MESSAGE (not just the code
+    the assertions below actually check) embeds the resolved-but-missing
+    cache path under `home/.alp/sdk-cache/...` -- an unscrubbed capture put
+    the capture host's own `home` straight into this committed file.
     """
     home = tmp_path / "home"
     argv = ["sdk", "switch", "9.9.9-does-not-exist", "--format", "json"]
-    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=())
+    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=(work_dir, home))
     p_code, p_out = _run(python_command(), argv, work_dir, home)
     assert (r_code, [i["code"] for i in r_out["issues"]]) == (1, ["sdk.path-not-found"])
     assert (p_code, [i["code"] for i in p_out["issues"]]) == (1, ["sdk.not-ported"])

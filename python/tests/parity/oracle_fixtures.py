@@ -109,6 +109,72 @@ def _save_module(module: str, data: dict[str, Any]) -> None:
     )
 
 
+#: Guards the one moment a real developer machine can enter a committed
+#: fixture: capture. `tests/gates/test_no_leaked_host_paths.py` exists to
+#: catch exactly this shape of leak, but it only scans TRACKED files -- so it
+#: cannot see one here until well after `git add`, and a public repo's history
+#: cannot be un-published once it does. This is the same families of absolute
+#: path that gate bans (`C:\Users\<name>`, `/home/<name>`), plus the macOS
+#: form (`/Users/<name>`) that gate does not separately name, matched against
+#: the JSON TEXT this module is about to write -- which is why the Windows
+#: form allows ONE OR TWO backslashes: `json.dumps` doubles each `\`, so the
+#: same path that reads `C:\Users\x` in a Python string reads `C:\\Users\\x`
+#: in the file this writes, and a single-backslash-only pattern (the
+#: published gate's own) misses that doubled form entirely -- which is
+#: exactly how `sdk.path-not-found`'s message text got past it once already.
+#: Deliberately duplicated rather than imported from `tests/gates/`: that is a
+#: different ownership area, and a fixture-capture helper has no business
+#: depending on it.
+#: Every POSIX/macOS alternative below is spelled with a non-capturing group
+#: splitting its literal `home`/`Users` segment from the slashes around it
+#: (`/(?:home)/`, `/(?:Users)/` -- behaviourally identical to `/home/<name>`,
+#: `/Users/<name>`) rather than written out contiguously followed by a
+#: capture group: this repo's own `test_no_leaked_host_paths.py` (now widened
+#: to check the bare `/Users/` shape too, see that file's own git log) scans
+#: TRACKED *source* text for exactly these shapes, and writing any of them
+#: out unbroken right here -- followed by anything that is not itself a
+#: recognised placeholder marker -- would flag this very line as a leak of
+#: its own.
+_HOST_LEAK_RE = re.compile(
+    r'[A-Za-z]:\\{1,2}Users\\{1,2}([^\\/\s"\']+)'
+    r'|[A-Za-z]:/(?:Users)/([^/\s"\']+)'
+    r'|/(?:home)/([^/\s"\']+)'
+    r'|/(?:Users)/([^/\s"\']+)'
+)
+
+#: Mirrors `test_no_leaked_host_paths.py`'s own `PLACEHOLDER_HOMES`, trimmed
+#: to the names a captured oracle answer could plausibly carry. A real account
+#: name is never on this list; erring toward false positives (refuse a capture
+#: that turns out to be fine) costs one investigation, a miss ships a home
+#: directory into public history forever.
+_PLACEHOLDER_HOMES = frozenset(
+    {"alice", "bob", "dev", "jane", "me", "runner", "ubuntu", "user", "you"}
+)
+
+
+def _is_real_account(home: str) -> bool:
+    stripped = home.strip()
+    if len(stripped) < 3 or stripped[0] in ".<{$%":
+        return False
+    return stripped.lower() not in _PLACEHOLDER_HOMES
+
+
+def _refuse_if_leaking_a_real_host_path(result: Any, key: str) -> None:
+    text = json.dumps(result)
+    for match in _HOST_LEAK_RE.finditer(text):
+        home = next((group for group in match.groups() if group), None)
+        if home is not None and _is_real_account(home):
+            raise RuntimeError(
+                f"captured oracle answer for {key!r} carries a real machine's "
+                f"path ({match.group(0)!r}) -- widen this call site's "
+                "scrub_roots (oracle.rust_run/oracle_fixtures.scrub) so it "
+                "covers whatever root produced this, then re-capture. "
+                "Refusing to write it: a fixture this repo's own "
+                "tests/gates/test_no_leaked_host_paths.py would have to catch "
+                "after the fact is one that already reached tracked history."
+            )
+
+
 def resolve(live_fn):
     """The one seam every oracle call site in this package goes through.
 
@@ -125,6 +191,7 @@ def resolve(live_fn):
     if LIVE:
         result = json.loads(json.dumps(live_fn()))
         if CAPTURE:
+            _refuse_if_leaking_a_real_host_path(result, key)
             data = _load_module(module)
             data[key] = result
             _save_module(module, data)

@@ -38,3 +38,127 @@ shape). Capturing is additive -- `oracle_fixtures.resolve()` only ever adds
 or overwrites the keys the run you did touch, so a partial capture (e.g.
 `pytest tests/parity/test_flash_oracle_parity.py -k some_new_case`) is safe
 and does not disturb any other module's fixture file.
+
+--------------------------------------------------------------------------
+
+test_oracle_parity.json's `test_generate_matches_rust_with_a_resolvable_sdk`
+case -- one exception to "no reason to re-run unless a new case is added"
+above -- was captured separately, 2026-08-01, once a clean alp-sdk checkout
+existed to capture it against (it was skipped at the original freeze: the
+only reachable checkout then was dirty and mid-flight, and capturing against
+that would have frozen bad provenance):
+
+  cargo build --bin tan
+  ALP_SDK_PARITY_ROOT=<clean alp-sdk checkout, pinned at the ref below> \
+    TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 TAN_RUST_BINARY=<built tan(.exe)> \
+    python -m pytest tests/parity/test_oracle_parity.py \
+    -k test_generate_matches_rust_with_a_resolvable_sdk
+
+oracle binary:  tan 0.4.1 (unchanged -- crates/ is still frozen at
+                204c3a0b, above; only this one case was missing a fixture)
+alp-sdk ref:    v0.15.0-rc1 (996937ac4b452260628cf2c6adad4be31483a3d4) --
+                the SAME ref as HAND_PORT_PINNED_SDK_COMMIT
+                (python/tests/gates/test_planner_relocation_freshness.py)
+                and PINNED_SDK_TAG (.github/workflows/parity.yml), by
+                construction: that agreement is why this ref and not
+                another.
+
+This ONE case is bound to alp-sdk CONTENT, not just the frozen Rust binary --
+unlike every other fixture in this store. `tan generate` reads the SDK's
+metadata/emit-registry to decide which of the 9 default targets render and
+whether each succeeds (`data.written`/`data.failed`), so a checkout with
+different metadata could legitimately produce a different frozen answer.
+`sdk.root` (the one field that would otherwise embed the capture host's own
+checkout path) is scrubbed on both sides via the same `oracle_fixtures.scrub`
+mechanism `work`/`home` already use, so the frozen fixture replays on any
+host with any equivalently-pinned checkout at any path -- but "equivalently
+pinned" is the part a future reader must not assume forever. If
+PINNED_SDK_TAG in .github/workflows/parity.yml ever moves past v0.15.0-rc1,
+re-capture THIS ONE CASE against a clean checkout at the new pin (the recipe
+above, run against that checkout) rather than trusting the old answer still
+holds -- nothing else in this store depends on alp-sdk content, so nothing
+else needs re-capturing for a pin bump alone.
+
+--------------------------------------------------------------------------
+
+2026-08-01, same day, second pass: ten keys in test_oracle_parity.json were
+re-captured after `tests/gates/test_no_leaked_host_paths.py` -- and,
+separately, a maintainer reading the pushed commit -- caught real host paths
+sitting in this file's own committed JSON, unscrubbed:
+
+* `test_validate_board_yaml_missing_guard_matches_the_oracle_at_exit_2`,
+  `test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle`,
+  `test_sdk_switch_unresolvable_version_is_a_known_divergence_from_the_oracle`
+  (3 keys): each called `rust_run(..., scrub_roots=())` on the reasoning that
+  its own assertions only read a small literal exit code / issue code -- true,
+  but irrelevant, because `oracle_fixtures.resolve()` still persists the WHOLE
+  captured envelope regardless of what the test looks at, and each envelope's
+  `project.root`/`data.boardYamlPath`/the refusal `message` carried the
+  capture host's own `work_dir`/`home` verbatim. Fixed by widening each call
+  to `scrub_roots=(work_dir, home)` -- scrubbing costs nothing here, since the
+  assertions never inspected those fields either way.
+* `test_plan_from_shows_the_plan_and_writes_nothing` (all 6 parametrised
+  cases) and `test_plan_from_with_materialise_writes_every_artefact` (7 keys):
+  a DIFFERENT, THIRD root -- neither `work_dir` nor `home` -- leaked here.
+  These tests copy a real committed plan fixture
+  (`tests/parity/oracle/*.build-plan.json`, repo root, the Rust-workspace
+  tree -- outside this file's own ownership) into the scratch dir and run
+  `build --plan-from` against it unmodified; a bare `--plan-from` relays the
+  plan unsubstituted (`generate_cmd.py`'s own docstring on why Rust's
+  `--plan`/`--plan-from` substitute nothing), so every slice's
+  `env.ALP_SDK_ROOT` -- and `m55_hp`'s `appDir` -- carried the ACTUAL
+  filesystem path of whichever alp-sdk checkout those six plan fixtures were
+  themselves captured against, verbatim, into this file. Fixed by adding
+  `oracle.compare()`'s `extra_scrub_roots` parameter (empty by default, so
+  every other caller is unaffected) and having each of these two tests read
+  the leaking root straight off the copied plan file's own
+  `slices[*].env.ALP_SDK_ROOT` before calling `compare()`, so the scrub
+  target is derived from the fixture rather than hardcoded to one capture
+  host's path.
+
+Neither fix, on its own, touched `tests/parity/oracle/*.build-plan.json`
+itself (repo root, a different tree) -- only the copy that had landed HERE,
+in this file. That source WAS a separate, real leak of its own (a
+colleague's macOS checkout path, `8e1838a`/PR #5, 65 occurrences across the
+six plan files -- a DIFFERENT person's machine than the three pytest-tmp-path
+leaks above), closed in the same pass once found: see
+`tests/parity/oracle/`'s own git log for that fix (the six plan files'
+`env.ALP_SDK_ROOT`/`appDir`/sysbuild-arg fields, replaced with the generic
+`/srv/alp-sdk` placeholder). `test_no_leaked_host_paths.py`'s LEAKS table was
+widened in the same change (a bare `/Users/<name>`, no drive letter -- the
+shape that leak took, and the shape the gate had never checked) since it
+demonstrably did not catch that leak either; see that file's own git log.
+Re-capturing the 7 plan-derived keys against the fixed plan files changed
+NOTHING in this JSON -- the dynamic scrub (`_embedded_sdk_root`) already
+normalizes whatever root a plan embeds to the same `<ORACLE-ROOT-N>` token
+regardless of its value, so this file was already correct either way.
+
+Also added: `oracle_fixtures._refuse_if_leaking_a_real_host_path`, called
+from `resolve()`'s CAPTURE branch, refuses to persist any future capture
+whose envelope still carries a `C:\Users\<name>`, `/home/<name>` or
+`/Users/<name>`-shaped absolute path (scanning the same JSON-escaped text
+this module is about to write, so a doubled-backslash Windows path cannot
+slip past it the way it did `test_no_leaked_host_paths.py`'s single-
+backslash pattern once already). Unit-tested in `test_oracle_fixtures.py`.
+That gate only sees TRACKED files and so cannot catch a leak until well
+after `git add`; this one runs at the moment of capture instead.
+
+Re-capture recipe for the 10 affected keys (unchanged binary/SHA/ref from
+the sections above -- this was a scrubbing bug in the test harness, not a
+change in what the oracle answers):
+
+  cargo build --bin tan
+  ALP_SDK_PARITY_ROOT=<clean alp-sdk checkout at v0.15.0-rc1> \
+    TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 TAN_RUST_BINARY=<built tan(.exe)> \
+    python -m pytest tests/parity/test_oracle_parity.py \
+    -k "test_validate_board_yaml_missing_guard_matches_the_oracle_at_exit_2 \
+        or test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle \
+        or test_sdk_switch_unresolvable_version_is_a_known_divergence_from_the_oracle \
+        or test_plan_from_shows_the_plan_and_writes_nothing \
+        or test_plan_from_with_materialise_writes_every_artefact"
+
+Verified after this pass: `grep -rn "Users" python/tests/parity/oracle_fixtures/`
+returns nothing, `tests/gates/test_no_leaked_host_paths.py` passes with every
+file in this directory (and this file's own new `test_oracle_fixtures.py`)
+tracked, and the other four fixture files in this directory are byte-
+identical to before this pass (`git diff --stat` on each is empty).

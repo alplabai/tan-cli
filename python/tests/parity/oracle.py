@@ -307,6 +307,7 @@ def compare(
     surface: str = ENVELOPE,
     home: Path | None = None,
     python: list[str] | None = None,
+    extra_scrub_roots: tuple[Path | str, ...] = (),
 ) -> ParityResult:
     """Diff the two binaries on ``argv``, scoped to ``surface``.
 
@@ -320,9 +321,15 @@ def compare(
     absolute path byte-comparable at all, and a frozen fixture was captured
     from a DIFFERENT scratch cwd than whatever this replay is using, so the
     substitution is what keeps that comparison meaningful in both modes.
+
+    ``extra_scrub_roots`` widens that same substitution for a case whose
+    envelope can carry a THIRD absolute path neither ``cwd`` nor ``home``
+    cover -- e.g. a checked-in fixture file (a ``--plan-from`` plan) that
+    itself embeds the path of whatever alp-sdk checkout it was captured
+    against. Empty by default, so every existing caller is unaffected.
     """
     home = home or cwd
-    roots = (cwd, home)
+    roots = (cwd, home, *extra_scrub_roots)
 
     r_code, r_out = rust_run(argv, cwd, home, scrub_roots=roots)
     p_code, p_out = _run(python or python_command(), argv, cwd, home)

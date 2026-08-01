@@ -94,8 +94,13 @@ LEAKS: tuple[tuple[re.Pattern[str], str], ...] = (
         "a synced corporate drive; also where the private SoM documents live",
     ),
     (
-        # Captures the home NAME so PLACEHOLDER_HOMES can clear it.
-        re.compile(r"(?:/home/|[A-Za-z]:[\\/]Users[\\/])([^\\/\s\"'`,)]+)"),
+        # Captures the home NAME so PLACEHOLDER_HOMES can clear it. The bare
+        # `/Users/` alternative (no drive letter) is the macOS shape -- added
+        # after `tests/parity/oracle/*.build-plan.json` (PR #5, 8e1838a)
+        # shipped a colleague's `/Users/<name>/...` checkout path in six
+        # committed plan fixtures and this pattern, having only ever checked
+        # the Windows drive-letter form, said nothing.
+        re.compile(r"(?:/home/|[A-Za-z]:[\\/]Users[\\/]|/Users/)([^\\/\s\"'`,)]+)"),
         "a home directory naming a real account",
     ),
 )
@@ -170,4 +175,23 @@ def test_no_tracked_file_names_a_real_machine() -> None:
         "is permanent; replace each with a placeholder or a token "
         "(`ALP_SDK_ROOT`, `~/.alp/sdk-default`, `/srv/alp-sdk`, `C:\\Users\\dev`):"
         "\n  " + "\n  ".join(findings)
+    )
+
+
+def test_the_macos_pattern_flags_a_bare_users_path() -> None:
+    """The regression this file's own bug taught it: a bare `/Users/<name>`
+    (no drive letter) is exactly the shape that shipped in six committed
+    `tests/parity/oracle/*.build-plan.json` fixtures (PR #5, 8e1838a) while
+    LEAKS only ever checked the Windows `C:\\Users\\` form -- proved directly
+    here, not just by re-running the (slow, whole-repo) test above against a
+    reverted tree.
+    """
+    line = 'ALP_SDK_ROOT: "/Users/notarealdevname/VSCodeProjects/alp-sdk-v0101"'
+    for pattern, _why in LEAKS:
+        for match in pattern.finditer(line):
+            home = match.groups()[0] if match.groups() else None
+            if home is not None and _is_real_account(home):
+                return  # caught -- test passes
+    raise AssertionError(
+        "no LEAKS pattern matched a bare macOS /Users/<name> path"
     )
