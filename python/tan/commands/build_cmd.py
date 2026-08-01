@@ -95,9 +95,9 @@ from tan.commands.build.token_substitution import (
 )
 from tan.commands.deferred_cmd import DEFERRED_ISSUE_CODE, DEFERRED_ISSUE_URL
 from tan.commands.sdk_cmd import project_pin_issue, resolve_sdk_tiered
-from tan.core.bootstrap import VenvLayout, venv_layout
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
+from tan.core.venv import venv_python
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -510,74 +510,6 @@ def resolve_sdk_root_wide(
     return None, "none", tiered.broken_project_pin
 
 
-def _has_west(venv: Path, layout: VenvLayout) -> bool:
-    return (venv / layout.bin_dir / layout.west).is_file()
-
-
-def _find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
-    """Locate the west-capable workspace `.venv`, mirroring Rust's
-    `find_workspace_venv` (`crates/tan-cli/src/venv.rs`): gated on `west`
-    actually being present under the candidate (not just the directory
-    existing), in this order:
-
-      1. a `.venv` in the project tree, searched from `start` upward;
-      2. the workspace venv derived from `$ZEPHYR_BASE`
-         (`<ZEPHYR_BASE>/../.venv`);
-      3. the SDK's canonical `<sdk-parent>/.venv` (post-alp-sdk#782) or the
-         legacy `<sdk-parent>/zephyrproject/.venv`.
-
-    `None` when none resolve (CI, an activated venv, the contract harness).
-    """
-    layout = venv_layout(os.name == "nt")
-
-    directory: Path | None = Path(start)
-    while directory is not None:
-        candidate = directory / ".venv"
-        if _has_west(candidate, layout):
-            return candidate
-        parent = directory.parent
-        directory = parent if parent != directory else None
-
-    zephyr_base = os.environ.get("ZEPHYR_BASE")
-    if zephyr_base:
-        candidate = Path(zephyr_base).parent / ".venv"
-        if _has_west(candidate, layout):
-            return candidate
-
-    if sdk_root is not None:
-        parent = Path(sdk_root).parent
-        for workspace in (parent, parent / "zephyrproject"):
-            candidate = workspace / ".venv"
-            if _has_west(candidate, layout):
-                return candidate
-
-    return None
-
-
-def _venv_python(start: str, sdk_root: str | None) -> str | None:
-    """The west-capable workspace venv's `python` (see
-    `_find_workspace_venv`), mirroring Rust's `venv_python`. `None` when no
-    workspace venv resolves, or the one that does has no `python` binary --
-    the caller then keeps its own PATH-name fallback rather than spawning a
-    path that doesn't exist.
-
-    Forward-slashed, matching `_abs_posix` and `apply_plan_token_substitution`'s
-    own `project_root` handling: this value is substituted verbatim into
-    `${PYTHON}`, which lands in a `-DPython3_EXECUTABLE=<...>` CMake `-D`
-    argument (`orchestrator.py`), and a Windows backslash there is an escape
-    character (alp-sdk#849 -- CMake read `\\U`/`\\N` etc. as invalid character
-    escapes). `apply_plan_token_substitution` only forward-slashes
-    `project_root`, not `python`, so an un-normalised venv path under
-    `C:\\Users\\...` reached CMake unescaped.
-    """
-    venv = _find_workspace_venv(start, sdk_root)
-    if venv is None:
-        return None
-    layout = venv_layout(os.name == "nt")
-    candidate = venv / layout.bin_dir / layout.python
-    return str(candidate).replace("\\", "/") if candidate.is_file() else None
-
-
 def _planner_python(start: str, sdk_root: str | None) -> str:
     """The interpreter a SPAWNED build step runs under.
 
@@ -585,13 +517,14 @@ def _planner_python(start: str, sdk_root: str | None) -> str:
     in-process: `${PYTHON}` token substitution (below), and
     `generate_cmd`'s `TAN_GENERATE_EXECUTOR=subprocess` escape hatch.
 
-    Prefers the west-capable workspace venv's `python` (`_venv_python`,
-    mirroring Rust's `venv_python`/`resolved_planner_python`), because the SDK
-    planner bakes ITS `sys.executable` into every Zephyr slice as
-    `-DPython3_EXECUTABLE=<...>` (alp-sdk#787) -- a bare PATH `python3` may
-    lack the `west` module entirely, which surfaced as the planner's own
-    `ModuleNotFoundError: No module named 'west'` inside CMake configure
-    (tan-cli, the documented-install-path bug) rather than a working build.
+    Prefers the west-capable workspace venv's `python`
+    (`tan.core.venv.venv_python`, mirroring Rust's `venv_python`/
+    `resolved_planner_python`), because the SDK planner bakes ITS
+    `sys.executable` into every Zephyr slice as `-DPython3_EXECUTABLE=<...>`
+    (alp-sdk#787) -- a bare PATH `python3` may lack the `west` module
+    entirely, which surfaced as the planner's own `ModuleNotFoundError: No
+    module named 'west'` inside CMake configure (tan-cli, the
+    documented-install-path bug) rather than a working build.
 
     Falls back to a bare PATH name -- `python3` off Windows, `python` on it,
     mirroring `tan_core::project::resolve_python_binary` -- only when no
@@ -600,7 +533,7 @@ def _planner_python(start: str, sdk_root: str | None) -> str:
     CLI; and this value is also the `${PYTHON}` substituted into the plan, so
     it has to name an interpreter the slice can find, not this process.
     """
-    return _venv_python(start, sdk_root) or ("python" if os.name == "nt" else "python3")
+    return venv_python(start, sdk_root) or ("python" if os.name == "nt" else "python3")
 
 
 def _emit_plan(sdk_root: str | None, board_yaml: str | None) -> str:

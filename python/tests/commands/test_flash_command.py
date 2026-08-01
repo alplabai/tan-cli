@@ -24,7 +24,9 @@ from pathlib import Path
 
 import pytest
 
+from tan.commands import flash_cmd
 from tan.core import flash_plan
+from tan.core.bootstrap import venv_layout
 from tan.core.flash_plan import (
     FlashInputs,
     FlashPlanError,
@@ -1603,6 +1605,98 @@ def test_no_spawn_for_a_pending_artefact_even_with_force_confirm(tmp_path, monke
     assert exit_code == 1
     assert payload["data"]["entries"][0]["status"] == "failed"
     assert "TBD" in payload["data"]["entries"][0]["message"]
+
+
+# ── venv-resolved west + west workspace topdir (tan-cli#289/#59/#61) ────────
+
+
+def test_flash_resolves_west_from_the_workspace_venv_and_runs_from_its_topdir(
+    tmp_path, monkeypatch
+):
+    """tan-cli#289 / #59 + #61: a `zephyr_west_flash` entry must resolve
+    `west` from the bootstrapped workspace `.venv` -- not stay a PATH-only
+    tool gate -- AND must run from the west WORKSPACE topdir (holding
+    `.west/`), not whatever directory happened to invoke `tan flash`. Both
+    reproduce the SAME symptom the Rust oracle already carries the fix for:
+    every `tan flash` on a host where `tan bootstrap` completed but the venv
+    is not on PATH -- the extension's normal environment.
+
+    `subprocess.run` is stubbed (mirrors `test_west_forward_command.py`'s own
+    `west_forward_cmd.subprocess.run` stub) rather than spawning anything
+    real -- this command writes to hardware, and no board is reserved here.
+    """
+    work = tmp_path
+    (work / "build").mkdir()
+    (work / "sdk" / "scripts").mkdir(parents=True)
+    (work / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    (work / "build" / "system-manifest.yaml").write_text(OK_SLICE, encoding="utf-8", newline="")
+
+    # #59: a west-capable venv under the app tree ("." -> `work`) -- PATH
+    # deliberately has NO `west` at all, matching a GUI-launched editor's
+    # un-activated environment.
+    layout = venv_layout(os.name == "nt")
+    venv_bin = work / ".venv" / layout.bin_dir
+    venv_bin.mkdir(parents=True)
+    west_path = venv_bin / layout.west
+    west_path.write_text("", encoding="utf-8")
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    empty_path = work / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    # #61: the west workspace topdir sits at the SDK-derived `zephyrproject`
+    # layout (`resolved_sdk.parent / "zephyrproject"`), deliberately NOT
+    # `work` itself -- distinct from the process's own cwd, so a resolved
+    # topdir that is silently just "wherever we already were" cannot pass
+    # this test by accident.
+    workspace_dir = work / "zephyrproject"
+    (workspace_dir / ".west").mkdir(parents=True)
+
+    calls: list[tuple[list[str], str | None]] = []
+
+    def _fake_run(argv, **kwargs):
+        calls.append((list(argv), kwargs.get("cwd")))
+        return subprocess.CompletedProcess(list(argv), 0, stdout="", stderr="")
+
+    monkeypatch.setattr(flash_cmd.subprocess, "run", _fake_run)
+
+    exit_code, data, _issues, _lines, _sdk = flash_cmd._run(
+        app_path=".", build_root_arg=None, sdk_root_arg=str(work / "sdk"), board_yaml=None,
+        core=None, helper=None, dry_run=False, skip_missing_tools=False, capture=True,
+        cwd=str(work),
+    )
+
+    assert len(calls) == 1, calls
+    argv, cwd = calls[0]
+    # #59: argv[0] is the VENV's own west, an absolute path -- not the bare
+    # PATH-resolved name the tool gate used to require and never find on the
+    # scrubbed PATH above.
+    assert Path(argv[0]).is_absolute(), argv
+    assert Path(argv[0]).samefile(west_path), argv
+    assert argv[1:3] == ["flash", "--build-dir"]
+    # #61: the child ran from the west workspace topdir, not `work`.
+    assert cwd is not None, "west flash ran with no cwd override at all"
+    assert Path(cwd).samefile(workspace_dir), cwd
+    assert data["entries"][0]["status"] == "ok"
+    assert exit_code == 0
+
+
+def test_flash_tool_gate_still_fails_when_neither_path_nor_the_venv_has_west(
+    tmp_path, monkeypatch
+):
+    """The negative control: with no venv at all (and PATH scrubbed), the
+    required-tool gate must still refuse -- `_tool_available`'s venv fallback
+    must never make a genuinely absent tool look present."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    exit_code, out, _ = run_flash(tmp_path, "--format", "json")
+    payload = envelope(out)
+    assert exit_code == 1
+    assert payload["data"]["entries"][0]["status"] == "failed"
+    assert "west" in payload["data"]["entries"][0]["message"]
 
 
 def test_is_pending_is_the_one_definition_shared_with_the_bundle_writer():

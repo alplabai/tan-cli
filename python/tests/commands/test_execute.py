@@ -9,6 +9,7 @@ from pathlib import Path
 from tan.core.build_plan import parse_build_plan
 from tan.commands.build.execute import execute_slices
 from tan.commands.build.manifest import PostBuildManifest
+from tan.core.bootstrap import venv_layout
 from tan.core.system_manifest import parse_system_manifest
 from tests.conftest import sdk_root
 
@@ -117,6 +118,46 @@ def test_missing_tool_is_skipped_per_policy(tmp_path):
     out = execute_slices(parse_build_plan(_plan(cmd)), build_root=tmp_path,
                          env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None)
     assert out[0].status == "skipped"
+
+
+def test_bare_west_tool_is_rewritten_to_the_workspace_venv_and_dispatches(tmp_path, monkeypatch):
+    """tan-cli#289 / #106: on a host where `tan bootstrap` completed but the
+    venv is not on PATH -- every GUI-launched VS Code -- a `tool: "west"`
+    slice command must resolve to the west-capable workspace venv's own
+    `west`, not stay a bare PATH lookup. `PATH` is deliberately scrubbed of
+    anything so this fails loudly if the rewrite ever stops firing: BEFORE
+    this fix, `tool` stays the literal string `"west"`, which does not
+    resolve on the scrubbed PATH, and this is exactly
+    `test_missing_tool_is_skipped_per_policy` above -- status "skipped",
+    message `` tool `west` not found ``.
+
+    The venv's `west` is a real file, deliberately not a real EXECUTABLE
+    (matching `test_build_planner_python.py`'s identical marker-file
+    convention) -- the point under test is dispatch (an absolute path was
+    resolved and a launch was ATTEMPTED), not that this stand-in program
+    runs cleanly; asserting a real spawn attempt happened (a launch error or
+    a real exit code, never the missing-tool skip) is a stronger, more
+    cross-platform-reliable signal than depending on the fake binary itself
+    being runnable.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    layout = venv_layout(os.name == "nt")
+    venv_bin = tmp_path / ".venv" / layout.bin_dir
+    venv_bin.mkdir(parents=True)
+    west_path = venv_bin / layout.west
+    west_path.write_text("", encoding="utf-8")
+    if os.name != "nt":
+        os.chmod(west_path, 0o755)
+
+    cmd = '{"tool": "west", "args": ["-c", "print(1)"], "cwd": null}'
+    out = execute_slices(parse_build_plan(_plan(cmd)), build_root=tmp_path,
+                         env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None)
+    assert out[0].status != "skipped", out[0].message
+    assert out[0].message != "tool `west` not found"
 
 
 def test_unknown_backend_fails_per_policy(tmp_path):

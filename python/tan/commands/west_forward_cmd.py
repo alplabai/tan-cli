@@ -31,9 +31,8 @@ from pathlib import Path
 import typer
 
 from tan.commands.bootstrap_cmd import _manifest_points_at
-from tan.commands.build_cmd import _find_workspace_venv
 from tan.commands.build_output import resolve_project_context, to_posix
-from tan.core.bootstrap import venv_layout
+from tan.core.venv import west_program, with_venv_on_path
 from tan.envelope import Envelope, Issue, emit
 from tan.exit_codes import ExitCode
 
@@ -96,38 +95,10 @@ def _zephyr_base_workspace(zephyr_base: Path, sdk_root: Path | None) -> Path | N
     return workspace
 
 
-def _west_program(start: str, sdk_root: Path | None) -> str:
-    """Port of `venv.rs::west_program`: the west-capable workspace `.venv`'s
-    own `west` binary, or the bare PATH name `west` when no such venv resolves
-    (mirrors `_planner_python`'s own PATH-name fallback in `build_cmd.py`)."""
-    venv = _find_workspace_venv(start, str(sdk_root) if sdk_root is not None else None)
-    if venv is None:
-        return "west"
-    layout = venv_layout(os.name == "nt")
-    candidate = venv / layout.bin_dir / layout.west
-    return str(candidate) if candidate.is_file() else "west"
-
-
 def _west_argv(subcommand: str, passthrough: list[str]) -> list[str]:
     """Port of `workspace.rs::west_argv`: `alp-<subcommand>` followed by the
     forwarded args, verbatim."""
     return [f"alp-{subcommand}", *passthrough]
-
-
-def _with_venv_on_path(env: dict[str, str], west_bin: str) -> dict[str, str]:
-    """Port of `venv.rs::with_venv_on_path`: when `west_bin` resolved to an
-    absolute (venv) path, prepend its directory to the child's `PATH` -- the
-    `alp-*` extension command may itself shell a nested `west`/`bitbake`,
-    which resolves purely via `PATH`. A bare `"west"` (PATH fallback) is left
-    untouched, matching the oracle's early return for a non-absolute `tool`.
-    """
-    bin_path = Path(west_bin)
-    if not bin_path.is_absolute():
-        return env
-    bin_dir = str(bin_path.parent)
-    existing = env.get("PATH", "")
-    path = os.pathsep.join([bin_dir, existing]) if existing else bin_dir
-    return {**env, "PATH": path}
 
 
 def _launch_error(err: OSError) -> str:
@@ -155,7 +126,7 @@ def _run_forward(
     west_cwd = context.workspace_root or "."
     sdk_path = Path(context.sdk.root) if context.sdk is not None else None
 
-    west_bin = _west_program(west_cwd, sdk_path)
+    west_bin = west_program(west_cwd, str(sdk_path) if sdk_path is not None else None)
     workspace = _west_workspace_dir(west_cwd, sdk_path)
     # `to_posix`: `str(PurePath)` renders with the platform separator (backslash
     # on Windows), but Rust's `Path::to_string_lossy` merely slices the already
@@ -181,7 +152,7 @@ def _run_forward(
         "args": list(passthrough),
     }
     project_ = context.project()
-    env = _with_venv_on_path(dict(os.environ), west_bin)
+    env = with_venv_on_path(dict(os.environ), west_bin)
     full_argv = [west_bin, *argv]
 
     if json_mode:
