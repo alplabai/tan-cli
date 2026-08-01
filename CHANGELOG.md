@@ -56,6 +56,38 @@ green CI run on a clean runner. Every defect below was invisible to both.*
   can catch this: a source-tree run has the developer's own trust, and the bug
   is invisible until the frozen artifact runs (#304, release-blocker).
 
+### Added
+
+- **`clean-host.yml` — the shipped-artefact gate on a genuinely clean host**
+  (#278, escalated to a release-blocker). All six defects above were found by
+  downloading the `v0.5.0-rc2` asset and running four commands on a host with
+  no alp-sdk checkout, no `~/.alp`, and an empty cwd -- a state no prior CI job
+  in this repo ever constructed, and the reason a green board shipped every
+  one of them. `getting-started.yml` proves the documented first-install path
+  works from a real `tan bootstrap`; it can never reproduce a HOST WITH NO SDK
+  REACHABLE AT ALL, which is exactly the state #292/#301/#302 need and exactly
+  the customer's actual first three commands. The new job freezes `tan` per
+  platform (`macos-15-intel`/`macos-15`/`windows-latest`/`ubuntu-latest`, same
+  shape as `release.yml`'s `build` job -- pre-tag, when these six needed to be
+  caught) and, separately, downloads the actual published asset after a
+  release goes out for a post-publish confirmation. Both legs run
+  `python/scripts/clean_host_smoke.py`'s `tan --version` / `tan doctor
+  --format json` / `tan sdk list --online` (the real GitHub API call, unmocked
+  -- the #304 CA-trust canary) / `tan bootstrap --dry-run`, twice each for
+  `doctor`/`bootstrap` -- once with `$ZEPHYR_BASE` unset, once pointed at a
+  directory that exists but carries no Zephyr markers at all, deliberately
+  bare rather than a fabricated lookalike (#286: a fixture shaped like what
+  the probe looks for proves the fixture, not the code). `doctor`'s envelope
+  is checked for internal self-consistency -- `ok`/`exitCode` agreeing with
+  `checks[]`, and no two checks named `<subject>` and
+  `<subject>Resolved`/`<subject>Provenance` (this repo's own corroborating-
+  check naming convention) disagreeing pass vs. fail -- which generalises the
+  #299 shape without grepping for `westResolved`/`west` by name. `macos-15`/
+  `macos-15-intel` are mandatory (where #304 manifested); a Windows pass on
+  `sdk list --online` is explicitly NOT read as CA-trust coverage, since
+  CPython's `ssl` on win32 already falls back to the Windows certificate store
+  where macOS and Linux have no equivalent.
+
 ### Known
 
 - `tan bootstrap` still refuses the documented quickstart layout (`tan.exe` and
