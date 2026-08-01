@@ -112,12 +112,16 @@ def test_retarget_is_byte_exact_for_the_trees_own_sku():
     assert retarget_board_yaml_som(original, "E1M-AEN801") == original
 
 
-def test_retarget_replaces_only_the_value_token():
+def test_retarget_drops_a_stale_trailing_comment_when_the_value_changes():
+    """A trailing comment routinely names the ORIGINAL SoM's vendor (e.g.
+    `# Alif Ensemble E8 SoM`) -- carrying it onto a genuinely different SKU
+    would misname the new board's vendor entirely, so an actual value change
+    drops the tail rather than relocating it."""
     out = retarget_board_yaml_som(
-        "som:\n  sku: E1M-AEN801           # aligned\ncores:\n", "E1M-V2N101"
+        "som:\n  sku: E1M-AEN801           # Alif Ensemble E8 SoM\ncores:\n", "E1M-V2N101"
     )
 
-    assert out == "som:\n  sku: E1M-V2N101           # aligned\ncores:\n"
+    assert out == "som:\n  sku: E1M-V2N101\ncores:\n"
 
 
 def test_retarget_handles_a_sku_key_with_no_value():

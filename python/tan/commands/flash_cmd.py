@@ -29,17 +29,20 @@ completed flash (**I-30**: this used to report byte-identical to a real write).
   in `flash` catches everything and reports `flash.internal-failure`; every
   helper it calls on its recovery path is chosen to be incapable of raising.
 
-**Known port gaps, both inherited and both deliberate.** The Rust resolves a
+**Workspace venv + west topdir (tan-cli#289/#59/#61).** Rust resolves a
 workspace venv (`venv_bin_dir`, so a GUI-launched editor's PATH-less `west` is
-still found) and the west workspace topdir (`west_workspace_dir`, which becomes
-each child's cwd so `west flash` can see alp-sdk's out-of-tree runners). This
-port has no venv-resolution module -- the same gap
-`tan.commands.build.execute` documents for `with_venv_on_path` -- so a
-`zephyr_west_flash` entry on such a host fails the tool gate here where Rust
-succeeds. Fixing it is one shared module for both commands, not a second copy.
+still found) and the west workspace topdir (`west_workspace_dir`, which
+becomes each child's cwd so `west flash` can see alp-sdk's out-of-tree
+runners). Both are resolved once per run in [`_run`] and threaded through
+[`_Context`]: `venv_bin` widens the required-tool gate ([`_tool_available`])
+and rewrites the spawned program to the venv's own copy
+([`_programs_resolved_in_venv`]), and `workspace` becomes every spawned
+child's cwd. The search itself is shared, not duplicated, with
+`tan.commands.build.execute` -- both consume `tan.core.venv`.
 """
 from __future__ import annotations
 
+import functools
 import os
 import subprocess
 import sys
@@ -47,12 +50,14 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import on_path
+from tan.commands.sdk_cmd import project_pin_issue
 from tan.core.flash_plan import (
     FAIL,
     FLOW_D_METHOD,
@@ -70,6 +75,7 @@ from tan.core.flash_plan import (
     flash_args_has_tbd,
     flow_d_preflight_script,
     is_pending,
+    is_rust_absolute,
     parse_atoc_start_address,
     parse_system_manifest,
     plan_flash_targets,
@@ -79,6 +85,7 @@ from tan.core.flash_plan import (
     tool_gate,
     validate_flow_d_preflight_args,
 )
+from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -210,11 +217,13 @@ def _resolve_project(root: str, board_yaml: str | None) -> Project:
     )
 
 
-def _resolve_sdk(sdk_root: str | None, workspace_root: str) -> tuple[str | None, str | None]:
-    """`(sdk_root, sourceTier)` -- `util.rs::resolve_sdk_root`: `--sdk-root`
-    (terminal) > the project's own `.alp/sdk-path` pin > the machine-global
-    default (`~/.alp/sdk-default`) > the wide positional walk -- the oracle's
-    closed five-value `SdkSourceTier` (`SdkRootFlag`, `ProjectPin`,
+def _resolve_sdk(
+    sdk_root: str | None, workspace_root: str
+) -> tuple[str | None, str | None, str | None]:
+    """`(sdk_root, sourceTier, brokenProjectPin)` -- `util.rs::resolve_sdk_root`:
+    `--sdk-root` (terminal) > the project's own `.alp/sdk-path` pin > the
+    machine-global default (`~/.alp/sdk-default`) > the wide positional walk --
+    the oracle's closed five-value `SdkSourceTier` (`SdkRootFlag`, `ProjectPin`,
     `GlobalDefault`, `Discovery`, `None`); no `ALP_SDK_ROOT` tier (tried and
     reverted -- the oracle only ever WRITES that variable into a build
     slice's env, never reads it back for discovery; the project-pin tier
@@ -226,11 +235,15 @@ def _resolve_sdk(sdk_root: str | None, workspace_root: str) -> tuple[str | None,
     different SDK. The pin/global-default/positional-walk tiers are
     best-effort -- previously skipped here entirely (this port had no writer
     for the pointer files when this comment was written; `tan init` writes
-    `.alp/sdk-path`, so skipping them silently ignored it)."""
+    `.alp/sdk-path`, so skipping them silently ignored it).
+
+    `brokenProjectPin` (tan-cli#263 review): `None` on the `--sdk-root` branch
+    (nothing to fall through from), else whatever
+    [`resolve_sdk_root_ladder_safe`] carried through."""
     if sdk_root is not None:
-        return (sdk_root if _is_sdk_root(sdk_root) else None), "sdkRootFlag"
-    found, tier = resolve_sdk_root_ladder_safe(workspace_root)
-    return found, tier
+        return (sdk_root if _is_sdk_root(sdk_root) else None), "sdkRootFlag", None
+    found, tier, broken_pin = resolve_sdk_root_ladder_safe(workspace_root)
+    return found, tier, broken_pin
 
 
 def _is_sdk_root(path: str) -> bool:
@@ -243,41 +256,49 @@ def _is_sdk_root(path: str) -> bool:
         return False
 
 
-def resolve_sdk_root_ladder_safe(workspace_root: str) -> tuple[str | None, str | None]:
+def resolve_sdk_root_ladder_safe(
+    workspace_root: str,
+) -> tuple[str | None, str | None, str | None]:
     """`build_cmd.resolve_sdk_root_ladder(None, ...)`, made incapable of
     raising -- an unreadable `.alp/sdk-path` pin, an unreadable global-default
     pointer (`~/.alp/sdk-default`), or an unreadable ancestor on the
     positional walk must not become a traceback in a command whose whole job
     is to report an envelope."""
     try:
-        found, tier = resolve_sdk_root_ladder(None, _as_path(workspace_root))
+        found, tier, broken_pin = resolve_sdk_root_ladder(None, Path(workspace_root))
     except (OSError, ValueError):
-        return None, None
-    return (str(found), tier) if found is not None else (None, None)
+        return None, None, None
+    return (str(found), tier, broken_pin) if found is not None else (None, None, broken_pin)
 
 
-def _as_path(text: str):
-    from pathlib import Path  # noqa: PLC0415 -- one call site, keeps the import local
-
-    return Path(text)
-
-
-def _tool_available(tool: str) -> bool:
-    """A tool counts as available when it is on PATH. `doctor_cmd.on_path` walks
-    `$PATH` by hand rather than using `shutil.which`, which on Windows probes the
-    CURRENT DIRECTORY first -- a project checked out with its own `openocd.exe`
-    at its root would otherwise be reported as this host's tooling and then
-    SPAWNED against attached silicon."""
+def _tool_available(tool: str, venv_bin: Path | None = None) -> bool:
+    """A tool counts as available when it is on PATH **or** provided by the
+    west-capable workspace venv (`venv_bin`, when one resolved), mirroring
+    Rust's `tool_available` (tan-cli#289/#59): `west` is the case that
+    matters -- `tan bootstrap` installs it INSIDE the venv, and a
+    GUI-launched editor's PATH never has it. `doctor_cmd.on_path` walks
+    `$PATH` by hand rather than using `shutil.which`, which on Windows probes
+    the CURRENT DIRECTORY first -- a project checked out with its own
+    `openocd.exe` at its root would otherwise be reported as this host's
+    tooling and then SPAWNED against attached silicon."""
     try:
-        return on_path(tool) is not None
+        if on_path(tool) is not None:
+            return True
     except (OSError, ValueError):
-        return False
+        pass
+    return venv_bin is not None and tool_in_venv(venv_bin, tool) is not None
 
 
 # ── spawning ────────────────────────────────────────────────────────────────
 
 
-def _spawn(argv, capture: bool, timeout: float) -> _Outcome:
+def _spawn(
+    argv,
+    capture: bool,
+    timeout: float,
+    venv_bin: Path | None = None,
+    workspace: str | None = None,
+) -> _Outcome:
     """One process. Captured in JSON mode (the output is kept for the failure
     message and never re-spawned), inherited-to-stderr in text mode so a long
     write streams live.
@@ -287,7 +308,14 @@ def _spawn(argv, capture: bool, timeout: float) -> _Outcome:
     using it, and a flash tool that prints to stdout would otherwise put
     non-envelope bytes there. Rust can inherit safely because its text path
     never writes an envelope at all; here the same process object owns both.
+
+    `venv_bin` (tan-cli#289/#59), when given, is prepended onto the child's
+    PATH -- `env=None` (the default, passed through unchanged) means
+    "inherit this process's own environment", exactly the pre-#59 behaviour.
+    `workspace` (tan-cli#289/#61), when given, becomes the child's cwd, so
+    `west flash` can see alp-sdk's out-of-tree runners.
     """
+    env = prepend_path(dict(os.environ), venv_bin) if venv_bin is not None else None
     try:
         if capture:
             proc = subprocess.run(
@@ -297,6 +325,8 @@ def _spawn(argv, capture: bool, timeout: float) -> _Outcome:
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                env=env,
+                cwd=workspace,
             )
             return _Outcome(
                 success=proc.returncode == 0,
@@ -318,13 +348,15 @@ def _spawn(argv, capture: bool, timeout: float) -> _Outcome:
                 encoding="utf-8",
                 errors="replace",
                 timeout=timeout,
+                env=env,
+                cwd=workspace,
             )
             if proc.stdout:
                 print(proc.stdout, end="", file=sys.stderr)
             if proc.stderr:
                 print(proc.stderr, end="", file=sys.stderr)
             return _Outcome(success=proc.returncode == 0, returncode=proc.returncode)
-        proc = subprocess.run(list(argv), stdout=sink, timeout=timeout)
+        proc = subprocess.run(list(argv), stdout=sink, timeout=timeout, env=env, cwd=workspace)
         return _Outcome(success=proc.returncode == 0, returncode=proc.returncode)
     except subprocess.TimeoutExpired:
         return _Outcome(
@@ -368,7 +400,14 @@ def _stderr_sink():
     return sys.stderr
 
 
-def _spawn_pipeline(left, right, capture: bool, timeout: float) -> _Outcome:
+def _spawn_pipeline(
+    left,
+    right,
+    capture: bool,
+    timeout: float,
+    venv_bin: Path | None = None,
+    workspace: str | None = None,
+) -> _Outcome:
     """A decompress -> dd pipeline: wire the decompressor's stdout into dd's
     stdin. Fails when EITHER process fails, matching the Python rc folding.
 
@@ -377,13 +416,19 @@ def _spawn_pipeline(left, right, capture: bool, timeout: float) -> _Outcome:
     mid-write to a real block device: once the decompressor writes more than the
     OS pipe buffer its `write()` blocks forever, it never reaches EOF on stdout,
     dd's `read()` blocks too, and the `wait()` never returns.
+
+    `venv_bin`/`workspace`: see [`_spawn`] -- the same PATH-prepend/cwd
+    threading, applied to BOTH halves of the pipeline (tan-cli#289/#59/#61).
     """
+    env = prepend_path(dict(os.environ), venv_bin) if venv_bin is not None else None
     deadline = time.monotonic() + timeout
     try:
         first = subprocess.Popen(  # noqa: S603 -- argv comes from the pure planner
             list(left),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE if capture else None,
+            env=env,
+            cwd=workspace,
         )
     except OSError as err:
         return _Outcome(success=False, stderr=f"could not spawn: {err}", captured=capture)
@@ -409,6 +454,8 @@ def _spawn_pipeline(left, right, capture: bool, timeout: float) -> _Outcome:
                 stdin=first.stdout,
                 stdout=subprocess.PIPE if capture else _stderr_sink(),
                 stderr=subprocess.PIPE if capture else None,
+                env=env,
+                cwd=workspace,
             )
         except OSError as err:
             return _Outcome(success=False, stderr=f"could not spawn: {err}", captured=capture)
@@ -464,7 +511,14 @@ def _text(raw: Any) -> str:
     return str(raw)
 
 
-def _spawn_jlink(argv, script: str, capture: bool, timeout: float) -> _Outcome:
+def _spawn_jlink(
+    argv,
+    script: str,
+    capture: bool,
+    timeout: float,
+    venv_bin: Path | None = None,
+    workspace: str | None = None,
+) -> _Outcome:
     """Materialise the Commander script to a temp file, append its path as the
     final `-CommanderScript` argument, spawn, and remove the temp file.
 
@@ -489,7 +543,7 @@ def _spawn_jlink(argv, script: str, capture: bool, timeout: float) -> _Outcome:
             captured=capture,
         )
     try:
-        return _spawn([*argv, path], capture, timeout)
+        return _spawn([*argv, path], capture, timeout, venv_bin, workspace)
     finally:
         _unlink(path)
 
@@ -501,16 +555,62 @@ def _unlink(path: str) -> None:
         pass
 
 
-def _execute(plan: FlashPlan, capture: bool) -> _Outcome:
+def _programs_resolved_in_venv(argv: list[str], venv_bin: Path | None) -> list[str]:
+    """Rewrite every PROGRAM position in `argv` -- `argv[0]`, plus the token
+    right after a `"|"` pipeline separator -- to its absolute venv path when
+    the venv provides that program, mirroring Rust's
+    `programs_resolved_in_venv` (tan-cli#289/#59). Arguments are never
+    touched, an already-absolute program is left alone, and a tool the venv
+    does not provide keeps its bare name so PATH resolution stays in charge.
+    Pure.
+
+    `is_rust_absolute`, not `os.path.isabs`: `flash_plan.py`'s own convention
+    (see its docstring) exists precisely because `os.path.isabs` answers
+    differently for a rooted-but-driveless Windows path across supported
+    Python versions (3.13 changed it) -- this argv-rewrite must not disagree
+    with the oracle, or with itself between interpreters on the same host.
+    """
+    if venv_bin is None:
+        return list(argv)
+    out: list[str] = []
+    is_program = True
+    for arg in argv:
+        if is_program and not is_rust_absolute(arg):
+            out.append(tool_in_venv(venv_bin, arg) or arg)
+        else:
+            out.append(arg)
+        is_program = arg == PIPE
+    return out
+
+
+def _execute(
+    plan: FlashPlan, capture: bool, venv_bin: Path | None = None, workspace: str | None = None
+) -> _Outcome:
     """Spawn the plan: a pipeline (a `"|"` token), a J-Link plan (temp Commander
-    script), or a plain single process."""
+    script), or a plain single process.
+
+    `venv_bin`/`workspace` (tan-cli#289/#59/#61): the run-wide west-capable
+    workspace venv bin dir and west workspace topdir, resolved once in
+    [`_run`]. `argv[0]` (and the post-`"|"` token) is rewritten to the venv's
+    own copy when it provides one ([`_programs_resolved_in_venv`]); the venv
+    only joins the child's PATH when a program was ACTUALLY resolved there
+    (mirroring the oracle's `on_path = if argv == plan.argv { None } else {
+    venv_bin }`) -- a plan naming only absolute/non-venv tools must not have
+    its PATH silently rewritten for no reason.
+    """
     argv = list(plan.argv)
-    if PIPE in argv:
-        cut = argv.index(PIPE)
-        return _spawn_pipeline(argv[:cut], argv[cut + 1 :], capture, _FLASH_TIMEOUT_S)
+    resolved = _programs_resolved_in_venv(argv, venv_bin)
+    on_path_bin = venv_bin if resolved != argv else None
+    if PIPE in resolved:
+        cut = resolved.index(PIPE)
+        return _spawn_pipeline(
+            resolved[:cut], resolved[cut + 1 :], capture, _FLASH_TIMEOUT_S, on_path_bin, workspace
+        )
     if plan.jlink_script is not None:
-        return _spawn_jlink(argv, plan.jlink_script, capture, _FLASH_TIMEOUT_S)
-    return _spawn(argv, capture, _FLASH_TIMEOUT_S)
+        return _spawn_jlink(
+            resolved, plan.jlink_script, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace
+        )
+    return _spawn(resolved, capture, _FLASH_TIMEOUT_S, on_path_bin, workspace)
 
 
 def _capture_tail(outcome: _Outcome) -> str | None:
@@ -551,6 +651,15 @@ class _Context:
     skip_missing_tools: bool
     force_confirm: bool
     capture: bool
+    #: The west-capable workspace venv's bin dir, when one resolves
+    #: (tan-cli#289/#59). `None` on CI, an activated venv, or the contract
+    #: harness -- every spawn/gate below then behaves exactly as before.
+    venv_bin: Path | None = None
+    #: The west workspace topdir (holding `.west/`), when one resolves
+    #: (tan-cli#289/#61) -- becomes every spawned child's cwd so `west
+    #: flash` can see alp-sdk's out-of-tree runners. `None` keeps the old
+    #: app-dir cwd, matching the oracle exactly.
+    workspace: str | None = None
 
 
 def _resolve_flow_d_atoc_address(flash_args: Any, build_root: str, sdk_root: str) -> Any:
@@ -613,6 +722,41 @@ def _resolve_flow_d_atoc_address(flash_args: Any, build_root: str, sdk_root: str
         )
     merged = dict(flash_args)
     merged["atoc_address"] = address
+    return merged
+
+
+def _resolve_flow_d_atoc_path(flash_args: Any, build_root: str, sdk_root: str) -> Any:
+    """Resolve `flash_args.atoc` to an absolute path before it reaches
+    `plan_alif_mram_jlink`, the same way `atoc_map` (above) and the entry's
+    own `output_artefact` (`_flash_entry`, before `FlashInputs` is built)
+    already are.
+
+    **tan-cli#289 follow-up.** `atoc` was the one MRAM-write input
+    `plan_alif_mram_jlink` read straight off `flash_args` with no resolution
+    at all (`fa_str(fa, "atoc")`) -- it goes verbatim into the J-Link
+    Commander script's `loadbin`/`verifybin` lines. #289 set the flash
+    child's `cwd` to the west workspace topdir (`_run` -> `west_workspace_dir`
+    -> `_Context.workspace`), which silently moved every OTHER relative
+    input's resolution base off the tan process's own cwd; `atoc` alone kept
+    resolving (at the OS level, at spawn time) against whatever that topdir
+    happens to be, not `build_root`. This repo's own fixtures spell it as a
+    relative `atoc: atoc.bin` in several places, and nothing in `docs/`
+    tells an author it must be absolute -- so a relative `atoc` now risks
+    writing a stale/foreign file to MRAM, or failing with a confusing
+    not-found, purely because the west topdir differs from the build root.
+    Resolving it here, at plan time and anchored on `build_root`/`sdk_root`
+    exactly like `atoc_map`, removes the ambiguity outright.
+
+    A missing/non-string `atoc` is left untouched: `fa_str` already reads
+    that as `None`, and `plan_alif_mram_jlink` raises its own, clearer
+    "flash_args.atoc ... required" refusal for it -- this must not turn that
+    into a resolved `<build_root>/None` string.
+    """
+    atoc = fa_str(flash_args, "atoc")
+    if atoc is None:
+        return flash_args
+    merged = dict(flash_args)
+    merged["atoc"] = resolve_artefact_path(atoc, build_root, sdk_root, _is_file)
     return merged
 
 
@@ -716,9 +860,24 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         artefact = f"<missing-artefact-for-{entry_id}>"
     artefact_path = resolve_artefact_path(artefact, ctx.build_root, ctx.sdk_root, _is_file)
 
+    # tan-cli#289/#59: widen the required-tool gate (and every plan-builder's
+    # own tool probe, below) with the resolved workspace venv -- a tool
+    # counts as AVAILABLE when it is on PATH **or** provided by the venv,
+    # never venv-only, so an explicit different tool the user put on PATH is
+    # never treated as MISSING just because this widening exists.
+    #
+    # This governs only the go/no-go GATE. Which binary actually SPAWNS is a
+    # separate, venv-preferring decision made later by
+    # `_programs_resolved_in_venv`: a PATH tool IS rewritten to the venv's own
+    # copy there whenever the venv provides one, PATH or no PATH -- matching
+    # Rust's split between `tool_available` (PATH-or-venv) and
+    # `programs_resolved_in_venv` (venv-preferring) at
+    # `crates/tan-cli/src/commands/flash/mod.rs:521-546`. The port matches the
+    # oracle; do not read the gate's PATH-or-venv rule as also governing argv[0].
+    available = functools.partial(_tool_available, venv_bin=ctx.venv_bin)
     gate = tool_gate(
         meta.requires, ctx.dry_run, ctx.skip_missing_tools, kind, entry_id, method,
-        _tool_available,
+        available,
     )
     if gate.outcome == SKIP:
         lines.append(gate.message)
@@ -729,14 +888,18 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
 
     flash_args = target.flash_args
     if method == FLOW_D_METHOD:
-        # The one place `flash_args` is augmented before dispatch: the ATOC
+        # The two places `flash_args` is augmented before dispatch: the ATOC
         # address is a build-time output, so it may need resolving from a
-        # build artefact rather than arriving on the manifest already. See
-        # `_resolve_flow_d_atoc_address`. A supplied-but-unusable `atoc_map`
+        # build artefact rather than arriving on the manifest already (see
+        # `_resolve_flow_d_atoc_address`; a supplied-but-unusable `atoc_map`
         # raises there rather than silently deferring to `plan_alif_mram_jlink`'s
-        # generic refusal -- caught here the same way `meta.build`'s is below.
+        # generic refusal, caught here the same way `meta.build`'s is below) --
+        # and the ATOC blob path itself is anchored on `build_root`/`sdk_root`
+        # (`_resolve_flow_d_atoc_path`) before it can reach the Commander
+        # script unresolved.
         try:
             flash_args = _resolve_flow_d_atoc_address(flash_args, ctx.build_root, ctx.sdk_root)
+            flash_args = _resolve_flow_d_atoc_path(flash_args, ctx.build_root, ctx.sdk_root)
         except FlashPlanError as err:
             msg = str(err)
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
@@ -752,7 +915,7 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         force_confirm=ctx.force_confirm,
     )
     try:
-        plan = meta.build(inputs, _tool_available)
+        plan = meta.build(inputs, available)
     except FlashPlanError as err:
         msg = str(err)
         lines.append(f"flash: {kind} '{entry_id}' -> {method}")
@@ -802,12 +965,12 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
     # wrong attached board is the one unrecoverable mistake here, so the identity
     # is confirmed while the session is still read-only, and a mismatch aborts.
     if method == FLOW_D_METHOD:
-        refusal = _flow_d_preflight(inputs)
+        refusal = _flow_d_preflight(inputs, ctx.venv_bin, ctx.workspace)
         if refusal is not None:
             lines.append(f"  FAIL: {refusal}")
             return 1, entry(method, "failed", 1, refusal), lines
 
-    outcome = _execute(plan, ctx.capture)
+    outcome = _execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace)
     if outcome.success:
         lines.append(f"  ok: {plan.ok_message}")
         return 0, entry(method, "ok", 0, plan.ok_message), lines
@@ -816,7 +979,9 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
     return 1, entry(method, "failed", 1, msg), lines
 
 
-def _flow_d_preflight(inputs: FlashInputs) -> str | None:
+def _flow_d_preflight(
+    inputs: FlashInputs, venv_bin: Path | None = None, workspace: str | None = None
+) -> str | None:
     """Connect read-only with the manifest's ATTACH device profile and confirm
     the SW-DP IDR before any MRAM write. Returns a refusal message, or `None`
     to proceed.
@@ -832,6 +997,14 @@ def _flow_d_preflight(inputs: FlashInputs) -> str | None:
     Capture is forced on regardless of output mode: the whole point is to READ
     the connect banner, and letting it stream would both lose the value and put
     probe output in the transcript ahead of the decision it drives.
+
+    `venv_bin`/`workspace` (tan-cli#289 review): the same run-wide
+    venv-bin-dir / west-topdir `_flash_entry` threads into `_execute` for the
+    real write. Without these this probe was PATH-only while the tool gate at
+    its call site is PATH-or-venv, so a venv-only J-Link host passed the gate
+    and then refused HERE with a confusing "no J-Link binary on PATH" -- the
+    "Unreachable via `_flash_entry`" comment below is the invariant this
+    restores, not just documents.
     """
     try:
         prepared = flow_d_preflight_script(inputs)
@@ -840,16 +1013,20 @@ def _flow_d_preflight(inputs: FlashInputs) -> str | None:
     if prepared is None:
         return None
     script, expected = prepared
-    binary = next((n for n in ("JLinkExe", "JLink") if _tool_available(n)), None)
+    binary = next((n for n in ("JLinkExe", "JLink") if _tool_available(n, venv_bin)), None)
     if binary is None:
-        # Unreachable via `_flash_entry` (the tool gate already required one),
-        # kept because the alternative to a refusal here would be proceeding to
-        # the WRITE with the identity unconfirmed.
-        return f"{FLOW_D_METHOD}: no J-Link binary on PATH for the DPIDR preflight."
+        # Unreachable via `_flash_entry`: the tool gate already required
+        # JLinkExe/JLink to be available PATH-or-venv (`_tool_available`,
+        # same as the probe above), and kept because the alternative to a
+        # refusal here would be proceeding to the WRITE with the identity
+        # unconfirmed.
+        return f"{FLOW_D_METHOD}: no J-Link binary on PATH or in the workspace venv for the DPIDR preflight."
+    resolved = _programs_resolved_in_venv([binary], venv_bin)
+    on_path_bin = venv_bin if resolved != [binary] else None
     # No `-ExitOnError`: a failed connect is the SIGNAL being read here, not an
     # error to abort the probe on.
-    outcome = _spawn_jlink([binary, "-NoGui", "1", "-CommanderScript"], script, True,
-                           _PREFLIGHT_TIMEOUT_S)
+    outcome = _spawn_jlink([resolved[0], "-NoGui", "1", "-CommanderScript"], script, True,
+                           _PREFLIGHT_TIMEOUT_S, on_path_bin, workspace)
     banner = f"{outcome.stdout}\n{outcome.stderr}"
     if _hex_in(expected, banner):
         return None
@@ -912,7 +1089,7 @@ def _run(
         build_root = _abs_join(app_dir, "build")
 
     # Anchored on the WORKSPACE root, never on `app_dir` -- see `workspace_root`.
-    resolved_sdk, tier = _resolve_sdk(sdk_root_arg, cwd)
+    resolved_sdk, tier, sdk_broken_pin = _resolve_sdk(sdk_root_arg, cwd)
     sdk = SdkInfo(resolved_sdk, tier) if resolved_sdk is not None else None
     if resolved_sdk is None:
         # Faithful to the Python `find_sdk_root() is None` die: `buildRoot` is
@@ -947,8 +1124,23 @@ def _run(
     force_confirm = os.environ.get("ALP_FLASH_FORCE") == "1"
     plan = plan_flash_targets(manifest, core, helper)
 
+    # tan-cli#289/#59/#61: resolved ONCE for the whole run, keyed on the SAME
+    # `app_dir` the oracle uses (`venv_bin_dir`/`west_workspace_dir` both walk
+    # the filesystem, so doing this per-target would repeat that walk for
+    # every slice/helper for no reason).
+    venv_bin = venv_bin_dir(app_dir, resolved_sdk)
+    workspace_dir = west_workspace_dir(app_dir, Path(resolved_sdk))
+    workspace = str(workspace_dir) if workspace_dir is not None else None
+
     text_lines: list[str] = []
     issues: list[Issue] = []
+    pin_issue = project_pin_issue(sdk_broken_pin, tier)
+    if pin_issue is not None:
+        # tan-cli#263 review: of every command in this ladder, flashing
+        # against the silently-wrong SDK is the one with the highest cost --
+        # real hardware, programmed with an image built against metadata for
+        # a checkout that was never the one `.alp/sdk-path` named.
+        issues.append(pin_issue)
     entries: list[dict[str, Any]] = []
     # Seeded with the status-refused slices: they never become a target, so they
     # cannot increment `failed` in the loop -- but a slice `tan build` reports
@@ -985,6 +1177,8 @@ def _run(
         skip_missing_tools=skip_missing_tools,
         force_confirm=force_confirm,
         capture=capture,
+        venv_bin=venv_bin,
+        workspace=workspace,
     )
     for target in plan.targets:
         rc, entry, lines = _flash_entry(target, ctx)

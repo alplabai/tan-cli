@@ -1,20 +1,24 @@
 # SPDX-License-Identifier: Apache-2.0
 """Dispatch each slice: assemble its env, apply the execution policy's
-skip-vs-fail dispositions, spawn the tool, stream its output, and report a
-per-slice outcome -- never an escaping exception. Mirrors the dispatch loop
-in `tan-cli/src/commands/build/execute/mod.rs`, trimmed to this port's
-current scope: no `tan build --pristine` manual override (`force_pristine` in
-the Rust oracle -- this port's `build` command has no `--pristine` flag yet,
-so the automatic stamp comparison is the only path that can ever fire), no
-Zephyr-boilerplate-loaded guard, and no `tool == "west"` rewrite to the
-venv's west (`with_venv_on_path` in the Rust oracle -- no Python
-venv-resolution module exists yet). What IS ported: the unknown-backend /
-null-command / unsafe-cwd / missing-tool skip-vs-fail policy and dispatch
-order, the build-dir-must-exist-before-the-tool-runs precondition, the
-sdk-switch-pristine guard (issue #52: wipe a slice's build dir before
-dispatch when it was configured against a different SDK root than this run
-resolved, then re-stamp it -- see [_maybe_pristine_stale_sdk_build_dir]), and
-(see [`last_manifest_write`]) the post-build `system-manifest.yaml` write.
+skip-vs-fail dispositions, resolve `west` from the workspace venv, spawn the
+tool, stream its output, and report a per-slice outcome -- never an escaping
+exception. Mirrors the dispatch loop in `tan-cli/src/commands/build/execute/
+mod.rs`, trimmed to this port's current scope: no `tan build --pristine`
+manual override (`force_pristine` in the Rust oracle -- this port's `build`
+command has no `--pristine` flag yet, so the automatic stamp comparison is
+the only path that can ever fire), and no Zephyr-boilerplate-loaded guard.
+What IS ported: the unknown-backend / null-command / unsafe-cwd / missing-tool
+skip-vs-fail policy and dispatch order, the build-dir-must-exist-before-the-
+tool-runs precondition, the `tool == "west"` rewrite to the workspace venv's
+own `west` plus the matching PATH prepend (tan-cli#289/#106: `west` normally
+lives ONLY inside the bootstrapped venv, and nothing activates it for a
+GUI-launched editor -- without this every Zephyr slice skipped with `tool
+'west' not found` on exactly the host the VS Code extension runs on; see
+`tan.core.venv`), the sdk-switch-pristine guard (issue #52: wipe a slice's
+build dir before dispatch when it was configured against a different SDK
+root than this run resolved, then re-stamp it -- see
+[_maybe_pristine_stale_sdk_build_dir]), and (see [`last_manifest_write`]) the
+post-build `system-manifest.yaml` write.
 
 **How the post-build write reaches `tan run` without a `build_cmd.py` change.**
 The Rust oracle's executor (`execute/mod.rs::execute_slices_outcome`) returns
@@ -60,6 +64,7 @@ from tan.core.plan_exec import (
     sdk_stamp_key,
 )
 from tan.core.system_manifest import SliceRunResult
+from tan.core.venv import west_program, with_venv_on_path
 from tan.envelope import Issue
 
 if os.name != "nt":
@@ -490,6 +495,13 @@ def execute_slices(
             continue
 
         tool = sl.command.tool
+        if tool == "west":
+            # tan-cli#289/#106: rewrite a bare `"west"` to the west-capable
+            # workspace venv's own binary -- an explicit different tool the
+            # plan named (an absolute path, or anything not literally
+            # `"west"`) is never touched, matching the Rust oracle's own
+            # `cmd.tool == "west"` exact-match precedence.
+            tool = west_program(str(build_root), sdk_root)
         if not _tool_is_available(tool):
             outcomes.append(
                 _skip_or_fail(
@@ -514,6 +526,12 @@ def execute_slices(
 
         env = dict(os.environ)
         env.update(dict(assemble_slice_env(sl.env, sl.env_append_path, env_lookup, gap_fillers)))
+        # tan-cli#289/#106: the venv `west` spawns nested `west`/`bitbake`
+        # (via `alp_orchestrate`) that resolve purely via PATH -- without
+        # this they fail to find `west` exactly like the parent process
+        # would have, unless the user activated the venv. A no-op when
+        # `tool` did not resolve to an absolute venv path above.
+        env = with_venv_on_path(env, tool)
 
         try:
             # A context manager: closes stdout/stderr/stdin on every exit

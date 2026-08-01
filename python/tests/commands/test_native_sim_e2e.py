@@ -69,7 +69,7 @@ from pathlib import Path
 
 import pytest
 
-from tan.commands.build_cmd import _find_workspace_venv
+from tan.core.venv import find_workspace_venv
 from tan.core.bootstrap import venv_layout
 from tan.core.plan_exec import apply_env_append
 from tests.conftest import REAL_ENVIRON, sdk_root
@@ -119,7 +119,7 @@ def _skip_reason() -> str | None:
     zephyr_base = _zephyr_base()
     if zephyr_base is None:
         return "no ZEPHYR_BASE Zephyr workspace resolved"
-    if _find_workspace_venv(str(zephyr_base), str(SDK)) is None:
+    if find_workspace_venv(str(zephyr_base), str(SDK)) is None:
         return "no west-capable .venv resolved near ZEPHYR_BASE/the SDK checkout"
     if _host_c_compiler_missing():
         return "no host C compiler (cc/gcc/clang) on PATH for native_sim's host toolchain"
@@ -158,7 +158,7 @@ def test_scaffold_then_native_sim_build_produces_a_real_zephyr_exe(tmp_path):
     sdk = SDK
     assert sdk is not None  # narrowed by _skip_reason() above
     zephyr_base = _zephyr_base()
-    venv = _find_workspace_venv(str(zephyr_base), str(sdk))
+    venv = find_workspace_venv(str(zephyr_base), str(sdk))
     assert venv is not None  # narrowed by _skip_reason() above
     layout = venv_layout(os.name == "nt")
     venv_bin = venv / layout.bin_dir

@@ -33,7 +33,6 @@ original's `click.BadParameter`/`click.UsageError`, both exit 2).
 from __future__ import annotations
 
 import json as _json
-import os
 import shutil
 import subprocess
 import sys
@@ -48,6 +47,7 @@ from tan.core.faultdecode import (
     report_to_json,
     render_human,
 )
+from tan.env import no_color_requested
 from tan.exit_codes import ExitCode
 
 _ADDR2LINE_TOOLS = ("arm-zephyr-eabi-addr2line", "llvm-addr2line", "addr2line")
@@ -88,7 +88,7 @@ def _use_color(no_color: bool) -> bool:
     replaces."""
     if no_color:
         return False
-    if os.environ.get("NO_COLOR"):
+    if no_color_requested():
         return False
     try:
         return sys.stdout.isatty()

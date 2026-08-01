@@ -30,10 +30,8 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.bootstrap_cmd import _manifest_points_at
-from tan.commands.build_cmd import _find_workspace_venv
 from tan.commands.build_output import resolve_project_context, to_posix
-from tan.core.bootstrap import venv_layout
+from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.envelope import Envelope, Issue, emit
 from tan.exit_codes import ExitCode
 
@@ -42,92 +40,17 @@ from tan.exit_codes import ExitCode
 #: `args` catch-all instead of Click's usual "no such option" usage error.
 FORWARD_CONTEXT_SETTINGS = {"ignore_unknown_options": True}
 
-
-def _west_workspace_dir(start: str, sdk_root: Path | None) -> Path | None:
-    """Port of `workspace.rs::west_workspace_dir`: the directory holding
-    `.west/` that a `west alp-*` extension command must run from -- these are
-    discovered only from a workspace manifest, never the app dir alone.
-    Checked in order: the project tree upward, `$ZEPHYR_BASE/..`
-    (manifest-verified against `sdk_root` when one resolved), then the
-    SDK-derived layouts (`<sdk-parent>` and the legacy
-    `<sdk-parent>/zephyrproject`). `None` when nothing resolves -- the caller
-    then keeps the old app-dir cwd, matching the oracle exactly.
-    """
-
-    def is_workspace(d: Path) -> bool:
-        return (d / ".west").is_dir()
-
-    directory: Path | None = Path(start)
-    while directory is not None:
-        if is_workspace(directory):
-            return directory
-        parent = directory.parent
-        directory = parent if parent != directory else None
-
-    zephyr_base = os.environ.get("ZEPHYR_BASE")
-    if zephyr_base:
-        found = _zephyr_base_workspace(Path(zephyr_base), sdk_root)
-        if found is not None:
-            return found
-
-    if sdk_root is not None:
-        parent = sdk_root.parent
-        for workspace in (parent, parent / "zephyrproject"):
-            if is_workspace(workspace):
-                return workspace
-
-    return None
-
-
-def _zephyr_base_workspace(zephyr_base: Path, sdk_root: Path | None) -> Path | None:
-    """Step 2 of `_west_workspace_dir`: port of `workspace.rs::zephyr_base_workspace`.
-    `zephyr_base`'s PARENT, but only when it is both a west workspace AND (when
-    `sdk_root` resolved) its manifest is verifiably alp-sdk's -- a stock/unrelated
-    Zephyr checkout's parent is a west workspace by the bare `.west`-dir test
-    alone, yet carries no alp-sdk extension commands at all. `sdk_root` absent
-    means there is nothing to verify against, so the old unconditional accept
-    stands rather than refusing a workspace this call can't check.
-    """
-    workspace = zephyr_base.parent
-    if not (workspace / ".west").is_dir():
-        return None
-    if sdk_root is not None and not _manifest_points_at(workspace, sdk_root):
-        return None
-    return workspace
-
-
-def _west_program(start: str, sdk_root: Path | None) -> str:
-    """Port of `venv.rs::west_program`: the west-capable workspace `.venv`'s
-    own `west` binary, or the bare PATH name `west` when no such venv resolves
-    (mirrors `_planner_python`'s own PATH-name fallback in `build_cmd.py`)."""
-    venv = _find_workspace_venv(start, str(sdk_root) if sdk_root is not None else None)
-    if venv is None:
-        return "west"
-    layout = venv_layout(os.name == "nt")
-    candidate = venv / layout.bin_dir / layout.west
-    return str(candidate) if candidate.is_file() else "west"
+#: Kept as the underscore-named alias this module (and its own tests) always
+#: called it -- the implementation moved to `tan.core.venv.west_workspace_dir`
+#: (tan-cli#289 review) so `flash_cmd.py` shares it instead of importing a
+#: private name across modules.
+_west_workspace_dir = west_workspace_dir
 
 
 def _west_argv(subcommand: str, passthrough: list[str]) -> list[str]:
     """Port of `workspace.rs::west_argv`: `alp-<subcommand>` followed by the
     forwarded args, verbatim."""
     return [f"alp-{subcommand}", *passthrough]
-
-
-def _with_venv_on_path(env: dict[str, str], west_bin: str) -> dict[str, str]:
-    """Port of `venv.rs::with_venv_on_path`: when `west_bin` resolved to an
-    absolute (venv) path, prepend its directory to the child's `PATH` -- the
-    `alp-*` extension command may itself shell a nested `west`/`bitbake`,
-    which resolves purely via `PATH`. A bare `"west"` (PATH fallback) is left
-    untouched, matching the oracle's early return for a non-absolute `tool`.
-    """
-    bin_path = Path(west_bin)
-    if not bin_path.is_absolute():
-        return env
-    bin_dir = str(bin_path.parent)
-    existing = env.get("PATH", "")
-    path = os.pathsep.join([bin_dir, existing]) if existing else bin_dir
-    return {**env, "PATH": path}
 
 
 def _launch_error(err: OSError) -> str:
@@ -155,7 +78,7 @@ def _run_forward(
     west_cwd = context.workspace_root or "."
     sdk_path = Path(context.sdk.root) if context.sdk is not None else None
 
-    west_bin = _west_program(west_cwd, sdk_path)
+    west_bin = west_program(west_cwd, str(sdk_path) if sdk_path is not None else None)
     workspace = _west_workspace_dir(west_cwd, sdk_path)
     # `to_posix`: `str(PurePath)` renders with the platform separator (backslash
     # on Windows), but Rust's `Path::to_string_lossy` merely slices the already
@@ -181,7 +104,7 @@ def _run_forward(
         "args": list(passthrough),
     }
     project_ = context.project()
-    env = _with_venv_on_path(dict(os.environ), west_bin)
+    env = with_venv_on_path(dict(os.environ), west_bin)
     full_argv = [west_bin, *argv]
 
     if json_mode:

@@ -14,8 +14,8 @@ scratch-tmp-dir + `.venv/<bin>/<exe>` shape.
 import os
 from pathlib import Path
 
-from tan.commands import build_cmd
 from tan.commands.build_cmd import _planner_python
+from tan.core import venv as venv_module
 
 _BARE_NAME = "python" if os.name == "nt" else "python3"
 
@@ -74,14 +74,14 @@ def test_falls_back_to_the_bare_path_name_when_no_venv_resolves(tmp_path, monkey
     """No `.venv` anywhere reachable -- the pre-existing fallback survives
     untouched (CI, an activated venv, the contract harness).
 
-    `_find_workspace_venv` is pinned to `None` rather than relying on
-    `tmp_path`'s ancestors being `.venv`-free: the upward walk climbs to the
-    filesystem root, and a developer machine with a `.venv` anywhere above
-    the OS temp dir (e.g. `~/.venv`) would red this test for reasons
-    unrelated to the code under test.
+    `tan.core.venv.find_workspace_venv` is pinned to `None` rather than
+    relying on `tmp_path`'s ancestors being `.venv`-free: the upward walk
+    climbs to the filesystem root, and a developer machine with a `.venv`
+    anywhere above the OS temp dir (e.g. `~/.venv`) would red this test for
+    reasons unrelated to the code under test.
     """
     monkeypatch.delenv("ZEPHYR_BASE", raising=False)
-    monkeypatch.setattr(build_cmd, "_find_workspace_venv", lambda *_args: None)
+    monkeypatch.setattr(venv_module, "find_workspace_venv", lambda *_args: None)
     empty = tmp_path / "no-venv-here"
     empty.mkdir()
 

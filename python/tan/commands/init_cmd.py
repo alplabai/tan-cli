@@ -347,13 +347,32 @@ def _join_display(dest: str, name: str) -> str:
 @dataclass(frozen=True)
 class _Sdk:
     """A resolved alp-sdk checkout: the `path` to use, and the `display` string
-    to RECORD (`data.sdkPinned`, `.alp/sdk-path`).
+    to RECORD (`data.sdkPinned`, `.alp/sdk-path`) -- always the SAME absolute
+    directory, `path` as a `Path` for filesystem calls and `display` as its
+    posix-separator string for the wire/pointer file.
 
-    Two fields because they are not interchangeable: `Path("./sdk")` stringifies
-    to `sdk`, dropping the `./` the caller typed, and Rust's `resolve_sdk_root`
-    returns an explicit `--sdk-root` as-is. Same directory either way -- but the
-    two binaries would write different bytes into the same pointer file, which is
-    exactly the cross-language drift the conformance suite exists to catch.
+    Both branches of [`_resolve_sdk_root`] build this from an already-absolute
+    path (an explicit `--sdk-root` is anchored against the real cwd; the
+    resolved-ladder branch was absolute already, being built from
+    `workspace_root`). tan-cli#263: an EARLIER revision recorded an explicit
+    `--sdk-root` verbatim -- `.\\alp-sdk` stayed `.\\alp-sdk` -- on the theory
+    that the oracle's `resolve_sdk_root` also returns the flag as-is and the two
+    binaries must write identical bytes into the same pointer file. That theory
+    only held for the value's IN-PROCESS use (resolved against THIS invocation's
+    cwd, in THIS run); persisted into `.alp/sdk-path`, the same relative string
+    is read back later by an unrelated invocation with a DIFFERENT cwd (a
+    `tan sdk current` run from inside the new project itself, typically), where
+    it silently resolves to the wrong directory or nowhere at all -- exactly the
+    layout the maintainer hit (`--sdk-root .\\alp-sdk` from the parent, read back
+    from the child). A persisted pointer has no cwd of its own to inherit, so it
+    must be self-contained: absolute. (A project-root-relative form was also
+    considered -- `.alp/sdk-path` lives inside the project it describes, and
+    that would survive the project being moved as a whole. Rejected here because
+    nothing on the READ side re-anchors a relative pointer against the project
+    root today -- `_pointer_target`/`_has_loader_script` hand it straight to
+    `Path()`, which is exactly the cwd-dependent behaviour this fix removes --
+    and because absolute matches what every OTHER tier already stores, with no
+    reader change required.)
     """
 
     path: Path
@@ -373,10 +392,29 @@ def _resolve_sdk_root(sdk_root: str | None, workspace_root: Path) -> _Sdk | None
     the sibling -- and `init` does not merely resolve an SDK, it WRITES the
     answer to `.alp/sdk-path`, which then outranks discovery for every later
     command in that project. Getting it wrong here binds the wrong checkout
-    permanently, so this one call site is worth a second helper."""
+    permanently, so this one call site is worth a second helper.
+
+    An explicit `--sdk-root` is expanded (`~`/`~user`) then anchored against
+    the process's real cwd with `os.path.abspath` -- lexical only (matching
+    `build_cmd._abs_posix`'s own reasoning), never `Path.resolve()`, so a
+    project reached through a symlink keeps the name the user typed and a
+    not-yet-existing path still resolves. `expanduser` first: `abspath` alone
+    does not expand `~`, so `--sdk-root ~/alp-sdk` would otherwise anchor to
+    `<cwd>/~/alp-sdk` -- a pre-existing gap, but persisting the wrong path into
+    `.alp/sdk-path` (rather than just misusing it for this one invocation)
+    makes it worth closing here. Anchored against the true cwd, not
+    `workspace_root`: `--project` picks which workspace `init` operates ON, it
+    does not rebase every OTHER relative CLI argument onto it, and no sibling
+    option in this command does that either."""
     if sdk_root:
-        return _Sdk(Path(sdk_root), sdk_root)
-    found, _tier = resolve_sdk_root_wide(None, workspace_root)
+        resolved = Path(os.path.abspath(os.path.expanduser(sdk_root)))
+        return _Sdk(resolved, posix(resolved))
+    # `_broken_pin` unused: `init` is what WRITES `.alp/sdk-path`, so a broken
+    # pin already sitting in the parent workspace is superseded by this run's
+    # own resolution rather than something for `init` itself to disclose --
+    # `sdk current`/`build`/`doctor` (tan-cli#263 review) are what customers
+    # see it through after the fact.
+    found, _tier, _broken_pin = resolve_sdk_root_wide(None, workspace_root)
     return _Sdk(found, posix(found)) if found is not None else None
 
 

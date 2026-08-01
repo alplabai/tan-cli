@@ -155,7 +155,7 @@ def test_ladder_takes_the_lateral_checkout_over_a_competing_child(tmp_path):
     _make_sdk(workspace / "alp-sdk")
     _make_sdk(tmp_path / "alp-sdk")
 
-    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path / "alp-sdk", "discovery")
+    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path / "alp-sdk", "discovery", None)
 
 
 def test_ladder_takes_the_enclosing_checkout_over_a_competing_child(tmp_path):
@@ -166,7 +166,7 @@ def test_ladder_takes_the_enclosing_checkout_over_a_competing_child(tmp_path):
     _make_sdk(tmp_path)
     _make_sdk(workspace / "alp-sdk")
 
-    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path, "discovery")
+    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path, "discovery", None)
 
 
 def test_ladder_falls_through_to_the_wide_walk_for_a_bootstrap_child(tmp_path):
@@ -177,7 +177,7 @@ def test_ladder_falls_through_to_the_wide_walk_for_a_bootstrap_child(tmp_path):
     workspace.mkdir()
     _make_sdk(workspace / "alp-sdk")
 
-    assert resolve_sdk_root_ladder(None, workspace) == (workspace / "alp-sdk", "discovery")
+    assert resolve_sdk_root_ladder(None, workspace) == (workspace / "alp-sdk", "discovery", None)
 
 
 def test_ladder_project_pin_outranks_every_discovery_candidate(tmp_path):
@@ -190,7 +190,7 @@ def test_ladder_project_pin_outranks_every_discovery_candidate(tmp_path):
     _make_sdk(tmp_path / "pinned")
     _write_pin(workspace, tmp_path / "pinned")
 
-    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path / "pinned", "projectPin")
+    assert resolve_sdk_root_ladder(None, workspace) == (tmp_path / "pinned", "projectPin", None)
 
 
 def test_ladder_sdk_root_flag_is_terminal_and_unvalidated(tmp_path):
@@ -204,6 +204,7 @@ def test_ladder_sdk_root_flag_is_terminal_and_unvalidated(tmp_path):
     assert resolve_sdk_root_ladder(str(tmp_path / "nope"), workspace) == (
         tmp_path / "nope",
         "sdkRootFlag",
+        None,
     )
 
 
@@ -225,7 +226,7 @@ def test_wide_ladder_takes_the_bootstrap_child(tmp_path):
     workspace.mkdir()
     _make_sdk(workspace / "alp-sdk")
 
-    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery")
+    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery", None)
 
 
 def test_wide_ladder_takes_the_child_over_a_competing_lateral(tmp_path):
@@ -238,7 +239,7 @@ def test_wide_ladder_takes_the_child_over_a_competing_lateral(tmp_path):
     _make_sdk(workspace / "alp-sdk")
     _make_sdk(tmp_path / "alp-sdk")
 
-    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery")
+    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery", None)
 
 
 def test_wide_ladder_takes_the_child_over_an_enclosing_checkout(tmp_path):
@@ -249,7 +250,7 @@ def test_wide_ladder_takes_the_child_over_an_enclosing_checkout(tmp_path):
     _make_sdk(tmp_path)
     _make_sdk(workspace / "alp-sdk")
 
-    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery")
+    assert resolve_sdk_root_wide(None, workspace) == (workspace / "alp-sdk", "discovery", None)
 
 
 def test_wide_ladder_project_pin_outranks_the_child(tmp_path):
@@ -263,7 +264,7 @@ def test_wide_ladder_project_pin_outranks_the_child(tmp_path):
     _make_sdk(tmp_path / "pinned")
     _write_pin(workspace, tmp_path / "pinned")
 
-    assert resolve_sdk_root_wide(None, workspace) == (tmp_path / "pinned", "projectPin")
+    assert resolve_sdk_root_wide(None, workspace) == (tmp_path / "pinned", "projectPin", None)
 
 
 # ------------------------------------------------------ write_post_build_manifest

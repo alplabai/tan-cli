@@ -286,6 +286,19 @@ def test_resolve_variant_forward_then_reverse_then_nothing():
     assert resolve_variant(None, None, variants) is None
 
 
+def test_resolve_variant_drops_a_padded_tbd_too():
+    """#276: a padded `' TBD '` must be dropped exactly like a bare `TBD` --
+    before this fix `resolve_variant` compared untrimmed, so a padded
+    placeholder fell through to a forward match instead of the sku reverse
+    lookup."""
+    variants = [
+        {"order_code": "AAA", "alp_module_skus": ["E1M-X"]},
+        {"order_code": " TBD ", "alp_module_skus": ["E1M-Z"]},
+    ]
+    assert resolve_variant(" TBD ", "E1M-X", variants)["order_code"] == "AAA"
+    assert resolve_variant("\tTBD\n", "E1M-X", variants)["order_code"] == "AAA"
+
+
 def test_core_token_is_the_uppercase_core_id():
     assert core_token("m55_hp") == "M55_HP"
 

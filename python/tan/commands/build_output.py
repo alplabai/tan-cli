@@ -69,6 +69,15 @@ class ProjectContext:
     #: The envelope's `sdk` block, or `None` when nothing resolved (absent, never
     #: `null`).
     sdk: SdkInfo | None
+    #: `ActiveSdk.broken_project_pin` carried through (tan-cli#263 review) --
+    #: `size`/`image`'s own `_run` turns this into the shared
+    #: `sdk.project-pin-unresolved` warning via `sdk_cmd.project_pin_issue`.
+    broken_project_pin: str | None = None
+    #: `ActiveSdk.tier`, unconditionally -- unlike `sdk` above, set even when
+    #: nothing resolved to a usable checkout (`sdk is None`), which is exactly
+    #: the shape `project_pin_issue` needs: a broken pin with NO working
+    #: fallback still has a real tier (`"none"`) to name in its message.
+    sdk_source_tier: str = "none"
 
     def project(self) -> Project:
         return Project.resolved(self.workspace_root, self.board_yaml)
@@ -102,7 +111,13 @@ def resolve_project_context(
         if active.path is not None and _has_loader(active.path)
         else None
     )
-    return ProjectContext(to_posix(workspace_root), to_posix(board_yaml), sdk)
+    return ProjectContext(
+        to_posix(workspace_root),
+        to_posix(board_yaml),
+        sdk,
+        active.broken_project_pin,
+        active.tier,
+    )
 
 
 def resolve_metadata_sdk_root(
@@ -130,7 +145,12 @@ def resolve_metadata_sdk_root(
         # Terminal: a bad `--sdk-root` must fail loudly as "no budget resolved",
         # not silently fall through to some other checkout.
         return Path(flag) if _has_loader(flag) else None
-    found, _tier = resolve_sdk_root_ladder(None, Path(workspace_root))
+    # `_broken_pin` unused here: `resolve_project_context` above already
+    # resolved (and each caller already reports) the SAME `.alp/sdk-path`
+    # pin's own status via `ProjectContext.broken_project_pin`; this walk is
+    # the deliberately SEPARATE metadata-budget resolution the module
+    # docstring describes, not a second envelope-facing resolution.
+    found, _tier, _broken_pin = resolve_sdk_root_ladder(None, Path(workspace_root))
     return found
 
 

@@ -286,3 +286,24 @@ def test_symbolication_is_skipped_gracefully_for_a_non_elf_file():
         assert "Symbolication:" not in result.output
     finally:
         Path(fake_elf).unlink()
+
+
+# --------------------------------------------------------------------------
+# NO_COLOR is PRESENCE, not truthiness (tan-cli#288)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["", "0", "false"])
+def test_no_color_env_var_suppresses_color_without_crashing(monkeypatch, value):
+    """`NO_COLOR=<value>` -- including set-but-empty -- must disable colour,
+    matching the oracle (`crates/tan-cli/src/style.rs:27`'s
+    `var_os("NO_COLOR").is_none()`) and the spec (any value disables colour).
+    `sys.stdout.isatty` is forced True so the divergence is actually
+    observable: under pytest's own non-tty stdout, a truthy check on an empty
+    `NO_COLOR` would fall through to the tty probe and land on the same
+    (correct) answer by accident, hiding the bug this pins."""
+    from tan.commands.faultdecode_cmd import _use_color
+
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    monkeypatch.setenv("NO_COLOR", value)
+    assert _use_color(no_color=False) is False
