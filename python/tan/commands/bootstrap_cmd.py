@@ -192,6 +192,15 @@ def _same_directory(a: Path, b: Path) -> bool:
 #: `pip-upgrade` is deliberately ABSENT, matching the oracle: it upgrades
 #: pip/wheel themselves, and the pip that was already there still installs
 #: packages -- the one genuinely cosmetic member of the phase.
+#:
+#: tan-cli#284 review minor (bootstrap_cmd.py:195): `west-config-reconcile-
+#: failed` is also absent, so a run whose OWN warning says "`west update`
+#: will resolve the manifest from whatever that pointer still names" (see
+#: `reconcile_west_manifest_path`'s "failed" branch below) still prints
+#: `bootstrap: complete.` at exit 0. Left as-is deliberately: it is faithful
+#: to this being a byte-for-byte port of the oracle's 3-element const, so
+#: adding a 4th member would be a parity DIVERGENCE, not a bug fix -- flagged
+#: for the maintainer to decide, not changed unilaterally here.
 WORKSPACE_BLOCKING: tuple[str, ...] = ("zephyr-requirements", "sdk-extras", "editable-install")
 
 
@@ -1807,6 +1816,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     guard_applies = workspace_override is not None or not _zephyr_base_will_adopt(
         pin, paths.repo_root
     )
+    target: Path | None = None
     if guard_applies:
         target = workspace_override
         if target is None:
@@ -1857,50 +1867,20 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     reported_project,
                     sdk,
                 )
-        if target is not None:
-            new_root, error = relocate_checkout(paths.repo_root, target)
-            if error is not None:
-                return _fatal(error, payload(), []), reported_project, sdk
-            if new_root is not None and str(new_root) != str(paths.repo_root):
-                old_root = sdk_root
-                # Snapshotted BEFORE anything below is mutated (tan-cli#284):
-                # a later rollback restores exactly these values rather than
-                # RE-DERIVING them (e.g. `workspace_dir` as `repo_root.parent`
-                # is wrong for a `--workspace` run over an ADOPTED
-                # `$ZEPHYR_BASE` topdir -- see `rollback_relocation_after`).
-                undo = RelocationUndo(
-                    old_root=old_root,
-                    previous_pointer=_read_global_sdk_pointer(),
-                    project=reported_project,
-                    workspace_dir=paths.workspace_dir,
-                    venv_dir=paths.venv_dir,
-                )
-                paths.repo_root = new_root
-                paths.workspace_dir = target
-                paths.venv_dir = target / facts.venv_dir_name
-                sdk_root = str(new_root)
-                sdk = SdkInfo(sdk_root, active.tier)
-                log.warn(
-                    "workspace-relocated",
-                    f"moved the alp-sdk checkout from {_native(old_root)} to "
-                    f"{_native(sdk_root)} so the west workspace "
-                    f"(zephyr/modules/.west/venv) stays out of "
-                    f"{_native(Path(old_root).parent)}, and set it as your default SDK "
-                    f"(`tan sdk switch --global` to change) (tan-cli#185)",
-                )
-                # The project may live INSIDE the checkout, so rebase any
-                # reported path under the OLD root onto the new one -- nothing
-                # downstream may keep naming a location the checkout vacated.
-                root = _rebase(root, old_root, sdk_root)
-                board_path = _rebase(board_path, old_root, sdk_root)
-                reported_project = Project.resolved(root, board_path)
-                relocation_undo = undo
-                _write_global_sdk_pointer(sdk_root)
 
-    # Host gate: refuse ONLY a project whose every in-play core is Yocto, on a
-    # non-Linux host. A mixed board still bootstraps -- nothing here is
-    # Yocto-specific (venv + west + Zephyr requirements) and its Zephyr cores
-    # need exactly this.
+    # Host gate + prerequisite gate, AFTER the write-avoiding checks above
+    # (whose relative order the existing test suite already pins) but BEFORE
+    # the relocation WRITE below and every other write past it -- tan-cli#284
+    # review majors: both refusals are knowable from facts that do not depend
+    # on where the checkout ends up (`board_path`/`sdk_root` name the SAME
+    # files whether read before or after a `--workspace` move; PATH tool
+    # presence is as static as the enclosing-`.west` fact just checked), so
+    # deciding them AFTER relocating + repointing the global default SDK --
+    # only to leave both in place on refusal, or roll them back -- was
+    # strictly worse than never doing either in the first place. Refuse ONLY
+    # a project whose every in-play core is Yocto, on a non-Linux host: a
+    # mixed board still bootstraps -- nothing here is Yocto-specific (venv +
+    # west + Zephyr requirements) and its Zephyr cores need exactly this.
     runtimes = read_board_runtimes(board_path, sdk_root)
     gate = yocto_gate(runtimes, host)
     if gate == GATE_REFUSE:
@@ -1954,6 +1934,46 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             sdk,
         )
 
+    if guard_applies and target is not None:
+        new_root, error = relocate_checkout(paths.repo_root, target)
+        if error is not None:
+            return _fatal(error, payload(), []), reported_project, sdk
+        if new_root is not None and str(new_root) != str(paths.repo_root):
+            old_root = sdk_root
+            # Snapshotted BEFORE anything below is mutated (tan-cli#284):
+            # a later rollback restores exactly these values rather than
+            # RE-DERIVING them (e.g. `workspace_dir` as `repo_root.parent`
+            # is wrong for a `--workspace` run over an ADOPTED
+            # `$ZEPHYR_BASE` topdir -- see `rollback_relocation_after`).
+            undo = RelocationUndo(
+                old_root=old_root,
+                previous_pointer=_read_global_sdk_pointer(),
+                project=reported_project,
+                workspace_dir=paths.workspace_dir,
+                venv_dir=paths.venv_dir,
+            )
+            paths.repo_root = new_root
+            paths.workspace_dir = target
+            paths.venv_dir = target / facts.venv_dir_name
+            sdk_root = str(new_root)
+            sdk = SdkInfo(sdk_root, active.tier)
+            log.warn(
+                "workspace-relocated",
+                f"moved the alp-sdk checkout from {_native(old_root)} to "
+                f"{_native(sdk_root)} so the west workspace "
+                f"(zephyr/modules/.west/venv) stays out of "
+                f"{_native(Path(old_root).parent)}, and set it as your default SDK "
+                f"(`tan sdk switch --global` to change) (tan-cli#185)",
+            )
+            # The project may live INSIDE the checkout, so rebase any
+            # reported path under the OLD root onto the new one -- nothing
+            # downstream may keep naming a location the checkout vacated.
+            root = _rebase(root, old_root, sdk_root)
+            board_path = _rebase(board_path, old_root, sdk_root)
+            reported_project = Project.resolved(root, board_path)
+            relocation_undo = undo
+            _write_global_sdk_pointer(sdk_root)
+
     log.line(f"Repo root:       {_native(paths.repo_root)}")
     if is_windows:
         log.line(
@@ -1999,25 +2019,43 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         if relocation_undo is None:
             return
         moved_to = paths.repo_root
-        undo_error = _undo_relocation(
+        undo = _undo_relocation(
             relocation_undo.old_root, moved_to, relocation_undo.previous_pointer
         )
-        if undo_error is None:
+        if undo.moved_back:
             # The checkout itself is back; anything the failed step already
             # created UNDER the vacated target (a partial venv/west checkout
             # lives beside the checkout, not inside it, so moving the
             # checkout back does not remove it) is left on disk -- named
             # honestly rather than asserting "nothing from this run is in
             # effect", which was true of the checkout and the pointer but
-            # never of whatever `step` had already written.
-            log.warn(
-                "workspace-relocation-rolled-back",
-                f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
-                f"moved it back to {_native(relocation_undo.old_root)} and restored the "
-                f"previous default SDK. Anything {step} already created under "
-                f"{_native(moved_to)} (a partial venv/west checkout) was left on disk -- "
-                f"delete {_native(moved_to)} by hand if you do not want it.",
-            )
+            # never of whatever `step` had already written. `paths`/
+            # `sdk_root`/`reported_project` are restored on THIS branch
+            # regardless of `undo.detail`: the checkout really is back at
+            # `old_root`, so every reported path must say so, whether or not
+            # the pointer restore below it also succeeded.
+            if undo.detail is None:
+                log.warn(
+                    "workspace-relocation-rolled-back",
+                    f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
+                    f"moved it back to {_native(relocation_undo.old_root)} and restored "
+                    f"the previous default SDK. Anything {step} already created under "
+                    f"{_native(moved_to)} (a partial venv/west checkout) was left on "
+                    f"disk -- delete {_native(moved_to)} by hand if you do not want it.",
+                )
+            else:
+                # The checkout moved back; only the pointer restore that
+                # follows it failed. Naming THAT failure, not "move it back
+                # by hand" for a directory that is no longer there (the
+                # tan-cli#284 review blocker).
+                log.warn(
+                    "workspace-relocation-rolled-back",
+                    f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
+                    f"moved it back to {_native(relocation_undo.old_root)}, but "
+                    f"{undo.detail}. Run `tan sdk switch --global "
+                    f"{_native(relocation_undo.old_root)}` to repoint the default SDK "
+                    f"yourself.",
+                )
             paths.repo_root = Path(relocation_undo.old_root)
             paths.workspace_dir = relocation_undo.workspace_dir
             paths.venv_dir = relocation_undo.venv_dir
@@ -2032,7 +2070,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 "workspace-relocation-rolled-back",
                 f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
                 f"could NOT move it back to {_native(relocation_undo.old_root)} "
-                f"({undo_error}); the checkout is still at {_native(moved_to)} and the "
+                f"({undo.detail}); the checkout is still at {_native(moved_to)} and the "
                 f"default SDK still points there. Move it back by hand, then run `tan "
                 f"sdk switch --global {_native(relocation_undo.old_root)}`.",
             )
@@ -2204,29 +2242,52 @@ def _read_global_sdk_pointer() -> bytes | None:
         return None
 
 
+@dataclass(frozen=True)
+class RelocationUndoResult:
+    """`_undo_relocation`'s outcome, as TWO independent facts rather than one
+    `str | None` (tan-cli#284 review blocker): whether the checkout itself
+    made it back to `old_root`, and -- regardless of that -- what, if
+    anything, still went wrong. A single `str | None` conflated "the
+    move-back failed, the checkout is still at the vacated path" with "the
+    move-back SUCCEEDED, only the pointer restore that follows it failed",
+    so a caller that treated any non-`None` return as the first case told a
+    customer whose checkout HAD moved back to go hand-move a directory that
+    no longer existed there.
+    """
+
+    #: Whether `relocate_checkout` actually put the checkout back at
+    #: `old_root`. Callers must branch on THIS, never on `detail`, to decide
+    #: which location (old vs. still-vacated) to keep reporting.
+    moved_back: bool
+    #: `None` when nothing went wrong; otherwise a short string naming what
+    #: could not be undone -- the move itself when `moved_back` is `False`,
+    #: or the pointer restore that runs only after a successful move-back
+    #: when `moved_back` is `True`.
+    detail: str | None
+
+
 def _undo_relocation(
     old_root: str, current_repo_root: Path, previous_pointer: bytes | None
-) -> str | None:
+) -> RelocationUndoResult:
     """Rollback of a relocation THIS run performed, for when a step after it
     -- `ensure_venv` or `west_phase` -- turns out to be the fallible one
     after all (tan-cli#284): move the checkout back to where it was, and
     restore (or remove) the global default-SDK pointer this run overwrote.
 
-    Returns `None` when the checkout was actually moved back AND the pointer
-    restored; otherwise a short string naming what could not be undone. The
-    caller (`rollback_relocation_after`) uses this to tell the customer the
-    TRUTH about where the checkout ended up, rather than asserting it moved
-    back when `relocate_checkout` refused -- e.g. because the vacated path
-    was recreated in the meantime, which `relocate_checkout`'s own
-    already-exists guard reports as an error, not a silent no-op.
-
-    The pointer restore is attempted only after a successful move-back: a
-    pointer pointed at a checkout that did NOT actually move back would be
-    worse than leaving it alone.
+    `moved_back=False` means `relocate_checkout` itself refused -- e.g.
+    because the vacated original path was recreated in the meantime, which
+    `relocate_checkout`'s own already-exists guard reports as an error, not a
+    silent no-op -- and the checkout is still at `current_repo_root`.
+    `moved_back=True` means the checkout IS back at `old_root`, whether or
+    not the pointer restore that follows it (attempted only once the move
+    itself succeeded, since a pointer aimed at a checkout that did NOT
+    actually move back would be worse than leaving it alone) also succeeded.
+    The caller (`rollback_relocation_after`) uses `moved_back` to decide
+    which location to keep reporting, and `detail` only to word WHAT failed.
     """
     _new_root, move_error = relocate_checkout(current_repo_root, Path(old_root).parent)
     if move_error is not None:
-        return move_error
+        return RelocationUndoResult(moved_back=False, detail=move_error)
     try:
         pointer = _home_alp_dir() / "sdk-default"
         if previous_pointer is None:
@@ -2234,11 +2295,11 @@ def _undo_relocation(
         else:
             pointer.write_bytes(previous_pointer)
     except OSError as err:
-        return (
-            f"the checkout moved back, but the default SDK pointer could not be "
-            f"restored: {err}"
+        return RelocationUndoResult(
+            moved_back=True,
+            detail=f"the default SDK pointer could not be restored: {err}",
         )
-    return None
+    return RelocationUndoResult(moved_back=True, detail=None)
 
 
 def bootstrap(
@@ -2286,8 +2347,22 @@ def bootstrap(
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
+    verbose: bool = typer.Option(False, "--verbose", hidden=True),
+    quiet: bool = typer.Option(False, "--quiet", hidden=True),
+    no_color: bool = typer.Option(False, "--no-color", hidden=True),
+    non_interactive: bool = typer.Option(False, "--non-interactive", hidden=True),
+    ci: bool = typer.Option(False, "--ci", hidden=True),
 ) -> None:
     """Set up the SDK's build environment: workspace venv, west, Python deps."""
+    # The five options above are clap's `GlobalArgs` members that `bootstrap.rs`
+    # accepts and never reads (tan-cli#284 review minor). Declared here purely so
+    # the argv SURFACE matches: `tan bootstrap --non-interactive` is the literal
+    # first-blink command in `.github/workflows/parity.yml` and
+    # `docs/python-release-feasibility.md` -- without these it was a Click usage
+    # error at rc=2, so that first command failed before bootstrap ever ran.
+    # Same port-wide gap as `clean_cmd.clean`'s identical block; not fixed here
+    # for `doctor`/`init`, which still have it.
+    del verbose, quiet, no_color, non_interactive, ci
     if output_format not in ("text", "json"):
         raise typer.BadParameter(
             f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"

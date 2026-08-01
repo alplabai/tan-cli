@@ -480,6 +480,24 @@ def test_each_flag_is_reflected_in_the_payload(flag, key, tmp_path):
     assert env["data"][key] is True
 
 
+@pytest.mark.parametrize(
+    "flag", ["--verbose", "--no-color", "--non-interactive", "--ci", "--quiet"]
+)
+def test_the_globals_the_oracle_ignores_are_accepted_not_rejected(flag, tmp_path):
+    """tan-cli#284 review minor (bootstrap_cmd.py:2244): `bootstrap` declared
+    none of clap's `GlobalArgs` members, so each of these was a Click usage
+    error at exit 2 where the oracle exits 0 -- `tan bootstrap
+    --non-interactive` is the literal first-blink command in
+    `.github/workflows/parity.yml` and `docs/python-release-feasibility.md`."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), flag, cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0, env
+
+
 # ---------------------------------------------------------------------------
 # Refusals, in the order the run applies them
 # ---------------------------------------------------------------------------
@@ -799,14 +817,50 @@ def test_a_blocked_rollback_reports_the_checkout_as_still_relocated(tmp_path):
     # rollback ran.
     old_root.mkdir()
 
-    error = bootstrap_cmd._undo_relocation(str(old_root), moved_to, None)
+    result = bootstrap_cmd._undo_relocation(str(old_root), moved_to, None)
 
-    assert error is not None
-    assert "already exists" in error
+    assert result.moved_back is False
+    assert result.detail is not None
+    assert "already exists" in result.detail
     # Nothing was moved: the checkout is still exactly where the failed run
     # left it, not half-migrated or silently vanished.
     assert moved_to.is_dir()
     assert (moved_to / "marker").exists()
+
+
+def test_a_successful_move_back_with_a_failed_pointer_restore_is_not_reported_as_still_relocated(
+    tmp_path, monkeypatch
+):
+    """tan-cli#284 review BLOCKER: `_undo_relocation` used to return a plain
+    `str | None`, so "the move-back failed" and "the move-back SUCCEEDED but
+    the pointer restore afterwards failed" were the same non-`None` shape --
+    the caller's `else` arm collapsed them and told a customer whose checkout
+    HAD moved back to "move it back by hand", naming a directory that no
+    longer existed. Measured (before the fix): a plain `str`, `old_root.is_dir()
+    == True`, `moved_to.exists() == False` -- exactly this permutation, which
+    the review named as having no test. Forces the pointer write to fail (not
+    the move) by pointing `_home_alp_dir` at a path whose PARENT does not
+    exist -- cross-platform, unlike a chmod-based permission-denied repro."""
+    old_root = tmp_path / "ws" / "alp-sdk"
+    old_root.parent.mkdir(parents=True)
+    moved_to = tmp_path / "elsewhere" / "alp-sdk"
+    moved_to.parent.mkdir(parents=True)
+    moved_to.mkdir()
+    (moved_to / "marker").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        bootstrap_cmd, "_home_alp_dir", lambda: tmp_path / "no-such-parent" / "deep"
+    )
+
+    result = bootstrap_cmd._undo_relocation(str(old_root), moved_to, b"previous-pointer-bytes")
+
+    # The checkout DID move back -- callers must trust `moved_back`, never
+    # infer "still relocated" from `detail` being non-`None`.
+    assert result.moved_back is True
+    assert result.detail is not None
+    assert "pointer" in result.detail
+    assert old_root.is_dir()
+    assert (old_root / "marker").exists()
+    assert not moved_to.exists()
 
 
 def test_a_yocto_only_project_is_refused_off_linux_and_a_mixed_one_only_warns(tmp_path):
@@ -853,6 +907,68 @@ def test_a_yocto_only_project_is_refused_off_linux_and_a_mixed_one_only_warns(tm
     # that can bootstrap its Zephyr cores; the frozen-code gate checks spelling,
     # not severity, so nothing else catches a collapse.
     assert len(yocto_issues) == 1 and yocto_issues[0]["severity"] == "warning"
+
+
+def test_the_yocto_host_refusal_fires_before_the_checkout_relocates(tmp_path):
+    """tan-cli#284 review MAJOR (bootstrap_cmd.py:1906, before the fix): this
+    refusal used to fire AFTER `--workspace` already moved the checkout and
+    repointed the global default SDK, and routed through `_refusal`'s
+    fresh single-issue list, so the recorded `bootstrap.workspace-relocated`
+    warning was silently dropped -- a JSON consumer got no record that a
+    customer's checkout had just been relocated. `read_board_runtimes`/
+    `yocto_gate` are pure reads of `board_path`/`sdk_root`, knowable before
+    any write, exactly like the enclosing-`.west` guard already checked
+    first -- so this must refuse BEFORE the move, leaving nothing on disk.
+    Skipped on Linux, where this refusal never fires at all."""
+    if sys.platform.startswith("linux"):
+        pytest.skip("yocto-host never refuses on Linux")
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    yocto = sdk / "examples" / "yocto-only"
+    yocto.mkdir(parents=True)
+    (yocto / "board.yaml").write_text(
+        "schema_version: 2\nsom:\n  sku: E1M-X-V2N101\ncores:\n  a55_cluster: {}\n",
+        encoding="utf-8",
+    )
+    target = tmp_path / "elsewhere"
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), "--project", str(yocto), "--workspace", str(target),
+        cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 2
+    assert codes(env) == ["bootstrap.yocto-host"]
+    # Refused BEFORE the checkout moved or the global default SDK was
+    # repointed (tan-cli#284's stated contract) -- nothing rolled back after
+    # the fact, because nothing happened yet.
+    assert sdk.exists()
+    assert not target.exists()
+    pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
+    assert not pointer.exists()
+
+
+def test_the_prerequisites_refusal_fires_before_the_checkout_relocates(tmp_path):
+    """tan-cli#284 review MAJOR (bootstrap_cmd.py:1927, before the fix): a
+    missing tool refused AFTER `--workspace` already moved the checkout and
+    repointed the global default SDK, with no rollback -- PATH tool presence
+    is as static as the enclosing-`.west` fact the guard above already
+    checks first, so this must refuse before any write too."""
+    sdk = make_sdk(tmp_path, tools=["tan-no-such-tool-xyz"])
+    target = tmp_path / "elsewhere"
+
+    proc = run_tan(
+        "bootstrap", "--format", "json",
+        "--sdk-root", str(sdk), "--workspace", str(target), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 1
+    assert codes(env)[-1] == "bootstrap.prerequisites-missing"
+    assert "bootstrap.workspace-relocated" not in codes(env)
+    assert sdk.exists()
+    assert not target.exists()
+    pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
+    assert not pointer.exists()
 
 
 # ---------------------------------------------------------------------------
