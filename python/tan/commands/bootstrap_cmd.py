@@ -1700,7 +1700,22 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             Project(root=None, board_yaml=None),
             None,
         )
-    sdk_root = resolved
+    # tan-cli#217/#296: `resolve_sdk_tiered` returns an explicit `--sdk-root`
+    # VERBATIM (I-31, so a typo surfaces rather than silently falling through
+    # to a lower tier) -- `./alp-sdk` stays `./alp-sdk`. That is fine for this
+    # run's OWN filesystem calls (relative to this process's real cwd), but
+    # every path below is either compared by PREFIX (`sdkRoot` vs
+    # `workspaceDir`) or handed to a consumer with a different cwd entirely --
+    # the vscode extension included. Anchored here, once, before `sdk_root`
+    # starts feeding `paths`/`SdkInfo`/the envelope, exactly as `init_cmd.
+    # _resolve_sdk_root` anchors an explicit `--sdk-root` before persisting it
+    # (tan-cli#263): `expanduser` first (`abspath` alone does not expand `~`),
+    # then `abspath`, which is lexical only (not `Path.resolve()`), so a
+    # checkout reached through a symlink keeps the name it was given and a
+    # not-yet-existing path still resolves. The other three tiers
+    # (`projectPin`/`globalDefault`/`discovery`) are already absolute, so this
+    # is a no-op for them.
+    sdk_root = os.path.abspath(os.path.expanduser(resolved))
     sdk = SdkInfo(sdk_root, active.tier)
     # tan-cli#263 review: `bootstrap` sets up a whole venv/west workspace
     # against whichever checkout this resolved -- a silently-missed

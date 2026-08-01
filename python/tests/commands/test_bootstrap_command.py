@@ -382,6 +382,37 @@ def test_the_envelope_key_set_and_sdk_omission(tmp_path):
     assert env["data"]["sdkRoot"].startswith(env["data"]["workspaceDir"])
 
 
+def test_a_relative_sdk_root_flag_resolves_absolute_everywhere_in_the_envelope(tmp_path):
+    """tan-cli#217/#296: `tan bootstrap --sdk-root ./alp-sdk --format json`
+    reported `data.sdkRoot` -- and everything derived from it -- exactly as
+    typed. A consumer reading the envelope from any OTHER cwd (the vscode
+    extension's, in particular) resolves nothing. Anchored the same way #263
+    anchored `init`'s `.alp/sdk-path` pin: against the cwd THIS run actually
+    used, not the string the caller typed.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    ws = sdk.parent
+    env = envelope(
+        run_tan(
+            "bootstrap", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", "./alp-sdk", cwd=ws,
+        )
+    )
+    assert env["exitCode"] == 0 and env["ok"] is True
+
+    ws_abs = os.path.abspath(str(ws)).replace("\\", "/")
+    for key in ("sdkRoot", "workspaceDir", "venvDir", "zephyrBase"):
+        value = env["data"][key]
+        assert value, f"data.{key} is empty"
+        assert os.path.isabs(value), f"data.{key}={value!r} is not absolute"
+        assert value.replace("\\", "/").startswith(ws_abs), key
+
+    assert env["data"]["workspaceDir"].replace("\\", "/") == ws_abs
+    assert env["data"]["sdkRoot"].replace("\\", "/") == f"{ws_abs}/alp-sdk"
+    assert os.path.isabs(env["project"]["root"])
+    assert Path(env["sdk"]["root"]).is_absolute()
+
+
 def test_the_sdk_key_is_absent_not_null_when_nothing_resolves(tmp_path):
     empty = tmp_path / "ws"
     empty.mkdir()
