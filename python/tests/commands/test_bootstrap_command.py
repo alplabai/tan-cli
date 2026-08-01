@@ -54,6 +54,7 @@ from tan.core.bootstrap import (
     WINDOWS,
     BootstrapManifestError,
     Tokens,
+    WorkspaceSdkRecord,
     capture_tail,
     completion_verdict,
     decide_workspace_reuse,
@@ -68,6 +69,7 @@ from tan.core.bootstrap import (
     parent_needs_workspace_guard,
     parse_bootstrap_manifest,
     parse_west_zephyr_pin,
+    parse_workspace_sdk_record,
     parse_zephyr_version_file,
     posix_refusal,
     posix_venv_unusable,
@@ -81,6 +83,7 @@ from tan.core.bootstrap import (
     set_manifest_path,
     windows_python_not_runnable,
     windows_refusal,
+    workspace_sdk_record_json,
     yocto_gate,
     zephyr_requirements_hint,
 )
@@ -1544,6 +1547,67 @@ def test_an_unreadable_west_config_is_a_failure_never_a_silent_no_op(tmp_path):
     (topdir / ".west" / "config").mkdir(parents=True)  # present, unreadable
     outcome, _old, detail = reconcile_west_manifest_path(str(sdk))
     assert outcome == "failed" and detail
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#292: the `<topdir>/.west/tan-workspace-sdk` record, extended with
+# venv provenance -- `workspace_sdk_record_json`/`parse_workspace_sdk_record`.
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_sdk_record_round_trips_the_full_provenance_stamp():
+    text = workspace_sdk_record_json(
+        "/ws/alp-sdk", venv_dir_name=".venv", venv_layout="bin", requirements_digest="ab" * 32
+    )
+    assert '"sdkPath": "/ws/alp-sdk"' in text
+    assert '"venvDir": ".venv"' in text
+    assert '"venvLayout": "bin"' in text
+    assert f'"requirementsDigest": "{"ab" * 32}"' in text
+
+    record = parse_workspace_sdk_record(text)
+    assert record == WorkspaceSdkRecord(
+        sdk_path="/ws/alp-sdk",
+        venv_dir_name=".venv",
+        venv_layout="bin",
+        requirements_digest="ab" * 32,
+    )
+
+
+def test_workspace_sdk_record_omits_absent_provenance_fields_rather_than_writing_null():
+    """A caller with nothing to report (no venv, a hash it could not compute)
+    omits the key -- mirrors `Check.as_dict`'s `skip_serializing_if`, and
+    keeps a record written by an older tan indistinguishable from one whose
+    caller simply had nothing new to say."""
+    text = workspace_sdk_record_json("/ws/alp-sdk")
+    assert "venvDir" not in text
+    assert "venvLayout" not in text
+    assert "requirementsDigest" not in text
+    assert parse_workspace_sdk_record(text) == WorkspaceSdkRecord(sdk_path="/ws/alp-sdk")
+
+
+def test_parse_workspace_sdk_record_reads_a_pre_292_two_field_record():
+    """A record written before tan-cli#292 (`sdkPath` + `updatedAt` only,
+    `tan.core.scaffold.sdk_pointer_json`'s shape) must still parse -- the
+    provenance fields are simply absent, not a parse failure."""
+    legacy = '{\n  "sdkPath": "/ws/alp-sdk",\n  "updatedAt": "2026-01-01T00:00:00Z"\n}\n'
+    assert parse_workspace_sdk_record(legacy) == WorkspaceSdkRecord(sdk_path="/ws/alp-sdk")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not json at all",
+        "[]",
+        "42",
+        '{"updatedAt": "2026-01-01T00:00:00Z"}',  # no sdkPath
+        '{"sdkPath": 7}',  # wrong type
+        '{"sdkPath": ""}',  # empty
+    ],
+)
+def test_parse_workspace_sdk_record_returns_none_for_anything_unusable(text):
+    """Unreadable is `None`, the SAME as no record at all -- never a mismatch
+    WARNING against a checkout `doctor` cannot even name."""
+    assert parse_workspace_sdk_record(text) is None
 
 
 def test_the_printed_blocks_keep_their_load_bearing_whitespace():
