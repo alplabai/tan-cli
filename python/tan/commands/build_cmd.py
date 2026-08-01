@@ -71,7 +71,10 @@ stops being built.
 """
 import json
 import os
+import shutil
 import sys
+import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -179,6 +182,145 @@ def _stream(line: str) -> None:
     envelope channel and carries nothing else; stderr carries no contract at
     all, so there is nothing to keep separate between the two modes."""
     print(line, file=sys.stderr, flush=True)
+
+
+#: Idle time -- since the last line ANY slice printed, or since dispatch
+#: began if none has arrived yet -- before [`_Heartbeat`] starts announcing
+#: it is still alive. Measured against tan-cli#287: a first-build CMake
+#: configure sat fully silent for 234.2s; a warm-cache rebuild (21.1s) prints
+#: output throughout and never crosses this. Short enough to catch the
+#: former, long enough that ordinary tool-startup chatter never trips it.
+_HEARTBEAT_SILENCE_THRESHOLD_S = 5.0
+#: Refresh cadence once armed -- a live, in-place counter (`\r`, no
+#: trailing newline), not a growing log.
+_HEARTBEAT_TICK_S = 1.0
+#: `shutil.get_terminal_size`'s own fallback when stderr's column count
+#: can't be read. Should not be reachable -- `_Heartbeat` is only ever armed
+#: behind an `isatty()` gate -- but naming a value here is still cheaper
+#: than trusting that gate never has a gap.
+_HEARTBEAT_WIDTH_FALLBACK = 80
+
+
+def _heartbeat_line_width() -> int:
+    """Usable columns for one self-overwriting heartbeat line: the
+    terminal's own width, minus one.
+
+    tan-cli#287 blocker: the erase pad used to be a HARDCODED 88 columns
+    while the message it erased ran 114+ chars (more once elapsed hits
+    1000s). On a terminal narrower than 114 columns -- 80 is the common
+    case -- `\r` rewinds only the terminal's OWN last row, so a message
+    that wraps grows a fresh row every tick instead of overwriting one:
+    ~234 stacked "still building" rows over the measured 234.2s configure.
+    Sizing the message AND its erase pad off the actual terminal width,
+    every tick, removes the mismatch instead of guessing a bigger constant.
+    The `- 1` leaves the last column unwritten: filling a line to the exact
+    terminal width is what triggers autowrap on many terminals, which would
+    make the fix for the wrap defect one more way to trigger it.
+
+    # ponytail: re-reads the width every tick rather than caching it, so a
+    # terminal resized mid-build can leave a stale tick's tail past the
+    # newly narrower edge; not the reported defect (a STATIC undersized
+    # pad on an unchanged terminal) and not measured here -- revisit if a
+    # resize-mid-build report ever lands.
+    """
+    columns = shutil.get_terminal_size(fallback=(_HEARTBEAT_WIDTH_FALLBACK, 24)).columns
+    return max(columns - 1, 1)
+
+
+class _Heartbeat:
+    """The `on_output` callback `_dispatch` constructs and hands
+    `execute_slices` directly: relays every line to [`_stream`] like
+    before, and -- TTY + text-mode only -- prints a single self-overwriting
+    "still building" line once the child has gone quiet for
+    `_HEARTBEAT_SILENCE_THRESHOLD_S` (tan-cli#287: a four-minute silent
+    CMake configure read as a hang with nothing to say otherwise). The
+    instant real output resumes, the line is blanked so it never mixes
+    with the stream it was standing in for.
+
+    Armed by [`_dispatch`] itself, not handed down by its caller: `_build`'s
+    two callers -- `build_cmd.build` and `run_cmd._build_then_run` -- both
+    bottleneck through `_dispatch` before any slice runs, so constructing
+    the heartbeat there covers `tan run`'s identical silent-CMake window
+    too, not just a direct `tan build` (tan-cli#287 follow-up).
+
+    `execute_slices` calls `on_output` once per line and has no hook for
+    "a slice started" or "configure ended, compile began" -- adding one
+    would mean editing `tan.commands.build.execute`, outside this file's
+    scope -- so this cannot name PHASES, only measure silence across the
+    whole dispatch and say tan is still alive.
+
+    # ponytail: one wall-clock timer for the whole dispatch, not a per-slice
+    # or per-phase one -- upgrade to a per-slice "building <core>" line if
+    # `execute_slices` ever grows a slice-start hook.
+
+    A disabled instance (`enabled=False` -- not a TTY, or `--format json`)
+    still relays every line via `__call__`, but never starts its thread and
+    so never prints anything of its own: behaviourally identical to passing
+    `_stream` straight through."""
+
+    def __init__(self, enabled: bool) -> None:
+        self._enabled = enabled
+        self._start = time.monotonic()
+        self._last_output = self._start
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._line_up = False
+
+    def __call__(self, line: str) -> None:
+        # Clear any live heartbeat line FIRST -- `_stream`'s `print` commits
+        # a trailing newline, so blanking AFTER it would scroll the
+        # heartbeat text away merged onto the same line as real output
+        # instead of erasing it.
+        self.note_output()
+        _stream(line)
+
+    def note_output(self) -> None:
+        with self._lock:
+            self._last_output = time.monotonic()
+            self._clear_locked()
+
+    def _clear_locked(self) -> None:
+        if self._line_up:
+            width = _heartbeat_line_width()
+            print("\r" + " " * width + "\r", end="", file=sys.stderr, flush=True)
+            self._line_up = False
+
+    def _tick(self) -> None:
+        while not self._stop.wait(_HEARTBEAT_TICK_S):
+            with self._lock:
+                idle = time.monotonic() - self._last_output
+                if idle < _HEARTBEAT_SILENCE_THRESHOLD_S:
+                    continue
+                elapsed = time.monotonic() - self._start
+                width = _heartbeat_line_width()
+                # Truncated AND right-padded to `width`, both to the SAME
+                # value: truncation keeps this tick's own text off the
+                # terminal's last column (see `_heartbeat_line_width`), and
+                # the pad overwrites a longer PRIOR tick's tail (elapsed/
+                # idle growing from single to double digits, say) -- both
+                # ticks compute the same width, so the pad always covers it
+                # on an unchanged terminal.
+                message = (
+                    f"... still building ({elapsed:.0f}s elapsed, no output for "
+                    f"{idle:.0f}s -- CMake configure can take several minutes on a "
+                    "first build)"
+                )[:width]
+                print("\r" + message.ljust(width), end="", file=sys.stderr, flush=True)
+                self._line_up = True
+
+    def __enter__(self) -> "_Heartbeat":
+        if self._enabled:
+            self._thread = threading.Thread(target=self._tick, daemon=True)
+            self._thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=_HEARTBEAT_TICK_S * 2)
+        with self._lock:
+            self._clear_locked()
 
 
 def _abs_posix(path: str) -> str:
@@ -617,8 +759,35 @@ def _dispatch(
     build_root: Path,
     sdk_root: str | None,
     sdk_root_for_stamp: str | None,
+    *,
+    json_mode: bool = False,
 ) -> tuple[list[SliceOutcome], list[Issue]]:
     """Run the plan's slices, holding back the ones token substitution demoted.
+
+    Arms its own [`_Heartbeat`] around the dispatch (tan-cli#287), rather
+    than taking one from the caller: `execute_slices` (below) is a single,
+    EAGER call that can run for minutes -- the loop after it only walks
+    results `execute_slices` already computed -- and this function is the
+    one seam every route into the build engine shares. `_build`'s two
+    callers, `build_cmd.build` (`tan build`) and `run_cmd._build_then_run`
+    (`tan run`), both bottleneck through here before any slice runs, so
+    arming the heartbeat at THIS level, not one up, is what covers `tan
+    run`'s identical silent-CMake window too -- the gap the previous
+    revision (a `_Heartbeat` built in `build()` and threaded down as
+    `on_output`) left, since `run_cmd.py:258` calls `_build` with no
+    `on_output` of its own.
+
+    `json_mode` is the one thing this function cannot discover for itself
+    (`sys.stderr.isatty()` it checks directly, same as `build()` used to).
+    `build()` passes its real value straight through. `run_cmd.
+    _build_then_run` has its own `--format json` support but does not yet
+    thread it here (out of this file's scope to add -- see `run_cmd.py:258`),
+    so its call keeps the default `False`.
+    # ponytail: the one live gap this leaves -- `tan run --format json` with
+    # a REAL terminal still attached to stderr would arm the heartbeat where
+    # it should stay silent. stdout (the envelope channel) is untouched
+    # either way; thread `json_mode` through `run_cmd._build_then_run` if
+    # that combination is ever hit for real.
 
     A demoted slice still names a literal `${TOOLCHAIN_ROOT}` in its own
     fields because this host resolved no toolchain. `execute_slices` does not
@@ -680,43 +849,50 @@ def _dispatch(
     }
 
     runnable = [sl for i, sl in enumerate(plan.slices) if i not in held]
-    dispatched = iter(
-        execute_slices(
-            replace(plan, slices=runnable),
-            build_root=build_root,
-            env_lookup=os.environ.get,
-            # NOT YET PORTED: Rust fills ZEPHYR_BASE and EXTRA_ZEPHYR_MODULES
-            # here from the resolved west workspace, so `west build -b
-            # <alp-board>` finds the SDK's boards without the user wiring
-            # -DEXTRA_ZEPHYR_MODULES. Plans emitted by the SDK carry both on
-            # the slice's own envAppendPath, so this is a gap only for a host
-            # relying on the CLI to fill them.
-            gap_fillers=(),
-            on_output=_stream,
-            sdk_root=sdk_root,
-            sdk_root_for_stamp=sdk_root_for_stamp,
-            held_outcomes=held_outcomes.values(),
-        )
-    )
-
-    outcomes: list[SliceOutcome] = []
-    issues: list[Issue] = []
-    for i, sl in enumerate(plan.slices):
-        demotion = held.get(i)
-        if demotion is None:
-            outcomes.append(next(dispatched))
-            continue
-        outcomes.append(held_outcomes[i])
-        issues.append(
-            Issue(
-                # Same code as the plan-fatal sibling on purpose: the
-                # extension needs no new vocabulary, only a severity that says
-                # whether this stopped the build.
-                "build.toolchain-root-unresolved",
-                "error" if failed else "warning",
-                f"slice `{sl.core_id}` {'failed' if failed else 'skipped'}: {demotion.reason}",
+    # tan-cli#287: TTY + text-mode only (never `--format json` -- stdout is
+    # untouched either way, this is belt-and-suspenders for a machine caller
+    # that also inherited the terminal's stderr). `__enter__`/`__exit__` run
+    # regardless of what happens inside, so a dispatch that raises still
+    # stops the thread and blanks any line it had printed.
+    with _Heartbeat(enabled=not json_mode and sys.stderr.isatty()) as heartbeat:
+        dispatched = iter(
+            execute_slices(
+                replace(plan, slices=runnable),
+                build_root=build_root,
+                env_lookup=os.environ.get,
+                # NOT YET PORTED: Rust fills ZEPHYR_BASE and EXTRA_ZEPHYR_MODULES
+                # here from the resolved west workspace, so `west build -b
+                # <alp-board>` finds the SDK's boards without the user wiring
+                # -DEXTRA_ZEPHYR_MODULES. Plans emitted by the SDK carry both on
+                # the slice's own envAppendPath, so this is a gap only for a host
+                # relying on the CLI to fill them.
+                gap_fillers=(),
+                on_output=heartbeat,
+                sdk_root=sdk_root,
+                sdk_root_for_stamp=sdk_root_for_stamp,
+                held_outcomes=held_outcomes.values(),
             )
         )
+
+        outcomes: list[SliceOutcome] = []
+        issues: list[Issue] = []
+        for i, sl in enumerate(plan.slices):
+            demotion = held.get(i)
+            if demotion is None:
+                outcomes.append(next(dispatched))
+                continue
+            outcomes.append(held_outcomes[i])
+            issues.append(
+                Issue(
+                    # Same code as the plan-fatal sibling on purpose: the
+                    # extension needs no new vocabulary, only a severity that
+                    # says whether this stopped the build.
+                    "build.toolchain-root-unresolved",
+                    "error" if failed else "warning",
+                    f"slice `{sl.core_id}` {'failed' if failed else 'skipped'}: "
+                    f"{demotion.reason}",
+                )
+            )
     return outcomes, issues
 
 
@@ -741,6 +917,40 @@ def _backend_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[Issue
     return issues
 
 
+def _missing_tool_issues(plan: BuildPlan, outcomes: list[SliceOutcome]) -> list[Issue]:
+    """Name the tool a skipped (or, under `executionPolicy.missingTool: fail`,
+    failed) slice could not find on this host.
+
+    Matched on `outcome.message` rather than re-probing PATH a second time:
+    `execute_slices`' missing-tool branch (`build/execute.py`) is the ONLY
+    skip/fail reason shaped exactly `` tool `{tool}` not found `` -- a
+    null-command skip reads `` has no command `` (and its reason already
+    lives in `plan.warnings`, I-11), and an unknown-backend one is caught
+    structurally by `_backend_issues` above -- so this recovers exactly the
+    missing-tool cases and nothing else.
+
+    tan-cli#283: without this, `tan build` on a host missing `west`/`bitbake`
+    reported each slice's specific reason only in `data.slices[].reason` --
+    never in `issues[]`, the field a JSON consumer (the VS Code extension,
+    CI) actually reads to decide whether anything needs flagging."""
+    issues = []
+    for sl, outcome in zip(plan.slices, outcomes, strict=True):
+        message = outcome.message
+        if message is None or not (
+            message.startswith("tool `") and message.endswith("` not found")
+        ):
+            continue
+        failed = outcome.status == "failed"
+        issues.append(
+            Issue(
+                "build.missing-tool",
+                "error" if failed else "warning",
+                f"slice `{sl.core_id}` {'failed' if failed else 'skipped'}: {message}",
+            )
+        )
+    return issues
+
+
 def _build(
     *,
     # Defaulted so `mode` stays optional for the OTHER caller of this engine:
@@ -752,6 +962,11 @@ def _build(
     sdk_root: str | None,
     sdk_root_for_stamp: str | None,
     board_yaml: str | None,
+    # Defaulted for the same reason as `mode`: `run_cmd._build_then_run`
+    # calls this with no format preference of its own today. Threaded
+    # straight through to `_dispatch`, which is where the heartbeat this
+    # gates is actually armed -- see that function's own docstring.
+    json_mode: bool = False,
 ) -> tuple[ExitCode, dict, list[Issue]]:
     text, plan = _acquire_plan(plan_from, sdk_root, board_yaml)
 
@@ -820,16 +1035,44 @@ def _build(
     # run's own write outcome below.
     reset_last_manifest_write()
     outcomes, issues = _dispatch(
-        plan, demotions, Path(build_root), sdk_root, sdk_root_for_stamp
+        plan, demotions, Path(build_root), sdk_root, sdk_root_for_stamp, json_mode=json_mode
     )
 
     any_failed = any(o.status not in ("succeeded", "skipped") for o in outcomes)
-    exit_code = ExitCode.RUNTIME_FAILURE if any_failed else ExitCode.SUCCESS
+    # tan-cli#283: a plan whose EVERY slice was skipped (e.g. `west`/
+    # `bitbake` absent from PATH) used to fall straight through this `if
+    # any_failed` gate -- `skipped` is deliberately not a failure status on
+    # its own line above -- and report `ok: true, exitCode: 0, issues: []`.
+    # A JSON consumer cannot tell that from a real build. A PARTIAL build
+    # (some slice built -- e.g. only the Zephyr cores, on a host with no
+    # Yocto toolchain) is a legitimate, deliberate outcome and must stay
+    # `ok: true`; refusing outright only when NOTHING built at all is the
+    # narrower fix, not "any skip is now a failure".
+    nothing_built = (
+        bool(outcomes)
+        and not any_failed
+        and not any(o.status == "succeeded" for o in outcomes)
+    )
+    exit_code = ExitCode.RUNTIME_FAILURE if (any_failed or nothing_built) else ExitCode.SUCCESS
     if any_failed:
         issues.insert(
             0, Issue("build.slice-failed", "error", "one or more slices failed to build")
         )
+    elif nothing_built:
+        issues.insert(
+            0,
+            Issue(
+                "build.nothing-built",
+                "error",
+                "no slice was built -- every slice was skipped",
+            ),
+        )
     issues.extend(_backend_issues(plan, outcomes))
+    # tan-cli#283: named per skipped/failed slice, even in the PARTIAL case
+    # `nothing_built` does not cover -- a consumer reading only `issues[]`
+    # (not `data.slices[]`) must still be able to tell "2 of 3 slices built"
+    # from "3 of 3".
+    issues.extend(_missing_tool_issues(plan, outcomes))
     # The sdk-switch-pristine wipe (issue #52) must not be stderr-only in
     # JSON mode -- the VS Code extension only ever sees the envelope, not
     # `_stream`'s output. Verbatim oracle codes/severity
@@ -1142,6 +1385,17 @@ def build(
     # unconditional path.
     project = Project.resolved(build_root, board_yaml)
 
+    # tan-cli#287: the heartbeat that covers a silent slice (a first-build
+    # CMake configure, measured at 234.2s with nothing printed) is armed
+    # inside `_dispatch`, not here -- `_build`'s OTHER caller,
+    # `run_cmd._build_then_run`, bottlenecks through the identical
+    # `_dispatch` call and needs the same cover for a silent `tan run`. See
+    # `_dispatch`'s own docstring for the TTY/`json_mode` gating (unchanged:
+    # still never armed for `--format json`, stdout is untouched either way)
+    # and for the mode-gating this also fixes for free -- `_MODE_PLAN`/
+    # `_MODE_MATERIALISE` return from `_build` before `_dispatch` is ever
+    # reached, so neither ticks a heartbeat for a slow in-process planner
+    # that never runs CMake at all.
     try:
         exit_code, data, issues = _build(
             mode=mode,
@@ -1150,14 +1404,16 @@ def build(
             sdk_root=sdk_root,
             sdk_root_for_stamp=sdk_root_for_stamp,
             board_yaml=board_yaml,
+            json_mode=json_mode,
         )
     except BuildError as err:
         exit_code, data, issues = err.exit_code, None, [Issue(err.code, "error", err.message)]
     except Exception as err:  # noqa: BLE001 -- see below
-        # The port's most-repeated defect class: an uncaught exception escapes
-        # as a raw traceback, stdout stays empty, and the extension renders
-        # nothing at all with no error on either side. Anything that reaches
-        # here is a tan bug, so it is reported as one -- with an envelope.
+        # The port's most-repeated defect class: an uncaught exception
+        # escapes as a raw traceback, stdout stays empty, and the
+        # extension renders nothing at all with no error on either side.
+        # Anything that reaches here is a tan bug, so it is reported as
+        # one -- with an envelope.
         exit_code = ExitCode.INTERNAL_FAILURE
         data = None
         issues = [Issue("build.internal-failure", "error", f"{type(err).__name__}: {err}")]
@@ -1205,9 +1461,17 @@ def _text_recap(mode: str, data: dict | None) -> None:
         )
         print(f"  warnings: {len(data.get('warnings') or [])}", file=sys.stderr)
         return
-    for result in data.get("slices", []):
+    slices = data.get("slices", [])
+    for result in slices:
         reason = f" -- {result['reason']}" if "reason" in result else ""
         print(
             f"{result['status']}: {result['coreId']} [{result['backend']}]{reason}",
             file=sys.stderr,
         )
+    # tan-cli#283: a one-line summary AFTER every per-slice line, so a
+    # partial or all-skipped build cannot be scrolled past -- the per-slice
+    # lines above already carry this same count, but only for a reader who
+    # counts them by hand.
+    if slices:
+        built = sum(1 for result in slices if result["status"] == "ok")
+        print(f"{built} of {len(slices)} slice(s) built", file=sys.stderr)

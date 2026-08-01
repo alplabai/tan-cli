@@ -61,10 +61,10 @@ lists (debug-readiness vs. zephyr/yocto/baremetal build-readiness -- compare
 --build`'s `git`/`cmake`/`ninja`/`dtc`/`gperf`/`vendorToolchain`/...). Byte-
 parity with BOTH of those lists is a second command's worth of new checks,
 not a flag gap -- and this port's own check list (`hostPython`/
-`hostPrerequisites`/`west`/`setools`/`jlink`) is ALREADY build/flash-oriented
-by design (see above), unlike the Rust oracle's PLAIN `doctor`. So `--build`
-here means what it says on this port's own terms: it turns on ONE extra,
-genuinely-probed check plain `tan doctor` does not run --
+`hostPrerequisites`/`west`/`zephyrSdk`/`setools`/`jlink`) is ALREADY
+build/flash-oriented by design (see above), unlike the Rust oracle's PLAIN
+`doctor`. So `--build` here means what it says on this port's own terms: it
+turns on ONE extra, genuinely-probed check plain `tan doctor` does not run --
 `zephyrWorkspace`, whether `$ZEPHYR_BASE` resolves to a real Zephyr checkout
 matching alp-sdk's `west.yml` pin -- rather than either silently doing
 nothing (the anti-pattern this whole command exists to avoid) or
@@ -140,6 +140,33 @@ JLINK_MIN_DLL = (9, 46)
 #: connects fine for read/attach/RAM-run and has no MRAM loader at all, so a
 #: Flow D burn against it silently is not one.
 JLINK_AEN_DEVICE = "AE822FA0E5597LS0_M55_HE"
+
+#: The Zephyr SDK release `west sdk install --version` pins. Mirrors
+#: `tan_core::host_env::ZEPHYR_SDK_INSTALL_VERSION` byte-for-byte, so the
+#: `zephyrSdk` check's fix hint below and the Rust oracle's own can never name
+#: two different versions.
+#:
+#: A NEW consumer of the pin `contract/fixtures/toolchains/toolchains.json`
+#: owns -- that fixture's own `_comment` states the rule verbatim: "A NEW
+#: consumer of this pin needs its own parity assertion; widening this scan
+#: will not reach it." `test_zephyr_sdk_install_version_matches_the_real_
+#: toolchain_lock` (test_doctor_command.py) is that assertion, mirroring
+#: `crates/tan-core/src/host_env.rs`'s test of the same name (tan-cli#172) --
+#: without it, an alp-sdk version bump makes Rust fail loudly and this
+#: constant go silently stale.
+ZEPHYR_SDK_INSTALL_VERSION = "1.0.1"
+
+#: PATH names west's `.7z` toolchain extraction (via patoolib, which shells
+#: out to an external binary with no pure-Python fallback) will accept --
+#: mirrors `crate::build_readiness::SEVEN_ZIP_PROGRAMS` byte-for-byte. Any ONE
+#: is enough; probing only `7z` would false-negative a host that has `7zz` or
+#: `unar` instead.
+SEVEN_ZIP_PROGRAMS = ("7z", "7za", "7zr", "7zz", "7zzs", "unar")
+
+#: Verified resolvable (`winget show 7zip.7zip` -> `Found 7-Zip [7zip.7zip]`,
+#: publisher Igor Pavlov) -- mirrors `crate::build_readiness::
+#: SEVEN_ZIP_INSTALL_COMMAND` byte-for-byte.
+SEVEN_ZIP_INSTALL_COMMAND = "winget install -e --id 7zip.7zip"
 
 
 @dataclass(frozen=True)
@@ -547,6 +574,103 @@ def west_check(
     return Check("west", "pass", f"west {_fmt(version)} ({found}).")
 
 
+def zephyr_sdk_install_command() -> str:
+    """The exact `west sdk install` invocation the `zephyrSdk` check's `fix`
+    names -- the ONE place it is assembled, mirroring
+    `tan_core::zephyr_sdk_install_command` verbatim. `tan bootstrap`'s own
+    "Next steps" text (`tan.core.bootstrap`) already promises "the `tan
+    doctor` above reports it, and names the exact install command"; this is
+    what makes that promise true rather than a second, independently-worded
+    copy able to drift from it.
+    """
+    return f"west sdk install --version {ZEPHYR_SDK_INSTALL_VERSION} -t arm-zephyr-eabi"
+
+
+def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
+    """`zephyrSdk` -- is the Zephyr SDK cross toolchain (`arm-zephyr-eabi`)
+    actually installed on this host? Ports `tan_core::zephyr_sdk_toolchain_check`
+    / `append_zephyr_sdk_toolchain` (tan-cli#160), closing tan-cli#286: this
+    port had NO such check at all, so on a host with no Zephyr SDK `tan
+    doctor` reported "3 passed, 2 warning(s), 0 failed" and never used the
+    word "toolchain" -- the exact alp-sdk#855 fresh-host gap #160 closed in
+    the Rust oracle, reintroduced here.
+
+    UNCONDITIONAL -- called from `_collect` regardless of `--build`, a
+    `board.yaml`, or an SDK checkout resolving. This is a HOST fact (an env
+    var / a scanned install dir), and ADR 0021 Lane 1 P0a runs `tan doctor`
+    as the very first command a customer runs, before anything project-shaped
+    exists. A Yocto-only project still gets a real `fail` here -- that host
+    genuinely has no Zephyr SDK -- not a skip for lacking a Zephyr core.
+
+    `env_dir` is the raw `ZEPHYR_SDK_INSTALL_DIR` value (or `None`), carried
+    only to word the Fail detail correctly: "ZEPHYR_SDK_INSTALL_DIR unset" is
+    true only when the variable really is unset. It used to be hardcoded even
+    when the variable WAS set and simply named a directory with no working
+    toolchain in it -- the exact stale-var case `_zephyr_sdk_detected` guards
+    against -- so a customer who greps their own environment and finds it set
+    disbelieved a diagnostic that was actually correct.
+
+    Paired with `seven_zip_check` on Windows (`_collect`, gated `os.name ==
+    "nt" and not detected` -- mirroring `crate::build_readiness`'s exact
+    `probe.is_windows && !probe.zephyr_sdk` gate, tan-cli#204): the `west sdk
+    install` this Fail's fix names cannot complete on native Windows without
+    7-Zip on PATH (`tan.core.bootstrap`'s `manual_install_windows` prose), so
+    this Fail's advice is only actionable together with that check.
+    """
+    if detected:
+        return Check("zephyrSdk", "pass", "Zephyr SDK toolchain detected.")
+    where = (
+        f"ZEPHYR_SDK_INSTALL_DIR=`{env_dir}` does not contain a working toolchain"
+        if env_dir
+        else "ZEPHYR_SDK_INSTALL_DIR unset"
+    )
+    return Check(
+        "zephyrSdk",
+        "fail",
+        f"Zephyr SDK toolchain not detected ({where}) -- from "
+        f"an initialised west workspace, run `{zephyr_sdk_install_command()}`.",
+        f"Install the Zephyr SDK toolchain (arm-zephyr-eabi, version "
+        f"{ZEPHYR_SDK_INSTALL_VERSION}): from an initialised west workspace, run "
+        f"`{zephyr_sdk_install_command()}`. Details: "
+        "https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
+    )
+
+
+def seven_zip_check(found: bool) -> Check:
+    """`sevenZip` -- Windows-only, and only while `zephyrSdk` is failing (see
+    `_collect`'s gate). Ports the Rust oracle's sibling check (`crate::
+    build_readiness`, tan-cli#204): `west sdk install`, the remedy
+    `zephyr_sdk_check` names, extracts the `.7z` toolchain archive by
+    delegating to `patoolib`, which shells out to one of `SEVEN_ZIP_PROGRAMS`
+    and has no pure-Python fallback -- documented in this repo's own
+    `tan.core.bootstrap` (`manual_install_windows` prose) but, until this
+    check, reaching no JSON consumer, so `alp-sdk-vscode` had no way to
+    surface it and a customer who followed the `zephyrSdk` fix hint alone hit
+    a patoolib error naming no Alp surface and no mention of 7-Zip.
+
+    `Warn`, not `Fail`, mirroring the oracle: a host that already has the SDK
+    never reaches this (the gate), and among hosts that do not, missing
+    7-Zip blocks the REMEDY, not the build itself -- `zephyrSdk` is the
+    `Fail` that stops things.
+    """
+    if found:
+        return Check(
+            "sevenZip",
+            "pass",
+            "7-Zip is available -- `west sdk install` can extract the toolchain.",
+        )
+    programs = ", ".join(SEVEN_ZIP_PROGRAMS)
+    return Check(
+        "sevenZip",
+        "warn",
+        f"No 7-Zip on PATH (looked for {programs}) -- `west sdk install` extracts "
+        "the toolchain with patoolib, which shells out to one of these and has no "
+        "pure-Python fallback, so it will fail on native Windows. Install it with "
+        f"`{SEVEN_ZIP_INSTALL_COMMAND}`.",
+        f"Install 7-Zip before running `west sdk install`: `{SEVEN_ZIP_INSTALL_COMMAND}`.",
+    )
+
+
 def zephyr_workspace_check(
     zephyr_base: str | None, version_text: str | None, sdk_pin: str | None
 ) -> Check:
@@ -810,6 +934,123 @@ def _python_candidates() -> list[list[str]]:
     return [["python3"], ["python"]]
 
 
+#: Where the `arm-zephyr-eabi` cross compiler sits INSIDE a zephyr-sdk-1.0.1
+#: root -- the version `ZEPHYR_SDK_INSTALL_VERSION` above pins and the only
+#: one this file's fix hints (`zephyr_sdk_install_command`) ever name.
+#:
+#: tan-cli#286 third pass: the SECOND pass's blocker. `_zephyr_sdk_root_valid`
+#: and `test_doctor_command.py`'s own `_plant_zephyr_sdk` fixture both
+#: previously hardcoded the WRONG layout (un-prefixed `arm-zephyr-eabi/bin/`)
+#: independently, so they agreed with EACH OTHER instead of with a real SDK
+#: and 77 tests passed over a broken probe. Both now build from this one
+#: tuple so they cannot drift back to silently matching only each other.
+#:
+#: The `gnu/` prefix is decisive, not guessed: a maintainer build log on the
+#: exact host this check hard-failed on -- "Found assembler:
+#: <home>/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc.exe"
+#: -- plus three in-repo measurements agreeing byte-for-byte:
+#: `crates/tan-core/src/runners.rs`'s real-AEN801-build fixture (`gdb:
+#: /zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin/arm-zephyr-eabi-gdb-py`),
+#: `crates/tan-core/src/debug_launch.rs`'s resolution test (same `gdbPath`),
+#: and `contract/fixtures/toolchains/toolchains.json`'s `du -sb` measurement
+#: of `gnu/arm-zephyr-eabi/` (784086497 bytes) as its own line item, separate
+#: from `hosttools/`.
+#:
+#: NOT widened to also accept the older, un-prefixed `arm-zephyr-eabi/bin/`
+#: layout (0.16.x): every fix hint in this file already promises exactly
+#: `--version 1.0.1`, so treating a stale sub-1.0 install as a Pass would
+#: validate a toolchain this file's own advice says to replace. NOT probing
+#: the SDK's own `sdk_version`/`sdk_toolchains` marker files either, tempting
+#: as a layout-proof alternative would be: no measurement of either file's
+#: real name, location or format exists anywhere in this repo, and guessing
+#: at one is the exact unverified-brief mistake that put the wrong compiler
+#: path here to begin with.
+ZEPHYR_SDK_TOOLCHAIN_DIR = ("gnu", "arm-zephyr-eabi", "bin")
+
+
+def _zephyr_sdk_root_valid(root: Path) -> bool:
+    """`True` when `root` is an actually-installed Zephyr SDK -- not merely a
+    directory that happens to be named right, or still named by a stale
+    `ZEPHYR_SDK_INSTALL_DIR`. Probes the one file every downstream check
+    (`west build`, `west flash`) actually needs: the `arm-zephyr-eabi` cross
+    compiler, at `ZEPHYR_SDK_TOOLCHAIN_DIR`. `is_dir()` alone passes on an
+    EMPTY directory -- the exact false Pass tan-cli#286 exists to fix;
+    measuring the shipped thing instead of a directory-name proxy is what
+    makes this port's docstring true.
+    """
+    exe = "arm-zephyr-eabi-gcc.exe" if os.name == "nt" else "arm-zephyr-eabi-gcc"
+    try:
+        return root.joinpath(*ZEPHYR_SDK_TOOLCHAIN_DIR, exe).is_file()
+    except OSError:
+        return False
+
+
+def _zephyr_sdk_scan_roots() -> list[Path]:
+    """Every directory `_zephyr_sdk_detected` scans for a `zephyr-sdk-*`
+    install, besides `/opt` -- `$HOME`, `%USERPROFILE%` AND `Path.home()`,
+    ALL of them, never `HOME or USERPROFILE`.
+
+    Under Git Bash/MSYS on Windows, `HOME` is a POSIX-translated path
+    (`/c/Users/caner`) while the real Zephyr SDK sits under the native
+    `%USERPROFILE%` (`C:\\Users\\caner\\zephyr-sdk-1.0.1`). `or`ing the two
+    picks whichever is set first and silently drops the other -- proven on a
+    real host: that host HAS the SDK and `_zephyr_sdk_detected()` still
+    returned `False`, a hard doctor FAIL worse than the false PASS #286
+    exists to fix. `Path.home()` resolves independently of both env vars
+    (POSIX `pwd`/`$HOME`; Windows `USERPROFILE` via CPython's own
+    `ntpath.expanduser`) and can disagree with both, so it is scanned too,
+    not assumed redundant.
+    """
+    roots = [Path("/opt")]
+    seen: set[str] = set()
+    for raw in (os.environ.get("HOME"), os.environ.get("USERPROFILE")):
+        if raw and raw not in seen:
+            seen.add(raw)
+            roots.append(Path(raw))
+    try:
+        home = Path.home()
+    except (OSError, RuntimeError):
+        home = None
+    if home is not None and str(home) not in seen:
+        roots.append(home)
+    return roots
+
+
+def _zephyr_sdk_detected() -> bool:
+    """`True` when a Zephyr SDK toolchain is installed anywhere this host
+    would resolve one from. Mirrors `crate::toolchain::resolve_toolchain_root`
+    /`zephyr_sdk_detected` (not yet ported for build-plan `${TOOLCHAIN_ROOT}`
+    substitution -- see `build_cmd.py`'s `toolchain_root=None` -- but doctor
+    only needs the yes/no, same split the Rust module docstring draws):
+    `ZEPHYR_SDK_INSTALL_DIR`, honored ONLY when the directory it names
+    actually CONTAINS the toolchain (`_zephyr_sdk_root_valid` -- the variable
+    is exported from a shell profile and routinely outlives the SDK it once
+    pointed at, e.g. after `rm -rf ~/zephyr-sdk-0.16.5`, and an empty
+    directory it never pointed at anything real for is the same failure mode
+    -- trusting presence alone would report a false Pass here and the real
+    failure would surface later as a raw CMake toolchain error); else any
+    `zephyr-sdk*`-named directory, similarly validated, directly under
+    `_zephyr_sdk_scan_roots()`. Several installs still count as detected --
+    this is only doctor's yes/no, not the ambiguous-root pick the build-plan
+    substitution path will need.
+
+    Never raises: an unreadable or missing scan root is "nothing found
+    there", not a doctor crash.
+    """
+    env_dir = os.environ.get("ZEPHYR_SDK_INSTALL_DIR")
+    if env_dir and _zephyr_sdk_root_valid(Path(env_dir)):
+        return True
+    for root in _zephyr_sdk_scan_roots():
+        try:
+            entries = list(root.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith("zephyr-sdk") and _zephyr_sdk_root_valid(entry):
+                return True
+    return False
+
+
 def _probe_host_python(floor: tuple[int, int]) -> tuple[str, tuple[int, int]] | None:
     """First candidate that RUNS and clears `floor`; else the first that merely
     ran, so the too-old message can name a real version instead of "did not
@@ -990,6 +1231,15 @@ def _collect(sdk_root: str | None, build: bool = False) -> list[Check]:
     west_exe = on_path("west")
     west_version = _parse_two(probe(["west", "--version"]) or "") if west_exe else None
     checks.append(west_check(west_exe, west_version, _parse_two(str(facts.get("_pipSpec") or ""))))
+
+    # Unconditional -- not gated on `build` or a resolved board.yaml/SDK. See
+    # `zephyr_sdk_check`'s docstring (tan-cli#286).
+    zephyr_sdk_ok = _zephyr_sdk_detected()
+    checks.append(zephyr_sdk_check(zephyr_sdk_ok, os.environ.get("ZEPHYR_SDK_INSTALL_DIR")))
+    # `sevenZip` rides beside the `zephyrSdk` Fail it unblocks and only there --
+    # see `seven_zip_check`'s docstring and tan-cli#204.
+    if os.name == "nt" and not zephyr_sdk_ok:
+        checks.append(seven_zip_check(any(on_path(p) for p in SEVEN_ZIP_PROGRAMS)))
 
     if build:
         zephyr_base = os.environ.get("ZEPHYR_BASE")

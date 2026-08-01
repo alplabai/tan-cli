@@ -38,6 +38,35 @@ from tan.commands import doctor_cmd
 #: resolves from a scratch cwd without a ``pip install``.
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
+#: The worktree root -- one level above ``python/`` -- so ``contract/`` fixtures
+#: can be read without re-typing a repo-relative path in every test.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _plant_zephyr_sdk(root: Path) -> None:
+    """Create the one file ``_zephyr_sdk_root_valid`` actually probes, so a
+    test SDK root is genuine rather than merely present -- the distinction
+    finding 1 (tan-cli#286 second pass) exists to enforce.
+
+    Builds the path from ``doctor_cmd.ZEPHYR_SDK_TOOLCHAIN_DIR`` -- the SAME
+    constant the production probe reads -- rather than a second, independently
+    spelled literal here: tan-cli#286 third pass's blocker was exactly that,
+    this fixture and the probe each hardcoding the layout by hand and
+    silently agreeing on the WRONG one, so 77 tests passed over a broken
+    probe. One constant, two readers, cannot drift apart the same way again.
+
+    The exe suffix reads ``doctor_cmd.os.name``, never this test module's own
+    (real) ``os`` -- ``doctor_cmd.os`` is the name a test rebinds to flip the
+    production platform branch (see ``_FixedOsName`` below), and reading the
+    real module here is finding 2 (tan-cli#286 third pass): it planted the
+    POSIX name while a faked-``nt`` probe looked for the ``.exe`` suffix,
+    failing 2 of 3 CI legs.
+    """
+    exe = "arm-zephyr-eabi-gcc.exe" if doctor_cmd.os.name == "nt" else "arm-zephyr-eabi-gcc"
+    bin_dir = root.joinpath(*doctor_cmd.ZEPHYR_SDK_TOOLCHAIN_DIR)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / exe).write_text("", encoding="utf-8")
+
 
 def run_tan(*argv, cwd, scrub_path=False, env_extra=None):
     """Spawn the port. ``scrub_path`` empties ``PATH`` so not one probe can
@@ -236,6 +265,229 @@ def test_west_absent_fails():
 def test_west_present_but_unparseable_version_is_a_warning_not_a_crash():
     check = doctor_cmd.west_check(found="west", version=None, floor=(0, 14))
     assert check.status == "warn"
+
+
+# --------------------------------------------------------------------------
+# zephyrSdk (tan-cli#286) -- the port had NO such check at all; the Rust
+# oracle's `zephyrSdk` (crates/tan-cli/src/commands/doctor.rs::
+# append_zephyr_sdk_toolchain, tan-cli#160) is unconditional in plain
+# `tan doctor`, so this must be too.
+# --------------------------------------------------------------------------
+
+
+def test_zephyr_sdk_detected_passes():
+    check = doctor_cmd.zephyr_sdk_check(True)
+    assert check.status == "pass"
+    assert check.fix is None
+
+
+def test_zephyr_sdk_not_detected_fails_and_names_the_exact_install_command():
+    check = doctor_cmd.zephyr_sdk_check(False)
+    assert check.status == "fail"
+    command = "west sdk install --version 1.0.1 -t arm-zephyr-eabi"
+    assert command in check.detail
+    assert command in (check.fix or "")
+
+
+def test_zephyr_sdk_check_names_the_env_var_when_it_points_at_a_bad_directory():
+    """Finding: the fail detail used to hardcode "(ZEPHYR_SDK_INSTALL_DIR
+    unset)" even when the variable WAS set and simply named a directory with
+    no working toolchain in it -- exactly the stale-var case the guard in
+    `_zephyr_sdk_detected` exists for. It must say the var is set and wrong,
+    not unset."""
+    check = doctor_cmd.zephyr_sdk_check(False, env_dir="/opt/zephyr-sdk-0.16.5")
+    assert "ZEPHYR_SDK_INSTALL_DIR=" in check.detail
+    assert "/opt/zephyr-sdk-0.16.5" in check.detail
+    assert "unset" not in check.detail
+
+
+def test_zephyr_sdk_check_says_unset_only_when_it_really_is():
+    check = doctor_cmd.zephyr_sdk_check(False, env_dir=None)
+    assert "ZEPHYR_SDK_INSTALL_DIR unset" in check.detail
+
+
+def test_zephyr_sdk_install_dir_env_wins_when_the_directory_actually_has_the_toolchain(
+    tmp_path, monkeypatch
+):
+    _plant_zephyr_sdk(tmp_path)
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(tmp_path))
+    assert doctor_cmd._zephyr_sdk_detected() is True
+
+
+def test_zephyr_sdk_install_dir_pointing_at_an_empty_directory_is_not_trusted(
+    tmp_path, monkeypatch
+):
+    """Finding 1, tan-cli#286 second pass: `Path(env_dir).is_dir()` alone
+    passes on ANY directory, so an empty one named by ZEPHYR_SDK_INSTALL_DIR
+    used to report a false Pass. The scan roots are pinned to an empty
+    stand-in too (finding 3, third pass) -- `/opt` is one of
+    `_zephyr_sdk_scan_roots`'s roots UNCONDITIONALLY, not only via
+    `HOME`/`USERPROFILE`/`Path.home()`, so pinning only those three (as this
+    test used to) still let the assertion flip on a host that genuinely has a
+    Zephyr SDK under `/opt` -- a documented `west sdk install` default."""
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        doctor_cmd, "_zephyr_sdk_scan_roots", lambda: [tmp_path / "not-a-real-home"]
+    )
+    assert doctor_cmd._zephyr_sdk_detected() is False
+
+
+def test_zephyr_sdk_install_dir_env_pointing_nowhere_is_not_trusted(tmp_path, monkeypatch):
+    """A stale `ZEPHYR_SDK_INSTALL_DIR` (exported once, the SDK since removed)
+    must not report a false Pass -- mirrors
+    `crate::toolchain::env_dir_still_exists`. The scan roots are pinned for
+    the same reason, including `/opt`, as the empty-directory case above."""
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(tmp_path / "gone"))
+    monkeypatch.setattr(
+        doctor_cmd, "_zephyr_sdk_scan_roots", lambda: [tmp_path / "not-a-real-home"]
+    )
+    assert doctor_cmd._zephyr_sdk_detected() is False
+
+
+def test_zephyr_sdk_detected_by_scanning_home_with_no_env_var_set(tmp_path, monkeypatch):
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    _plant_zephyr_sdk(tmp_path / "zephyr-sdk-1.0.1")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    assert doctor_cmd._zephyr_sdk_detected() is True
+
+
+def test_zephyr_sdk_detected_via_msys_home_split_from_windows_userprofile(tmp_path, monkeypatch):
+    """Finding 2, tan-cli#286 second pass -- reproduced on a real host: Git
+    Bash/MSYS sets `HOME` to a POSIX-translated path (`/c/Users/caner`) that is
+    real but has no SDK under it, while the actual Zephyr SDK sits under the
+    native `%USERPROFILE%` (`C:\\Users\\caner\\zephyr-sdk-1.0.1`). The old
+    `HOME or USERPROFILE` picked `HOME` (set first) and never scanned
+    `USERPROFILE` at all, so a host that HAS the SDK reported `False`. Both
+    must be scanned."""
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    posix_home = tmp_path / "msys-home"  # stands in for e.g. /c/Users/dev: real, empty
+    posix_home.mkdir()
+    windows_profile = tmp_path / "win-profile"  # stands in for C:\Users\dev
+    _plant_zephyr_sdk(windows_profile / "zephyr-sdk-1.0.1")
+    monkeypatch.setenv("HOME", str(posix_home))
+    monkeypatch.setenv("USERPROFILE", str(windows_profile))
+    assert doctor_cmd._zephyr_sdk_detected() is True
+
+
+def test_zephyr_sdk_root_valid_rejects_a_directory_with_no_compiler_in_it(tmp_path):
+    assert doctor_cmd._zephyr_sdk_root_valid(tmp_path) is False
+
+
+def test_zephyr_sdk_root_valid_accepts_a_real_layout(tmp_path):
+    _plant_zephyr_sdk(tmp_path)
+    assert doctor_cmd._zephyr_sdk_root_valid(tmp_path) is True
+
+
+def test_zephyr_sdk_install_version_matches_the_real_toolchain_lock():
+    """tan-cli#172's Python-side half. `contract/fixtures/toolchains/
+    toolchains.json`'s own `_comment` states the rule verbatim: "A NEW
+    consumer of this pin needs its own parity assertion; widening this scan
+    will not reach it." Mirrors `crates/tan-core/src/host_env.rs`'s
+    `zephyr_sdk_install_version_matches_the_real_toolchain_lock` -- so a bump
+    that updates the Rust constant but not this one fails HERE, instead of
+    `tan doctor` silently naming a stale `west sdk install --version`."""
+    fixture = REPO_ROOT / "contract" / "fixtures" / "toolchains" / "toolchains.json"
+    doc = json.loads(fixture.read_text(encoding="utf-8"))
+    assert doctor_cmd.ZEPHYR_SDK_INSTALL_VERSION == doc["zephyrSdk"]["version"]
+
+
+# --------------------------------------------------------------------------
+# sevenZip (tan-cli#286 second pass, finding 3) -- the `zephyrSdk` Fail names
+# `west sdk install` as the whole remedy, but on native Windows that command
+# cannot complete without 7-Zip on PATH (`tan.core.bootstrap`'s
+# `manual_install_windows` prose). Mirrors `crate::build_readiness`'s
+# `sevenZip` sibling, gated exactly `probe.is_windows && !probe.zephyr_sdk`
+# (tan-cli#204).
+# --------------------------------------------------------------------------
+
+
+def test_seven_zip_check_passes_clean_with_no_fix_when_found():
+    check = doctor_cmd.seven_zip_check(True)
+    assert check.status == "pass"
+    assert check.fix is None
+
+
+def test_seven_zip_check_names_the_pinned_install_command_when_absent():
+    check = doctor_cmd.seven_zip_check(False)
+    assert check.status == "warn"
+    command = "winget install -e --id 7zip.7zip"
+    assert command in check.detail
+    assert command in (check.fix or "")
+    for program in doctor_cmd.SEVEN_ZIP_PROGRAMS:
+        assert program in check.detail
+
+
+class _FixedOsName:
+    """A stand-in for the `os` module that reports a FIXED `os.name`, proxying
+    every other attribute to the real module.
+
+    Rebinding `doctor_cmd.os` to one of these (rather than mutating
+    `os.name` on the real, process-wide module object `import os` hands back
+    everywhere) is the only safe way to flip an `os.name`-gated branch in a
+    test: mutating the shared module crashes pytest's OWN failure-reporting on
+    a real failure (`pathlib.Path.__new__` re-picks `WindowsPath`/`PosixPath`
+    from `os.name` on every call, including ones pytest itself makes) --
+    caught while writing this test, not theoretical.
+    """
+
+    def __init__(self, name):
+        self._name = name
+
+    def __getattr__(self, attr):
+        return getattr(os, attr)
+
+    @property
+    def name(self):
+        return self._name
+
+
+def test_collect_adds_seven_zip_only_on_windows_while_the_sdk_is_absent(tmp_path, monkeypatch):
+    """Finding 3 (tan-cli#286 third pass): the scan roots are stubbed outright
+    -- `/opt` is one of `_zephyr_sdk_scan_roots`'s roots unconditionally, so a
+    developer host with a real `/opt/zephyr-sdk-*` would otherwise flip this
+    to `zephyrSdk` detected and drop `sevenZip` from the check list."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("nt"))
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    monkeypatch.setattr(
+        doctor_cmd, "_zephyr_sdk_scan_roots", lambda: [tmp_path / "not-a-real-home"]
+    )
+    checks = doctor_cmd._collect(None)
+    assert "sevenZip" in {c.name for c in checks}
+
+
+def test_collect_omits_seven_zip_off_windows(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("posix"))
+    monkeypatch.delenv("ZEPHYR_SDK_INSTALL_DIR", raising=False)
+    monkeypatch.setattr(
+        doctor_cmd, "_zephyr_sdk_scan_roots", lambda: [tmp_path / "not-a-real-home"]
+    )
+    checks = doctor_cmd._collect(None)
+    assert "sevenZip" not in {c.name for c in checks}
+
+
+def test_collect_omits_seven_zip_on_windows_once_the_sdk_is_detected(tmp_path, monkeypatch):
+    """The permanent-noise case the gate exists to avoid: once the SDK is
+    present, the extractor is irrelevant, so `sevenZip` must not linger."""
+    monkeypatch.setattr(doctor_cmd, "os", _FixedOsName("nt"))
+    _plant_zephyr_sdk(tmp_path)
+    monkeypatch.setenv("ZEPHYR_SDK_INSTALL_DIR", str(tmp_path))
+    checks = doctor_cmd._collect(None)
+    assert "sevenZip" not in {c.name for c in checks}
+
+
+def test_collect_reports_zephyr_sdk_unconditionally_with_no_board_or_sdk_resolved():
+    """The load-bearing regression case: before this check existed, plain
+    `tan doctor` with no SDK and no `--build` (the exact fresh-host,
+    ADR-0021-Lane-1-P0a call) never mentioned a Zephyr toolchain at all --
+    reverting the `_collect` wiring must fail this."""
+    checks = doctor_cmd._collect(None, build=False)
+    assert "zephyrSdk" in {c.name for c in checks}
+
+
+def test_collect_reports_zephyr_sdk_under_build_too():
+    checks = doctor_cmd._collect(None, build=True)
+    assert "zephyrSdk" in {c.name for c in checks}
 
 
 # --------------------------------------------------------------------------
