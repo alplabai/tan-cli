@@ -10,7 +10,7 @@
 # `tan-cli` was also free; `alp-tan` is preferred because the other Alp Lab
 # artefacts are `alp-`prefixed.
 name = "alp-tan"
-version = "0.5.0rc1"
+version = "0.5.0rc2"
 description = "The Alp Lab build CLI: one board.yaml to firmware, across MCU and MPU cores."
 readme = "README.md"
 license = "Apache-2.0"
