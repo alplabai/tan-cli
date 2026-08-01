@@ -25,6 +25,7 @@ first build died inside Zephyr's CMake configure pointing at Zephyr.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -939,3 +940,328 @@ def test_explicit_relative_board_yaml_is_anchored_on_project_not_cwd(tmp_path):
         "root": app.as_posix(),
         "boardYaml": (app / "board.yaml").as_posix(),
     }
+
+
+# --------------------------------------------------------------------------
+# tan-cli#294 finding 1 -- host-environment checks, reintroducing tan-cli#70.
+# --------------------------------------------------------------------------
+
+
+def test_zephyr_sdk_host_check_distinguishes_a_served_host_from_an_unserved_one():
+    served = doctor_cmd.zephyr_sdk_host_check("linux", "x86_64")
+    assert served.status == "pass"
+    assert served.fix is None
+
+    unserved = doctor_cmd.zephyr_sdk_host_check("linux", "riscv64")
+    assert unserved.status == "fail"
+    assert unserved.fix is not None
+    assert unserved.name == "zephyrSdkAvailableForHost"
+
+
+def test_zephyr_sdk_host_check_names_wsl2_for_windows_on_arm_and_a_different_remedy_for_intel_mac():
+    """The correction this check exists to make: routing an Intel Mac to WSL2
+    is advice that cannot be followed -- the two unserved hosts must get
+    DIFFERENT remedies, not one shared message."""
+    windows_arm = doctor_cmd.zephyr_sdk_host_check("windows", "aarch64")
+    intel_mac = doctor_cmd.zephyr_sdk_host_check("macos", "x86_64")
+    assert "WSL2" in windows_arm.fix
+    assert "linux-aarch64" in windows_arm.fix
+    assert windows_arm.fix != intel_mac.fix
+    assert "WSL" not in intel_mac.fix
+    assert "Linux host" in intel_mac.fix
+
+
+def test_long_paths_check_distinguishes_enabled_disabled_and_unknown():
+    on = doctor_cmd.long_paths_check(True)
+    assert on.status == "pass"
+    assert on.fix is None
+
+    off = doctor_cmd.long_paths_check(False)
+    assert off.status == "warn"
+    assert "MAX_PATH" in off.detail
+    assert "New-ItemProperty" in (off.fix or "")
+
+    unknown = doctor_cmd.long_paths_check(None)
+    assert unknown.status == "warn"
+    assert "unknown" in unknown.detail
+    # "could not tell" must never render as a silent Pass.
+    assert unknown.status != "pass"
+
+
+def test_home_path_check_distinguishes_a_spaced_home_from_a_clean_one():
+    spaced = doctor_cmd.home_path_check(r"C:\Users\Jane Doe")
+    assert spaced.status == "warn"
+    assert r"C:\Users\Jane Doe" in spaced.detail
+    assert spaced.status != "fail"  # degraded, not a hard blocker
+
+    clean = doctor_cmd.home_path_check(r"C:\Users\jane")
+    assert clean.status == "pass"
+    assert clean.fix is None
+
+    unset = doctor_cmd.home_path_check(None)
+    assert unset.status == "warn"
+    assert unset.fix is not None
+
+
+def test_collect_reports_the_host_environment_trio_unconditionally(tmp_path):
+    """Reverting the `_collect` wiring must fail this: these are host facts,
+    not gated on `--build`, a board.yaml, or a resolved SDK."""
+    checks = doctor_cmd._collect(None, workspace_root=str(tmp_path))
+    names = {c.name for c in checks}
+    assert "zephyrSdkAvailableForHost" in names
+    assert "homePath" in names
+
+
+# --------------------------------------------------------------------------
+# tan-cli#294 finding 2 -- build-environment preflight, reintroducing
+# tan-cli#100, #98, #159.
+# --------------------------------------------------------------------------
+
+
+def test_sdk_check_distinguishes_a_resolved_sdk_from_an_unresolved_one():
+    resolved = doctor_cmd.sdk_check("/opt/alp-sdk", project_scope=None)
+    assert resolved.status == "pass"
+
+    unresolved = doctor_cmd.sdk_check(None, project_scope=None)
+    assert unresolved.status == "fail"
+    assert "tan sdk switch" in unresolved.detail
+
+
+def test_sdk_check_names_the_project_scoped_switch_when_a_project_scope_is_given():
+    """tan-cli#101: a bare `tan sdk switch <path>` reports success and leaves
+    a `tan --project <p> ...` invocation failing byte-for-byte identically --
+    the hint has to carry the scope."""
+    check = doctor_cmd.sdk_check(None, project_scope="examples/uart-echo")
+    assert check.status == "fail"
+    assert "tan --project examples/uart-echo sdk switch <path>" in check.detail
+    assert "--sdk-root" in check.detail
+    assert check.fix == "tan --project examples/uart-echo sdk switch <path>"
+
+
+def test_board_yaml_preflight_check_distinguishes_present_from_absent():
+    assert doctor_cmd.board_yaml_preflight_check(True).status == "pass"
+    absent = doctor_cmd.board_yaml_preflight_check(False)
+    assert absent.status == "fail"
+    assert "tan init" in absent.detail
+
+
+def test_resolve_west_workspace_dir_finds_a_dot_west_walking_up_the_project_tree(tmp_path):
+    workspace = tmp_path / "workspace"
+    (workspace / ".west").mkdir(parents=True)
+    app = workspace / "app" / "nested"
+    app.mkdir(parents=True)
+    assert doctor_cmd._resolve_west_workspace_dir(str(app), None) == str(workspace)
+
+
+def test_resolve_west_workspace_dir_falls_back_to_the_sdk_derived_layout(tmp_path):
+    """The canonical alp-sdk#782 layout: the workspace topdir is the SDK
+    checkout's OWN parent directory."""
+    workspace = tmp_path / "workspace"
+    sdk = workspace / "alp-sdk"
+    sdk.mkdir(parents=True)
+    (workspace / ".west").mkdir()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert doctor_cmd._resolve_west_workspace_dir(str(outside), str(sdk)) == str(workspace)
+
+
+def test_resolve_west_workspace_dir_returns_none_when_nothing_resolves(tmp_path):
+    nowhere = tmp_path / "nowhere"
+    nowhere.mkdir()
+    assert doctor_cmd._resolve_west_workspace_dir(str(nowhere), None) is None
+
+
+def test_workspace_preflight_check_distinguishes_resolved_from_absent():
+    assert doctor_cmd.workspace_preflight_check("/ws").status == "pass"
+    absent = doctor_cmd.workspace_preflight_check(None)
+    assert absent.status == "fail"
+    assert "tan bootstrap" in absent.detail
+
+
+def test_zephyr_version_preflight_check_distinguishes_a_match_from_a_patch_level_drift():
+    """tan-cli#98: compared at full MAJOR.MINOR.PATCH -- a truncated compare
+    would let v4.4.0 read as a match against a v4.4.1 pin."""
+    match = doctor_cmd.zephyr_version_preflight_check("4.4.1", "4.4.1")
+    assert match.status == "pass"
+
+    drifted = doctor_cmd.zephyr_version_preflight_check("4.4.0", "4.4.1")
+    assert drifted.status == "fail"  # tan-cli#159: FAIL, not warn
+    assert "4.4.0" in drifted.detail and "4.4.1" in drifted.detail
+
+
+def test_zephyr_version_preflight_check_is_skipped_when_unknown():
+    assert doctor_cmd.zephyr_version_preflight_check(None, "4.4.1") is None
+    assert doctor_cmd.zephyr_version_preflight_check("4.4.1", None) is None
+
+
+def test_collect_leads_the_report_with_the_build_preflight_and_fails_a_workspaceless_host(
+    tmp_path,
+):
+    """The regression tan-cli#100 names: before this, a host with no SDK
+    selected, no board.yaml and no Zephyr workspace reported `0 failed` on
+    every other check -- these four now report the gap themselves, and lead
+    the check list (`nextSteps` follows check order)."""
+    checks = doctor_cmd._collect(None, board_yaml=None, workspace_root=str(tmp_path))
+    names = [c.name for c in checks]
+    assert names[0] == "sdk"
+    assert names[1] == "boardYaml"
+    assert names[2] == "workspace"
+    assert next(c for c in checks if c.name == "sdk").status == "fail"
+    assert next(c for c in checks if c.name == "boardYaml").status == "fail"
+    assert next(c for c in checks if c.name == "workspace").status == "fail"
+
+
+def test_collect_resolves_a_real_workspace_and_matching_zephyr_version(tmp_path):
+    """The other host state: an SDK resolved, a board.yaml present, a
+    workspace resolved with a Zephyr matching the SDK's pin -- all four
+    Pass."""
+    sdk_root = tmp_path / "workspace" / "alp-sdk"
+    sdk_root.mkdir(parents=True)
+    (sdk_root / "west.yml").write_text(
+        "manifest:\n  projects:\n    - name: zephyr\n      revision: v4.4.1\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "workspace" / ".west").mkdir()
+    zephyr = tmp_path / "workspace" / "zephyr"
+    zephyr.mkdir()
+    (zephyr / "VERSION").write_text(
+        "VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = 1\n", encoding="utf-8"
+    )
+    board_yaml = tmp_path / "app" / "board.yaml"
+    board_yaml.parent.mkdir(parents=True)
+    board_yaml.write_text("", encoding="utf-8")
+
+    checks = doctor_cmd._collect(
+        str(sdk_root), board_yaml=str(board_yaml), workspace_root=str(tmp_path / "app")
+    )
+    for name in ("sdk", "boardYaml", "workspace", "zephyrVersion"):
+        check = next(c for c in checks if c.name == name)
+        assert check.status == "pass", f"{name}: {check.detail}"
+
+
+# --------------------------------------------------------------------------
+# tan-cli#294 finding 3 -- `posix_venv_unusable` never reached doctor,
+# reintroducing tan-cli#161.
+# --------------------------------------------------------------------------
+
+
+def test_posix_venv_capable_distinguishes_a_working_probe_from_a_failing_one():
+    working = doctor_cmd._posix_venv_capable([sys.executable, "-c", "import sys; sys.exit(0)"])
+    assert working is True
+    broken = doctor_cmd._posix_venv_capable([sys.executable, "-c", "import sys; sys.exit(1)"])
+    assert broken is False
+
+
+def test_prerequisites_check_distinguishes_a_clean_host_from_a_venv_unusable_one():
+    clean = doctor_cmd.prerequisites_check(
+        checked=["git", "cmake", "python3"], missing=[], install={}, source="x"
+    )
+    assert clean.status == "pass"
+    assert clean.missing is None
+
+    refusal = doctor_cmd.posix_venv_unusable()
+    unusable = doctor_cmd.prerequisites_check(
+        checked=["git", "cmake", "python3"],
+        missing=[],
+        install={},
+        source="x",
+        venv_refusal=refusal,
+    )
+    assert unusable.status == "fail"
+    assert unusable.code == "bootstrap.venv-unusable"
+    assert "ensurepip" in unusable.detail
+    # tan-cli#294 finding 4: the structured pair rides on the SAME check.
+    assert unusable.missing == [
+        {"tool": "python3-venv", "command": "sudo apt-get install -y python3-venv"}
+    ]
+
+
+def test_prerequisites_check_tool_missing_outranks_venv_unusable():
+    """A missing TOOL is the more urgent fact -- if `python3` itself is
+    missing there is nothing to run `ensurepip` against."""
+    refusal = doctor_cmd.posix_venv_unusable()
+    check = doctor_cmd.prerequisites_check(
+        checked=["git", "cmake", "python3"],
+        missing=["cmake"],
+        install={"cmake": "sudo apt-get install -y cmake"},
+        source="x",
+        venv_refusal=refusal,
+    )
+    assert check.code == "bootstrap.prerequisites-missing"
+    assert "cmake" in check.detail
+    assert check.missing == [
+        {"tool": "cmake", "command": "sudo apt-get install -y cmake"},
+        {"tool": "python3-venv", "command": "sudo apt-get install -y python3-venv"},
+    ]
+
+
+# --------------------------------------------------------------------------
+# tan-cli#294 finding 4 -- `data.missingPrerequisites`, #203/#210,
+# alp-sdk-vscode#347, ADR 0021 P0a.
+# --------------------------------------------------------------------------
+
+
+def test_missing_prerequisites_key_is_populated_on_a_scrubbed_host(tmp_path):
+    """The end-to-end wire: with PATH scrubbed, EVERY tool is missing, so
+    `data.missingPrerequisites` must be a non-empty, runnable list -- never
+    absent and never `[]` masquerading as `null`."""
+    proc = run_tan("doctor", "--format", "json", cwd=tmp_path, scrub_path=True)
+    envelope = json.loads(proc.stdout)
+    missing = envelope["data"]["missingPrerequisites"]
+    assert missing, "missingPrerequisites must be populated when tools are missing"
+    for entry in missing:
+        assert entry["tool"]
+        assert "command" in entry  # present, possibly null -- never absent
+
+
+def test_missing_prerequisites_key_is_present_and_null_when_the_check_is_clean():
+    check = doctor_cmd.prerequisites_check(
+        checked=["git"], missing=[], install={}, source="x"
+    )
+    assert check.missing is None
+
+
+# --------------------------------------------------------------------------
+# tan-cli#294 finding 5 -- `sdkProvenance` (no numbered GH issue).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git must be on PATH for this test")
+def test_sdk_provenance_check_distinguishes_a_real_git_checkout_from_a_plain_directory(
+    tmp_path,
+):
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True,
+        )
+
+    plain = tmp_path / "no-git"
+    plain.mkdir()
+    no_checkout = doctor_cmd.sdk_provenance_check(str(plain))
+    assert no_checkout.status == "pass"
+    assert "no git checkout" in no_checkout.detail
+
+    git("init", "-q")
+    git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty", "-q", "-m", "x")
+    head = git("rev-parse", "--short", "HEAD").stdout.strip()
+
+    real_checkout = doctor_cmd.sdk_provenance_check(str(tmp_path))
+    assert real_checkout.status == "pass"
+    assert head in real_checkout.detail
+
+
+def test_sdk_provenance_check_reads_the_sdk_version_file_when_present(tmp_path):
+    metadata = tmp_path / "metadata"
+    metadata.mkdir()
+    (metadata / "sdk_version.yaml").write_text("version: 0.42.0\n", encoding="utf-8")
+    check = doctor_cmd.sdk_provenance_check(str(tmp_path))
+    assert "0.42.0" in check.detail
+
+
+def test_collect_reports_sdk_provenance_only_when_an_sdk_resolves(tmp_path):
+    without_sdk = doctor_cmd._collect(None, workspace_root=str(tmp_path))
+    assert "sdkProvenance" not in {c.name for c in without_sdk}
+
+    with_sdk = doctor_cmd._collect(str(tmp_path), workspace_root=str(tmp_path))
+    assert "sdkProvenance" in {c.name for c in with_sdk}
