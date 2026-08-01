@@ -83,7 +83,7 @@ import typer
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
-from tan.commands.sdk_cmd import SDK_MARKER
+from tan.commands.sdk_cmd import SDK_MARKER, project_pin_issue
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -681,7 +681,7 @@ def sdk_root_resolves(sdk_root: str | None, workspace_root: Path) -> bool:
     reports through `resolve_sdk_tiered` alone, so a bootstrap-child workspace
     gates open here while reporting no `sdk` at all.
     """
-    resolved, tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    resolved, tier, _broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
     if resolved is None:
         return False
     if tier == "sdkRootFlag":
@@ -735,6 +735,7 @@ def _run(
     project = Project.resolved(workspace_root, board_yaml)
     resolved_sdk = resolve_sdk(sdk_root_arg, workspace_root)
     sdk = SdkInfo(resolved_sdk[0], resolved_sdk[1]) if resolved_sdk else None
+    pin_issue = project_pin_issue(resolved_sdk[2], resolved_sdk[1]) if resolved_sdk else None
 
     # App base: a non-`.` positional roots the removal at that app dir,
     # overriding `--project`; `.` falls back to the resolved workspace.
@@ -789,6 +790,11 @@ def _run(
 
     text: list[str] = []
     issues: list[Issue] = []
+    if pin_issue is not None:
+        # tan-cli#263 review: `clean` reached the SDK guard above (something
+        # DID resolve), so the pin's silent fallthrough belongs in the same
+        # place every other non-fatal notice here lands.
+        issues.append(pin_issue)
 
     # Best-effort, manifest-aware sweep. Absence (or an unreadable file) is
     # silent; a parse/version error is a warning, NEVER fatal -- clean must not

@@ -53,6 +53,7 @@ import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import on_path
+from tan.commands.sdk_cmd import project_pin_issue
 from tan.core.flash_plan import (
     FAIL,
     FLOW_D_METHOD,
@@ -210,11 +211,13 @@ def _resolve_project(root: str, board_yaml: str | None) -> Project:
     )
 
 
-def _resolve_sdk(sdk_root: str | None, workspace_root: str) -> tuple[str | None, str | None]:
-    """`(sdk_root, sourceTier)` -- `util.rs::resolve_sdk_root`: `--sdk-root`
-    (terminal) > the project's own `.alp/sdk-path` pin > the machine-global
-    default (`~/.alp/sdk-default`) > the wide positional walk -- the oracle's
-    closed five-value `SdkSourceTier` (`SdkRootFlag`, `ProjectPin`,
+def _resolve_sdk(
+    sdk_root: str | None, workspace_root: str
+) -> tuple[str | None, str | None, str | None]:
+    """`(sdk_root, sourceTier, brokenProjectPin)` -- `util.rs::resolve_sdk_root`:
+    `--sdk-root` (terminal) > the project's own `.alp/sdk-path` pin > the
+    machine-global default (`~/.alp/sdk-default`) > the wide positional walk --
+    the oracle's closed five-value `SdkSourceTier` (`SdkRootFlag`, `ProjectPin`,
     `GlobalDefault`, `Discovery`, `None`); no `ALP_SDK_ROOT` tier (tried and
     reverted -- the oracle only ever WRITES that variable into a build
     slice's env, never reads it back for discovery; the project-pin tier
@@ -226,11 +229,15 @@ def _resolve_sdk(sdk_root: str | None, workspace_root: str) -> tuple[str | None,
     different SDK. The pin/global-default/positional-walk tiers are
     best-effort -- previously skipped here entirely (this port had no writer
     for the pointer files when this comment was written; `tan init` writes
-    `.alp/sdk-path`, so skipping them silently ignored it)."""
+    `.alp/sdk-path`, so skipping them silently ignored it).
+
+    `brokenProjectPin` (tan-cli#263 review): `None` on the `--sdk-root` branch
+    (nothing to fall through from), else whatever
+    [`resolve_sdk_root_ladder_safe`] carried through."""
     if sdk_root is not None:
-        return (sdk_root if _is_sdk_root(sdk_root) else None), "sdkRootFlag"
-    found, tier = resolve_sdk_root_ladder_safe(workspace_root)
-    return found, tier
+        return (sdk_root if _is_sdk_root(sdk_root) else None), "sdkRootFlag", None
+    found, tier, broken_pin = resolve_sdk_root_ladder_safe(workspace_root)
+    return found, tier, broken_pin
 
 
 def _is_sdk_root(path: str) -> bool:
@@ -243,17 +250,19 @@ def _is_sdk_root(path: str) -> bool:
         return False
 
 
-def resolve_sdk_root_ladder_safe(workspace_root: str) -> tuple[str | None, str | None]:
+def resolve_sdk_root_ladder_safe(
+    workspace_root: str,
+) -> tuple[str | None, str | None, str | None]:
     """`build_cmd.resolve_sdk_root_ladder(None, ...)`, made incapable of
     raising -- an unreadable `.alp/sdk-path` pin, an unreadable global-default
     pointer (`~/.alp/sdk-default`), or an unreadable ancestor on the
     positional walk must not become a traceback in a command whose whole job
     is to report an envelope."""
     try:
-        found, tier = resolve_sdk_root_ladder(None, _as_path(workspace_root))
+        found, tier, broken_pin = resolve_sdk_root_ladder(None, _as_path(workspace_root))
     except (OSError, ValueError):
-        return None, None
-    return (str(found), tier) if found is not None else (None, None)
+        return None, None, None
+    return (str(found), tier, broken_pin) if found is not None else (None, None, broken_pin)
 
 
 def _as_path(text: str):
@@ -912,7 +921,7 @@ def _run(
         build_root = _abs_join(app_dir, "build")
 
     # Anchored on the WORKSPACE root, never on `app_dir` -- see `workspace_root`.
-    resolved_sdk, tier = _resolve_sdk(sdk_root_arg, cwd)
+    resolved_sdk, tier, sdk_broken_pin = _resolve_sdk(sdk_root_arg, cwd)
     sdk = SdkInfo(resolved_sdk, tier) if resolved_sdk is not None else None
     if resolved_sdk is None:
         # Faithful to the Python `find_sdk_root() is None` die: `buildRoot` is
@@ -949,6 +958,13 @@ def _run(
 
     text_lines: list[str] = []
     issues: list[Issue] = []
+    pin_issue = project_pin_issue(sdk_broken_pin, tier)
+    if pin_issue is not None:
+        # tan-cli#263 review: of every command in this ladder, flashing
+        # against the silently-wrong SDK is the one with the highest cost --
+        # real hardware, programmed with an image built against metadata for
+        # a checkout that was never the one `.alp/sdk-path` named.
+        issues.append(pin_issue)
     entries: list[dict[str, Any]] = []
     # Seeded with the status-refused slices: they never become a target, so they
     # cannot increment `failed` in the loop -- but a slice `tan build` reports

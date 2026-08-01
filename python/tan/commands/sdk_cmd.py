@@ -285,10 +285,23 @@ def empty_readiness(sdk_path: str) -> dict[str, Any]:
 @dataclass(frozen=True)
 class ActiveSdk:
     """What `sdk current` reports: the active path (or `None`) and the tier that
-    produced it. `tier` is the wire string, camelCase, from `SdkSourceTier`."""
+    produced it. `tier` is the wire string, camelCase, from `SdkSourceTier`.
+
+    `broken_project_pin` (tan-cli#263) is the raw `sdkPath` a workspace
+    `.alp/sdk-path` pointer held when that file existed but its target failed
+    the loader-script check -- `None` on every other path, including "no
+    pointer file at all". Set once, in the one tier that can discover it,
+    then carried through every LOWER tier this call falls through to: a caller
+    that reports the tier which finally answered must still be able to say a
+    pin existed and did not, rather than silently looking as deliberate as a
+    workspace that was never pinned in the first place. Distinct from a
+    SIXTH `sourceTier` value on purpose -- the tier that actually supplied
+    `path` stays accurate; this is a supplementary fact about a REJECTED
+    candidate, reported by the caller via `issues[]` instead."""
 
     path: str | None
     tier: str
+    broken_project_pin: str | None = None
 
 
 def _nearest_ancestor_sdk(start: Path) -> str | None:
@@ -369,25 +382,59 @@ def resolve_sdk_tiered(sdk_root: str | None, workspace_root: Path) -> ActiveSdk:
 
     Both pointer tiers are best-effort by contrast -- each is used only while it
     still points at a real checkout -- so a stale pointer falls through instead
-    of locking the user out of every command.
+    of locking the user out of every command. The project pin's own fallthrough
+    is not silent, though (tan-cli#263): its raw target survives on the
+    returned `ActiveSdk.broken_project_pin` no matter which lower tier ends up
+    answering, so a caller can report "this workspace IS pinned, and the pin
+    does not resolve" instead of looking indistinguishable from a workspace
+    that was never pinned at all -- exactly what let a `tan init` run under a
+    since-moved project silently re-resolve a DIFFERENT alp-sdk checkout with
+    `ok: true`, `issues: []`.
     """
     flag = (sdk_root or "").strip()
     if flag:
         return ActiveSdk(flag, "sdkRootFlag")
 
+    broken_project_pin: str | None = None
     pin = _pointer_target(workspace_root / ".alp" / "sdk-path")
-    if pin is not None and _has_loader_script(Path(pin)):
-        return ActiveSdk(pin, "projectPin")
+    if pin is not None:
+        if _has_loader_script(Path(pin)):
+            return ActiveSdk(pin, "projectPin")
+        broken_project_pin = pin
 
     default = _pointer_target(_home_alp_dir() / "sdk-default")
     if default is not None and _has_loader_script(Path(default)):
-        return ActiveSdk(default, "globalDefault")
+        return ActiveSdk(default, "globalDefault", broken_project_pin)
 
     discovered = discover_workspace_sdk(workspace_root)
     if discovered is not None:
-        return ActiveSdk(discovered, "discovery")
+        return ActiveSdk(discovered, "discovery", broken_project_pin)
 
-    return ActiveSdk(None, "none")
+    return ActiveSdk(None, "none", broken_project_pin)
+
+
+def project_pin_issue(broken_project_pin: str | None, tier: str) -> Issue | None:
+    """The tan-cli#263 warning for an unresolvable `.alp/sdk-path` project pin
+    -- shared by EVERY caller of `resolve_sdk_tiered` (directly, or through
+    `build_cmd.resolve_sdk_root_ladder`/`resolve_sdk_root_wide`), not just `sdk
+    current`. `None` when nothing was rejected, so every call site can do
+    `issue = project_pin_issue(broken, tier); if issue: issues.append(issue)`
+    unconditionally.
+
+    `tan build` is the caller this matters most for: a workspace whose pin
+    silently misses still gets a real build, against whichever SDK the ladder
+    fell through to, with no signal it was not the one `.alp/sdk-path` names
+    -- `sdk current` alone only helps someone already suspicious enough to run
+    it."""
+    if broken_project_pin is None:
+        return None
+    return Issue(
+        "sdk.project-pin-unresolved",
+        "warning",
+        f'.alp/sdk-path names "{broken_project_pin}", which does not resolve '
+        f"to an alp-sdk checkout from the current directory -- falling "
+        f"through to the {tier} tier instead.",
+    )
 
 
 def _default_cache_root() -> Path:
@@ -668,6 +715,22 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
         if readiness is not None
         else no_active_sdk_text(cached_sdk_versions())
     )
+    issues: list[Issue] = []
+    pin_issue = project_pin_issue(active.broken_project_pin, active.tier)
+    if pin_issue is not None:
+        # tan-cli#263: without this, a workspace whose `.alp/sdk-path` names an
+        # unreachable checkout reports `ok: true`, `issues: []`, `sourceTier`
+        # silently one tier lower -- identical to a workspace that was never
+        # pinned at all. `warning`, not `error`: the command still answers the
+        # question asked (SOME SDK, or none, is active); it is the SILENCE
+        # about the rejected pin that was the defect, not the fallthrough
+        # itself.
+        text = [
+            f'Project pin .alp/sdk-path names "{active.broken_project_pin}", which '
+            f"does not resolve to an alp-sdk checkout from here.",
+            *text,
+        ]
+        issues.append(pin_issue)
     _emit(
         json_mode=json_mode,
         data={
@@ -676,7 +739,7 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
             "readiness": readiness,
             "sourceTier": active.tier,
         },
-        issues=[],
+        issues=issues,
         exit_code=ExitCode.SUCCESS,
         text_lines=text,
         # The envelope's optional `sdk` key mirrors the Rust's

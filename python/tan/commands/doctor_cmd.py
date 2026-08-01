@@ -89,6 +89,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import _abs_posix, resolve_sdk_root_ladder
+from tan.commands.sdk_cmd import project_pin_issue
 from tan.core.bootstrap import parse_west_zephyr_pin, parse_zephyr_version_file
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -1097,7 +1098,7 @@ def doctor(
     # docstring). Previously this skipped straight from `--sdk-root` to the
     # positional walk, silently ignoring `tan init`'s own pointer in the same
     # directory.
-    resolved_sdk_root, sdk_tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Forward slashes -- the established envelope contract on this seam
@@ -1132,6 +1133,13 @@ def doctor(
         exit_code = ExitCode.INTERNAL_FAILURE
         data = None
         issues = [Issue("doctor.internal-failure", "error", f"{type(err).__name__}: {err}")]
+
+    # tan-cli#263 review: this is the "tan doctor says ready, 0 issues"
+    # report -- a `.alp/sdk-path` pin that silently missed must show up here,
+    # not just on a `sdk current` a suspicious operator has to think to run.
+    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
+    if pin_issue is not None:
+        issues = [pin_issue, *issues]
 
     if json_mode:
         emit(Envelope("doctor", project, data, issues, exit_code, sdk=sdk))

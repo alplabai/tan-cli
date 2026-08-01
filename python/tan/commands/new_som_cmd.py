@@ -90,7 +90,7 @@ import yaml
 
 from tan.commands.build_cmd import _planner_python
 from tan.commands.doctor_cmd import probe
-from tan.commands.sdk_cmd import SDK_MARKER, resolve_sdk_tiered
+from tan.commands.sdk_cmd import SDK_MARKER, project_pin_issue, resolve_sdk_tiered
 from tan.exit_codes import ExitCode
 
 _SKU_RE = re.compile(r"^E1M-[A-Z0-9-]+$")
@@ -610,6 +610,13 @@ def new_som(
         _fail(_SDK_ROOT_UNRESOLVED)
         return
     resolved_sdk = Path(active.path)
+    # tan-cli#263 review: this command WRITES metadata skeletons into
+    # `resolved_sdk` -- a silently-missed `.alp/sdk-path` pin means porting a
+    # new SoM into the wrong checkout. Text-only warning, matching the rest of
+    # this file (no `--format json` here to carry an `Issue`).
+    pin_issue = project_pin_issue(active.broken_project_pin, active.tier)
+    if pin_issue is not None:
+        typer.echo(f"new-som: warning: {pin_issue.message}", err=True)
 
     # -- 1. Gather inputs.  Interactive prompts need a real terminal; in a
     # pipe / CI, fail fast naming exactly what is missing instead of an

@@ -92,6 +92,7 @@ import typer
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
 from tan import planner_emit
 from tan.commands.build_cmd import _planner_python, resolve_sdk_root_wide
+from tan.commands.sdk_cmd import project_pin_issue
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -638,8 +639,9 @@ def _resolve_board_path(board_yaml: str | None, workspace_root: Path) -> Path:
 
 def _resolve_sdk_root(
     sdk_root: str | None, workspace_root: Path
-) -> tuple[Path, str, str] | None:
-    """`(path, sourceTier, reported)` -- or `None` when unresolved. `--sdk-root`
+) -> tuple[Path, str, str, str | None] | None:
+    """`(path, sourceTier, reported, brokenProjectPin)` -- or `None` when
+    unresolved. `--sdk-root`
     is TERMINAL: an explicit path that is not an SDK checkout fails loudly here
     rather than silently falling through to discovery and generating against a
     different checkout than the caller named (I-31); its tier is always
@@ -663,10 +665,10 @@ def _resolve_sdk_root(
     if sdk_root:
         candidate = Path(sdk_root)
         if (candidate / "scripts" / "alp_project.py").is_file():
-            return candidate, "sdkRootFlag", sdk_root
+            return candidate, "sdkRootFlag", sdk_root, None
         return None
-    found, tier = resolve_sdk_root_wide(None, workspace_root)
-    return (found, tier, str(found)) if found is not None else None
+    found, tier, broken_pin = resolve_sdk_root_wide(None, workspace_root)
+    return (found, tier, str(found), broken_pin) if found is not None else None
 
 
 def _finish(
@@ -854,7 +856,7 @@ def generate(
                 "switch <version|path>`, or place the project near an alp-sdk checkout.",
                 ExitCode.VALIDATION_FAILURE,
             )
-        resolved_sdk, sdk_tier, sdk_reported = resolved
+        resolved_sdk, sdk_tier, sdk_reported, sdk_broken_pin = resolved
         # Set only now: every guard from here on runs with a resolved SDK, so
         # the envelope carries `sdk` on both success and a later refusal
         # (`--target`/`--core` mistakes, an overlay guard, ...), matching the
@@ -957,6 +959,9 @@ def generate(
                     f"in-process planner: {fallback_reason}",
                 )
             )
+        pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
+        if pin_issue is not None:
+            issues.append(pin_issue)
     except GenerateError as err:
         refuse(err)
         return
