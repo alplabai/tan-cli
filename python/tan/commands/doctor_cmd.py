@@ -110,7 +110,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import _abs_posix, discover_sdk_root, resolve_sdk_root_ladder
-from tan.commands.sdk_cmd import parse_sdk_version_yaml, project_pin_issue
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, parse_sdk_version_yaml, project_pin_issue
 from tan.core.bootstrap import (
     MissingPrerequisite,
     PrereqFailure,
@@ -564,9 +564,11 @@ def python_floor_skew_check(
             f"is standing in"
         )
         fix = (
-            "Resolve or pin an alp-sdk checkout (`tan sdk switch <version|path>`) so its "
-            "own metadata/bootstrap.json pythonMinVersion is read instead of tan's "
-            "built-in floor."
+            # `tan sdk switch` refuses in this build (tan-cli#305) -- point at
+            # the mechanism that actually resolves one instead.
+            f"Resolve an alp-sdk checkout: {NO_SDK_NEXT_STEPS}. That checkout's "
+            "own metadata/bootstrap.json pythonMinVersion is then read instead "
+            "of tan's built-in floor."
         )
     return Check(
         "pythonFloor",
@@ -1279,11 +1281,18 @@ def sdk_check(
     """`sdk` -- is an alp-sdk checkout resolved at all? Mirrors
     `tan_core::preflight::build_preflight_checks`'s `sdk` check.
 
-    `project_scope` (the `--project` value, unjoined) names the SCOPED
-    `tan sdk switch` a customer actually needs: the `.alp/sdk-path` pointer
-    `tan sdk switch` writes is scoped to `--project`, so a bare
-    `tan sdk switch <path>` from a `tan --project <p> doctor` run reports
-    success and changes nothing about THIS invocation (tan-cli#101).
+    `project_scope` (the `--project` value, unjoined) used to name a SCOPED
+    `tan sdk switch <path>` fix (tan-cli#101: the `.alp/sdk-path` pointer
+    `sdk switch` writes is scoped to `--project`, so a bare `tan sdk switch
+    <path>` from a `tan --project <p> doctor` run would have reported success
+    while changing nothing about THIS invocation). That fix is moot now that
+    `sdk switch` refuses outright in every build of tan on this branch
+    (tan-cli#305, `sdk_cmd._run_not_ported`) -- recommending it, scoped or
+    not, was the actual dead end #305 reported, since the ONLY thing left
+    that resolves an SDK at all is `--sdk-root`, which needs no scoping. The
+    parameter stays (worded into the fail detail below) because `--project`
+    is still a fact worth naming, just no longer the reason for a different
+    remedy.
 
     `tier`/`unselected_candidate` (tan-cli#301) -- a reported host named THREE
     different roots in one report (a leftover `globalDefault`, a stale
@@ -1312,20 +1321,12 @@ def sdk_check(
                 )
             detail += ")"
         return Check("sdk", "pass", detail)
-    if project_scope is not None:
-        fix = f"tan --project {project_scope} sdk switch <path>"
-        return Check(
-            "sdk",
-            "fail",
-            "no SDK selected -- the `.alp/sdk-path` pointer is scoped to `--project`, so "
-            f"run `{fix}` (or pass `--sdk-root <path>`)",
-            fix,
-        )
+    scope_note = f" for --project {project_scope}" if project_scope is not None else ""
     return Check(
         "sdk",
         "fail",
-        "no SDK selected -- run `tan sdk switch <path>` or `tan sdk install <ver>`",
-        "tan sdk switch <path>",
+        f"no SDK selected{scope_note} -- {NO_SDK_NEXT_STEPS}",
+        "--sdk-root <path>",
     )
 
 

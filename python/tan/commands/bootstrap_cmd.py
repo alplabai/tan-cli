@@ -50,6 +50,7 @@ stray byte there breaks the extension silently.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -67,7 +68,13 @@ from tan.commands.doctor_cmd import (
     zephyr_python_floor,
 )
 from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
-from tan.commands.sdk_cmd import SDK_MARKER, _home_alp_dir, project_pin_issue, resolve_sdk_tiered
+from tan.commands.sdk_cmd import (
+    NO_SDK_NEXT_STEPS,
+    SDK_MARKER,
+    _home_alp_dir,
+    project_pin_issue,
+    resolve_sdk_tiered,
+)
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_REL_PATH,
     DEFAULT_WORKSPACE_DIR_NAME,
@@ -110,6 +117,7 @@ from tan.core.bootstrap import (
     venv_exe_names,
     windows_python_not_runnable,
     windows_refusal,
+    workspace_sdk_record_json,
     yocto_gate,
     yocto_mixed_warning,
     yocto_only_refusal,
@@ -986,7 +994,24 @@ def _safe_exists(path: Path) -> bool:
         return False
 
 
-def record_workspace_sdk(topdir: Path, sdk_root: str) -> None:
+def _hash_requirements_file(path: Path) -> str | None:
+    """Lowercase-hex SHA-256 of `path`'s bytes, or `None` when it cannot be
+    read -- the same "absence, not a claim" rule `record_workspace_sdk`
+    already applies to the rest of this record: a hash tan could not compute
+    must never be silently reported as a match OR a mismatch later."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def record_workspace_sdk(
+    topdir: Path,
+    sdk_root: str,
+    venv_dir_name: str | None = None,
+    venv_layout: str | None = None,
+    requirements_path: Path | None = None,
+) -> None:
     """Record that `topdir`'s workspace is now synced to `sdk_root`, after a
     `west update` that actually ran.
 
@@ -996,14 +1021,30 @@ def record_workspace_sdk(topdir: Path, sdk_root: str) -> None:
     cannot stand in for the update having happened. Best-effort -- a workspace
     that cannot record it simply keeps getting the `tan bootstrap` advice.
 
-    Broadly guarded on purpose: `sdk_pointer_json` renders a timestamp and can
-    throw on an out-of-range `SOURCE_DATE_EPOCH` (the milliseconds case), and a
-    best-effort record must never be the thing that kills the command.
+    `venv_dir_name`/`venv_layout`/`requirements_path` are the tan-cli#292
+    venv-provenance stamp `doctor`'s `venvProvenance` check reads back:
+    which venv this run populated, which bin-dir layout it created (#291),
+    and a content hash of the Zephyr requirements file that populated it
+    (`requirements_path`, hashed here -- the CALLER passes the path, not a
+    precomputed digest, so a caller with none of this to report can simply
+    omit the arguments rather than duplicating the hashing). All optional and
+    independently best-effort: a caller mid-`--no-pip` or one that cannot
+    determine the venv layout still gets the `sdkPath` half of the record
+    written, which is strictly more than tan wrote before tan-cli#292.
+
+    Broadly guarded on purpose: `workspace_sdk_record_json` renders a
+    timestamp and can throw on an out-of-range `SOURCE_DATE_EPOCH` (the
+    milliseconds case), and a best-effort record must never be the thing that
+    kills the command.
     """
     try:
+        digest = _hash_requirements_file(requirements_path) if requirements_path else None
         record = topdir / ".west" / "tan-workspace-sdk"
         record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(sdk_pointer_json(sdk_root), encoding="utf-8")
+        record.write_text(
+            workspace_sdk_record_json(sdk_root, venv_dir_name, venv_layout, digest),
+            encoding="utf-8",
+        )
     except Exception:  # noqa: BLE001 -- best-effort by contract; see the docstring
         pass
 
@@ -1712,8 +1753,12 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 ExitCode.VALIDATION_FAILURE,
                 "sdk-root-unresolved",
                 [
-                    "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk "
-                    "switch <version|path>`, or run `tan sdk install <version>` first."
+                    # `tan sdk switch`/`tan sdk install` both refuse in this
+                    # build (tan-cli#305, `sdk_cmd._run_not_ported`) -- naming
+                    # either here left a clean host with no way forward at
+                    # all. `NO_SDK_NEXT_STEPS` is the one mechanism that
+                    # actually resolves an SDK, shared with `doctor_cmd`.
+                    f"alp-sdk root is unresolved -- {NO_SDK_NEXT_STEPS}."
                 ],
                 _data(
                     args=flags,
@@ -2207,7 +2252,13 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # returned success over trees belonging to the OTHER SDK, and recording
         # a sync would assert the very thing that did not happen.
         if outcome != "failed" and not plan.reuse and not dry_run:
-            record_workspace_sdk(paths.workspace_dir, sdk_root)
+            record_workspace_sdk(
+                paths.workspace_dir,
+                sdk_root,
+                venv_dir_name=ws.facts.venv_dir_name,
+                venv_layout=venv.bin_dir,
+                requirements_path=ws.workspace_dir / ws.facts.zephyr_requirements_path,
+            )
 
     if no_pip:
         log.line("Skipping pip installs (--no-pip)")

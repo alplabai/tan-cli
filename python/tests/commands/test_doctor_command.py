@@ -1250,18 +1250,29 @@ def test_sdk_check_distinguishes_a_resolved_sdk_from_an_unresolved_one():
 
     unresolved = doctor_cmd.sdk_check(None, project_scope=None)
     assert unresolved.status == "fail"
-    assert "tan sdk switch" in unresolved.detail
+    # tan-cli#305: `sdk switch` refuses in this build -- the fail detail must
+    # not send the user to it, and the only thing that still resolves an SDK
+    # is `--sdk-root`.
+    assert "sdk switch" not in unresolved.detail
+    assert "sdk install" not in unresolved.detail
+    assert "--sdk-root" in unresolved.detail
+    assert unresolved.fix == "--sdk-root <path>"
 
 
-def test_sdk_check_names_the_project_scoped_switch_when_a_project_scope_is_given():
-    """tan-cli#101: a bare `tan sdk switch <path>` reports success and leaves
-    a `tan --project <p> ...` invocation failing byte-for-byte identically --
-    the hint has to carry the scope."""
+def test_sdk_check_names_the_project_scope_without_recommending_a_refused_switch():
+    """tan-cli#101 used to hint a project-scoped `tan sdk switch <path>` here,
+    reasoning a bare one reports success while leaving a `tan --project <p>
+    ...` invocation failing identically. tan-cli#305: that hint is moot now
+    that `sdk switch` refuses in EVERY scope -- the fix is `--sdk-root`
+    regardless, so the project is named only as context, never as part of a
+    broken remedy."""
     check = doctor_cmd.sdk_check(None, project_scope="examples/uart-echo")
     assert check.status == "fail"
-    assert "tan --project examples/uart-echo sdk switch <path>" in check.detail
+    assert "examples/uart-echo" in check.detail
+    assert "sdk switch" not in check.detail
+    assert "sdk install" not in check.detail
     assert "--sdk-root" in check.detail
-    assert check.fix == "tan --project examples/uart-echo sdk switch <path>"
+    assert check.fix == "--sdk-root <path>"
 
 
 # --------------------------------------------------------------------------
