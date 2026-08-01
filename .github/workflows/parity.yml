@@ -379,8 +379,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          commit=$(grep -oE 'PINNED_SDK_COMMIT = "[0-9a-f]{40}"' \
-              python/tests/gates/test_planner_relocation_freshness.py | grep -oE '[0-9a-f]{40}')
+          # ANCHORED at line start on purpose. The gate also declares
+          # `HAND_PORT_PINNED_SDK_COMMIT` (the separate pin the hand-ported
+          # emitters are audited against), and an unanchored pattern matches
+          # that line too because it CONTAINS the substring
+          # `PINNED_SDK_COMMIT = "..."`. That returned two SHAs, so
+          # `commit=${commit}` wrote a second bare line into $GITHUB_OUTPUT and
+          # the step died with `Invalid format '<sha>'` -- a grep standing in
+          # for a parse, which is what the second pin quietly broke.
+          gate=python/tests/gates/test_planner_relocation_freshness.py
+          commit=$(grep -oE '^PINNED_SDK_COMMIT = "[0-9a-f]{40}"' "$gate" \
+              | grep -oE '[0-9a-f]{40}')
+          # Exactly one, or say so here rather than emitting a malformed output
+          # that fails three steps later with nothing naming the cause.
+          n=$(printf '%s\n' "$commit" | grep -c .)
+          if [ "$n" -ne 1 ]; then
+            echo "::error::expected exactly ONE ^PINNED_SDK_COMMIT in ${gate}, found ${n}: ${commit}"
+            exit 1
+          fi
           echo "commit=${commit}" >> "$GITHUB_OUTPUT"
           echo "::notice::planner-relocation-freshness audited against alp-sdk ${commit}"
 
