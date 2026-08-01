@@ -57,6 +57,7 @@ from tan.commands.build_output import (
     resolve_metadata_sdk_root,
     resolve_project_context,
 )
+from tan.core.pending import is_pending_placeholder
 from tan.core.size import (
     MemoryBudget,
     SliceSize,
@@ -242,8 +243,12 @@ def _read_som_preset(path: str) -> tuple[str, str | None] | None:
 
 
 def _clean_str(value: Any) -> str | None:
-    """`str_clean`: a string, with the `TBD` sentinel dropped to absent."""
-    if not isinstance(value, str) or value.strip() == "TBD":
+    """`str_clean`: a string, with the `TBD` sentinel dropped to absent.
+
+    Delegates to `tan.core.pending.is_pending_placeholder` (#276) for the
+    trimmed, non-case-folded, non-substring comparison shared with `tan
+    flash` -- not a second hand-rolled `== "TBD"`."""
+    if not isinstance(value, str) or is_pending_placeholder(value):
         return None
     return value
 

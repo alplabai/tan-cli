@@ -42,9 +42,6 @@ concurrency:
   group: getting-started-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  CARGO_TERM_COLOR: always
-
 jobs:
   first-install:
     name: "first install -- install.sh -> bootstrap -> init -> build"
@@ -149,17 +146,32 @@ jobs:
       # So: the installer is verified for real above, and then the binary UNDER
       # TEST replaces it at the path install.sh chose. Everything after this
       # point runs the PR's `tan`, resolved off PATH the way a customer's shell
-      # resolves it. Debug build, like parity.yml's -- a release build costs
-      # minutes here and changes nothing this job asserts.
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          rustflags: "" # keep parity with the local gates (see ci.yml's lint job)
+      # resolves it.
+      #
+      # Frozen via `python/scripts/build_binary.sh` -- the SAME script
+      # release.yml's Linux leg runs -- NOT `cargo build --bin tan` (tan-cli#278).
+      # The release assets are PyInstaller --onefile freezes of `python/`, not
+      # cargo builds of `crates/` (tan-cli#271): v0.5.0-rc1's first tag published
+      # ZERO assets because `python:3.12-slim-bullseye` (release.yml's freeze
+      # image) lacks `binutils`, PyInstaller refuses without `objdump`, and this
+      # job's old `cargo build` smoke test never touched that path at all. The
+      # steps below mirror release.yml's Linux build leg (venv, `.[monitor]`,
+      # `pyinstaller>=6.10`, the binutils install), swapping the frozen binary in
+      # at the same path install.sh chose, same as before.
+      - name: binutils (PyInstaller shells out to objdump on Linux; release.yml's freeze image lacks it)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends binutils
 
-      - name: build tan from this checkout and swap it in
+      - name: freeze tan from this checkout (python/scripts/build_binary.sh) and swap it in
+        working-directory: python
         run: |
           set -euo pipefail
-          cargo build --locked --bin tan
-          install -m 0755 target/debug/tan "$HOME/.local/bin/tan"
+          python -m venv .venv-build
+          .venv-build/bin/python -m pip install --quiet --upgrade pip
+          .venv-build/bin/python -m pip install --quiet ".[monitor]" "pyinstaller>=6.10"
+          PYTHON=.venv-build/bin/python bash scripts/build_binary.sh
+          install -m 0755 dist/tan "$HOME/.local/bin/tan"
           command -v tan
           tan --version
 

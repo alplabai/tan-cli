@@ -303,6 +303,21 @@ boot_order: []
     assert payload["data"]["entries"] == []
 
 
+
+_AEN_M55_COLLISION_MANIFEST = """schema_version: 1
+hw_info: {sku: E1M-AEN801}
+slices:
+- {core_id: m55_hp, os: zephyr, output_artefact: build_hp/zephyr/zephyr.bin,
+   status: ok, flash_method: zephyr_west_flash, flash_args: {}}
+- {core_id: m55_he, os: zephyr, output_artefact: build_he/zephyr/zephyr.bin,
+   status: ok, flash_method: zephyr_west_flash, flash_args: {}}
+helper_mcus: []
+boot_order: []
+"""
+
+
+
+
 def test_build_root_pointing_at_a_regular_file(tmp_path):
     (tmp_path / "notadir").write_text("x", encoding="utf-8")
     exit_code, out, _ = run_flash(
@@ -1592,10 +1607,15 @@ def test_no_spawn_for_a_pending_artefact_even_with_force_confirm(tmp_path, monke
 
 def test_is_pending_is_the_one_definition_shared_with_the_bundle_writer():
     """#222's central ask: decide what an unfilled field IS once, not per
-    consumer. `tan image` and `tan flash` must never drift apart on it."""
-    from tan.core.image_bundle import PENDING_SENTINEL
+    consumer. `tan image` and `tan flash` must never drift apart on it.
 
-    assert flash_plan.PENDING_SENTINEL is PENDING_SENTINEL
+    #276 moved the definition to the neutral `tan.core.pending` module (no
+    flash- or image-bundle machinery behind it) so non-flash readers like
+    `tan.core.size` can share it too; `flash_plan.PENDING_SENTINEL` is now an
+    alias for it rather than a value copied from `image_bundle`."""
+    from tan.core.pending import PENDING_PLACEHOLDER
+
+    assert flash_plan.PENDING_SENTINEL is PENDING_PLACEHOLDER
     assert flash_plan.is_pending("TBD")
     assert flash_plan.is_pending("  TBD  ")
     assert not flash_plan.is_pending("tbd")

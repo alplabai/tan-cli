@@ -445,6 +445,21 @@ def test_an_unset_path_resolves_nothing_rather_than_raising(monkeypatch):
     assert _find_on_path("size") is False
 
 
+def test_clean_str_drops_a_padded_tbd_too():
+    """#276: `_clean_str` (the SoM-preset `silicon`/`silicon_variant` reader)
+    already trimmed before comparing; this pins that it still does, alongside
+    the sibling fix in `tan.core.size.resolve_variant`."""
+    from tan.commands.size_cmd import _clean_str
+
+    assert _clean_str(" TBD ") is None
+    assert _clean_str("\tTBD\n") is None
+    assert _clean_str("TBD") is None
+    assert _clean_str("TBD-1234") == "TBD-1234"
+    assert _clean_str("tbd") == "tbd"
+    assert _clean_str(None) is None
+    assert _clean_str(123) is None
+
+
 def test_absurd_core_id_and_os_values_do_not_crash(tmp_path):
     write(
         tmp_path / "br" / "system-manifest.yaml",

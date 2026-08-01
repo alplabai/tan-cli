@@ -32,7 +32,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from tan.core.image_bundle import PENDING_SENTINEL
+from tan.core.pending import PENDING_PLACEHOLDER as PENDING_SENTINEL, is_pending_placeholder
 
 #: The system-manifest schema major this command consumes. A different value is
 #: REFUSED rather than read as if it were v1 -- mirrors
@@ -274,6 +274,7 @@ class TargetPlan:
     refused_skipped: tuple[str, ...] = ()
 
 
+
 def plan_flash_targets(
     manifest: Manifest, core: str | None = None, helper: str | None = None
 ) -> TargetPlan:
@@ -396,6 +397,7 @@ def plan_flash_targets(
                     update_channel=h.update_channel,
                 )
             )
+
 
     return TargetPlan(
         tuple(targets), tuple(warnings), tuple(refused), tuple(refused_skipped)
@@ -631,11 +633,17 @@ def is_pending(value: Any) -> bool:
     widening to it means widening the SDK's convention first, in one place,
     not here.
 
-    The constant is SHARED with the bundle writer (`image_bundle`) so `tan
-    image` and `tan flash` can never disagree about what "unfilled" means --
-    which is the central ask of #222: decide it once, not per consumer.
+    The comparison is the single `tan.core.pending.is_pending_placeholder`
+    definition (#276): the neutral module with no flash- or image-bundle
+    machinery behind it, so `tan.core.size` (and `pinmux`, once ported) can
+    read the same rule without pulling flash internals in. `PENDING_SENTINEL`
+    stays the name this module exports -- `flash_cmd` and the flash tests
+    already spell it that way -- but it is now an alias for
+    `pending.PENDING_PLACEHOLDER`, not a second definition. `tan image`'s own
+    `image_bundle.PENDING_SENTINEL` is still a separate `"TBD"` literal;
+    pointing it at the same module too is a follow-up outside flash_plan.py.
     """
-    return isinstance(value, str) and value.strip() == PENDING_SENTINEL
+    return is_pending_placeholder(value)
 
 
 def flash_args_has_tbd(value: Any) -> bool:

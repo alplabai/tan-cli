@@ -39,6 +39,20 @@ TIME, and that is load-bearing, not style. This gate used to read
 EVERY run, including runs with the variable exported. It had therefore never
 once compared a hash, which is how the fork drifted eleven alp-sdk commits
 without a word (tan-cli#275). A gate that cannot fail is not a gate.
+
+tan-cli#279: PINNED_HASHES only ever looks inside `scripts/alp_orchestrate/`,
+so a HAND-PORT of some OTHER alp-sdk file is invisible to it by construction --
+`git log <pinned>..<new> -- scripts/alp_orchestrate` comes back empty and
+reassuring while such a file drifts. `zephyr_board.py`
+(`scripts/gen_zephyr_board.py`) and `project_loader.py`
+(`scripts/alp_project_loader.py`) both did, and both shipped real defects
+before anything noticed (a missing `CONFIG_USE_DT_CODE_PARTITION=y`, and an
+unaudited unknown-`hw_rev` path). `HAND_PORT_HASHES` below closes that for the
+ten known hand-ports; `test_every_planner_module_is_tracked_or_declared_exempt`
+closes it for the CLASS, by asserting every `.py` file under `tan/planner/`
+is named in one of PINNED_HASHES, HAND_PORT_SOURCES, or
+EXEMPT_FROM_RELOCATION_TRACKING, so a future hand-port with none of the three
+has nowhere to hide.
 """
 
 from __future__ import annotations
@@ -85,6 +99,54 @@ PINNED_HASHES: dict[str, str] = {
     "topology.py": "12f5f62d3adeb9e935594934fd2fc2b1fbeaec6f466d6dd89c329c54e844f3b1",
     "validate.py": "2dbe9dcb36ff0ebe4c968ef120983342aa00f02f32b9166f9c1608d1578495e7",
 }
+
+#: alp-sdk commit the HAND-PORTED `tan/planner/` modules below (everything
+#: pinned in HAND_PORT_HASHES) were last audited against -- the commit
+#: `v0.15.0-rc1` names, not the tag itself, so a tag that is later moved
+#: cannot silently repoint what this pins. `zephyr_board.py` and
+#: `project_loader.py` were re-vendored to this point in 947f3d0 / 52fdd01.
+HAND_PORT_PINNED_SDK_COMMIT = "996937ac4b452260628cf2c6adad4be31483a3d4"  # alp-sdk v0.15.0-rc1
+
+#: sha256 of every alp-sdk source file a `tan/planner/**` module was
+#: hand-ported from OUTSIDE `scripts/alp_orchestrate/`, keyed by its
+#: alp-sdk-relative path -- NOT by filename: `project_loader.py` and
+#: `som_metadata.py` are both ported out of the SAME
+#: `scripts/alp_project_loader.py`, so a filename-keyed table (like
+#: PINNED_HASHES above, where the relocation is 1:1) cannot hold this.
+HAND_PORT_HASHES: dict[str, str] = {
+    "scripts/gen_zephyr_board.py": "2fb2a991431494c41e0d9eac5541100d6159663ad525ac492819defbffa05467",
+    "scripts/alp_project_loader.py": "7ae0c9aa135d1f39b6a2904f1b5b5ae12febdc13795b8bbe9a7580c5edd34ff7",
+    "scripts/alp_template.py": "45efe843937faf44d31e6e6e382d4b793b76da3b6cc01d5a5c8edb45084aadc0",
+    "scripts/alp_project_emit/__init__.py": "62c4742bc373e7fafcd8aa864ad7692d3c05b610c6d7457023aeb82c98847d88",
+    "scripts/alp_project_emit/bom_netlist.py": "d2ccef0b4453aede2119cf9af1de7c1f97f2780f7cf1ec7e9b717aafaa8e32f8",
+    "scripts/alp_project_emit/dts.py": "cb6d4278e2fc886a23c28f2ef30b4ae9714738071219f7c29cbccbbeb1bc1782",
+    "scripts/alp_project_emit/hw_info.py": "e1ff1f64e16a275758bec27550d1811b3cc8d3ac73d32325e63f9402ec83715c",
+    "scripts/alp_project_emit/native_sim.py": "24943e7099d745b254b853135ff0b4ae8415be7946d93170d479b637105f18c0",
+    "scripts/alp_project_emit/west_libs.py": "0bfad8fb6c22b955d0554f8fffca8c1c9bf9f73d3c64778b9ba2de76eb6a972d",
+}
+
+#: `tan/planner/`-relative path -> the alp-sdk-relative source path it was
+#: hand-ported from (a key into HAND_PORT_HASHES). Doubles as the coverage
+#: list `test_every_planner_module_is_tracked_or_declared_exempt` checks
+#: every on-disk `tan/planner/**.py` file against.
+HAND_PORT_SOURCES: dict[str, str] = {
+    "zephyr_board.py": "scripts/gen_zephyr_board.py",
+    "project_loader.py": "scripts/alp_project_loader.py",
+    "som_metadata.py": "scripts/alp_project_loader.py",
+    "template.py": "scripts/alp_template.py",
+    "project_emit/__init__.py": "scripts/alp_project_emit/__init__.py",
+    "project_emit/bom_netlist.py": "scripts/alp_project_emit/bom_netlist.py",
+    "project_emit/dts.py": "scripts/alp_project_emit/dts.py",
+    "project_emit/hw_info.py": "scripts/alp_project_emit/hw_info.py",
+    "project_emit/native_sim.py": "scripts/alp_project_emit/native_sim.py",
+    "project_emit/west_libs.py": "scripts/alp_project_emit/west_libs.py",
+}
+
+#: `tan/planner/`-relative paths with no alp-sdk source at all -- original tan
+#: code, not a port. Empty today: every current file traces to PINNED_HASHES
+#: or HAND_PORT_SOURCES. A file belongs here only if it genuinely has no
+#: alp-sdk counterpart; a real hand-port belongs in HAND_PORT_SOURCES instead.
+EXEMPT_FROM_RELOCATION_TRACKING: frozenset[str] = frozenset()
 
 
 #: Resolved at import time -- see the module docstring on why that matters.
@@ -140,4 +202,69 @@ def test_relocated_planner_modules_match_the_pinned_sdk_audit():
         "into the matching tan/planner/ module, then update PINNED_HASHES "
         "(and PINNED_SDK_COMMIT) in this file to re-pin the audit:\n  "
         + "\n  ".join(drifted)
+    )
+
+
+def test_hand_ported_planner_modules_match_their_pinned_sdk_source():
+    """tan-cli#279: the HAND-PORT half of the staleness gate.
+
+    Same shape as `test_relocated_planner_modules_match_the_pinned_sdk_audit`
+    above, but keyed by the alp-sdk-relative source path rather than a
+    `scripts/alp_orchestrate/`-relative name -- these nine files live all over
+    alp-sdk's `scripts/` tree, not in one directory.
+    """
+    root = _sdk_root()
+    drifted: list[str] = []
+    for rel_path, pinned_hash in HAND_PORT_HASHES.items():
+        upstream = root / rel_path
+        if not upstream.is_file():
+            drifted.append(f"{rel_path}: gone from the bound SDK checkout")
+            continue
+        current_hash = hashlib.sha256(upstream.read_bytes()).hexdigest()
+        if current_hash != pinned_hash:
+            drifted.append(
+                f"{rel_path}: sha256 {current_hash} != pinned {pinned_hash}"
+            )
+    assert not drifted, (
+        "a tan/planner/ hand-port's alp-sdk source moved past the commit "
+        f"({HAND_PORT_PINNED_SDK_COMMIT}) it was last audited against. Diff "
+        "each file below in the bound alp-sdk checkout, port the behavioural "
+        "delta into the tan/planner/ module(s) HAND_PORT_SOURCES names for it, "
+        "then update HAND_PORT_HASHES (and HAND_PORT_PINNED_SDK_COMMIT) in "
+        "this file to re-pin the audit:\n  "
+        + "\n  ".join(drifted)
+    )
+
+
+def test_every_planner_module_is_tracked_or_declared_exempt():
+    """tan-cli#279: the COVERAGE half -- no bound alp-sdk checkout needed.
+
+    The two tests above only ever check files that are already keys in
+    PINNED_HASHES / HAND_PORT_HASHES, so a brand-new hand-port added to
+    `tan/planner/` from yet another alp-sdk source is invisible to both --
+    which is exactly how `zephyr_board.py` and `project_loader.py` escaped
+    for as long as they did. This asserts the SET instead: every `.py` file
+    that exists on disk under `tan/planner/` must be named in one of
+    PINNED_HASHES (relocated from `scripts/alp_orchestrate/`),
+    HAND_PORT_SOURCES (hand-ported from elsewhere), or
+    EXEMPT_FROM_RELOCATION_TRACKING (no alp-sdk source at all) -- so a future
+    hand-port with none of the three has nowhere to hide.
+    """
+    planner = pathlib.Path(__file__).resolve().parents[2] / "tan" / "planner"
+    tracked = set(PINNED_HASHES) | set(HAND_PORT_SOURCES) | EXEMPT_FROM_RELOCATION_TRACKING
+    untracked = sorted(
+        rel
+        for p in planner.rglob("*.py")
+        for rel in [str(p.relative_to(planner)).replace("\\", "/")]
+        if rel not in tracked
+    )
+    assert not untracked, (
+        "tan/planner/ has file(s) with no recorded alp-sdk origin: "
+        + ", ".join(untracked)
+        + ". If it is a hand-port of an alp-sdk file OUTSIDE "
+        "scripts/alp_orchestrate/, add it to HAND_PORT_HASHES + "
+        "HAND_PORT_SOURCES above (tan-cli#279). If it relocated FROM "
+        "scripts/alp_orchestrate/, its basename belongs in PINNED_HASHES "
+        "instead. If it has no alp-sdk source at all, declare it in "
+        "EXEMPT_FROM_RELOCATION_TRACKING with a one-line reason."
     )

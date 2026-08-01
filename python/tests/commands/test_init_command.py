@@ -572,8 +572,10 @@ def test_from_example_copies_the_tree_and_retargets_the_som(tmp_path):
     assert env["data"]["templateId"] == "example:peripheral-io/hello-world"
     assert env["data"]["written"] == ["board.yaml", "src/main.c"]
     board = (tmp_path / "copy" / "board.yaml").read_text(encoding="utf-8")
-    # Only the value token moves; the column-aligned comment survives.
-    assert "  sku: E1M-V2N101           # aligned comment\n" in board
+    # The value token moves; a stale trailing comment (it named the ORIGINAL
+    # SoM's vendor) is dropped rather than carried onto the new SKU.
+    assert "  sku: E1M-V2N101\n" in board
+    assert "aligned comment" not in board
     # `--sdk-root ./sdk` is recorded VERBATIM, not normalised to `sdk`: the Rust
     # returns an explicit `--sdk-root` as-is, and both binaries write this same
     # pointer file.

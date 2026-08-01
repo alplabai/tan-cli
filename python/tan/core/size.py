@@ -22,6 +22,8 @@ import struct
 from dataclasses import dataclass, field
 from typing import Any
 
+from tan.core.pending import is_pending_placeholder
+
 #: ELF `sh_flags` bits used to classify a section.
 SHF_WRITE = 0x1
 SHF_ALLOC = 0x2
@@ -272,10 +274,11 @@ def resolve_variant(
     silicon_variant: str | None, sku: str | None, variants: list[dict]
 ) -> dict | None:
     """Resolve a SoM preset to its matching SoC-JSON variant: forward via
-    `silicon_variant == order_code` (skipping empty / `TBD`), then reverse via
-    `sku in alp_module_skus`. `None` when neither path resolves. A forward value
-    that names no variant falls THROUGH to the reverse lookup."""
-    if silicon_variant and silicon_variant != "TBD":
+    `silicon_variant == order_code` (skipping empty / `TBD`, trimmed -- #276),
+    then reverse via `sku in alp_module_skus`. `None` when neither path
+    resolves. A forward value that names no variant falls THROUGH to the
+    reverse lookup."""
+    if silicon_variant and not is_pending_placeholder(silicon_variant):
         for variant in variants:
             if variant.get("order_code") == silicon_variant:
                 return variant
