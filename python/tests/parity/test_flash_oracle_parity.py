@@ -23,12 +23,13 @@ import shutil
 
 import pytest
 
-from .oracle import ENVELOPE, compare, rust_binary
+from .oracle import ENVELOPE, compare, missing_for_live, rust_binary, rust_run
 
 RUST = rust_binary()
 
 pytestmark = pytest.mark.skipif(
-    RUST is None, reason="no Rust tan to diff against; set TAN_RUST_BINARY"
+    missing_for_live(RUST),
+    reason="TAN_PARITY_LIVE=1 needs a Rust tan; set TAN_RUST_BINARY",
 )
 
 #: A manifest with one Zephyr slice whose `flash_method`/`flash_args` the case
@@ -498,7 +499,7 @@ def test_unknown_method_diverges_by_exactly_the_flow_d_registry_key(work_dir):
     from .oracle import _run, python_command  # noqa: PLC0415 -- test-only seam
 
     argv = _argv([])
-    rust_code, rust_out = _run([RUST], argv, work_dir, work_dir)
+    rust_code, rust_out = rust_run(argv, work_dir, work_dir)
     py_code, py_out = _run(python_command(), argv, work_dir, work_dir)
     assert rust_code == py_code == 1
     assert _available(py_out) - _available(rust_out) == {"alif_mram_jlink"}
@@ -552,7 +553,10 @@ def test_manifest_shape_errors_agree_on_code_and_exit(case_id, manifest, extra, 
     assert offending <= {"issues"}, f"{case_id}: unexpected divergence: {result.diffs}"
     from .oracle import _run, python_command  # noqa: PLC0415 -- test-only seam
 
-    for command in ([RUST], python_command()):
-        exit_code, payload = _run(command, argv, work_dir, work_dir)
-        assert exit_code == 1, f"{case_id}: {command} exited {exit_code}"
-        assert [i["code"] for i in payload["issues"]] == [code], f"{case_id}: {payload['issues']}"
+    sides = {
+        "rust": rust_run(argv, work_dir, work_dir),
+        "python": _run(python_command(), argv, work_dir, work_dir),
+    }
+    for name, (exit_code, payload) in sides.items():
+        assert exit_code == 1, f"{case_id}: {name} exited {exit_code}"
+        assert [i["code"] for i in payload["issues"]] == [code], f"{case_id}: {name} {payload['issues']}"

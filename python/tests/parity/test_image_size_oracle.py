@@ -39,13 +39,14 @@ from pathlib import Path
 
 import pytest
 
-from .oracle import PACKAGE_ROOT, python_command, rust_binary
+from . import oracle_fixtures
+from .oracle import PACKAGE_ROOT, missing_for_live, python_command, rust_binary
 
 RUST = rust_binary()
 
 pytestmark = pytest.mark.skipif(
-    RUST is None,
-    reason="no Rust tan to diff against; build it (cargo build) or set TAN_RUST_BINARY",
+    missing_for_live(RUST),
+    reason="TAN_PARITY_LIVE=1 needs a Rust tan; build it (cargo build) or set TAN_RUST_BINARY",
 )
 
 SOC_5M5 = '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "tcm_kb": 1280}]}'
@@ -190,6 +191,22 @@ def _normalise(payload: dict) -> dict:
     return payload
 
 
+def _rust_run(
+    argv: list[str], work: Path, env_extra=None
+) -> tuple[int, dict, str]:
+    """The rust side of `assert_parity`, frozen by default (tan-cli#272) --
+    see `oracle_fixtures.resolve`. Scrubbed on `work` (both sides run in the
+    SAME directory here, so that is the only root either output can embed)
+    so the frozen answer stays replayable from a different scratch dir."""
+
+    def _live():
+        code, payload, err = _run([RUST], argv, work, work, env_extra)
+        return [code, oracle_fixtures.scrub(payload, work), oracle_fixtures.scrub(err, work)]
+
+    code, payload, err = oracle_fixtures.resolve(_live)
+    return code, payload, err
+
+
 def assert_parity(
     work: Path, argv: list[str], *, text_mode: bool = False, env_extra=None
 ) -> None:
@@ -197,11 +214,13 @@ def assert_parity(
     envelope agree. `text_mode` compares stderr verbatim instead -- the human
     table and the notice lines, which are a real user surface even though stdout
     carries no contract there."""
-    r_code, r_out, r_err = _run([RUST], argv, work, work, env_extra)
+    r_code, r_out, r_err = _rust_run(argv, work, env_extra)
     # A previous run's bundle must not decide the next one's notices.
     for build_root in work.rglob("image-bundle"):
         shutil.rmtree(build_root, ignore_errors=True)
     p_code, p_out, p_err = _run(python_command(), argv, work, work, env_extra)
+    p_out = oracle_fixtures.scrub(p_out, work)
+    p_err = oracle_fixtures.scrub(p_err, work)
 
     assert r_code == p_code, (
         f"exit code: rust={r_code} python={p_code}\n"

@@ -47,13 +47,15 @@ from pathlib import Path
 
 import pytest
 
-from .oracle import PACKAGE_ROOT, python_command, rust_binary
+from . import oracle_fixtures
+from .oracle import PACKAGE_ROOT, missing_for_live, python_command, rust_binary
 
 RUST = rust_binary()
 WINDOWS = os.name == "nt"
 
 pytestmark = pytest.mark.skipif(
-    not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`"
+    missing_for_live(RUST),
+    reason="TAN_PARITY_LIVE=1 needs a Rust tan; set TAN_RUST_BINARY or run `cargo build`",
 )
 
 
@@ -209,6 +211,32 @@ def _run(command: list[str], argv: list[str], root: Path):
     if not isinstance(payload, dict):  # a bare JSON scalar/array on stdout
         return proc.returncode, {"__raw__": _scrub(proc.stdout.strip(), root)}
     return proc.returncode, _normalise_issues(json.loads(_scrub(json.dumps(payload), root)))
+
+
+def _run_rust(argv: list[str], root: Path) -> tuple[int, dict]:
+    """The rust side of `_run`, frozen by default (tan-cli#272) -- see
+    `oracle_fixtures.resolve`. `_run` already scrubs its own `root` out of the
+    payload before returning, so the captured/replayed answer is already
+    portable across scratch directories with no extra work here."""
+
+    def _live():
+        return list(_run([RUST], argv, root))
+
+    return oracle_fixtures.resolve(_live)
+
+
+def _run_rust_with_survivors(argv: list[str], root: Path) -> tuple[int, dict, list[str]]:
+    """`_run_rust` plus `_survivors(root)` in the SAME frozen unit: which
+    files rust's own run left behind is part of what tan-cli#272 asks this
+    suite to capture (`clean` deletes -- the survivor set is not a pure
+    function of `tree`, it is the oracle's own observed behaviour)."""
+
+    def _live():
+        code, payload = _run([RUST], argv, root)
+        return [code, payload, _survivors(root)]
+
+    code, payload, survivors = oracle_fixtures.resolve(_live)
+    return code, payload, survivors
 
 
 #: ``(id, argv, tree kwargs)``. ``@@ROOT@@`` in an argument is replaced with that
@@ -368,13 +396,16 @@ WINDOWS_CASES = [
 )
 def test_python_clean_matches_rust(argv, tree, tmp_path):
     sides = {}
-    for name, command in (("rust", [RUST]), ("python", python_command())):
+    for name in ("rust", "python"):
         root = tmp_path / name
         root.mkdir()
         _build_tree(root, **tree)
         resolved = [a.replace("@@ROOT@@", str(root)) for a in argv]
-        code, payload = _run(command, resolved, root)
-        sides[name] = (code, payload, _survivors(root))
+        if name == "rust":
+            sides[name] = _run_rust_with_survivors(resolved, root)
+        else:
+            code, payload = _run(python_command(), resolved, root)
+            sides[name] = (code, payload, _survivors(root))
 
     # Independent of parity, and asserted FIRST: neither implementation may ever
     # reach outside the build root. A case where BOTH destroyed the canary would
@@ -415,8 +446,13 @@ def test_the_comparator_goes_red_on_a_planted_divergence(tmp_path):
         root = tmp_path / name
         root.mkdir()
         _build_tree(root)
-        sides[name] = _run([RUST], argv, root)
+        sides[name] = _run_rust_with_survivors(argv, root)
     assert sides["a"][1] != sides["b"][1], "the comparator cannot tell two runs apart"
-    assert _survivors(tmp_path / "a") != _survivors(tmp_path / "b"), (
+    # Compared from the FROZEN survivor lists, not a fresh disk scan: in
+    # frozen replay mode nothing actually ran `clean` against either tree
+    # (there is no live rust to spawn), so the trees on disk are identical by
+    # construction and a disk re-scan would read this self-check vacuously
+    # true for the wrong reason.
+    assert sides["a"][2] != sides["b"][2], (
         "the file-set comparison cannot tell a dry run from a real one"
     )

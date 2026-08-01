@@ -1,0 +1,40 @@
+Every *.json fixture in this directory was captured from an actual run of the
+Rust oracle -- never inferred from crates/ or a docstring (docs/ROADMAP.md's
+Standing Rules) -- via:
+
+  cargo build --bin tan
+  TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 TAN_RUST_BINARY=<path to the built
+    tan(.exe)> python -m pytest tests/parity/test_oracle_parity.py \
+    tests/parity/test_clean_parity.py tests/parity/test_flash_oracle_parity.py \
+    tests/parity/test_image_size_oracle.py tests/parity/test_run_oracle_parity.py
+
+oracle binary:  tan 0.4.1  (`tan --version`)
+oracle source:  crates/ at 204c3a0b8dcb165e10ac3d14f3e9bfa699e45b59
+                "fix: close five RC follow-ups -- flake, TBD sentinel, repr
+                parity, CI coverage, prog name" -- the last commit that
+                touched crates/ as of the capture, per `git log -1 -- crates/`.
+                crates/ is frozen (docs/ROADMAP.md's Standing Rule), so this
+                is the SHA that actually determines the binary's behaviour;
+                it is what a future re-capture must diff against to know
+                whether anything really changed, not whichever commit HEAD
+                happened to be at when `cargo build` ran.
+worktree HEAD:  b40109b46aefdd42d82ff30f89c8bf8d5061d72d (unrelated python/
+                commits on top; does not affect the oracle binary)
+captured:       2026-08-01 (tan-cli#272)
+platform:       Windows (win32) -- a case gated `WINDOWS_CASES` in
+                test_clean_parity.py was captured on a host where that gate
+                is true; re-capturing on a non-Windows host will leave those
+                keys untouched (the test itself still skips there) rather
+                than overwrite them with something else.
+
+See tests/parity/oracle_fixtures.py's own module docstring for the replay
+mechanics (TAN_PARITY_LIVE / TAN_PARITY_CAPTURE, the PYTEST_CURRENT_TEST-
+keyed store, and why a missing key is a loud KeyError rather than a skip).
+
+Re-capturing: crates/ is frozen and will not change again for this reason,
+so there should be no reason to re-run the capture recipe above UNLESS a
+NEW case is added to one of the five files it lists (a new argv, a new tree
+shape). Capturing is additive -- `oracle_fixtures.resolve()` only ever adds
+or overwrites the keys the run you did touch, so a partial capture (e.g.
+`pytest tests/parity/test_flash_oracle_parity.py -k some_new_case`) is safe
+and does not disturb any other module's fixture file.

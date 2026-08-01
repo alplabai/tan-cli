@@ -83,6 +83,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import oracle_fixtures
+
 #: ``python/`` -- pinned onto the subprocess ``PYTHONPATH`` so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``, mirroring the
 #: conformance harness.
@@ -180,6 +182,20 @@ def rust_binary() -> str | None:
     return None
 
 
+def missing_for_live(rust: str | None) -> bool:
+    """Whether a test must SKIP for lack of an oracle binary.
+
+    Frozen replay (the default -- ``oracle_fixtures.LIVE`` unset) never needs
+    one at all, so this is false there regardless of ``rust``: a case with no
+    committed fixture fails loudly inside :func:`oracle_fixtures.resolve`
+    instead, which is the point (tan-cli#272) -- a quiet skip here would hide
+    exactly the gap that function exists to surface. Only an explicit
+    ``TAN_PARITY_LIVE=1`` run, asked to spawn a binary that is not there,
+    skips.
+    """
+    return oracle_fixtures.LIVE and rust is None
+
+
 def python_command() -> list[str]:
     """The port under test. Defaults to the source tree so the harness runs
     without a packaging step; ``TAN_PYTHON_BINARY`` points it at the PyInstaller
@@ -258,6 +274,32 @@ def narrow_plan(payload: dict) -> dict:
     return {**payload, "data": plan}
 
 
+def rust_run(
+    argv: list[str], cwd: Path, home: Path, *, scrub_roots: tuple[Path | str, ...] | None = None
+) -> tuple[int, dict]:
+    """The rust side of a comparison, ALONE -- for a case whose assertions
+    are not a symmetric :func:`compare` (a known, pinned divergence; a
+    bespoke multi-step flow like ``init`` then ``generate``). Frozen by
+    default, exactly like :func:`compare`.
+
+    ``scrub_roots`` defaults to ``(cwd, home)``, the same pair every
+    :func:`compare` caller scrubs -- pass ``()`` explicitly for a case whose
+    assertions only ever touch small literal fields (an exit code, an issue
+    code) that cannot contain a scratch path, to skip the pointless work.
+    """
+    roots = (cwd, home) if scrub_roots is None else scrub_roots
+
+    def _live():
+        rust = rust_binary()
+        if rust is None:
+            raise RuntimeError("no Rust tan to diff against; set TAN_RUST_BINARY")
+        code, out = _run([rust], argv, cwd, home)
+        return [code, oracle_fixtures.scrub(out, *roots)]
+
+    code, out = oracle_fixtures.resolve(_live)
+    return code, out
+
+
 def compare(
     argv: list[str],
     cwd: Path,
@@ -270,14 +312,21 @@ def compare(
 
     ``python`` overrides the command used for the port -- that seam is what lets
     the suite plant a known divergence and prove this comparator goes red.
-    """
-    rust = rust_binary()
-    if rust is None:
-        raise RuntimeError("no Rust tan to diff against; set TAN_RUST_BINARY")
-    home = home or cwd
 
-    r_code, r_out = _run([rust], argv, cwd, home)
+    The rust side is frozen by default (tan-cli#272) -- see
+    :func:`oracle_fixtures.resolve`. Both sides are scrubbed of ``cwd``/``home``
+    (:func:`oracle_fixtures.scrub`) before comparing: a live run relies on
+    both binaries sharing the identical scratch cwd to make an embedded
+    absolute path byte-comparable at all, and a frozen fixture was captured
+    from a DIFFERENT scratch cwd than whatever this replay is using, so the
+    substitution is what keeps that comparison meaningful in both modes.
+    """
+    home = home or cwd
+    roots = (cwd, home)
+
+    r_code, r_out = rust_run(argv, cwd, home, scrub_roots=roots)
     p_code, p_out = _run(python or python_command(), argv, cwd, home)
+    p_out = oracle_fixtures.scrub(p_out, *roots)
 
     diffs: list[str] = []
     if r_code != p_code:
