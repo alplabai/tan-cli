@@ -92,13 +92,10 @@ pub enum ParseError {
     /// of `som:\n  sku: <SKU>`). Matches the Python port's `BoardShapeError`
     /// for the same shape — see `python/tan/commands/validate_cmd.py:251-256`,
     /// pinned by the `validate-offline-schema-violation` contract golden —
-    /// byte-identical for string/int/float/bool/flat-list scalars whose
-    /// YAML 1.1 (PyYAML) and YAML 1.2 (serde_yaml) resolutions agree. Two
-    /// known gaps `python_repr` does not close (tracked as a GA follow-up,
-    /// not fixed here): a mapping nested inside a sequence renders as a
-    /// `{...}` placeholder instead of Python's own dict repr, and
-    /// non-printable characters inside a string are not escaped the way
-    /// Python's `repr()` escapes them.
+    /// byte-identical for string/int/float/bool/mapping/list scalars whose
+    /// YAML 1.1 (PyYAML) and YAML 1.2 (serde_yaml) resolutions agree; that
+    /// resolution difference is the one known gap `python_repr` does not
+    /// close (tracked as a GA follow-up, not fixed here).
     #[error(
         "board.yaml is not valid: `som:` must be a mapping carrying a `sku:` key, but a scalar was given ({0}). Write it as:\n  som:\n    sku: <SKU>"
     )]
@@ -165,11 +162,12 @@ pub fn parse_board_model(text: &str) -> Result<BoardModel, ParseError> {
 }
 
 /// Renders a `serde_yaml::Value` the way Python's `repr()` would, for the
-/// shapes a mis-typed `som:` can take (string, number, bool, sequence — see
-/// `ParseError::SomNotMapping`'s doc comment for exactly how far this tracks
-/// Python's actual `repr()`). A mapping can reach this arm nested inside a
-/// sequence (`som: [{k: v}]`); it renders as a `{...}` placeholder rather
-/// than Python's own dict repr — one of the known gaps noted there.
+/// shapes a mis-typed `som:` can take (string, number, bool, sequence,
+/// mapping — see `ParseError::SomNotMapping`'s doc comment for exactly how
+/// far this tracks Python's actual `repr()`). A mapping can reach this arm
+/// nested inside a sequence (`som: [{k: v}]`); it recurses the same as
+/// Python's own dict repr, `{}`-joined in the mapping's iteration order
+/// (`serde_yaml::Mapping` preserves insertion order, matching `dict`).
 fn python_repr(value: &serde_yaml::Value) -> String {
     match value {
         serde_yaml::Value::Null => "None".to_string(),
@@ -180,15 +178,25 @@ fn python_repr(value: &serde_yaml::Value) -> String {
             let rendered: Vec<String> = items.iter().map(python_repr).collect();
             format!("[{}]", rendered.join(", "))
         }
-        serde_yaml::Value::Mapping(_) => "{...}".to_string(),
+        serde_yaml::Value::Mapping(map) => {
+            let rendered: Vec<String> = map
+                .iter()
+                .map(|(k, v)| format!("{}: {}", python_repr(k), python_repr(v)))
+                .collect();
+            format!("{{{}}}", rendered.join(", "))
+        }
         serde_yaml::Value::Tagged(tagged) => python_repr(&tagged.value),
     }
 }
 
 /// Python `str.__repr__`: single-quoted unless the string carries a `'` and
 /// no `"`, in which case double quotes avoid escaping. Escapes `\`, the
-/// chosen quote, and the common whitespace control chars — the shapes a
-/// hand-typed board.yaml SKU/scalar can realistically carry.
+/// chosen quote, the common whitespace control chars, and — the thing
+/// `repr()` exists for — any other non-printable character, as `\xNN`/
+/// `\uNNNN`/`\UNNNNNNNN` by code point width. C0 controls can't reach here:
+/// both YAML parsers reject a raw one in the source text before this ever
+/// runs (a `\t`/`\n`/`\r` byte only arrives via the YAML string's own escape,
+/// hence the dedicated arms above).
 fn python_repr_str(s: &str) -> String {
     let quote = if s.contains('\'') && !s.contains('"') {
         '"'
@@ -207,11 +215,61 @@ fn python_repr_str(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            c if !is_python_printable(c) => {
+                let code = c as u32;
+                if code < 0x100 {
+                    out.push_str(&format!("\\x{code:02x}"));
+                } else if code < 0x10000 {
+                    out.push_str(&format!("\\u{code:04x}"));
+                } else {
+                    out.push_str(&format!("\\U{code:08x}"));
+                }
+            }
             c => out.push(c),
         }
     }
     out.push(quote);
     out
+}
+
+/// Python `str.isprintable()`'s notion of printable: not Unicode category
+/// Other (Cc/Cf/Cs/Co/Cn) or Separator (Zs/Zl/Zp), except the ASCII space.
+/// `char::is_control()` covers Cc (the C1 range included — a raw C0 byte is
+/// already rejected by both YAML parsers before this runs, per this
+/// function's caller). The rest is a hand-picked range table of the
+/// zero-width/bidi format characters, non-ASCII space separators, and
+/// private-use areas a copy-pasted string realistically carries (the soft
+/// hyphen from issue #277 among them) — not a generated Unicode category
+/// table, so it does not attempt Cs (impossible in a Rust `char` anyway) or
+/// Cn (unassigned code points).
+// ponytail: hand-picked ranges, not a generated Unicode table; upgrade to a
+// `unicode-general-category`-style crate if Cn coverage ever matters.
+fn is_python_printable(c: char) -> bool {
+    if c.is_control() {
+        return false;
+    }
+    if c == ' ' {
+        return true;
+    }
+    let non_printable = matches!(c,
+        // Zs 2000-200A + Cf 200B-200F (zero-width space/joiners/bidi marks).
+        '\u{00A0}' | '\u{1680}' | '\u{2000}'..='\u{200F}'
+        // Cf 202A-202E (bidi embed/override) + Zs 202F (narrow no-break space).
+        | '\u{202A}'..='\u{202F}'
+        // Zs 205F + Cf 2060-206F (word joiner, invisible operators, bidi isolates).
+        | '\u{205F}' | '\u{2060}'..='\u{206F}'
+        // Zl / Zp.
+        | '\u{2028}' | '\u{2029}'
+        // Zs (ideographic space) + assorted Cf (soft hyphen, Arabic/Syriac
+        // format marks, Mongolian vowel separator, BOM, interlinear
+        // annotation, language tag).
+        | '\u{3000}' | '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}'
+        | '\u{070F}' | '\u{08E2}' | '\u{180E}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}'
+        | '\u{E0001}' | '\u{E0020}'..='\u{E007F}'
+        // Co — private use areas.
+        | '\u{E000}'..='\u{F8FF}' | '\u{F0000}'..='\u{FFFFD}' | '\u{100000}'..='\u{10FFFD}'
+    );
+    !non_printable
 }
 
 /// Local structural validation. Mirrors `validateBoardYamlLocally`:
@@ -543,6 +601,58 @@ mod tests {
             "board.yaml is not valid: `som:` must be a mapping carrying a `sku:` key, \
              but a scalar was given ('E1M-AEN701'). Write it as:\n  som:\n    sku: <SKU>"
         );
+    }
+
+    #[test]
+    fn nested_mapping_in_sequence_matches_python_dict_repr() {
+        // `som: [{k: v}]` — Python: repr([{'k': 'v'}]) == "[{'k': 'v'}]"
+        // (differentially checked against CPython 3.11). Issue #277 gap 1.
+        let err = parse_board_model("som: [{k: v}]\n").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "board.yaml is not valid: `som:` must be a mapping carrying a `sku:` key, \
+             but a scalar was given ([{'k': 'v'}]). Write it as:\n  som:\n    sku: <SKU>"
+        );
+    }
+
+    #[test]
+    fn mapping_repr_matches_python_dict_repr_with_mixed_value_types() {
+        // YAML `[1, {a: 1, b: true, c: null}, 2]` — Python:
+        // repr([1, {'a': 1, 'b': True, 'c': None}, 2])
+        //   == "[1, {'a': 1, 'b': True, 'c': None}, 2]"
+        let value: serde_yaml::Value =
+            serde_yaml::from_str("[1, {a: 1, b: true, c: null}, 2]").unwrap();
+        assert_eq!(
+            python_repr(&value),
+            "[1, {'a': 1, 'b': True, 'c': None}, 2]"
+        );
+    }
+
+    #[test]
+    fn non_printable_soft_hyphen_is_escaped_like_python_repr() {
+        // Soft hyphen (U+00AD) — exactly what a SKU copy-pasted out of a
+        // hyphenated PDF carries. Python: repr('a\xadb') == "'a\\xadb'"
+        // (differentially checked against CPython 3.11). Issue #277 gap 2.
+        let text = "som: \"a\u{00ad}b\"\n";
+        let err = parse_board_model(text).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "board.yaml is not valid: `som:` must be a mapping carrying a `sku:` key, \
+             but a scalar was given ('a\\xadb'). Write it as:\n  som:\n    sku: <SKU>"
+        );
+    }
+
+    #[test]
+    fn python_repr_str_escapes_non_printables_like_python() {
+        // Each pinned against real CPython 3.11 `repr()` output.
+        assert_eq!(python_repr_str("a\u{ad}b"), "'a\\xadb'"); // soft hyphen
+        assert_eq!(python_repr_str("a\u{a0}b"), "'a\\xa0b'"); // NBSP
+        assert_eq!(python_repr_str("a\u{200b}b"), "'a\\u200bb'"); // zero-width space
+        assert_eq!(python_repr_str("a\u{feff}b"), "'a\\ufeffb'"); // BOM
+        assert_eq!(python_repr_str("a\u{2028}b"), "'a\\u2028b'"); // line separator
+        assert_eq!(python_repr_str("a\u{e0001}b"), "'a\\U000e0001b'"); // >0xFFFF format char
+        assert_eq!(python_repr_str("plain"), "'plain'");
+        assert_eq!(python_repr_str("café"), "'café'"); // printable non-ASCII stays raw
     }
 
     #[test]

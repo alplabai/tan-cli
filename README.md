@@ -225,12 +225,12 @@ tan run --flash                       # build, then run (host) or program (hardw
 ```
 
 `tan doctor` sanity-checks the host: build readiness (SDK, Zephyr workspace,
-west) alongside debug readiness for the selected target/server. `tan doctor
---build --fix` goes further, resolving the OS set from `board.yaml` and
-diagnosing (and repairing what it can) a build environment that is not ready;
-`--fix` requires `--build`. `tan completion --shell zsh` is deferred in this
-build (see Commands below) and exits 1 rather than emitting a completion
-script.
+west) alongside debug readiness for the selected target/server — the full
+check list runs unconditionally. `--build` is accepted for compatibility
+(both `alp-sdk-vscode` call sites pass it) and changes nothing; `--fix` is
+not yet accepted (tan-cli#295). `tan completion --shell zsh` is deferred in
+this build (see Commands below) and exits 1 rather than emitting a
+completion script.
 
 `bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; it
 names the missing prerequisites rather than installing system packages itself.

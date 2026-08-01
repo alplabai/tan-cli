@@ -445,6 +445,21 @@ def test_an_unset_path_resolves_nothing_rather_than_raising(monkeypatch):
     assert _find_on_path("size") is False
 
 
+def test_clean_str_drops_a_padded_tbd_too():
+    """#276: `_clean_str` (the SoM-preset `silicon`/`silicon_variant` reader)
+    already trimmed before comparing; this pins that it still does, alongside
+    the sibling fix in `tan.core.size.resolve_variant`."""
+    from tan.commands.size_cmd import _clean_str
+
+    assert _clean_str(" TBD ") is None
+    assert _clean_str("\tTBD\n") is None
+    assert _clean_str("TBD") is None
+    assert _clean_str("TBD-1234") == "TBD-1234"
+    assert _clean_str("tbd") == "tbd"
+    assert _clean_str(None) is None
+    assert _clean_str(123) is None
+
+
 def test_absurd_core_id_and_os_values_do_not_crash(tmp_path):
     write(
         tmp_path / "br" / "system-manifest.yaml",
@@ -457,3 +472,25 @@ def test_absurd_core_id_and_os_values_do_not_crash(tmp_path):
     result = run_cli(tmp_path, "--format", "json", "--build-root", "br")
     assert result.returncode == 0
     assert len(envelope(result)["data"]["slices"]) == 4
+
+
+# --------------------------------------------------------------------------
+# NO_COLOR is PRESENCE, not truthiness (tan-cli#288)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("value", ["", "0", "false"])
+def test_no_color_env_var_suppresses_color_without_crashing(monkeypatch, value):
+    """`NO_COLOR=<value>` -- including set-but-empty -- must disable colour,
+    matching the oracle (`crates/tan-cli/src/style.rs:27`'s
+    `var_os("NO_COLOR").is_none()`) and the spec (any value disables colour).
+    `sys.stderr.isatty` is forced True (this command's human text goes to
+    stderr) so the divergence is actually observable: under pytest's own
+    non-tty stderr, a truthy check on an empty `NO_COLOR` would fall through
+    to the tty probe and land on the same (correct) answer by accident,
+    hiding the bug this pins."""
+    from tan.commands.size_cmd import _use_color
+
+    monkeypatch.setattr("sys.stderr.isatty", lambda: True)
+    monkeypatch.setenv("NO_COLOR", value)
+    assert _use_color(no_color=False, ci=False) is False

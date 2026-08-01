@@ -5,6 +5,177 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.5.0-rc2] — 2026-08-01
+
+*Everything the maintainer's first real `v0.5.0-rc1` run turned up, plus what
+reviewing those fixes turned up in turn. Six release-blockers, and one theme:
+almost every defect was a check measuring a **proxy** instead of the thing it
+claimed to measure — and the ones that shipped green did so because a test
+encoded the same assumption as the code.*
+
+**Still a pre-release.** Nothing on the stable extension channel upgrades onto
+this; the delivery mechanism is unchanged from rc1 (`alp-sdk-vscode` odd-minor
+pre-release channel, `prerelease: true` / `make_latest: false`, both installers
+resolving `latest` which excludes prereleases).
+
+### Fixed
+
+- **`tan build` and `tan flash` could not find `west` on a host that had
+  bootstrapped successfully (#289, release-blocker).** `4d70bdc`/`eac6cbf`
+  landed a venv resolver and three consumers were never wired to it. On any host
+  where the workspace venv is not *activated* — which is every GUI-launched VS
+  Code, the extension's normal environment — every Zephyr slice was skipped with
+  `tool 'west' not found`, and `tan flash`'s PATH-only gate refused where the
+  Rust oracle succeeds. New `tan/core/venv.py` is the shared module
+  `flash_cmd.py`'s own docstring asked for ("one shared module for both
+  commands, not a second copy"), ported from `crates/tan-cli/src/venv.rs`; five
+  scattered private helpers were deleted in favour of it.
+  - `#106` — `build/execute.py` rewrites `tool == "west"` through
+    `west_program()` and prepends the venv bin dir to the child's `PATH`.
+  - `#59` — `flash_cmd.py`'s tool gate gains a venv fallback. PATH still wins
+    the *availability* tie; `argv[0]` selection is venv-preferring, matching
+    `crates/tan-cli/src/commands/flash/mod.rs:521-546`.
+  - `#61` — `west_workspace_dir` (a **different** search: it walks for `.west/`,
+    not `.venv/`) is resolved once and threaded as every spawn's cwd, so
+    `west flash` can see alp-sdk's out-of-tree runners.
+
+- **Flow D could write the wrong file to a board's MRAM.** Fixing #289 set the
+  flash child's cwd to the west topdir, and `flash_args.atoc` was the one Flow D
+  input never run through `resolve_artefact_path` — it reaches the J-Link
+  Commander script verbatim (`loadbin {atoc} {atoc_address}`). The repo's own
+  fixtures use a relative `atoc: atoc.bin` at five sites, so a relative path
+  silently changed which file it named. Now anchored on `build_root`/`sdk_root`
+  like `atoc_map` and `output_artefact` already were. The reason it was missed
+  is recorded: `grep -rn "FLOW_D\|flow_d_preflight\|expect_dpidr" crates/`
+  returns nothing — Flow D is Python-only, so Rust's cwd-safety audit was
+  inherited without ever covering the one backend that writes on-die MRAM.
+
+- **A bootstrapped venv could be invisible to build and flash (#291,
+  release-blocker).** Creation picks the executable directory by what is on disk
+  (`bootstrap_cmd.py Workspace.venv_bin` probes both layouts); resolution derived
+  it from the host. A Git Bash-created `Scripts/` venv on a posix-reporting host
+  was therefore created, then not found. Resolution now uses the same
+  directory-wins rule, consuming `core/bootstrap.py`'s existing
+  `venv_exe_names()` rather than restating it. **Deliberate oracle divergence:**
+  `crates/tan-cli/src/venv.rs:34` is still `venv_layout(cfg!(windows))` — the
+  same host-derived bug — so this port is knowingly more correct than the oracle
+  here.
+
+- **`typer>=0.12` was unbounded across a change in what typer *is* (#293,
+  release-blocker).** typer 0.26 dropped its public-click dependency and began
+  vendoring its own fork, and `cli.py` depends on that private hierarchy
+  (`typer._click.exceptions`). Now `typer>=0.26,<0.28`, both ends measured by
+  wheel inspection: `0.25.1`'s `requires_dist` still lists `click>=8.2.1` and
+  `0.26.0`'s does not. The old floor was itself a lie — `typer==0.12.0` on PyPI
+  is a broken metapackage stub requiring `typer-slim`/`typer-cli`. Matters
+  because `pip install ./python` is the documented install path for `win32/arm64`
+  and `linux/arm64`, which have no published asset, and because CI carries no
+  lockfile and no pin. `tests/gates/test_typer_click_bound.py` now checks the
+  range *and* the private-MRO coupling directly.
+
+- **`tan init` pinned a relative SDK root that later invocations could not
+  resolve (#263, release-blocker).** The pointer is written absolute, and a
+  stored pin that cannot resolve now says so (`sdk.project-pin-unresolved`).
+
+- **`tan build` reported `ok: true` / `exitCode: 0` / `issues: []` when every
+  slice was skipped (#283).** A build that built nothing was indistinguishable
+  from one that succeeded. Emits `build.nothing-built` / `build.missing-tool`.
+
+- **`tan bootstrap` moved the alp-sdk checkout before it could refuse (#284).**
+  An ancestor `.west` now returns `exitCode: 2` with
+  `bootstrap.enclosing-west-workspace` and nothing moves. Rollback no longer
+  re-derives what it should have remembered: `RelocationUndo` snapshots
+  `old_root`, the pointer, `project`, `workspace_dir` and `venv_dir` *before*
+  relocation. `_undo_relocation` returned `str | None` where a non-None string
+  meant two opposite things, so a user whose checkout **had** moved back was
+  told to "Move it back by hand" — naming a directory that no longer existed —
+  while `data.sdkRoot`/`data.workspaceDir`/`project.root` kept the vacated path.
+  The yocto-host and prerequisite refusals were **hoisted above** the relocation
+  rather than given rollback paths.
+
+- **`bootstrap: complete.` printed after a step reported a problem (#285)**, and
+  `$LASTEXITCODE` was 0 on a self-declared incomplete venv. `completion_verdict`
+  is now a port of the oracle's `verdict()` — named blocking codes, an
+  `INCOMPLETE` line, an `--allow-partial` escape. The Python ceiling stays a
+  **warning**: `PYTHON_CEILING_KNOWN_GOOD` is 3.12, measured by a real bootstrap
+  run in `getting-started.yml`, and refuses no host.
+
+- **`doctor` had dropped six checks the oracle emits, each reintroducing a
+  closed defect (#286, #290, #294).** Found by one audit rather than one field
+  at a time — @hkngln's call, and the right one, since every instance is the
+  same proxy-measuring shape and invisible from any single case.
+  - `zephyrSdk` (#160), plus the `sevenZip` sibling gated to match
+    `build_readiness.rs:545` — `west sdk install` shells to patoolib for `.7z`
+    with no pure-Python fallback, so without 7-Zip the fix hint cannot be
+    followed.
+  - `westResolved` (#123) — now the version of the **venv-resolved** west, never
+    a re-probe of bare PATH. Verified by mutation: swapping in `on_path("west")`
+    and re-probing the version each turn the test red.
+  - `zephyrSdkAvailableForHost` / `longPaths` / `homePath` (#70) — the old check
+    answered "is one installed *here*", never "*can* one be installed on this
+    machine".
+  - `sdk` / `boardYaml` / `workspace` / `zephyrVersion` preflight (#100, #98,
+    #159), folded into **plain** `doctor` as Rust does.
+  - `posix_venv_unusable` (#161) — the function already existed at
+    `core/bootstrap.py:1140` and was simply never called from `doctor`.
+  - `data.missingPrerequisites` (#203/#210) — absent from the envelope though
+    `bootstrap_cmd.py` already populated it. The extension feature-detects on
+    its absence, so nothing crashed; what regressed was the one-click dependency
+    install at `alp-sdk-vscode/src/deps/vscodeAdapter.ts:379`.
+  - `sdkProvenance` — git short-commit plus `metadata/sdk_version.yaml`.
+
+- **Restoring those checks made `doctor` refuse hosts that work — four times,
+  all caught before release.** `boardYaml` exited 4 on a fully bootstrapped host
+  with no `board.yaml` in cwd (the first command a user runs after bootstrap,
+  from the directory bootstrap just made); `_posix_venv_capable` failed *closed*
+  on an inconclusive probe where `crates/tan-cli/src/util.rs:241-247` is
+  `.unwrap_or(true)` on purpose; an Apple-silicon Mac running an x86_64 Python
+  was told to build on Linux (no `sysctl.proc_translated` check); and a
+  `$ZEPHYR_BASE`-only workspace was told "no Zephyr workspace". Every one was
+  green because its test asserted the refusal was correct.
+
+- **A Zephyr pin mismatch was reported twice** — `summary.fail` 5 instead of 4,
+  two issue codes, two `nextSteps` for one remedy. Rust drops its own duplicate
+  `boardYaml` for exactly this reason.
+
+- **`NO_COLOR` was checked two different ways and `faultdecode` diverged
+  (#288).** `size` used a presence check (matching `style.rs:27` and the
+  NO_COLOR spec); `faultdecode` used a truthy check, so `NO_COLOR=` kept colour
+  on. Both now call `tan.env.no_color_requested()`. Deliberately **not**
+  `typer.Option(envvar="NO_COLOR")` — Click coerces bool envvars by truthy-string
+  parsing, so `NO_COLOR=` would raise `not a valid boolean` and crash a command
+  that works today.
+
+- **234 seconds of silence during CMake configure read as a hang (#287).** Phase
+  announcements and an elapsed heartbeat, armed at the shared `_dispatch` choke
+  point so `tan run` is covered too, TTY-gated and byte-silent under
+  `--format json`. Line width comes from `shutil.get_terminal_size()`; the
+  previous hardcoded 88-column erase pad stacked rows on any terminal narrower
+  than 114.
+
+- **`tan bootstrap --non-interactive` exited 2.** It is the literal first-blink
+  command in `parity.yml` and the docs. `bootstrap` now accepts the five globals
+  the oracle accepts and ignores.
+
+- Smaller: the published asset filename leaking into `--help` usage text (#280);
+  `python_repr` diverging on nested mappings (#277); the `TBD` sentinel trimmed
+  on one path and not another (#276); a `venv_has_usable_pip` `ETXTBSY` flake
+  (#250); `zephyr_board.py` escaping `PINNED_HASHES` (#279); and
+  `getting-started.yml` smoke-testing the **Rust** `tan` while the release ships
+  a PyInstaller freeze (#278).
+
+### Changed
+
+- **`doctor`'s `--build` is accepted and inert.** The check set is now
+  unconditional, so there is no build-gated half left. `README.md` no longer
+  claims `--build --fix` repairs anything.
+- **`doctor` gained `sdkProvenance` and `data.missingPrerequisites`**; consumers
+  reading the envelope get two keys that did not exist in rc1.
+- **`--fix` is still not accepted** (tan-cli#295). `alp-sdk-vscode` calls
+  `tan bootstrap` instead, which is what actually creates the venv and west
+  workspace; accepting the flag as a no-op would have given users a Fix button
+  that reports success having repaired nothing.
+
 ## [0.5.0-rc1] — 2026-07-31
 
 *The first release in which `tan` is a Python program: the planner relocated

@@ -10,7 +10,7 @@
 # `tan-cli` was also free; `alp-tan` is preferred because the other Alp Lab
 # artefacts are `alp-`prefixed.
 name = "alp-tan"
-version = "0.5.0rc1"
+version = "0.5.0rc2"
 description = "The Alp Lab build CLI: one board.yaml to firmware, across MCU and MPU cores."
 readme = "README.md"
 license = "Apache-2.0"
@@ -45,20 +45,58 @@ requires-python = ">=3.12"
 # planner `sys.exit`s with an install hint if it is absent and `tan build` turns
 # that into a coded `build.plan-unavailable` envelope, never a traceback.
 #
-# `click` is the fifth, and it is declared because `tan/cli.py` IMPORTS IT
-# DIRECTLY -- `from click.testing import CliRunner`, which is how `--help` under
-# `--format json` is captured into one envelope instead of Click printing
-# straight to stdout and calling `ctx.exit(0)` before `emit()` can run
-# (`_emit_help_envelope`). It rode along transitively for years because typer
-# depended on click; **typer 0.27.0 does not** -- its requires are
-# `shellingham`, `rich`, `annotated-doc` and `colorama` (Windows only). So a
-# clean `pip install alp-tan` produced `ModuleNotFoundError: No module named
-# 'click'` on first run, and every local test suite passed regardless because
-# click was present for other reasons. A package that imports a module must
-# declare it; leaning on someone else's dependency graph is what broke.
-# `tests/gates/test_declared_dependencies.py` now fails if any module under
-# `tan/` imports a distribution this list omits.
-dependencies = ["typer>=0.12", "rich>=13", "pyyaml>=6", "jsonschema>=4.18", "click>=8.1"]
+# `click` is the fifth, and it is declared because `tan/cli.py` and
+# `tan/commands/new_som_cmd.py` IMPORT IT DIRECTLY -- `from click.testing
+# import CliRunner` is how `--help` under `--format json` is captured into one
+# envelope instead of Click printing straight to stdout and calling
+# `ctx.exit(0)` before `emit()` can run (`_emit_help_envelope`). It rode along
+# transitively for years because typer depended on click; starting at **typer
+# 0.26.0** it does not (measured: PyPI `requires_dist` for 0.25.1 still lists
+# `click>=8.2.1`; 0.26.0's does not, and its wheel gained a vendored
+# `typer/_click/` package -- typer's OWN click-alike, not a re-export of the
+# public one). So a clean `pip install alp-tan` produced `ModuleNotFoundError:
+# No module named 'click'` on first run, and every local test suite passed
+# regardless because click was present for other reasons. A package that
+# imports a module must declare it; leaning on someone else's dependency graph
+# is what broke. `tests/gates/test_declared_dependencies.py` fails if any
+# module under `tan/` imports a distribution this list omits. `click` stays
+# required even though typer no longer needs it transitively -- the two direct
+# imports above are real, not incidental.
+#
+# `typer` is capped, not just floored, and the cap is the point of this whole
+# comment. `tan/cli.py:_emit_help_envelope` drives `typer.main.get_command()`'s
+# result -- a `TyperCommand` -- through the PUBLIC `click.testing.CliRunner`.
+# Measured: `type(get_command(app)).__mro__` descends from
+# `typer._click.core.Command`, typer's PRIVATE vendored fork, not from
+# `click.core.Command` -- so this mixes two different click implementations,
+# and it only works because the vendored `UsageError.show()` still exits via
+# `SystemExit`, which `CliRunner` catches generically (see the docstring at
+# that function). That is stable across the vendored-click line -- measured
+# clean (`tests/test_cli_skeleton.py` + `tests/gates`) against both 0.26.0 and
+# 0.27.0, the only two releases of that line so far -- but it is an
+# implementation detail of typer's private fork, not a contract, so nothing
+# says a `0.28` won't change what `get_command()` returns or how its group
+# raises. Uncapped, a resolver is free to pick that day's newest typer for a
+# `pip install ./python` -- the documented path on win32/arm64 and
+# linux/arm64, the two hosts with no frozen asset -- and hand it a CLI built
+# against a private surface that may no longer exist.
+#
+# The floor moved off `>=0.12` for the same "measure, don't guess" reason:
+# `typer==0.12.0` on PyPI is a metapackage stub (`requires_dist` is just
+# `typer-slim[standard]==0.12.0` + `typer-cli==0.12.0`), not a working install
+# of the real `typer` module -- a floor including it was already claiming
+# support that cannot work. `>=0.26` also makes the floor mean something: every
+# version it admits is the SAME vendored-click behaviour this whole comment
+# and `tests/gates/test_typer_click_bound.py` are about, not two different
+# regimes (pre- and post-vendoring) blurred into one range. Pre-0.26 typer may
+# well still work -- it was not the question this port needed answered.
+#
+# `tests/gates/test_typer_click_bound.py` fails if the installed typer drifts
+# outside `<0.28`, or if the private surface this range assumes (`TyperCommand`
+# descending from `typer._click.core.Command`, and a `SystemExit`-raising
+# `UsageError`) goes away from an in-range version -- so a version bump here is
+# a decision, not a drift.
+dependencies = ["typer>=0.26,<0.28", "rich>=13", "pyyaml>=6", "jsonschema>=4.18", "click>=8.1"]
 
 # `pyserial` is OPTIONAL, not required: only `tan monitor` needs it, and a serial
 # console is not worth adding to every install of a build tool. `monitor_cmd`

@@ -63,7 +63,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.sdk_cmd import SDK_MARKER, resolve_sdk_tiered
+from tan.commands.sdk_cmd import SDK_MARKER, project_pin_issue, resolve_sdk_tiered
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -508,8 +508,11 @@ def resolve_project_paths(project: str | None, board_yaml: str | None) -> tuple[
     return root, f"{root}{sep}{_posix(leaf)}"
 
 
-def resolve_sdk(sdk_root: str | None, workspace_root: str) -> tuple[str, str] | None:
-    """`(root, sourceTier)` for the resolved checkout, or `None`.
+def resolve_sdk(
+    sdk_root: str | None, workspace_root: str
+) -> tuple[str, str, str | None] | None:
+    """`(root, sourceTier, brokenProjectPin)` for the resolved checkout, or
+    `None`.
 
     `resolve_sdk_tiered` walks the four tiers (`--sdk-root` > project pin >
     global default > discovery) and is TERMINAL on `--sdk-root` (I-31): a typo'd
@@ -518,11 +521,16 @@ def resolve_sdk(sdk_root: str | None, workspace_root: str) -> tuple[str, str] | 
     re-applies on top of that -- so an invalid `--sdk-root` resolves to nothing
     (empty lists + the frozen warning), which is the oracle's behaviour and NOT
     the same as "resolved something else".
+
+    `brokenProjectPin` (tan-cli#263 review) is `active.broken_project_pin`,
+    carried through even when this call returns `None` overall -- both callers
+    (`presets`, `clean_cmd.resolve_sdk`) surface it as `sdk.project-pin-
+    unresolved` alongside whatever else they already report.
     """
     active = resolve_sdk_tiered(sdk_root, Path(workspace_root))
     if active.path is None or not Path(active.path).joinpath(*SDK_MARKER).exists():
         return None
-    return _posix(active.path), active.tier
+    return _posix(active.path), active.tier, active.broken_project_pin
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +576,7 @@ def presets(
     json_mode = output_format == "json"
 
     root, board_path = ".", "./board.yaml"
-    sdk: tuple[str, str] | None = None
+    sdk: tuple[str, str, str | None] | None = None
     soms: list[Som] = []
     board_libraries: list[str] = []
     issues: list[Issue] = []
@@ -579,6 +587,9 @@ def presets(
         if sdk is not None:
             soms = read_soms(sdk[0])
             board_libraries = read_board_libraries(sdk[0])
+            pin_issue = project_pin_issue(sdk[2], sdk[1])
+            if pin_issue is not None:
+                issues = [pin_issue]
         else:
             issues = [Issue(SDK_UNRESOLVED_CODE, "warning", SDK_UNRESOLVED_MESSAGE)]
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring

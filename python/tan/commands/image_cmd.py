@@ -54,6 +54,7 @@ from tan.commands.build_output import (
     resolve_build_root,
     resolve_project_context,
 )
+from tan.commands.sdk_cmd import project_pin_issue
 from tan.core.image_bundle import (
     BUNDLE_DIR,
     BUNDLE_MANIFEST,
@@ -415,11 +416,15 @@ def _run(
         if any(n.severity == "error" for n in notices)
         else ExitCode.SUCCESS
     )
+    issues = [Issue(n.code, n.severity, n.message) for n in notices]
+    pin_issue = project_pin_issue(context.broken_project_pin, context.sdk_source_tier)
+    if pin_issue is not None:
+        issues.append(pin_issue)
     return _Outcome(
         exit_code,
         bundle,
         project,
-        [Issue(n.code, n.severity, n.message) for n in notices],
+        issues,
         [n.message for n in notices] + [f"image: bundle ready at {bundle_dir}"],
         context.sdk,
     )

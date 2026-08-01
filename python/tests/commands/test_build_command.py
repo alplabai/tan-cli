@@ -259,7 +259,11 @@ def test_slice_output_goes_to_stderr_and_stdout_stays_one_envelope(project):
 def test_a_null_command_slice_survives_with_its_warning(project):
     # I-11, on the real plan that has this shape: `m33` carries `command:
     # null` plus a `board-tree-missing` warning naming why. Neither the slice
-    # nor the warning may be dropped.
+    # nor the warning may be dropped. `a55_cluster` carries a REAL `bitbake`
+    # command, which also skips under `scrub_path` (tan-cli#283: this fixture
+    # therefore has NOTHING built), so the envelope is a coded refusal now --
+    # see `test_a_wholly_skipped_build_refuses_not_reports_success` for the
+    # dedicated coverage of that half; this test stays about I-11 alone.
     plan_doc = real_plan("multicore_rpmsg-imx93")
     plan = write_plan(project, plan_doc)
     proc = run_tan(
@@ -268,7 +272,8 @@ def test_a_null_command_slice_survives_with_its_warning(project):
     )
 
     env = envelope_of(proc)
-    assert proc.returncode == 0, env
+    assert proc.returncode == 1, env
+    assert env["ok"] is False
 
     slices = env["data"]["slices"]
     assert [s["coreId"] for s in slices] == ["a55_cluster", "m33"]
@@ -283,7 +288,11 @@ def test_a_null_command_slice_survives_with_its_warning(project):
 def test_no_slice_is_filtered_out_however_few_cores_the_customer_named(project):
     # I-04. The planner fans out over the SoC's cores; this AEN plan carries
     # three slices, one of them a Yocto slice on the A-cluster the customer's
-    # board.yaml need never have mentioned. The CLI must report all three.
+    # board.yaml need never have mentioned. The CLI must report all three --
+    # tan-cli#283: this fixture is also the exact all-skipped repro (every
+    # slice's tool absent under `scrub_path`), covered end to end by
+    # `test_a_wholly_skipped_build_refuses_not_reports_success` below; this
+    # test stays about I-04 (all three slices present, none filtered).
     plan = write_plan(project, real_plan("multicore_rpmsg-aen"))
     proc = run_tan(
         "build", "--plan-from", str(plan), "--execute", "--format", "json",
@@ -291,11 +300,97 @@ def test_no_slice_is_filtered_out_however_few_cores_the_customer_named(project):
     )
 
     env = envelope_of(proc)
-    assert proc.returncode == 0, env
+    assert proc.returncode == 1, env
+    assert env["ok"] is False
     slices = env["data"]["slices"]
     assert [s["coreId"] for s in slices] == ["a32_cluster", "m55_he", "m55_hp"]
     assert [s["backend"] for s in slices] == ["yocto", "zephyr", "zephyr"]
     assert all(s["status"] == "skipped" for s in slices), slices
+
+
+# --- tan-cli#283: zero-built is a refusal, a partial build still succeeds ---
+
+
+def test_a_wholly_skipped_build_refuses_not_reports_success(project):
+    """The exact tan-cli#283 repro: every slice of a real captured plan
+    skipped for a missing tool (`bitbake`/`west` absent from `scrub_path`'s
+    emptied PATH) used to report `ok: true, exitCode: 0, issues: []` -- a
+    JSON consumer could not tell that from a real build. Now a coded refusal:
+    `exitCode` 1, `ok: false`, `build.nothing-built` plus one `build.missing-
+    tool` issue PER skipped slice, each naming its tool."""
+    plan = write_plan(project, real_plan("multicore_rpmsg-aen"))
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json",
+        cwd=project, scrub_path=True,
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 1, env
+    assert env["ok"] is False
+    assert env["exitCode"] == 1
+
+    codes = [i["code"] for i in env["issues"]]
+    assert codes[0] == "build.nothing-built", env["issues"]
+    assert codes.count("build.missing-tool") == 3, env["issues"]
+
+    missing_tool_issues = [i for i in env["issues"] if i["code"] == "build.missing-tool"]
+    assert any("bitbake" in i["message"] and "a32_cluster" in i["message"]
+               for i in missing_tool_issues), missing_tool_issues
+    assert any("west" in i["message"] and "m55_he" in i["message"]
+               for i in missing_tool_issues), missing_tool_issues
+    assert any("west" in i["message"] and "m55_hp" in i["message"]
+               for i in missing_tool_issues), missing_tool_issues
+    assert all(i["severity"] == "warning" for i in missing_tool_issues), missing_tool_issues
+
+
+def test_a_partial_build_where_only_some_slices_are_skipped_still_reports_ok(project):
+    """A user deliberately building only the Zephyr side on a host with no
+    Yocto toolchain must NOT need a flag: at least one slice built, so this
+    stays `ok: true` -- but the skipped slice(s) still land in `issues[]`,
+    naming their missing tool, so a consumer reading only `issues[]` can
+    still tell "2 of 3" from "3 of 3"."""
+    plan_doc = two_slice_plan(ALL_ARTEFACTS)
+    # Swap the null-command second slice for a real one naming a tool that
+    # cannot exist on any host, so it takes the missing-tool branch (not the
+    # null-command one) while the first slice (sys.executable) still runs.
+    plan_doc["slices"][1]["command"] = {
+        "tool": "definitely-not-a-real-tool-tan-cli-283",
+        "args": [],
+        "cwd": None,
+    }
+    plan = write_plan(project, plan_doc)
+    proc = run_tan(
+        "build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project
+    )
+
+    env = envelope_of(proc)
+    assert proc.returncode == 0, env
+    assert env["ok"] is True
+    assert env["exitCode"] == 0
+
+    statuses = {s["coreId"]: s["status"] for s in env["data"]["slices"]}
+    assert statuses == {"aaa_probe": "ok", "zzz_nocmd": "skipped"}, env["data"]
+
+    assert not any(i["code"] == "build.nothing-built" for i in env["issues"]), env["issues"]
+    missing_tool = [i for i in env["issues"] if i["code"] == "build.missing-tool"]
+    assert len(missing_tool) == 1, env["issues"]
+    assert "definitely-not-a-real-tool-tan-cli-283" in missing_tool[0]["message"]
+    assert "zzz_nocmd" in missing_tool[0]["message"]
+    assert missing_tool[0]["severity"] == "warning"
+
+
+def test_text_mode_summary_line_cannot_be_scrolled_past(project):
+    """`tan build --format text` (the default) prints one status line per
+    slice, then a summary line naming built-vs-total -- tan-cli#283's human-
+    path half, so the all-skipped repro's own text-mode transcript (the
+    original bug report) is not just three easy-to-miss `skipped:` lines with
+    a `0` exit code nowhere in sight."""
+    plan = write_plan(project, real_plan("multicore_rpmsg-aen"))
+    proc = run_tan("build", "--plan-from", str(plan), "--execute", cwd=project, scrub_path=True)
+
+    assert proc.returncode == 1, proc.stderr
+    lines = proc.stderr.splitlines()
+    assert "0 of 3 slice(s) built" in lines, proc.stderr
 
 
 def declared_artefacts(plan_doc: dict) -> list[str]:
@@ -904,7 +999,12 @@ def test_alp_sdk_root_env_is_not_a_discovery_tier(project, monkeypatch):
 
 @pytest.mark.parametrize(
     "policy,expected_exit,expected_status,expected_severity",
-    [("skip", 0, "skipped", "warning"), ("fail", 1, "failed", "error")],
+    # tan-cli#283: BOTH slices of this fixture end up not-succeeded here --
+    # slice 0 is held/skipped by the demotion this test exists to check,
+    # slice 1 (`zzz_nocmd`) is the plan's own null-command skip -- so under
+    # missingTool=skip too this is a wholly-skipped build (nothing built) and
+    # refuses, exit 1, same as the missingTool=fail row already did.
+    [("skip", 1, "skipped", "warning"), ("fail", 1, "failed", "error")],
     ids=["missingTool=skip", "missingTool=fail"],
 )
 def test_a_slice_still_naming_toolchain_root_is_routed_not_spawned(

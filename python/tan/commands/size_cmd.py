@@ -57,6 +57,8 @@ from tan.commands.build_output import (
     resolve_metadata_sdk_root,
     resolve_project_context,
 )
+from tan.commands.sdk_cmd import project_pin_issue
+from tan.core.pending import is_pending_placeholder
 from tan.core.size import (
     MemoryBudget,
     SliceSize,
@@ -78,6 +80,7 @@ from tan.core.system_manifest import (
     slice_elf_candidates,
     slice_footprint_dirs,
 )
+from tan.env import no_color_requested
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -242,8 +245,12 @@ def _read_som_preset(path: str) -> tuple[str, str | None] | None:
 
 
 def _clean_str(value: Any) -> str | None:
-    """`str_clean`: a string, with the `TBD` sentinel dropped to absent."""
-    if not isinstance(value, str) or value.strip() == "TBD":
+    """`str_clean`: a string, with the `TBD` sentinel dropped to absent.
+
+    Delegates to `tan.core.pending.is_pending_placeholder` (#276) for the
+    trimmed, non-case-folded, non-substring comparison shared with `tan
+    flash` -- not a second hand-rolled `== "TBD"`."""
+    if not isinstance(value, str) or is_pending_placeholder(value):
         return None
     return value
 
@@ -401,7 +408,7 @@ def _measure_slice(
 def _use_color(no_color: bool, ci: bool) -> bool:
     """`Theme::from_args`: human text goes to stderr, so the TTY probe is against
     stderr."""
-    if no_color or ci or os.environ.get("NO_COLOR") is not None:
+    if no_color or ci or no_color_requested():
         return False
     try:
         return sys.stderr.isatty()
@@ -496,6 +503,10 @@ def _run(
     text: list[str] = []
     issues: list[Issue] = []
     exit_code = ExitCode.SUCCESS
+
+    pin_issue = project_pin_issue(context.broken_project_pin, context.sdk_source_tier)
+    if pin_issue is not None:
+        issues.append(pin_issue)
 
     if not json_mode:
         text.extend(render_table_lines(rows, _use_color(no_color, ci)))

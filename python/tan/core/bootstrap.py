@@ -1021,6 +1021,122 @@ def python_floor_skew_warning(
     )
 
 
+# ---------------------------------------------------------------------------
+# The Python CEILING (tan-cli#285): a floor alone caught "too old"; it cannot
+# catch "too new for the ecosystem".
+# ---------------------------------------------------------------------------
+
+#: The highest CPython minor tan has actually seen a full venv build clean
+#: against. STALE BY DEFAULT, exactly like `ZEPHYR_VERSION` above -- there is
+#: no `pythonMaxVersion` in `metadata/bootstrap.json` yet (it carries only the
+#: FLOOR, `pythonMinVersion`), so this is tan's own placeholder until that
+#: manifest can carry a real ceiling. Bump it only against a real run that
+#: built a complete venv on the newer minor -- not by inference.
+#:
+#: A design choice, not a mechanical value, and worth stating explicitly: this
+#: used to read `(3, 13)`, on the reasoning "3.14 broke, so one minor below it
+#: is probably fine" -- a COMPUTED guess asserted as "a MEASUREMENT, not a
+#: computed bound", which it never was (nothing in CI, `getting-started.yml`
+#: or a first-blink run has ever bootstrapped on 3.13). `(3, 12)` is what is
+#: actually measured good (every CI Python job pins it) against `(3, 14)`
+#: measured bad (the `hidapi` failure this whole mechanism exists to warn
+#: about). Tightening the number to what is true is NOT the same change as
+#: tightening the gate: this stays a WARN at 3.12 exactly as it was at 3.13 --
+#: see `python_ceiling_warning`'s own docstring for why a hard refusal here
+#: would be its own defect, symmetric to the floor bug this port already
+#: fixed. A working 3.13 host still bootstraps clean either way; it now also
+#: gets told, correctly, that this port has not verified that combination.
+PYTHON_CEILING_KNOWN_GOOD = (3, 12)
+
+
+def python_ceiling_warning(found: tuple[int, int], venv_dir: str) -> tuple[str, str] | None:
+    """`(code suffix, message)` when `found` is newer than any Python tan has
+    verified a complete venv against, else `None`. `venv_dir` is the
+    already-rendered (`_native`) workspace venv path, named in the remedy.
+
+    **Deliberately a WARN, never a refusal.** The floor check above refuses,
+    because a too-OLD interpreter is a GUARANTEED failure -- Zephyr's own CMake
+    configure enforces its floor unconditionally. A too-NEW interpreter is not
+    guaranteed to fail at all: most projects never touch the specific optional
+    dependency (`hidapi`, in the one case measured so far) that lacks a
+    prebuilt wheel for it, and most hosts will bootstrap a perfectly complete
+    venv anyway. Refusing a host that would have built cleanly is the same
+    defect the floor fix above exists to close, mirrored onto the other edge --
+    a hard ceiling that blocks a WORKING host is its own bug, not a safety
+    rail. This warning exists only to give the customer the "why" up front,
+    before they spend time chasing a build failure back to their interpreter
+    choice; the venv-completeness check (tan-cli#285's other half) is what
+    actually catches it when it happens.
+    """
+    if found <= PYTHON_CEILING_KNOWN_GOOD:
+        return None
+    return (
+        "python-newer-than-verified",
+        f"Python {found[0]}.{found[1]} is newer than the highest tan has verified a "
+        f"complete venv against ({PYTHON_CEILING_KNOWN_GOOD[0]}."
+        f"{PYTHON_CEILING_KNOWN_GOOD[1]}). Not refused -- most hosts and most projects "
+        f"bootstrap cleanly on a newer Python anyway -- but a dependency with no "
+        f"prebuilt wheel yet for this interpreter (hidapi is the one seen so far) can "
+        f"still fall back to a source build and fail. If a later warning reports the "
+        f"venv incomplete: delete {venv_dir} (there is no --recreate-venv) and re-run "
+        f"`tan bootstrap` -- a REUSED venv keeps the interpreter that created it, so "
+        f"installing another Python 3 alongside this one does nothing by itself. On "
+        f"Windows, put that older interpreter first on PATH before re-running (or create "
+        f"the venv yourself, e.g. `py -3.12 -m venv {venv_dir}`), since tan's own default "
+        f"candidate is `py -3`, which resolves to the newest install.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# The pip phase's remediation hints (tan-cli#285): gated on the REAL host, not
+# assumed Linux.
+# ---------------------------------------------------------------------------
+
+
+def zephyr_requirements_hint(host: str) -> str:
+    """The OS-gated remedy appended to the `zephyr-requirements` warning.
+
+    Only LINUX and WINDOWS get a named package/command below: those are the
+    two hosts a real failure has actually been measured and diagnosed on (a
+    stock ubuntu-24.04 CI runner; Python 3.14 on Windows, `LINK : fatal error
+    LNK1104`). Printing the Linux line unconditionally used to send a Windows
+    customer to run `sudo apt-get` on a host with no `apt-get` at all, and to
+    misdiagnose an MSVC linker failure as a missing header. macOS/other get a
+    host-neutral line rather than a GUESSED command -- printing an unverified
+    package name would repeat the exact defect this fixes, just against a
+    different OS.
+
+    None of the three text blames "the output above"/"the output" as if a
+    reader can already see it: `--format json` has no terminal output at all
+    -- the caller (`pip_phase`) appends the actual captured pip tail to the
+    SAME message when one was captured, so "the captured pip output" here
+    always names something that is either right there in the message or
+    genuinely was not captured (text mode, where the child's own log already
+    streamed live).
+    """
+    if host == WINDOWS:
+        return (
+            "On Windows this is usually `hidapi` with no prebuilt wheel yet for this "
+            "Python, falling back to a source build that needs the MSVC linker (look "
+            "for `LINK : fatal error LNK1104` in the captured pip output -- this is NOT "
+            "a missing native header): install the \"Desktop development with C++\" "
+            "workload from the Visual Studio Build Tools "
+            "(https://visualstudio.microsoft.com/visual-cpp-build-tools/), which "
+            "supplies both the linker and the Windows SDK libraries hidapi links "
+            "against, then re-run `tan bootstrap`."
+        )
+    if host == LINUX:
+        return (
+            "On Linux this is usually `hidapi` needing native headers: `sudo apt-get "
+            "install -y pkg-config libusb-1.0-0-dev libudev-dev`, then re-run `tan "
+            "bootstrap`."
+        )
+    return (
+        "Check the captured pip output for the real cause (often a native "
+        "dependency with no prebuilt wheel for this host), then re-run `tan bootstrap`."
+    )
+
+
 def posix_venv_unusable() -> PrereqFailure:
     """Linux: `python3` runs and clears every check above, but its `venv` module
     cannot create a usable environment because `ensurepip` is missing --
@@ -1498,6 +1614,59 @@ def next_steps_block(
             ]
         )
     return lines
+
+
+def completion_verdict(blocking: list[str], allow_partial: bool) -> tuple[list[str], bool]:
+    """The closing text line(s), and whether the run counts as a SUCCESS,
+    given which install phases left the workspace unable to do what it was
+    bootstrapped for (tan-cli#220 / tan-cli#285).
+
+    Ported from the Rust oracle's `verdict()`
+    (`crates/tan-cli/src/commands/bootstrap/mod.rs`), not re-derived: the
+    wording, the named failures and the `--allow-partial` escape hatch are the
+    ALREADY-SHIPPED, ALREADY TAGGED (`CHANGELOG.md` `[0.5.0-rc1]`) contract
+    tan-cli#220 defined. A second, independently-worded rule for the same
+    decision is exactly how this port's closing line, its escape hatch and its
+    severity drift from the one alp-sdk-vscode and every other consumer
+    already integrated against.
+
+    `blocking` is `Log.blocking()`'s output, in the order the warnings were
+    raised: the subset of recorded warning codes after which the workspace
+    cannot do what it was bootstrapped for (`WORKSPACE_BLOCKING`). Empty (the
+    normal case) reports success, unchanged from before tan-cli#220.
+
+    Printing `bootstrap: complete.` and exiting 0 after a step already warned
+    the venv is incomplete is the original defect: both read as an unqualified
+    green light, and nothing about the exit code or the closing line told a
+    consumer -- human or the extension -- to go look back at a warning that
+    may have scrolled off screen minutes earlier (`hidapi`'s wheel build is
+    minutes into a cold `west update`). `--allow-partial` is the informed
+    escape: it still reports success, but the line still NAMES what did not
+    install, so accepting the gap is a choice rather than a silent default.
+    """
+    if not blocking:
+        return ["bootstrap: complete."], True
+    named = ", ".join(blocking)
+    if allow_partial:
+        return (
+            [
+                "bootstrap: complete.",
+                f"  (--allow-partial: {named} did not install; commands that need "
+                f"them will fail.)",
+            ],
+            True,
+        )
+    return (
+        [
+            f"bootstrap: INCOMPLETE -- {named} did not install, so this workspace "
+            f"cannot build yet.",
+            "  The messages above name the remedy for each. Fix them and re-run `tan "
+            "bootstrap`, or pass --allow-partial to accept this workspace as-is (the "
+            "west workspace and venv are already on disk, and a build that needs none "
+            "of the missing packages will still work).",
+        ],
+        False,
+    )
 
 
 def capture_tail(stdout: bytes | str, stderr: bytes | str) -> str:

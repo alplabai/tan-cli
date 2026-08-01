@@ -62,6 +62,7 @@ import typer
 from tan.commands import flash_cmd
 from tan.commands.build import execute
 from tan.commands.build_cmd import BuildError, _abs_posix, _build, resolve_sdk_root_ladder
+from tan.commands.sdk_cmd import project_pin_issue
 from tan.core.flash_plan import resolve_artefact_path
 from tan.core.plan_exec import normalize_path
 from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice
@@ -369,7 +370,7 @@ def run(
     # engine, so it must agree with `build` on which checkout that is. No
     # `ALP_SDK_ROOT` tier (tried and reverted -- see `resolve_sdk_root_ladder`'s
     # own docstring).
-    resolved_sdk_root, sdk_tier = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Same normalized, workspace-root-anchored stamp identity `build_cmd.build`
@@ -399,6 +400,12 @@ def run(
         data = None
         issues = [Issue("run.internal-failure", "error", f"{type(err).__name__}: {err}")]
         text_lines = [f"run: internal failure: {type(err).__name__}: {err}"]
+
+    # tan-cli#263 review: `run` builds via the same engine as `build` and must
+    # disclose the same silently-missed project pin.
+    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
+    if pin_issue is not None:
+        issues = [pin_issue, *issues]
 
     if json_mode:
         emit(Envelope("run", project_obj, data, issues, exit_code, sdk=sdk))

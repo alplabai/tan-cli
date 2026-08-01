@@ -504,7 +504,14 @@ def main() -> None:
         sys.exit(_emit_help_envelope(argv))
 
     if not json_mode:
-        app()
+        # `prog_name="tan"` -- Click otherwise derives the name it prints in
+        # `Usage: ...` from `os.path.basename(sys.argv[0])`, which is the
+        # frozen binary's OWN filename (`tan.exe` locally, or whatever
+        # `release.yml` renamed the uploaded asset to, e.g.
+        # `tan-x86_64-pc-windows-msvc.exe`, if a user runs the download in
+        # place). Pinned here rather than left to derive, same as
+        # `_emit_help_envelope`'s `prog_name="tan"` above.
+        app(prog_name="tan")
         return
 
     # `--format json`, past `--help`: TEE stderr for the duration of the run
@@ -527,7 +534,12 @@ def main() -> None:
     sys.stderr = captured_stderr
     try:
         try:
-            app()
+            # `prog_name="tan"` -- see the text-mode call above; it matters MORE
+            # here, since a Click usage error's rendered message (captured via
+            # `_TeeStderr`) is what `_usage_error_envelope` folds verbatim into
+            # `data.message`, a machine-readable envelope field a consumer
+            # should not see vary with how the binary happened to be named.
+            app(prog_name="tan")
         except SystemExit as exc:
             code = exc.code
             if code is None:

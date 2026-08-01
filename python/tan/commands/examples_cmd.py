@@ -51,6 +51,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide
+from tan.commands.sdk_cmd import project_pin_issue
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -283,8 +284,11 @@ def render_examples_text(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_sdk(sdk_root: str | None, workspace_root: Path) -> tuple[Path, str, str] | None:
-    """`(path, display, sourceTier)` for the resolved checkout, or `None`.
+def _resolve_sdk(
+    sdk_root: str | None, workspace_root: Path
+) -> tuple[Path, str, str, str | None] | None:
+    """`(path, display, sourceTier, brokenProjectPin)` for the resolved
+    checkout, or `None`.
 
     `--sdk-root` is TERMINAL (I-31): a value that is not a real checkout resolves
     to nothing rather than falling through to discovery, so a typo'd flag yields
@@ -294,11 +298,16 @@ def _resolve_sdk(sdk_root: str | None, workspace_root: Path) -> tuple[Path, str,
     `display` is separate from `path` because they are not interchangeable:
     `Path("./sdk")` stringifies to `sdk`, dropping the `./` the caller typed,
     while Rust records `--sdk-root` as-is -- and `sdk.root` is on the wire.
+
+    `brokenProjectPin` (tan-cli#263 review) is `None` on the `--sdk-root`
+    branch (nothing to fall through from), else whatever
+    `resolve_sdk_root_wide` carried through -- `examples()` turns it into the
+    shared `sdk.project-pin-unresolved` warning.
     """
     if sdk_root:
         path = Path(sdk_root)
         if (path / "scripts" / "alp_project.py").is_file():
-            return path, sdk_root, "sdkRootFlag"
+            return path, sdk_root, "sdkRootFlag", None
         return None
     # `.alp/sdk-path` project pin > the machine-global default
     # (`~/.alp/sdk-default`) > the WIDE positional walk
@@ -308,10 +317,10 @@ def _resolve_sdk(sdk_root: str | None, workspace_root: Path) -> tuple[Path, str,
     # child `<ws>/alp-sdk`'s catalogue over a competing `../alp-sdk`'s
     # (tan-cli#263). No `ALP_SDK_ROOT` tier (tried and reverted -- see
     # `resolve_sdk_root_ladder`'s own docstring).
-    found, tier = resolve_sdk_root_wide(None, workspace_root)
+    found, tier, broken_pin = resolve_sdk_root_wide(None, workspace_root)
     if found is None:
         return None
-    return found, str(found).replace("\\", "/"), tier
+    return found, str(found).replace("\\", "/"), tier, broken_pin
 
 
 def examples(
@@ -334,7 +343,7 @@ def examples(
         )
     json_mode = output_format == "json"
 
-    sdk: tuple[Path, str, str] | None = None
+    sdk: tuple[Path, str, str, str | None] | None = None
     found: list[Example] = []
     issues: list[Issue] = []
     exit_code = ExitCode.SUCCESS
@@ -346,6 +355,9 @@ def examples(
         sdk = _resolve_sdk(sdk_root, workspace_root)
         if sdk is not None:
             found = discover_examples(sdk[0] / "examples")
+            pin_issue = project_pin_issue(sdk[3], sdk[2])
+            if pin_issue is not None:
+                issues.append(pin_issue)
         if filter_ is not None:
             found = [e for e in found if example_matches_filter(e, filter_)]
     except Exception as err:  # noqa: BLE001 -- the backstop; see the module docstring

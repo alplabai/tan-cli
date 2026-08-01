@@ -9,4 +9,4 @@
 # is strictly worse for a user's project than a rejected one.
 #
 # Pre-1.0 SemVer puts a break in the MINOR, and a language rewrite is a break.
-TAN_VERSION = "0.5.0-rc1"
+TAN_VERSION = "0.5.0-rc2"

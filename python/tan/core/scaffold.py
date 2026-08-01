@@ -234,14 +234,24 @@ def _family_bucket(sku: str) -> str:
 
 def retarget_board_yaml_som(content: str, sku: str) -> str:
     """Rewrite the FIRST `som:` -> `sku:` value to `sku`, leaving the rest of
-    that line byte-for-byte alone.
+    that line byte-for-byte alone -- UNLESS the value is actually changing and
+    a trailing comment is present, in which case the comment is dropped.
 
     `wizard::retarget_board_yaml_som`. Only the value token moves: the gap
     before a trailing comment is preserved, so a column-aligned inline comment
     (the vendored `iot` scaffold's `sku:` line has one) survives, and passing a
-    tree its OWN vendored SKU is a byte-exact no-op. Reconstructing the tail as
-    a fixed two-space gap silently collapsed that alignment even in the no-op
-    case.
+    tree its OWN vendored SKU is a byte-exact no-op (`--template
+    iot-starter` always does: its `--som` is validated equal to
+    `IOT_STARTER_SUPPORTED_SKU` before this ever runs). Reconstructing the tail
+    as a fixed two-space gap silently collapsed that alignment even in the
+    no-op case.
+
+    A DIFFERENT `sku` is the one case that tail must NOT survive: an
+    `--from-example` board.yaml's inline comment routinely names the ORIGINAL
+    SoM's vendor/silicon (e.g. `sku: E1M-AEN801  # Alif Ensemble E8 SoM`), and
+    there is no SKU->vendor-name table here to rewrite it correctly for the new
+    one -- retargeting onto `E1M-V2N101` left that Alif comment on a Renesas
+    SKU. Dropping it is honest; inventing a new one is not this function's job.
     """
     out: list[str] = []
     in_som = False
@@ -265,7 +275,10 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
                     out.append(f"{indent}sku: {sku}{after_key}")
                 else:
                     match = re.search(r"\s", stripped)
+                    value = stripped[: match.start()] if match else stripped
                     tail = stripped[match.start() :] if match else ""
+                    if value != sku:
+                        tail = ""
                     out.append(f"{indent}sku:{leading_ws}{sku}{tail}")
                 done = True
                 continue
