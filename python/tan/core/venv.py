@@ -23,14 +23,36 @@ from pathlib import Path
 from tan.core.bootstrap import VenvLayout, venv_layout
 
 
-def _has_west(venv: Path, layout: VenvLayout) -> bool:
-    return (venv / layout.bin_dir / layout.west).is_file()
+def _resolve_layout(venv: Path) -> VenvLayout | None:
+    """Which bin directory actually has `west`, POSIX first -- the SAME
+    directory-wins rule creation already applies
+    (`bootstrap_cmd.Workspace.venv_bin`/`venv_present`), so a
+    Git-Bash/MSYS-created `Scripts/` venv (or a `bin/` venv found on a
+    Windows host) that bootstrap accepted is not invisible here. `None` when
+    `west` is present under neither layout.
+
+    Deliberately NOT `venv_layout(os.name == "nt")` (host-only): that was
+    tan-cli#291 -- bootstrap already derives the executable NAMES from the
+    winning directory (`core.bootstrap.venv_exe_names`), not the host, and
+    resolution disagreeing let a venv bootstrap just populated be invisible
+    to `build`/`flash`. The Rust oracle (`crates/tan-cli/src/venv.rs`) is
+    still host-only; tan-cli#291 identifies that as a latent oracle bug this
+    port inherited, not a divergence to keep copying now that creation has
+    already fixed it on its side (`3879cae`, tan-cli#289).
+    """
+    for is_windows in (False, True):
+        layout = venv_layout(is_windows)
+        if (venv / layout.bin_dir / layout.west).is_file():
+            return layout
+    return None
 
 
 def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
     """Locate the west-capable workspace `.venv`, mirroring Rust's
-    `find_workspace_venv`: gated on `west` actually being present under the
-    candidate (not just the directory existing), in this order:
+    `find_workspace_venv` but resolving the bin-dir layout directory-wins
+    (see `_resolve_layout`) rather than host-only: gated on `west` actually
+    being present under EITHER layout (not just the directory existing), in
+    this order:
 
       1. a `.venv` in the project tree, searched from `start` upward;
       2. the workspace venv derived from `$ZEPHYR_BASE`
@@ -40,12 +62,10 @@ def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
 
     `None` when none resolve (CI, an activated venv, the contract harness).
     """
-    layout = venv_layout(os.name == "nt")
-
     directory: Path | None = Path(start)
     while directory is not None:
         candidate = directory / ".venv"
-        if _has_west(candidate, layout):
+        if _resolve_layout(candidate) is not None:
             return candidate
         parent = directory.parent
         directory = parent if parent != directory else None
@@ -53,29 +73,31 @@ def find_workspace_venv(start: str, sdk_root: str | None) -> Path | None:
     zephyr_base = os.environ.get("ZEPHYR_BASE")
     if zephyr_base:
         candidate = Path(zephyr_base).parent / ".venv"
-        if _has_west(candidate, layout):
+        if _resolve_layout(candidate) is not None:
             return candidate
 
     if sdk_root is not None:
         parent = Path(sdk_root).parent
         for workspace in (parent, parent / "zephyrproject"):
             candidate = workspace / ".venv"
-            if _has_west(candidate, layout):
+            if _resolve_layout(candidate) is not None:
                 return candidate
 
     return None
 
 
 def venv_bin_dir(start: str, sdk_root: str | None) -> Path | None:
-    """The west-capable workspace venv's executable directory (`bin`,
-    `Scripts` on Windows), mirroring Rust's `venv_bin_dir`. This is the handle
-    a spawning command needs: the directory to look tool names up in, and the
-    directory to put on the child's PATH. `None` when no west-capable venv
-    resolves."""
+    """The west-capable workspace venv's executable directory (`bin` or
+    `Scripts`, chosen directory-wins -- see `_resolve_layout`, tan-cli#291).
+    This is the handle a spawning command needs: the directory to look tool
+    names up in, and the directory to put on the child's PATH. `None` when no
+    west-capable venv resolves."""
     venv = find_workspace_venv(start, sdk_root)
     if venv is None:
         return None
-    return venv / venv_layout(os.name == "nt").bin_dir
+    layout = _resolve_layout(venv)
+    assert layout is not None  # find_workspace_venv only returns what _resolve_layout accepted
+    return venv / layout.bin_dir
 
 
 def west_workspace_dir(start: str, sdk_root: Path | None) -> Path | None:
@@ -150,14 +172,18 @@ def _zephyr_base_workspace(zephyr_base: Path, sdk_root: Path | None) -> Path | N
 
 
 def tool_in_venv(bin_dir: Path, tool: str) -> str | None:
-    """Resolve `tool` INSIDE an already-located venv bin dir, mirroring
-    Rust's `tool_in_venv`: returns its absolute path when it is really a file
-    there. `.exe` is appended on Windows unless the caller already spelled
-    it. `None` means "this venv does not provide that tool" -- the caller
-    then keeps its PATH behaviour instead of spawning a path that doesn't
-    exist."""
+    """Resolve `tool` INSIDE an already-located venv bin dir: returns its
+    absolute path when it is really a file there. `.exe` is appended when
+    `bin_dir` IS the Windows-layout dir (its name matches
+    `venv_layout(True).bin_dir`, i.e. `Scripts`) unless the caller already
+    spelled it -- keyed on the directory that won (tan-cli#291), not
+    `os.name`: `bin_dir` is whatever `_resolve_layout`'s directory-wins probe
+    picked, which can be `Scripts/` on a POSIX-reporting host or `bin/` on
+    Windows when that is the layout actually on disk. `None` means "this venv
+    does not provide that tool" -- the caller then keeps its PATH behaviour
+    instead of spawning a path that doesn't exist."""
     name = tool
-    if os.name == "nt" and not tool.lower().endswith(".exe"):
+    if bin_dir.name == venv_layout(True).bin_dir and not tool.lower().endswith(".exe"):
         name = f"{tool}.exe"
     candidate = bin_dir / name
     return str(candidate) if candidate.is_file() else None

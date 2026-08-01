@@ -10,11 +10,47 @@ directly: `tool_in_venv`'s own file-existence + `.exe` behaviour, and
 import os
 from pathlib import Path
 
-from tan.core.venv import tool_in_venv, west_program, with_venv_on_path
+from tan.core.venv import (
+    find_workspace_venv,
+    tool_in_venv,
+    venv_bin_dir,
+    west_program,
+    with_venv_on_path,
+)
 
 
 def _venv_parts() -> tuple[str, str]:
     return ("Scripts", "west.exe") if os.name == "nt" else ("bin", "west")
+
+
+def test_find_workspace_venv_accepts_the_non_host_layout(tmp_path, monkeypatch):
+    """tan-cli#291: bootstrap creation accepts EITHER layout by directory
+    presence (`bootstrap_cmd.Workspace.venv_bin`'s directory-wins probe), not
+    the host -- resolution must match. A venv whose executables live under
+    the layout this host does NOT natively use (a Git-Bash/MSYS-created
+    `bin/` venv found on native Windows, or the mirror `Scripts/` venv found
+    on POSIX) must not be invisible to `find_workspace_venv`/
+    `venv_bin_dir`/`west_program`.
+
+    Exercises the real host's non-native layout rather than faking
+    `os.name`: patching `os.name` to the other platform breaks `pathlib.Path`
+    construction outright on a real Windows host (`Path.__new__` picks its
+    concrete subclass from `os.name`, so a patched value crashes on the very
+    next `Path(str)` call -- including ones inside pytest's own failure-repr
+    machinery, corrupting the test run itself rather than failing cleanly).
+    `_resolve_layout` never reads `os.name` post-fix, so proving it accepts
+    THIS host's non-native layout already proves the directory-wins rule;
+    the code path is identical for the mirror layout on the mirror host.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    other_bin, other_exe = ("bin", "west") if os.name == "nt" else ("Scripts", "west.exe")
+    venv_bin = tmp_path / ".venv" / other_bin
+    venv_bin.mkdir(parents=True)
+    (venv_bin / other_exe).write_text("", encoding="utf-8")
+
+    assert find_workspace_venv(str(tmp_path), None) == tmp_path / ".venv"
+    assert venv_bin_dir(str(tmp_path), None) == venv_bin
+    assert west_program(str(tmp_path), None) == str(venv_bin / other_exe)
 
 
 def test_tool_in_venv_resolves_only_files_that_exist(tmp_path):
