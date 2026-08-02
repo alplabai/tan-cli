@@ -9,10 +9,12 @@ helper-MCU firmware into `image-bundle/helper-mcus/`, and write
 order, forward-slash artefact paths, the ok-slice gate, the path guard -- is pure
 in `tan.core.image_bundle`.
 
-**Nothing here shells the SDK, and nothing here needs one.** The only input is a
-file this project's own build wrote (I-32 / anti-pattern #22). No `sdk` key is
-emitted unless the shared project resolver happened to resolve a checkout, which
-is exactly what the oracle reports.
+**Nothing here shells the SDK, and nothing here needs one.** The main input is a
+file this project's own build wrote (I-32 / anti-pattern #22); the one exception
+is a helper's `firmware_path` (below), which reads a real file straight out of
+an already-resolved SDK checkout when the build tree does not have it. No `sdk`
+key is emitted unless the shared project resolver happened to resolve a
+checkout, which is exactly what the oracle reports.
 
 Deliberate divergences from the retired `west alp-image`, carried over from the
 Rust and re-verified against the binary:
@@ -24,6 +26,19 @@ Rust and re-verified against the binary:
     is a HARD error, not a silent skip: a consumer keying on `ok`/exit code must
     not see a "complete" bundle missing a promised artefact. The `TBD` pending
     sentinel and an absent `firmware_path` stay non-fatal skips.
+
+A relative `firmware_path` resolves against **build_root, then sdk_root**
+(`tan.core.image_bundle.helper_firmware_candidates`) -- alp-sdk#330: the SDK's
+`som-preset-v1.schema.json` defines it repository-relative, i.e. relative to the
+SDK checkout, not to this project's `build/`, so build-root-only resolution
+(the pre-#330 behaviour) rejected every helper an SDK actually ships. build_root
+still goes first, matching the precedence `flash_plan.resolve_artefact_path`
+already established for the same two-roots ambiguity (#301, #322): a helper
+artefact THIS build produced under `build/` wins over a same-named file the SDK
+happens to ship. When neither root has the file, the `image.helper-missing`
+error names every root tried and the absolute path each one produced, not just
+the raw manifest string -- the old message left a reporter to go find the file
+by hand to prove it existed.
 
 The one divergence from the ORACLE is the archive bytes: Python's `tarfile` +
 `gzip` cannot produce the Rust `tar`+`flate2` stream byte-for-byte (member order,
@@ -64,6 +79,7 @@ from tan.core.image_bundle import (
     assemble_bundle_manifest,
     helper_artefact_rel,
     helper_entry,
+    helper_firmware_candidates,
     slice_archive_name,
     slice_artefact_rel,
     slice_entry,
@@ -71,7 +87,6 @@ from tan.core.image_bundle import (
 )
 from tan.core.system_manifest import (
     SystemManifest,
-    anchor_under,
     raw_passthrough,
     slice_build_dir,
 )
@@ -193,7 +208,11 @@ def _bundle_slice(
 
 
 def _bundle_helper(
-    helper: dict, build_root: str, helpers_dir: str, used_names: set[str]
+    helper: dict,
+    build_root: str,
+    sdk_root: str | None,
+    helpers_dir: str,
+    used_names: set[str],
 ) -> dict[str, Any] | _Notice | None:
     """Copy one helper's firmware, or a notice, or `None` for an absent one.
 
@@ -214,13 +233,20 @@ def _bundle_helper(
             "warning",
             f"image: helper-mcu firmware not found at {raw}; skipping",
         )
-    firmware = anchor_under(raw, build_root)
-    if not _is_file(firmware):
+    # Two roots, tried in order -- see `helper_firmware_candidates` for why
+    # build_root goes first and sdk_root is the fallback that resolves a
+    # genuinely SDK-shipped, repository-relative firmware_path (alp-sdk#330).
+    candidates = helper_firmware_candidates(raw, build_root, sdk_root)
+    firmware = next((path for _, path in candidates if _is_file(path)), None)
+    if firmware is None:
+        tried = "; ".join(f"{label} {path}" for label, path in candidates)
+        if sdk_root is None and not os.path.isabs(raw):
+            tried += "; sdk root not resolved (no --sdk-root and no discoverable checkout)"
         return _Notice(
             "image.helper-missing",
             "error",
-            f"image: helper-mcu firmware not found at {raw}; refusing to produce "
-            "an incomplete bundle",
+            f"image: helper-mcu firmware not found at {raw} (tried {tried}); "
+            "refusing to produce an incomplete bundle",
         )
     basename = _basename(firmware) or "firmware.bin"
     dest_name = basename
@@ -277,7 +303,7 @@ def _is_file(path: str) -> bool:
 
 
 def _assemble_bundle(
-    build_root: str, manifest: SystemManifest, yaml_text: str
+    build_root: str, sdk_root: str | None, manifest: SystemManifest, yaml_text: str
 ) -> tuple[list[_Notice], dict[str, Any], str]:
     """Do the filesystem work: mkdir the bundle tree, tar each ok slice, copy each
     present helper firmware, write `bundle-manifest.json`."""
@@ -304,7 +330,7 @@ def _assemble_bundle(
     helper_entries: list[dict[str, Any]] = []
     used_names: set[str] = set()
     for helper in manifest.helper_mcus:
-        result = _bundle_helper(helper, build_root, helpers_dir, used_names)
+        result = _bundle_helper(helper, build_root, sdk_root, helpers_dir, used_names)
         if result is None:
             continue
         if isinstance(result, _Notice):
@@ -396,8 +422,9 @@ def _run(
             f"{err.path}: {err.detail}",
         )
 
+    sdk_root = context.sdk.root if context.sdk is not None else None
     try:
-        notices, bundle, bundle_dir = _assemble_bundle(build_root, manifest, yaml_text)
+        notices, bundle, bundle_dir = _assemble_bundle(build_root, sdk_root, manifest, yaml_text)
     except BundleWriteError as err:
         return _error_outcome(
             project,

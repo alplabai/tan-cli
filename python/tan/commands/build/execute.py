@@ -108,6 +108,14 @@ _TERMINATE_GRACE_S = 1.0
 #: reuses it for the post-build overlay too.
 _WIRE_STATUS = {"succeeded": "ok", "skipped": "skipped"}
 
+#: tan-cli#336: west's own literal message (`west/util.py::west_topdir`) when
+#: neither an ancestor `.west` nor `$ZEPHYR_BASE` resolves a workspace --
+#: watched for on a west slice's stdout so a failure carrying it can be
+#: re-worded with what tan itself resolved (see [`execute_slices`]'s dispatch
+#: loop). Substring match, not the whole line: west prefixes it with
+#: "FATAL ERROR: ".
+_WEST_NO_WORKSPACE_MSG = "Could not find a west workspace"
+
 
 @dataclass(frozen=True)
 class SliceOutcome:
@@ -592,6 +600,38 @@ def execute_slices(
         # `tool` did not resolve to an absolute venv path above.
         env = with_venv_on_path(env, tool)
 
+        if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in sl.env:
+            # tan-cli#336: a dangling `$ZEPHYR_BASE` inherited from the
+            # ambient shell (seeded above by `dict(os.environ)`) OUTRANKS the
+            # workspace tan just resolved -- west's own `set_zephyr_base`
+            # (`west/app/main.py`) trusts an already-set `ZEPHYR_BASE`
+            # UNCONDITIONALLY over the manifest-derived one, with no
+            # existence check, so a stale value is never self-corrected.
+            # This is a DIFFERENT hazard than tan-cli#307's, and the cwd pin
+            # above does not cover it: the `build` extension's OWN internal
+            # `west_topdir(self.source_dir)` call (zephyr's
+            # `scripts/west_commands/build.py`) walks from the SLICE'S OWN
+            # app directory, not from cwd. An app inside the workspace tree
+            # (an SDK-bundled shim) still resolves fine via that ancestor
+            # walk regardless of `ZEPHYR_BASE`; the user's own project -- the
+            # normal shape `tan init` scaffolds, a SIBLING of the workspace,
+            # never nested inside it -- has no ancestor `.west` at all, so
+            # that walk falls through to `$ZEPHYR_BASE` and inherits
+            # whatever this process saw. Verified against a real dual-core
+            # Zephyr SDK slice pair: the SDK-shim core builds either way,
+            # the user's-project core fails only when `ZEPHYR_BASE` is
+            # stale-but-set.
+            #
+            # Popping the key (rather than pinning it to a value computed
+            # here) lets west's OWN manifest-project lookup re-derive it --
+            # exactly what already happens when `ZEPHYR_BASE` is unset
+            # (verified: an unset `ZEPHYR_BASE` self-heals via the
+            # manifest's "zephyr"-named project, `zephyr.base-prefer`
+            # unset). A plan that pins `ZEPHYR_BASE` on the slice's OWN
+            # `env` is left untouched -- "plan wins / CLI fills gaps"
+            # applies here too (see `assemble_slice_env`'s docstring).
+            env.pop("ZEPHYR_BASE", None)
+
         # tan-cli#307: pin `west build` to the workspace tan resolved rather
         # than letting west infer one from `cwd` -- see [`_pin_west_workspace`].
         # Every OTHER use of `cwd` in this function (the pristine guard just
@@ -604,6 +644,22 @@ def execute_slices(
             if is_west
             else (cwd, list(sl.command.args))
         )
+
+        # tan-cli#336: watch the slice's own stdout for west's literal
+        # "could not find a workspace" message so a failure carrying it can
+        # be re-worded below with what tan itself resolved -- the bare
+        # `terminated with exit code: N` a plain west failure gets otherwise
+        # is "the least informative true statement available" (issue #336).
+        # `nonlocal` into a fresh binding scoped to THIS iteration (declared
+        # inside the loop, not hoisted above it), so a later slice's closure
+        # never reads a previous one's leftover.
+        saw_no_workspace = False
+
+        def _watch_for_no_workspace(line: str) -> None:
+            nonlocal saw_no_workspace
+            if _WEST_NO_WORKSPACE_MSG in line:
+                saw_no_workspace = True
+            on_output(line)
 
         try:
             # A context manager: closes stdout/stderr/stdin on every exit
@@ -629,7 +685,7 @@ def execute_slices(
                 bufsize=1,
                 start_new_session=True,
             ) as proc:
-                if _drain_output(proc, on_output, cancelled):
+                if _drain_output(proc, _watch_for_no_workspace, cancelled):
                     _terminate(proc)
                     outcomes.append(
                         SliceOutcome(
@@ -655,6 +711,27 @@ def execute_slices(
         output_artefact, slice_build_dir = (
             resolve_zephyr_artefact(cwd, sl.command.args) if code == 0 else (None, None)
         )
+        if code == 0:
+            message = None
+        elif is_west and saw_no_workspace and workspace_dir is not None:
+            # tan-cli#336: west named no cause beyond its own exit code even
+            # though tan was holding a resolved workspace path the whole
+            # time -- name it, and the `ZEPHYR_BASE` this spawn actually saw
+            # ("unset" is the honest state after the pop above for every
+            # slice this fix covers; a real value here means the PLAN
+            # pinned it, or `workspace_dir` didn't resolve the same
+            # workspace west itself would have). Plain string interpolation,
+            # not `!r`: a Windows path's backslashes survive unescaped this
+            # way, matching every other path already embedded in this
+            # module's messages (e.g. the sdk-switch-pristine note above).
+            seen_zephyr_base = env.get("ZEPHYR_BASE") or "unset"
+            message = (
+                f"slice `{sl.core_id}` terminated with exit code: {code} -- west could not "
+                f"find a workspace; tan resolved `{workspace_dir}`, but the spawned process "
+                f"saw ZEPHYR_BASE={seen_zephyr_base}"
+            )
+        else:
+            message = f"slice `{sl.core_id}` terminated with exit code: {code}"
         outcomes.append(
             SliceOutcome(
                 sl.core_id,
@@ -664,7 +741,7 @@ def execute_slices(
                 # that case (it has no single-integer exit code), so the
                 # envelope's `rc` must be null too, not the raw `-N`.
                 None if code < 0 else code,
-                None if code == 0 else f"slice `{sl.core_id}` terminated with exit code: {code}",
+                message,
                 output_artefact,
                 slice_build_dir,
             )

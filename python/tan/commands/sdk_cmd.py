@@ -581,9 +581,19 @@ def format_release_table(releases: list[dict[str, Any]]) -> list[str]:
     lines = [f"Alp SDK releases ({len(releases)})"]
     for release in releases:
         date = release["publishedAt"][:10]
-        summary = release["releaseNotesSummary"]
+        # Collapse ALL whitespace before truncating. `releaseNotesSummary` is
+        # the release body verbatim, and a body whose first line is short
+        # (`## Highlights`) used to put a literal newline INSIDE a table row:
+        # the row spilled onto a second, unindented line and the `{flags}`
+        # suffix landed after the spilled text rather than on the row it
+        # describes (#316). Collapsing also spends the 60-char budget on
+        # visible text rather than on layout this table then discards.
+        summary = " ".join((release["releaseNotesSummary"] or "").split())
         # Char-aware truncation to 60, no ellipsis -- Python slicing is by
         # character, matching the Rust's `chars().take(60)` rather than bytes.
+        # The Rust does NOT collapse first, so this is a deliberate divergence
+        # on the text surface: measured, no committed fixture and no parity
+        # case covers this table, and the oracle renders the same broken row.
         notes = f"   {summary[:60]}" if summary else ""
         flags = {
             (True, True): " [draft, prerelease]",

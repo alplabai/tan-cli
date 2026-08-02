@@ -5,6 +5,102 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.5.0-rc4] — 2026-08-02
+
+*Everything below was found by running the published `v0.5.0-rc3` binary as a
+customer would — on real Windows, macOS and Linux hosts, in isolated
+environments — not by testing the source. Two of them destroy or misplace a
+user's files; one silently drops a core from a multi-core build.*
+
+### Fixed
+
+- **`tan bootstrap --dry-run` moved the user's alp-sdk checkout and rewrote
+  `~/.alp/sdk-default`.** One command on a clean directory left `alp-sdk/`
+  **gone**, `alp-workspace/` created and the global SDK pointer repointed —
+  while reporting `exit 0`, `ok: true`, and narrating the relocation in the
+  past tense. No data was lost (all 4067 files survived the move and `git log`
+  still resolved) but a preview flag must not move a repository or rewrite a
+  global config. `relocate_checkout()` now takes `dry_run`: it still validates
+  and reports the planned destination, performs no `mkdir` and no `os.rename`,
+  skips the pointer write, and says *"would move"* / *"would set"*. The
+  relocation itself is unchanged on a real run — that behaviour is what closed
+  #302 (#323).
+- **`tan init` and `tan generate` followed symlinked parents and wrote outside
+  the project while reporting success.** A pre-existing directory symlink under
+  the project caused bytes to land elsewhere, with the envelope reporting the
+  logical in-project path and `ok: true` — a data-placement bug and a
+  truthfulness bug together. A new shared guard (`tan/core/fs_confine.py`,
+  `resolve_confined`) compares two **resolved** paths; both write surfaces and
+  `init`'s `.alp/sdk-path` pin now confine before writing anything, refusing the
+  whole run rather than partway through. A symlinked *project root* still works
+  (#325).
+- **A dangling `$ZEPHYR_BASE` silently dropped a core from a multi-core build.**
+  Zephyr's `build` extension makes a separate `west_topdir(self.source_dir)`
+  call that walks from the slice's own app directory — which `_pin_west_workspace`
+  (#307) never covered, since that only pins the child's cwd for west's startup
+  search. An app bundled inside the workspace resolves regardless; a `tan init`
+  project is always a **sibling** of the workspace, so it has no ancestor
+  `.west` and falls through to `$ZEPHYR_BASE`, which west's `set_zephyr_base`
+  trusts with no existence check. Result: `ok: m55_he`, `failed: m55_hp`,
+  `FATAL ERROR: Could not find a west workspace in this or any parent
+  directory` — blaming west for a stale environment variable. Every west slice
+  spawn is now independent of an inherited `ZEPHYR_BASE`, and the failed
+  slice's `reason` names the workspace tan resolved and the `ZEPHYR_BASE` the
+  spawn saw (#336).
+- **`tan --version` was not eager: a version probe executed the following
+  subcommand.** `tan --version init --template zephyr-app --destination <dir>`
+  printed the version **and created the project**. The root callback returned
+  rather than short-circuiting dispatch, which a Click/Typer group callback does
+  not do when a subcommand is also present. Now handled through the framework's
+  own `is_eager` + callback mechanism, matching the Rust oracle (#326).
+- **`envelope.serialize-failed` printed `exitCode: 5` while the process exited
+  `0`.** `Envelope.to_json()` fell back correctly but `emit()` never propagated
+  the fallback code, so stdout and `$?` disagreed — breaking the invariant every
+  consumer relies on, `process exit code == stdout envelope.exitCode`. The
+  fallback code now reaches the process boundary (#327).
+- **`tan image` rejected helper firmware the SDK actually ships.** alp-sdk
+  defines `firmware_path` as repository-relative, but `_bundle_helper` resolved
+  it only under `build/`, so a real `cc3501e-v0.2.0.bin` (1087888 bytes) present
+  in the SDK produced `image.helper-missing` and refused the bundle. Relative
+  paths are now tried against both roots in a defined order, and the error names
+  every root tried with its absolute path (#330).
+- **`sdk list --online` split table rows in half.** `releaseNotesSummary` is the
+  release body verbatim, truncated to 60 characters with no whitespace handling;
+  a body whose first line was short put a literal newline inside a row, and the
+  `{flags}` suffix then landed after the spilled text rather than on the row it
+  described. Whitespace is collapsed before truncating (#316).
+- **`bootstrap`'s `INCOMPATIBLE $ZEPHYR_BASE` message named the verdict but not
+  the cause**, while its two sibling paths both named theirs. A workspace that
+  missed on **two** axes at once — version skew *and* a foreign manifest — fell
+  past both specific branches into a catch-all whose own comment claimed "not a
+  usable west workspace at all", which was untrue of the reported case. The
+  branch now accumulates the observed facts and renders them together. The
+  decision and exit code are unchanged; the fallback was already correct (#334).
+- **`tan/planner/` had drifted from alp-sdk's `scripts/alp_orchestrate/`**, so
+  tan emitted different Kconfig and accepted a board alp-sdk refuses. On
+  `mproc-mailbox`, `tan generate`'s Zephyr conf fragment was **56 lines against
+  alp-sdk's 63** — seven Kconfig symbols a user's build never got. On
+  `rpmsg-imx93`, alp-sdk refused the board (`E1M-NX9101` hw_rev `r1`, status
+  `tbd`) while tan reported `ok` and planned a build for it. Re-synced, and
+  seam1's harness now **compares** a legitimate refusal on both sides instead of
+  treating alp-sdk's non-zero emit as a harness abort (#320).
+
+### Internal
+
+- Two test fixtures wrote an executable and immediately `exec`'d it with no
+  guard, so a sibling test's still-open write handle could make the kernel
+  return `ETXTBSY` — the third occurrence of #250's race, and the cause of a
+  flaky **required** check (3 failures in 40 consecutive full-suite runs,
+  0 after the fix). The guard is hoisted so every fixture picks it up; the crate
+  now has zero unguarded write-then-exec sites (#318, #333).
+
+### Known issues
+
+- `@alplabai/tan` has never published to npm: `NPM_TOKEN` is a classic token and
+  `npm publish` demands an OTP. Needs an automation token (#233).
+- `SUPPORTED_CLI_VERSION` still lives in alp-sdk-vscode rather than being
+  derived from the Python tan (#268).
+
 ## [0.5.0-rc3] — 2026-08-01
 
 *Found by running the published `v0.5.0-rc2` binary end to end on a real
