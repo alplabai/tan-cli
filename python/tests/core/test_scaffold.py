@@ -8,6 +8,8 @@ transforms that decide what lands in a customer's `board.yaml`.
 wizard/vendored/` -- that tree is frozen at its own permanent vendor point
 (`docs/ROADMAP.md`'s Standing Rules) and the two are expected to diverge.
 """
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -16,6 +18,8 @@ from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     TEMPLATE_IDS,
     CoresError,
+    PlannedFile,
+    ScaffoldWriteError,
     app_core_for_sku,
     infer_runtime_for_core_id,
     is_plain_relative,
@@ -26,8 +30,27 @@ from tan.core.scaffold import (
     splice_companion_cores,
     vendored_app_core_key,
     vendored_core_ids,
+    write_files,
 )
 from tan.templates import VENDORED_ROOT
+
+WINDOWS = os.name == "nt"
+
+
+def _make_dir_link(link: Path, target: Path) -> bool:
+    """A directory link `link` -> `target`: a Windows JUNCTION (no elevated
+    privilege needed, unlike a real symlink) or a POSIX symlink. `False` when
+    the host refuses to make one at all -- matches `test_clean_command.py`'s
+    own precedent for this exact tradeoff."""
+    target.mkdir(parents=True, exist_ok=True)
+    if WINDOWS:
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+        )
+        return made.returncode == 0
+    link.symlink_to(target, target_is_directory=True)
+    return True
 
 
 def files_under(root: Path):
@@ -258,3 +281,92 @@ def test_tree_preview_marks_the_last_entry():
     assert preview[0] == "."
     assert preview[1] == "|-- CMakeLists.txt"
     assert preview[-1].startswith("`-- ")
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#325: `write_files` must not follow a symlink out of the project,
+# and must refuse the WHOLE run -- before anything lands on disk -- rather
+# than writing through it and reporting the in-project logical path as
+# written.
+# ---------------------------------------------------------------------------
+
+
+def test_write_files_refuses_a_write_through_a_symlinked_parent_with_a_missing_leaf(
+    tmp_path,
+):
+    """The `tan init` repro shape exactly: `<project>/src` is a pre-existing
+    directory link, and the planned leaf (`src/main.c`) does not exist yet."""
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    if not _make_dir_link(project / "src", outside):
+        pytest.skip("cannot create a directory link on this host")
+
+    files = [PlannedFile("src/main.c", "int main(void) { return 0; }\n")]
+    with pytest.raises(ScaffoldWriteError):
+        write_files(project, files)
+
+    assert not (outside / "main.c").exists()
+    assert not (project / "src" / "main.c").exists()
+
+
+def test_write_files_refuses_a_write_through_a_symlinked_existing_leaf(tmp_path):
+    """The second regression shape the issue names: the planned file itself,
+    not just a parent directory, is a symlink to somewhere outside."""
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    (project / "src").mkdir(parents=True)
+    outside.mkdir()
+    real_file = outside / "main.c"
+    real_file.write_text("old content\n", encoding="utf-8")
+    link = project / "src" / "main.c"
+    try:
+        link.symlink_to(real_file)
+    except OSError:
+        pytest.skip("cannot create a file symlink on this host")
+
+    files = [PlannedFile("src/main.c", "new content\n")]
+    with pytest.raises(ScaffoldWriteError):
+        write_files(project, files)
+
+    assert real_file.read_text(encoding="utf-8") == "old content\n"
+
+
+def test_write_files_refuses_the_whole_run_when_one_of_several_targets_escapes(
+    tmp_path,
+):
+    """`README.md` alone would succeed; paired with the escaping `src/main.c`
+    in the SAME run, neither may land -- 'refuse before the first write'."""
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    if not _make_dir_link(project / "src", outside):
+        pytest.skip("cannot create a directory link on this host")
+
+    files = [
+        PlannedFile("README.md", "hello\n"),
+        PlannedFile("src/main.c", "int main(void) { return 0; }\n"),
+    ]
+    with pytest.raises(ScaffoldWriteError):
+        write_files(project, files)
+
+    assert not (project / "README.md").exists()
+    assert not (outside / "main.c").exists()
+
+
+def test_write_files_still_works_through_a_symlinked_project_root(tmp_path):
+    """Not over-tightened: a project reached THROUGH a symlinked root is a
+    legitimate write, because it still lands inside the resolved root."""
+    real_project = tmp_path / "real_project"
+    real_project.mkdir()
+    link = tmp_path / "project_link"
+    if not _make_dir_link(link, real_project):
+        pytest.skip("cannot create a directory link on this host")
+
+    files = [PlannedFile("board.yaml", "som:\n  sku: E1M-AEN801\n")]
+    result = write_files(link, files)
+
+    assert result.written == ["board.yaml"]
+    assert (real_project / "board.yaml").read_text(encoding="utf-8") == (
+        "som:\n  sku: E1M-AEN801\n"
+    )
