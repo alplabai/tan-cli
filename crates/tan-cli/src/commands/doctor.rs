@@ -1184,6 +1184,69 @@ pub(crate) mod tests {
         }
     }
 
+    /// An executable `#!/bin/sh` stand-in that ignores its arguments and exits
+    /// with `code`. Deliberately NOT `/bin/true` / `/bin/false`: macOS ships
+    /// neither under `/bin` (they live in `/usr/bin`), so hardcoding the Linux
+    /// path passed ubuntu and windows and failed only the macos-latest leg
+    /// with `failed to launch /bin/true: No such file or directory (os error
+    /// 2)`. A script written into the test's own temp dir depends on no host
+    /// layout at all.
+    ///
+    /// Hoisted here from `bootstrap::steps` (tan-cli#333): `pub(crate)` so
+    /// `bootstrap::steps::tests` -- which cannot see back into this crate's
+    /// `bootstrap::steps` module from outside it, since `mod steps;`
+    /// (`bootstrap/mod.rs`) is private, but CAN see into this already-`pub`
+    /// `doctor` module -- reuses this instead of keeping its own copy. Same
+    /// pattern `support_bundle::tests` already uses for `TempTree` above.
+    #[cfg(unix)]
+    pub(crate) fn exit_code_shim(dir: &Path, name: &str, code: i32) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wait_until_spawnable(&path);
+        path
+    }
+
+    /// #250. Block until `path` can actually be `exec`'d, absorbing a
+    /// transient `ETXTBSY` ("Text file busy", os error 26) instead of letting
+    /// it leak out of this helper as a false probe failure.
+    ///
+    /// Root-caused, not guessed: isolating the repro (`--test-threads=1`,
+    /// filtered to just a single affected test) is clean in isolation; only
+    /// WITH its `Command`-spawning siblings running concurrently does it
+    /// flake. `fork()` (which every `Command::spawn` uses under the hood)
+    /// duplicates every fd the whole process holds at that instant into the
+    /// new child -- including, for the few instructions between a sibling's
+    /// `write` and its implicit `close`, a write handle on a script or binary
+    /// that sibling just finished creating. Until that unrelated sibling's
+    /// child finishes its OWN `exec` (or exits) and so drops the inherited
+    /// duplicate, the kernel still considers that path "open for writing" and
+    /// refuses to `exec` it for anyone -- including a caller that never
+    /// touched that fd itself. Caught live at ~1 failure in 40 consecutive
+    /// full-suite runs of the unmodified tree (tan-cli#333), which is CI's
+    /// actual single-process `cargo test` shape, not a synthetic overload.
+    ///
+    /// The contention is self-clearing in low milliseconds once the racing
+    /// fork's child completes its own exec, so a short bounded retry drains
+    /// it without masking a REAL regression in whatever this gates: this only
+    /// waits out noise in the fixture's own setup, once, before any assertion
+    /// runs against it.
+    #[cfg(unix)]
+    pub(crate) fn wait_until_spawnable(path: &Path) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        loop {
+            match std::process::Command::new(path).output() {
+                Ok(_) => return,
+                Err(e) if e.raw_os_error() == Some(26) && std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                Err(e) => panic!("shim at {} never became spawnable: {e}", path.display()),
+            }
+        }
+    }
+
     /// `--format json` global args, optionally rooted at a scratch project.
     /// `sdk_root: None` on purpose — the tests below assert on wiring that must
     /// hold with no SDK resolved, which is also the state the extension calls
@@ -2080,6 +2143,13 @@ pub(crate) mod tests {
             let mut perms = std::fs::metadata(&west_path).unwrap().permissions();
             perms.set_mode(0o755);
             std::fs::set_permissions(&west_path, perms).unwrap();
+            // tan-cli#333: the third occurrence of #250's `ETXTBSY` race
+            // (write+chmod a script, exec it with no guard) -- caught live at
+            // ~1 failure in 40 consecutive full-suite runs of the unmodified
+            // tree. `wait_until_spawnable` is the same guard `exit_code_shim`
+            // applies to its own stand-ins, right after this same write+chmod
+            // sequence.
+            wait_until_spawnable(&west_path);
         }
         #[cfg(windows)]
         std::fs::copy(env!("CARGO"), &west_path).expect("copy cargo as a west stand-in");
