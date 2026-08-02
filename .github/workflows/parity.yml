@@ -23,6 +23,21 @@
 
 name: parity
 
+# tan-cli#213: surface `client_payload.sdk_ref` in the Actions API's own
+# `display_title` (what `run-name` sets) rather than only a job-log `::notice::`
+# (see the "resolve alp-sdk ref" step below) -- alp-sdk's dispatch-confirmation
+# poll can then filter on the exact ref it sent instead of "any run created
+# after our dispatch epoch", which a concurrent push or other sender also
+# satisfies. Only `repository_dispatch` carries `client_payload`; the other
+# three triggers below (`push`, `pull_request`, and `workflow_call` from
+# release.yml) render an empty string instead, which is NOT a blank/broken
+# title -- GitHub's own rule is that an omitted-or-whitespace-only `run-name`
+# falls back to the event-specific default (the commit message on `push`, the
+# PR title on `pull_request`), and that default is strictly more informative
+# than a constant `parity (push)` string would be. Same empty-string-means-
+# "use the default" idiom as the `ref:` step below.
+run-name: ${{ github.event_name == 'repository_dispatch' && format('parity (sdk {0})', github.event.client_payload.sdk_ref) || '' }}
+
 on:
   # Direct pushes to `main` (an admin merge, a hotfix, a back-merge) open no PR,
   # so without this the three jobs below never ran on those commits at all --
