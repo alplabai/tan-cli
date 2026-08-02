@@ -755,3 +755,99 @@ def test_from_example_with_no_board_yaml_and_board_yaml_flag_adds_it(tmp_path):
     assert (tmp_path / "board.yaml").read_text(encoding="utf-8") == custom.read_text(
         encoding="utf-8"
     )
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#325: `_pin_sdk`'s `.alp/sdk-path` write shares scaffold.py's
+# confinement guard -- a symlinked `.alp` (or a symlinked parent of it) must
+# not carry the pin write outside the project while `init` still reports
+# success. The write's target is the fixed, shallow `<project_root>/.alp/
+# sdk-path`, so "a symlinked parent of `.alp`" has exactly one instance that
+# is not simply the project root itself (covered separately below, and which
+# must keep WORKING): `.alp` being a directory link IS the parent of the
+# `sdk-path` leaf. The scaffold.py suite's third shape (an existing LEAF
+# itself a symlink) needs a real file symlink, which this box lacks the
+# privilege to create -- same constraint noted there.
+# ---------------------------------------------------------------------------
+
+WINDOWS = os.name == "nt"
+
+
+def _make_dir_link(link: Path, target: Path) -> bool:
+    """A directory link `link` -> `target`: a Windows JUNCTION (no elevated
+    privilege needed, unlike a real symlink) or a POSIX symlink. `False` when
+    the host refuses to make one at all (policy-dependent) -- the same
+    tradeoff `test_scaffold.py`/`test_generate_command.py` already make for
+    the same reason. This box lacks the privilege for a real Windows symlink,
+    so the repro below uses a junction, not a symlink -- distinct mechanisms
+    (a junction is a filesystem-level directory alias with no reparse-tag
+    ACL/privilege check; a symlink can also target a file and needs
+    SeCreateSymbolicLinkPrivilege), but both make `.resolve()` walk through a
+    directory alias, which is the only property this guard depends on."""
+    target.mkdir(parents=True, exist_ok=True)
+    if WINDOWS:
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+        )
+        return made.returncode == 0
+    link.symlink_to(target, target_is_directory=True)
+    return True
+
+
+def _sdk_checkout(root: Path) -> Path:
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    return root
+
+
+def test_pin_sdk_refuses_a_write_through_a_symlinked_alp_dir(tmp_path):
+    """The tan-cli#325 repro applied to `_pin_sdk`: `<project>/.alp` is a
+    pre-existing directory link to somewhere outside the project. Before the
+    fix this followed the link, wrote `<outside>/sdk-path`, and still
+    reported `ok: true` with `sdkPinned` set. Now it must refuse -- nothing
+    from `tan init` may land outside the project, and the command must report
+    an error, not a silent `sdkPinned: null`."""
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    sdk = _sdk_checkout(tmp_path / "sdk")
+    if not _make_dir_link(project / ".alp", outside):
+        pytest.skip("cannot create a directory link on this host")
+
+    proc = run_tan(
+        "init", "--template", "minimal-app", "--destination", str(project),
+        "--sdk-root", str(sdk), "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 3  # ExitCode.WRITE_FAILURE
+    assert env["ok"] is False
+    assert issue(env)["code"] == "init.write-failed"
+    # The filesystem outcome, not just the message: nothing landed outside
+    # the project, through the link or otherwise.
+    assert not any(outside.rglob("*"))
+    assert not (project / ".alp" / "sdk-path").exists()
+
+
+def test_pin_sdk_still_works_when_the_project_root_itself_is_a_symlink(tmp_path):
+    """The fix must not be over-tightened: a project reached THROUGH a
+    symlinked root is still a legitimate write, because `.alp/sdk-path`'s
+    resolved target still lands inside the resolved root."""
+    real_project = tmp_path / "real_project"
+    real_project.mkdir()
+    link = tmp_path / "project_link"
+    sdk = _sdk_checkout(tmp_path / "sdk")
+    if not _make_dir_link(link, real_project):
+        pytest.skip("cannot create a directory link on this host")
+
+    proc = run_tan(
+        "init", "--template", "minimal-app", "--destination", str(link),
+        "--sdk-root", str(sdk), "--format", "json", cwd=tmp_path,
+    )
+    env = envelope(proc)
+
+    assert proc.returncode == 0, env["issues"]
+    assert env["data"]["sdkPinned"] == sdk.as_posix()
+    pointer = json.loads((real_project / ".alp" / "sdk-path").read_text(encoding="utf-8"))
+    assert pointer["sdkPath"] == sdk.as_posix()
