@@ -113,10 +113,38 @@ jobs:
         run: pip install pytest
       # Public repo, so the default token is enough. Only on the release path:
       # see the `sdk_parity` input for why PRs skip it.
+      #
+      # PINNED, and that is the whole point. With no `ref:` this cloned
+      # alp-sdk's DEFAULT BRANCH (`dev`), which made the release gate compare a
+      # frozen tag against a moving target in ANOTHER repo: the same commit
+      # passes today and fails tomorrow because someone landed an alp-sdk
+      # change, with nothing here altered. That is exactly how `v0.5.0-rc3`
+      # died -- `gates / python` went red on `tan/planner/` drift against
+      # alp-sdk `dev`, so `build` and `release` skipped and the tag was spent
+      # with no Release behind it (#319).
+      #
+      # `parity.yml` already pins this same dependency (`PINNED_SDK_TAG`) for
+      # exactly this reason. The two MUST be bumped together, or the release
+      # gate and the parity gate silently measure different alp-sdks.
+      #
+      # Bumped from `v0.15.0-rc1` (#319) to this exact commit for tan-cli#320:
+      # `tan/planner/` was behind `scripts/alp_orchestrate/` on alp-sdk `dev`
+      # (8 files, +267/-33, mostly `kconfig.py` and `sdk_compat.py`) as of
+      # v0.15.0-rc1, so a `sdk_parity: true` run's `pytest tests -q` (no
+      # `--ignore=tests/gates`, unlike `parity.yml`'s own `python-tests` job)
+      # hashed alp_orchestrate/*.py at this OLDER ref and mismatched the
+      # freshly re-pinned `PINNED_HASHES` in
+      # `python/tests/gates/test_planner_relocation_freshness.py`, which now
+      # audits against this same commit. Not a tag -- alp-sdk had not cut one
+      # past v0.15.0-rc1 at the time of this port; re-pin to a real tag once
+      # alp-sdk cuts one at or after this SHA, the same deferred-tag pattern
+      # `parity.yml`'s own `PINNED_SDK_TAG` history used while waiting on
+      # v0.14.0.
       - uses: actions/checkout@v4
         if: ${{ inputs.sdk_parity }}
         with:
           repository: alplabai/alp-sdk
+          ref: f4d87a1f472dffe9fe7dffc247cc55bce71034ba
           path: alp-sdk
       - name: enable the SDK-dependent tests
         if: ${{ inputs.sdk_parity }}

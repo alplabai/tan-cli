@@ -94,11 +94,19 @@ import pytest
 from tests.conftest import sdk_root
 
 #: alp-sdk commit this port was last audited against. Bumped from
-#: `ef79eab0` (origin/main) by the tan-cli #275 re-sync, which carried
-#: alp-sdk #1057 (`jlink_flash_device` -> `flash_args`, without which Flow D
-#: can never arm) and #1054/#1025 (refuse an hw_rev absent from the resolved
-#: `hw_revisions:` table) into `tan/planner/`.
-PINNED_SDK_COMMIT = "0f3cefbec9a8b2467875c57b76451a1f7cf695b9"  # alp-sdk origin/dev
+#: `0f3cefbe` (origin/dev) by the tan-cli #320 re-sync, which carried
+#: alp-sdk #1080 (`CONFIG_DCACHE=n` for a `raw_shmem` cross-core carve-out,
+#: not just the Ethos-U inference path) and #1025's status half
+#: (`SdkRevisionNotBuildable` -- refuse an hw_rev that EXISTS but is
+#: `status: reserved`/`status: tbd`/status-less) into `tan/planner/`, plus
+#: #1048's `is_tbd()` case/whitespace normalisation (ported inline at each
+#: call site rather than as a shared module -- see loader.py/kconfig.py/
+#: slugs.py/carveout.py; a `tan/planner/sentinels.py` counterpart to
+#: alp-sdk's new top-level `scripts/sentinels.py` has no clean home in this
+#: gate's PINNED_HASHES/HAND_PORT_HASHES taxonomy without also re-auditing
+#: the unrelated `zephyr_board.py`/`alp_project_loader.py` drift sitting
+#: between HAND_PORT_PINNED_SDK_COMMIT and here).
+PINNED_SDK_COMMIT = "f4d87a1f472dffe9fe7dffc247cc55bce71034ba"  # alp-sdk origin/dev
 
 #: sha256 of every `scripts/alp_orchestrate/<name>.py` at PINNED_SDK_COMMIT,
 #: for every upstream module that has a same-named relocated counterpart
@@ -107,24 +115,24 @@ PINNED_SDK_COMMIT = "0f3cefbec9a8b2467875c57b76451a1f7cf695b9"  # alp-sdk origin
 #: single upstream file to pin and are out of scope for this hash check).
 PINNED_HASHES: dict[str, str] = {
     "__main__.py": "77b98caf27ba425b888a19f8727683bba23e7c24ebb4b6aa1874e5316a291d27",
-    "__init__.py": "2393cab9e971145889488a8049df48da7df24ece19b041d5a93c575edb3ceb04",
+    "__init__.py": "739a0288487997d6f1be7dc1f47fcf05b34a16386c0c81e8fe4eaadcfb84e3f0",
     "buildplan.py": "1d8d27be880b876b7c0fa386e2f46317377e30899d02164e3fdd189ad55be438",
-    "carveout.py": "2fc94f4b39c3357f3d5e68122aa1dadddfd7fcb8653d1c1a2268f0b9dba35145",
+    "carveout.py": "1c62a7e8b9ac6fd4526e2e5bc5e6234c9d4ca5f0a2d019cc85f00392fff91198",
     "cli.py": "b2d9e82d62c5dd1668d4d893e148fb66efc50825b465c8f8385f9bf668572419",
     "headers.py": "9a9cc0ca4801b2bdb7a551662e4dddf27c47bb42fad06939c92a8c95b221156b",
-    "kconfig.py": "a94d7db046cc1c7e57b6ef97914357bff19ef3908a364057d81f091144b6a176",
+    "kconfig.py": "2839a56f86a8ec831bbcdd7836a36a36865b137865c15003671b4ccb3fef3ad9",
     "kconfig_symbols.py": "fe3a3df4aa00db808ce8443548d113b4a97cf600b5fda106d075e8d071243729",
     "libraries.py": "47b823e0fc06cc657a3c3068598b953e342720cf359443651a9996b93be7aaa5",
-    "loader.py": "b4db9e97410956f44fce4a1d11e57deb3d9ec66c2acc0491a87554a420bbd483",
+    "loader.py": "61eb397822a75ec1a5d662ce888488d0f388bd692e2f26b5f88f305a8e5e9c97",
     "manifest.py": "930aa9c453fd86b487f66ec84be8f074a53f22a6077b0310390e176fee7918ba",
     "memregion.py": "f3e62050172bb1500e98d0023eda7408a67e1085a70a4acd92f45f08213ebfa3",
-    "models.py": "56f6800dd6a382ab6fa65dd82219216fa975fe065ad3e4106d28fb8cbba7f19b",
+    "models.py": "6d33258874d6f732d66668d30c22fd644e02de2fb9f35e7b497ddd2d81164109",
     "orchestrator.py": "7d8891d4781b6bdf809340d8428d2b374d3f62fdf6730acc93761093d0943d3d",
-    "partition.py": "d1783b95948c12b08dd02493c33613f8bc2b133cc893125c7dc33cd21e0681e3",
+    "partition.py": "97e7646ab7f8692919d1cd529d42be453d7fc3240416f98e202a5920cb6cb029",
     "paths.py": "a2d8b74570f88ad223d797d6428a58fc3851dad6bb9a1ae2c2aa109db789bc93",
-    "sdk_compat.py": "145868e163de709463496fe17b9a3a1596c37075efb89d5de0dc05ef9172b719",
+    "sdk_compat.py": "ae8e5244877d3e9ad35f89e6b7782861f810825321052ed9f5770b9762c0281a",
     "secure.py": "a6a5762fbac2f99fc4356f01b3ffedd15d366af6d2ddde0042223b3da749cbe6",
-    "slugs.py": "16295edbb9ded47eba1063f86a52ce20990d7284ef3ad0365c7f952aec4031f9",
+    "slugs.py": "0cc4c7608a751aa65a8eb1cc2c4c50d868e908ff5d2e11657857e66be10f1b23",
     "topology.py": "12f5f62d3adeb9e935594934fd2fc2b1fbeaec6f466d6dd89c329c54e844f3b1",
     "validate.py": "2dbe9dcb36ff0ebe4c968ef120983342aa00f02f32b9166f9c1608d1578495e7",
 }
