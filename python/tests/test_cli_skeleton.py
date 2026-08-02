@@ -49,6 +49,40 @@ def test_version_under_format_json_is_an_envelope_not_a_bare_line():
         assert env["data"]["message"].startswith("tan ")
 
 
+def test_version_does_not_execute_a_following_subcommand(tmp_path):
+    """tan-cli#326: the Rust oracle treats `--version` as eager and exits
+    before ever looking at a following subcommand; the pre-fix Python root
+    callback handled `--version` with a plain `return`, which does not stop
+    Click's own group dispatch, so `init` ran anyway and created a project.
+    Asserting the version STRING alone (`test_version_first_line_matches_the_
+    extension_probe`, above) would keep passing while that kept happening --
+    this asserts the observable filesystem side effect instead: nothing is
+    created."""
+    destination = tmp_path / "project"
+    p = run("--version", "init", "--template", "zephyr-app", "--destination", str(destination))
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.splitlines()[0].startswith("tan ")
+    assert "created" not in p.stdout, p.stdout  # `init`'s own success line
+    assert not destination.exists(), sorted(str(x) for x in destination.rglob("*"))
+
+
+def test_version_before_a_subcommand_writes_exactly_one_stdout_document():
+    """The JSON-framing half of tan-cli#326: pre-fix, `--version sdk current
+    --format json` printed a bare `tan X.Y.Z` line (from the eager-in-name-only
+    `--version` handling) followed by `sdk current`'s own JSON envelope --
+    two stdout documents, which breaks any consumer that parses stdout as one.
+    The oracle folds the trailing `--format json` into a single JSON version
+    envelope instead (verified against `target/debug/tan.exe --version sdk
+    current --format json`); `sdk current` must never run at all here, on
+    either side of the subcommand boundary."""
+    p = run("--version", "sdk", "current", "--format", "json")
+    assert p.returncode == 0, p.stderr
+    assert len(p.stdout.splitlines()) == 1, p.stdout  # exactly one document
+    env = json.loads(p.stdout)
+    assert env["command"] == "cli", env  # not "sdk" -- sdk current never ran
+    assert env["data"]["message"].startswith("tan ")
+
+
 def test_unknown_command_exits_2_and_emits_an_envelope_in_json_mode():
     p = run("definitely-not-a-command", "--format", "json")
     assert p.returncode == 2
