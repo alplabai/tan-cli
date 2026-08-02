@@ -60,6 +60,7 @@ from pathlib import Path
 
 import typer
 
+from tan.commands.build_cmd import resolve_sdk_root_ladder
 from tan.commands.doctor_cmd import (
     FALLBACK_PYTHON_FLOOR,
     _read_text,
@@ -74,7 +75,6 @@ from tan.commands.sdk_cmd import (
     _home_alp_dir,
     global_default_pointer_fix_hint,
     project_pin_issue,
-    resolve_sdk_tiered,
 )
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_REL_PATH,
@@ -1226,7 +1226,9 @@ def find_enclosing_west(start: Path) -> Path | None:
         current = parent
 
 
-def relocate_checkout(repo_root: Path, target_parent: Path) -> tuple[Path | None, str | None]:
+def relocate_checkout(
+    repo_root: Path, target_parent: Path, dry_run: bool = False
+) -> tuple[Path | None, str | None]:
     """Move `repo_root` to be a direct child of `target_parent`, preserving its
     basename. Returns `(new_root, error)`.
 
@@ -1239,6 +1241,12 @@ def relocate_checkout(repo_root: Path, target_parent: Path) -> tuple[Path | None
     cross-device target or a file locked open inside the tree fails the WHOLE
     rename, leaving the checkout exactly where it was -- there is no
     "moved half the files" state this can reach.
+
+    `dry_run=True` (tan-cli#323) runs every check above -- the already-a-child
+    no-op, the destination-exists refusal -- and returns the SAME `new_root` a
+    real run would, but stops there: no `mkdir`, no `os.rename`. A preview
+    flag that reports a planned destination must never be the thing that
+    creates it.
     """
     if _same_directory(repo_root.parent, target_parent):
         return repo_root, None
@@ -1251,6 +1259,8 @@ def relocate_checkout(repo_root: Path, target_parent: Path) -> tuple[Path | None
             f"{_native(destination)} already exists; refusing to relocate the checkout "
             f"there (nothing was moved)"
         )
+    if dry_run:
+        return destination, None
     try:
         target_parent.mkdir(parents=True, exist_ok=True)
     except OSError as err:
@@ -1785,8 +1795,24 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # `board_path` names where one WOULD live regardless.
     reported_project = Project.resolved(root, board_path)
 
-    active = resolve_sdk_tiered(sdk_root_flag, Path(root))
-    resolved = active.path if active.path and Path(active.path).joinpath(*SDK_MARKER).exists() else None
+    # tan-cli#322: routed through `resolve_sdk_root_ladder` -- the SAME
+    # resolver `doctor` and eleven other commands call -- rather than
+    # `resolve_sdk_tiered` directly. `resolve_sdk_tiered` alone only checks
+    # the workspace root itself, a LATERAL `../alp-sdk` sibling, or an
+    # enclosing checkout; it has no candidate for the documented quickstart
+    # layout (`tan.exe` beside a freshly cloned `alp-sdk/`, a CHILD of cwd).
+    # `resolve_sdk_root_ladder` falls through to the wider positional walk
+    # (`discover_sdk_root`, which does check that child) exactly when the
+    # narrow tiers come up empty -- the same fallback `doctor` already
+    # benefits from, which is why `doctor` resolved a checkout here and a
+    # bootstrap calling the narrower resolver alone did not. A second,
+    # bootstrap-only copy of that fallback would be the very drift this
+    # fixes: one resolver, consulted by both.
+    active_path, active_tier, broken_project_pin = resolve_sdk_root_ladder(
+        sdk_root_flag, Path(root)
+    )
+    active_is_sdk = active_path is not None and active_path.joinpath(*SDK_MARKER).exists()
+    resolved = str(active_path) if active_is_sdk else None
     if resolved is None:
         return (
             _refusal(
@@ -1812,10 +1838,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             Project(root=None, board_yaml=None),
             None,
         )
-    # tan-cli#217/#296: `resolve_sdk_tiered` returns an explicit `--sdk-root`
-    # VERBATIM (I-31, so a typo surfaces rather than silently falling through
-    # to a lower tier) -- `./alp-sdk` stays `./alp-sdk`. That is fine for this
-    # run's OWN filesystem calls (relative to this process's real cwd), but
+    # tan-cli#217/#296: `resolve_sdk_root_ladder` returns an explicit
+    # `--sdk-root` VERBATIM (I-31, so a typo surfaces rather than silently
+    # falling through to a lower tier) -- `./alp-sdk` stays `./alp-sdk`. That
+    # is fine for this run's OWN filesystem calls (relative to this process's
+    # real cwd), but
     # every path below is either compared by PREFIX (`sdkRoot` vs
     # `workspaceDir`) or handed to a consumer with a different cwd entirely --
     # the vscode extension included. Anchored here, once, before `sdk_root`
@@ -1828,14 +1855,14 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # (`projectPin`/`globalDefault`/`discovery`) are already absolute, so this
     # is a no-op for them.
     sdk_root = os.path.abspath(os.path.expanduser(resolved))
-    sdk = SdkInfo(sdk_root, active.tier)
+    sdk = SdkInfo(sdk_root, active_tier)
     # tan-cli#263 review: `bootstrap` sets up a whole venv/west workspace
     # against whichever checkout this resolved -- a silently-missed
     # `.alp/sdk-path` pin belongs on the same two SUCCESS paths below
     # (`--print-env`, and the full run) as every other non-fatal notice this
     # command reports; not `log.warn`, which always prefixes `bootstrap.` and
     # would misname this shared code.
-    pin_issue = project_pin_issue(active.broken_project_pin, active.tier)
+    pin_issue = project_pin_issue(broken_project_pin, active_tier)
 
     # `west init -l <alp-sdk>` always makes the topdir the checkout's PARENT and
     # alp-sdk itself the manifest repo, which is what registers the `alp-*`
@@ -2092,7 +2119,14 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         )
 
     if guard_applies and target is not None:
-        new_root, error = relocate_checkout(paths.repo_root, target)
+        # `dry_run=dry_run` (tan-cli#323): a preview run still computes and
+        # validates the destination -- so `data.sdkRoot`/`data.workspaceDir`
+        # below keep reporting the planned relocation -- but performs neither
+        # the `mkdir` nor the `os.rename`. The `_write_global_sdk_pointer`
+        # write a few lines down is gated the same way, for the same reason:
+        # a flag whose entire purpose is "show me, don't do it" must not move
+        # the checkout or repoint the machine-global default SDK.
+        new_root, error = relocate_checkout(paths.repo_root, target, dry_run=dry_run)
         if error is not None:
             return _fatal(error, payload(), []), reported_project, sdk
         if new_root is not None and str(new_root) != str(paths.repo_root):
@@ -2113,13 +2147,15 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             paths.workspace_dir = target
             paths.venv_dir = target / facts.venv_dir_name
             sdk_root = str(new_root)
-            sdk = SdkInfo(sdk_root, active.tier)
+            sdk = SdkInfo(sdk_root, active_tier)
+            move_verb = "would move" if dry_run else "moved"
+            set_verb = "would set" if dry_run else "set"
             log.warn(
                 "workspace-relocated",
-                f"moved the alp-sdk checkout from {_native(old_root)} to "
+                f"{move_verb} the alp-sdk checkout from {_native(old_root)} to "
                 f"{_native(sdk_root)} so the west workspace "
                 f"(zephyr/modules/.west/venv) stays out of "
-                f"{_native(Path(old_root).parent)}, and set it as your default SDK "
+                f"{_native(Path(old_root).parent)}, and {set_verb} it as your default SDK "
                 # `tan sdk switch --global` refuses in this build (tan-cli#305) --
                 # naming the pointer mechanism itself instead of a subcommand
                 # keeps this true even once that changes.
@@ -2133,7 +2169,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             board_path = _rebase(board_path, old_root, sdk_root)
             reported_project = Project.resolved(root, board_path)
             relocation_undo = undo
-            _write_global_sdk_pointer(sdk_root)
+            if not dry_run:
+                _write_global_sdk_pointer(sdk_root)
 
     log.line(f"Repo root:       {_native(paths.repo_root)}")
     if is_windows:
@@ -2222,7 +2259,7 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             paths.workspace_dir = relocation_undo.workspace_dir
             paths.venv_dir = relocation_undo.venv_dir
             sdk_root = relocation_undo.old_root
-            sdk = SdkInfo(sdk_root, active.tier)
+            sdk = SdkInfo(sdk_root, active_tier)
             reported_project = relocation_undo.project
         else:
             # The move-back itself refused or failed (e.g. the vacated path

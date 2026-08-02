@@ -304,11 +304,11 @@ def test_relocation_rollback_move_back_refused_never_recommends_a_refused_subcom
     real_relocate = bootstrap_cmd.relocate_checkout
     calls = {"n": 0}
 
-    def flaky_relocate(repo_root, target_parent):
+    def flaky_relocate(repo_root, target_parent, dry_run=False):
         calls["n"] += 1
         if calls["n"] == 2:
             (target_parent / repo_root.name).mkdir(parents=True)
-        return real_relocate(repo_root, target_parent)
+        return real_relocate(repo_root, target_parent, dry_run=dry_run)
 
     monkeypatch.setattr(bootstrap_cmd, "relocate_checkout", flaky_relocate)
     monkeypatch.setattr(
