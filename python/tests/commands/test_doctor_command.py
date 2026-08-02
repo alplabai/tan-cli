@@ -1036,27 +1036,52 @@ def test_jlink_flash_device_is_read_from_e8_json_when_an_sdk_resolves(tmp_path):
 
 
 def test_jlink_flash_device_falls_back_with_no_sdk_root():
+    """Case 1: nothing to read from at all -- the one wording tan-cli#310 left
+    unchanged. Its own distinguishing text ("no alp-sdk checkout resolved")
+    must NOT appear in either of the other two fallback causes below, or a
+    doctor run with a perfectly good SDK checkout tells the user to go hunting
+    for an SDK-resolution problem they do not have (the bug tan-cli#310
+    found)."""
     device, source = doctor_cmd.jlink_flash_device(None)
     assert device == doctor_cmd.JLINK_AEN_DEVICE
     assert "built-in fallback" in source
+    assert "no alp-sdk checkout resolved" in source
 
 
 def test_jlink_flash_device_falls_back_when_no_variant_carries_the_key(tmp_path):
+    """Case 3: an SDK resolved and its `e8.json` parsed fine, but no variant
+    carries `debug.jlink_flash_device` -- the real state of every checkout
+    since alp-sdk#1057 moved that fact to a per-board `flash_args` value
+    doctor has no board selected to read. Must say THAT, not case 1's "no
+    alp-sdk checkout resolved" (tan-cli#310: a checkout genuinely resolved
+    here, so that sentence would be false)."""
     _write_e8_json(tmp_path, [{"debug": {"jlink_device": {"m55_he": "Cortex-M55"}}}])
     device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
     assert device == doctor_cmd.JLINK_AEN_DEVICE
     assert "built-in fallback" in source
+    assert "no variant carries" in source
+    assert "flash_args" in source
+    assert "no alp-sdk checkout resolved" not in source
 
 
 def test_jlink_flash_device_survives_a_missing_or_malformed_e8_json(tmp_path):
-    """No file, and a directory where a file is expected: both fall back rather
-    than raising -- doctor's whole job is to run on a host where things are
-    wrong."""
-    assert doctor_cmd.jlink_flash_device(str(tmp_path))[0] == doctor_cmd.JLINK_AEN_DEVICE
+    """Case 2: an SDK resolved but `e8.json` itself is missing / unreadable /
+    malformed -- both fall back rather than raising (doctor's whole job is to
+    run on a host where things are wrong), and both must say THAT, naming the
+    path, not case 1's "no alp-sdk checkout resolved" (a checkout DID
+    resolve; only the file under it did not read)."""
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "missing, unreadable" in source
+    assert "no alp-sdk checkout resolved" not in source
+    assert str(tmp_path) in source
 
     (tmp_path / "metadata" / "socs" / "alif" / "ensemble").mkdir(parents=True)
     (tmp_path / "metadata" / "socs" / "alif" / "ensemble" / "e8.json").mkdir()
-    assert doctor_cmd.jlink_flash_device(str(tmp_path))[0] == doctor_cmd.JLINK_AEN_DEVICE
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "missing, unreadable" in source
+    assert "no alp-sdk checkout resolved" not in source
 
 
 def test_jlink_flash_device_falls_back_when_variants_disagree(tmp_path):
