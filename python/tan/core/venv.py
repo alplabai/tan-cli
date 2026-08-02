@@ -139,13 +139,24 @@ def venv_bin_dir(start: str, sdk_root: str | None) -> Path | None:
 def west_workspace_dir(start: str, sdk_root: Path | None) -> Path | None:
     """Port of `workspace.rs::west_workspace_dir`: the directory holding
     `.west/` that a `west alp-*` extension command -- and `tan flash`'s
-    spawned children (tan-cli#289/#61) -- must run from. Discovered only from
-    a workspace manifest, never the app dir alone. Checked in order: the
-    project tree upward, `$ZEPHYR_BASE/..` (manifest-verified against
-    `sdk_root` when one resolved), then the SDK-derived layouts
-    (`<sdk-parent>` and the legacy `<sdk-parent>/zephyrproject`). `None` when
-    nothing resolves -- the caller then keeps the old app-dir cwd, matching
-    the oracle exactly.
+    spawned children (tan-cli#289/#61), and (tan-cli#307) `tan build`'s own
+    `west build` children -- must run from. Discovered only from a workspace
+    manifest, never the app dir alone. Checked in order: the project tree
+    upward (manifest-verified against `sdk_root` when one resolved --
+    tan-cli#307, see `_manifest_ok` below), `$ZEPHYR_BASE/..`
+    (manifest-verified the same way), then the SDK-derived layouts
+    (`<sdk-parent>` and the legacy `<sdk-parent>/zephyrproject`, never
+    manifest-checked -- they are already anchored on `sdk_root` itself, with
+    nothing independent left to verify). `None` when nothing resolves -- the
+    caller then keeps the old app-dir cwd, matching the oracle exactly.
+
+    **tan-cli#307: the upward walk is manifest-guarded too, not just
+    `$ZEPHYR_BASE`.** A project sitting inside a directory that ALSO holds an
+    unrelated `.west` (a second Zephyr checkout, a vendor SDK, an old
+    workspace) used to have that ancestor win here purely because it sits
+    closer to `start` than the workspace `tan bootstrap` actually created
+    elsewhere -- the same class of bug tan-cli#61/#292 already fixed for the
+    `$ZEPHYR_BASE` candidate, now closed for the plain upward walk too.
 
     **Moved here from `tan.commands.west_forward_cmd` (tan-cli#289 review).**
     `flash_cmd.py` needed the SAME resolver `west_forward_cmd.py` already
@@ -160,9 +171,23 @@ def west_workspace_dir(start: str, sdk_root: Path | None) -> Path | None:
     def is_workspace(d: Path) -> bool:
         return (d / ".west").is_dir()
 
+    def manifest_ok(d: Path) -> bool:
+        """`sdk_root` absent means there is nothing to verify against, so
+        `d` is accepted unconditionally -- the same "nothing to check"
+        fallback every other candidate in this function already applies."""
+        if sdk_root is None:
+            return True
+        # Lazy for the same reason `_zephyr_base_workspace` below is lazy:
+        # `tan.commands.bootstrap_cmd` pulls in typer + the whole bootstrap
+        # command surface, and this `tan.core` module must not depend on it
+        # at import time.
+        from tan.commands.bootstrap_cmd import _manifest_points_at  # noqa: PLC0415
+
+        return _manifest_points_at(d, sdk_root)
+
     directory: Path | None = Path(start)
     while directory is not None:
-        if is_workspace(directory):
+        if is_workspace(directory) and manifest_ok(directory):
             return directory
         parent = directory.parent
         directory = parent if parent != directory else None
