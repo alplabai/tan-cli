@@ -870,6 +870,11 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&python_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // #250/#318: absorb the same transient ETXTBSY `exit_code_shim` guards
+        // against -- this shim is spawned by `probe_venv_pip` inside
+        // `ensure_venv` below, moments after the `write` above, and is exactly
+        // as exposed to a still-open write fd from a concurrent sibling test.
+        wait_until_spawnable(&python_path);
         assert!(
             python_path.is_file(),
             "the broken interpreter must exist first"
@@ -926,6 +931,12 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&python_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
+        // #250/#318: same fix as `exit_code_shim` -- `probe_venv_pip` spawns
+        // this shim inside `ensure_venv` below, and a still-open write fd
+        // inherited by a concurrent sibling test's fork can make that spawn
+        // see a transient ETXTBSY, fail closed, and wrongly recreate the venv
+        // `/bin/false` was meant to prove untouched (tan-cli#318).
+        wait_until_spawnable(&python_path);
 
         let facts = fallback_facts((3, 10));
         let ws = Workspace {
