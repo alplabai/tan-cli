@@ -735,59 +735,17 @@ mod tests {
         );
     }
 
-    /// An executable `#!/bin/sh` stand-in that ignores its arguments and exits
-    /// with `code`. Deliberately NOT `/bin/true` / `/bin/false`: macOS ships
-    /// neither under `/bin` (they live in `/usr/bin`), so hardcoding the Linux
-    /// path passed ubuntu and windows and failed only the macos-latest leg
-    /// with `failed to launch /bin/true: No such file or directory (os error
-    /// 2)`. A script written into the test's own temp dir depends on no host
-    /// layout at all.
+    // `exit_code_shim` / `wait_until_spawnable` (the #250 `ETXTBSY` guard)
+    // moved to `doctor::tests` (tan-cli#333): `doctor.rs`'s
+    // `westresolved_version` fixture was the third occurrence of one race
+    // (#250, then this file via #318, then doctor.rs) -- hoisting stops a
+    // fourth. `doctor` is the shared home rather than `bootstrap::steps`
+    // because `mod steps;` (`bootstrap/mod.rs`) is private to `bootstrap`,
+    // unreachable from `doctor.rs`; `doctor` is already `pub mod doctor;`
+    // with `mod tests` already `pub(crate)` for exactly this kind of sharing
+    // (`support_bundle::tests` already reaches in for `TempTree`).
     #[cfg(unix)]
-    fn exit_code_shim(dir: &std::path::Path, name: &str, code: i32) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::create_dir_all(dir).unwrap();
-        let path = dir.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\nexit {code}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        wait_until_spawnable(&path);
-        path
-    }
-
-    /// #250. Block until `path` can actually be `exec`'d, absorbing a
-    /// transient `ETXTBSY` ("Text file busy", os error 26) instead of letting
-    /// it leak out of this helper as a false probe failure.
-    ///
-    /// Root-caused, not guessed: isolating the repro (`--test-threads=1`,
-    /// filtered to just `venv_has_usable_pip_reads_the_probe_exit_status`)
-    /// is 30/30 clean; only WITH its `Command`-spawning siblings in this file
-    /// running concurrently does it flake. `fork()` (which every
-    /// `Command::spawn` uses under the hood) duplicates every fd the whole
-    /// process holds at that instant into the new child -- including, for
-    /// the few instructions between the `write` above and its implicit
-    /// `close`, a write handle on the shim script just created. Until that
-    /// unrelated sibling's child finishes its OWN `exec` (or exits) and so
-    /// drops the inherited duplicate, the kernel still considers the shim
-    /// "open for writing" and refuses to `exec` it for anyone -- including a
-    /// caller, such as `probe_venv_pip`, that never touched that fd itself.
-    ///
-    /// The contention is self-clearing in low milliseconds once the racing
-    /// fork's child completes its own exec, so a short bounded retry drains
-    /// it without masking a REAL regression in `probe_venv_pip`: this only
-    /// waits out noise in the shim's own setup, once, before any assertion
-    /// runs against it.
-    #[cfg(unix)]
-    fn wait_until_spawnable(path: &std::path::Path) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-        loop {
-            match Command::new(path).output() {
-                Ok(_) => return,
-                Err(e) if e.raw_os_error() == Some(26) && std::time::Instant::now() < deadline => {
-                    std::thread::sleep(std::time::Duration::from_millis(2));
-                }
-                Err(e) => panic!("shim at {} never became spawnable: {e}", path.display()),
-            }
-        }
-    }
+    use crate::commands::doctor::tests::exit_code_shim;
 
     /// Stand-ins for a venv whose `pip` works vs. one whose `-m pip --version`
     /// fails, without needing a real Python venv on the test host (both ignore
@@ -859,17 +817,18 @@ mod tests {
     fn ensure_venv_recreates_a_venv_with_no_usable_pip() {
         let root = tmp("ensure-venv-broken");
         let venv_dir = root.join(".venv");
-        let python_path = venv_dir.join("bin").join("python");
-        std::fs::create_dir_all(python_path.parent().unwrap()).unwrap();
         // A real, executable script that runs (unlike Debian's actual failure
         // mode, whose `bin/python` runs fine and only `-m pip` fails) but
         // fails EVERY invocation -- sufficient to make `venv_has_usable_pip`
-        // read it as broken, which is all `ensure_venv` consults.
-        std::fs::write(&python_path, "#!/bin/sh\nexit 1\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&python_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        // read it as broken, which is all `ensure_venv` consults. Built
+        // through `exit_code_shim` (tan-cli#318), not an inline
+        // write+chmod: without its `wait_until_spawnable` guard this is the
+        // exact #250 ETXTBSY race replayed against a differently-shaped
+        // fixture -- a concurrently-forking sibling test can transiently
+        // hold this file open for writing in a duplicated fd, and the
+        // kernel refuses to `exec` it for anyone, `probe_venv_pip` included,
+        // until that unrelated child exits.
+        let python_path = exit_code_shim(&venv_dir.join("bin"), "python", 1);
         assert!(
             python_path.is_file(),
             "the broken interpreter must exist first"
@@ -918,14 +877,21 @@ mod tests {
     fn ensure_venv_reuses_a_venv_with_usable_pip() {
         let root = tmp("ensure-venv-healthy");
         let venv_dir = root.join(".venv");
-        let python_path = venv_dir.join("bin").join("python");
-        std::fs::create_dir_all(python_path.parent().unwrap()).unwrap();
+        // Built through `exit_code_shim`, not an inline write+chmod
+        // (tan-cli#318): the inline form skips `exit_code_shim`'s
+        // `wait_until_spawnable` guard, so it replays the exact #250 race
+        // that guard exists to absorb -- a concurrently-forking sibling
+        // test can transiently hold this freshly-written script open in a
+        // duplicated fd, and the kernel refuses to `exec` it for anyone,
+        // `probe_venv_pip` included, until that unrelated child exits. That
+        // read as "no usable pip" and made `ensure_venv` try to recreate
+        // the venv, tripping the `/bin/false` tripwire below -- the
+        // `panicked at ...steps.rs:949` this test flaked on. The marker
+        // text must still match `exit_code_shim`'s own
+        // `#!/bin/sh\nexit {code}\n` shape for the byte-identity assertion
+        // at the end to mean what it says.
         let marker = "#!/bin/sh\nexit 0\n";
-        std::fs::write(&python_path, marker).unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&python_path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        let python_path = exit_code_shim(&venv_dir.join("bin"), "python", 0);
 
         let facts = fallback_facts((3, 10));
         let ws = Workspace {

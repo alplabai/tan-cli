@@ -2,6 +2,7 @@
 """`tan.__main__.main` is the process boundary (see its own docstring for why
 it, not `tan.cli`, owns this): a closed stdout must exit quietly, not crash.
 """
+import json
 import os
 import subprocess
 import sys
@@ -67,3 +68,60 @@ def test_closed_stdout_exits_quietly_instead_of_crashing():
         assert not drain.is_alive(), "stderr drain thread did not finish -- read is incomplete"
         assert proc.returncode == 0, stderr.decode(errors="replace")
         assert stderr == b"", stderr.decode(errors="replace")
+
+
+def test_json_exit_code_follows_serialize_failure_fallback_not_stale_run_exit(tmp_path):
+    """tan-cli#327, driven through the real process boundary (`tan.__main__.main`
+    -> `tan.cli.main` -> `sdk list` -> `emit`), the same shape as the Rust
+    process boundary's own `json_exit_code_follows_serialize_failure_fallback_
+    not_stale_run_exit` test.
+
+    `sdk_cmd._fetch_releases` is monkeypatched, in a CHILD PROCESS, to return
+    one otherwise-valid release row plus a tuple key `json.dumps` cannot
+    encode -- `sdk list --online --format json` reaches its normal SUCCESS
+    exit (`ExitCode.SUCCESS`, chosen before serialisation ever runs), then
+    `Envelope.to_json()` falls back to `exitCode: 5` /
+    `envelope.serialize-failed` (already covered for the JSON shape alone by
+    `test_envelope.py`'s `test_to_json_never_raises_on_unserialisable_
+    payload`). Pre-fix, `emit()` printed that fallback and returned `None`;
+    the command's own `raise typer.Exit(0)` then won at the process boundary,
+    so stdout said `exitCode: 5` while the process exited `0` -- the wire
+    invariant `process exit code == envelope.exitCode` broke silently for any
+    consumer, `alp-sdk-vscode` included, that trusts one without re-checking
+    the other.
+
+    Asserts the IDENTITY, not the literal 5, so this keeps meaning if the
+    fallback code ever changes.
+    """
+    script = tmp_path / "provoke_serialize_failure.py"
+    script.write_text(
+        "import sys\n"
+        "from tan.commands import sdk_cmd\n"
+        "release = {\n"
+        "    'tag': 'v1', 'publishedAt': '2026-01-01', 'releaseNotesSummary': 'x',\n"
+        "    'draft': False, 'prerelease': False,\n"
+        "    (1, 2): 3,  # unserialisable: json.dumps only accepts str/int/float/bool/None keys\n"
+        "}\n"
+        "sdk_cmd._fetch_releases = lambda: ([release], None)\n"
+        "sys.argv = ['tan', 'sdk', 'list', '--online', '--format', 'json']\n"
+        "from tan.__main__ import main\n"
+        "main()\n",
+        encoding="utf-8",
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+        ),
+    }
+    proc = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+    )
+    payload = json.loads(proc.stdout)
+    assert payload["issues"][0]["code"] == "envelope.serialize-failed", payload
+    assert proc.returncode == payload["exitCode"], (proc.returncode, payload)
