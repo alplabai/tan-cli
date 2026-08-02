@@ -168,7 +168,36 @@ env:
   #   (`the_fallback_matches_the_real_manifest_field_for_field`).
   #   `tests/parity/bootstrap_manifest_parity.py` itself survives as a
   #   manual diagnostic tool (see its module doc), not run in CI.
-  PINNED_SDK_TAG: v0.15.0-rc1
+  #
+  # v0.15.0-rc1 -> f4d87a1f (tan-cli#320): `python/tests/gates/
+  # test_planner_relocation_freshness.py`'s own PINNED_SDK_COMMIT moved to
+  # this exact commit when `tan/planner/` was re-synced against
+  # `scripts/alp_orchestrate/` (alp-sdk#1080's `raw_shmem` cross-core
+  # CONFIG_DCACHE=n and alp-sdk#1025's `SdkRevisionNotBuildable` status
+  # half). Left at v0.15.0-rc1, this job's `python-tests` job (which
+  # `--ignore=tests/gates` but NOT `tests/parity` -- see that job's own
+  # comment) would diff the newly-fixed planner's
+  # `tests/parity/test_planner_emit_parity.py` cases against the OLD,
+  # pre-fix `scripts/alp_orchestrate/` and reopen the exact divergence #320
+  # closes. `ci.yml`'s `sdk_parity` checkout `ref:` moved to the same commit
+  # for the same reason -- the two MUST agree (see that file's comment).
+  #
+  # NOT a tag: alp-sdk had not cut one past v0.15.0-rc1 at the time of this
+  # port. Re-pin to a real tag once alp-sdk cuts one at or after this SHA,
+  # the same deferred-tag pattern this pin's own v0.14.0 -> v0.15.0-rc1
+  # history used.
+  #
+  # Re-verified the other three CI-wired byte-parity gates locally against
+  # this commit before the bump (same discipline the v0.14.0 -> v0.15.0-rc1
+  # move used): kconfig-fixture PASS (814 bytes, unchanged --
+  # `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` did not move
+  # between v0.15.0-rc1 and this commit), toolchain-lock PASS (6592 bytes,
+  # unchanged -- `metadata/toolchains.json` did not move either), scaffold
+  # byte-parity PASS across all 9 (template, sku) pairs (verified from a
+  # Windows host this time -- none of the vendored templates' SDK inputs
+  # changed in this range, so the Windows-only limitation this comment
+  # elsewhere notes did not block the check for THIS bump specifically).
+  PINNED_SDK_TAG: f4d87a1f472dffe9fe7dffc247cc55bce71034ba
 
 jobs:
   seam1-plan-shape:

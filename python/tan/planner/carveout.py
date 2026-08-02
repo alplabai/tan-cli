@@ -120,7 +120,12 @@ def resolve_carve_outs(
     rpmsg_block_reason: Optional[str] = None
     if has_rpmsg_entry:
         controller = mailbox.get("controller")
-        if controller is None or controller == "TBD":
+        # Case/whitespace-insensitive: "tbd", "Tbd", " TBD " are all the
+        # same hand-typed placeholder as a bare "TBD" (alp-sdk #1048).
+        controller_is_tbd = (
+            isinstance(controller, str) and controller.strip().upper() == "TBD"
+        )
+        if controller is None or controller_is_tbd:
             rpmsg_block_reason = (
                 f"SoM {project.sku} mailbox controller is "
                 f"{'unset' if controller is None else 'TBD'}; "
