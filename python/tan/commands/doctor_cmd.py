@@ -383,10 +383,21 @@ def jlink_flash_device(sdk_root: str | None) -> tuple[str, str]:
     is the one with an MRAM loader profile at all; the other AE822 package
     variant's `debug` has a `jlink_device` (attach) entry but no
     `jlink_flash_device`, because it has no Flow D loader to unlock.
-    `JLINK_AEN_DEVICE` is only the FALLBACK for a host with no SDK checkout
-    resolved yet, mirroring `zephyr_python_floor`'s shape -- kept byte-identical
-    to today's metadata value so a doctor run with no `--sdk-root` still names
-    the right part instead of a stale one.
+
+    `JLINK_AEN_DEVICE` is the fallback for THREE distinct causes, and the
+    returned source string names WHICH one fired (tan-cli#310) -- they used
+    to collapse into one sentence that only ever matched the first, so a host
+    with a perfectly good SDK checkout got told "no alp-sdk checkout
+    resolved" in the same envelope that reported resolving one:
+
+    1. no `sdk_root` at all -- the honest "nothing to read from" case;
+    2. `sdk_root` resolved but `e8.json` is missing, unreadable, or does not
+       parse as a JSON object -- named with the exact path that was tried;
+    3. `sdk_root` resolved and `e8.json` parsed fine, but no variant carries
+       `debug.jlink_flash_device` -- the real state of a checkout predating
+       alp-sdk#1057, which publishes this fact into a per-board `flash_args`
+       value instead; doctor has no board selected to read one from, so the
+       built-in constant is the honest answer, not a resolution failure.
 
     Every variant is checked, not just the first hit: if a future package
     variant declares a DIFFERENT `jlink_flash_device`, picking whichever
@@ -399,36 +410,50 @@ def jlink_flash_device(sdk_root: str | None) -> tuple[str, str]:
     variant carrying the key all fall back the same way -- doctor's whole job
     is to run on a host where things are wrong.
     """
-    if sdk_root:
-        path = Path(sdk_root) / "metadata" / "socs" / "alif" / "ensemble" / "e8.json"
-        text = _read_text(path)
-        if text is not None:
-            try:
-                doc = json.loads(text)
-            except ValueError:
-                doc = None
-            if isinstance(doc, dict):
-                found: set[str] = set()
-                for variant in doc.get("variants") or []:
-                    if not isinstance(variant, dict):
-                        continue
-                    debug = variant.get("debug")
-                    device = debug.get("jlink_flash_device") if isinstance(debug, dict) else None
-                    if isinstance(device, str) and device:
-                        found.add(device)
-                if len(found) == 1:
-                    return next(iter(found)), str(path)
-                if len(found) > 1:
-                    return JLINK_AEN_DEVICE, (
-                        f"tan's built-in fallback {JLINK_AEN_DEVICE} -- {path} "
-                        f"variants[].debug.jlink_flash_device carries {len(found)} "
-                        "DIFFERENT values across variants (ambiguous), refusing to "
-                        "pick one arbitrarily"
-                    )
+    if not sdk_root:
+        return JLINK_AEN_DEVICE, (
+            f"tan's built-in fallback {JLINK_AEN_DEVICE} -- no alp-sdk checkout "
+            "resolved to read metadata/socs/alif/ensemble/e8.json "
+            "variants[].debug.jlink_flash_device from"
+        )
+
+    path = Path(sdk_root) / "metadata" / "socs" / "alif" / "ensemble" / "e8.json"
+    text = _read_text(path)
+    doc = None
+    if text is not None:
+        try:
+            doc = json.loads(text)
+        except ValueError:
+            doc = None
+    if not isinstance(doc, dict):
+        return JLINK_AEN_DEVICE, (
+            f"tan's built-in fallback {JLINK_AEN_DEVICE} -- {path} is missing, "
+            "unreadable, or did not parse as a JSON object, so its "
+            "variants[].debug.jlink_flash_device could not be read"
+        )
+
+    found: set[str] = set()
+    for variant in doc.get("variants") or []:
+        if not isinstance(variant, dict):
+            continue
+        debug = variant.get("debug")
+        device = debug.get("jlink_flash_device") if isinstance(debug, dict) else None
+        if isinstance(device, str) and device:
+            found.add(device)
+    if len(found) == 1:
+        return next(iter(found)), str(path)
+    if len(found) > 1:
+        return JLINK_AEN_DEVICE, (
+            f"tan's built-in fallback {JLINK_AEN_DEVICE} -- {path} "
+            f"variants[].debug.jlink_flash_device carries {len(found)} "
+            "DIFFERENT values across variants (ambiguous), refusing to "
+            "pick one arbitrarily"
+        )
     return JLINK_AEN_DEVICE, (
-        f"tan's built-in fallback {JLINK_AEN_DEVICE} -- no alp-sdk checkout "
-        "resolved to read metadata/socs/alif/ensemble/e8.json "
-        "variants[].debug.jlink_flash_device from"
+        f"tan's built-in fallback {JLINK_AEN_DEVICE} -- {path} parsed but no "
+        "variant carries debug.jlink_flash_device; alp-sdk#1057 publishes this "
+        "profile into a per-board flash_args value instead, and doctor has no "
+        "board selected to read one from"
     )
 
 
