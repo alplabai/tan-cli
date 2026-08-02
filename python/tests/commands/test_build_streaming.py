@@ -167,7 +167,11 @@ def test_json_format_stdout_carries_no_heartbeat_bytes(project):
     and, spelled out for this ticket, none of the heartbeat's own vocabulary
     or control bytes -- proving `on_output=_Heartbeat(...)` never reaches
     stdout regardless of what the (disabled, non-TTY-here) heartbeat would
-    have printed on a real terminal."""
+    have printed on a real terminal. `two_slice_plan` is already `baremetal`
+    (tan-cli#309: a `zephyr` backend here would trip the Zephyr-boilerplate
+    guard, since the probe command never produces real Zephyr CMake evidence),
+    which is all this test needs -- it asserts stdout framing only, and
+    Zephyr-ness is incidental to that."""
     plan = write_plan(project, two_slice_plan(ALL_ARTEFACTS))
     proc = run_tan(
         "build", "--plan-from", str(plan), "--execute", "--format", "json", cwd=project
