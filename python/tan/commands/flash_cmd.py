@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -1036,6 +1037,30 @@ def _flow_d_preflight(
             f"({outcome.stderr.strip() or 'probe silent'}); refusing to write MRAM "
             "without confirming which board is attached."
         )
+    # `expected` is confirmed absent (checked above) -- but "absent" covers two
+    # measurably different banners (tan-cli#312): a connect that DID reach a
+    # board and reported some OTHER SW-DP ID (a real wrong-board / wiring /
+    # probe-selection problem), and a connect that reported no ID at all
+    # (measured on the rc3 bench: the probe still re-enumerating a few seconds
+    # after a prior `JLinkExe` close -- same probe, same cable, same
+    # `jlink_serial`, and nothing wrong with either). Both used to get the
+    # SAME wiring-and-jlink_serial sentence, which sent a user re-checking
+    # cables that were never the problem.
+    #
+    # Conservative on purpose: the "no ID at all" message below asserts the
+    # wiring is FINE, so it is only used when BOTH signals agree -- no
+    # DP-ID-shaped token anywhere in the banner, AND the banner carries
+    # SEGGER's own "the probe itself refused" wording. Anything the detector
+    # cannot place that confidently keeps the original sentence rather than
+    # guessing the wiring is innocent.
+    if not _dp_id_reported(banner) and _connect_failed_outright(banner):
+        return (
+            f"{FLOW_D_METHOD}: the read-only DPIDR preflight's connect reported no "
+            f"SW-DP ID at all (expected {expected}) -- refusing to write MRAM to an "
+            "unidentified board. This looks like the J-Link probe still "
+            "re-enumerating after a previous JLinkExe session closed, not a wiring "
+            "or probe-selection problem -- wait a couple of seconds and retry."
+        )
     return (
         f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
         "-- refusing to write MRAM to an unidentified board. Check the probe "
@@ -1052,6 +1077,52 @@ def _hex_in(expected: str, haystack: str) -> bool:
             needle = expected[len(prefix) :].lower()
             break
     return needle in haystack.lower().replace("0x", "")
+
+
+#: SEGGER's own wording for a successful SWD connect that read AN id, whatever
+#: it turned out to be -- "Found SW-DP with ID 0x........" / "DPIDR: 0x........".
+#: Matched loosely on purpose: what this distinguishes is "a real board
+#: answered with a different identity" from "nothing answered", not the exact
+#: firmware/DLL version's phrasing.
+_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*0x[0-9A-Fa-f]+", re.IGNORECASE)
+
+#: SEGGER's own wording for the PROBE itself refusing the connection outright
+#: -- measured verbatim on the rc3 bench run: "Connecting to J-Link ...FAILED:
+#: Cannot connect to the probe/programmer." (tan-cli#312). Deliberately NOT a
+#: bare `FAILED`/`Cannot connect` match (that was the tan-cli#312 review
+#: finding): JLinkExe prints "FAILED" in many contexts, and "Cannot connect"
+#: alone also fires on a TARGET-level refusal -- see `_CONNECT_FAILED_TARGET_RE`
+#: below -- which is a real wiring/probe-selection problem, not a re-enumerating
+#: probe.
+_CONNECT_FAILED_RE = re.compile(r"Cannot connect to the probe/programmer", re.IGNORECASE)
+
+#: SEGGER's own wording for a TARGET-level connect refusal -- "Cannot connect
+#: to target." (unplugged SWD ribbon, unpowered board) or "Cannot connect to
+#: J-Link." (a probe that IS reachable via USB but refuses the requested
+#: `jlink_serial`). Both are genuine wiring/probe-selection problems, so their
+#: presence forces `_connect_failed_outright` to False even alongside the
+#: probe-level phrase above -- asserting "wiring is fine" here would be the
+#: false negative tan-cli#312's review flagged (measured against a real
+#: unplugged-ribbon and a real unpowered-target banner).
+_CONNECT_FAILED_TARGET_RE = re.compile(r"Cannot connect to (?:target|J-Link)\b", re.IGNORECASE)
+
+
+def _dp_id_reported(banner: str) -> bool:
+    """Whether the banner names ANY SW-DP ID -- not whether it matches
+    `expected` (the caller already ruled that out via `_hex_in`), only whether
+    a connect got far enough to read one at all."""
+    return _DP_ID_RE.search(banner) is not None
+
+
+def _connect_failed_outright(banner: str) -> bool:
+    """Whether the banner carries SEGGER's own wording for the PROBE itself
+    refusing the connection (still re-enumerating, no board reachable at all),
+    as opposed to a TARGET-level refusal -- a real wiring/probe-selection
+    problem that must keep the original remediation, not the re-enumeration
+    one."""
+    if _CONNECT_FAILED_TARGET_RE.search(banner) is not None:
+        return False
+    return _CONNECT_FAILED_RE.search(banner) is not None
 
 
 def _is_file(path: str) -> bool:
