@@ -1377,21 +1377,134 @@ def test_host_os_arch_tags_leaves_a_native_intel_mac_alone(monkeypatch):
     assert doctor_cmd._host_os_arch_tags() == ("macos", "x86_64")
 
 
-def test_long_paths_check_distinguishes_enabled_disabled_and_unknown():
-    on = doctor_cmd.long_paths_check(True)
-    assert on.status == "pass"
-    assert on.fix is None
+def test_long_paths_check_passes_only_when_both_the_registry_and_git_are_on():
+    both_on = doctor_cmd.long_paths_check(True, True)
+    assert both_on.status == "pass"
+    assert both_on.fix is None
 
-    off = doctor_cmd.long_paths_check(False)
-    assert off.status == "warn"
+    # Every OTHER combination of the two axes must NOT pass -- swapping any
+    # one of these to "pass" is the mutation that turns tan-cli#306 back into
+    # a silent regression: a pass here is a customer-facing claim that
+    # `west update` will not hit "Filename too long".
+    for registry in (True, False, None):
+        for git in (True, False, None):
+            if registry is True and git is True:
+                continue
+            check = doctor_cmd.long_paths_check(registry, git)
+            assert check.status != "pass", f"registry={registry} git={git}: {check}"
+
+
+def test_long_paths_check_fails_when_the_registry_says_yes_and_git_does_not():
+    """The exact defect tan-cli#306 reports: the registry read alone said
+    `pass` while `west update`'s own `git` -- which does not consult the
+    registry at all -- refused a long path. This is the one combination that
+    must be `fail`, not `warn`: `git` is the first thing in the toolchain to
+    touch a long path, and its own setting says no, so the break is
+    certain."""
+    for git in (False, None):
+        check = doctor_cmd.long_paths_check(True, git)
+        assert check.status == "fail", f"git={git}: {check}"
+        # Fix #3 in tan-cli#306: the remedy must name the exact command,
+        # verbatim.
+        assert "git config --global core.longpaths true" in (check.fix or "")
+
+
+def test_long_paths_check_warns_but_does_not_fail_when_git_is_on_and_the_registry_is_not():
+    """Git handles long paths on its own once `core.longpaths=true` (it
+    never consults the registry), so the failure this check exists to catch
+    will NOT reproduce -- must not be `fail`. But other manifested tools
+    (CMake, Ninja) still rely on the registry flag, so residual risk
+    remains -- must not be a bare `pass` either."""
+    for registry in (False, None):
+        check = doctor_cmd.long_paths_check(registry, True)
+        assert check.status == "warn", f"registry={registry}: {check}"
+        assert check.fix is not None
+        assert "git core.longpaths is true" in check.detail
+
+
+def test_long_paths_check_warns_when_neither_axis_is_on():
+    for registry in (False, None):
+        for git in (False, None):
+            check = doctor_cmd.long_paths_check(registry, git)
+            assert check.status == "warn", f"registry={registry} git={git}: {check}"
+            assert check.fix is not None
+    off = doctor_cmd.long_paths_check(False, False)
     assert "MAX_PATH" in off.detail
     assert "New-ItemProperty" in (off.fix or "")
 
-    unknown = doctor_cmd.long_paths_check(None)
-    assert unknown.status == "warn"
-    assert "unknown" in unknown.detail
+    unknown = doctor_cmd.long_paths_check(None, None)
+    assert "could not be read" in unknown.detail or "could not be determined" in unknown.detail
     # "could not tell" must never render as a silent Pass.
     assert unknown.status != "pass"
+
+
+def test_classify_git_core_longpaths_maps_exit_status_and_never_guesses():
+    assert doctor_cmd.classify_git_core_longpaths(0, "true") is True
+    assert doctor_cmd.classify_git_core_longpaths(0, "false") is False
+    # git's own boolean grammar: case-insensitive, other spellings.
+    assert doctor_cmd.classify_git_core_longpaths(0, "TRUE") is True
+    assert doctor_cmd.classify_git_core_longpaths(0, "no") is False
+    assert doctor_cmd.classify_git_core_longpaths(0, "1") is True
+    assert doctor_cmd.classify_git_core_longpaths(0, "0") is False
+    # exit 1: git's documented "not set in any scope" -- its own default, and
+    # the state a fresh HOME is in.
+    assert doctor_cmd.classify_git_core_longpaths(1, "") is False
+    # Anything else (git missing, a malformed config) is uncertain, not
+    # guessed.
+    assert doctor_cmd.classify_git_core_longpaths(2, "") is None
+    assert doctor_cmd.classify_git_core_longpaths(128, "") is None
+    assert doctor_cmd.classify_git_core_longpaths(None, "") is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="longPaths is Windows-only")
+def test_long_paths_reads_gits_real_config_not_just_the_registry(tmp_path):
+    """tan-cli#306's own regression, driven through the REAL CLI with a REAL
+    `git` subprocess -- as far as an automated test can go without writing
+    `HKLM` (the registry axis genuinely cannot be driven this way; see the
+    module docstring). A fresh `HOME` with no global `.gitconfig` is the
+    exact state that broke `west update` on a customer's machine, and it is
+    reachable here the same way `test_zephyr_sdk_detected_via_msys_home_
+    split_from_windows_userprofile` (above) reaches `_zephyr_sdk_detected`'s
+    own `HOME`/`USERPROFILE` axis: both env vars are read by git itself, not
+    reimplemented here, this test just controls which directory `git` sees.
+
+    The check's overall `status` is deliberately NOT asserted -- it also
+    depends on the registry flag, which THIS runner's own state decides and
+    a test must not write. What is asserted is the one thing under this
+    test's control either way: the DETAIL names git's real, freshly-read
+    value.
+
+    `GIT_CONFIG_NOSYSTEM=1` isolates this from whatever the CI image's own
+    system-wide git config carries -- with it set, only `HOME` (verified by
+    hand to outrank `USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` in git's own
+    global-config lookup) decides what `git config --get core.longpaths`
+    sees, so both cases below are deterministic regardless of the runner.
+    """
+
+    def longpaths_detail(tag: str, gitconfig: str | None) -> str:
+        home = tmp_path / f"home-{tag}"
+        home.mkdir()
+        if gitconfig is not None:
+            (home / ".gitconfig").write_text(gitconfig, encoding="utf-8")
+        work_dir = tmp_path / f"work-{tag}"
+        work_dir.mkdir()
+
+        proc = run_tan(
+            "doctor",
+            "--format",
+            "json",
+            cwd=work_dir,
+            env_extra={"HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1"},
+        )
+        envelope = json.loads(proc.stdout)
+        check = next(c for c in envelope["data"]["checks"] if c["name"] == "longPaths")
+        return check["detail"]
+
+    unset = longpaths_detail("unset", None)
+    assert "git core.longpaths is unset or false" in unset, unset
+
+    on = longpaths_detail("on", "[core]\n\tlongpaths = true\n")
+    assert "git core.longpaths is true" in on, on
 
 
 def test_home_path_check_distinguishes_a_spaced_home_from_a_clean_one():

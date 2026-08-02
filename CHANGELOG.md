@@ -55,6 +55,27 @@ green CI run on a clean runner. Every defect below was invisible to both.*
   proof that the freeze actually bundles both mechanisms, since no unit test
   can catch this: a source-tree run has the developer's own trust, and the bug
   is invisible until the frozen artifact runs (#304, release-blocker).
+- **`longPaths` read the Windows registry flag and nothing else, so `tan
+  doctor` said `pass` on a fresh install while `tan bootstrap`'s own `west
+  update` died with "Filename too long" a moment later.** Windows'
+  `LongPathsEnabled` governs manifested Win32 API calls; it does nothing for
+  git, which `west update` uses for every module clone/checkout and which
+  refuses a long path unless its OWN `core.longpaths` is set, regardless of
+  the registry -- measured on a real Windows 11 host with a genuinely fresh
+  `HOME` (no global `.gitconfig`), where `bootstrap` failed inside
+  `hal_nxp`'s `tf-psa-crypto` vendor tree even though `doctor` had just
+  reported the host fine. `longPaths` now reads BOTH axes (`git config --get
+  core.longpaths`, which resolves system/global/local precedence itself) and
+  **fails** -- not warns -- exactly when the registry says yes and git does
+  not, since that combination breaks `west update` with certainty rather
+  than merely risking it; it warns when only one axis is on, matching the
+  pre-existing severity for neither. The remedy names the exact command,
+  `git config --global core.longpaths true`. `tan bootstrap` also forces
+  `core.longpaths=true` on the `west update` child's own environment
+  (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, reaching every
+  project's own `git` subprocess without writing to any `.gitconfig` the
+  workspace or the user owns), so a fresh install gets past the failure
+  outright rather than only being warned about it (#306, release-blocker).
 
 ### Added
 

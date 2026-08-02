@@ -1798,6 +1798,34 @@ def test_die_appends_a_detail_only_when_there_is_one():
     )
 
 
+def test_force_git_long_paths_env_is_the_documented_override_triple():
+    assert bootstrap_cmd.FORCE_GIT_LONG_PATHS_ENV == {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.longpaths",
+        "GIT_CONFIG_VALUE_0": "true",
+    }
+
+
+def test_runner_run_extra_env_reaches_the_real_child_process():
+    """tan-cli#306: `west_phase` passes `FORCE_GIT_LONG_PATHS_ENV` as
+    `extra_env` on the `west update` call specifically so every nested `git`
+    subprocess it spawns inherits it. This proves the PLUMBING with a real
+    child process (not just that the dict is correct) -- a subprocess that
+    checks its OWN environment for the override and exits 0 only if it is
+    there, so a `Runner.run` that dropped `extra_env` on the floor would fail
+    here rather than only in a real `west update`."""
+    runner = bootstrap_cmd.Runner(json=True)
+    probe = [
+        sys.executable,
+        "-c",
+        "import os, sys; sys.exit(0 if os.environ.get('TAN_TEST_LONGPATHS') == 'yes' else 1)",
+    ]
+    assert runner.run(probe, extra_env={"TAN_TEST_LONGPATHS": "yes"}) is None
+    # Without it, the same probe must fail -- otherwise this test would pass
+    # for the wrong reason (the variable already being set some other way).
+    assert runner.run(probe) is not None
+
+
 def test_the_no_pyyaml_board_scan_reads_cores_in_both_forms():
     """The frozen binary ships without PyYAML, so this fallback is THE path on
     the shipped artifact."""

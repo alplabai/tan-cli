@@ -1206,44 +1206,108 @@ def zephyr_sdk_host_check(host_os: str, arch: str) -> Check:
     return Check("zephyrSdkAvailableForHost", "fail", detail, fix)
 
 
-def long_paths_check(enabled: bool | None) -> Check:
-    """`longPaths` -- Windows only. Mirrors `tan_core::host_env::long_paths_check`.
+def _enable_long_paths_fix(key: str) -> str:
+    """The elevated one-liner that sets `LongPathsEnabled` -- shared by every
+    `long_paths_check` arm that names it, so the command cannot drift between
+    them."""
+    return (
+        "Enable long paths in an ELEVATED PowerShell, then reopen your shell and VS "
+        f"Code so new processes pick it up: New-ItemProperty -Path '{key}' -Name "
+        "LongPathsEnabled -Value 1 -PropertyType DWORD -Force"
+    )
 
-    `Warn`, not `Fail`: Windows 11 still ships `LongPathsEnabled` off by
-    default, so `Fail` would exit 4 on nearly every stock Windows host --
-    including the many that build fine because their workspace sits shallow
-    enough. It is a PROBABLE cause (a Zephyr `build/` tree nests deep enough
-    to cross the 260-character `MAX_PATH`), not a proven blocker, and the
-    failure it predicts arrives as a CMake/compiler error about a file that
-    plainly exists -- nobody connects that to a registry flag unaided.
 
-    `None` (the read failed, or this is not Windows) is ALSO `Warn`, naming
-    the uncertainty -- a `Pass` for "could not tell" would be worse than no
-    check.
+#: Fix #3 in tan-cli#306: the remedy must name this EXACT command, verbatim
+#: and runnable, no elevation needed (unlike `_enable_long_paths_fix`, which
+#: touches `HKLM`) -- the cheaper fix, and the one that unblocks the actual
+#: reported failure (`west update`'s own `git` calls).
+_GIT_LONG_PATHS_FIX = "Enable it in git: git config --global core.longpaths true"
+
+
+def long_paths_check(registry_enabled: bool | None, git_core_longpaths: bool | None) -> Check:
+    """`longPaths` -- Windows only. Mirrors
+    `tan_core::host_env::long_paths_check`.
+
+    Two independent axes, and conflating them into one is exactly the defect
+    tan-cli#306 reports. `LongPathsEnabled` (the registry) governs manifested
+    Win32 API calls (CMake, Ninja, a plain file open); it does nothing for
+    git, which refuses any path past its own limit unless ITS OWN
+    `core.longpaths` is set, regardless of the registry. `west update`
+    clones/checks out every Zephyr module with `git`, so on a fresh `HOME`
+    (no global `.gitconfig` -- a first-run customer's exact state) the
+    registry read alone reported `pass` while `west update` died on
+    `hal_nxp`'s `tf-psa-crypto` vendor tree with "Filename too long".
+
+    **`Fail`, not `Warn`, exactly when the registry reads enabled and git's
+    does not.** That combination is not a probability the way a bare
+    disabled registry flag is: `west update` runs `git`, `git` is the first
+    thing in the whole toolchain to touch a long path, and its own setting
+    says no -- the break is certain. Anything softer here would repeat the
+    exact defect this check exists to fix.
+
+    **`Warn`, not `Fail` or `Pass`, when git is set but the registry is
+    not.** Git manages long paths on its own once `core.longpaths=true` (it
+    prefixes paths with `\\\\?\\` internally and never consults the
+    registry), so the specific failure this check exists to catch will not
+    reproduce -- but `LongPathsEnabled` still governs every OTHER manifested
+    tool in the chain, so real residual risk remains.
+
+    **`Warn` when neither is set** -- the original, pre-#306 severity for a
+    bare disabled registry flag: workspace-root-depth-dependent, not
+    certain.
     """
     key = r"HKLM\SYSTEM\CurrentControlSet\Control\FileSystem"
-    if enabled is True:
-        return Check(
-            "longPaths", "pass", f"Windows long paths are enabled ({key}\\LongPathsEnabled = 1)."
+    registry_on = registry_enabled is True
+    git_on = git_core_longpaths is True
+
+    if registry_enabled is True:
+        registry_detail = f"{key}\\LongPathsEnabled = 1"
+    elif registry_enabled is False:
+        registry_detail = f"{key}\\LongPathsEnabled is 0 or unset"
+    else:
+        registry_detail = f"{key}\\LongPathsEnabled could not be read"
+
+    if git_core_longpaths is True:
+        git_detail = "git core.longpaths is true"
+    elif git_core_longpaths is False:
+        git_detail = "git core.longpaths is unset or false"
+    else:
+        git_detail = "git core.longpaths could not be determined"
+
+    if registry_on and git_on:
+        status = "pass"
+        headline = "Windows long paths are enabled at both the OS level and in git."
+        fix = None
+    elif registry_on and not git_on:
+        status = "fail"
+        headline = (
+            "Windows reports long paths enabled, but git does not honour that flag: git "
+            "has its own core.longpaths and refuses paths past its limit without it, "
+            "regardless of the registry. west update runs git, so bootstrap WILL fail on "
+            "a long Zephyr module path (e.g. hal_nxp's tf-psa-crypto vendor tree) even "
+            "though this host looks fine."
         )
-    if enabled is False:
-        return Check(
-            "longPaths",
-            "warn",
-            f"Windows long paths are disabled ({key}\\LongPathsEnabled is 0 or unset, the "
-            "Windows default). A Zephyr build/ tree nests deep enough to cross the "
-            "260-character MAX_PATH limit, and it surfaces as a CMake or compiler error "
-            "about a file that exists.",
-            "Enable long paths in an ELEVATED PowerShell, then reopen your shell and VS "
-            f"Code so new processes pick it up: New-ItemProperty -Path '{key}' -Name "
-            "LongPathsEnabled -Value 1 -PropertyType DWORD -Force",
+        fix = _GIT_LONG_PATHS_FIX
+    elif git_on:
+        status = "warn"
+        headline = (
+            "git's own core.longpaths is set, so west update's git operations are safe. "
+            "Windows' LongPathsEnabled is not, though, and every OTHER tool in the build "
+            "chain (CMake, Ninja, plain Win32 file APIs) relies on it -- a sufficiently "
+            "deep workspace can still cross MAX_PATH outside of git."
         )
-    return Check(
-        "longPaths",
-        "warn",
-        f"Could not read {key}\\LongPathsEnabled, so long-path support is unknown.",
-        f"Check it by hand: (Get-ItemProperty '{key}').LongPathsEnabled -- 1 is enabled.",
-    )
+        fix = _enable_long_paths_fix(key)
+    else:
+        status = "warn"
+        headline = (
+            "Neither Windows' LongPathsEnabled nor git's core.longpaths is set. A Zephyr "
+            "build/ tree nests deep enough to cross the 260-character MAX_PATH limit, and "
+            'it surfaces as a git "Filename too long" error during west update, or a '
+            "CMake/compiler error about a file that exists."
+        )
+        fix = f"{_GIT_LONG_PATHS_FIX}\n{_enable_long_paths_fix(key)}"
+
+    return Check("longPaths", status, f"{headline} ({registry_detail}; {git_detail}).", fix)
 
 
 def home_path_check(home: str | None) -> Check:
@@ -1707,6 +1771,62 @@ def _host_os_arch_tags() -> tuple[str, str]:
     return host_os, arch
 
 
+def classify_git_core_longpaths(exit_code: int | None, stdout: str) -> bool | None:
+    """The three-way verdict for a `git config --get core.longpaths`
+    invocation -- the git-side counterpart to `_long_paths_enabled`'s
+    registry read, split out as its own pure function (mirroring
+    `tan_core::host_env::classify_git_core_longpaths`) so the exact mapping
+    tan-cli#306 argues hardest about is unit-tested without needing a real
+    `git` invocation for every case.
+
+    * exit 0 -> the stdout value, parsed with git's own boolean grammar.
+    * exit 1 -> `False`. `git config --get` documents this code as "the key
+      is not set in any scope (system/global/local)" -- git's own default,
+      and the state a fresh `HOME` is in (tan-cli#306's exact repro).
+    * anything else (`git` not on PATH, a malformed config file, a
+      permissions error) -> `None`: uncertain, not guessed.
+    """
+    if exit_code == 0:
+        value = stdout.strip().lower()
+        return value not in ("false", "no", "off", "0")
+    if exit_code == 1:
+        return False
+    return None
+
+
+def _git_core_longpaths() -> bool | None:
+    """Read git's own EFFECTIVE `core.longpaths` (system -> global -> local
+    precedence, resolved by `git config --get` itself rather than tan
+    re-implementing that precedence by hand) via a real `git` subprocess.
+
+    A SEPARATE axis from `_long_paths_enabled` on purpose (tan-cli#306): the
+    registry governs manifested Win32 API calls; it does nothing for git,
+    which `west update` uses for every project clone/checkout and which
+    refuses a long path unless ITS OWN setting says so -- the registry read
+    alone reported `pass` on a fresh `HOME` while `west update` died on
+    `hal_nxp`'s `tf-psa-crypto` tree.
+
+    Not built on this file's own `probe()`: `probe()` collapses "ran and
+    exited non-zero" (exit 1, meaning "unset") and "could not run at all"
+    (meaning "unknown") to the same `None`, and `classify_git_core_longpaths`
+    needs to tell those apart.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "config", "--get", "core.longpaths"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return classify_git_core_longpaths(out.returncode, out.stdout)
+
+
 def _long_paths_enabled() -> bool | None:
     """Windows `HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\\
     LongPathsEnabled`, via the stdlib `winreg` module (Windows-only).
@@ -2117,7 +2237,7 @@ def _collect(
     host_os, host_arch = _host_os_arch_tags()
     checks.append(zephyr_sdk_host_check(host_os, host_arch))
     if os.name == "nt":
-        checks.append(long_paths_check(_long_paths_enabled()))
+        checks.append(long_paths_check(_long_paths_enabled(), _git_core_longpaths()))
     checks.append(
         home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
     )

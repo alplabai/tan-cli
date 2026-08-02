@@ -520,20 +520,32 @@ class Runner:
     #: Every argv a dry run would have spawned, in order. `data.plannedCommands`.
     planned: list[list[str]] = field(default_factory=list)
 
-    def _env(self) -> dict[str, str] | None:
-        if not self.clear_zephyr_base:
+    def _env(self, extra_env: dict[str, str] | None = None) -> dict[str, str] | None:
+        if not self.clear_zephyr_base and not extra_env:
             return None
         env = dict(os.environ)
-        env.pop("ZEPHYR_BASE", None)
+        if self.clear_zephyr_base:
+            env.pop("ZEPHYR_BASE", None)
+        if extra_env:
+            env.update(extra_env)
         return env
 
-    def run(self, argv: list[str], cwd: Path | None = None) -> str | None:
+    def run(
+        self,
+        argv: list[str],
+        cwd: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> str | None:
         """Run to completion. `None` on success; otherwise a string carrying
         whatever detail is recoverable -- the captured tail in JSON mode, a
         launch error in either mode, and `""` in text mode where the child's own
         log already streamed to the terminal.
 
         `""` is a FAILURE, not a success: callers must test `is not None`.
+
+        `extra_env` overlays on top of the inherited environment (or the
+        `clear_zephyr_base`-filtered copy of it) -- see `force_git_long_paths`
+        for the one caller that uses it.
         """
         self.planned.append(list(argv))
         if self.dry_run:
@@ -546,7 +558,7 @@ class Runner:
                     capture_output=True,
                     stdin=subprocess.DEVNULL,
                     timeout=INSTALL_TIMEOUT_S,
-                    env=self._env(),
+                    env=self._env(extra_env),
                     check=False,
                 )
                 if out.returncode == 0:
@@ -557,7 +569,7 @@ class Runner:
                 cwd=str(cwd) if cwd else None,
                 stdin=subprocess.DEVNULL,
                 timeout=INSTALL_TIMEOUT_S,
-                env=self._env(),
+                env=self._env(extra_env),
                 check=False,
             )
             return None if out.returncode == 0 else ""
@@ -774,6 +786,31 @@ def _west_argv(venv: VenvBin, args: list[str]) -> list[str]:
     return [str(venv.west), *args]
 
 
+#: Force git's own `core.longpaths` to `true` for every subprocess `west
+#: update` spawns, WITHOUT writing to any `.gitconfig` the workspace or the
+#: user owns (tan-cli#306: `tan doctor`'s `longPaths` check can only WARN
+#: about this -- it has no file to fix -- but `bootstrap` owns the workspace
+#: it is about to `west update`, so it can make the one command that
+#: actually breaks succeed outright).
+#:
+#: `west update` clones/checks out EACH project with its own `git`
+#: subprocess, and none of those repos is `topdir` itself -- a west topdir is
+#: not a git repo at all, `alp-sdk`/`zephyr`/every HAL module are. That rules
+#: out both alternatives the issue named: `git -C <topdir> config` has no
+#: repo to write into, and a `-c core.longpaths=true` on `west`'s OWN CLI
+#: never reaches the nested `git` calls (west does not forward unrecognised
+#: flags to git). `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
+#: is git's own documented ad hoc override -- it outranks every file-based
+#: scope (system/global/local) without touching any of them, and it is
+#: inherited by every child process `west update`'s own children spawn, so
+#: it reaches every project git touches in one shot.
+FORCE_GIT_LONG_PATHS_ENV = {
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "core.longpaths",
+    "GIT_CONFIG_VALUE_0": "true",
+}
+
+
 def west_phase(
     ws: Workspace, venv: VenvBin, log: Log, runner: Runner, reuse: bool
 ) -> str | None:
@@ -828,7 +865,9 @@ def west_phase(
         log.line("Running 'west update' (shallow + narrow)")
 
     detail = runner.run(
-        _west_argv(venv, list(ws.facts.west_update_args)), cwd=ws.workspace_dir
+        _west_argv(venv, list(ws.facts.west_update_args)),
+        cwd=ws.workspace_dir,
+        extra_env=FORCE_GIT_LONG_PATHS_ENV if ws.is_windows else None,
     )
     if detail is not None:
         return die("west update failed", detail)
