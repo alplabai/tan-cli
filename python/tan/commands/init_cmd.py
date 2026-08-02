@@ -94,6 +94,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide
+from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
@@ -711,6 +712,20 @@ def _finish(
             partial=(err.partial.written, err.partial.unchanged),
         ) from err
 
+    try:
+        sdk_pinned = _pin_sdk(project_root, sdk)
+    except (PathEscapeError, OSError, ValueError) as err:
+        # The project's own files already landed (`result` above); `partial`
+        # carries them so a consumer knows what to clean up rather than
+        # reading `written: []` for a project that is really half on disk --
+        # same reasoning as the `ScaffoldWriteError` branch just above.
+        raise InitError(
+            "init.write-failed",
+            f"refusing to pin the SDK: {err}",
+            ExitCode.WRITE_FAILURE,
+            partial=(result.written, result.unchanged),
+        ) from err
+
     return _Outcome(
         template_id=template_id,
         destination=destination,
@@ -720,7 +735,7 @@ def _finish(
         files=files,
         written=result.written,
         unchanged=result.unchanged,
-        sdk_pinned=_pin_sdk(project_root, sdk),
+        sdk_pinned=sdk_pinned,
     )
 
 
@@ -728,15 +743,29 @@ def _pin_sdk(project_root: Path, sdk: _Sdk | None) -> str | None:
     """Record the resolved SDK in `<project>/.alp/sdk-path` so the new project is
     reproducible without a separate `tan sdk switch`.
 
-    A `None`, a path that is not a real checkout, and a failed write are all a
-    silent skip -- never a reason to fail a `tan init` whose files already
-    landed. Reached only after the write, so `--preview` can never trip it.
+    `None` and "not a real checkout" are a silent skip -- an optional
+    convenience pointer is never a reason to fail a `tan init` whose real
+    files already landed. Reached only after the write, so `--preview` can
+    never trip it.
+
+    A confinement ESCAPE is different: a pre-existing symlinked (or
+    junctioned) `.alp`, or a symlinked parent of it, used to carry this write
+    to wherever that link pointed while still reporting the logical
+    `.alp/sdk-path` as pinned (tan-cli#325, the same defect `scaffold.py`'s
+    `write_files` and `generate_cmd`'s default outputs already close). Checked
+    with the SAME shared guard those two use (`tan.core.fs_confine`) before
+    anything is written, and raised rather than swallowed -- `_finish` turns
+    it into a coded `init.write-failed` refusal instead of a silent
+    `sdkPinned: null` that would hide bytes landing outside the project. Any
+    OTHER write failure (permission denied, a full disk) still returns `None`:
+    it is a real filesystem problem, not an escape, and the existing
+    silent-skip contract for those is unchanged.
     """
     if sdk is None or not _is_sdk_checkout(sdk.path):
         return None
     sdk_path = sdk.display
+    pointer = resolve_confined(project_root, project_root / ".alp" / "sdk-path")
     try:
-        pointer = project_root / ".alp" / "sdk-path"
         pointer.parent.mkdir(parents=True, exist_ok=True)
         with pointer.open("w", encoding="utf-8", newline="") as handle:
             handle.write(sdk_pointer_json(sdk_path))
