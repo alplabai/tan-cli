@@ -1,0 +1,2670 @@
+{
+ "tests/parity/test_image_size_oracle.py::test_a_hostile_home_does_not_break_sdk_resolution[bogus]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SoM preset for E1M-X",
+      "core_id": "c",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\c-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_a_hostile_home_does_not_break_sdk_resolution[empty]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SoM preset for E1M-X",
+      "core_id": "c",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\c-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_a_project_that_does_not_exist_parity[image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-unavailable",
+     "message": "system-manifest.yaml not found at <ORACLE-ROOT-0>/nowhere\\build\\system-manifest.yaml; run `tan build` first.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>/nowhere"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_a_project_that_does_not_exist_parity[size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-unavailable",
+     "message": "no system-manifest.yaml at <ORACLE-ROOT-0>/nowhere\\build\\system-manifest.yaml; run `tan build` first (The system cannot find the path specified. (os error 3)).",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>/nowhere"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_an_embedded_nul_in_a_helper_firmware_path_parity#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.helper-missing",
+     "message": "image: helper-mcu firmware not found at a\u0000b; refusing to produce an incomplete bundle",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_an_embedded_nul_in_a_path_field_parity[build_dir-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "image.slice-skipped",
+     "message": "image: skipping c (build_dir missing)",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_an_embedded_nul_in_a_path_field_parity[build_dir-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "c",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\a\u0000b\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_an_embedded_nul_in_a_path_field_parity[output_artefact-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "image.slice-skipped",
+     "message": "image: skipping c (build_dir missing)",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_an_embedded_nul_in_a_path_field_parity[output_artefact-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "c",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\a\u0000b.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[boot_order-scalar-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: boot_order: invalid type: string \"notalist\", expected a sequence at line 2 column 13",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[boot_order-scalar-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: boot_order: invalid type: string \"notalist\", expected a sequence at line 2 column 13",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[endpoints-scalar-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: ipc[0].endpoints: invalid type: string \"nope\", expected a sequence at line 5 column 14",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[endpoints-scalar-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: ipc[0].endpoints: invalid type: string \"nope\", expected a sequence at line 5 column 14",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[hw_info-core-schema-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {
+     "a": "yes",
+     "b": "007",
+     "c": "1:30",
+     "d": "2024-01-01",
+     "e": 15,
+     "f": 165,
+     "g": 1.5
+    },
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[hw_info-core-schema-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[hw_info-int-beyond-serde-range-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[hw_info-int-beyond-serde-range-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[hw_info-null-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: hw_info: invalid type: unit value, expected struct HwInfo at line 2 column 10",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[hw_info-null-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: hw_info: invalid type: unit value, expected struct HwInfo at line 2 column 10",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[hw_info-scalar-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: hw_info: invalid type: string \"notamapping\", expected struct HwInfo at line 2 column 10",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[hw_info-scalar-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: hw_info: invalid type: string \"notamapping\", expected struct HwInfo at line 2 column 10",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[null-required-vs-optional-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {
+     "sku": null
+    },
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[null-required-vs-optional-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no Zephyr image (Yocto/baremetal)",
+      "core_id": "c",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "os": "~",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "n/a"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[sku-sequence-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: hw_info.sku: invalid type: sequence, expected a string at line 3 column 8",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[sku-sequence-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: hw_info.sku: invalid type: sequence, expected a string at line 3 column 8",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[slices-null-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: slices: invalid type: unit value, expected a sequence at line 2 column 9",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[slices-null-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: slices: invalid type: unit value, expected a sequence at line 2 column 9",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[storage-scalar-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: storage: invalid type: string \"nope\", expected a sequence at line 2 column 10",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[storage-scalar-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: storage: invalid type: string \"nope\", expected a sequence at line 2 column 10",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[string-fields-keep-raw-text-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {
+     "sku": 16
+    },
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_field_type_leniency_parity[string-fields-keep-raw-text-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SoM preset for 0x10",
+      "core_id": "007",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\0o17\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_i18_nested_elf_diverges_from_the_oracle#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "flash=soc_flash_mb; ram=core tcm_kb (ITCM+DTCM)",
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": null,
+       "total": 5767168,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\m55_hp-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": 1310720,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_i18_nested_footprint_json_diverges_from_the_oracle#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\m55_hp-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_helper_basename_collision#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [
+     {
+      "artefact": "helper-mcus/zephyr.bin",
+      "chip": "gd32g553",
+      "name": "gd32_bridge",
+      "sha256": "8730ead38036367126b4f0b84da6cdc0022932f0ed6f11942856a9437377afd4",
+      "size": 12
+     },
+     {
+      "artefact": "helper-mcus/2-zephyr.bin",
+      "chip": "cc3501e",
+      "name": "cc3501e_otp",
+      "sha256": "f030e4ca8621b006dc792a9b6df477987ecf65b04902121ca9d0dc002d499a7b",
+      "size": 15
+     }
+    ],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_helper_states#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.helper-missing",
+     "message": "image: helper-mcu firmware not found at firmware/gd32.bin; refusing to produce an incomplete bundle",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_helper_states#1": [
+  1,
+  {
+   "__raw__": ""
+  },
+  "image: helper-mcu firmware not found at firmware/gd32.bin; refusing to produce an incomplete bundle\nimage: bundle ready at <ORACLE-ROOT-0>\\hard\\image-bundle\n"
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_helper_states#2": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {
+     "sku": "E1M-AEN701"
+    },
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "image.helper-skipped",
+     "message": "image: helper-mcu firmware not found at TBD; skipping",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_missing_manifest#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-unavailable",
+     "message": "system-manifest.yaml not found at <ORACLE-ROOT-0>\\br\\system-manifest.yaml; run `tan build` first.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_missing_manifest#1": [
+  1,
+  {
+   "__raw__": ""
+  },
+  "image: system-manifest.yaml not found at <ORACLE-ROOT-0>\\br\\system-manifest.yaml; run `tan build` first.\n"
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_ok_slice_helper_and_hw_info_passthrough#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [
+     "m55_hp"
+    ],
+    "generated_by": "tan image",
+    "helper_mcus": [
+     {
+      "artefact": "helper-mcus/zephyr.bin",
+      "chip": "gd32g553",
+      "name": "gd32_bridge",
+      "sha256": "8730ead38036367126b4f0b84da6cdc0022932f0ed6f11942856a9437377afd4",
+      "size": 12
+     }
+    ],
+    "hw_info": {
+     "eeprom": {
+      "magic": "keep"
+     },
+     "sku": "E1M-AEN701"
+    },
+    "schema_version": 1,
+    "slices": [
+     {
+      "artefact": "slices/m55_hp-zephyr.tar.gz",
+      "core_id": "m55_hp",
+      "os": "zephyr",
+      "sha256": "55213ab74d5a4fc1792498d482bad5b561c210c4ba8e187d0a90dbd7ce082137",
+      "size": 159
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_slice_skip_and_unsafe_name#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "image.slice-skipped",
+     "message": "image: skipping m55_hp (build_dir missing)",
+     "severity": "warning"
+    },
+    {
+     "code": "image.slice-skipped",
+     "message": "image: skipping m55_he (build_dir missing)",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_slice_skip_and_unsafe_name#1": [
+  0,
+  {
+   "__raw__": ""
+  },
+  "image: skipping m55_hp (build_dir missing)\nimage: skipping m55_he (build_dir missing)\nimage: bundle ready at <ORACLE-ROOT-0>\\skip\\image-bundle\n"
+ ],
+ "tests/parity/test_image_size_oracle.py::test_image_slice_skip_and_unsafe_name#2": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "image.slice-unsafe-name",
+     "message": "image: skipping ../../../../escape (core_id/os is not a safe archive name)",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[bad-version-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: unsupported system-manifest schema_version 2 (this CLI consumes v1); upgrade the CLI or the SDK so the versions match",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[bad-version-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: unsupported system-manifest schema_version 2 (this CLI consumes v1); upgrade the CLI or the SDK so the versions match",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[bad-yaml-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: did not find expected node content at line 3 column 1, while parsing a flow node",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[bad-yaml-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: did not find expected node content at line 3 column 1, while parsing a flow node",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[no-version-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: missing field `schema_version`",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[no-version-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: missing field `schema_version`",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[scalar-root-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: invalid type: string \"just-a-string\", expected struct SystemManifest",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[scalar-root-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: invalid type: string \"just-a-string\", expected struct SystemManifest",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[slice-no-core-id-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: slices[0]: missing field `core_id` at line 3 column 3",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_malformed_manifest_parity[slice-no-core-id-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-invalid",
+     "message": "<ORACLE-ROOT-0>\\br\\system-manifest.yaml: system-manifest is not valid YAML: slices[0]: missing field `core_id` at line 3 column 3",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_manifest_path_is_a_directory_parity[image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-unavailable",
+     "message": "system-manifest.yaml not found at <ORACLE-ROOT-0>\\br\\system-manifest.yaml; run `tan build` first.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_manifest_path_is_a_directory_parity[size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-unavailable",
+     "message": "no system-manifest.yaml at <ORACLE-ROOT-0>\\br\\system-manifest.yaml; run `tan build` first (Access is denied. (os error 5)).",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_no_color_and_ci_flags_are_accepted_by_both#0": [
+  0,
+  {
+   "__raw__": ""
+  },
+  "CORE           OS         FLASH used/total         RAM used/total           STATUS\n----------------------------------------------------------------------------------\nc              zephyr            ?/?           -          ?/?           -   not built\n                          -> no SKU in manifest\n"
+ ],
+ "tests/parity/test_image_size_oracle.py::test_no_color_and_ci_flags_are_accepted_by_both#1": [
+  0,
+  {
+   "__raw__": ""
+  },
+  "CORE           OS         FLASH used/total         RAM used/total           STATUS\n----------------------------------------------------------------------------------\nc              zephyr            ?/?           -          ?/?           -   not built\n                          -> no SKU in manifest\n"
+ ],
+ "tests/parity/test_image_size_oracle.py::test_non_utf8_manifest_parity[image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-unavailable",
+     "message": "system-manifest.yaml not found at <ORACLE-ROOT-0>\\br\\system-manifest.yaml; run `tan build` first.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_non_utf8_manifest_parity[size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-unavailable",
+     "message": "no system-manifest.yaml at <ORACLE-ROOT-0>\\br\\system-manifest.yaml; run `tan build` first (stream did not contain valid UTF-8).",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_odd_build_root_values_parity[dot-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {
+     "sku": "E1M-X"
+    },
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_odd_build_root_values_parity[dot-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SoM preset for E1M-X",
+      "core_id": "c",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\.\\c-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_odd_build_root_values_parity[dot-slash-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {
+     "sku": "E1M-X"
+    },
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_odd_build_root_values_parity[dot-slash-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SoM preset for E1M-X",
+      "core_id": "c",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\./c-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_odd_build_root_values_parity[empty-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {
+     "sku": "E1M-X"
+    },
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_odd_build_root_values_parity[empty-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SoM preset for E1M-X",
+      "core_id": "c",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\c-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_path_resolution_parity[bare-image]#0": [
+  1,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "image.manifest-unavailable",
+     "message": "system-manifest.yaml not found at <ORACLE-ROOT-0>\\build\\system-manifest.yaml; run `tan build` first.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_path_resolution_parity[bare-size]#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-unavailable",
+     "message": "no system-manifest.yaml at <ORACLE-ROOT-0>\\build\\system-manifest.yaml; run `tan build` first (The system cannot find the path specified. (os error 3)).",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_path_resolution_parity[positional-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {
+     "sku": "E1M-X"
+    },
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_path_resolution_parity[positional-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_path_resolution_parity[project-flag-image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {
+     "sku": "E1M-X"
+    },
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>/app"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_path_resolution_parity[project-flag-size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>/app"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_root_format_flag_position_parity[image]#0": [
+  0,
+  {
+   "command": "image",
+   "data": {
+    "boot_order": [],
+    "generated_by": "tan image",
+    "helper_mcus": [],
+    "hw_info": {},
+    "schema_version": 1,
+    "slices": []
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_root_format_flag_position_parity[size]#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_absurd_core_id_and_os_values#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     },
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "with space",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\with space-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     },
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "m55/hp",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\m55/hp-zephyr\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_bad_footprint_json_shapes#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "a",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\a\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     },
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "b",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\b\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     },
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "c",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\c\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_board_override_and_a_bogus_sdk_root#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "flash=soc_flash_mb; ram=core tcm_kb (ITCM+DTCM)",
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": 0.2,
+       "total": 2097152,
+       "used": 4096
+      },
+      "os": "zephyr",
+      "ram": {
+       "pct": 0.4,
+       "total": 524288,
+       "used": 2048
+      },
+      "source": "rom/ram.json",
+      "status": "ok"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_board_override_and_a_bogus_sdk_root#1": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SoM preset for E1M-TEST",
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": 4096
+      },
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": 2048
+      },
+      "source": "rom/ram.json",
+      "status": "no-budget"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": [
+      "m55_hp"
+     ]
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_garbage_artefact_is_not_built#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SKU in manifest",
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\junk.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_measured_slice_and_the_sdk_envelope_key#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "flash=soc_flash_mb; ram=core tcm_kb (ITCM+DTCM)",
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": 0.1,
+       "total": 5767168,
+       "used": 4096
+      },
+      "os": "zephyr",
+      "ram": {
+       "pct": 0.2,
+       "total": 1310720,
+       "used": 2048
+      },
+      "source": "rom/ram.json",
+      "status": "ok"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_measures_a_real_elf#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": 0.0,
+       "total": 5767168,
+       "used": 160
+      },
+      "os": "zephyr",
+      "ram": {
+       "pct": 0.0,
+       "total": 1048576,
+       "used": 240
+      },
+      "source": "size-tool",
+      "status": "ok"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_missing_manifest#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-unavailable",
+     "message": "no system-manifest.yaml at <ORACLE-ROOT-0>\\br\\system-manifest.yaml; run `tan build` first (The system cannot find the file specified. (os error 2)).",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_over_budget_and_n_a_and_not_built#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "flash=soc_flash_mb; ram=core tcm_kb (ITCM+DTCM)",
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": 96153.8,
+       "total": 104,
+       "used": 100000
+      },
+      "os": "zephyr",
+      "ram": {
+       "pct": 7.6,
+       "total": 1310720,
+       "used": 100000
+      },
+      "source": "rom/ram.json",
+      "status": "over"
+     },
+     {
+      "budget_note": "no Zephyr image (Yocto/baremetal)",
+      "core_id": "a32_cluster",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "os": "yocto",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "n/a"
+     },
+     {
+      "budget_note": "flash=soc_flash_mb",
+      "core_id": "m55_he",
+      "flash": {
+       "pct": null,
+       "total": 104,
+       "used": null
+      },
+      "notes": [
+       "no footprint source at <ORACLE-ROOT-0>\\br\\nope\\zephyr\\zephyr.elf"
+      ],
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": null
+      },
+      "source": null,
+      "status": "not-built"
+     }
+    ],
+    "summary": {
+     "over_budget": [
+      "m55_hp"
+     ],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.over-budget",
+     "message": "size: over budget: [m55_hp].",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_over_budget_and_n_a_and_not_built#1": [
+  1,
+  {
+   "__raw__": ""
+  },
+  "CORE           OS         FLASH used/total         RAM used/total           STATUS\n----------------------------------------------------------------------------------\nm55_hp         zephyr        97.7K/104B     96153.8%    97.7K/1.25M      7.6% OVER\n                          -> flash=soc_flash_mb; ram=core tcm_kb (ITCM+DTCM)\na32_cluster    yocto             ?/?           -          ?/?           -   n/a\n                          -> no Zephyr image (Yocto/baremetal)\nm55_he         zephyr            ?/104B        -          ?/?           -   not built\n                          -> flash=soc_flash_mb\nsize: over budget: [m55_hp].\n"
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_preset_variant_resolution_corner_cases#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "flash=soc_flash_mb; ram=core tcm_kb (ITCM+DTCM)",
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": 0.1,
+       "total": 4194304,
+       "used": 4096
+      },
+      "os": "zephyr",
+      "ram": {
+       "pct": 0.2,
+       "total": 1310720,
+       "used": 2048
+      },
+      "source": "rom/ram.json",
+      "status": "ok"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   },
+   "sdk": {
+    "root": "sdk",
+    "sourceTier": "sdkRootFlag"
+   }
+  },
+  ""
+ ],
+ "tests/parity/test_image_size_oracle.py::test_size_unknown_budget_notice#0": [
+  0,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [
+     {
+      "budget_note": "no SoM preset for E1M-NOPRESET",
+      "core_id": "m55_hp",
+      "flash": {
+       "pct": null,
+       "total": null,
+       "used": 4096
+      },
+      "os": "zephyr",
+      "ram": {
+       "pct": null,
+       "total": null,
+       "used": 2048
+      },
+      "source": "rom/ram.json",
+      "status": "no-budget"
+     }
+    ],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": [
+      "m55_hp"
+     ]
+    }
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "size.budget-unknown",
+     "message": "size: budget unknown for [m55_hp] \u2014 skipped by --fail-over-budget (no guess).",
+     "severity": "info"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  },
+  ""
+ ]
+}

@@ -26,6 +26,40 @@
 # Deliberately NOT `paths`-filtered. A gate that skips itself on a "docs-only"
 # PR reports green for a run that checked nothing, and the classifier that
 # decides which diffs can break bootstrap does not exist.
+#
+# ---------------------------------------------------------------------------
+# Section 10 below (dirty-host coverage) exists because even THIS job proves
+# only the happy path: install -> bootstrap -> init -> build never leaves
+# `west` off bare PATH, because bootstrap's own venv is on PATH the moment it
+# finishes (the step above appends it to $GITHUB_PATH). Yet "west resolvable
+# from the workspace venv but ABSENT from bare PATH" is the GUARANTEED state
+# right after any real `tan bootstrap` (it deliberately does not put `west` on
+# PATH -- its own next-steps text tells the user to activate the venv) and the
+# permanent state of a GUI-launched VS Code (tan-cli#289). v0.5.0-rc2 shipped
+# `tan doctor` exiting 4 on every fresh install because no gate anywhere ever
+# constructed that state; the fix for it (tan-cli#299) then shipped its own
+# false-pass (`west` absent EVERYWHERE reporting exit 0) for the same reason.
+# Four more defects in this class shipped the same cycle, including tan-cli#301
+# (a stale `$ZEPHYR_BASE` or `~/.alp/sdk-default` naming a DIFFERENT tree than
+# the one a report was actually about). All of them needed a dirty host by
+# hand; none of them could have been caught by a clean-runner job, however
+# thorough.
+#
+# These steps are EXTRA STEPS in THIS job, not a sibling job with its own
+# `tan bootstrap` -- deliberately. The expensive part (install.sh's real
+# download, `tan bootstrap`'s venv + west workspace + SDK deps, `west sdk
+# install`'s real toolchain fetch) is already paid for by the time execution
+# reaches here; re-paying it in a second job costs ~8 minutes of runner time
+# for zero additional coverage, since the dirty states below are constructed
+# by editing PATH/env/files on the SAME real tree, not by bootstrapping a
+# different one. A sibling job would also need `upload-artifact`/
+# `download-artifact` to hand off the multi-hundred-MB Zephyr workspace, which
+# a `needs:`-chained job in the SAME workflow gets for free by just being
+# later steps of the one job that built it. Each new step scopes its dirty
+# state to its OWN `run:` shell (PATH is only ever exported inline, never
+# written to $GITHUB_PATH; anything moved aside or written under $HOME is
+# restored via `trap ... EXIT`) so it cannot leak into a step after it.
+# ---------------------------------------------------------------------------
 
 name: getting-started
 
@@ -325,6 +359,10 @@ jobs:
                   sys.exit(1)
           with open(os.environ["GITHUB_ENV"], "a") as fh:
               fh.write("ZEPHYR_BASE=%s\n" % d["zephyrBase"])
+              # Captured for section 10's dirty-host steps below, so they can
+              # locate (and selectively scrub/restore) the venv's bin dir
+              # without a second parse of this same envelope.
+              fh.write("TAN_VENV_DIR=%s\n" % d["venvDir"])
           # The workflow equivalent of the `source <venv>/bin/activate` line
           # `tan bootstrap --print-env` prints -- a customer runs it, so this job
           # runs it. It is not here to cover for tan's own venv discovery; that
@@ -495,6 +533,213 @@ jobs:
           fi
           echo "first-install: install.sh -> bootstrap -> init -> validate -> build -> ARM ELF, all asserted."
 
+      # ---- 10. dirty-host coverage (the reason this job exists) -------------
+      # See the file header for why these are extra steps here and not a
+      # second job with its own bootstrap.
+
+      # tan-cli#299 (the false-refusal v0.5.0-rc2 shipped): straight after a
+      # real `tan bootstrap`, with `west` off bare PATH, a host that provably
+      # builds used to get `tan doctor` exit 4. Asserts the FIX: exit 0, and a
+      # real `tan build` -- forced through a fresh CMake configure via `tan
+      # clean`, so this cannot pass by reusing the ELF section 9 already built
+      # -- still resolves `west` through the venv with none of it on PATH.
+      - name: "dirty host 1/3: west in the venv, absent from bare PATH (tan-cli#299)"
+        working-directory: alp-workspace/my-app
+        run: |
+          set -euo pipefail
+          VENV_BIN="${TAN_VENV_DIR}/bin"
+          if [ ! -x "${VENV_BIN}/west" ]; then
+            echo "::error::expected an executable west at ${VENV_BIN}/west after a real bootstrap -- nothing to scrub PATH of."
+            exit 1
+          fi
+          # Exact-line match (grep -x), not a substring: a differently-named
+          # directory sharing a prefix with $VENV_BIN must survive the scrub.
+          SCRUBBED_PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "${VENV_BIN}" | paste -sd: -)"
+          if PATH="$SCRUBBED_PATH" command -v west >/dev/null 2>&1; then
+            echo "::error::west is still resolvable on bare PATH after scrubbing ${VENV_BIN} -- this step is not exercising the state it claims to."
+            PATH="$SCRUBBED_PATH" command -v west
+            exit 1
+          fi
+
+          set +e
+          PATH="$SCRUBBED_PATH" tan doctor --format json > /tmp/gs-dirty-doctor-venv-only.json
+          rc=$?
+          set -e
+          cat /tmp/gs-dirty-doctor-venv-only.json
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::tan doctor exited ${rc} with west resolvable only through the bootstrap venv (bare PATH scrubbed of it) -- expected exit 0. A host that builds must not be refused (tan-cli#299)."
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json, sys
+          e = json.load(open("/tmp/gs-dirty-doctor-venv-only.json"))
+          if e.get("exitCode") != 0 or e.get("ok") is not True:
+              sys.exit(f"::error::tan doctor's envelope disagrees with its own process exit 0: exitCode={e.get('exitCode')} ok={e.get('ok')}")
+          checks = {c["name"]: c for c in (e.get("data") or {}).get("checks", [])}
+          for name in ("westResolved", "west"):
+              if name not in checks:
+                  sys.exit(f"::error::tan doctor reported no `{name}` check at all -- renamed or removed since this job was written.")
+          if checks["westResolved"]["status"] != "pass":
+              sys.exit("::error::westResolved is " + checks["westResolved"]["status"] +
+                        ", not pass, with west resolvable through the venv: " +
+                        checks["westResolved"]["detail"])
+          if checks["west"]["status"] == "fail":
+              sys.exit("::error::`west` (the bare-PATH check) is FAIL, not warn, on a host that "
+                        "provably builds -- the exact tan-cli#299 false-refusal: " +
+                        checks["west"]["detail"])
+          print("westResolved:", checks["westResolved"]["status"], "-- west:", checks["west"]["status"])
+          PY
+
+          # `tan clean` needs no PATH-resolved tool (filesystem-only), so it
+          # runs before the scrub is re-applied for the build below.
+          tan clean
+          set +e
+          PATH="$SCRUBBED_PATH" tan build 2>&1 | tee /tmp/gs-dirty-build-venv-only.log
+          brc="${PIPESTATUS[0]}"
+          set -e
+          if [ "$brc" -ne 0 ]; then
+            echo "::error::tan build exited ${brc} with west resolvable only through the venv (bare PATH scrubbed of it) -- tan-cli#289 exists precisely so this works."
+            exit 1
+          fi
+          ELF="build/m55_hp-zephyr/build/zephyr/zephyr.elf"
+          if [ ! -f "${ELF}" ]; then
+            echo "::error::tan build reported success with PATH scrubbed of the venv, but produced no ${ELF}."
+            exit 1
+          fi
+          echo "confirmed: tan build resolved west from ${VENV_BIN} with bare PATH scrubbed of it."
+
+      # tan-cli#299's own false-pass (found only by a real run, per
+      # `exit_code_for`'s own docstring: "Never 0 on an unhealthy host"): the
+      # fix for dirty-host-1 above, taken too far, turned "west absent
+      # everywhere -- nothing can execute a single build slice" into a WARN
+      # and an exit-0 report. Asserts that regression stays fixed: with the
+      # venv's own `west` moved aside too (not just off PATH), `tan doctor`
+      # must exit 4 and `westResolved` must be `fail`.
+      - name: "dirty host 2/3: west absent EVERYWHERE, doctor must exit 4 (tan-cli#299 false-pass)"
+        working-directory: alp-workspace/my-app
+        run: |
+          set -uo pipefail
+          VENV_BIN="${TAN_VENV_DIR}/bin"
+          if [ ! -x "${VENV_BIN}/west" ]; then
+            echo "::error::expected an executable west at ${VENV_BIN}/west before moving it aside -- nothing to remove."
+            exit 1
+          fi
+          mv "${VENV_BIN}/west" "${VENV_BIN}/west.moved-aside-by-ci"
+          restore_west() { mv -f "${VENV_BIN}/west.moved-aside-by-ci" "${VENV_BIN}/west" 2>/dev/null || true; }
+          trap restore_west EXIT
+
+          SCRUBBED_PATH="$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF "${VENV_BIN}" | paste -sd: -)"
+          if PATH="$SCRUBBED_PATH" command -v west >/dev/null 2>&1; then
+            echo "::error::west is STILL resolvable somewhere on this scrubbed PATH even with the venv's own west moved aside -- this step is not exercising 'west absent everywhere'."
+            PATH="$SCRUBBED_PATH" command -v west
+            exit 1
+          fi
+
+          set +e
+          PATH="$SCRUBBED_PATH" tan doctor --format json > /tmp/gs-dirty-doctor-no-west.json
+          rc=$?
+          set -e
+          cat /tmp/gs-dirty-doctor-no-west.json
+          if [ "$rc" -ne 4 ]; then
+            echo "::error::tan doctor exited ${rc} with west absent everywhere -- expected exit 4 (exit_code_for's own docstring: 'Never 0 on an unhealthy host'). This is the false-pass tan-cli#299's own fix for dirty-host-1 introduced."
+            exit 1
+          fi
+
+          python3 - <<'PY'
+          import json, sys
+          e = json.load(open("/tmp/gs-dirty-doctor-no-west.json"))
+          if e.get("exitCode") != 4 or e.get("ok") is not False:
+              sys.exit(f"::error::envelope disagrees with the process exit 4: exitCode={e.get('exitCode')} ok={e.get('ok')}")
+          checks = {c["name"]: c for c in (e.get("data") or {}).get("checks", [])}
+          if "westResolved" not in checks:
+              sys.exit("::error::no `westResolved` check in the report -- renamed or removed since this job was written.")
+          if checks["westResolved"]["status"] != "fail":
+              sys.exit("::error::westResolved is " + checks["westResolved"]["status"] +
+                        ", not fail, with west absent everywhere -- exit_code_for must never report "
+                        "success here: " + checks["westResolved"]["detail"])
+          print("westResolved: fail (as expected) --", checks["westResolved"]["detail"])
+          PY
+
+      # tan-cli#301: a stale `$ZEPHYR_BASE` (Zephyr's own docs, and `tan
+      # bootstrap`'s own next-steps text, both tell a customer to export it)
+      # and a stale `~/.alp/sdk-default` (left by an earlier `tan sdk switch`)
+      # used to leak into a report that was supposed to describe THIS tree --
+      # `tan doctor`/`tan bootstrap` naming three different roots in one
+      # report and disagreeing about which SDK a bare invocation meant. Both
+      # stale pointers here are fabricated, not real checkouts: only their
+      # SHAPE matters (a loader-script marker for the SDK, a
+      # PYTHON_MINIMUM_REQUIRED for the Zephyr tree) and a value nothing in
+      # this real toolchain would coincidentally match (3.99).
+      - name: "dirty host 3/3: stale $ZEPHYR_BASE + stale ~/.alp/sdk-default must not leak into the report (tan-cli#301)"
+        working-directory: alp-workspace/my-app
+        run: |
+          set -euo pipefail
+          STALE_ZEPHYR="/tmp/unrelated-zephyr-tree/zephyr"
+          STALE_SDK="/tmp/unrelated-alp-sdk"
+          mkdir -p "${STALE_ZEPHYR}/cmake/modules" "${STALE_SDK}/scripts"
+          printf 'set(PYTHON_MINIMUM_REQUIRED 3.99)\n' > "${STALE_ZEPHYR}/cmake/modules/python.cmake"
+          touch "${STALE_SDK}/scripts/alp_project.py"
+
+          HOME_ALP="${HOME}/.alp"
+          mkdir -p "${HOME_ALP}"
+          BACKUP=""
+          if [ -f "${HOME_ALP}/sdk-default" ]; then
+            BACKUP="${HOME_ALP}/sdk-default.bak-gs"
+            mv "${HOME_ALP}/sdk-default" "${BACKUP}"
+          fi
+          printf '{"sdkPath": "%s", "updatedAt": "1970-01-01T00:00:00Z"}\n' "${STALE_SDK}" > "${HOME_ALP}/sdk-default"
+          restore_default() {
+            rm -f "${HOME_ALP}/sdk-default"
+            if [ -n "${BACKUP}" ]; then mv -f "${BACKUP}" "${HOME_ALP}/sdk-default"; fi
+          }
+          trap restore_default EXIT
+
+          ZEPHYR_BASE="${STALE_ZEPHYR}" tan doctor --format json > /tmp/gs-dirty-doctor-stale.json
+          cat /tmp/gs-dirty-doctor-stale.json
+
+          python3 - "$STALE_ZEPHYR" "$STALE_SDK" <<'PY'
+          import json, sys
+          stale_zephyr, stale_sdk = sys.argv[1], sys.argv[2]
+          e = json.load(open("/tmp/gs-dirty-doctor-stale.json"))
+          checks = {c["name"]: c for c in (e.get("data") or {}).get("checks", [])}
+          for name in ("sdk", "workspace", "hostPython"):
+              if name not in checks:
+                  sys.exit(f"::error::no `{name}` check in the report -- renamed or removed since this job was written.")
+
+          sdk_detail = checks["sdk"]["detail"]
+          if stale_sdk in sdk_detail:
+              sys.exit("::error::`sdk` check named the STALE ~/.alp/sdk-default "
+                        f"({stale_sdk}) instead of the real project-pinned alp-sdk -- "
+                        f"tan-cli#301: {sdk_detail}")
+          if "alp-workspace/alp-sdk" not in sdk_detail:
+              sys.exit(f"::error::`sdk` check does not name the real alp-workspace/alp-sdk "
+                        f"checkout at all: {sdk_detail}")
+
+          workspace_detail = checks["workspace"]["detail"]
+          if stale_zephyr in workspace_detail:
+              sys.exit(f"::error::`workspace` check named the STALE $ZEPHYR_BASE tree instead of "
+                        f"the real resolved workspace: {workspace_detail}")
+
+          python_detail = checks["hostPython"]["detail"]
+          floor_check = checks.get("pythonFloor")
+          to_check = [("hostPython", python_detail)]
+          if floor_check is not None:
+              to_check.append(("pythonFloor", floor_check["detail"]))
+          for label, detail in to_check:
+              if stale_zephyr in detail:
+                  sys.exit(f"::error::`{label}` names the STALE $ZEPHYR_BASE tree ({stale_zephyr}) "
+                            f"instead of the real resolved workspace's Zephyr -- tan-cli#301: {detail}")
+              if "3.99" in detail:
+                  sys.exit(f"::error::`{label}` picked up the fabricated 3.99 floor from the STALE "
+                            f"$ZEPHYR_BASE tree -- tan-cli#301: {detail}")
+
+          print("sdk/workspace/hostPython all describe the real tree, not the stale ZEPHYR_BASE/sdk-default:")
+          print(" sdk:", sdk_detail)
+          print(" workspace:", workspace_detail)
+          print(" hostPython:", python_detail)
+          PY
+
       - name: upload first-install logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -506,4 +751,8 @@ jobs:
             /tmp/gs-print-env.sh
             /tmp/gs-badflag.log
             /tmp/gs-build.log
+            /tmp/gs-dirty-doctor-venv-only.json
+            /tmp/gs-dirty-build-venv-only.log
+            /tmp/gs-dirty-doctor-no-west.json
+            /tmp/gs-dirty-doctor-stale.json
           if-no-files-found: warn

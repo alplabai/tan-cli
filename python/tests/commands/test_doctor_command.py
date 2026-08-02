@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 from tan.commands import doctor_cmd
-from tan.core.bootstrap import venv_layout
+from tan.core.bootstrap import venv_layout, workspace_sdk_record_json
 
 #: ``python/`` -- pinned onto the child's PYTHONPATH so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``.
@@ -154,7 +154,8 @@ def test_zephyr_floor_survives_an_unreadable_cmake_file(tmp_path):
 
 def test_the_manifest_declaring_a_lower_floor_is_itself_reported():
     """`doctor` must not silently paper over the skew: it says which floor is
-    which, so the fix lands in the manifest rather than in the customer."""
+    which, and where the ACTUAL fix belongs (a newer host interpreter, not
+    the manifest -- tan-cli#300)."""
     check = doctor_cmd.python_floor_skew_check(
         manifest_floor=(3, 10), effective_floor=(3, 12), effective_source="zephyr python.cmake"
     )
@@ -162,6 +163,21 @@ def test_the_manifest_declaring_a_lower_floor_is_itself_reported():
     assert check.status == "warn"
     assert "3.10" in check.detail and "3.12" in check.detail
     assert "metadata/bootstrap.json" in check.detail
+
+
+def test_the_skew_fix_points_at_the_reverted_alp_sdk_change_not_a_manifest_raise():
+    """tan-cli#300: raising `prerequisites.pythonMinVersion` was tried and
+    reverted (alp-sdk#1078) -- it gates EVERY backend, not just Zephyr's, so
+    it would refuse a Yocto-only/metadata-only host that builds today. The
+    `fix` text must send the reader to a real interpreter, not back to the
+    manifest edit that was already rejected."""
+    check = doctor_cmd.python_floor_skew_check(
+        manifest_floor=(3, 10), effective_floor=(3, 12), effective_source="zephyr python.cmake"
+    )
+    assert check is not None
+    assert "alp-sdk#1078" in (check.fix or "")
+    assert "tried and reverted" in (check.fix or "")
+    assert "Raise `prerequisites.pythonMinVersion`" not in (check.fix or "")
 
 
 def test_no_skew_check_when_the_two_floors_agree():
@@ -254,17 +270,63 @@ def test_missing_prerequisites_carry_the_frozen_code_and_the_install_commands():
     assert "sudo apt-get install -y ninja-build" in (check.fix or "")
 
 
+def test_west_on_bare_path_the_activated_venv_state_passes():
+    """STATE 1 of tan-cli#299's four required states: the workspace venv has
+    been sourced into this shell, so bare PATH sees `west` too. Unaffected by
+    the tan-cli#299 second-half fix below -- `resolved` is not even consulted
+    once `found` is not `None`."""
+    check = doctor_cmd.west_check(found="west", version=(1, 5), floor=(1, 4))
+    assert check.status == "pass"
+
+
 def test_west_below_the_manifest_floor_warns_and_names_both_versions():
+    """STATE 4 (part 1): a parseable-but-too-old version, on bare PATH.
+    Unaffected by the tan-cli#299 second-half fix -- `resolved` is not
+    consulted once `found` is not `None`."""
     check = doctor_cmd.west_check(found="west", version=(0, 13), floor=(0, 14))
     assert check.status == "warn"
     assert "0.13" in check.detail and "0.14" in check.detail
 
 
-def test_west_absent_fails():
-    assert doctor_cmd.west_check(found=None, version=None, floor=(0, 14)).status == "fail"
+def test_west_absent_from_bare_path_but_resolved_in_the_venv_passes():
+    """STATE 2 (tan-cli#299 second half): the DEFAULT state of every correct
+    fresh install -- `tan bootstrap` deliberately does not put `west` on PATH
+    (its own next-steps text tells the user to activate the venv afterwards).
+    `west_check` now consults the SAME resolver `westResolved` uses
+    (`tan.core.venv.west_program`) and reports `pass`, naming the resolved
+    path, instead of the permanent `warn` a bare-PATH-only probe could not
+    avoid. A warning that fires on every correct install trains users to
+    ignore warnings -- the same defect as the false `fail` this replaced,
+    one severity down."""
+    check = doctor_cmd.west_check(
+        found=None, version=None, floor=(0, 14), resolved="/ws/.venv/bin/west"
+    )
+    assert check.status == "pass"
+    assert "/ws/.venv/bin/west" in check.detail
+    assert check.fix is None
+    assert doctor_cmd.exit_code_for([check]) == doctor_cmd.ExitCode.SUCCESS
+
+
+def test_west_absent_from_bare_path_and_unresolvable_anywhere_still_warns_not_fails():
+    """STATE 3, the one that must NOT regress: west absent from PATH AND
+    unresolvable through the venv resolver either (`resolved=None`) -- a
+    genuinely unbuildable host. `west` itself still only WARNs here: FAIL is
+    `west_resolved_check`'s job alone (tan-cli#123's one-version-per-check
+    contract applied to severity -- see `test_the_two_west_checks_split_the_
+    question_and_only_one_can_be_fatal` and `test_collect_exit_code_over_
+    two_REAL_trees_venv_with_west_and_without` for the check that actually
+    fails this state and owns the exit code). Making BOTH checks non-fatal
+    on this exact state is the regression tan-cli#299's own first attempt
+    shipped: west absent everywhere produced two warns and exited 0."""
+    check = doctor_cmd.west_check(found=None, version=None, floor=(0, 14), resolved=None)
+    assert check.status == "warn"
+    assert doctor_cmd.exit_code_for([check]) == doctor_cmd.ExitCode.SUCCESS
 
 
 def test_west_present_but_unparseable_version_is_a_warning_not_a_crash():
+    """STATE 4 (part 2): found on bare PATH but `--version` unparseable.
+    Unaffected by the tan-cli#299 second-half fix -- `resolved` is not
+    consulted once `found` is not `None`."""
     check = doctor_cmd.west_check(found="west", version=None, floor=(0, 14))
     assert check.status == "warn"
 
@@ -274,12 +336,110 @@ def test_west_present_but_unparseable_version_is_a_warning_not_a_crash():
 # --------------------------------------------------------------------------
 
 
-def test_west_resolved_warns_when_nothing_resolves():
-    """The refusing state: neither the workspace venv nor PATH has a `west`
-    to run."""
+def test_west_resolved_FAILS_when_nothing_resolves_anywhere():
+    """No venv west, no PATH west: NO build slice can run, so this is the check
+    that fails and owns the exit code.
+
+    It was a Warn, on the premise that `west` (bare PATH) "already fails
+    outright on a totally-absent west". tan-cli#299 removed that Fail and
+    falsified the premise. Measured on a real host with `west.exe` renamed out
+    of the venv and off PATH, both checks Warned and `tan doctor` exited **0**
+    on a machine where nothing could build -- a false refusal traded for a
+    false pass. This test is the one that would have caught it.
+    """
     check = doctor_cmd.west_resolved_check(None, None)
-    assert check.status == "warn"
+    assert check.status == "fail"
     assert check.fix == "tan bootstrap"
+
+
+def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_path, monkeypatch):
+    """The proof the unit tests below cannot give: two actual host states, run
+    through `_collect` + `exit_code_for`, asserting the EXIT CODE.
+
+    `west_check(found=None)` is ONE input covering three different host states
+    (venv has west / venv lacks it / no venv at all). A test that calls the
+    check twice with the same argument is two inputs, not two states, and it is
+    exactly what let five "refuses a host that works" defects ship green out of
+    this file. The state that actually shipped broken -- venv lacks it too --
+    was constructed by no fixture at all.
+
+    So: build two real trees, differing only in whether the venv holds a west,
+    keep PATH scrubbed in both, and assert 0 vs 4.
+    """
+    def _tree(name: str, *, with_west: bool) -> Path:
+        ws = tmp_path / name
+        (ws / ".west").mkdir(parents=True)
+        bin_dir = ws / ".venv" / ("Scripts" if os.name == "nt" else "bin")
+        bin_dir.mkdir(parents=True)
+        if with_west:
+            (bin_dir / ("west.exe" if os.name == "nt" else "west")).write_text("", encoding="utf-8")
+        return ws
+
+    # west is on NEITHER PATH in both states -- that is the constant under test.
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+
+    have = _tree("have", with_west=True)
+    lack = _tree("lack", with_west=False)
+
+    def _run(ws: Path) -> tuple[list[doctor_cmd.Check], int]:
+        checks = doctor_cmd._collect(None, workspace_root=str(ws))
+        return checks, int(doctor_cmd.exit_code_for(checks))
+
+    # STATE 1 -- the DEFAULT post-bootstrap state. Builds work; must not refuse.
+    checks, _ = _run(have)
+    by_name = {c.name: c.status for c in checks}
+    assert by_name.get("westResolved") == "pass", "venv holds a west: westResolved must pass"
+    # tan-cli#299 second half, at `_collect` level: `west` (bare-PATH-only)
+    # must ALSO pass here, fed the same resolved venv path, not warn forever
+    # on the default state every correct install starts in.
+    assert by_name.get("west") == "pass", "west must consult the same resolved venv path"
+    assert not any(i.code == "doctor.west" for i in doctor_cmd.checks_to_issues(checks)), (
+        "a passing `west` check must not surface as an issue at all"
+    )
+
+    # STATE 2 -- nothing anywhere. No slice can run; must refuse.
+    checks, code = _run(lack)
+    by_name = {c.name: c.status for c in checks}
+    assert by_name.get("westResolved") == "fail", "no west anywhere: westResolved must FAIL"
+    assert code == 4, "a host where no build slice can run must not exit 0"
+    # The regression tan-cli#299's first attempt shipped: both checks warning
+    # here (and NEITHER failing) is exactly what let this exit 0.
+    assert by_name.get("west") == "warn", "west stays a warn -- westResolved alone is fatal"
+    # The failing ENVELOPE, not just the check objects -- the same assembly
+    # `doctor_cmd.doctor` calls (`checks_to_issues`), mirroring the
+    # `{ok, exitCode, issues}` shape `alp-sdk-vscode` actually consumes.
+    issues = doctor_cmd.checks_to_issues(checks)
+    assert any(
+        i.code == "doctor.westResolved" and i.severity == "error" for i in issues
+    ), issues
+
+
+def test_the_two_west_checks_split_the_question_and_only_one_can_be_fatal():
+    """`west` = "is it on bare PATH, or resolvable through the same resolver
+    `westResolved` uses" -- never fatal either way (tan-cli#299 second half).
+    `westResolved` = "can a slice run at all", fatal when not. tan-cli#123's
+    one-version-per-check contract, applied to severity: exactly one of them
+    can ever own the exit code.
+
+    Both states, not one twice -- a single-state test is what let five
+    "refuses a host that works" defects ship green out of this file.
+    """
+    # DEFAULT post-bootstrap state: venv has west, PATH does not. Builds work.
+    # `west` now PASSES here too (tan-cli#299 second half) -- fed the same
+    # resolved path `westResolved` reports, never a second bare-PATH re-probe.
+    assert doctor_cmd.west_check(None, None, None, "/ws/.venv/bin/west").status == "pass"
+    assert doctor_cmd.west_resolved_check("/ws/.venv/bin/west", (1, 5)).status == "pass"
+
+    # ABSENT state: nothing anywhere. Builds cannot work. `west` still only
+    # WARNs -- FAIL stays `westResolved`'s alone.
+    assert doctor_cmd.west_check(None, None, None).status == "warn"
+    assert doctor_cmd.west_resolved_check(None, None).status == "fail"
+
+    # `west`'s text must not predict what `westResolved` found -- asserting the
+    # venv resolved one was wrong in exactly the absent state.
+    detail = doctor_cmd.west_check(None, None, None).detail
+    assert "actually resolves it through the workspace venv" not in detail
+    assert "westResolved" in detail
 
 
 def test_west_resolved_passes_and_names_the_resolved_binary_and_version():
@@ -310,13 +470,21 @@ def test_collect_reports_west_resolved_unconditionally(tmp_path):
 def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     """tan-cli#123's exact bug, reproduced then guarded: a workspace venv
     holds `west`, PATH is scrubbed empty so a bare lookup CANNOT possibly
-    answer -- `west` (bare-PATH-only) must fail, and `westResolved` must
-    still resolve and report a version, proving it came from the venv
-    binary, never a bare-PATH re-probe. Break `west_resolved_check`'s wiring
-    in `_collect` (e.g. feed it `on_path("west")` instead of
-    `tan.core.venv.west_program`'s result) and this goes red: `westResolved`
-    would report the same `warn`/absent verdict `west` does, with PATH
-    scrubbed.
+    answer -- `westResolved` must still resolve and report a version, proving
+    it came from the venv binary, never a bare-PATH re-probe. Break
+    `west_resolved_check`'s wiring in `_collect` (e.g. feed it
+    `on_path("west")` instead of `tan.core.venv.west_program`'s result) and
+    this goes red: `westResolved` would report the same absent verdict `west`
+    (bare-PATH-only) does, with PATH scrubbed.
+
+    Also STATE 2 of tan-cli#299's second half, run through the REAL envelope
+    a `tan doctor --format json` process emits (`doctor_cmd.doctor`'s own
+    `checks_to_issues`/`exit_code_for`, not a hand-built `Check`): `west`
+    must now PASS here too -- fed the SAME resolved venv path `westResolved`
+    reports -- naming it, and it must not surface as a `doctor.west` issue
+    at any severity in `data.issues`. Before this fix, this exact state (the
+    default one every correct install starts in) reported `west` as a
+    permanent `warn`.
     """
     layout = venv_layout(os.name == "nt")
     bin_dir = tmp_path / ".venv" / layout.bin_dir
@@ -344,7 +512,6 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     envelope = json.loads(proc.stdout)
     checks = {c["name"]: c for c in envelope["data"]["checks"]}
 
-    assert checks["west"]["status"] == "fail", checks["west"]
     resolved = checks["westResolved"]
     assert resolved["status"] == "pass", resolved
     if os.name == "nt":
@@ -352,6 +519,139 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
     else:
         expected = "99.98"
     assert expected in resolved["detail"], resolved["detail"]
+
+    # tan-cli#299 second half.
+    west = checks["west"]
+    assert west["status"] == "pass", west
+    assert str(west_path) in west["detail"], west["detail"]
+    assert not any(i["code"] == "doctor.west" for i in envelope["issues"]), envelope["issues"]
+
+
+# --------------------------------------------------------------------------
+# venvProvenance (tan-cli#292 consequences 1 and 3): the resolved venv's
+# tan-written record must name the SAME SDK this report resolved against.
+# --------------------------------------------------------------------------
+
+
+def _plant_venv_with_record(venv_dir: Path, record_json: str | None) -> None:
+    """A west-capable `.venv` at `venv_dir`, with `record_json` (if given)
+    written as its sibling `.west/tan-workspace-sdk` -- the exact on-disk
+    shape `bootstrap_cmd.record_workspace_sdk` produces, one level up from
+    the venv itself."""
+    layout = venv_layout(os.name == "nt")
+    bin_dir = venv_dir / layout.bin_dir
+    bin_dir.mkdir(parents=True)
+    (bin_dir / layout.west).write_text("", encoding="utf-8")
+    if record_json is not None:
+        record_dir = venv_dir.parent / ".west"
+        record_dir.mkdir(parents=True, exist_ok=True)
+        (record_dir / "tan-workspace-sdk").write_text(record_json, encoding="utf-8")
+
+
+def test_venv_provenance_warns_when_the_record_names_a_different_sdk(tmp_path, monkeypatch):
+    """Consequence 3 (`tan sdk switch` leaves the venv behind): the resolved
+    venv's own record still names the SDK that last populated it, not the
+    one this report resolved against."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    old_sdk = tmp_path / "sdk-v1"
+    old_sdk.mkdir()
+    new_sdk = tmp_path / "sdk-v2"
+    new_sdk.mkdir()
+    workspace = tmp_path / "ws"
+    _plant_venv_with_record(
+        workspace / ".venv", workspace_sdk_record_json(str(old_sdk))
+    )
+
+    checks = doctor_cmd._collect(str(new_sdk), workspace_root=str(workspace))
+    check = next(c for c in checks if c.name == "venvProvenance")
+    assert check.status == "warn", check.detail
+    assert str(old_sdk) in check.detail
+    assert str(new_sdk) in check.detail
+    assert check.fix == "tan bootstrap"
+
+
+def test_venv_provenance_passes_when_the_record_matches_the_resolved_sdk(tmp_path, monkeypatch):
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk = tmp_path / "alp-sdk"
+    sdk.mkdir()
+    workspace = tmp_path / "ws"
+    _plant_venv_with_record(
+        workspace / ".venv", workspace_sdk_record_json(str(sdk))
+    )
+
+    checks = doctor_cmd._collect(str(sdk), workspace_root=str(workspace))
+    check = next(c for c in checks if c.name == "venvProvenance")
+    assert check.status == "pass", check.detail
+
+
+def test_venv_provenance_catches_a_neighbouring_tan_bootstrapped_projects_venv(
+    tmp_path, monkeypatch
+):
+    """Consequence 1 (a neighbouring project's venv wins the upward walk):
+    reproduced with the neighbour ITSELF tan-bootstrapped -- for a different
+    SDK -- so it carries a record `venvProvenance` can actually compare
+    against. A neighbour with no tan record at all (a bare `west init`, the
+    #278 shape) is the documented, still-open gap this mechanism does not
+    close; see `venv_provenance_check`'s docstring."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    other_sdk = tmp_path / "other-project" / "alp-sdk"
+    other_sdk.mkdir(parents=True)
+    # The neighbour's venv sits ABOVE the customer's own project in the tree,
+    # so `find_workspace_venv`'s upward walk from the project reaches it
+    # before any SDK-derived candidate.
+    neighbour_root = tmp_path / "other-project"
+    _plant_venv_with_record(
+        neighbour_root / ".venv",
+        workspace_sdk_record_json(str(other_sdk)),
+    )
+    project = neighbour_root / "nested" / "my-app"
+    project.mkdir(parents=True)
+
+    my_sdk = tmp_path / "my-sdk"
+    my_sdk.mkdir()
+    checks = doctor_cmd._collect(str(my_sdk), workspace_root=str(project))
+    check = next(c for c in checks if c.name == "venvProvenance")
+    assert check.status == "warn", check.detail
+    assert str(other_sdk) in check.detail
+
+
+def test_venv_provenance_emits_no_check_on_a_record_less_bootstrap_sh_workspace(
+    tmp_path, monkeypatch
+):
+    """A workspace alp-sdk's own `bootstrap.sh` set up writes no tan record
+    at all (`crates/tan-cli/src/venv.rs:25-27`) -- `venvProvenance` must not
+    invent a verdict against a checkout it was never told about."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk = tmp_path / "alp-sdk"
+    sdk.mkdir()
+    workspace = tmp_path / "ws"
+    _plant_venv_with_record(workspace / ".venv", None)  # west-capable, no record
+
+    checks = doctor_cmd._collect(str(sdk), workspace_root=str(workspace))
+    assert not any(c.name == "venvProvenance" for c in checks)
+
+
+def test_venv_provenance_emits_no_check_when_no_venv_resolves(tmp_path, monkeypatch):
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    sdk = tmp_path / "alp-sdk"
+    sdk.mkdir()
+    empty = tmp_path / "elsewhere"
+    empty.mkdir()
+
+    checks = doctor_cmd._collect(str(sdk), workspace_root=str(empty))
+    assert not any(c.name == "venvProvenance" for c in checks)
+
+
+def test_venv_provenance_check_unit_covers_the_no_sdk_root_case():
+    """`_collect` never has "a record but no `sdk_root`" to feed the check in
+    practice (the record's OWN existence implies bootstrap ran against SOME
+    resolvable SDK), but `venv_provenance_check` is exercised directly here
+    for the branch: nothing to compare against, so `None`, never a fabricated
+    verdict."""
+    record = doctor_cmd.WorkspaceSdkRecord(sdk_path="/ws/alp-sdk")
+    assert doctor_cmd.venv_provenance_check(record, None) is None
+    assert doctor_cmd.venv_provenance_check(None, "/ws/alp-sdk") is None
+    assert doctor_cmd.venv_provenance_check(None, None) is None
 
 
 # --------------------------------------------------------------------------
@@ -441,9 +741,9 @@ def test_zephyr_sdk_detected_by_scanning_home_with_no_env_var_set(tmp_path, monk
 
 def test_zephyr_sdk_detected_via_msys_home_split_from_windows_userprofile(tmp_path, monkeypatch):
     """Finding 2, tan-cli#286 second pass -- reproduced on a real host: Git
-    Bash/MSYS sets `HOME` to a POSIX-translated path (`/c/Users/caner`) that is
+    Bash/MSYS sets `HOME` to a POSIX-translated path (`/c/Users/dev`) that is
     real but has no SDK under it, while the actual Zephyr SDK sits under the
-    native `%USERPROFILE%` (`C:\\Users\\caner\\zephyr-sdk-1.0.1`). The old
+    native `%USERPROFILE%` (`C:\\Users\\dev\\zephyr-sdk-1.0.1`). The old
     `HOME or USERPROFILE` picked `HOME` (set first) and never scanned
     `USERPROFILE` at all, so a host that HAS the SDK reported `False`. Both
     must be scanned."""
@@ -736,27 +1036,52 @@ def test_jlink_flash_device_is_read_from_e8_json_when_an_sdk_resolves(tmp_path):
 
 
 def test_jlink_flash_device_falls_back_with_no_sdk_root():
+    """Case 1: nothing to read from at all -- the one wording tan-cli#310 left
+    unchanged. Its own distinguishing text ("no alp-sdk checkout resolved")
+    must NOT appear in either of the other two fallback causes below, or a
+    doctor run with a perfectly good SDK checkout tells the user to go hunting
+    for an SDK-resolution problem they do not have (the bug tan-cli#310
+    found)."""
     device, source = doctor_cmd.jlink_flash_device(None)
     assert device == doctor_cmd.JLINK_AEN_DEVICE
     assert "built-in fallback" in source
+    assert "no alp-sdk checkout resolved" in source
 
 
 def test_jlink_flash_device_falls_back_when_no_variant_carries_the_key(tmp_path):
+    """Case 3: an SDK resolved and its `e8.json` parsed fine, but no variant
+    carries `debug.jlink_flash_device` -- the real state of every checkout
+    since alp-sdk#1057 moved that fact to a per-board `flash_args` value
+    doctor has no board selected to read. Must say THAT, not case 1's "no
+    alp-sdk checkout resolved" (tan-cli#310: a checkout genuinely resolved
+    here, so that sentence would be false)."""
     _write_e8_json(tmp_path, [{"debug": {"jlink_device": {"m55_he": "Cortex-M55"}}}])
     device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
     assert device == doctor_cmd.JLINK_AEN_DEVICE
     assert "built-in fallback" in source
+    assert "no variant carries" in source
+    assert "flash_args" in source
+    assert "no alp-sdk checkout resolved" not in source
 
 
 def test_jlink_flash_device_survives_a_missing_or_malformed_e8_json(tmp_path):
-    """No file, and a directory where a file is expected: both fall back rather
-    than raising -- doctor's whole job is to run on a host where things are
-    wrong."""
-    assert doctor_cmd.jlink_flash_device(str(tmp_path))[0] == doctor_cmd.JLINK_AEN_DEVICE
+    """Case 2: an SDK resolved but `e8.json` itself is missing / unreadable /
+    malformed -- both fall back rather than raising (doctor's whole job is to
+    run on a host where things are wrong), and both must say THAT, naming the
+    path, not case 1's "no alp-sdk checkout resolved" (a checkout DID
+    resolve; only the file under it did not read)."""
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "missing, unreadable" in source
+    assert "no alp-sdk checkout resolved" not in source
+    assert str(tmp_path) in source
 
     (tmp_path / "metadata" / "socs" / "alif" / "ensemble").mkdir(parents=True)
     (tmp_path / "metadata" / "socs" / "alif" / "ensemble" / "e8.json").mkdir()
-    assert doctor_cmd.jlink_flash_device(str(tmp_path))[0] == doctor_cmd.JLINK_AEN_DEVICE
+    device, source = doctor_cmd.jlink_flash_device(str(tmp_path))
+    assert device == doctor_cmd.JLINK_AEN_DEVICE
+    assert "missing, unreadable" in source
+    assert "no alp-sdk checkout resolved" not in source
 
 
 def test_jlink_flash_device_falls_back_when_variants_disagree(tmp_path):
@@ -1077,21 +1402,134 @@ def test_host_os_arch_tags_leaves_a_native_intel_mac_alone(monkeypatch):
     assert doctor_cmd._host_os_arch_tags() == ("macos", "x86_64")
 
 
-def test_long_paths_check_distinguishes_enabled_disabled_and_unknown():
-    on = doctor_cmd.long_paths_check(True)
-    assert on.status == "pass"
-    assert on.fix is None
+def test_long_paths_check_passes_only_when_both_the_registry_and_git_are_on():
+    both_on = doctor_cmd.long_paths_check(True, True)
+    assert both_on.status == "pass"
+    assert both_on.fix is None
 
-    off = doctor_cmd.long_paths_check(False)
-    assert off.status == "warn"
+    # Every OTHER combination of the two axes must NOT pass -- swapping any
+    # one of these to "pass" is the mutation that turns tan-cli#306 back into
+    # a silent regression: a pass here is a customer-facing claim that
+    # `west update` will not hit "Filename too long".
+    for registry in (True, False, None):
+        for git in (True, False, None):
+            if registry is True and git is True:
+                continue
+            check = doctor_cmd.long_paths_check(registry, git)
+            assert check.status != "pass", f"registry={registry} git={git}: {check}"
+
+
+def test_long_paths_check_fails_when_the_registry_says_yes_and_git_does_not():
+    """The exact defect tan-cli#306 reports: the registry read alone said
+    `pass` while `west update`'s own `git` -- which does not consult the
+    registry at all -- refused a long path. This is the one combination that
+    must be `fail`, not `warn`: `git` is the first thing in the toolchain to
+    touch a long path, and its own setting says no, so the break is
+    certain."""
+    for git in (False, None):
+        check = doctor_cmd.long_paths_check(True, git)
+        assert check.status == "fail", f"git={git}: {check}"
+        # Fix #3 in tan-cli#306: the remedy must name the exact command,
+        # verbatim.
+        assert "git config --global core.longpaths true" in (check.fix or "")
+
+
+def test_long_paths_check_warns_but_does_not_fail_when_git_is_on_and_the_registry_is_not():
+    """Git handles long paths on its own once `core.longpaths=true` (it
+    never consults the registry), so the failure this check exists to catch
+    will NOT reproduce -- must not be `fail`. But other manifested tools
+    (CMake, Ninja) still rely on the registry flag, so residual risk
+    remains -- must not be a bare `pass` either."""
+    for registry in (False, None):
+        check = doctor_cmd.long_paths_check(registry, True)
+        assert check.status == "warn", f"registry={registry}: {check}"
+        assert check.fix is not None
+        assert "git core.longpaths is true" in check.detail
+
+
+def test_long_paths_check_warns_when_neither_axis_is_on():
+    for registry in (False, None):
+        for git in (False, None):
+            check = doctor_cmd.long_paths_check(registry, git)
+            assert check.status == "warn", f"registry={registry} git={git}: {check}"
+            assert check.fix is not None
+    off = doctor_cmd.long_paths_check(False, False)
     assert "MAX_PATH" in off.detail
     assert "New-ItemProperty" in (off.fix or "")
 
-    unknown = doctor_cmd.long_paths_check(None)
-    assert unknown.status == "warn"
-    assert "unknown" in unknown.detail
+    unknown = doctor_cmd.long_paths_check(None, None)
+    assert "could not be read" in unknown.detail or "could not be determined" in unknown.detail
     # "could not tell" must never render as a silent Pass.
     assert unknown.status != "pass"
+
+
+def test_classify_git_core_longpaths_maps_exit_status_and_never_guesses():
+    assert doctor_cmd.classify_git_core_longpaths(0, "true") is True
+    assert doctor_cmd.classify_git_core_longpaths(0, "false") is False
+    # git's own boolean grammar: case-insensitive, other spellings.
+    assert doctor_cmd.classify_git_core_longpaths(0, "TRUE") is True
+    assert doctor_cmd.classify_git_core_longpaths(0, "no") is False
+    assert doctor_cmd.classify_git_core_longpaths(0, "1") is True
+    assert doctor_cmd.classify_git_core_longpaths(0, "0") is False
+    # exit 1: git's documented "not set in any scope" -- its own default, and
+    # the state a fresh HOME is in.
+    assert doctor_cmd.classify_git_core_longpaths(1, "") is False
+    # Anything else (git missing, a malformed config) is uncertain, not
+    # guessed.
+    assert doctor_cmd.classify_git_core_longpaths(2, "") is None
+    assert doctor_cmd.classify_git_core_longpaths(128, "") is None
+    assert doctor_cmd.classify_git_core_longpaths(None, "") is None
+
+
+@pytest.mark.skipif(os.name != "nt", reason="longPaths is Windows-only")
+def test_long_paths_reads_gits_real_config_not_just_the_registry(tmp_path):
+    """tan-cli#306's own regression, driven through the REAL CLI with a REAL
+    `git` subprocess -- as far as an automated test can go without writing
+    `HKLM` (the registry axis genuinely cannot be driven this way; see the
+    module docstring). A fresh `HOME` with no global `.gitconfig` is the
+    exact state that broke `west update` on a customer's machine, and it is
+    reachable here the same way `test_zephyr_sdk_detected_via_msys_home_
+    split_from_windows_userprofile` (above) reaches `_zephyr_sdk_detected`'s
+    own `HOME`/`USERPROFILE` axis: both env vars are read by git itself, not
+    reimplemented here, this test just controls which directory `git` sees.
+
+    The check's overall `status` is deliberately NOT asserted -- it also
+    depends on the registry flag, which THIS runner's own state decides and
+    a test must not write. What is asserted is the one thing under this
+    test's control either way: the DETAIL names git's real, freshly-read
+    value.
+
+    `GIT_CONFIG_NOSYSTEM=1` isolates this from whatever the CI image's own
+    system-wide git config carries -- with it set, only `HOME` (verified by
+    hand to outrank `USERPROFILE`/`HOMEDRIVE`+`HOMEPATH` in git's own
+    global-config lookup) decides what `git config --get core.longpaths`
+    sees, so both cases below are deterministic regardless of the runner.
+    """
+
+    def longpaths_detail(tag: str, gitconfig: str | None) -> str:
+        home = tmp_path / f"home-{tag}"
+        home.mkdir()
+        if gitconfig is not None:
+            (home / ".gitconfig").write_text(gitconfig, encoding="utf-8")
+        work_dir = tmp_path / f"work-{tag}"
+        work_dir.mkdir()
+
+        proc = run_tan(
+            "doctor",
+            "--format",
+            "json",
+            cwd=work_dir,
+            env_extra={"HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1"},
+        )
+        envelope = json.loads(proc.stdout)
+        check = next(c for c in envelope["data"]["checks"] if c["name"] == "longPaths")
+        return check["detail"]
+
+    unset = longpaths_detail("unset", None)
+    assert "git core.longpaths is unset or false" in unset, unset
+
+    on = longpaths_detail("on", "[core]\n\tlongpaths = true\n")
+    assert "git core.longpaths is true" in on, on
 
 
 def test_home_path_check_distinguishes_a_spaced_home_from_a_clean_one():
@@ -1130,18 +1568,122 @@ def test_sdk_check_distinguishes_a_resolved_sdk_from_an_unresolved_one():
 
     unresolved = doctor_cmd.sdk_check(None, project_scope=None)
     assert unresolved.status == "fail"
-    assert "tan sdk switch" in unresolved.detail
+    # tan-cli#305: `sdk switch` refuses in this build -- the fail detail must
+    # not send the user to it, and the only thing that still resolves an SDK
+    # is `--sdk-root`.
+    assert "sdk switch" not in unresolved.detail
+    assert "sdk install" not in unresolved.detail
+    assert "--sdk-root" in unresolved.detail
+    assert unresolved.fix == "--sdk-root <path>"
 
 
-def test_sdk_check_names_the_project_scoped_switch_when_a_project_scope_is_given():
-    """tan-cli#101: a bare `tan sdk switch <path>` reports success and leaves
-    a `tan --project <p> ...` invocation failing byte-for-byte identically --
-    the hint has to carry the scope."""
+def test_sdk_check_names_the_project_scope_without_recommending_a_refused_switch():
+    """tan-cli#101 used to hint a project-scoped `tan sdk switch <path>` here,
+    reasoning a bare one reports success while leaving a `tan --project <p>
+    ...` invocation failing identically. tan-cli#305: that hint is moot now
+    that `sdk switch` refuses in EVERY scope -- the fix is `--sdk-root`
+    regardless, so the project is named only as context, never as part of a
+    broken remedy."""
     check = doctor_cmd.sdk_check(None, project_scope="examples/uart-echo")
     assert check.status == "fail"
-    assert "tan --project examples/uart-echo sdk switch <path>" in check.detail
+    assert "examples/uart-echo" in check.detail
+    assert "sdk switch" not in check.detail
+    assert "sdk install" not in check.detail
     assert "--sdk-root" in check.detail
-    assert check.fix == "tan --project examples/uart-echo sdk switch <path>"
+    assert check.fix == "--sdk-root <path>"
+
+
+# --------------------------------------------------------------------------
+# tan-cli#301 -- `sdk` names the winning TIER, and an unselected cwd
+# candidate a higher tier outranked. No behaviour change: the tier ladder
+# itself (GlobalDefault > Discovery, tan-cli#263's absolute pins) is untouched.
+# --------------------------------------------------------------------------
+
+
+def test_sdk_check_with_no_tier_given_keeps_the_old_bare_detail():
+    """Every existing direct caller (no `tier` passed) must see byte-identical
+    output -- this is a report-only addition."""
+    check = doctor_cmd.sdk_check("/opt/alp-sdk", project_scope=None)
+    assert check.detail == "alp-sdk at /opt/alp-sdk"
+
+
+def test_sdk_check_reports_the_tier_alongside_the_root():
+    check = doctor_cmd.sdk_check("/opt/alp-sdk", project_scope=None, tier="globalDefault")
+    assert check.status == "pass"
+    assert "alp-sdk at /opt/alp-sdk" in check.detail
+    assert "globalDefault" in check.detail
+
+
+def test_sdk_check_names_an_unselected_candidate_and_how_to_select_it():
+    check = doctor_cmd.sdk_check(
+        "/opt/alp-sdk",
+        project_scope=None,
+        tier="globalDefault",
+        unselected_candidate="/home/dev/project/alp-sdk",
+    )
+    assert "was not selected" in check.detail
+    assert "/home/dev/project/alp-sdk" in check.detail
+    assert "--sdk-root /home/dev/project/alp-sdk" in check.detail
+
+
+def _make_sdk_root(path: Path) -> Path:
+    (path / "scripts").mkdir(parents=True, exist_ok=True)
+    (path / "scripts" / "alp_project.py").write_text("", encoding="utf-8", newline="")
+    return path
+
+
+def _write_global_default_pointer(target: Path) -> None:
+    """`~/.alp/sdk-default` -- `HOME`/`USERPROFILE` are already repointed at
+    an isolated tmp dir by the autouse `conftest._scrub_sdk_discovery_env`
+    fixture, so this cannot touch a developer's real global default."""
+    home = Path(os.environ["USERPROFILE" if os.name == "nt" else "HOME"])
+    pointer = home / ".alp" / "sdk-default"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(
+        json.dumps({"sdkPath": str(target), "updatedAt": "1970-01-01T00:00:00Z"}),
+        encoding="utf-8",
+        newline="",
+    )
+
+
+def test_collect_names_the_global_default_tier_and_the_unselected_child_checkout(tmp_path):
+    """tan-cli#301's exact reported shape: a global-default alp-sdk wins over
+    a checkout the user was standing IN (a CHILD of the workspace root), and
+    the report used to say nothing about either fact -- three roots, one
+    report, no way to tell which is which. `resolve_sdk_root_ladder` still
+    picks the SAME globalDefault (no behaviour change); only `sdk`'s own
+    detail changes."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    child_sdk = _make_sdk_root(workspace / "alp-sdk")
+    global_sdk = _make_sdk_root(tmp_path / "elsewhere" / "alp-sdk")
+    _write_global_default_pointer(global_sdk)
+
+    resolved_root, tier, broken_pin = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    assert tier == "globalDefault"
+    assert str(resolved_root) == str(global_sdk)
+    assert broken_pin is None
+
+    checks = doctor_cmd._collect(
+        str(resolved_root), workspace_root=str(workspace), sdk_tier=tier
+    )
+    sdk = next(c for c in checks if c.name == "sdk")
+    assert sdk.status == "pass"
+    assert "globalDefault" in sdk.detail
+    assert str(child_sdk) in sdk.detail
+    assert "was not selected" in sdk.detail
+    assert f"--sdk-root {child_sdk}" in sdk.detail
+
+
+def test_collect_names_no_unselected_candidate_when_discovery_itself_answered(tmp_path):
+    """The tier that resolved IS discovery -- there is no "unselected"
+    candidate to name; a bolder discovery walk finding the SAME checkout
+    again must not read as a second, ignored one."""
+    workspace = tmp_path / "ws"
+    sdk = _make_sdk_root(workspace)
+    checks = doctor_cmd._collect(str(sdk), workspace_root=str(workspace), sdk_tier="discovery")
+    check = next(c for c in checks if c.name == "sdk")
+    assert "was not selected" not in check.detail
 
 
 def test_board_yaml_preflight_check_passes_when_present_regardless_of_selection():
@@ -1197,6 +1739,124 @@ def test_collect_resolves_the_workspace_from_a_bare_zephyr_base_with_no_sdk_root
     check = next(c for c in checks if c.name == "workspace")
     assert check.status == "pass", check.detail
     assert str(workspace) in check.detail
+
+
+# --------------------------------------------------------------------------
+# tan-cli#301, second half: `hostPython`/`pythonFloor` must read the SAME
+# resolved workspace `zephyrWorkspace` reports, not an independent
+# `$ZEPHYR_BASE` re-read -- else one report can cite two different Zephyrs.
+# --------------------------------------------------------------------------
+
+
+def _plant_zephyr_tree(zephyr_dir: Path, python_floor: str, patchlevel: int = 1) -> None:
+    """A minimal `<zephyr_dir>/{VERSION,cmake/modules/python.cmake}` -- the two
+    files `zephyrWorkspace` and `zephyr_python_floor` each read."""
+    zephyr_dir.mkdir(parents=True, exist_ok=True)
+    (zephyr_dir / "VERSION").write_text(
+        f"VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = {patchlevel}\n",
+        encoding="utf-8",
+    )
+    modules = zephyr_dir / "cmake" / "modules"
+    modules.mkdir(parents=True)
+    (modules / "python.cmake").write_text(
+        f"set(PYTHON_MINIMUM_REQUIRED {python_floor})\n", encoding="utf-8"
+    )
+
+
+def test_hostpython_and_zephyrworkspace_name_the_same_tree_over_a_stale_zephyr_base(
+    tmp_path, monkeypatch
+):
+    """Reproduces the issue's own shape measured on a real host: a genuine
+    resolved workspace (`.west` + `zephyr/`), and a stale exported
+    `$ZEPHYR_BASE` pointing at an unrelated, un-workspaced tree with a
+    materially different floor. Before this fix, `hostPython`/`pythonFloor`
+    read `$ZEPHYR_BASE` regardless of the resolved workspace `zephyrWorkspace`
+    itself reports -- one report, two different Zephyrs.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+
+    workspace = tmp_path / "alp-workspace"
+    (workspace / ".west").mkdir(parents=True)
+    _plant_zephyr_tree(workspace / "zephyr", "3.11")
+
+    # An un-workspaced (no `.west` at its parent), unrelated tree -- exactly
+    # the "stray-zephyrproject" shape from the issue -- with a DIFFERENT
+    # floor, so a report reading it instead of the resolved workspace is
+    # provably wrong, not merely differently-worded.
+    stray = tmp_path / "dirty" / "stray-zephyrproject" / "zephyr"
+    _plant_zephyr_tree(stray, "3.14")
+    monkeypatch.setenv("ZEPHYR_BASE", str(stray))
+
+    checks = doctor_cmd._collect(None, workspace_root=str(workspace))
+    zephyr_workspace = next(c for c in checks if c.name == "zephyrWorkspace")
+    host_python = next(c for c in checks if c.name == "hostPython")
+    python_floor = next((c for c in checks if c.name == "pythonFloor"), None)
+
+    assert zephyr_workspace.status == "pass", zephyr_workspace.detail
+    # Same tree: the resolved workspace's own topdir names both.
+    assert str(workspace) in zephyr_workspace.detail
+    assert str(workspace) in host_python.detail
+    # Anchor on the FLOOR phrase, never on a bare `"3.14" not in detail`. This
+    # detail also carries the INTERPRETER's version (`Python 3.14 (`py -3`)
+    # meets the effective floor 3.11 (...)`), and CI's Windows runner really is
+    # on 3.14 -- a bare substring search cannot tell "the stray tree's floor
+    # leaked" from "the host happens to run that version", and asserted the
+    # latter while claiming the former.
+    assert "effective floor 3.11" in host_python.detail
+    assert "effective floor 3.14" not in host_python.detail
+    # Never the stray tree `$ZEPHYR_BASE` points at.
+    assert str(stray) not in host_python.detail
+
+    # 3.11 > the (3, 10) fallback manifest floor (no `sdk_root` resolved), so
+    # `pythonFloor` fires -- and must cite the same resolved tree too.
+    assert python_floor is not None, "expected pythonFloor: workspace floor 3.11 > fallback 3.10"
+    assert str(workspace) in python_floor.detail
+    assert str(stray) not in python_floor.detail
+
+
+def test_collect_python_floor_source_falls_back_to_zephyr_base_when_no_workspace_resolves(
+    tmp_path, monkeypatch
+):
+    """State 2 of 3: no `.west` workspace resolves anywhere (the stray tree's
+    parent has no `.west`, and no `sdk_root` is given), so `zephyr_python_floor`
+    falls back to a literal `$ZEPHYR_BASE` read -- and that source, not the
+    workspace one, is what `hostPython` must name here."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    stray = tmp_path / "dirty" / "stray-zephyrproject" / "zephyr"
+    _plant_zephyr_tree(stray, "3.13")
+    monkeypatch.setenv("ZEPHYR_BASE", str(stray))
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    checks = doctor_cmd._collect(None, workspace_root=str(outside))
+
+    workspace_check = next(c for c in checks if c.name == "workspace")
+    assert workspace_check.status == "fail", workspace_check.detail  # nothing resolved
+
+    host_python = next(c for c in checks if c.name == "hostPython")
+    assert str(stray) in host_python.detail
+    # `effective floor 3.13`, not a bare `"3.13" in detail` -- the detail also
+    # carries the interpreter's own version, so the bare form would pass on a
+    # host running 3.13 even if the floor were read from entirely the wrong
+    # place. That is a FALSE PASS, and this test's whole job is provenance.
+    assert "effective floor 3.13" in host_python.detail
+
+
+def test_collect_python_floor_source_falls_back_to_the_built_in_pin_when_neither_resolves(
+    tmp_path, monkeypatch
+):
+    """State 3 of 3: no workspace resolves and `$ZEPHYR_BASE` is unset --
+    `zephyr_python_floor` lands on `ZEPHYR_PYTHON_FLOOR`, and says so."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    checks = doctor_cmd._collect(None, workspace_root=str(outside))
+
+    host_python = next(c for c in checks if c.name == "hostPython")
+    assert "tan's built-in pin" in host_python.detail
+    assert "no $ZEPHYR_BASE workspace" in host_python.detail
+    pin = f"{doctor_cmd.ZEPHYR_PYTHON_FLOOR[0]}.{doctor_cmd.ZEPHYR_PYTHON_FLOOR[1]}"
+    assert f"effective floor {pin}" in host_python.detail
 
 
 def test_workspace_preflight_check_distinguishes_resolved_from_absent():

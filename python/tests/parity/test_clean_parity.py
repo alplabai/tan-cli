@@ -15,8 +15,14 @@ and compares three things:
 * the exit code;
 * the whole stdout envelope, with the tree root textually scrubbed out (the two
   trees necessarily live at different paths) -- so ``data.buildRoot``, every
-  ``targets[].path``, ``project.*`` and ``sdk.*`` are all compared, separator
-  style included;
+  ``targets[].path``, ``project.*`` and ``sdk.*`` are all compared. Separator
+  style included ON the capture platform and under ``TAN_PARITY_LIVE=1``; on a
+  frozen replay elsewhere the separators INSIDE the redacted root are
+  normalised first (``oracle_fixtures.normalise_scrubbed_path_separators``),
+  because a fixture frozen on ``CAPTURE_PLATFORM`` carries that host's joins
+  (``"<ROOT>/proj\\build"``) and diffing those against a live POSIX run reports
+  a platform difference as a port defect. Everything else in the envelope is
+  still byte-for-byte on every platform;
 * the SURVIVING FILE SET. An envelope that reads correctly is not evidence that
   nothing else was deleted, and on this command that is the only claim that
   matters.
@@ -47,13 +53,15 @@ from pathlib import Path
 
 import pytest
 
-from .oracle import PACKAGE_ROOT, python_command, rust_binary
+from . import oracle_fixtures
+from .oracle import PACKAGE_ROOT, missing_for_live, python_command, rust_binary
 
 RUST = rust_binary()
 WINDOWS = os.name == "nt"
 
 pytestmark = pytest.mark.skipif(
-    not RUST, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`"
+    missing_for_live(RUST),
+    reason="TAN_PARITY_LIVE=1 needs a Rust tan; set TAN_RUST_BINARY or run `cargo build`",
 )
 
 
@@ -211,6 +219,32 @@ def _run(command: list[str], argv: list[str], root: Path):
     return proc.returncode, _normalise_issues(json.loads(_scrub(json.dumps(payload), root)))
 
 
+def _run_rust(argv: list[str], root: Path) -> tuple[int, dict]:
+    """The rust side of `_run`, frozen by default (tan-cli#272) -- see
+    `oracle_fixtures.resolve`. `_run` already scrubs its own `root` out of the
+    payload before returning, so the captured/replayed answer is already
+    portable across scratch directories with no extra work here."""
+
+    def _live():
+        return list(_run([RUST], argv, root))
+
+    return oracle_fixtures.resolve(_live)
+
+
+def _run_rust_with_survivors(argv: list[str], root: Path) -> tuple[int, dict, list[str]]:
+    """`_run_rust` plus `_survivors(root)` in the SAME frozen unit: which
+    files rust's own run left behind is part of what tan-cli#272 asks this
+    suite to capture (`clean` deletes -- the survivor set is not a pure
+    function of `tree`, it is the oracle's own observed behaviour)."""
+
+    def _live():
+        code, payload = _run([RUST], argv, root)
+        return [code, payload, _survivors(root)]
+
+    code, payload, survivors = oracle_fixtures.resolve(_live)
+    return code, payload, survivors
+
+
 #: ``(id, argv, tree kwargs)``. ``@@ROOT@@`` in an argument is replaced with that
 #: side's own tree root, so a case can name an absolute path outside the project.
 CASES = [
@@ -353,6 +387,22 @@ WINDOWS_CASES = [
 ]
 
 
+#: Cases whose manifest plants a ROOT-RELATIVE path, which the two platforms
+#: resolve to genuinely different absolute paths: Windows anchors `/` onto the
+#: current drive (`C:/`), POSIX to the filesystem root (`/`). The refusal
+#: itself is identical on both -- `clean.unsafe-target`, same exit code, same
+#: surviving file set -- only the resolved path quoted back in the message and
+#: in `targets[].path` differs, and each is right about its own OS.
+#:
+#: NOT covered by :func:`oracle_fixtures.normalise_scrubbed_path_separators`,
+#: and deliberately so: that helper rewrites separators inside a REDACTED
+#: scratch root, where the text is a harness artefact. `C:/` is neither
+#: redacted nor an artefact -- it is what the platform resolved. Arrived at by
+#: measurement: it is the ONLY case of the 41 that runs on POSIX once the
+#: separator noise is gone.
+_HOST_ANCHORED_ROOT_CASES = frozenset({"manifest-root-build-dir"})
+
+
 @pytest.mark.parametrize(
     "argv,tree",
     [pytest.param(a, t, id=i) for i, a, t in CASES]
@@ -366,15 +416,30 @@ WINDOWS_CASES = [
         for i, a, t in WINDOWS_CASES
     ],
 )
-def test_python_clean_matches_rust(argv, tree, tmp_path):
+def test_python_clean_matches_rust(argv, tree, tmp_path, request):
+    if (
+        request.node.callspec.id in _HOST_ANCHORED_ROOT_CASES
+        and not oracle_fixtures.REPLAY_IS_CAPTURE_PLATFORM
+    ):
+        pytest.skip(
+            f"{request.node.callspec.id} plants `build_dir: /`, which Windows "
+            f"resolves onto the current DRIVE (`C:/`) and POSIX resolves to the "
+            f"filesystem root (`/`); the frozen answer is "
+            f"{oracle_fixtures.CAPTURE_PLATFORM}'s and both are correct -- a real "
+            "OS difference in what a root-relative path MEANS, not a separator "
+            "artefact and not a port defect. Both sides still refuse it"
+        )
     sides = {}
-    for name, command in (("rust", [RUST]), ("python", python_command())):
+    for name in ("rust", "python"):
         root = tmp_path / name
         root.mkdir()
         _build_tree(root, **tree)
         resolved = [a.replace("@@ROOT@@", str(root)) for a in argv]
-        code, payload = _run(command, resolved, root)
-        sides[name] = (code, payload, _survivors(root))
+        if name == "rust":
+            sides[name] = _run_rust_with_survivors(resolved, root)
+        else:
+            code, payload = _run(python_command(), resolved, root)
+            sides[name] = (code, payload, _survivors(root))
 
     # Independent of parity, and asserted FIRST: neither implementation may ever
     # reach outside the build root. A case where BOTH destroyed the canary would
@@ -387,7 +452,17 @@ def test_python_clean_matches_rust(argv, tree, tmp_path):
     diffs = []
     if sides["rust"][0] != sides["python"][0]:
         diffs.append(f"exit code: rust={sides['rust'][0]} python={sides['python'][0]}")
-    rust_doc, py_doc = sides["rust"][1], sides["python"][1]
+    # `_scrub` redacts the tree ROOT but leaves the separators that JOIN the
+    # segments after it, and the frozen rust side carries the CAPTURE host's:
+    # `"buildRoot": "<ROOT>/proj\\build"` -- forward-slash root portion, native
+    # `\` on the final join -- where a live POSIX run says `<ROOT>/proj/build`.
+    # Both are correct on their own OS. Applied to BOTH sides, and only off the
+    # capture platform, so Windows CI and `TAN_PARITY_LIVE=1` keep the
+    # byte-for-byte diff this module's docstring describes; see that function
+    # for the exact trade. Replaces a blanket skip of every JSON-mode case,
+    # which stopped measuring the other 40-odd fields to guard this one.
+    rust_doc = oracle_fixtures.normalise_scrubbed_path_separators(sides["rust"][1])
+    py_doc = oracle_fixtures.normalise_scrubbed_path_separators(sides["python"][1])
     for key in sorted(set(rust_doc) | set(py_doc)):
         if rust_doc.get(key) != py_doc.get(key):
             diffs.append(
@@ -415,8 +490,13 @@ def test_the_comparator_goes_red_on_a_planted_divergence(tmp_path):
         root = tmp_path / name
         root.mkdir()
         _build_tree(root)
-        sides[name] = _run([RUST], argv, root)
+        sides[name] = _run_rust_with_survivors(argv, root)
     assert sides["a"][1] != sides["b"][1], "the comparator cannot tell two runs apart"
-    assert _survivors(tmp_path / "a") != _survivors(tmp_path / "b"), (
+    # Compared from the FROZEN survivor lists, not a fresh disk scan: in
+    # frozen replay mode nothing actually ran `clean` against either tree
+    # (there is no live rust to spawn), so the trees on disk are identical by
+    # construction and a disk re-scan would read this self-check vacuously
+    # true for the wrong reason.
+    assert sides["a"][2] != sides["b"][2], (
         "the file-set comparison cannot tell a dry run from a real one"
     )

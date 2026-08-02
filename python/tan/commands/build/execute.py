@@ -20,6 +20,14 @@ root than this run resolved, then re-stamp it -- see
 [_maybe_pristine_stale_sdk_build_dir]), and (see [`last_manifest_write`]) the
 post-build `system-manifest.yaml` write.
 
+**tan-cli#307, a DELIBERATE divergence from the frozen Rust oracle.**
+`crates/` is frozen (`docs/ROADMAP.md`'s standing rule), and the oracle's own
+`execute/mod.rs` has the identical bug: `Command::new(&tool).current_dir(&cwd)`
+lets `west` resolve its topdir from `cwd` alone, so an unrelated `.west`
+ABOVE the project wins over the workspace `tan bootstrap` actually created,
+purely because west never consults the workspace tan itself resolved. Fixed
+Python-side only -- see [`_pin_west_workspace`].
+
 **How the post-build write reaches `tan run` without a `build_cmd.py` change.**
 The Rust oracle's executor (`execute/mod.rs::execute_slices_outcome`) returns
 a `NativeBuildOutcome` bundling the dispatch result with the write's two
@@ -64,7 +72,7 @@ from tan.core.plan_exec import (
     sdk_stamp_key,
 )
 from tan.core.system_manifest import SliceRunResult
-from tan.core.venv import west_program, with_venv_on_path
+from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.envelope import Issue
 
 if os.name != "nt":
@@ -395,6 +403,46 @@ def _maybe_pristine_stale_sdk_build_dir(
     return issues
 
 
+def _pin_west_workspace(
+    cwd: Path, args: Sequence[str], workspace_dir: Path | None
+) -> tuple[Path, list[str]]:
+    """tan-cli#307: `west` resolves its own topdir purely from the SPAWNED
+    PROCESS's cwd (`west.util.west_topdir`/`west.app.main.WestApp.run`,
+    verified against the real package: no env var and no CLI flag override
+    it -- `$ZEPHYR_BASE` is consulted only as a last resort, when NOTHING is
+    found walking up from cwd at all) -- entirely independent of the binary
+    tan already resolved (`west_program`). An ancestor `.west` above the
+    project (a second Zephyr checkout, a vendor SDK, an old workspace) wins
+    over the workspace `tan bootstrap` actually created purely because west
+    never consults anything tan resolved; tan picking the right binary and
+    then letting that binary pick the wrong workspace is exactly tan-cli#307.
+
+    Fixed by making the CHILD's own cwd land inside `workspace_dir` -- but
+    that collides with `west build`'s OWN cwd dependency: with no
+    `-d`/`--build-dir` in `args` (the plan's normal shape), `west build`
+    defaults its build dir to `<cwd>/build`, exactly the location
+    [`resolve_zephyr_artefact`] expects afterward. Moving `cwd` to the
+    workspace topdir would silently move that output too. Decoupled by
+    adding an explicit `-d <original cwd>/build` ourselves before handing
+    `cwd` off to the topdir: the effective build location stays identical to
+    what `west` would have defaulted to, and `cwd`'s new value only ever
+    answers "which workspace is this", never "where do the artefacts land".
+
+    No-op (returns `cwd`/`args` verbatim) when: no workspace resolved
+    (`workspace_dir` is `None` -- the caller then keeps behaving exactly as
+    before this fix, matching every other `west_workspace_dir` consumer's
+    `None` fallback); the command is not `west build` (`args[0] != "build"`
+    -- this pin only knows how to preserve `west build`'s own
+    default-build-dir rule, not any other verb); or the plan itself already
+    redirects the build dir (`build_dir_overridden`) -- that value may
+    already be an absolute path west will honour regardless of `cwd`, or a
+    relative one this function has no safe way to re-anchor; either way a
+    caller-supplied `-d` is left exactly as given, never doubled up."""
+    if workspace_dir is None or not args or args[0] != "build" or build_dir_overridden(args):
+        return cwd, list(args)
+    return workspace_dir, [args[0], "-d", str(cwd / "build"), *args[1:]]
+
+
 def execute_slices(
     plan,
     *,
@@ -443,6 +491,16 @@ def execute_slices(
     # `sdk_root` itself is unresolved -- see `sdk_stamp_key`'s docstring.
     stamp_root = sdk_root_for_stamp if sdk_root_for_stamp is not None else sdk_root
     sdk_stamp_key_str = sdk_stamp_key(stamp_root, plan.sdk_commit)
+    # tan-cli#307: resolved ONCE for the whole run (same reasoning as
+    # `flash_cmd.py`'s own `workspace_dir` -- see that module's docstring),
+    # keyed on `build_root` like every other `west_workspace_dir`/
+    # `west_program` call in this function already is. `None` when nothing
+    # resolves (CI, an activated venv, the contract harness) -- every west
+    # slice below then keeps its old cwd, matching the pre-fix behaviour
+    # exactly (see [`_pin_west_workspace`]).
+    workspace_dir = west_workspace_dir(
+        str(build_root), Path(sdk_root) if sdk_root is not None else None
+    )
 
     for sl in plan.slices:
         if sl.backend not in KNOWN_BACKENDS:
@@ -495,7 +553,8 @@ def execute_slices(
             continue
 
         tool = sl.command.tool
-        if tool == "west":
+        is_west = tool == "west"
+        if is_west:
             # tan-cli#289/#106: rewrite a bare `"west"` to the west-capable
             # workspace venv's own binary -- an explicit different tool the
             # plan named (an absolute path, or anything not literally
@@ -533,6 +592,19 @@ def execute_slices(
         # `tool` did not resolve to an absolute venv path above.
         env = with_venv_on_path(env, tool)
 
+        # tan-cli#307: pin `west build` to the workspace tan resolved rather
+        # than letting west infer one from `cwd` -- see [`_pin_west_workspace`].
+        # Every OTHER use of `cwd` in this function (the pristine guard just
+        # above, `resolve_zephyr_artefact` below) deliberately still reads
+        # the ORIGINAL `cwd`/`sl.command.args`, not these: this pin is a
+        # spawn-time-only concern, not a change to where the build dir
+        # itself lives on disk.
+        spawn_cwd, spawn_args = (
+            _pin_west_workspace(cwd, sl.command.args, workspace_dir)
+            if is_west
+            else (cwd, list(sl.command.args))
+        )
+
         try:
             # A context manager: closes stdout/stderr/stdin on every exit
             # path (success, cancellation, exception) -- a bare `Popen(...)`
@@ -546,8 +618,8 @@ def execute_slices(
             # Windows (subprocess.py's Windows `_execute_child` takes and
             # ignores it), where `_terminate` uses `taskkill /T` instead.
             with subprocess.Popen(
-                [tool, *sl.command.args],
-                cwd=str(cwd),
+                [tool, *spawn_args],
+                cwd=str(spawn_cwd),
                 env=env,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,

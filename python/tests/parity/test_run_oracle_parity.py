@@ -24,9 +24,28 @@ from typer.main import get_command
 
 from tan.commands.run_cmd import run as run_fn
 
-from .oracle import ENVELOPE, compare, rust_binary
+from . import oracle_fixtures
+from .oracle import ENVELOPE, compare, missing_for_live, rust_binary
 
 RUST = rust_binary()
+LIVE_GATE = pytest.mark.skipif(
+    missing_for_live(RUST),
+    reason="TAN_PARITY_LIVE=1 needs a Rust tan; set TAN_RUST_BINARY or run `cargo build`",
+)
+
+
+def _rust_help(*argv: str) -> str:
+    """`tan <argv> --help`'s raw stdout, frozen by default (tan-cli#272) --
+    static usage text with no scratch path in it, so no scrubbing is needed."""
+
+    def _live():
+        proc = subprocess.run(
+            [RUST, *argv, "--help"], capture_output=True, text=True, encoding="utf-8", timeout=20
+        )
+        assert proc.returncode == 0, proc.stderr
+        return proc.stdout
+
+    return oracle_fixtures.resolve(_live)
 
 
 def _declared_flags() -> set[str]:
@@ -43,34 +62,25 @@ def _declared_flags() -> set[str]:
     return flags
 
 
-@pytest.mark.skipif(RUST is None, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
+@LIVE_GATE
 def test_declared_flags_all_exist_in_the_real_run_help():
-    proc = subprocess.run(
-        [RUST, "run", "--help"], capture_output=True, text=True, encoding="utf-8", timeout=20
-    )
-    assert proc.returncode == 0, proc.stderr
-    help_flags = set(re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", proc.stdout))
+    help_text = _rust_help("run")
+    help_flags = set(re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", help_text))
     declared = _declared_flags()
     missing = declared - help_flags
     assert not missing, (
         f"run_cmd.run declares a flag the oracle's own `tan run --help` does not "
-        f"list: {sorted(missing)}\n{proc.stdout}"
+        f"list: {sorted(missing)}\n{help_text}"
     )
 
 
-@pytest.mark.skipif(RUST is None, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
+@LIVE_GATE
 def test_run_help_is_not_the_same_flag_set_as_build_or_flash():
     """The real, shipped surfaces disagree by design -- `run` is a distinct
     `Commands` variant (`crates/tan-cli/src/cli.rs`), not an alias."""
-    run_help = subprocess.run(
-        [RUST, "run", "--help"], capture_output=True, text=True, encoding="utf-8", timeout=20
-    ).stdout
-    build_help = subprocess.run(
-        [RUST, "build", "--help"], capture_output=True, text=True, encoding="utf-8", timeout=20
-    ).stdout
-    flash_help = subprocess.run(
-        [RUST, "flash", "--help"], capture_output=True, text=True, encoding="utf-8", timeout=20
-    ).stdout
+    run_help = _rust_help("run")
+    build_help = _rust_help("build")
+    flash_help = _rust_help("flash")
     run_flags = set(re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", run_help))
     assert run_flags != set(re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", build_help))
     assert run_flags != set(re.findall(r"--[a-zA-Z][a-zA-Z0-9-]*", flash_help))
@@ -79,7 +89,7 @@ def test_run_help_is_not_the_same_flag_set_as_build_or_flash():
     )
 
 
-@pytest.mark.skipif(RUST is None, reason="no Rust tan; set TAN_RUST_BINARY or run `cargo build`")
+@LIVE_GATE
 @pytest.mark.xfail(
     strict=True,
     reason="`run` not yet registered in tan.cli -- pending the app.command(\"run\") wiring",

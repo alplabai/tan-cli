@@ -16,7 +16,7 @@
       "coreId": "m55_he",
       "backend": "zephyr",
       "buildDir": "build/m55_he-zephyr",
-      "appDir": "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/firmware/alp-stock-shim",
+      "appDir": "/srv/alp-sdk/firmware/alp-stock-shim",
       "configArtefacts": [
         {
           "path": "build/m55_he-zephyr/alp.conf",
@@ -47,23 +47,23 @@
           "build",
           "-b",
           "alp_e1m_aen801_m55_he/ae822fa0e5597ls0/rtss_he",
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/firmware/alp-stock-shim",
+          "/srv/alp-sdk/firmware/alp-stock-shim",
           "--sysbuild",
           "--",
           "-DPython3_EXECUTABLE=/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "-DSB_CONF_FILE=/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/zephyr/sysbuild/aen/sysbuild.conf;/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/examples/connectivity/iot-fleet-ota/build/alp_sysbuild.conf"
+          "-DSB_CONF_FILE=/srv/alp-sdk/zephyr/sysbuild/aen/sysbuild.conf;/srv/alp-sdk/examples/connectivity/iot-fleet-ota/build/alp_sysbuild.conf"
         ],
         "cwd": "build/m55_he-zephyr"
       },
       "env": {
-        "ALP_SDK_ROOT": "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent"
+        "ALP_SDK_ROOT": "/srv/alp-sdk"
       },
       "envAppendPath": {
         "EXTRA_ZEPHYR_MODULES": [
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent"
+          "/srv/alp-sdk"
         ],
         "PYTHONPATH": [
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/scripts"
+          "/srv/alp-sdk/scripts"
         ]
       }
     },
@@ -71,7 +71,7 @@
       "coreId": "m55_hp",
       "backend": "zephyr",
       "buildDir": "build/m55_hp-zephyr",
-      "appDir": "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/examples/connectivity/iot-fleet-ota/src",
+      "appDir": "/srv/alp-sdk/examples/connectivity/iot-fleet-ota/src",
       "configArtefacts": [
         {
           "path": "build/m55_hp-zephyr/alp.conf",
@@ -102,23 +102,23 @@
           "build",
           "-b",
           "alp_e1m_aen801_m55_hp/ae822fa0e5597ls0/rtss_hp",
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/examples/connectivity/iot-fleet-ota",
+          "/srv/alp-sdk/examples/connectivity/iot-fleet-ota",
           "--sysbuild",
           "--",
           "-DPython3_EXECUTABLE=/opt/homebrew/opt/python@3.14/bin/python3.14",
-          "-DSB_CONF_FILE=/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/zephyr/sysbuild/aen/sysbuild.conf;/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/examples/connectivity/iot-fleet-ota/build/alp_sysbuild.conf"
+          "-DSB_CONF_FILE=/srv/alp-sdk/zephyr/sysbuild/aen/sysbuild.conf;/srv/alp-sdk/examples/connectivity/iot-fleet-ota/build/alp_sysbuild.conf"
         ],
         "cwd": "build/m55_hp-zephyr"
       },
       "env": {
-        "ALP_SDK_ROOT": "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent"
+        "ALP_SDK_ROOT": "/srv/alp-sdk"
       },
       "envAppendPath": {
         "EXTRA_ZEPHYR_MODULES": [
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent"
+          "/srv/alp-sdk"
         ],
         "PYTHONPATH": [
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/scripts"
+          "/srv/alp-sdk/scripts"
         ]
       }
     }

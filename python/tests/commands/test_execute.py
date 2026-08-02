@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import json
 import os
+import shutil
 import sys
 import threading
 import time
 from pathlib import Path
 
 from tan.core.build_plan import parse_build_plan
-from tan.commands.build.execute import execute_slices
+from tan.commands.build.execute import _pin_west_workspace, execute_slices
 from tan.commands.build.manifest import PostBuildManifest
 from tan.core.bootstrap import venv_layout
 from tan.core.system_manifest import parse_system_manifest
@@ -785,3 +786,139 @@ def test_execute_slices_writes_a_real_manifest_when_the_sdk_is_discoverable(tmp_
     manifest_written, native_sim_target = execute_module.last_manifest_write()
     assert manifest_written is True
     assert native_sim_target is False  # AEN801 has no native_sim slice
+
+
+# ---------------------------------------------------------- tan-cli#307 -----
+# `west build`'s own topdir resolution walks up from the SPAWNED PROCESS's
+# cwd, independent of the binary tan already resolved -- pin it to the
+# workspace `west_workspace_dir` resolved instead of letting an ancestor
+# `.west` win. See [`_pin_west_workspace`]'s own docstring for the mechanism.
+
+
+def test_pin_west_workspace_is_a_noop_when_no_workspace_resolved(tmp_path):
+    cwd = tmp_path / "build" / "c1"
+    args = ["build", "-b", "board", "/app"]
+    assert _pin_west_workspace(cwd, args, None) == (cwd, args)
+
+
+def test_pin_west_workspace_is_a_noop_for_a_non_build_verb(tmp_path):
+    """This pin only knows how to preserve `west build`'s own
+    default-build-dir rule -- any other west verb is left untouched rather
+    than guessed at."""
+    cwd = tmp_path / "build" / "c1"
+    workspace = tmp_path / "ws"
+    args = ["flash", "--build-dir", str(cwd / "build")]
+    assert _pin_west_workspace(cwd, args, workspace) == (cwd, args)
+
+
+def test_pin_west_workspace_is_a_noop_when_the_plan_already_overrides_build_dir(tmp_path):
+    """A plan-supplied `-d`/`--build-dir` may already be an absolute path (or
+    a relative one this function has no safe way to re-anchor) -- either way
+    it is left exactly as given, never doubled up."""
+    cwd = tmp_path / "build" / "c1"
+    workspace = tmp_path / "ws"
+    args = ["build", "-d", "elsewhere", "-b", "board", "/app"]
+    assert _pin_west_workspace(cwd, args, workspace) == (cwd, args)
+
+
+def test_pin_west_workspace_redirects_cwd_and_injects_the_original_build_dir(tmp_path):
+    """The happy path: `cwd` becomes the resolved workspace, and an explicit
+    `-d <original cwd>/build` preserves the exact location `west build`
+    would otherwise have defaulted to from the (now abandoned) original
+    `cwd` -- so the effective build-dir location is byte-identical to
+    before this fix, only WHICH directory `west` resolves its topdir from
+    changes."""
+    cwd = tmp_path / "build" / "c1"
+    workspace = tmp_path / "ws"
+    args = ["build", "-b", "board", "/app"]
+    new_cwd, new_args = _pin_west_workspace(cwd, args, workspace)
+    assert new_cwd == workspace
+    assert new_args == ["build", "-d", str(cwd / "build"), "-b", "board", "/app"]
+
+
+def _plant_spawnable_west(west_path: Path) -> None:
+    """A REAL, spawnable stand-in for `west` -- a renamed copy of the running
+    interpreter (mirrors `test_doctor_command.py`'s `test_west_resolved_
+    reproduces_and_closes_tan_cli_123`, the established recipe for a
+    Windows-real `.exe` under the exact required name; DLLs copied alongside
+    since PATH is not guaranteed to resolve them for the renamed copy). Lets
+    a test drive `west build`'s OWN relative-script-argument resolution: a
+    bare positional arg like `build` is a source-file path python resolves
+    relative to ITS OWN cwd, so placing a script named `build` inside the
+    directory this test expects `west` to be SPAWNED FROM (not the slice's
+    build dir) is a real, cross-platform proof that the spawned process's
+    cwd -- not merely the workspace `tan` computed on paper -- landed where
+    this fix intends."""
+    west_path.parent.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        interpreter_dir = Path(sys.executable).parent
+        for dll in interpreter_dir.glob("*.dll"):
+            shutil.copy(dll, west_path.parent / dll.name)
+        shutil.copy(sys.executable, west_path)
+    else:
+        west_path.write_text(
+            f'#!/bin/sh\nexec {json.dumps(sys.executable)} "$@"\n', encoding="utf-8"
+        )
+        os.chmod(west_path, 0o755)
+
+
+def test_west_build_pins_the_resolved_workspace_over_an_ancestor_west(tmp_path, monkeypatch):
+    """tan-cli#307 end to end: reproduces the maintainer's exact dirty-host
+    layout -- a project inside an ancestor directory that ALSO holds an
+    unrelated `.west` (its manifest names `unrelated`, not this SDK), with
+    the workspace `tan bootstrap` actually created a SIBLING, not an
+    ancestor, of the project. Before this fix `west` would resolve the
+    ancestor's `.west` and refuse the `build` extension command entirely;
+    this proves the spawned process's cwd lands in the resolved workspace
+    instead, by making the `build` verb itself only resolvable as a script
+    from there (see [`_plant_spawnable_west`])."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+
+    ancestor = tmp_path / "dirty"
+    (ancestor / ".west").mkdir(parents=True)
+    (ancestor / ".west" / "config").write_text("[manifest]\npath = unrelated\n", encoding="utf-8")
+
+    real_ws = tmp_path / "dirty-ws"
+    sdk_root = real_ws / "alp-sdk"
+    sdk_root.mkdir(parents=True)
+    (real_ws / ".west").mkdir()
+    (real_ws / ".west" / "config").write_text("[manifest]\npath = alp-sdk\n", encoding="utf-8")
+
+    build_root = ancestor / "work" / "proj"
+    build_root.mkdir(parents=True)
+
+    layout = venv_layout(os.name == "nt")
+    _plant_spawnable_west(build_root / ".venv" / layout.bin_dir / layout.west)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    probe = real_ws / "cwd.txt"
+    argv_probe = real_ws / "argv.txt"
+    script = (
+        f"import os, sys\n"
+        f"open({json.dumps(str(probe))}, 'w').write(os.getcwd())\n"
+        f"open({json.dumps(str(argv_probe))}, 'w').write(repr(sys.argv[1:]))\n"
+    )
+    (real_ws / "build").write_text(script, encoding="utf-8")
+
+    cmd = json.dumps({"tool": "west", "args": ["build", "-b", "board", "/app"], "cwd": "build/c1"})
+    out = execute_slices(
+        parse_build_plan(_plan(cmd)),
+        build_root=build_root,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root),
+    )
+
+    assert out[0].status == "succeeded", out[0].message
+    assert probe.is_file(), "the `build` script never ran -- west did not spawn from `real_ws`"
+    assert Path(probe.read_text(encoding="utf-8")).samefile(real_ws)
+    # The effective build-dir location is unchanged: `-d <original slice
+    # cwd>/build`, exactly what `west build` would have defaulted to from
+    # `build_root/build/c1` before this fix redirected `cwd` itself.
+    original_build_dir = str(build_root / "build" / "c1" / "build")
+    assert argv_probe.read_text(encoding="utf-8") == repr(
+        ["-d", original_build_dir, "-b", "board", "/app"]
+    )

@@ -10,7 +10,14 @@ __pycache__/
 # PyInstaller output + the clean build venv (python/scripts/build_binary.sh)
 /python/dist/
 /python/.build/
-/python/.venv-build/
+# GLOB, not the single `.venv-build` name this used to list. A venv created for
+# an ad-hoc freeze under a different name (`.venv-e2e`) slipped straight past
+# the exact-name rule and 3327 files were committed -- including `pyvenv.cfg`
+# and `Activate.ps1` carrying a literal `C:\Users\<name>` home path, in a public
+# repo whose history is permanent. Same reason the support-bundle rule below
+# exists; the fix is to stop matching one name and match the shape.
+/python/.venv*/
+/python/venv*/
 python/build/
 python/*.egg-info/
 # `tan doctor` support bundles. They snapshot the DEVELOPER's machine -- two so

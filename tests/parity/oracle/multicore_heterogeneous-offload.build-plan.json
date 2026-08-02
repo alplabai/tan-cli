@@ -16,7 +16,7 @@
       "coreId": "a55_cluster",
       "backend": "yocto",
       "buildDir": "build/a55_cluster-yocto",
-      "appDir": "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/examples/multicore/heterogeneous-offload/linux",
+      "appDir": "/srv/alp-sdk/examples/multicore/heterogeneous-offload/linux",
       "configArtefacts": [
         {
           "path": "build/a55_cluster-yocto/local.conf",
@@ -49,14 +49,14 @@
         "cwd": "build/a55_cluster-yocto"
       },
       "env": {
-        "ALP_SDK_ROOT": "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent"
+        "ALP_SDK_ROOT": "/srv/alp-sdk"
       },
       "envAppendPath": {
         "EXTRA_ZEPHYR_MODULES": [
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent"
+          "/srv/alp-sdk"
         ],
         "PYTHONPATH": [
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/scripts"
+          "/srv/alp-sdk/scripts"
         ]
       }
     },
@@ -64,7 +64,7 @@
       "coreId": "m33_sm",
       "backend": "zephyr",
       "buildDir": "build/m33_sm-zephyr",
-      "appDir": "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/examples/multicore/heterogeneous-offload/m33_sm",
+      "appDir": "/srv/alp-sdk/examples/multicore/heterogeneous-offload/m33_sm",
       "configArtefacts": [
         {
           "path": "build/m33_sm-zephyr/alp.conf",
@@ -95,21 +95,21 @@
           "build",
           "-b",
           "alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33",
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/examples/multicore/heterogeneous-offload/m33_sm",
+          "/srv/alp-sdk/examples/multicore/heterogeneous-offload/m33_sm",
           "--",
           "-DPython3_EXECUTABLE=/opt/homebrew/opt/python@3.14/bin/python3.14"
         ],
         "cwd": "build/m33_sm-zephyr"
       },
       "env": {
-        "ALP_SDK_ROOT": "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent"
+        "ALP_SDK_ROOT": "/srv/alp-sdk"
       },
       "envAppendPath": {
         "EXTRA_ZEPHYR_MODULES": [
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent"
+          "/srv/alp-sdk"
         ],
         "PYTHONPATH": [
-          "/private/tmp/claude-501/-Users-hakan-VSCodeProjects-alp-sdk-v0101/3fe25295-942f-4c84-8faa-26da1ae1d2f0/scratchpad/oracle-src-df312cec-parent/scripts"
+          "/srv/alp-sdk/scripts"
         ]
       }
     }

@@ -40,7 +40,7 @@ on:
   workflow_dispatch:
     inputs:
       verify:
-        description: "Run the four per-asset proofs (version / --output / emit / init)"
+        description: "Run the five per-asset proofs (version / --output / emit / init / CA trust anchors)"
         type: boolean
         default: true
 

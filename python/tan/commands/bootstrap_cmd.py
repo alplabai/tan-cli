@@ -50,6 +50,7 @@ stray byte there breaks the extension silently.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -67,7 +68,14 @@ from tan.commands.doctor_cmd import (
     zephyr_python_floor,
 )
 from tan.commands.presets_cmd import parse_som_preset, resolve_project_paths
-from tan.commands.sdk_cmd import SDK_MARKER, _home_alp_dir, project_pin_issue, resolve_sdk_tiered
+from tan.commands.sdk_cmd import (
+    NO_SDK_NEXT_STEPS,
+    SDK_MARKER,
+    _home_alp_dir,
+    global_default_pointer_fix_hint,
+    project_pin_issue,
+    resolve_sdk_tiered,
+)
 from tan.core.bootstrap import (
     BOOTSTRAP_MANIFEST_REL_PATH,
     DEFAULT_WORKSPACE_DIR_NAME,
@@ -110,6 +118,7 @@ from tan.core.bootstrap import (
     venv_exe_names,
     windows_python_not_runnable,
     windows_refusal,
+    workspace_sdk_record_json,
     yocto_gate,
     yocto_mixed_warning,
     yocto_only_refusal,
@@ -511,20 +520,32 @@ class Runner:
     #: Every argv a dry run would have spawned, in order. `data.plannedCommands`.
     planned: list[list[str]] = field(default_factory=list)
 
-    def _env(self) -> dict[str, str] | None:
-        if not self.clear_zephyr_base:
+    def _env(self, extra_env: dict[str, str] | None = None) -> dict[str, str] | None:
+        if not self.clear_zephyr_base and not extra_env:
             return None
         env = dict(os.environ)
-        env.pop("ZEPHYR_BASE", None)
+        if self.clear_zephyr_base:
+            env.pop("ZEPHYR_BASE", None)
+        if extra_env:
+            env.update(extra_env)
         return env
 
-    def run(self, argv: list[str], cwd: Path | None = None) -> str | None:
+    def run(
+        self,
+        argv: list[str],
+        cwd: Path | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> str | None:
         """Run to completion. `None` on success; otherwise a string carrying
         whatever detail is recoverable -- the captured tail in JSON mode, a
         launch error in either mode, and `""` in text mode where the child's own
         log already streamed to the terminal.
 
         `""` is a FAILURE, not a success: callers must test `is not None`.
+
+        `extra_env` overlays on top of the inherited environment (or the
+        `clear_zephyr_base`-filtered copy of it) -- see `force_git_long_paths`
+        for the one caller that uses it.
         """
         self.planned.append(list(argv))
         if self.dry_run:
@@ -537,7 +558,7 @@ class Runner:
                     capture_output=True,
                     stdin=subprocess.DEVNULL,
                     timeout=INSTALL_TIMEOUT_S,
-                    env=self._env(),
+                    env=self._env(extra_env),
                     check=False,
                 )
                 if out.returncode == 0:
@@ -548,7 +569,7 @@ class Runner:
                 cwd=str(cwd) if cwd else None,
                 stdin=subprocess.DEVNULL,
                 timeout=INSTALL_TIMEOUT_S,
-                env=self._env(),
+                env=self._env(extra_env),
                 check=False,
             )
             return None if out.returncode == 0 else ""
@@ -765,6 +786,31 @@ def _west_argv(venv: VenvBin, args: list[str]) -> list[str]:
     return [str(venv.west), *args]
 
 
+#: Force git's own `core.longpaths` to `true` for every subprocess `west
+#: update` spawns, WITHOUT writing to any `.gitconfig` the workspace or the
+#: user owns (tan-cli#306: `tan doctor`'s `longPaths` check can only WARN
+#: about this -- it has no file to fix -- but `bootstrap` owns the workspace
+#: it is about to `west update`, so it can make the one command that
+#: actually breaks succeed outright).
+#:
+#: `west update` clones/checks out EACH project with its own `git`
+#: subprocess, and none of those repos is `topdir` itself -- a west topdir is
+#: not a git repo at all, `alp-sdk`/`zephyr`/every HAL module are. That rules
+#: out both alternatives the issue named: `git -C <topdir> config` has no
+#: repo to write into, and a `-c core.longpaths=true` on `west`'s OWN CLI
+#: never reaches the nested `git` calls (west does not forward unrecognised
+#: flags to git). `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`
+#: is git's own documented ad hoc override -- it outranks every file-based
+#: scope (system/global/local) without touching any of them, and it is
+#: inherited by every child process `west update`'s own children spawn, so
+#: it reaches every project git touches in one shot.
+FORCE_GIT_LONG_PATHS_ENV = {
+    "GIT_CONFIG_COUNT": "1",
+    "GIT_CONFIG_KEY_0": "core.longpaths",
+    "GIT_CONFIG_VALUE_0": "true",
+}
+
+
 def west_phase(
     ws: Workspace, venv: VenvBin, log: Log, runner: Runner, reuse: bool
 ) -> str | None:
@@ -819,7 +865,9 @@ def west_phase(
         log.line("Running 'west update' (shallow + narrow)")
 
     detail = runner.run(
-        _west_argv(venv, list(ws.facts.west_update_args)), cwd=ws.workspace_dir
+        _west_argv(venv, list(ws.facts.west_update_args)),
+        cwd=ws.workspace_dir,
+        extra_env=FORCE_GIT_LONG_PATHS_ENV if ws.is_windows else None,
     )
     if detail is not None:
         return die("west update failed", detail)
@@ -986,7 +1034,24 @@ def _safe_exists(path: Path) -> bool:
         return False
 
 
-def record_workspace_sdk(topdir: Path, sdk_root: str) -> None:
+def _hash_requirements_file(path: Path) -> str | None:
+    """Lowercase-hex SHA-256 of `path`'s bytes, or `None` when it cannot be
+    read -- the same "absence, not a claim" rule `record_workspace_sdk`
+    already applies to the rest of this record: a hash tan could not compute
+    must never be silently reported as a match OR a mismatch later."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def record_workspace_sdk(
+    topdir: Path,
+    sdk_root: str,
+    venv_dir_name: str | None = None,
+    venv_layout: str | None = None,
+    requirements_path: Path | None = None,
+) -> None:
     """Record that `topdir`'s workspace is now synced to `sdk_root`, after a
     `west update` that actually ran.
 
@@ -996,14 +1061,30 @@ def record_workspace_sdk(topdir: Path, sdk_root: str) -> None:
     cannot stand in for the update having happened. Best-effort -- a workspace
     that cannot record it simply keeps getting the `tan bootstrap` advice.
 
-    Broadly guarded on purpose: `sdk_pointer_json` renders a timestamp and can
-    throw on an out-of-range `SOURCE_DATE_EPOCH` (the milliseconds case), and a
-    best-effort record must never be the thing that kills the command.
+    `venv_dir_name`/`venv_layout`/`requirements_path` are the tan-cli#292
+    venv-provenance stamp `doctor`'s `venvProvenance` check reads back:
+    which venv this run populated, which bin-dir layout it created (#291),
+    and a content hash of the Zephyr requirements file that populated it
+    (`requirements_path`, hashed here -- the CALLER passes the path, not a
+    precomputed digest, so a caller with none of this to report can simply
+    omit the arguments rather than duplicating the hashing). All optional and
+    independently best-effort: a caller mid-`--no-pip` or one that cannot
+    determine the venv layout still gets the `sdkPath` half of the record
+    written, which is strictly more than tan wrote before tan-cli#292.
+
+    Broadly guarded on purpose: `workspace_sdk_record_json` renders a
+    timestamp and can throw on an out-of-range `SOURCE_DATE_EPOCH` (the
+    milliseconds case), and a best-effort record must never be the thing that
+    kills the command.
     """
     try:
+        digest = _hash_requirements_file(requirements_path) if requirements_path else None
         record = topdir / ".west" / "tan-workspace-sdk"
         record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(sdk_pointer_json(sdk_root), encoding="utf-8")
+        record.write_text(
+            workspace_sdk_record_json(sdk_root, venv_dir_name, venv_layout, digest),
+            encoding="utf-8",
+        )
     except Exception:  # noqa: BLE001 -- best-effort by contract; see the docstring
         pass
 
@@ -1055,28 +1136,31 @@ def default_relocation_target(
     return None
 
 
-def workspace_guard_refusal(workspace_dir: Path, target: Path) -> str:
-    """Names `tan bootstrap --workspace <path>` explicitly, not a bare
-    `--workspace <path>`: this same refusal is inherited by `tan build` and
-    `tan doctor --build --fix`, neither of which has a `--workspace` of its
-    own.
+def workspace_guard_target_occupied_refusal(workspace_dir: Path, target: Path) -> str:
+    """tan-cli#302: the ONE case the workspace-parent guard still refuses.
 
-    Never says "re-run interactively". The Rust oracle
-    (`crates/tan-cli/src/commands/bootstrap/relocate.rs`'s `interactive`
-    branch) prompts via `inquire` on a real TTY and falls through to wording
-    like this only when it is not one; this port takes NO input on this
-    decision on ANY run, TTY or not (see the "NO PROMPT, ever, in this port"
-    note at the guard's call site in `_run`). Telling an already-interactive
-    customer to re-run interactively sent them looking for a prompt this port
-    was never going to show them (tan-cli#284) -- the fix is the wording, not
-    adding the prompt this port deliberately does not have.
+    A dirty parent with no `--workspace` given now RELOCATES the checkout into
+    `target` (`default_relocation_target`'s own `alp-workspace` choice)
+    automatically rather than refusing and naming that same path back to the
+    customer -- see the "tan-cli#302" note at the guard's call site in `_run`
+    for why. That auto-relocation needs somewhere EMPTY to land, though:
+    `target` already existing and already holding content of its own (a
+    previous attempt's partial venv is the realistic case, per
+    `rollback_relocation_after`'s own docstring) is the same "write into a
+    directory without asking" hazard the guard exists to prevent in the first
+    place, just one level deeper. This refusal is what still catches that one.
+
+    Never says "re-run interactively", for the same reason tan-cli#284 settled
+    on that wording originally: this port takes NO input on this decision on
+    ANY run, TTY or not.
     """
     return (
         f"{_native(workspace_dir)} holds more than this checkout, and is not itself an "
-        f"existing west workspace; refusing to write the west workspace "
-        f"(zephyr/modules/.west/venv) there without asking. Run `tan bootstrap --workspace "
-        f"<path>` (for example {_native(target)}) to move the checkout there, or clone "
-        f"alp-sdk into a dedicated directory yourself."
+        f"existing west workspace; tan would ordinarily move the checkout into "
+        f"{_native(target)} automatically, but that directory already exists and already "
+        f"holds content of its own, so tan is not going to write into it without asking. "
+        f"Run `tan bootstrap --workspace <path>` with an empty destination, or clear out "
+        f"{_native(target)} yourself and re-run."
     )
 
 
@@ -1709,8 +1793,12 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 ExitCode.VALIDATION_FAILURE,
                 "sdk-root-unresolved",
                 [
-                    "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk "
-                    "switch <version|path>`, or run `tan sdk install <version>` first."
+                    # `tan sdk switch`/`tan sdk install` both refuse in this
+                    # build (tan-cli#305, `sdk_cmd._run_not_ported`) -- naming
+                    # either here left a clean host with no way forward at
+                    # all. `NO_SDK_NEXT_STEPS` is the one mechanism that
+                    # actually resolves an SDK, shared with `doctor_cmd`.
+                    f"alp-sdk root is unresolved -- {NO_SDK_NEXT_STEPS}."
                 ],
                 _data(
                     args=flags,
@@ -1839,19 +1927,41 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             sdk,
         )
 
-    # Workspace-parent guard, BEFORE any write below, so a refusal leaves
-    # nothing on disk. A `$ZEPHYR_BASE` workspace about to be ADOPTED repoints
-    # the write target away from `repo_root`'s parent entirely -- a dirty parent
-    # is not a problem when nothing is going to be written there. An explicit
+    # Workspace-parent guard, BEFORE any write below, so a refusal -- the one
+    # case that still is one, see below -- leaves nothing on disk. A
+    # `$ZEPHYR_BASE` workspace about to be ADOPTED repoints the write target
+    # away from `repo_root`'s parent entirely -- a dirty parent is not a
+    # problem when nothing is going to be written there. An explicit
     # `--workspace` answers the question outright regardless.
+    #
+    # tan-cli#302: a dirty parent with no `--workspace` given now RELOCATES
+    # the checkout into `default_relocation_target`'s own `alp-workspace`
+    # choice instead of refusing. The refusal this replaced named that exact
+    # path back to the customer ("run `tan bootstrap --workspace <path>` --
+    # for example <target>"), and the condition that trips it is tan's own
+    # binary sitting beside a freshly cloned alp-sdk: the documented
+    # quickstart (download `tan.exe`, clone `alp-sdk` beside it, run `tan
+    # bootstrap`) followed LITERALLY, making the first command in the product
+    # fail a customer for doing exactly what they were told. Typing back a
+    # path tan already computed is strictly more work than tan just doing it.
+    # (An alternative shape -- excluding tan's own binary from the "holds more
+    # than this checkout" test -- was considered and rejected: it only helps
+    # the customer whose directory is otherwise empty, and a stray `README` or
+    # `.gitignore` beside the clone puts them right back in the refusal.)
+    # `target` is used exactly as an explicit `--workspace <target>` would be
+    # from here on: the enclosing-`.west` check just below, the relocation
+    # itself further down, and its rollback on a later failure
+    # (`rollback_relocation_after`) are all the SAME code, shared with that
+    # path unchanged -- so tan-cli#284's invariant (refuse or relocate BEFORE
+    # writing anything; never leave a half-moved checkout) covers this
+    # auto-relocation exactly as it already covers an explicit one.
     #
     # NO PROMPT, ever, in this port: a prompt needs a human at a console, and
     # every caller that reaches here without `--workspace` gets the
-    # non-interactive refusal. `--format json` says so explicitly; a piped or
+    # non-interactive outcome -- a relocation now, rather than a refusal, but
+    # still no question asked. `--format json` says so explicitly; a piped or
     # redirected stdin says so just as loudly, and the oracle hung forever on
-    # exactly that before the terminal term was added. Refusing names both
-    # remedies, so nothing is unreachable -- it only costs the interactive
-    # convenience of answering "yes" in place.
+    # exactly that before the terminal term was added.
     guard_applies = workspace_override is not None or not _zephyr_base_will_adopt(
         pin, paths.repo_root
     )
@@ -1862,22 +1972,30 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
             target = default_relocation_target(
                 paths.repo_root, paths.workspace_dir, facts.venv_dir_name
             )
-            if target is not None:
+            if target is not None and _list_entries(target):
+                # The one case that still refuses (tan-cli#302): `target` --
+                # the directory the auto-relocation below would move the
+                # checkout INTO -- already exists and already holds content of
+                # its own. Auto-relocating there anyway would be the exact
+                # "wrote into a directory without asking" hazard this guard
+                # exists to prevent, one level down. An ABSENT or genuinely
+                # EMPTY `target` (the ordinary case) falls straight through to
+                # the relocation instead.
                 return (
                     _refusal(
                         ExitCode.VALIDATION_FAILURE,
                         "workspace-guard",
-                        [workspace_guard_refusal(paths.workspace_dir, target)],
+                        [workspace_guard_target_occupied_refusal(paths.workspace_dir, target)],
                         payload(),
                     ),
                     reported_project,
                     sdk,
                 )
         # tan-cli#284: whichever directory is about to become the west topdir
-        # -- `target` when relocating (an explicit `--workspace`, since that
-        # path never consults `default_relocation_target` above), else the
-        # checkout's own already-clean parent -- probe its ancestors for an
-        # ENCLOSING `.west` before the first mutation below. `west init -l`
+        # -- `target` whenever a relocation is happening (an explicit
+        # `--workspace`, or the tan-cli#302 auto-relocation just above), else
+        # the checkout's own already-clean parent -- probe its ancestors for
+        # an ENCLOSING `.west` before the first mutation below. `west init -l`
         # would hit exactly this and abort; caught here, refusing leaves
         # nothing on disk, whereas discovering it after `relocate_checkout` /
         # `_write_global_sdk_pointer` below leaves the checkout moved and the
@@ -2002,7 +2120,11 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 f"{_native(sdk_root)} so the west workspace "
                 f"(zephyr/modules/.west/venv) stays out of "
                 f"{_native(Path(old_root).parent)}, and set it as your default SDK "
-                f"(`tan sdk switch --global` to change) (tan-cli#185)",
+                # `tan sdk switch --global` refuses in this build (tan-cli#305) --
+                # naming the pointer mechanism itself instead of a subcommand
+                # keeps this true even once that changes.
+                f"(to change later: {global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))}) "
+                f"(tan-cli#185)",
             )
             # The project may live INSIDE the checkout, so rebase any
             # reported path under the OLD root onto the new one -- nothing
@@ -2091,9 +2213,10 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     "workspace-relocation-rolled-back",
                     f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
                     f"moved it back to {_native(relocation_undo.old_root)}, but "
-                    f"{undo.detail}. Run `tan sdk switch --global "
-                    f"{_native(relocation_undo.old_root)}` to repoint the default SDK "
-                    f"yourself.",
+                    f"{undo.detail}. The default SDK pointer may still name the "
+                    f"vacated path -- "
+                    f"{global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))} "
+                    f"(to point at {_native(relocation_undo.old_root)}).",
                 )
             paths.repo_root = Path(relocation_undo.old_root)
             paths.workspace_dir = relocation_undo.workspace_dir
@@ -2110,8 +2233,9 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 f"{step} failed after the checkout was moved to {_native(moved_to)} -- "
                 f"could NOT move it back to {_native(relocation_undo.old_root)} "
                 f"({undo.detail}); the checkout is still at {_native(moved_to)} and the "
-                f"default SDK still points there. Move it back by hand, then run `tan "
-                f"sdk switch --global {_native(relocation_undo.old_root)}`.",
+                f"default SDK still points there. Move it back by hand, then "
+                f"{global_default_pointer_fix_hint(_native(_home_alp_dir() / 'sdk-default'))} "
+                f"(to point at {_native(relocation_undo.old_root)}).",
             )
 
     # The venv backs BOTH later phases, so it is created when either will run.
@@ -2174,7 +2298,13 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # returned success over trees belonging to the OTHER SDK, and recording
         # a sync would assert the very thing that did not happen.
         if outcome != "failed" and not plan.reuse and not dry_run:
-            record_workspace_sdk(paths.workspace_dir, sdk_root)
+            record_workspace_sdk(
+                paths.workspace_dir,
+                sdk_root,
+                venv_dir_name=ws.facts.venv_dir_name,
+                venv_layout=venv.bin_dir,
+                requirements_path=ws.workspace_dir / ws.facts.zephyr_requirements_path,
+            )
 
     if no_pip:
         log.line("Skipping pip installs (--no-pip)")

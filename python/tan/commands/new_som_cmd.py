@@ -90,7 +90,12 @@ import yaml
 
 from tan.commands.build_cmd import _planner_python
 from tan.commands.doctor_cmd import probe
-from tan.commands.sdk_cmd import SDK_MARKER, project_pin_issue, resolve_sdk_tiered
+from tan.commands.sdk_cmd import (
+    NO_SDK_NEXT_STEPS,
+    SDK_MARKER,
+    project_pin_issue,
+    resolve_sdk_tiered,
+)
 from tan.exit_codes import ExitCode
 
 _SKU_RE = re.compile(r"^E1M-[A-Z0-9-]+$")
@@ -109,9 +114,13 @@ DEFAULT_BOARD = "E1M-EVK"
 DEFAULT_HW_REV = "r1"
 
 #: `scripts/alp_project.py` is THE marker for an alp-sdk checkout (I-31).
+#: `tan sdk switch` refuses in this build (tan-cli#305) -- kept the two
+#: mechanisms that actually work here (`--sdk-root`, placing the project near
+#: a checkout, both live tiers of `resolve_sdk_tiered`) and swapped the third
+#: for `NO_SDK_NEXT_STEPS`'s honest "how to get one at all".
 _SDK_ROOT_UNRESOLVED = (
-    "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk "
-    "switch <version|path>`, or place the project near an alp-sdk checkout."
+    "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+    f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}."
 )
 
 

@@ -1,0 +1,2442 @@
+{
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-is-file]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-is-junction]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-device-ns]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "\\\\?\\C:\\nope",
+    "dryRun": false,
+    "removed": 1,
+    "targets": [
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "\\\\?\\C:\\nope"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-dot]#0": [
+  1,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>\\proj",
+    "dryRun": false,
+    "removed": 0,
+    "targets": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "clean.unsafe-build-root",
+     "message": "refusing to remove `<ROOT>\\proj`: a build root may not be the project root, an ancestor of it, or a filesystem root",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-dotdot-text]#0": [
+  1,
+  {
+   "__raw__": ""
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-dotdot]#0": [
+  1,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>",
+    "dryRun": false,
+    "removed": 0,
+    "targets": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "clean.unsafe-build-root",
+     "message": "refusing to remove `<ROOT>`: a build root may not be the project root, an ancestor of it, or a filesystem root",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-drive-relative]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "C:foo",
+    "dryRun": false,
+    "removed": 1,
+    "targets": [
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "C:foo"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-empty]#0": [
+  1,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>\\proj",
+    "dryRun": false,
+    "removed": 0,
+    "targets": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "clean.unsafe-build-root",
+     "message": "refusing to remove `<ROOT>\\proj`: a build root may not be the project root, an ancestor of it, or a filesystem root",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-nested]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>\\proj\\build\\m55_hp-zephyr",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>\\proj\\build\\m55_hp-zephyr"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-outside]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>\\oot",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>\\oot"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-rooted]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "C:\\rooted-nope",
+    "dryRun": false,
+    "removed": 1,
+    "targets": [
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "C:\\rooted-nope"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[build-root-unc]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "\\\\server\\share\\x",
+    "dryRun": false,
+    "removed": 1,
+    "targets": [
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "\\\\server\\share\\x"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[crossed-device-ns-flag-and-out-of-tree-slice]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "\\\\?\\C:\\nope",
+    "dryRun": false,
+    "removed": 1,
+    "targets": [
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "\\\\?\\C:\\nope"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "oot",
+   "oot/tmp.txt",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/build/system-manifest.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[dry-run-text]#0": [
+  0,
+  {
+   "__raw__": ""
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[dry-run]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": true,
+    "removed": 0,
+    "targets": [
+     {
+      "action": "would-remove",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "would-remove",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[junction-inside-build]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-comment-only]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "clean.manifest-unreadable",
+     "message": "ignoring unreadable system-manifest.yaml: system-manifest is not valid YAML: missing field `schema_version`",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-device-ns-build-dir]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     },
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "\\\\?\\C:\\x"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-dotdot-build-dir]#0": [
+  1,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "refused-unsafe",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\../.."
+     },
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "clean.unsafe-target",
+     "message": "refusing to remove slice 'm55_hp' build_dir \"../..\" (resolves to <ROOT>/proj\\../..) \u2014 it is the project root, an ancestor of it, or a filesystem root; fix build/system-manifest.yaml",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-drive-relative-build-dir]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     },
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "C:rel"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-empty-build-dir]#0": [
+  1,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "refused-unsafe",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\"
+     },
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "clean.unsafe-target",
+     "message": "refusing to remove slice 'm55_hp' build_dir \"\" (resolves to <ROOT>/proj\\) \u2014 it is the project root, an ancestor of it, or a filesystem root; fix build/system-manifest.yaml",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-empty-file]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "clean.manifest-unreadable",
+     "message": "ignoring unreadable system-manifest.yaml: system-manifest is not valid YAML: missing field `schema_version`",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-is-a-directory]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-no-build-dir]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-non-utf8]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-null-doc]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "clean.manifest-unreadable",
+     "message": "ignoring unreadable system-manifest.yaml: system-manifest is not valid YAML: invalid type: unit value, expected struct SystemManifest",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-out-of-tree-dry]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": true,
+    "removed": 0,
+    "targets": [
+     {
+      "action": "would-remove",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "would-remove",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     },
+     {
+      "action": "would-remove",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\../oot"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "oot",
+   "oot/tmp.txt",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/build/system-manifest.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-out-of-tree]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 3,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     },
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\../oot"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-quiet-text]#0": [
+  0,
+  {
+   "__raw__": ""
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-quiet]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "clean.manifest-unreadable",
+     "message": "ignoring unreadable system-manifest.yaml: system-manifest is not valid YAML: invalid type: sequence, expected struct SystemManifest",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-root-build-dir]#0": [
+  1,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "refused-unsafe",
+      "kind": "dir",
+      "path": "C:/"
+     },
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "clean.unsafe-target",
+     "message": "refusing to remove slice 'm55_hp' build_dir \"/\" (resolves to C:/) \u2014 it is the project root, an ancestor of it, or a filesystem root; fix build/system-manifest.yaml",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-rooted-build-dir]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     },
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "C:\\rooted-nope"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-scalar-core-id]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-sequence]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "clean.manifest-unreadable",
+     "message": "ignoring unreadable system-manifest.yaml: system-manifest is not valid YAML: invalid type: sequence, expected struct SystemManifest",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-slice-missing-core-id]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "clean.manifest-unreadable",
+     "message": "ignoring unreadable system-manifest.yaml: system-manifest is not valid YAML: slices[0]: missing field `core_id`",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-slices-scalar]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "clean.manifest-unreadable",
+     "message": "ignoring unreadable system-manifest.yaml: system-manifest is not valid YAML: slices: invalid type: integer `7`, expected a sequence",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-subsumed]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-unc-build-dir]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     },
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "\\\\srv\\sh\\x"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-v2]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "clean.manifest-unreadable",
+     "message": "ignoring unreadable system-manifest.yaml: unsupported system-manifest schema_version 2 (this CLI consumes v1); upgrade the CLI or the SDK so the versions match",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[manifest-version-string]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "clean.manifest-unreadable",
+     "message": "ignoring unreadable system-manifest.yaml: system-manifest is not valid YAML: schema_version: invalid type: string \"1\", expected u32",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[no-sdk]#0": [
+  1,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "",
+    "dryRun": false,
+    "removed": 0,
+    "targets": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "clean.sdk-root-not-found",
+     "message": "Cannot locate alp-sdk root.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[nothing-to-remove]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>\\proj\\absent",
+    "dryRun": false,
+    "removed": 1,
+    "targets": [
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "<ROOT>\\proj\\absent"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[positional-absolute]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/oot\\build",
+    "dryRun": false,
+    "removed": 0,
+    "targets": [
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "<ROOT>/oot\\build"
+     },
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "<ROOT>/oot\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "oot",
+   "oot/tmp.txt",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[positional-dotdot]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>\\proj\\..\\build",
+    "dryRun": false,
+    "removed": 0,
+    "targets": [
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "<ROOT>\\proj\\..\\build"
+     },
+     {
+      "action": "absent",
+      "kind": "absent",
+      "path": "<ROOT>\\proj\\..\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[read-only-artefact]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[real-text]#0": [
+  0,
+  {
+   "__raw__": ""
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[real]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[sdk-root-bogus]#0": [
+  1,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "",
+    "dryRun": false,
+    "removed": 0,
+    "targets": []
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "clean.sdk-root-not-found",
+     "message": "Cannot locate alp-sdk root.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_python_clean_matches_rust[sdk-root-flag]#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": true,
+    "removed": 0,
+    "targets": [
+     {
+      "action": "would-remove",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "would-remove",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "sdkRootFlag"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_the_comparator_goes_red_on_a_planted_divergence#0": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": true,
+    "removed": 0,
+    "targets": [
+     {
+      "action": "would-remove",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "would-remove",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/.alp-build-state.json",
+   "proj/board.yaml",
+   "proj/build",
+   "proj/build/m55_hp-zephyr",
+   "proj/build/m55_hp-zephyr/zephyr",
+   "proj/build/m55_hp-zephyr/zephyr/zephyr.elf",
+   "proj/build/marker",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ],
+ "tests/parity/test_clean_parity.py::test_the_comparator_goes_red_on_a_planted_divergence#1": [
+  0,
+  {
+   "command": "clean",
+   "data": {
+    "buildRoot": "<ROOT>/proj\\build",
+    "dryRun": false,
+    "removed": 2,
+    "targets": [
+     {
+      "action": "removed",
+      "kind": "dir",
+      "path": "<ROOT>/proj\\build"
+     },
+     {
+      "action": "removed",
+      "kind": "file",
+      "path": "<ROOT>/proj\\.alp-build-state.json"
+     }
+    ]
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": "<ROOT>/proj/board.yaml",
+    "root": "<ROOT>/proj"
+   },
+   "sdk": {
+    "root": "<ROOT>/proj",
+    "sourceTier": "discovery"
+   }
+  },
+  [
+   "CANARY.txt",
+   "home",
+   "precious",
+   "precious/work.txt",
+   "proj",
+   "proj/board.yaml",
+   "proj/scripts",
+   "proj/scripts/alp_project.py",
+   "proj/src",
+   "proj/src/main.c"
+  ]
+ ]
+}
