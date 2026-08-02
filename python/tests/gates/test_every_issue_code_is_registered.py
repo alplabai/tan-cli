@@ -712,7 +712,12 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         attr="warn",
         arg_index=0,
-        expected_calls=16,
+        # 17, not 16, since dev's 518ac8c (tan-cli#334) split the single
+        # `zephyr-base-incompatible` warn into a found/else pair so the message
+        # can name the evidence. Two call sites, ONE code, already registered
+        # (`bootstrap.zephyr-base-incompatible`) -- checked before bumping,
+        # which is the whole point of the count: it forced the look.
+        expected_calls=17,
         sites=1,
     ),
     ("tan/commands/bootstrap_cmd.py", "_refusal"): dict(
