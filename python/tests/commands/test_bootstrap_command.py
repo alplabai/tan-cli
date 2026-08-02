@@ -1425,6 +1425,76 @@ def test_a_foreign_manifest_is_never_stale_only_mismatched_or_ignored():
     assert parse_zephyr_version_file("VERSION_MAJOR = 4\n") is None
 
 
+# tan-cli#334: `INCOMPATIBLE` is `decide_workspace_reuse`'s catch-all -- reached
+# by missing on ONE axis (no readable VERSION, or no `.west/`) or on TWO at
+# once (a real workspace that is both off-pin AND on a foreign manifest). The
+# rejection message must still name whichever facts were actually observed,
+# the way `STALE` and `MANIFEST_MISMATCH` already do for their own single-axis
+# cases -- not a fixed string, so these assert by CONTENT.
+V440 = "VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = 0\n"
+
+
+def _incompatible_message(monkeypatch, tmp_path, existing_facts):
+    """Drives `_select_workspace` for a canned `_existing_workspace_facts`
+    triple `(version_file, top_is_west_workspace, manifest_is_sdk)` -- the
+    decision + message-rendering under test, not the filesystem probing that
+    `_existing_workspace_facts` covers on its own."""
+    zephyr_base = tmp_path / "zephyr"
+    monkeypatch.setenv("ZEPHYR_BASE", str(zephyr_base))
+    monkeypatch.setattr(bootstrap_cmd, "_existing_workspace_facts", lambda _repo_root: existing_facts)
+    log = bootstrap_cmd.Log(json_mode=True)
+    paths = bootstrap_cmd.RunPaths(
+        repo_root=tmp_path / "sdk",
+        workspace_dir=tmp_path / "ws",
+        venv_dir=tmp_path / "ws" / ".venv",
+    )
+    bootstrap_cmd._select_workspace(log, False, "4.4.1", fallback_facts((3, 12)), paths)
+    assert [code for code, _ in log.warnings] == ["zephyr-base-incompatible"]
+    return log.warnings[0][1]
+
+
+def test_incompatible_names_the_version_and_pin_when_only_that_axis_missed(monkeypatch, tmp_path):
+    """No `.west/` at the topdir, so the manifest axis was never in play -- but
+    the Zephyr VERSION was readable and off the pin: name both, the way STALE
+    already does for its own (same-manifest) case."""
+    message = _incompatible_message(monkeypatch, tmp_path, (V440, False, False))
+    assert "4.4.0" in message
+    assert "4.4.1" in message
+
+
+def test_incompatible_names_the_foreign_manifest_when_only_that_axis_missed(monkeypatch, tmp_path):
+    """A `.west/` IS there but its manifest is not this SDK's, and no Zephyr
+    VERSION could be read at all: name the manifest problem, the way
+    MANIFEST_MISMATCH already does for its own (on-pin) case."""
+    message = _incompatible_message(monkeypatch, tmp_path, ("not a version file", True, False))
+    assert "manifest" in message
+    assert "not alp-sdk's west.yml" in message
+
+
+def test_incompatible_names_both_axes_when_both_missed_at_once(monkeypatch, tmp_path):
+    """The reported case (tan-cli#334): a real `.west/` workspace on a real
+    Zephyr checkout, but the WRONG version AND a foreign manifest together --
+    misses both the STALE and the MANIFEST_MISMATCH branch, so both facts must
+    survive into the catch-all rather than neither."""
+    message = _incompatible_message(monkeypatch, tmp_path, (V440, True, False))
+    assert "4.4.0" in message
+    assert "4.4.1" in message
+    assert "not alp-sdk's west.yml" in message
+
+
+def test_incompatible_keeps_its_original_wording_when_genuinely_not_a_workspace(
+    monkeypatch, tmp_path
+):
+    """No readable Zephyr VERSION and no `.west/` -- there is nothing to name,
+    so the terse original wording is exactly preserved: this is the case the
+    branch's comment always meant."""
+    message = _incompatible_message(monkeypatch, tmp_path, ("not a version file", False, False))
+    assert message == (
+        f"$ZEPHYR_BASE ({tmp_path / 'zephyr'}) is not an alp-sdk Zephyr 4.4.1 west workspace -- "
+        f"ignoring it and building an isolated one"
+    )
+
+
 def test_the_parent_guard_never_keys_off_a_directory_name(tmp_path):
     """A name list (`Downloads`/`Desktop`/...) is locale-dependent and incomplete
     by construction. The guard counts entries instead."""
