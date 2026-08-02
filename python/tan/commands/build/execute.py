@@ -6,7 +6,7 @@ exception. Mirrors the dispatch loop in `tan-cli/src/commands/build/execute/
 mod.rs`, trimmed to this port's current scope: no `tan build --pristine`
 manual override (`force_pristine` in the Rust oracle -- this port's `build`
 command has no `--pristine` flag yet, so the automatic stamp comparison is
-the only path that can ever fire), and no Zephyr-boilerplate-loaded guard.
+the only path that can ever fire).
 What IS ported: the unknown-backend / null-command / unsafe-cwd / missing-tool
 skip-vs-fail policy and dispatch order, the build-dir-must-exist-before-the-
 tool-runs precondition, the `tool == "west"` rewrite to the workspace venv's
@@ -17,8 +17,12 @@ GUI-launched editor -- without this every Zephyr slice skipped with `tool
 `tan.core.venv`), the sdk-switch-pristine guard (issue #52: wipe a slice's
 build dir before dispatch when it was configured against a different SDK
 root than this run resolved, then re-stamp it -- see
-[_maybe_pristine_stale_sdk_build_dir]), and (see [`last_manifest_write`]) the
-post-build `system-manifest.yaml` write.
+[_maybe_pristine_stale_sdk_build_dir]), (tan-cli#309, upstream tan-cli #97)
+the Zephyr-boilerplate-loaded guard -- an `os: zephyr` slice that exits 0
+without ever loading Zephyr's CMake boilerplate (`tan.commands.build.
+manifest.zephyr_boilerplate_loaded`) is reported `failed`, not `ok`, since a
+real exit code alone is not evidence the build produced firmware -- and (see
+[`last_manifest_write`]) the post-build `system-manifest.yaml` write.
 
 **tan-cli#307, a DELIBERATE divergence from the frozen Rust oracle.**
 `crates/` is frozen (`docs/ROADMAP.md`'s standing rule), and the oracle's own
@@ -61,6 +65,7 @@ from tan.commands.build.manifest import (
     resolve_zephyr_artefact,
     write_post_build_manifest,
     write_sdk_stamp,
+    zephyr_boilerplate_loaded,
 )
 from tan.commands.build.materialise import MaterialiseError, confine_to_build_root
 from tan.core.plan_exec import (
@@ -73,6 +78,7 @@ from tan.core.plan_exec import (
 )
 from tan.core.system_manifest import SliceRunResult
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
+from tan.core.zephyr_env import zephyr_env_overrides
 from tan.envelope import Issue
 
 if os.name != "nt":
@@ -506,9 +512,17 @@ def execute_slices(
     # resolves (CI, an activated venv, the contract harness) -- every west
     # slice below then keeps its old cwd, matching the pre-fix behaviour
     # exactly (see [`_pin_west_workspace`]).
-    workspace_dir = west_workspace_dir(
-        str(build_root), Path(sdk_root) if sdk_root is not None else None
-    )
+    sdk_root_path = Path(sdk_root) if sdk_root is not None else None
+    workspace_dir = west_workspace_dir(str(build_root), sdk_root_path)
+    # tan-cli#308: port of the oracle's `resolve_zephyr_base` -- the
+    # workspace's own `zephyr/` checkout, filtered to a real directory so a
+    # `workspace_dir` that resolved but was never `west update`d (no
+    # `zephyr/` yet) does not hand `west` a `ZEPHYR_BASE` that does not
+    # exist. `None` propagates through [`zephyr_env_overrides`] as "nothing
+    # to fill", matching every other `workspace_dir` consumer's fallback.
+    zephyr_base = workspace_dir / "zephyr" if workspace_dir is not None else None
+    if zephyr_base is not None and not zephyr_base.is_dir():
+        zephyr_base = None
 
     for sl in plan.slices:
         if sl.backend not in KNOWN_BACKENDS:
@@ -591,8 +605,26 @@ def execute_slices(
             )
         )
 
+        # tan-cli#308: the zephyr gap-fillers are computed PER SLICE (not
+        # once for the whole run, unlike `workspace_dir`/`zephyr_base`
+        # themselves) because "plan wins" depends on THIS slice's own
+        # `env`/`env_append_path` -- a heterogeneous plan can have one slice
+        # that already pins `EXTRA_ZEPHYR_MODULES` (an SDK-emitted plan's
+        # `envAppendPath`) alongside one that doesn't, and the caller's
+        # `gap_fillers` merge (`assemble_slice_env`) OVERWRITES a key
+        # unconditionally -- computing this once, outside the loop, would
+        # silently clobber the plan's own richer module list on every slice
+        # that DOES pin it.
+        slice_gap_fillers = [
+            *gap_fillers,
+            *zephyr_env_overrides(
+                zephyr_base, sdk_root_path, sl.env, sl.env_append_path, env_lookup
+            ),
+        ]
         env = dict(os.environ)
-        env.update(dict(assemble_slice_env(sl.env, sl.env_append_path, env_lookup, gap_fillers)))
+        env.update(
+            dict(assemble_slice_env(sl.env, sl.env_append_path, env_lookup, slice_gap_fillers))
+        )
         # tan-cli#289/#106: the venv `west` spawns nested `west`/`bitbake`
         # (via `alp_orchestrate`) that resolve purely via PATH -- without
         # this they fail to find `west` exactly like the parent process
@@ -705,11 +737,46 @@ def execute_slices(
             )
             continue
 
+        status = "succeeded" if code == 0 else "failed"
+        message = None if code == 0 else f"slice `{sl.core_id}` terminated with exit code: {code}"
+
+        # tan-cli#309 (upstream tan-cli #97): a core declared `os: zephyr`
+        # whose CMakeLists.txt never calls `find_package(Zephyr ...)` still
+        # configures and links fine under `west build -b <board>` (CMake
+        # only emits a *dev* warning about the missing `project()` call), so
+        # a real exit code 0 is NOT sufficient evidence -- without this the
+        # out-of-the-box scaffold was reported `[+] ok` for a plain host
+        # binary with no Zephyr in it at all. Checked only on an otherwise-
+        # successful slice (a genuine build failure already speaks for
+        # itself) and skipped when the slice redirects west's own build dir
+        # (`-d`/`--build-dir`), where the evidence lives somewhere this
+        # cannot see -- the same refusal `resolve_zephyr_artefact` below
+        # already makes.
+        if (
+            status == "succeeded"
+            and sl.backend == "zephyr"
+            and not build_dir_overridden(sl.command.args)
+            and not zephyr_boilerplate_loaded(cwd)
+        ):
+            status = "failed"
+            message = (
+                f"core `{sl.core_id}` is declared `os: zephyr`, but the build in "
+                f"`{sl.command.cwd or '.'}` never loaded Zephyr (no ZEPHYR_BASE in its "
+                f"CMakeCache.txt and no zephyr/ output) — its CMakeLists.txt must call "
+                f"`find_package(Zephyr REQUIRED HINTS $ENV{{ZEPHYR_BASE}})` before `project()`; "
+                f"without it CMake builds a plain host binary, not firmware. Scaffold a working "
+                f"app with `tan init --template zephyr-app`, or point the core's `app:` at one "
+                f"that does."
+            )
+
         # On success, resolve the real on-disk artefact west produced so the
         # post-build manifest points downstream consumers (`run`/`size`/
         # `flash`/`image`) at the elf that exists, not a plan-time guess.
+        # Gated on the FINAL `status` (after the guard above), not the raw
+        # exit code: a guard-failed slice has no real Zephyr artefact to
+        # report even though the tool itself exited 0.
         output_artefact, slice_build_dir = (
-            resolve_zephyr_artefact(cwd, sl.command.args) if code == 0 else (None, None)
+            resolve_zephyr_artefact(cwd, sl.command.args) if status == "succeeded" else (None, None)
         )
         if code == 0:
             message = None
@@ -735,11 +802,14 @@ def execute_slices(
         outcomes.append(
             SliceOutcome(
                 sl.core_id,
-                "succeeded" if code == 0 else "failed",
+                status,
                 # A negative POSIX return code means the process died from a
                 # signal -- Rust's `ExitStatus::code()` returns `None` for
                 # that case (it has no single-integer exit code), so the
-                # envelope's `rc` must be null too, not the raw `-N`.
+                # envelope's `rc` must be null too, not the raw `-N`. Stays
+                # the tool's REAL exit code even when the guard above
+                # overrode `status` to "failed" -- `west build` really did
+                # exit 0, the guard is refusing the RESULT, not the exit.
                 None if code < 0 else code,
                 message,
                 output_artefact,

@@ -124,15 +124,30 @@ def two_slice_plan(probe_args):
     """Two slices: one that really runs (the artefact probe) and one carrying
     ``command: null`` plus its matching ``warnings[]`` entry -- I-11's shape.
     Slice order is `sorted(coreId)` as the SDK emits it (I-06); `aaa_probe`
-    sorts first, so the probe IS the first dispatch."""
+    sorts first, so the probe IS the first dispatch.
+
+    Backend is ``baremetal``, not ``zephyr``: this fixture is dispatch/policy/
+    envelope scaffolding across the whole file, and the probe tool never
+    loads real Zephyr CMake boilerplate -- a `zephyr` backend here would trip
+    the tan-cli#309 guard and report the probe slice `failed` on every case
+    that expects it `ok`. `backend` is the ONLY field that does that -- the
+    guard branches on `sl.backend` alone (`build/execute.py`), and the `cwd`
+    it inspects comes from `sl.command.cwd`, not from `buildDir`. `buildDir`
+    and `toolchain.id` were matched to it purely so the fixture does not read
+    as three different backends at once; both are inert here (nothing reads
+    `toolchain`, and `build_dir` reaches only token substitution and the
+    post-build manifest). The ``-zephyr`` suffix kept in the `configArtefacts` path
+    strings below is a separate, cosmetic naming convention -- several cases
+    elsewhere in this file assert those exact path literals, so they are
+    left as-is; it carries no Zephyr meaning of its own."""
     def slice_(core_id, command, artefacts):
         return {
             "coreId": core_id,
-            "backend": "zephyr",
-            "buildDir": f"build/{core_id}-zephyr",
+            "backend": "baremetal",
+            "buildDir": f"build/{core_id}",
             "appDir": None,
             "configArtefacts": artefacts,
-            "toolchain": {"id": "zephyr"},
+            "toolchain": {"id": "baremetal"},
             "artifacts": {"elf": None},
             "debug": {"console": "rtt"},
             "command": command,
@@ -344,11 +359,11 @@ def test_a_wholly_skipped_build_refuses_not_reports_success(project):
 
 
 def test_a_partial_build_where_only_some_slices_are_skipped_still_reports_ok(project):
-    """A user deliberately building only the Zephyr side on a host with no
-    Yocto toolchain must NOT need a flag: at least one slice built, so this
-    stays `ok: true` -- but the skipped slice(s) still land in `issues[]`,
-    naming their missing tool, so a consumer reading only `issues[]` can
-    still tell "2 of 3" from "3 of 3"."""
+    """A build where one slice's tool is present and runs while another
+    names a tool missing from the host must NOT need a flag: at least one
+    slice built, so this stays `ok: true` -- but the skipped slice(s) still
+    land in `issues[]`, naming their missing tool, so a consumer reading
+    only `issues[]` can still tell "2 of 3" from "3 of 3"."""
     plan_doc = two_slice_plan(ALL_ARTEFACTS)
     # Swap the null-command second slice for a real one naming a tool that
     # cannot exist on any host, so it takes the missing-tool branch (not the

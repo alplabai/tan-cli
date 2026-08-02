@@ -805,12 +805,14 @@ def _dispatch(
                 replace(plan, slices=runnable),
                 build_root=build_root,
                 env_lookup=os.environ.get,
-                # NOT YET PORTED: Rust fills ZEPHYR_BASE and EXTRA_ZEPHYR_MODULES
-                # here from the resolved west workspace, so `west build -b
-                # <alp-board>` finds the SDK's boards without the user wiring
-                # -DEXTRA_ZEPHYR_MODULES. Plans emitted by the SDK carry both on
-                # the slice's own envAppendPath, so this is a gap only for a host
-                # relying on the CLI to fill them.
+                # tan-cli#308: no build_cmd.py-level gap fillers of our own --
+                # `execute_slices` fills ZEPHYR_BASE/EXTRA_ZEPHYR_MODULES
+                # itself, PER SLICE, from the west workspace it resolves
+                # internally (`tan.core.zephyr_env.zephyr_env_overrides`),
+                # exactly where the Rust oracle's own `execute_slices`
+                # computes them (`execute/mod.rs`, inside its own per-slice
+                # loop) -- not from an outer caller. This parameter stays for
+                # a caller-supplied override this port has none of yet.
                 gap_fillers=(),
                 on_output=heartbeat,
                 sdk_root=sdk_root,
