@@ -76,10 +76,24 @@
 #    which is a DIFFERENT tool's DIFFERENT endpoint and is not this call), so
 #    this workflow cannot authenticate it. CHOSEN: retry (see
 #    `clean_host_smoke.py:assert_sdk_list_online`, 3 attempts with backoff)
-#    against the anonymous per-IP rate limit, and FAIL LOUDLY, not skip, if
-#    every attempt still comes back bad -- distinguishing "looks like GitHub
-#    rate limiting" from "looks like a real regression" in the failure
-#    message, but never turning a real failure into a quiet pass either way.
+#    against the anonymous per-IP rate limit; if every attempt still comes
+#    back an HTTP 403 `rate limit exceeded`, WARN and continue. Any other
+#    failure still fails the job.
+#
+#    REVERSED, on measurement, from this file's original "FAIL LOUDLY, not
+#    skip". That call red-X'd three separate runs of PR #303 while nothing was
+#    wrong with the artefact: 60 requests/hour is per SOURCE IP, shared across
+#    GitHub's runner pool, so what trips it is other tenants' traffic. A gate
+#    that goes red for a reason unrelated to its subject stops being read.
+#    The exclusion is ONE narrowly-matched condition (403 AND the literal
+#    `rate limit`), announced as a workflow warning that names what went
+#    unverified -- a `CERTIFICATE_VERIFY_FAILED` (the #304 shape) cannot
+#    produce that pair and still fails.
+#
+#    A token is NOT the fix. `tan` sends no Authorization header, so a
+#    workflow-side `GH_TOKEN` is inert; and teaching the CLI to read one is a
+#    customer-facing change to a public tool, made for CI convenience, in a
+#    job that runs PR-authored code on `pull_request` -- forks included.
 #
 # 3. "No check both passes and fails on the same subject" (the #299
 #    invariant, generalised) is implemented in
@@ -131,9 +145,12 @@
 #     `install.sh` actually downloads -- only `release-asset-smoke`, which
 #     runs after the tag is already published, does that (see judgement call
 #     1).
-#   * A rate-limited `sdk list --online` failure and a real CA regression look
-#     identical in the job's red X; the failure message (not the checkmark)
-#     is what tells them apart -- see `clean_host_smoke.py`'s rate-limit hint.
+#   * CA trust, on a run where the anonymous API quota was exhausted. That
+#     case now WARNS instead of failing (judgement call 2), so a green X on
+#     such a run means "every other assertion passed and the canary did not
+#     run" -- the warning, not the checkmark, is what says so. Only an HTTP
+#     403 carrying the literal `rate limit` takes that path; every other
+#     `sdk list --online` failure is still red.
 
 name: clean-host
 
