@@ -39,6 +39,15 @@ def peripheral_kconfig() -> dict[str, tuple[str, ...]]:
     }
 
 
+def _is_tbd(value: object) -> bool:
+    """Case/whitespace-insensitive `TBD` placeholder match ("tbd", "Tbd",
+    " TBD " all match, alp-sdk #1048) -- the two chip-slug extractors below
+    both used a bare `== "TBD"` before, so an all-lowercase board.yaml
+    value silently fell through as a real chip slug instead of being
+    dropped as the placeholder it was hand-typed to mean."""
+    return isinstance(value, str) and value.strip().upper() == "TBD"
+
+
 def _board_define_slug(name: str) -> str:
     """'E1M-X-EVK' -> 'E1M_X_EVK': the ALP_BOARD_* compile-define suffix.
 
@@ -97,7 +106,7 @@ def _slugs_from_on_module(on_module: dict) -> list[str]:
     seen: set[str] = set()
 
     def _add(val: object) -> None:
-        if not val or val == "TBD":
+        if not val or _is_tbd(val):
             return
         if not isinstance(val, str):
             return
@@ -141,7 +150,7 @@ def _slugs_from_helper_firmware(helper_firmware: list) -> list[str]:
         if not isinstance(entry, dict):
             continue
         chip = entry.get("chip")
-        if chip and chip != "TBD":
+        if chip and not _is_tbd(chip):
             seen.add(chip)
     return sorted(seen)
 

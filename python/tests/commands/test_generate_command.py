@@ -1017,3 +1017,120 @@ def test_the_in_process_writer_keeps_lf_on_every_host(tmp_path):
     destination = tmp_path / "deep" / "alp.conf"
     planner_emit.write("CONFIG_A=y\nCONFIG_B=y\n", destination)
     assert destination.read_bytes() == b"CONFIG_A=y\nCONFIG_B=y\n"
+
+
+# --------------------------------------------------------------------------
+# tan-cli#325: the default output path must not follow a symlink out of the
+# project, and must not report the logical in-project path as written when
+# it would have.
+# --------------------------------------------------------------------------
+
+WINDOWS = os.name == "nt"
+
+
+def _make_dir_link(link: Path, target: Path) -> bool:
+    """A directory link `link` -> `target`: a Windows JUNCTION (no elevated
+    privilege needed, unlike a real symlink) or a POSIX symlink. `False` when
+    the host refuses to make one at all (policy-dependent) -- the same
+    tradeoff `test_clean_command.py` already makes for the same reason."""
+    target.mkdir(parents=True, exist_ok=True)
+    if WINDOWS:
+        made = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+        )
+        return made.returncode == 0
+    link.symlink_to(target, target_is_directory=True)
+    return True
+
+
+def test_default_output_refuses_a_write_through_a_symlinked_build_dir(
+    tmp_path, monkeypatch, capsys
+):
+    """The exact tan-cli#325 repro: `<project>/build` is a pre-existing
+    directory link to somewhere outside the project. Before the fix this
+    followed the link, wrote `<outside>/generated/alp-cmake-args.txt`, and
+    still reported `ok: true` with the logical in-project path. Now it must
+    refuse before ever spawning the emitter, and nothing may land outside."""
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    if not _make_dir_link(project / "build", outside):
+        pytest.skip("cannot create a directory link on this host")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+
+    code = _call_generate(target="cmake-args", sdk_root=str(sdk), output_format="json")
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["ok"] is False
+    assert env["issues"][0]["code"] == "generate.write-escapes-project"
+    # The filesystem outcome, not just the message: nothing landed outside
+    # the project, through the link or otherwise.
+    assert not any(outside.rglob("*"))
+    assert not (project / "build" / "generated").exists()
+
+
+def test_default_output_still_works_when_the_project_root_itself_is_a_symlink(
+    tmp_path, monkeypatch
+):
+    """The fix must not be over-tightened: a project reached THROUGH a
+    symlinked root is still a legitimate write, because the write still lands
+    inside the resolved root."""
+    real_project = tmp_path / "real_project"
+    real_project.mkdir()
+    (real_project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    link = tmp_path / "project_link"
+    if not _make_dir_link(link, real_project):
+        pytest.skip("cannot create a directory link on this host")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_text('generated\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+
+    code = _call_generate(
+        target="cmake-args", project=str(link), sdk_root=str(sdk), output_format="text"
+    )
+
+    assert code == 0
+    written = real_project / "build" / "generated" / "alp-cmake-args.txt"
+    assert written.read_text(encoding="utf-8") == "generated\n"
+
+
+def test_an_explicit_output_override_is_exempt_from_the_confinement_guard(
+    tmp_path, monkeypatch
+):
+    """`--output` names the caller's OWN destination (CMake decides where a
+    Zephyr build reads from, not tan) -- an explicit out-of-project path there
+    is honoured, not refused as an accidental escape. This is pre-existing,
+    documented behaviour (see the module docstring's `--output` section); the
+    new guard must not touch it."""
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    outside = tmp_path / "outside" / "alp-cmake-args.txt"
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "out.parent.mkdir(parents=True, exist_ok=True)\n"
+        "out.write_text('generated\\n', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+
+    code = _call_generate(
+        target="cmake-args", sdk_root=str(sdk), output=str(outside), output_format="text"
+    )
+
+    assert code == 0
+    assert outside.read_text(encoding="utf-8") == "generated\n"

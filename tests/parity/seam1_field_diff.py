@@ -11,6 +11,23 @@ Renode smoke test) is a documented follow-up that needs a Linux toolchain
 runner -- see `tests/parity/README.md` and the `seam2` placeholder job in
 `.github/workflows/parity.yml`.
 
+tan-cli#320 addendum: a live `--emit build-plan` can legitimately REFUSE a
+board the frozen oracle captured as buildable -- alp-sdk#1025 taught the
+loader to refuse an `hw_rev` that exists but is `status: reserved`/
+`status: tbd`/status-less, and `multicore_rpmsg-imx93`'s only `hw_rev`
+(imx93 r1, `status: tbd`) is exactly that case. A live-emit failure used to
+be an unconditional `ComparatorError` -> FAIL, which could never tell "the
+SDK started correctly refusing this board" apart from "the SDK is broken".
+`_tan_reconciled_refusal` closes that gap FOR TAN-CLI'S OWN COPY ONLY: on a
+live-emit failure it also tries tan's own `--emit build-plan` for the same
+board and, if tan refuses too, reports PASS ("both refuse") instead of
+FAIL. This function is a no-op (returns `None`, old FAIL behaviour
+unchanged) wherever `tan` is not importable -- which is always true on
+alp-sdk's own copy of this file (there is no `tan` package in that repo to
+compare against). The two copies can therefore stay byte-identical (KEEP
+IN LOCKSTEP, below) while behaving differently per environment, rather
+than diverging in source to carry a tan-only branch.
+
 Seam-1 deliberately does NOT compare the materialised config-artefact
 CONTENT (`slices[*].configArtefacts[*].contents` / `sharedArtefacts[*].
 contents` -- the rendered alp.conf/local.conf/cmake-args.txt/DTS-overlay/
@@ -345,6 +362,32 @@ def _discover_boards(oracle_dir: Path) -> list[str]:
                   for p in oracle_dir.glob("*.build-plan.json"))
 
 
+def _tan_reconciled_refusal(sdk_root: Path, board_yaml: str) -> tuple[bool, str] | None:
+    """Whether tan's own `--emit build-plan` ALSO refuses `board_yaml`.
+
+    Returns `None` when `tan` is not importable in this interpreter -- see
+    the module docstring's tan-cli#320 addendum: that is the normal case on
+    alp-sdk's own (byte-identical) copy of this file, which has no `tan`
+    package to compare against, and `run()` below falls back to the
+    original unconditional-FAIL behaviour whenever this returns `None`.
+
+    Otherwise returns `(refused, detail)`: `refused` is True iff tan's own
+    emit also raised (any exception counts -- this asks "did tan ALSO
+    refuse", not "did it refuse for the identical reason", since the two
+    codebases raise different exception classes for the same fact);
+    `detail` is tan's own error text for the PASS/FAIL message.
+    """
+    try:
+        from tan.planner_root import emit as tan_emit
+    except ImportError:
+        return None
+    try:
+        tan_emit("build-plan", root=sdk_root, board_yaml=sdk_root / board_yaml)
+    except Exception as e:  # noqa: BLE001 -- any refusal is the signal we want
+        return True, str(e)
+    return False, ""
+
+
 def run(sdk: Path, oracle_dir: Path, boards: list[str]) -> bool:
     """Run the seam-1 comparison for `boards`; return True iff all pass."""
     all_ok = True
@@ -365,8 +408,18 @@ def run(sdk: Path, oracle_dir: Path, boards: list[str]) -> bool:
         try:
             live_plan = emit_live_plan(sdk, board_yaml)
         except ComparatorError as e:
-            print(f"FAIL {board}: {e}")
-            all_ok = False
+            reconciled = _tan_reconciled_refusal(sdk, board_yaml)
+            if reconciled is None:
+                print(f"FAIL {board}: {e}")
+                all_ok = False
+            elif reconciled[0]:
+                print(f"PASS {board} (alp-sdk and tan both refuse this board)")
+                print(f"    alp-sdk: {e}")
+                print(f"    tan:     {reconciled[1]}")
+            else:
+                print(f"FAIL {board}: alp-sdk refuses but tan does not "
+                      f"(parity divergence) -- {e}")
+                all_ok = False
             continue
 
         allowed, failing = diff_plans(normalize_plan(oracle_plan),
