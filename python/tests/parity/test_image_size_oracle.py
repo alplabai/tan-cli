@@ -313,6 +313,39 @@ def test_size_unknown_budget_notice(tmp_path):
     )
 
 
+def _the_size_tool_reads_this_elf(elf: Path) -> bool:
+    """Would this host's size tool actually MEASURE `elf`, or would the port
+    fall through to its section-header rung?
+
+    `data.slices[].source` reports which rung answered -- `size-tool` or
+    `pyelftools` -- so the frozen envelope encodes the CAPTURE host's tooling,
+    not tan's behaviour. `SIZE_TOOLS`' last entry is the bare name `size`, and
+    macOS ships a Mach-O `size` under it that cannot read an ARM ELF at all:
+    the port correctly drops to `pyelftools` there while the fixture (captured
+    where `size` was GNU binutils) says `size-tool`. Both are right about
+    their own host, and the measured numbers AGREE either way -- it is only
+    the label naming the rung that differs.
+
+    Probed by RUNNING the resolved tool on the ELF this test just wrote, not
+    by name-matching or `sys.platform`: the question is whether the tool
+    parses this file, and that is the only thing that answers it. `SIZE_TOOLS`
+    is imported rather than restated so the probe order cannot drift from the
+    port's.
+    """
+    from tan.commands.size_cmd import SIZE_TOOLS  # noqa: PLC0415 -- test-only seam
+
+    resolved = next((t for t in SIZE_TOOLS if shutil.which(t)), None)
+    if resolved is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [resolved, str(elf)], capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def test_size_measures_a_real_elf(tmp_path):
     fake_sdk(
         tmp_path / "sdk",
@@ -326,7 +359,16 @@ def test_size_measures_a_real_elf(tmp_path):
         "schema_version: 1\nhw_info:\n  sku: E1M-TEST\nslices:\n"
         "- core_id: m55_hp\n  os: zephyr\n  build_dir: m55_hp-zephyr\n",
     )
-    wbytes(tmp_path / "br" / "m55_hp-zephyr" / "zephyr" / "zephyr.elf", make_elf())
+    elf = tmp_path / "br" / "m55_hp-zephyr" / "zephyr" / "zephyr.elf"
+    wbytes(elf, make_elf())
+    if not oracle_fixtures.REPLAY_IS_CAPTURE_PLATFORM and not _the_size_tool_reads_this_elf(elf):
+        pytest.skip(
+            "this host's size tool cannot read an ARM ELF (macOS ships a Mach-O "
+            "`size`), so the port answers from its section-header rung and labels "
+            f"`source: pyelftools` where the {oracle_fixtures.CAPTURE_PLATFORM} "
+            "fixture says `size-tool`; that is the HOST's tooling, not tan's "
+            "behaviour -- the measured flash/ram numbers agree either way"
+        )
     assert_parity(
         tmp_path,
         ["size", "--format", "json", "--build-root", "br", "--sdk-root", "sdk"],
