@@ -1692,6 +1692,7 @@ def _select_workspace(
     existing = _existing_workspace_facts(paths.repo_root)
     if existing is None:
         return WorkspacePlan()
+    _, top_is_west_workspace, manifest_is_sdk = existing
     zephyr_base = _env("ZEPHYR_BASE") or ""
     top = Path(zephyr_base).parent
     var = "$env:ZEPHYR_BASE" if is_windows else "$ZEPHYR_BASE"
@@ -1734,14 +1735,34 @@ def _select_workspace(
         )
         return WorkspacePlan(clear_zephyr_base=True)
 
-    # INCOMPATIBLE: not a usable west workspace at all. bootstrap.sh's message
-    # carries a tail bootstrap.ps1's does not.
+    # INCOMPATIBLE: the tree missed on at least one axis -- an unreadable
+    # Zephyr VERSION, no .west/ topdir, or (tan-cli#334) a version skew AND a
+    # foreign manifest at once, which fails BOTH the STALE and
+    # MANIFEST_MISMATCH branches above and used to fall through here with
+    # neither explanation. Accumulate whichever facts were actually observed
+    # instead of a single "not a west workspace at all" claim, which is only
+    # true when NONE of them were found. bootstrap.sh's message carries a tail
+    # bootstrap.ps1's does not.
     tail = "" if is_windows else " and building an isolated one"
-    log.warn(
-        "zephyr-base-incompatible",
-        f"{var} ({zephyr_base}) is not an alp-sdk Zephyr {pin} west workspace -- "
-        f"ignoring it{tail}",
-    )
+    found: list[str] = []
+    if version:
+        found.append(f"Zephyr {version} (this alp-sdk pins {pin})")
+    if top_is_west_workspace and not manifest_is_sdk:
+        found.append("a manifest that is not alp-sdk's west.yml")
+
+    if found:
+        detail = " and ".join(found)
+        log.warn(
+            "zephyr-base-incompatible",
+            f"{var} ({zephyr_base}) has {detail} -- not an alp-sdk Zephyr {pin} "
+            f"west workspace; ignoring it{tail}",
+        )
+    else:
+        log.warn(
+            "zephyr-base-incompatible",
+            f"{var} ({zephyr_base}) is not an alp-sdk Zephyr {pin} west workspace -- "
+            f"ignoring it{tail}",
+        )
     return WorkspacePlan(clear_zephyr_base=True)
 
 
