@@ -64,8 +64,9 @@ GENERATE_SDK = sdk_root()
 #: Every case: argv, the surface it is scoped to, and -- when the port cannot
 #: satisfy it yet -- why. A ``None`` reason means the case runs for real.
 CASES = [
-    # The extension's acceptance probe. Compared by SHAPE: 0.5.0-dev vs
-    # 0.4.1-dev is a deliberate, permanent difference (python/tan/version.py).
+    # The extension's acceptance probe. Compared by SHAPE: the port's
+    # 0.5.0-rc3 (python/tan/version.py) vs the oracle's 0.4.1 (Cargo.toml) is
+    # a deliberate, permanent difference.
     (["--version"], VERSION, None),
     # A usage error must put its diagnosis on stderr and leave stdout EMPTY --
     # the extension parses stdout whole, so one stray byte breaks it. clap and
@@ -609,6 +610,443 @@ def test_sdk_switch_unresolvable_version_is_a_known_divergence_from_the_oracle(w
     assert (p_code, [i["code"] for i in p_out["issues"]]) == (1, ["sdk.not-ported"])
 
 
+# --- v0.6.0's named command-surface parity ----------------------------------
+#
+# v0.6.0's own milestone goal states, verbatim: "Full command-surface parity
+# with the v0.4.1 oracle: model, new-som, monitor, faultdecode, the
+# introspection set, renode, and the seven entirely-unported verbs." Nothing
+# above this point in the file ever runs any of those verbs -- this section is
+# what actually reads that claim, one case per verb, against a REAL run of the
+# oracle (never inferred from `crates/` or a docstring).
+#
+# These do NOT go through `compare()`/`rust_run()`: both replay a COMMITTED
+# fixture by default (`oracle_fixtures.resolve`), and adding a fixture entry
+# for a brand-new case is a separate, deliberate act with its own capture
+# recipe (`oracle_fixtures/PROVENANCE.txt`) -- out of scope for this change.
+# Instead these spawn `RUST` directly, every run, skipped only when no oracle
+# binary is built (`_ORACLE_REQUIRED`, keyed on BINARY PRESENCE, not
+# `TAN_PARITY_LIVE` like `LIVE_GATE` above): reusing `LIVE_GATE` here would NOT
+# skip when `RUST is None`, since `missing_for_live` only ever fires under
+# `TAN_PARITY_LIVE=1`, and would instead crash inside `subprocess.run([None,
+# ...])`. `ci.yml`'s `python` job never runs `cargo build`, so `RUST is None`
+# there and these cleanly skip; `parity.yml`'s `python-tests` job DOES
+# (`cargo build --locked --bin tan`), so there -- and on any host with
+# `target/{release,debug}/tan` already built, this one included -- these
+# genuinely spawn both binaries fresh, in the SAME `work_dir`/`home`, and diff
+# them for real. Because both sides share that one scratch `work_dir`, an
+# embedded absolute path is already byte-comparable with no
+# `oracle_fixtures.scrub` needed, unlike the frozen-replay cases above (whose
+# fixture was captured from a DIFFERENT scratch dir than any replay).
+#
+# `_ORACLE_REQUIRED` skips on binary ABSENCE only -- never on a resolved binary
+# being the WRONG one. `rust_binary()` picks the MOST RECENTLY BUILT of
+# target/{release,debug}/tan (its own docstring), so a resolved-but-wrong
+# binary today means either an inverted or TIED mtime between the two
+# profiles (a tie is refused outright inside `rust_binary()` itself -- see
+# that function) or an explicit TAN_RUST_BINARY naming the wrong one. This
+# comment used to describe an OLDER rule -- a fixed release-over-debug
+# preference -- and the failure that rule caused: measured on a real host, a
+# stale `target/release/tan` (`tan 0.1.1`, weeks old) sat next to a fresh
+# `target/debug/tan` (`tan 0.4.1`), `RUST` silently bound to the stale one
+# because release was tried unconditionally regardless of either file's age,
+# and every case below -- which, unlike the `LIVE_GATE` cases above, has no
+# frozen fixture to fall back to -- measured itself against a binary that
+# predates half the commands it runs: 7 of these failed, with no signal that
+# the oracle, not the port, was wrong. Turning that into a SKIP (e.g.
+# widening `_ORACLE_REQUIRED`'s condition to also skip on a version mismatch)
+# would reopen exactly the hole `missing_for_live`'s own docstring refuses --
+# "a quiet skip here would hide exactly the gap that function exists to
+# surface" (tan-cli#272) -- so `pinned_oracle`, now a session-scoped, autouse
+# fixture in `conftest.py` that every module under `tests/parity/` inherits
+# (not just this section), FAILS the run instead, loudly, naming the
+# mismatch. `_ORACLE_REQUIRED` below composes only the presence skip: the
+# content check no longer needs opting into per case.
+
+
+def _oracle_required(fn):
+    """`@_ORACLE_REQUIRED`'s actual decorator: skips on binary ABSENCE only.
+    The version-WRONGNESS check (`pinned_oracle`) is a session-scoped,
+    autouse fixture in `conftest.py` now, so every case tagged
+    `@_ORACLE_REQUIRED` gets it for free the same way every OTHER module
+    under `tests/parity/` does -- nothing here opts it in by hand any more."""
+    fn = pytest.mark.skipif(
+        RUST is None,
+        reason="needs a built Rust tan; run `cargo build --bin tan` (or set TAN_RUST_BINARY)",
+    )(fn)
+    return fn
+
+
+_ORACLE_REQUIRED = _oracle_required
+
+
+@_ORACLE_REQUIRED
+@pytest.mark.parametrize(
+    "argv,exit_code",
+    [
+        (["explain", "--format", "json"], 0),
+        (["explain", "--template", "bogus-template", "--format", "json"], 1),
+        (["explain", "--target", "bogus-target", "--format", "json"], 1),
+    ],
+    ids=["overview", "unknown-template", "unknown-target"],
+)
+def test_explain_matches_the_oracle(argv, exit_code, work_dir, tmp_path):
+    """tan-cli#257 (the introspection set). `explain` reads no board.yaml and
+    no alp-sdk checkout at all -- it is a static topic index over the
+    template/target catalogues baked into both binaries -- and its envelope
+    is byte-identical on every invocation measured here: the overview, an
+    unknown ``--template``, and an unknown ``--target``.
+
+    ``exit_code`` is PINNED per case (0 for the overview, 1 for each
+    unknown-topic refusal), measured directly rather than left as a bare
+    ``r_code == p_code``: that comparison, plus ``oracle._run``'s own
+    degrade-on-unparseable-stdout fallback (``{'__raw__': ...}``), lets two
+    binaries that both wrote NOTHING to stdout (say, both crashing before
+    printing) compare equal at exit ``0 == 0`` having measured nothing at
+    all. The explicit non-empty, non-``__raw__`` envelope check below closes
+    that the rest of the way."""
+    home = tmp_path / "home"
+    r_code, r_out = _run([RUST], argv, work_dir, home)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    assert r_code == p_code == exit_code
+    assert r_out and "__raw__" not in r_out, r_out
+    assert p_out and "__raw__" not in p_out, p_out
+    assert r_out == p_out
+
+
+# No `image`-missing-manifest case here, unlike its introspection-set siblings
+# above and below: `test_image_missing_manifest` in `test_image_size_oracle.py`
+# already covers this exact surface (exit 1, byte-identical envelope,
+# including the message's embedded absolute path) and does so with NO
+# divergence to pin -- `image`'s refusal message carries no OS-error tail to
+# normalise or narrow, unlike `size` just below. A case living here would
+# duplicate that assertion verbatim while adding nothing (measured: the two
+# read byte-for-byte identical envelopes on this oracle), so it was dropped
+# rather than kept as a second copy of the same check.
+#
+# Honestly, the drop gives up two things `size`'s own case below keeps, and
+# both are acceptable for the identical reason -- no divergence exists for
+# `image` to hide from either axis:
+#
+# * LIVE-SPAWN coverage. `test_image_missing_manifest` runs through
+#   `assert_parity` -> `_rust_run` -> `oracle_fixtures.resolve`, which REPLAYS
+#   a frozen fixture unless `TAN_PARITY_LIVE=1` is set. `size`'s case here
+#   uses `@_ORACLE_REQUIRED`, which spawns the oracle live unconditionally
+#   whenever a binary is present. Dropping `image` here means it is never
+#   exercised by THIS file's unconditional-live mode, only by a frozen replay
+#   or an opt-in live run elsewhere.
+# * DEFAULT-BUILD-ROOT coverage. `test_image_missing_manifest` always passes
+#   an explicit `--build-root br`; `size`'s case here passes no
+#   `--build-root` at all, resolving the DEFAULT `work_dir/build/system-
+#   manifest.yaml`. `image`'s missing-manifest path is never measured against
+#   the default build root anywhere in this repo.
+#
+# Both gaps are safe to leave open because they are gaps in HOW the answer is
+# produced, not in WHAT could go wrong: `image`'s refusal message is a fixed
+# string plus an embedded path with no OS-error tail, so it cannot drift
+# between a frozen fixture and a live run, or between an explicit and a
+# default build root, the way `size`'s OS-`errno` rendering can. A live,
+# default-build-root `image` case would measure the identical envelope this
+# file already confirmed byte-identical under `--build-root br`, adding
+# coverage of the harness's own plumbing, not of `image` itself.
+
+@_ORACLE_REQUIRED
+def test_renode_no_sdk_matches_the_oracle(work_dir, tmp_path):
+    """tan-cli#77. ``renode`` with no alp-sdk resolvable and no manifest is
+    byte-identical -- the whole ``data`` placeholder shape (empty sku/repl/
+    resc/elf, the derived ``logPath``) included."""
+    home = tmp_path / "home"
+    argv = ["renode", "--format", "json"]
+    r_code, r_out = _run([RUST], argv, work_dir, home)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    assert r_code == p_code == 1
+    assert r_out == p_out
+
+
+@_ORACLE_REQUIRED
+def test_size_missing_manifest_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
+    """tan-cli#257 (the introspection set). Exit code and issue CODE match;
+    the message's trailing OS-error text does not, and permanently cannot --
+    it is Rust's ``io::Error`` Display ("No such file or directory (os error
+    2)") against Python's ``OSError`` str ("[Errno 2] No such file or
+    directory: '<path>'"), two runtimes rendering the identical ``ENOENT``.
+    Pinned literally on BOTH the matching prefix and the diverging tail, per
+    this file's own rule against narrowing a comparison down to "exit code
+    only" to make it pass -- a change to either rendering, or the two
+    converging, must fail this test rather than pass it silently.
+
+    Overlaps `test_size_missing_manifest` in `test_image_size_oracle.py` on
+    the SAME setup (an empty ``build/system-manifest.yaml``-less project) but
+    NOT on what it asserts: that test's `_normalise` collapses this exact
+    OS-error tail into a placeholder (``run \\`tan build\\` first
+    (<OS-ERROR>).``) before comparing, deliberately treating the wording as
+    immaterial -- this test asserts the opposite, pinning the literal,
+    un-normalised text on BOTH sides as the divergence itself. It is also,
+    unlike that one, an unconditional LIVE spawn (`_ORACLE_REQUIRED` is keyed
+    on binary presence, not `TAN_PARITY_LIVE`; see the module comment above
+    the v0.6.0 section), where the counterpart replays a committed fixture by
+    default and only spawns the oracle under `TAN_PARITY_LIVE=1`."""
+    home = tmp_path / "home"
+    argv = ["size", "--format", "json"]
+    r_code, r_out = _run([RUST], argv, work_dir, home)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    assert r_code == p_code == 1
+    assert [i["code"] for i in r_out["issues"]] == ["size.manifest-unavailable"]
+    assert [i["code"] for i in p_out["issues"]] == ["size.manifest-unavailable"]
+    manifest_path = str(work_dir / "build" / "system-manifest.yaml")
+    prefix = f"no system-manifest.yaml at {manifest_path}; run `tan build` first ("
+    r_message = r_out["issues"][0]["message"]
+    p_message = p_out["issues"][0]["message"]
+    assert r_message == prefix + "No such file or directory (os error 2))."
+    assert p_message == prefix + f"[Errno 2] No such file or directory: '{manifest_path}')."
+    # Everything OUTSIDE the message -- exit code, `data`, the issue code --
+    # is a real match, not just coincidentally unchecked here.
+    assert {**r_out, "issues": []} == {**p_out, "issues": []}
+
+
+@_ORACLE_REQUIRED
+def test_run_no_sdk_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
+    """tan-cli#257 (the introspection set). Exit code and issue CODE match
+    (``build.plan-unavailable``, 1); the message's wording does not -- the
+    oracle names three remedies (``--sdk-root``, ``tan sdk switch``, ``tan
+    bootstrap``) where the port names one (``--sdk-root`` or a sibling
+    checkout), and neither is a substring of the other. Pinned literally, not
+    narrowed to the codes alone.
+
+    Everything OUTSIDE the message -- exit code, ``data``, the issue code --
+    is a real match too, not just coincidentally unchecked here: mirrors the
+    whole-envelope-minus-message bar
+    ``test_size_missing_manifest_is_a_known_divergence_from_the_oracle`` sets
+    one function above, measured true for ``run`` the same way."""
+    home = tmp_path / "home"
+    argv = ["run", "--format", "json"]
+    r_code, r_out = _run([RUST], argv, work_dir, home)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    assert r_code == p_code == 1
+    assert [i["code"] for i in r_out["issues"]] == ["build.plan-unavailable"]
+    assert [i["code"] for i in p_out["issues"]] == ["build.plan-unavailable"]
+    r_message = r_out["issues"][0]["message"]
+    p_message = p_out["issues"][0]["message"]
+    assert r_message == (
+        "no alp-sdk checkout found — pass `--sdk-root <PATH>`, pin one "
+        "with `tan sdk switch <version|path>`, set it in settings, or run "
+        "`tan bootstrap`. The build-plan comes from the SDK's "
+        "`alp_orchestrate --emit build-plan`."
+    )
+    assert p_message == (
+        "no alp-sdk checkout found -- pass `--sdk-root <PATH>` or run from a "
+        "project beside one. Planning reads the SDK's `metadata/**`."
+    )
+    assert r_out["data"] is None
+    assert p_out["data"] is None
+    assert {**r_out, "issues": []} == {**p_out, "issues": []}
+
+
+@_ORACLE_REQUIRED
+def test_model_bare_invocation_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
+    """tan-cli#253. The oracle's ``model`` is a generic ARGS-forwarding
+    wrapper (``[ARGS]...`` in its own ``--help``, shared machinery with
+    ``new-som``/``monitor``/``faultdecode``) that resolves an alp-sdk
+    checkout before doing anything else and refuses
+    ``model.failed``/"alp-sdk root is unresolved", exit 2, when none is
+    found. The port re-implements ``model`` natively with its own ``build``
+    subcommand (``Usage: tan model [OPTIONS] [SUBCOMMAND]``) and never
+    touches an SDK at this step, refusing instead with
+    ``model.unknown-subcommand``, exit 1, when no subcommand is named.
+    Neither the exit code nor the issue code agree -- both pinned, not
+    narrowed to the one thing they share (a ``command: "model"`` JSON
+    envelope shape)."""
+    home = tmp_path / "home"
+    argv = ["model", "--format", "json"]
+    r_code, r_out = _run([RUST], argv, work_dir, home)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    assert r_out["command"] == p_out["command"] == "model"
+    assert (r_code, [i["code"] for i in r_out["issues"]]) == (2, ["model.failed"])
+    assert (p_code, [i["code"] for i in p_out["issues"]]) == (1, ["model.unknown-subcommand"])
+
+
+@_ORACLE_REQUIRED
+def test_new_som_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
+    """tan-cli#254. The port's ``new-som`` declares no ``--format`` option at
+    all (only ``--sku``/``--soc-ref``/…/``--force``; confirmed via
+    ``new-som --help``), so ``--format json`` never reaches a
+    ``new-som``-shaped envelope -- Click raises a USAGE error the ROOT
+    handler wraps as ``command: "cli"`` / ``cli.parse-error`` instead, where
+    the oracle's own ``--format json`` reaches a real ``command: "new-som"``
+    refusal (``new-som.failed``, exit 2). Even the bare, ``--format``-free
+    invocation both sides genuinely answer disagrees: exit 2 vs exit 1, and
+    the message is not the same sentence reworded -- the port adds a
+    ``git clone`` suggestion the oracle never had."""
+    home = tmp_path / "home"
+    r_code, _ = _run([RUST], ["new-som"], work_dir, home)
+    p_code, _ = _run(python_command(), ["new-som"], work_dir, home)
+    assert r_code == 2
+    assert p_code == 1
+    _, r_json_out = _run([RUST], ["new-som", "--format", "json"], work_dir, home)
+    _, p_json_out = _run(python_command(), ["new-som", "--format", "json"], work_dir, home)
+    assert r_json_out["command"] == "new-som"
+    assert [i["code"] for i in r_json_out["issues"]] == ["new-som.failed"]
+    assert p_json_out["command"] == "cli"
+    assert [i["code"] for i in p_json_out["issues"]] == ["cli.parse-error"]
+
+
+@_ORACLE_REQUIRED
+def test_monitor_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
+    """tan-cli#255. The oracle's ``monitor`` shares the same SDK-resolving
+    forwarder as ``model``/``new-som``/``faultdecode`` and refuses
+    ``monitor.failed``/"alp-sdk root is unresolved", exit 2, with no SDK
+    resolvable. The port's ``monitor`` is a deliberate redesign
+    (``monitor_cmd.py``'s own docstring: "no alp-sdk checkout required,
+    unlike `model`" -- "a deliberate, documented improvement, not a
+    regression") that never touches an SDK at all; with no ``--port`` given
+    it refuses at exit 1 with EITHER ``monitor.pyserial-missing`` (pyserial
+    not installed in THIS interpreter) or ``monitor.no-port`` (pyserial
+    present, no port named) -- which of the two fires depends on this host's
+    own package set, so both are accepted here rather than pinning the one
+    this authoring host happened to hit (tan-cli#313/#324 is exactly the
+    class of bug that would be).
+
+    This is NOT the same tool-inventory gap `_DEFERRED_VERBS` pins PATH
+    against: pyserial is an interpreter PACKAGE, invisible to any PATH pin.
+    The either-or is real and stays real across this repo's own two CI legs,
+    named explicitly rather than left as an unexplained widening:
+    `parity.yml`'s `python-tests` job installs `-e ".[monitor]"` (pyserial
+    present -> `monitor.no-port`), `ci.yml`'s `python` job installs the bare
+    package with no extras (`pip install -e ./python`, pyserial absent ->
+    `monitor.pyserial-missing`) -- both are legitimate, currently-running CI
+    configurations, not a hypothetical."""
+    home = tmp_path / "home"
+    argv = ["monitor", "--format", "json"]
+    r_code, r_out = _run([RUST], argv, work_dir, home)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    assert (r_code, [i["code"] for i in r_out["issues"]]) == (2, ["monitor.failed"])
+    assert p_code == 1
+    p_codes = [i["code"] for i in p_out["issues"]]
+    assert p_codes in (["monitor.pyserial-missing"], ["monitor.no-port"]), p_codes
+
+
+@_ORACLE_REQUIRED
+def test_faultdecode_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
+    """tan-cli#256. Exit codes COINCIDE at 2 here -- which is exactly why
+    this case exists: pinned on the issue code and ``command`` field too, so
+    a narrowed "exit code only" comparison could never quietly stand in for
+    a real match (this file's own stated trap). The oracle forwards to
+    ``alp faultdecode`` and refuses on the SAME unresolved-SDK guard as
+    ``model``/``monitor``/``new-som``. The port re-implements
+    ``faultdecode`` natively (pure ARMv8-M register arithmetic, no SDK read
+    at all -- see ``faultdecode --help``'s own text) and refuses instead
+    because no fault register was supplied on the command line."""
+    home = tmp_path / "home"
+    argv = ["faultdecode", "--format", "json"]
+    r_code, r_out = _run([RUST], argv, work_dir, home)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    assert r_code == p_code == 2
+    assert r_out["command"] == "faultdecode"
+    assert [i["code"] for i in r_out["issues"]] == ["faultdecode.failed"]
+    assert p_out["command"] == "cli"
+    assert [i["code"] for i in p_out["issues"]] == ["cli.parse-error"]
+
+
+#: ``(verb, rust_exit_code, rust_issue_codes)`` -- measured directly against
+#: the oracle in an empty project with no alp-sdk resolvable, not inferred.
+#: Every one of these is a REAL, distinct outcome per verb; the port
+#: collapses all seven to the identical ``cli.command-deferred`` shape
+#: (tan-cli#260).
+#:
+#: ``support-bundle``'s third issue, ``support-bundle.hostPrerequisites``, is a
+#: TOOL PROBE -- the oracle checks a built-in fallback tool list (measured:
+#: ``git cmake python3 ninja xz wget``) against ``PATH`` and only raises it when
+#: something is missing. On a host where every one of those happens to resolve
+#: it does not fire at all (two issues, not three); under a stripped
+#: ``PATH=/usr/bin:/bin`` (has everything but ``ninja``) it fires naming just
+#: ``ninja``; under a truly empty ``PATH`` it fires naming all six. This is
+#: exactly tan-cli#313/#324's class of bug reintroduced -- pinning ``[sdkRoot,
+#: boardYaml]`` here silently encoded THIS capture host's tool inventory. Fixed
+#: by pinning to `empty_tool_inventory` below, the same fixture
+#: `test_west_forward_matches_rust` already uses for the identical class of
+#: bug -- the one outcome that does not depend on what happens to be
+#: installed on whichever host runs this suite.
+#:
+#: The three-code answer below is now a GENUINE "all six absent" measurement,
+#: not an artefact: on POSIX the oracle's tool probe resolves each name by
+#: SPAWNING ``which <tool>``, and a PATH pointing at a directory that is
+#: literally empty can't resolve ``which`` either, so every probe failed
+#: before it ever ran for real -- measured directly, a PATH holding all six
+#: required tools but not ``which`` still reported all six missing, which
+#: means the pin used to read the right three codes for the wrong reason.
+#: `empty_tool_inventory` now seeds its directory with a working ``which``
+#: symlink for exactly this reason (see that function's own docstring); the
+#: three codes here are unchanged after re-measuring against the fixed pin --
+#: ``git cmake python3 ninja xz wget`` still resolve to nothing in a
+#: directory holding only ``which`` -- so this is a correctness fix to HOW
+#: the answer is produced, not a change to the answer itself.
+#:
+#: Measured directly (not asserted) that the other six verbs are PATH-inert:
+#: run each one's argv under this host's real PATH and under the pinned PATH,
+#: rust and python both, and diff -- identical on every one of the twelve
+#: (six verbs x two sides) except this row. Only `support-bundle` branches on
+#: a tool probe among the seven; the pin below is applied to all seven anyway
+#: (cheap, and it is what keeps the whole parametrized set on one
+#: deterministic footing) rather than special-cased to just this one row.
+_DEFERRED_VERBS = [
+    ("scaffold", 2, ["scaffold.name-required"]),
+    ("completion", 0, []),
+    ("diff", 2, ["diff.board-yaml-missing"]),
+    ("pinmux", 0, ["pinmux.no-target", "pinmux.sdk-root-unresolved"]),
+    ("inspect", 0, ["inspect.board-yaml-missing"]),
+    ("trace", 2, ["trace.sdk-root-unresolved"]),
+    (
+        "support-bundle",
+        4,
+        [
+            "support-bundle.sdkRoot",
+            "support-bundle.boardYaml",
+            "support-bundle.hostPrerequisites",
+        ],
+    ),
+]
+
+
+@_ORACLE_REQUIRED
+@pytest.mark.parametrize(
+    "verb, rust_exit, rust_issue_codes", _DEFERRED_VERBS, ids=[v[0] for v in _DEFERRED_VERBS]
+)
+def test_deferred_verb_is_a_known_divergence_from_the_oracle(
+    verb, rust_exit, rust_issue_codes, work_dir, tmp_path
+):
+    """tan-cli#260: the seven verbs v0.6.0 names as "entirely-unported".
+    Every one is registered in ``tan/cli.py`` (each appears in
+    ``tan --help``), but the command body is a uniform stub: exit 1, issue
+    ``cli.command-deferred``, a message naming this tracking issue --
+    verified identical in shape across all seven, not just asserted to
+    differ from whatever the oracle happens to say. The oracle, by
+    contrast, answers each verb for real, and no two of the seven share an
+    outcome (a warning-only success, three different flavours of exit 2,
+    and one exit 4) -- each pinned here from an actual run, not copied from
+    a docstring.
+
+    Both sides spawn under ``PATH`` pinned to `empty_tool_inventory`'s scratch
+    directory (empty of every PROBEABLE tool, seeded with only a working
+    ``which`` -- see that function's own docstring for why the seed matters),
+    SYMMETRICALLY -- unlike `compare()`'s ``python_env_overrides`` (which
+    only ever pins the python side, because in frozen-replay mode the rust
+    side never spawns at all), this test spawns both binaries live on every
+    run, so pinning only one side would not even keep them on the same
+    footing, let alone a host-independent one. See `_DEFERRED_VERBS`'s own
+    comment for what this pin is actually for: ``support-bundle`` alone,
+    among the seven, branches on a tool probe (tan-cli#313/#324's class of
+    bug)."""
+    home = tmp_path / "home"
+    argv = [verb, "--format", "json"]
+    env_overrides = {"PATH": empty_tool_inventory(tmp_path)}
+    r_code, r_out = _run([RUST], argv, work_dir, home, env_overrides=env_overrides)
+    p_code, p_out = _run(python_command(), argv, work_dir, home, env_overrides=env_overrides)
+    assert r_code == rust_exit, (verb, r_out)
+    assert [i["code"] for i in r_out["issues"]] == rust_issue_codes, (verb, r_out)
+    assert p_code == 1, (verb, p_out)
+    assert [i["code"] for i in p_out["issues"]] == ["cli.command-deferred"], (verb, p_out)
+    assert "tan-cli/issues/260" in p_out["issues"][0]["message"]
+
+
 # --- the harness must be able to go red ------------------------------------
 #
 # A parity run that cannot fail is worse than no parity run: it reads as
@@ -635,7 +1073,9 @@ def test_harness_reports_a_planted_exit_code_difference(work_dir, tmp_path):
         "print('tan v0.5-dev')",
         # ...and the shape must cover the WHOLE of stdout. A prefix-anchored
         # match let both of these through as parity, on the one case that
-        # actually runs today. Rust prints exactly `tan 0.4.1-dev`.
+        # actually runs today. Rust prints exactly `tan 0.4.1`
+        # (oracle.PINNED_ORACLE_VERSION owns that spelling); the strings below
+        # are deliberately fabricated stdout, not either binary's real output.
         "print('tan 0.5.0-dev'); print('LEAKED EXTRA STDOUT LINE')",
         "print('tan 9.9.9 THIS IS NOT TAN AT ALL')",
     ],
