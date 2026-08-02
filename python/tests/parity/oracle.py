@@ -22,9 +22,10 @@ declares the surface both binaries genuinely produce:
 
 ``VERSION``
     Exit code plus the *shape* of the version line. The literals differ BY
-    DESIGN and permanently: the port declares 0.5.0-dev, the checked-out Rust
-    declares 0.4.1-dev (``python/tan/version.py`` records why the port must not
-    reuse the shipped number). What the extension actually contracts on is the
+    DESIGN and permanently: the port declares ``0.5.0-rc3``
+    (``python/tan/version.py``, which records why the port must not reuse the
+    shipped number), the checked-out Rust declares ``0.4.1``
+    (``Cargo.toml``). What the extension actually contracts on is the
     regex ``/^tan \\d+\\.\\d+\\.\\d+/``
     (alp-sdk-vscode/src/alpCli/service.ts:107-121), so that is what is compared
     -- and a side that fails the regex outright is reported even when both
@@ -36,7 +37,8 @@ declares the surface both binaries genuinely produce:
     compare that would enforce it. Prefix-anchoring here silently accepted
     ``"tan 0.5.0-dev\\nLEAKED EXTRA STDOUT LINE"`` and
     ``"tan 9.9.9 THIS IS NOT TAN AT ALL"`` as parity -- on the one case that
-    actually runs today. Rust prints exactly ``tan 0.4.1-dev``.
+    actually runs today. Rust prints exactly ``tan 0.4.1`` (see
+    :data:`PINNED_ORACLE_VERSION`, the one place that spelling is owned).
 
 ``PLAN``
     Exit code, the envelope shell, and -- inside ``data`` -- a NARROWED view of
@@ -78,6 +80,7 @@ declares the surface both binaries genuinely produce:
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -202,16 +205,56 @@ class ParityResult:
     diffs: list[str]
 
 
+#: The exact ``--version`` line the whole parity suite is measured against.
+#: Not ``0.4.1-dev``: that spelling is this repo's OLDER PROSE for the RUST
+#: oracle, from before ``Cargo.toml`` settled on ``version = "0.4.1"``, which
+#: is why the binary prints no suffix today. It has never been the PORT's
+#: string -- ``python/tan/version.py`` declares ``TAN_VERSION = "0.5.0-rc3"``.
+#: The checked-out Rust binary's actual stdout, byte for byte, is
+#: ``tan 0.4.1`` with no suffix (verified directly: ``tan --version | cat -A``
+#: -> ``tan 0.4.1$``). Shared here, not owned by any one test module, because
+#: ``conftest.py``'s session-scoped ``pinned_oracle`` fixture checks against
+#: it for every file under ``tests/parity/``, not just the module that used to
+#: define it alone.
+PINNED_ORACLE_VERSION = "tan 0.4.1"
+
+
 def rust_binary() -> str | None:
-    """``TAN_RUST_BINARY`` if set, else a build in the usual places. Returns
-    ``None`` only when NOBODY named an oracle and none was built, so the caller
-    can skip rather than invent a comparison.
+    """``TAN_RUST_BINARY`` if set, else the MOST RECENTLY BUILT of
+    ``target/{release,debug}/tan``. Returns ``None`` only when NOBODY named an
+    oracle and none was built, so the caller can skip rather than invent a
+    comparison.
 
     A set-but-missing ``TAN_RUST_BINARY`` RAISES instead. It must not fall back
     to some other binary -- an operator who named one should not silently get a
     different one -- but it must not skip either: a typo'd path in CI would then
     produce an all-skip, all-green run that certifies nothing, which is the
     exact failure mode this harness exists to prevent.
+
+    When both profiles exist, the choice is by ``st_mtime``, not a fixed
+    release-over-debug preference (what this function used to do,
+    unconditionally). That preference used to silently pick a STALE binary: a
+    ``target/release/tan`` left over from a much earlier build (measured --
+    ``tan 0.1.1``, weeks old) sitting next to a freshly rebuilt
+    ``target/debug/tan`` (``tan 0.4.1``) always won, because ``release`` was
+    tried first regardless of either file's age, and every unpinned caller of
+    this function silently measured against the wrong oracle with no signal
+    that anything was off. mtime is what an ordinary edit-build-test loop
+    actually implies: whichever profile was rebuilt LAST is the one a
+    developer (or CI job that just ran ``cargo build``) intends to test
+    against right now. A caller that legitimately wants one profile over the
+    other regardless of freshness should set ``TAN_RUST_BINARY`` explicitly
+    rather than rely on this default.
+
+    A TIE (identical ``st_mtime`` on both profiles) is refused outright rather
+    than resolved silently -- silently is what this function used to do, and
+    it always broke to ``target/release``, which is exactly the stale-pick bug
+    the mtime rule above replaced. A CI cache restore, ``cp -p``, rsync, or an
+    artifact download can equalise (or invert) mtimes on ``target/`` with no
+    rebuild involved, so a tie is a real, reachable way to reinstate that bug
+    for every caller that does not separately assert the resolved version (see
+    ``conftest.py``'s ``pinned_oracle``, which is that safety net -- this raise
+    is the thing it nets).
     """
     override = os.environ.get("TAN_RUST_BINARY")
     if override:
@@ -222,11 +265,25 @@ def rust_binary() -> str | None:
                 "Fix the path, or unset it to fall back to target/{release,debug}."
             )
         return override
-    for profile in ("release", "debug"):
-        candidate = REPO_ROOT / "target" / profile / f"tan{_EXE}"
-        if candidate.exists():
-            return str(candidate)
-    return None
+    candidates = [
+        REPO_ROOT / "target" / profile / f"tan{_EXE}" for profile in ("release", "debug")
+    ]
+    existing = [c for c in candidates if c.exists()]
+    if not existing:
+        return None
+    newest_mtime = max(c.stat().st_mtime for c in existing)
+    tied = [c for c in existing if c.stat().st_mtime == newest_mtime]
+    if len(tied) > 1:
+        raise RuntimeError(
+            "target/release/tan and target/debug/tan report the IDENTICAL "
+            f"mtime ({newest_mtime!r}): {', '.join(str(c) for c in tied)}. "
+            "Refusing to pick one silently -- a tie used to break to "
+            "target/release unconditionally, which is the exact stale-binary "
+            "bug the mtime rule this function now uses was written to "
+            "replace. Rebuild one of the two profiles to break the tie, or "
+            "set TAN_RUST_BINARY=<path> to the one you mean."
+        )
+    return str(tied[0])
 
 
 def missing_for_live(rust: str | None) -> bool:
@@ -244,28 +301,82 @@ def missing_for_live(rust: str | None) -> bool:
 
 
 def empty_tool_inventory(scratch: Path) -> str:
-    """A ``PATH`` value pointing at one EMPTY scratch directory -- the general
-    form of ``test_flash_oracle_parity.py``'s ``_pin_tool_inventory`` for a
-    case whose frozen fixture answer is "no such tool anywhere on PATH", not
-    "found this specific stand-in". Any ``shutil.which``/``doctor_cmd.on_path``
-    probe run against this directory alone reports every name absent,
-    matching whatever tool inventory a fixture's capture host happened to
-    lack (tan-cli#313, tan-cli#324) -- ``west`` for
-    ``test_west_forward_matches_rust`` today, and any other which()-gated
-    case's absent-tool branch tomorrow, without inventing a second
-    bespoke per-file helper for each one that comes up.
+    """A ``PATH`` value that resolves NOTHING except ``which`` itself -- the
+    general form of ``test_flash_oracle_parity.py``'s ``_pin_tool_inventory``
+    for a case whose frozen fixture answer is "no such tool anywhere on PATH",
+    not "found this specific stand-in". Any ``shutil.which``/
+    ``doctor_cmd.on_path`` probe run against this directory reports every
+    PROBED name absent -- ``west`` for ``test_west_forward_matches_rust``
+    today, ``git``/``cmake``/``ninja``/``python3``/``xz``/``wget`` for
+    ``support-bundle.hostPrerequisites``, and any other which()-gated case's
+    absent-tool branch tomorrow -- matching whatever tool inventory a
+    fixture's capture host happened to lack (tan-cli#313, tan-cli#324),
+    without inventing a second bespoke per-file helper for each one that
+    comes up.
+
+    Seeds the directory with exactly one file: a symlink to the REAL
+    ``which`` this host resolves on its own PATH, POSIX only (a no-op on
+    Windows, whose probe -- ``crate::util::windows_path_lookup`` -- walks
+    ``%PATH%`` by hand and never spawns an external ``which`` at all). A
+    directory that is genuinely, literally empty is NOT a clean "nothing on
+    PATH" answer on POSIX: the oracle's own probe
+    (``crates/tan-cli/src/util.rs:35-50``, ``command_on_path``) resolves a
+    tool by SPAWNING ``which <tool>`` as a subprocess, and that spawn itself
+    has to find ``which`` via this SAME (oracle-controlled) PATH. An empty
+    directory can't resolve ``which`` either, so the probe fails before it
+    ever answers the question asked -- measured directly: a PATH holding
+    every one of ``support-bundle``'s six required tools but NOT ``which``
+    still reports all six missing, and copying a working ``which`` in
+    (touching nothing else) makes that same warning vanish entirely. A
+    literally-empty directory's "everything missing" answer was an artefact
+    of the unresolvable ``which`` spawn, not a real absence measurement --
+    see ``_DEFERRED_VERBS``'s own comment for what the pinned
+    ``support-bundle`` answer means now that this seeds a working ``which``:
+    a GENUINE probe that ran and found nothing, not a degenerate one that
+    could not run at all.
 
     REPLACES ``PATH`` outright rather than prepending, for the identical
     reason ``_pin_tool_inventory`` does: prepending would still let a REAL
     tool further down the replay host's own PATH be found, which is exactly
-    the host-dependence this exists to remove. Hand the result to
-    :func:`compare`'s ``python_env_overrides`` -- e.g.
-    ``{"PATH": empty_tool_inventory(tmp_path)}`` -- never fabricate the
-    equivalent for the rust side; see that parameter's own docstring for why
-    forwarding a PATH pin to the oracle is not a safe substitute.
+    the host-dependence this exists to remove.
+
+    Hand the result to :func:`compare`'s ``python_env_overrides`` -- e.g.
+    ``{"PATH": empty_tool_inventory(tmp_path)}`` -- for a FROZEN-REPLAY
+    caller, and never fabricate the equivalent for the rust side THERE: the
+    frozen answer is a recorded fixture, and pinning only the python side's
+    PATH is exactly right in that mode (see that parameter's own docstring
+    for why forwarding the same pin to the rust side under
+    ``TAN_PARITY_LIVE=1`` is not a safe substitute -- the whole tan-cli#313/
+    #324 bug was one side pinned and the other left to whatever happened to
+    be installed). That ban is scoped to ``compare()``'s frozen-replay path --
+    it does not reach a case that spawns BOTH binaries live on every run
+    instead (e.g. ``test_deferred_verb_is_a_known_divergence_from_the_
+    oracle``): there, applying this SAME value to both sides' subprocess
+    environments is sound, because it is one identical override applied
+    twice, symmetrically, not a pin smuggled onto one side only.
     """
     stub_dir = scratch / "empty-path"
     stub_dir.mkdir(exist_ok=True)
+    if sys.platform != "win32":
+        # The seed is NOT optional. A literally-empty PATH makes the oracle's
+        # POSIX probe unable to resolve `which` ITSELF, so its tool report goes
+        # degenerate: it names every tool missing because it could not look,
+        # not because they are absent. A caller pinning that answer measures a
+        # broken probe. Refuse rather than silently return to it (tan-cli#313,
+        # tan-cli#324 -- the same silent-degradation class both closed).
+        real_which = shutil.which("which")
+        if real_which is None:
+            raise RuntimeError(
+                "empty_tool_inventory() cannot seed `which` into the stub PATH: "
+                "shutil.which('which') returned None on this POSIX host. Without "
+                "it the oracle's tool probe cannot run at all and reports every "
+                "tool missing for the wrong reason -- refusing rather than "
+                "pinning that artefact."
+            )
+        link = stub_dir / "which"
+        if not link.exists():
+            os.symlink(real_which, link)
+        assert link.exists(), f"failed to seed `which` into {stub_dir}"
     return str(stub_dir)
 
 
