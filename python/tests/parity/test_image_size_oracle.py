@@ -221,6 +221,16 @@ def assert_parity(
     p_code, p_out, p_err = _run(python_command(), argv, work, work, env_extra)
     p_out = oracle_fixtures.scrub(p_out, work)
     p_err = oracle_fixtures.scrub(p_err, work)
+    # On a non-capture-platform replay, the separators inside any path
+    # anchored at a `scrub` placeholder are the RECORDING host's, not either
+    # binary's behaviour -- `size`/`image` reach that surface through
+    # `issues[].message` ("no system-manifest.yaml at <ORACLE-ROOT-0>\br\
+    # system-manifest.yaml"), not through a dedicated path field. A no-op on
+    # Windows and under TAN_PARITY_LIVE=1; see the function for the trade.
+    r_out = oracle_fixtures.normalise_scrubbed_path_separators(r_out)
+    p_out = oracle_fixtures.normalise_scrubbed_path_separators(p_out)
+    r_err = oracle_fixtures.normalise_scrubbed_path_separators(r_err)
+    p_err = oracle_fixtures.normalise_scrubbed_path_separators(p_err)
 
     assert r_code == p_code, (
         f"exit code: rust={r_code} python={p_code}\n"

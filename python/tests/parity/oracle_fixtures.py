@@ -44,6 +44,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -251,3 +252,78 @@ def scrub(payload: Any, *roots: Path | str) -> Any:
             if form:
                 text = text.replace(form, token)
     return json.loads(text) if as_json else text
+
+
+#: True when THIS replay's separator style is the one the fixture store was
+#: captured with, so a byte-for-byte diff is meaningful and
+#: :func:`normalise_scrubbed_path_separators` must stay a no-op. Two ways to
+#: be true: replaying on :data:`CAPTURE_PLATFORM` itself (Windows CI), or
+#: running ``TAN_PARITY_LIVE=1``, where both binaries are spawned on the SAME
+#: host and any separator disagreement between them is a REAL divergence
+#: rather than a capture artefact.
+REPLAY_IS_CAPTURE_PLATFORM = LIVE or sys.platform == CAPTURE_PLATFORM
+
+#: The region a :func:`scrub` placeholder opens: the token, then everything up
+#: to the next quote or newline. Deliberately NOT bounded at whitespace, even
+#: though a bare ``data.buildRoot`` ends there -- the surface this has to reach
+#: is mostly free text that EMBEDS a path, and a path segment can legally
+#: contain a space. Both shapes are real, in the same fixture store::
+#:
+#:     no footprint source at <ORACLE-ROOT-0>\br\with space-zephyr\zephyr\...
+#:     would run dd if=<ORACLE-ROOT-0>\.\build\a.wic of=/dev/sdb bs=4M
+#:
+#: The first needs the space to CONTINUE the run, the second needs it to end
+#: it; nothing lexical separates the two. Running greedily to the quote (``dd:
+#: failed to open '<ORACLE-ROOT-0>\.\build\a.elf': ...``) resolves it in the
+#: only direction that keeps both correct, and over-running costs nothing
+#: wherever the tail carries no ``\`` to rewrite -- which is every case
+#: measured. The residual: a message that pairs a redacted path with an
+#: UNRELATED backslash inside the same quote-delimited region would have that
+#: one rewritten too. A string with no token at all is never touched.
+_SCRUBBED_PATH_TAIL_RE = re.compile(r"<ORACLE-ROOT-\d+>[^'\"\n]*")
+
+
+def normalise_scrubbed_path_separators(payload: Any) -> Any:
+    """``\\`` -> ``/``, but ONLY inside a path anchored at a :func:`scrub`
+    placeholder, and ONLY when this replay is not on the capture platform
+    (:data:`REPLAY_IS_CAPTURE_PLATFORM`).
+
+    A path rooted at ``<ORACLE-ROOT-N>`` is, by construction, a scratch
+    directory the harness itself created and then redacted. What separator
+    joins its segments is the RECORDING host's, not a behaviour of either
+    binary: a fixture frozen on win32 (tan-cli#272) says ``<ORACLE-ROOT-0>\\.
+    \\build``, a live port on ubuntu/macOS says ``<ORACLE-ROOT-0>/./build``,
+    and both are correct on their own host. Diffing those two byte-for-byte
+    reports a platform difference as a port defect.
+
+    Deliberately narrower than the blanket separator-flattening
+    ``test_clean_parity.py`` refuses, and narrower than a key allow-list
+    (:data:`oracle.PATH_KEYS`) can be: the anchor is the redaction token, not
+    a field name, so it reaches ``issues[].message`` and
+    ``data.entries[].message`` -- where the real mismatch lives -- without
+    granting those free-text fields separator-insensitivity anywhere else in
+    their content. A ``\\`` that is not in a redacted-root path still fails
+    the diff.
+
+    What this gives up, stated plainly: on a NON-capture platform it can no
+    longer catch the two binaries rendering a workspace-rooted path with
+    different separators. That is not a loss against the alternative --
+    skipping the case, which is what the platform gate this replaces did --
+    because a fixture frozen on win32 cannot observe that divergence on POSIX
+    either way. On the capture platform, and under ``TAN_PARITY_LIVE=1``,
+    the comparison stays byte-exact and the divergence is still caught.
+
+    Accepts a JSON-serializable value or a plain ``str`` (captured stderr),
+    like :func:`scrub`; returns the same shape it was given.
+
+    tan-cli#272
+    """
+    if REPLAY_IS_CAPTURE_PLATFORM:
+        return payload
+    if isinstance(payload, str):
+        return _SCRUBBED_PATH_TAIL_RE.sub(lambda m: m.group(0).replace("\\", "/"), payload)
+    if isinstance(payload, list):
+        return [normalise_scrubbed_path_separators(item) for item in payload]
+    if isinstance(payload, dict):
+        return {k: normalise_scrubbed_path_separators(v) for k, v in payload.items()}
+    return payload

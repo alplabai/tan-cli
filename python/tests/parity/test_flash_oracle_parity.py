@@ -20,9 +20,11 @@ rather than byte-for-byte; both are called out on the case that covers them.
 """
 import os
 import shutil
+import subprocess
 
 import pytest
 
+from . import oracle_fixtures
 from .oracle import ENVELOPE, compare, missing_for_live, rust_binary, rust_run
 
 RUST = rust_binary()
@@ -384,8 +386,33 @@ def work_dir(tmp_path_factory):
     return root
 
 
+#: Cases whose MANIFEST plants a POSIX-absolute path (``/abs/tree/...``) that
+#: the two platforms then resolve to genuinely different absolute paths --
+#: Windows re-anchors a root-relative path onto the current drive, so the
+#: frozen answer says ``C:/abs/tree`` where a POSIX run says ``/abs/tree``.
+#: That is not a separator artefact (:func:`oracle_fixtures.
+#: normalise_scrubbed_path_separators` already covers those, and the path is
+#: outside the scrubbed scratch root anyway) and it is not a port defect: both
+#: renderings are correct on their own OS. A fixture frozen on
+#: ``CAPTURE_PLATFORM`` simply cannot answer for the other one here.
+#:
+#: Exactly one case, arrived at by MEASUREMENT rather than by reading the
+#: manifests: `explicit-build-dir-wins-over-the-derived-one` and the
+#: `flash-args-tbd-*` pair also embed absolute paths and compare clean on
+#: POSIX, because their value never reaches the diffed surface. Do not widen
+#: this to "every case with a leading slash" -- that skips cases that are
+#: really comparing.
+_HOST_ANCHORED_ABSOLUTE_CASES = frozenset({"absolute-artefact-passes-through"})
+
+
 @pytest.mark.parametrize("case_id, manifest, extra", CASES, ids=[c[0] for c in CASES])
 def test_flash_matches_the_rust_oracle(case_id, manifest, extra, work_dir):
+    if case_id in _HOST_ANCHORED_ABSOLUTE_CASES and not oracle_fixtures.REPLAY_IS_CAPTURE_PLATFORM:
+        pytest.skip(
+            f"{case_id} plants a POSIX-absolute artefact path; the frozen answer "
+            f"was captured on {oracle_fixtures.CAPTURE_PLATFORM}, which anchors it "
+            f"to a DRIVE (`C:/abs/tree`) -- a real OS difference, not a port defect"
+        )
     if manifest is not None:
         (work_dir / "build" / "system-manifest.yaml").write_text(
             manifest, encoding="utf-8", newline=""
@@ -404,6 +431,30 @@ def _argv(extra, app_path="."):
     return ["flash", *base, "--format", "json", *extra, app_path]
 
 
+def _dd_matches_the_captured_implementation() -> bool:
+    """Is the `dd` on PATH the one whose stderr the fixture froze?
+
+    This is the only case that compares a THIRD-PARTY tool's message, so the
+    frozen answer is valid only where that tool words its failure the same
+    way. GNU coreutils `dd` (the capture host's, via ubuntu CI too) says ``dd:
+    failed to open '<path>': No such file or directory``; macOS ships a BSD
+    `dd` that says ``dd: <path>: No such file or directory``. Neither is
+    wrong, and neither is tan's text.
+
+    Probed rather than keyed off `sys.platform`: what matters is the
+    implementation, not the OS -- a Linux host with busybox, or a mac with
+    coreutils on PATH, both get the right answer this way. BSD `dd` has no
+    `--version` and exits non-zero, so the check is a natural fit.
+    """
+    try:
+        proc = subprocess.run(
+            ["dd", "--version"], capture_output=True, text=True, timeout=10
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and "coreutils" in proc.stdout.lower()
+
+
 def test_a_real_spawn_diffs_including_the_captured_failure_tail(work_dir):
     """The one case that actually SPAWNS a flash tool.
 
@@ -416,9 +467,19 @@ def test_a_real_spawn_diffs_including_the_captured_failure_tail(work_dir):
     Skipped where `dd` is absent: the two sides would then agree on a DIFFERENT
     message (the no-tool refusal), which is real parity but not this test's
     subject.
+
+    Also skipped where the local `dd` is not the implementation the fixture
+    captured -- see `_dd_matches_the_captured_implementation`.
     """
     if shutil.which("dd") is None:
         pytest.skip("no `dd` on PATH; nothing to spawn")
+    if not _dd_matches_the_captured_implementation():
+        pytest.skip(
+            "the local `dd` words its open failure differently from the one the "
+            "fixture captured (BSD `dd: <path>: No such file` vs GNU `dd: failed "
+            "to open '<path>': No such file`); the tail this test compares is the "
+            "SPAWNED TOOL's text, not tan's, so that diff is not a port defect"
+        )
     (work_dir / "build" / "system-manifest.yaml").write_text(
         _slice("yocto_wic", "{target: /dev/sdb}"), encoding="utf-8", newline=""
     )

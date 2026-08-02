@@ -387,6 +387,13 @@ def compare(
     # already native-Windows `\`), so this never masks a real divergence.
     r_out = normalise_path_separators(r_out)
     p_out = normalise_path_separators(p_out)
+    # And, on a non-capture-platform replay only, the separators INSIDE any
+    # path anchored at a `scrub` placeholder -- the redacted scratch root the
+    # harness itself made. Anchored on the token rather than a key, so it also
+    # reaches the `issues[].message`/`entries[].message` text that embeds one.
+    # See that function for what this trades away, and where it does not.
+    r_out = oracle_fixtures.normalise_scrubbed_path_separators(r_out)
+    p_out = oracle_fixtures.normalise_scrubbed_path_separators(p_out)
 
     diffs: list[str] = []
     if r_code != p_code:
