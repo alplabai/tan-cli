@@ -15,8 +15,14 @@ and compares three things:
 * the exit code;
 * the whole stdout envelope, with the tree root textually scrubbed out (the two
   trees necessarily live at different paths) -- so ``data.buildRoot``, every
-  ``targets[].path``, ``project.*`` and ``sdk.*`` are all compared, separator
-  style included;
+  ``targets[].path``, ``project.*`` and ``sdk.*`` are all compared. Separator
+  style included ON the capture platform and under ``TAN_PARITY_LIVE=1``; on a
+  frozen replay elsewhere the separators INSIDE the redacted root are
+  normalised first (``oracle_fixtures.normalise_scrubbed_path_separators``),
+  because a fixture frozen on ``CAPTURE_PLATFORM`` carries that host's joins
+  (``"<ROOT>/proj\\build"``) and diffing those against a live POSIX run reports
+  a platform difference as a port defect. Everything else in the envelope is
+  still byte-for-byte on every platform;
 * the SURVIVING FILE SET. An envelope that reads correctly is not evidence that
   nothing else was deleted, and on this command that is the only claim that
   matters.
@@ -43,7 +49,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -382,21 +387,20 @@ WINDOWS_CASES = [
 ]
 
 
-def _is_json_mode(argv: list[str]) -> bool:
-    """Whether ``argv`` puts the compared envelope's `data.buildRoot`/per-
-    target paths on stdout at all.
-
-    The four ``*-text`` cases in ``CASES`` omit ``--format json`` on purpose:
-    ``clean``'s text-mode summary goes to STDERR (module docstring, "stdout
-    carries the envelope and NOTHING else"), so their captured stdout is the
-    empty string on both sides, and the only other frozen field -- the
-    survivor list -- is already forward-slash-normalised by ``_survivors``
-    above. Checked by inspecting the actual captured fixture rather than
-    assumed: these are the ONLY four (of 49 -- ``CASES`` plus
-    ``WINDOWS_CASES``) whose stored payload never puts ``<ROOT>`` next to a
-    `/` or `\\`.
-    """
-    return "--format" in argv
+#: Cases whose manifest plants a ROOT-RELATIVE path, which the two platforms
+#: resolve to genuinely different absolute paths: Windows anchors `/` onto the
+#: current drive (`C:/`), POSIX to the filesystem root (`/`). The refusal
+#: itself is identical on both -- `clean.unsafe-target`, same exit code, same
+#: surviving file set -- only the resolved path quoted back in the message and
+#: in `targets[].path` differs, and each is right about its own OS.
+#:
+#: NOT covered by :func:`oracle_fixtures.normalise_scrubbed_path_separators`,
+#: and deliberately so: that helper rewrites separators inside a REDACTED
+#: scratch root, where the text is a harness artefact. `C:/` is neither
+#: redacted nor an artefact -- it is what the platform resolved. Arrived at by
+#: measurement: it is the ONLY case of the 41 that runs on POSIX once the
+#: separator noise is gone.
+_HOST_ANCHORED_ROOT_CASES = frozenset({"manifest-root-build-dir"})
 
 
 @pytest.mark.parametrize(
@@ -412,26 +416,18 @@ def _is_json_mode(argv: list[str]) -> bool:
         for i, a, t in WINDOWS_CASES
     ],
 )
-def test_python_clean_matches_rust(argv, tree, tmp_path):
-    # The frozen rust side was captured on `oracle_fixtures.CAPTURE_PLATFORM`
-    # (win32) and carries THAT host's native path separators in `buildRoot`/
-    # per-target paths (`_scrub` normalises the tree ROOT, deliberately not
-    # the separator style -- see this module's docstring, "separator style
-    # included"). A live run on a DIFFERENT platform would emit `/`, so
-    # comparing it against a frozen `\`-bearing envelope diffs two platforms'
-    # own, both-correct behaviour -- not a port defect. This
-    # skip is scoped to the JSON-mode cases (`_is_json_mode`): the four
-    # text-mode cases carry no separator anywhere in their compared surface,
-    # so they keep comparing for real on every platform -- coverage this
-    # suite never had before tan-cli#272 either way. Never fires when
-    # `TAN_PARITY_LIVE=1`: both sides then spawn fresh, on THIS host, so
-    # there is no captured-elsewhere answer to be stale against.
-    if not oracle_fixtures.LIVE and not WINDOWS and _is_json_mode(argv):
+def test_python_clean_matches_rust(argv, tree, tmp_path, request):
+    if (
+        request.node.callspec.id in _HOST_ANCHORED_ROOT_CASES
+        and not oracle_fixtures.REPLAY_IS_CAPTURE_PLATFORM
+    ):
         pytest.skip(
-            f"fixture captured on {oracle_fixtures.CAPTURE_PLATFORM} carries "
-            f"native path separators in the compared envelope; this replay "
-            f"host is {sys.platform!r} -- cross-platform separator diffs are "
-            "not a port defect (see oracle_fixtures.CAPTURE_PLATFORM)"
+            f"{request.node.callspec.id} plants `build_dir: /`, which Windows "
+            f"resolves onto the current DRIVE (`C:/`) and POSIX resolves to the "
+            f"filesystem root (`/`); the frozen answer is "
+            f"{oracle_fixtures.CAPTURE_PLATFORM}'s and both are correct -- a real "
+            "OS difference in what a root-relative path MEANS, not a separator "
+            "artefact and not a port defect. Both sides still refuse it"
         )
     sides = {}
     for name in ("rust", "python"):
@@ -456,7 +452,17 @@ def test_python_clean_matches_rust(argv, tree, tmp_path):
     diffs = []
     if sides["rust"][0] != sides["python"][0]:
         diffs.append(f"exit code: rust={sides['rust'][0]} python={sides['python'][0]}")
-    rust_doc, py_doc = sides["rust"][1], sides["python"][1]
+    # `_scrub` redacts the tree ROOT but leaves the separators that JOIN the
+    # segments after it, and the frozen rust side carries the CAPTURE host's:
+    # `"buildRoot": "<ROOT>/proj\\build"` -- forward-slash root portion, native
+    # `\` on the final join -- where a live POSIX run says `<ROOT>/proj/build`.
+    # Both are correct on their own OS. Applied to BOTH sides, and only off the
+    # capture platform, so Windows CI and `TAN_PARITY_LIVE=1` keep the
+    # byte-for-byte diff this module's docstring describes; see that function
+    # for the exact trade. Replaces a blanket skip of every JSON-mode case,
+    # which stopped measuring the other 40-odd fields to guard this one.
+    rust_doc = oracle_fixtures.normalise_scrubbed_path_separators(sides["rust"][1])
+    py_doc = oracle_fixtures.normalise_scrubbed_path_separators(sides["python"][1])
     for key in sorted(set(rust_doc) | set(py_doc)):
         if rust_doc.get(key) != py_doc.get(key):
             diffs.append(

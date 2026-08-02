@@ -263,7 +263,17 @@ def scrub(payload: Any, *roots: Path | str) -> Any:
 #: rather than a capture artefact.
 REPLAY_IS_CAPTURE_PLATFORM = LIVE or sys.platform == CAPTURE_PLATFORM
 
-#: The region a :func:`scrub` placeholder opens: the token, then everything up
+#: The two placeholder spellings this suite's root-redaction produces:
+#: ``<ORACLE-ROOT-N>`` from :func:`scrub` (position-keyed, however many roots a
+#: call site passes) and the bare ``<ROOT>`` from ``test_clean_parity._scrub``,
+#: which predates :func:`scrub` and redacts exactly one tree root. Both mean
+#: the same thing -- "a scratch directory this harness created and then
+#: redacted" -- so both open the same host-shaped region. Listed here rather
+#: than parameterised per call site so a third spelling cannot appear without
+#: landing next to these two.
+_ROOT_TOKEN = r"<(?:ORACLE-ROOT-\d+|ROOT)>"
+
+#: The region a placeholder opens: the token, then everything up
 #: to the next quote or newline. Deliberately NOT bounded at whitespace, even
 #: though a bare ``data.buildRoot`` ends there -- the surface this has to reach
 #: is mostly free text that EMBEDS a path, and a path segment can legally
@@ -280,7 +290,7 @@ REPLAY_IS_CAPTURE_PLATFORM = LIVE or sys.platform == CAPTURE_PLATFORM
 #: measured. The residual: a message that pairs a redacted path with an
 #: UNRELATED backslash inside the same quote-delimited region would have that
 #: one rewritten too. A string with no token at all is never touched.
-_SCRUBBED_PATH_TAIL_RE = re.compile(r"<ORACLE-ROOT-\d+>[^'\"\n]*")
+_SCRUBBED_PATH_TAIL_RE = re.compile(_ROOT_TOKEN + r"[^'\"\n]*")
 
 
 def normalise_scrubbed_path_separators(payload: Any) -> Any:

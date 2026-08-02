@@ -127,6 +127,11 @@ def replaying_on_capture_platform(monkeypatch):
         ("a literal C:\\Windows\\path in prose", "a literal C:\\Windows\\path in prose"),
         # Token present, but the backslash is BEFORE it -- outside the region.
         ("C:\\pre <ORACLE-ROOT-0>\\b", "C:\\pre <ORACLE-ROOT-0>/b"),
+        # `test_clean_parity._scrub`'s OWN spelling, which predates `scrub`.
+        # Its real frozen shape is MIXED -- forward-slash root portion, native
+        # separator on the final join -- which is why a `\`-only search would
+        # have missed that this module had the same defect.
+        ("<ROOT>/proj\\build", "<ROOT>/proj/build"),
     ],
     ids=[
         "bare-path-field",
@@ -136,6 +141,7 @@ def replaying_on_capture_platform(monkeypatch):
         "already-forward-slash",
         "no-token-untouched",
         "backslash-before-the-token-untouched",
+        "clean-parity-bare-root-token",
     ],
 )
 def test_rewrites_only_the_token_anchored_region(
