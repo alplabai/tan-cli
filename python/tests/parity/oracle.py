@@ -243,6 +243,32 @@ def missing_for_live(rust: str | None) -> bool:
     return oracle_fixtures.LIVE and rust is None
 
 
+def empty_tool_inventory(scratch: Path) -> str:
+    """A ``PATH`` value pointing at one EMPTY scratch directory -- the general
+    form of ``test_flash_oracle_parity.py``'s ``_pin_tool_inventory`` for a
+    case whose frozen fixture answer is "no such tool anywhere on PATH", not
+    "found this specific stand-in". Any ``shutil.which``/``doctor_cmd.on_path``
+    probe run against this directory alone reports every name absent,
+    matching whatever tool inventory a fixture's capture host happened to
+    lack (tan-cli#313, tan-cli#324) -- ``west`` for
+    ``test_west_forward_matches_rust`` today, and any other which()-gated
+    case's absent-tool branch tomorrow, without inventing a second
+    bespoke per-file helper for each one that comes up.
+
+    REPLACES ``PATH`` outright rather than prepending, for the identical
+    reason ``_pin_tool_inventory`` does: prepending would still let a REAL
+    tool further down the replay host's own PATH be found, which is exactly
+    the host-dependence this exists to remove. Hand the result to
+    :func:`compare`'s ``python_env_overrides`` -- e.g.
+    ``{"PATH": empty_tool_inventory(tmp_path)}`` -- never fabricate the
+    equivalent for the rust side; see that parameter's own docstring for why
+    forwarding a PATH pin to the oracle is not a safe substitute.
+    """
+    stub_dir = scratch / "empty-path"
+    stub_dir.mkdir(exist_ok=True)
+    return str(stub_dir)
+
+
 def python_command() -> list[str]:
     """The port under test. Defaults to the source tree so the harness runs
     without a packaging step; ``TAN_PYTHON_BINARY`` points it at the PyInstaller
@@ -270,7 +296,22 @@ def _env(home: Path) -> dict[str, str]:
     }
 
 
-def _run(command: list[str], argv: list[str], cwd: Path, home: Path):
+def _run(
+    command: list[str],
+    argv: list[str],
+    cwd: Path,
+    home: Path,
+    *,
+    env_overrides: dict[str, str] | None = None,
+):
+    """``env_overrides`` layers on top of :func:`_env`'s shared environment --
+    e.g. pinning ``PATH`` so a tool-presence probe INSIDE the spawned process
+    (``shutil.which``/``doctor_cmd.on_path``) cannot pick up whatever happens
+    to be installed on whichever host is replaying this suite (tan-cli#313).
+    Empty by default, so every existing caller is unaffected."""
+    env = _env(home)
+    if env_overrides:
+        env = {**env, **env_overrides}
     proc = subprocess.run(
         [*command, *argv],
         capture_output=True,
@@ -281,7 +322,7 @@ def _run(command: list[str], argv: list[str], cwd: Path, home: Path):
         encoding="utf-8",
         errors="replace",
         cwd=cwd,
-        env=_env(home),
+        env=env,
     )
     try:
         payload = json.loads(proc.stdout)
@@ -355,6 +396,7 @@ def compare(
     home: Path | None = None,
     python: list[str] | None = None,
     extra_scrub_roots: tuple[Path | str, ...] = (),
+    python_env_overrides: dict[str, str] | None = None,
 ) -> ParityResult:
     """Diff the two binaries on ``argv``, scoped to ``surface``.
 
@@ -374,12 +416,57 @@ def compare(
     cover -- e.g. a checked-in fixture file (a ``--plan-from`` plan) that
     itself embeds the path of whatever alp-sdk checkout it was captured
     against. Empty by default, so every existing caller is unaffected.
+
+    ``python_env_overrides`` (tan-cli#313) layers extra environment onto the
+    PYTHON side's subprocess ONLY, never the rust side's -- and is REFUSED
+    outright whenever ``oracle_fixtures.LIVE`` is set, rather than silently
+    applied to one side only. In frozen replay (the default, no
+    ``TAN_PARITY_LIVE``) the rust side never spawns anything at all, so
+    pinning only the python side is exactly right: the frozen fixture IS the
+    rust answer, already captured against a specific tool inventory, and the
+    python side's live PATH probe needs pinning to match it, or the
+    comparison depends on what happens to be installed on whoever runs the
+    suite. See ``test_flash_oracle_parity.py``'s ``_pin_tool_inventory``.
+
+    Under ``TAN_PARITY_LIVE=1`` both sides DO spawn, and ``_env``'s own
+    invariant applies in full ("one environment, shared by both sides --
+    the whole point is that the only difference between the two runs is the
+    implementation"): applying the pin to python alone would silently break
+    that invariant for exactly the pinned cases, and forwarding it to
+    ``rust_run`` too is NOT a safe substitute -- measured against the real
+    oracle (``target/debug/tan``), POSIX ``command_on_path``
+    (``crates/tan-cli/src/util.rs:45-50``) resolves a tool by SPAWNING
+    ``which`` as its own subprocess, which itself has to be found via the
+    (now-pinned, ``which``-free) ``PATH`` -- so a PATH replaced with only a
+    ``dd`` stand-in makes ``which`` itself unresolvable, every rust-side
+    probe report "not found" including ``dd``, and the SAME pin that makes
+    python answer "dd" makes rust answer "bmaptool" -- the opposite tool, on
+    the identical override. So under ``TAN_PARITY_LIVE=1`` this parameter
+    raises rather than comparing two binaries under two different (or two
+    subtly-broken-in-opposite-directions) environments; the caller should
+    drop the pin for a live run (both binaries then share this host's REAL
+    tool inventory, which is the whole point of a live re-validation) and
+    keep it only for frozen replay. ``None`` by default, so every existing
+    caller is unaffected.
     """
     home = home or cwd
     roots = (cwd, home, *extra_scrub_roots)
 
+    if oracle_fixtures.LIVE and python_env_overrides:
+        raise RuntimeError(
+            "compare() got python_env_overrides under TAN_PARITY_LIVE=1: both "
+            "binaries spawn for real in this mode, and pinning only the "
+            "python side's PATH breaks _env's 'one environment, shared by "
+            "both sides' invariant -- see this parameter's own docstring for "
+            "why forwarding the same pin to the rust side is not a safe fix "
+            "either (tan-cli#313). Drop python_env_overrides for a live run, "
+            "or drop TAN_PARITY_LIVE to replay the frozen fixture with it."
+        )
+
     r_code, r_out = rust_run(argv, cwd, home, scrub_roots=roots)
-    p_code, p_out = _run(python or python_command(), argv, cwd, home)
+    p_code, p_out = _run(
+        python or python_command(), argv, cwd, home, env_overrides=python_env_overrides
+    )
     p_out = oracle_fixtures.scrub(p_out, *roots)
     # Scoped to PATH_KEYS, on BOTH sides, before the diff -- see that
     # constant's own docstring. A no-op whenever the two sides already agree

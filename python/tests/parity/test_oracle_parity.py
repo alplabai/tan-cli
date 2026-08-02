@@ -39,6 +39,7 @@ from .oracle import (
     VERSION,
     _run,
     compare,
+    empty_tool_inventory,
     missing_for_live,
     narrow_plan,
     normalise_path_separators,
@@ -205,11 +206,17 @@ def test_west_forward_matches_rust(verb, work_dir, tmp_path):
     so `data.westCwd` actually goes through the workspace-walk branch (not just
     the already-posix `--project` echo) -- the branch where a bare
     `str(PathLikeObject)` re-renders with the platform separator on Windows
-    and breaks the envelope's platform-identical-path contract. Neither side
-    has a real `west` on PATH here, so both report the same launch-error
-    envelope; that error envelope still carries `data.westCommand`/`westCwd`/
-    `args`, which is exactly what a westCwd or args-capture regression would
-    move.
+    and breaks the envelope's platform-identical-path contract. The frozen
+    fixture was captured on a host with no `west` on PATH at all, so the rust
+    side's (frozen) answer is the "west not found on PATH" launch error;
+    `python_env_overrides` pins the PYTHON side's PATH to match that same
+    absence, rather than whatever this replay host happens to have installed
+    -- on any host with a PATH-resolvable `west`, working or not, the python
+    side would otherwise genuinely launch it and diverge on ITS output
+    instead of reporting the same launch error (tan-cli#324; the identical class of bug
+    `_pin_tool_inventory` fixed for the yocto_wic flash cases, tan-cli#313).
+    That error envelope still carries `data.westCommand`/`westCwd`/`args`,
+    which is exactly what a westCwd or args-capture regression would move.
     """
     (work_dir / ".west").mkdir()
     # `--format json` sits BEFORE the forwarded `--core`/`-b` flags on purpose:
@@ -232,7 +239,12 @@ def test_west_forward_matches_rust(verb, work_dir, tmp_path):
         "-b",
         "some_board",
     ]
-    result = compare(argv, cwd=work_dir, home=tmp_path / "home")
+    result = compare(
+        argv,
+        cwd=work_dir,
+        home=tmp_path / "home",
+        python_env_overrides={"PATH": empty_tool_inventory(tmp_path)},
+    )
     assert result.matches, "\n".join(result.diffs)
 
 
