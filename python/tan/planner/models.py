@@ -62,6 +62,20 @@ class SdkRevisionUnknown(OrchestratorError):
     """
 
 
+class SdkRevisionNotBuildable(OrchestratorError):
+    """The requested hw_rev exists but its declared `status:` refuses a build.
+
+    Distinct from `SdkRevisionUnknown`: that one names a revision that
+    isn't a key in its table at all.  This one names a revision that IS a
+    key -- it exists -- but is `status: reserved`, `status: tbd`, or
+    carries no `status` key at all (the maintainer's broad-reading decision
+    on alp-sdk #1025's status half).  In alp-sdk this gets its own exit code
+    in `scripts/validate_board_yaml.py`; that script has no tan counterpart
+    (see `SdkRevisionUnsupported`'s docstring), so here the subclass buys
+    `except OrchestratorError` compatibility only.
+    """
+
+
 _E1M_I2C_BUS_RE = re.compile(r"^e1m(?:_x)?_i2c([0-9]+)$")
 
 
