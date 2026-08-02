@@ -94,6 +94,7 @@ from tan import planner_emit
 from tan.commands.build_cmd import _planner_python, resolve_sdk_root_wide
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, project_pin_issue
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
+from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -412,6 +413,35 @@ def _ensure_writable(output: Path, target: str) -> None:
             f"--output path `{output}` cannot be written: {err}",
             ExitCode.WRITE_FAILURE,
         ) from err
+
+
+def _confine_default_outputs(
+    workspace_root: Path, targets: tuple[str, ...], board_dir_name: str | None
+) -> None:
+    """Refuse the WHOLE run, before any target writes, if any DEFAULT output
+    path -- i.e. `--output` was not given -- would resolve outside the
+    project after symlink resolution (tan-cli#325): a pre-existing directory
+    symlink at, say, `<project>/build` used to carry `_output_path`'s literal
+    join to wherever that symlink pointed, while the envelope still reported
+    the logical in-project path (`build/generated/alp.conf`) as written.
+
+    `--output` is exempt on purpose -- it names the caller's OWN chosen
+    destination (see the module docstring's `--output` section: CMake, not
+    tan, decides where a Zephyr build reads from), so an explicit path there
+    is honoured as typed, not treated as an accidental escape.
+    """
+    for mode in targets:
+        candidate = _output_path(workspace_root, mode, board_dir_name)
+        try:
+            resolve_confined(workspace_root, candidate)
+        except (PathEscapeError, OSError, ValueError) as err:
+            raise GenerateError(
+                "generate.write-escapes-project",
+                f"target '{mode}' would write to '{candidate}', which resolves "
+                f"outside the project root '{workspace_root}' ({err}); refusing "
+                "to generate any target for this run.",
+                ExitCode.WRITE_FAILURE,
+            ) from err
 
 
 def _overlay_would_overwrite(
@@ -912,6 +942,13 @@ def generate(
         # `som.sku` or overlay guard above was about to refuse.
         if output_override is not None:
             _ensure_writable(output_override, targets[0])
+        else:
+            # No `--output`: every target writes its DEFAULT path, which must
+            # stay confined to the project after symlink resolution
+            # (tan-cli#325). Checked for every target up front, so a run with
+            # several targets refuses before the first one writes rather than
+            # leaving an earlier target's file on disk.
+            _confine_default_outputs(workspace_root, targets, board_dir_name)
 
         # Only the spawned engine cares which interpreter PATH offers -- the
         # in-process one IS the interpreter. Probing regardless would refuse a
