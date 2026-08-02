@@ -42,6 +42,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 
+from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.timestamp import generated_at_iso
 from tan.templates import VENDORED_ROOT
 
@@ -866,22 +867,40 @@ def write_files(project_root: Path, files: list[PlannedFile]) -> WriteResult:
     needed. A file whose content already matches is skipped and counted
     `unchanged`.
 
+    Every planned target is confined to `project_root` -- after symlink
+    resolution -- BEFORE anything is written: a pre-existing symlinked (or
+    junctioned) parent directory, or a symlinked existing leaf, that would
+    carry a write outside the project refuses the WHOLE run rather than
+    writing through it and reporting the in-project logical path as written
+    (tan-cli#325). A symlinked project ROOT itself is unaffected -- see
+    `resolve_confined`.
+
     Raises `ScaffoldWriteError` carrying the partial result on the first
     failure -- an unwritable destination, a path component that is a file
-    rather than a directory, a read-only tree, a full disk. Every one of those
-    is the user's environment, not a tan bug, so none may escape as a
-    traceback.
+    rather than a directory, a read-only tree, a full disk, or the escape
+    guard above. Every one of those is the user's environment, not a tan bug,
+    so none may escape as a traceback.
     """
+    targets: list[tuple[PlannedFile, Path]] = []
+    for planned in files:
+        try:
+            target = resolve_confined(project_root, project_root / planned.relative_path)
+        except (PathEscapeError, OSError, ValueError) as err:
+            raise ScaffoldWriteError(
+                f"refusing to write '{planned.relative_path}': {err}",
+                WriteResult([], []),
+            ) from err
+        targets.append((planned, target))
+
     written: list[str] = []
     unchanged: list[str] = []
-    for planned in files:
-        path = project_root / planned.relative_path
-        if path.exists() and _existing_content(path) == planned.content:
+    for planned, target in targets:
+        if target.exists() and _existing_content(target) == planned.content:
             unchanged.append(planned.relative_path)
             continue
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            _write_verbatim(path, planned.content)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _write_verbatim(target, planned.content)
         except OSError as err:
             raise ScaffoldWriteError(str(err), WriteResult(written, unchanged)) from err
         written.append(planned.relative_path)
