@@ -11,6 +11,7 @@ from tan.core.image_bundle import (
     assemble_bundle_manifest,
     helper_artefact_rel,
     helper_entry,
+    helper_firmware_candidates,
     is_plain_relative,
     slice_archive_name,
     slice_artefact_rel,
@@ -102,3 +103,31 @@ def test_hw_info_and_boot_order_are_carried_verbatim():
     )
     assert bundle["hw_info"]["eeprom"] == {"magic": 165}
     assert bundle["boot_order"] == ["m55_hp"]
+
+
+# ------------------------------------------------ helper_firmware_candidates
+# alp-sdk#330: a helper's `firmware_path` is SDK-repository-relative
+# (`som-preset-v1.schema.json`), not build-tree-relative, so `build_root` alone
+# rejected a genuinely SDK-shipped firmware.
+
+
+def test_relative_path_tries_build_root_before_sdk_root():
+    rel = "firmware/cc3501e/prebuilt/cc3501e-v0.2.0.bin"
+    candidates = helper_firmware_candidates(rel, "/proj/build", "/sdk")
+    assert candidates == [
+        ("build root", os.path.join("/proj/build", rel)),
+        ("sdk root", os.path.join("/sdk", rel)),
+    ]
+
+
+def test_relative_path_with_no_sdk_root_only_tries_build_root():
+    rel = "gd32_bridge.bin"
+    candidates = helper_firmware_candidates(rel, "/proj/build", None)
+    assert candidates == [("build root", os.path.join("/proj/build", rel))]
+
+
+def test_absolute_path_yields_itself_alone_ignoring_both_roots():
+    absolute = os.path.join(os.sep, "opt", "firmware", "fw.bin")
+    assert helper_firmware_candidates(absolute, "/proj/build", "/sdk") == [
+        ("absolute path", absolute)
+    ]

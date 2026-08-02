@@ -54,6 +54,15 @@ def wbytes(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
+def make_sdk_root(base: Path) -> Path:
+    """A minimal alp-sdk checkout: just enough for `scripts/alp_project.py`, the
+    loader marker `resolve_project_context` checks for."""
+    sdk = base / "sdk"
+    (sdk / "scripts").mkdir(parents=True, exist_ok=True)
+    (sdk / "scripts" / "alp_project.py").write_text("# marker\n", encoding="utf-8")
+    return sdk
+
+
 # ---------------------------------------------------------------- happy paths
 
 
@@ -194,6 +203,125 @@ def test_re_running_a_read_only_helper_copy_still_succeeds(tmp_path):
     )
     assert run_cli(tmp_path, "--format", "json", "--build-root", "br").returncode == 0
     assert run_cli(tmp_path, "--format", "json", "--build-root", "br").returncode == 0
+
+
+# ------------------------------------------------- alp-sdk#330: --sdk-root resolution
+
+
+def test_sdk_relative_helper_firmware_resolves_against_sdk_root(tmp_path):
+    # The real fixture shape from alp-sdk#330: cc3501e_otp's firmware_path is
+    # repository-relative per som-preset-v1.schema.json, and the SDK genuinely
+    # ships the file -- but not under this project's build/.
+    sdk = make_sdk_root(tmp_path)
+    wbytes(
+        sdk / "firmware" / "cc3501e" / "prebuilt" / "cc3501e-v0.2.0.bin",
+        b"CC3501E-FIRMWARE",
+    )
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
+        "- name: cc3501e_otp\n  chip: cc3501e\n"
+        "  firmware_path: firmware/cc3501e/prebuilt/cc3501e-v0.2.0.bin\n"
+        "boot_order: []\n",
+    )
+    result = run_cli(
+        tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", str(sdk)
+    )
+    assert result.returncode == 0
+    doc = envelope(result)
+    assert doc["ok"] is True
+    helpers = doc["data"]["helper_mcus"]
+    assert len(helpers) == 1
+    assert helpers[0]["name"] == "cc3501e_otp"
+    assert helpers[0]["chip"] == "cc3501e"
+    assert helpers[0]["artefact"] == "helper-mcus/cc3501e-v0.2.0.bin"
+    assert helpers[0]["sha256"] == hashlib.sha256(b"CC3501E-FIRMWARE").hexdigest()
+    assert doc["issues"] == []
+
+
+def test_a_genuinely_absent_helper_firmware_still_refuses_and_names_every_root_tried(
+    tmp_path,
+):
+    sdk = make_sdk_root(tmp_path)
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
+        "- name: cc3501e_otp\n  chip: cc3501e\n"
+        "  firmware_path: firmware/cc3501e/prebuilt/cc3501e-v0.2.0.bin\n"
+        "boot_order: []\n",
+    )
+    result = run_cli(
+        tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", str(sdk)
+    )
+    assert result.returncode == 1
+    doc = envelope(result)
+    assert doc["ok"] is False
+    issue = doc["issues"][0]
+    assert issue["code"] == "image.helper-missing"
+    message = issue["message"]
+    # The old message named only the raw relative string; a reporter had to go
+    # find the file by hand to prove it existed. Now every root tried, and the
+    # absolute path each one produced, is in the message.
+    assert "build root" in message
+    assert "sdk root" in message
+    # Both candidate absolute paths end in the same relative artefact string --
+    # the one at the raw manifest path, plus one per root tried.
+    assert message.count("cc3501e-v0.2.0.bin") >= 3
+
+
+def test_absolute_helper_firmware_path_resolves_directly_unchanged(tmp_path):
+    outside = tmp_path / "outside" / "fw.bin"
+    wbytes(outside, b"OUTSIDE-FW")
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
+        f"- name: h\n  chip: c\n  firmware_path: {json.dumps(str(outside))}\n"
+        "boot_order: []\n",
+    )
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br")
+    assert result.returncode == 0
+    doc = envelope(result)
+    helper = doc["data"]["helper_mcus"][0]
+    assert helper["sha256"] == hashlib.sha256(b"OUTSIDE-FW").hexdigest()
+
+
+def test_build_produced_helper_artefact_still_resolves_when_sdk_root_is_also_given(
+    tmp_path,
+):
+    # --sdk-root must not regress the already-working case: a helper artefact
+    # this build itself produced, absent from the sdk root entirely.
+    sdk = make_sdk_root(tmp_path)
+    wbytes(tmp_path / "br" / "gd32_bridge.bin", b"BRIDGEFW")
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
+        "- name: gd32_bridge\n  chip: gd32g553\n  firmware_path: gd32_bridge.bin\n"
+        "boot_order: []\n",
+    )
+    result = run_cli(
+        tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", str(sdk)
+    )
+    assert result.returncode == 0
+    helper = envelope(result)["data"]["helper_mcus"][0]
+    assert helper["sha256"] == hashlib.sha256(b"BRIDGEFW").hexdigest()
+
+
+def test_build_root_wins_the_precedence_when_both_roots_have_the_file(tmp_path):
+    # The deliberate precedence: build_root first, sdk_root as fallback -- an
+    # artefact THIS run built wins over a same-named file the SDK ships.
+    sdk = make_sdk_root(tmp_path)
+    wbytes(sdk / "fw.bin", b"SDK-COPY")
+    wbytes(tmp_path / "br" / "fw.bin", b"BUILD-COPY")
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info: {}\nslices: []\nhelper_mcus:\n"
+        "- name: h\n  chip: c\n  firmware_path: fw.bin\nboot_order: []\n",
+    )
+    result = run_cli(
+        tmp_path, "--format", "json", "--build-root", "br", "--sdk-root", str(sdk)
+    )
+    helper = envelope(result)["data"]["helper_mcus"][0]
+    assert helper["sha256"] == hashlib.sha256(b"BUILD-COPY").hexdigest()
 
 
 # ------------------------------------------------------------ notice paths
