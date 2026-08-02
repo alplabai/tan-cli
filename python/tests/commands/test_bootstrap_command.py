@@ -1140,6 +1140,92 @@ def test_plannedcommands_appears_only_under_dry_run(tmp_path):
     assert "plannedCommands" not in normal["data"]
 
 
+def test_a_dry_run_moves_nothing_and_never_writes_the_global_default_pointer(tmp_path):
+    """tan-cli#323 (release blocker): the dirty-parent auto-relocation
+    (tan-cli#302) used to read `--dry-run` as decoration -- it moved the
+    checkout with `os.rename` and repointed `~/.alp/sdk-default` exactly as a
+    real run does, then reported the move in the PAST tense, so a preview run
+    looked identical to one that had actually happened. Same fixture as
+    `test_the_workspace_parent_guard_relocates_into_alp_workspace_
+    automatically` (an `unrelated.txt` beside the checkout, so the parent
+    guard actually fires and a relocation is actually planned) with
+    `--dry-run` added: the checkout must stay exactly where it started,
+    `alp-workspace/` must never be created on disk, and the pointer file must
+    never be written -- a flag whose entire purpose is "show me, don't do it"
+    must not do it.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    target = sdk.parent / "alp-workspace"
+    new_sdk = target / sdk.name
+
+    env = envelope(
+        run_tan(
+            "bootstrap", "--dry-run", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
+        )
+    )
+    assert env["exitCode"] == 0
+    codes_seen = codes(env)
+    assert "bootstrap.workspace-relocated" in codes_seen
+    message = next(
+        i["message"] for i in env["issues"] if i["code"] == "bootstrap.workspace-relocated"
+    )
+    # Conditional tense: the relocation this describes has NOT happened yet.
+    assert "would move" in message
+    assert "would set" in message
+    assert "moved the alp-sdk" not in message
+
+    # Nothing on disk moved: the source is untouched, the planned destination
+    # was never created, and the pre-existing sibling is undisturbed.
+    assert sdk.exists()
+    assert (sdk / "scripts" / "alp_project.py").is_file()
+    assert not target.exists()
+    assert sorted(p.name for p in sdk.parent.iterdir()) == ["alp-sdk", "unrelated.txt"]
+
+    # The global default SDK pointer was never written.
+    pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
+    assert not pointer.exists()
+
+    # `data.sdkRoot`/`data.workspaceDir` still report the PLANNED destination
+    # (tan-cli#323's own requirement) -- a preview that reports nothing useful
+    # is not a fix, only a quieter version of the bug.
+    assert env["data"]["sdkRoot"] == bootstrap_cmd._native(str(new_sdk))
+    assert env["data"]["workspaceDir"] == bootstrap_cmd._native(str(target))
+
+
+def test_doctor_and_bootstrap_resolve_the_same_root_on_the_quickstart_layout(tmp_path):
+    """tan-cli#322: on the documented quickstart layout -- `tan.exe` and a
+    freshly cloned `alp-sdk/` side by side, no `--sdk-root` -- `doctor` used
+    to resolve the checkout (`tier: discovery`, via `resolve_sdk_root_ladder`'s
+    fallback to the wide positional walk, which checks the CHILD `<cwd>/alp-
+    sdk`) while `bootstrap` called the narrower `resolve_sdk_tiered` directly,
+    which has no candidate for a child at all -- so it refused with
+    `sdk-root-unresolved` and told the user to clone a checkout sitting right
+    there. `make_sdk`'s own layout (`root/ws/alp-sdk`, with `root/ws` -- the
+    cwd here -- holding nothing else) already IS that layout, so no extra
+    fixture setup is needed to reproduce it. Both commands now route through
+    `resolve_sdk_root_ladder`, so they must resolve identically."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+
+    doctor_env = envelope(run_tan("doctor", "--format", "json", cwd=sdk.parent))
+    assert doctor_env["sdk"]["sourceTier"] == "discovery"
+
+    bootstrap_env = envelope(
+        run_tan(
+            "bootstrap", "--dry-run", "--no-west", "--no-pip", "--format", "json",
+            cwd=sdk.parent,
+        )
+    )
+    assert bootstrap_env["exitCode"] == 0
+    assert "bootstrap.sdk-root-unresolved" not in codes(bootstrap_env)
+    assert bootstrap_env["sdk"]["sourceTier"] == "discovery"
+    # The load-bearing assertion: the SAME checkout, reported identically by
+    # both commands from the identical cwd.
+    assert bootstrap_env["sdk"]["root"] == doctor_env["sdk"]["root"]
+    assert bootstrap_env["sdk"]["root"] == str(sdk).replace("\\", "/")
+
+
 # ---------------------------------------------------------------------------
 # Hostile inputs. None may produce a traceback or an empty stdout.
 # ---------------------------------------------------------------------------
