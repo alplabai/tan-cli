@@ -23,6 +23,13 @@ def _venv_parts() -> tuple[str, str]:
     return ("Scripts", "west.exe") if os.name == "nt" else ("bin", "west")
 
 
+def _plant_west_capable_venv(venv_dir: Path) -> None:
+    bin_dir, west_exe = _venv_parts()
+    bin_path = venv_dir / bin_dir
+    bin_path.mkdir(parents=True)
+    (bin_path / west_exe).write_text("", encoding="utf-8")
+
+
 def test_find_workspace_venv_accepts_the_non_host_layout(tmp_path, monkeypatch):
     """tan-cli#291: bootstrap creation accepts EITHER layout by directory
     presence (`bootstrap_cmd.Workspace.venv_bin`'s directory-wins probe), not
@@ -51,6 +58,86 @@ def test_find_workspace_venv_accepts_the_non_host_layout(tmp_path, monkeypatch):
     assert find_workspace_venv(str(tmp_path), None) == tmp_path / ".venv"
     assert venv_bin_dir(str(tmp_path), None) == venv_bin
     assert west_program(str(tmp_path), None) == str(venv_bin / other_exe)
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#292 consequence 2: `$ZEPHYR_BASE` must not outrank an explicit/
+# resolved `--sdk-root` -- mirrors the manifest guard `_zephyr_base_workspace`
+# already applies to the topdir search (tan-cli#61).
+# ---------------------------------------------------------------------------
+
+
+def test_find_workspace_venv_refuses_a_manifest_mismatched_zephyr_base_venv_when_sdk_root_is_known(
+    tmp_path, monkeypatch
+):
+    """Reproduces tan-cli#292 consequence 2 against the published v0.5.0-rc2
+    shape (tan-cli#278's comment): an ordinary upstream `west init` workspace
+    -- its OWN manifest, not alp-sdk's -- sitting behind a stale exported
+    `$ZEPHYR_BASE`. Before this fix, step 2 accepted that venv unconditionally
+    and the canonical SDK-derived venv (step 3) was never reached even though
+    `sdk_root` was known.
+    """
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    foreign = tmp_path / "foreign-zephyrproject"
+    foreign_zephyr = foreign / "zephyr"
+    foreign_zephyr.mkdir(parents=True)
+    (foreign / ".west").mkdir()
+    # A real, but UNRELATED, manifest -- points `path` at a sibling that is
+    # not the SDK under test at all.
+    (foreign / ".west" / "config").write_text("[manifest]\npath = zephyr\n", encoding="utf-8")
+    _plant_west_capable_venv(foreign / ".venv")
+    monkeypatch.setenv("ZEPHYR_BASE", str(foreign_zephyr))
+
+    sdk = tmp_path / "ws" / "alp-sdk"
+    sdk.mkdir(parents=True)
+    _plant_west_capable_venv(tmp_path / "ws" / ".venv")
+
+    start = tmp_path / "elsewhere"
+    start.mkdir()
+
+    assert find_workspace_venv(str(start), str(sdk)) == tmp_path / "ws" / ".venv"
+
+
+def test_find_workspace_venv_still_resolves_a_manifest_matching_zephyr_base_venv(
+    tmp_path, monkeypatch
+):
+    """The guard must not be a blanket refusal: an ACTIVATED workspace whose
+    manifest really is the resolved SDK's still resolves via `$ZEPHYR_BASE`,
+    exactly as before -- the common case (`source ... && tan build`)."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    workspace = tmp_path / "ws"
+    zephyr = workspace / "zephyr"
+    zephyr.mkdir(parents=True)
+    sdk = workspace / "alp-sdk"
+    sdk.mkdir()
+    (workspace / ".west").mkdir()
+    (workspace / ".west" / "config").write_text("[manifest]\npath = alp-sdk\n", encoding="utf-8")
+    _plant_west_capable_venv(workspace / ".venv")
+    monkeypatch.setenv("ZEPHYR_BASE", str(zephyr))
+
+    start = tmp_path / "elsewhere"
+    start.mkdir()
+
+    assert find_workspace_venv(str(start), str(sdk)) == workspace / ".venv"
+
+
+def test_find_workspace_venv_zephyr_base_venv_wins_unconditionally_when_sdk_root_is_unresolved(
+    tmp_path, monkeypatch
+):
+    """No `sdk_root` means nothing to verify the `$ZEPHYR_BASE` workspace's
+    manifest against -- the OLD unconditional accept stands, matching
+    `_zephyr_base_workspace`'s own "nothing to verify against" fallback."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    foreign = tmp_path / "foreign-zephyrproject"
+    zephyr = foreign / "zephyr"
+    zephyr.mkdir(parents=True)
+    _plant_west_capable_venv(foreign / ".venv")
+    monkeypatch.setenv("ZEPHYR_BASE", str(zephyr))
+
+    start = tmp_path / "elsewhere"
+    start.mkdir()
+
+    assert find_workspace_venv(str(start), None) == foreign / ".venv"
 
 
 def test_tool_in_venv_resolves_only_files_that_exist(tmp_path):

@@ -22,6 +22,7 @@ byte-identical; the four that did not are each pinned here with the reason:
 The install steps are exercised through `--dry-run`, which records the argv it
 WOULD have spawned; `test_a_dry_run_writes_nothing` is what keeps that honest.
 """
+import hashlib
 import json
 import os
 import subprocess
@@ -54,6 +55,7 @@ from tan.core.bootstrap import (
     WINDOWS,
     BootstrapManifestError,
     Tokens,
+    WorkspaceSdkRecord,
     capture_tail,
     completion_verdict,
     decide_workspace_reuse,
@@ -68,6 +70,7 @@ from tan.core.bootstrap import (
     parent_needs_workspace_guard,
     parse_bootstrap_manifest,
     parse_west_zephyr_pin,
+    parse_workspace_sdk_record,
     parse_zephyr_version_file,
     posix_refusal,
     posix_venv_unusable,
@@ -81,6 +84,7 @@ from tan.core.bootstrap import (
     set_manifest_path,
     windows_python_not_runnable,
     windows_refusal,
+    workspace_sdk_record_json,
     yocto_gate,
     zephyr_requirements_hint,
 )
@@ -332,6 +336,29 @@ def test_the_skew_warning_matches_doctors_pythonfloor_check_on_both_numbers():
     # Agreeing floors raise nothing on either side.
     assert python_floor_skew_warning((3, 12), (3, 12), "x") is None
     assert doctor_cmd.python_floor_skew_check((3, 12), (3, 12), "x") is None
+
+
+def test_neither_side_tells_the_user_to_raise_the_manifest_floor():
+    """tan-cli#300. Raising `prerequisites.pythonMinVersion` was tried and
+    REVERTED (alp-sdk#1078): the key is host-universal while this floor is
+    Zephyr's, so raising it refuses a 3.10/3.11 host for a Yocto-only project
+    that builds today.
+
+    This is asserted because nothing asserted it before, which is exactly why
+    the advice shipped in v0.5.0-rc2 -- and why it shipped on the path that
+    matters most: `bootstrap` emits this WHILE REFUSING, so it is the last line
+    a blocked user reads.
+    """
+    _, message = python_floor_skew_warning((3, 10), (3, 12), "zephyr python.cmake")
+    check = doctor_cmd.python_floor_skew_check((3, 10), (3, 12), "zephyr python.cmake")
+
+    # `doctor` splits its prose across `detail` and `fix`; `bootstrap` has one
+    # string. Read whatever the user actually sees, not one field of it.
+    doctor_text = f"{check.detail} {check.fix or ''}"
+
+    for text, where in ((message, "bootstrap"), (doctor_text, "doctor")):
+        assert "Raise `prerequisites.pythonMinVersion`" not in text, where
+        assert "alp-sdk#1078" in text, where
 
 
 def test_the_skew_warning_reaches_the_wire_even_on_a_successful_run(tmp_path):
@@ -643,13 +670,63 @@ def test_workspace_is_validated_before_anything_touches_the_disk(value, fragment
         resolve_workspace_target(value, os.getcwd())
 
 
-def test_the_workspace_parent_guard_refuses_and_leaves_nothing_on_disk(tmp_path):
-    """`west init -l` forces the topdir to be the checkout's PARENT, so a clone
-    into `~/Downloads` sprays zephyr/modules/.west/venv there where no
-    `.gitignore` can reach it."""
-    sdk = make_sdk(tmp_path)
+def test_the_workspace_parent_guard_relocates_into_alp_workspace_automatically(tmp_path):
+    """tan-cli#302: the documented quickstart -- download `tan.exe`, clone
+    `alp-sdk` beside it, run `tan bootstrap` -- makes tan's OWN binary the
+    "other content" that used to trip this guard, turning the FIRST command in
+    the product into a refusal for following the install instructions
+    literally. The refusal even NAMED `<parent>/alp-workspace` as the fix
+    (`default_relocation_target`'s own choice); this proves tan now performs
+    that move itself, saying so plainly, rather than asking for it back."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
     (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
-    before = sorted(p.name for p in sdk.parent.iterdir())
+    target = sdk.parent / "alp-workspace"
+    new_sdk = target / sdk.name
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0
+    codes_seen = codes(env)
+    assert "bootstrap.workspace-guard" not in codes_seen
+    assert "bootstrap.workspace-relocated" in codes_seen
+    message = next(i["message"] for i in env["issues"] if i["code"] == "bootstrap.workspace-relocated")
+    assert bootstrap_cmd._native(str(sdk)) in message
+    assert bootstrap_cmd._native(str(new_sdk)) in message
+    # The checkout really moved: gone from the old location, present (with its
+    # own content) at the new one; `unrelated.txt` is untouched, still the
+    # only other thing in the original parent.
+    assert not sdk.exists()
+    assert (new_sdk / "scripts" / "alp_project.py").is_file()
+    assert (sdk.parent / "unrelated.txt").exists()
+    assert sorted(p.name for p in sdk.parent.iterdir()) == ["alp-workspace", "unrelated.txt"]
+    # The envelope's own paths agree with where the checkout actually ended up
+    # (tan-cli#284's review majors, re-applying to the auto-relocated case).
+    assert env["data"]["sdkRoot"] == bootstrap_cmd._native(str(new_sdk))
+    assert env["data"]["workspaceDir"] == bootstrap_cmd._native(str(target))
+    # tan-cli#185 (shared with the explicit `--workspace` path): the global
+    # default SDK now points at the new location.
+    pointer = tmp_path / "fake-home" / ".alp" / "sdk-default"
+    assert pointer.exists()
+    assert json.loads(pointer.read_text(encoding="utf-8"))["sdkPath"] == str(new_sdk)
+
+
+def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_path):
+    """tan-cli#302 non-negotiable: auto-relocating into
+    `default_relocation_target`'s own `alp-workspace` choice is safe only into
+    an EMPTY (or absent) directory -- silently writing into one that already
+    holds something would be the exact "wrote into a directory without asking"
+    hazard the parent guard exists to prevent, one level down. The realistic
+    trigger is a previous attempt's partial venv, left behind by
+    `rollback_relocation_after` on a retry (its own docstring: "left on disk...
+    delete it by hand if you do not want it"); reproduced directly here rather
+    than via a real failing venv."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    target = sdk.parent / "alp-workspace"
+    (target / "leftover").mkdir(parents=True)
 
     proc = run_tan(
         "bootstrap", "--no-west", "--no-pip", "--format", "json",
@@ -659,11 +736,14 @@ def test_the_workspace_parent_guard_refuses_and_leaves_nothing_on_disk(tmp_path)
     assert proc.returncode == 2
     assert codes(env) == ["bootstrap.workspace-guard"]
     message = env["issues"][0]["message"]
-    # Names BOTH remedies: this refusal is inherited by `tan build` and `tan
-    # doctor --build --fix`, neither of which has a `--workspace` of its own.
+    assert "already exists" in message
+    assert bootstrap_cmd._native(str(target)) in message
     assert "tan bootstrap --workspace <path>" in message
-    assert "dedicated directory" in message
-    assert sorted(p.name for p in sdk.parent.iterdir()) == before
+    # Nothing was moved: the checkout is exactly where it started, and the
+    # pre-existing `alp-workspace/leftover` was not written into.
+    assert sdk.exists()
+    assert (target / "leftover").is_dir()
+    assert not (target / sdk.name).exists()
     # tan-cli#284: the stale "re-run interactively" advice is gone -- this
     # port never prompts, on any run, TTY or not.
     assert "interactively" not in message
@@ -764,10 +844,21 @@ def test_the_enclosing_west_guard_does_not_fire_when_the_topdir_reuses_its_own_w
 
     `--dry-run`, not `--no-west`: this keeps the rest of the run hermetic
     (nothing spawned) while still exercising the guard exactly as a real run
-    would reach it -- the guard itself does not consult `dry_run`."""
+    would reach it -- the guard itself does not consult `dry_run`.
+
+    The topdir's own `.west` carries a `config` (not just a bare directory):
+    since tan-cli#302, a bare `.west` with no `config` is NOT `dot_west_is_
+    workspace` to the parent guard (`default_relocation_target`), so it reads
+    as ordinary dirty content and the guard would auto-relocate the checkout
+    one directory deeper -- a different scenario from the one under test
+    here, which is specifically the reuse path leaving `intended_topdir`
+    unmoved."""
     sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
     (tmp_path / ".west").mkdir()  # an ancestor of sdk.parent (the topdir)
     (sdk.parent / ".west").mkdir()  # the topdir's OWN -- triggers reuse, not init
+    (sdk.parent / ".west" / "config").write_text(
+        "[manifest]\npath = alp-sdk\n", encoding="utf-8"
+    )
 
     proc = run_tan(
         "bootstrap", "--dry-run", "--format", "json",
@@ -1459,6 +1550,138 @@ def test_an_unreadable_west_config_is_a_failure_never_a_silent_no_op(tmp_path):
     assert outcome == "failed" and detail
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#292: the `<topdir>/.west/tan-workspace-sdk` record, extended with
+# venv provenance -- `workspace_sdk_record_json`/`parse_workspace_sdk_record`.
+# ---------------------------------------------------------------------------
+
+
+def test_workspace_sdk_record_round_trips_the_full_provenance_stamp():
+    text = workspace_sdk_record_json(
+        "/ws/alp-sdk", venv_dir_name=".venv", venv_layout="bin", requirements_digest="ab" * 32
+    )
+    assert '"sdkPath": "/ws/alp-sdk"' in text
+    assert '"venvDir": ".venv"' in text
+    assert '"venvLayout": "bin"' in text
+    assert f'"requirementsDigest": "{"ab" * 32}"' in text
+
+    record = parse_workspace_sdk_record(text)
+    assert record == WorkspaceSdkRecord(
+        sdk_path="/ws/alp-sdk",
+        venv_dir_name=".venv",
+        venv_layout="bin",
+        requirements_digest="ab" * 32,
+    )
+
+
+def test_workspace_sdk_record_omits_absent_provenance_fields_rather_than_writing_null():
+    """A caller with nothing to report (no venv, a hash it could not compute)
+    omits the key -- mirrors `Check.as_dict`'s `skip_serializing_if`, and
+    keeps a record written by an older tan indistinguishable from one whose
+    caller simply had nothing new to say."""
+    text = workspace_sdk_record_json("/ws/alp-sdk")
+    assert "venvDir" not in text
+    assert "venvLayout" not in text
+    assert "requirementsDigest" not in text
+    assert parse_workspace_sdk_record(text) == WorkspaceSdkRecord(sdk_path="/ws/alp-sdk")
+
+
+def test_parse_workspace_sdk_record_reads_a_pre_292_two_field_record():
+    """A record written before tan-cli#292 (`sdkPath` + `updatedAt` only,
+    `tan.core.scaffold.sdk_pointer_json`'s shape) must still parse -- the
+    provenance fields are simply absent, not a parse failure."""
+    legacy = '{\n  "sdkPath": "/ws/alp-sdk",\n  "updatedAt": "2026-01-01T00:00:00Z"\n}\n'
+    assert parse_workspace_sdk_record(legacy) == WorkspaceSdkRecord(sdk_path="/ws/alp-sdk")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not json at all",
+        "[]",
+        "42",
+        '{"updatedAt": "2026-01-01T00:00:00Z"}',  # no sdkPath
+        '{"sdkPath": 7}',  # wrong type
+        '{"sdkPath": ""}',  # empty
+    ],
+)
+def test_parse_workspace_sdk_record_returns_none_for_anything_unusable(text):
+    """Unreadable is `None`, the SAME as no record at all -- never a mismatch
+    WARNING against a checkout `doctor` cannot even name."""
+    assert parse_workspace_sdk_record(text) is None
+
+
+def test_record_workspace_sdk_writes_the_full_venv_provenance_stamp(tmp_path):
+    """`bootstrap_cmd.record_workspace_sdk` -- the IO wrapper around
+    `workspace_sdk_record_json` -- hashes the requirements file it is handed
+    and writes every field, given all of them."""
+    topdir = tmp_path / "ws"
+    topdir.mkdir()
+    requirements = topdir / "zephyr" / "scripts" / "requirements-base.txt"
+    requirements.parent.mkdir(parents=True)
+    # `newline=""`: a hash is of RAW BYTES, and `write_text`'s platform
+    # newline translation (`\n` -> `\r\n` on Windows) would otherwise make
+    # the fixture's on-disk bytes -- and so its hash -- host-dependent.
+    requirements.write_text("west>=0.14.0\n", encoding="utf-8", newline="")
+
+    bootstrap_cmd.record_workspace_sdk(
+        topdir,
+        str(topdir / "alp-sdk"),
+        venv_dir_name=".venv",
+        venv_layout="bin",
+        requirements_path=requirements,
+    )
+
+    record = parse_workspace_sdk_record(
+        (topdir / ".west" / "tan-workspace-sdk").read_text(encoding="utf-8")
+    )
+    assert record.sdk_path == str(topdir / "alp-sdk")
+    assert record.venv_dir_name == ".venv"
+    assert record.venv_layout == "bin"
+    assert record.requirements_digest == hashlib.sha256(b"west>=0.14.0\n").hexdigest()
+
+
+def test_record_workspace_sdk_omits_the_digest_when_the_requirements_file_is_unreadable(
+    tmp_path,
+):
+    """A caller can hand `record_workspace_sdk` a path that (yet) does not
+    exist -- e.g. `--no-pip`, or a Zephyr module that never shipped a
+    requirements file at that path -- and the sdkPath half of the record must
+    still be written; the digest is simply absent, never a fabricated one."""
+    topdir = tmp_path / "ws"
+    topdir.mkdir()
+
+    bootstrap_cmd.record_workspace_sdk(
+        topdir,
+        str(topdir / "alp-sdk"),
+        venv_dir_name=".venv",
+        venv_layout="bin",
+        requirements_path=topdir / "zephyr" / "does-not-exist.txt",
+    )
+
+    record = parse_workspace_sdk_record(
+        (topdir / ".west" / "tan-workspace-sdk").read_text(encoding="utf-8")
+    )
+    assert record.sdk_path == str(topdir / "alp-sdk")
+    assert record.requirements_digest is None
+
+
+def test_record_workspace_sdk_still_writes_the_bare_record_with_no_venv_args(tmp_path):
+    """Backward-compatible call shape: a caller passing only `(topdir,
+    sdk_root)` -- there is none left in this tree, but the signature must not
+    force every future one to compute a hash it may not have -- still writes
+    a usable record."""
+    topdir = tmp_path / "ws"
+    topdir.mkdir()
+
+    bootstrap_cmd.record_workspace_sdk(topdir, str(topdir / "alp-sdk"))
+
+    record = parse_workspace_sdk_record(
+        (topdir / ".west" / "tan-workspace-sdk").read_text(encoding="utf-8")
+    )
+    assert record == WorkspaceSdkRecord(sdk_path=str(topdir / "alp-sdk"))
+
+
 def test_the_printed_blocks_keep_their_load_bearing_whitespace():
     """Copy-pasteable shell snippets: no `bootstrap: ` prefix, and POSIX quotes a
     value only when it contains `/`."""
@@ -1573,6 +1796,34 @@ def test_die_appends_a_detail_only_when_there_is_one():
     assert die("west update failed", "fatal: not a git repo") == (
         "west update failed: fatal: not a git repo"
     )
+
+
+def test_force_git_long_paths_env_is_the_documented_override_triple():
+    assert bootstrap_cmd.FORCE_GIT_LONG_PATHS_ENV == {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.longpaths",
+        "GIT_CONFIG_VALUE_0": "true",
+    }
+
+
+def test_runner_run_extra_env_reaches_the_real_child_process():
+    """tan-cli#306: `west_phase` passes `FORCE_GIT_LONG_PATHS_ENV` as
+    `extra_env` on the `west update` call specifically so every nested `git`
+    subprocess it spawns inherits it. This proves the PLUMBING with a real
+    child process (not just that the dict is correct) -- a subprocess that
+    checks its OWN environment for the override and exits 0 only if it is
+    there, so a `Runner.run` that dropped `extra_env` on the floor would fail
+    here rather than only in a real `west update`."""
+    runner = bootstrap_cmd.Runner(json=True)
+    probe = [
+        sys.executable,
+        "-c",
+        "import os, sys; sys.exit(0 if os.environ.get('TAN_TEST_LONGPATHS') == 'yes' else 1)",
+    ]
+    assert runner.run(probe, extra_env={"TAN_TEST_LONGPATHS": "yes"}) is None
+    # Without it, the same probe must fail -- otherwise this test would pass
+    # for the wrong reason (the variable already being set some other way).
+    assert runner.run(probe) is not None
 
 
 def test_the_no_pyyaml_board_scan_reads_cores_in_both_forms():

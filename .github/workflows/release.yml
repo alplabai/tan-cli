@@ -96,7 +96,9 @@
 #   TAN_MAX_ARTIFACT_BYTES_MUSL=18000000 (musl links libc statically and runs
 #   larger; not published here, see the Linux section above) — and prints
 #   what it measured. The TIGHTEST measurement to date is the Windows freeze
-#   at 13717947 B — about 2.8 MB of headroom against the DEFAULT ceiling — so
+#   at 14047624 B (tan-cli#304 added `truststore` + `certifi`'s bundled
+#   `cacert.pem` — a prior measurement of 13717947 B predates both) — about
+#   2.3 MB of headroom against the DEFAULT ceiling — so
 #   the next runtime dependency added to python/pyproject.toml is plausibly
 #   the one that trips it, under a tag. (build_binary.sh and
 #   tests/conformance/test_packaged_binary.py both source/parse this one file

@@ -73,6 +73,49 @@ def test_west_workspace_dir_falls_back_to_sdk_parent(tmp_path):
     assert _west_workspace_dir(str(lonely), sdk_root) == tmp_path
 
 
+def test_west_workspace_dir_skips_an_ancestor_whose_manifest_does_not_match(tmp_path):
+    """tan-cli#307: an ancestor `.west` ABOVE the project -- a second Zephyr
+    checkout, a vendor SDK, an old workspace -- is a real west workspace by
+    the bare-directory test alone, but must not shadow the workspace `tan
+    bootstrap` actually created purely because it sits closer to `start`.
+    Mirrors `test_venv.py`'s `test_find_workspace_venv_refuses_a_manifest_
+    mismatched_zephyr_base_venv_when_sdk_root_is_known`, now applied to the
+    plain upward walk instead of the `$ZEPHYR_BASE` candidate -- the exact
+    scenario a maintainer's dirty-host e2e reproduced: an ancestor `.west`
+    whose manifest names `unrelated`, with the real workspace a SIBLING, not
+    an ancestor, of the project (so only the sdk-derived fallback below can
+    ever find it)."""
+    ancestor = tmp_path / "dirty"
+    (ancestor / ".west").mkdir(parents=True)
+    (ancestor / ".west" / "config").write_text("[manifest]\npath = unrelated\n", encoding="utf-8")
+
+    real_ws = tmp_path / "dirty-ws"
+    sdk_root = real_ws / "alp-sdk"
+    sdk_root.mkdir(parents=True)
+    (real_ws / ".west").mkdir()
+    (real_ws / ".west" / "config").write_text("[manifest]\npath = alp-sdk\n", encoding="utf-8")
+
+    project = ancestor / "work" / "proj"
+    project.mkdir(parents=True)
+
+    assert _west_workspace_dir(str(project), sdk_root) == real_ws
+
+
+def test_west_workspace_dir_still_accepts_an_unverified_ancestor_with_no_sdk_root(tmp_path):
+    """`sdk_root=None` means nothing to verify a candidate's manifest
+    against -- the plain upward walk's old unconditional accept stands here
+    too, matching every other candidate's own "nothing to check" fallback
+    (`test_west_workspace_dir_walks_up_from_start` above already covers a
+    `.west` with no `config` at all; this covers one with a real but
+    unrelated manifest, which is the shape tan-cli#307 actually hit)."""
+    top = tmp_path / "ws"
+    (top / ".west").mkdir(parents=True)
+    (top / ".west" / "config").write_text("[manifest]\npath = unrelated\n", encoding="utf-8")
+    nested = top / "app" / "sub"
+    nested.mkdir(parents=True)
+    assert _west_workspace_dir(str(nested), None) == top
+
+
 # --- CLI-level forwarding, west spawn stubbed --------------------------------
 
 

@@ -5,6 +5,116 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.5.0-rc3] — 2026-08-01
+
+*Found by running the published `v0.5.0-rc2` binary end to end on a real
+Windows host -- fresh and dirty -- rather than testing the source or trusting a
+green CI run on a clean runner. Every defect below was invisible to both.*
+
+### Fixed
+
+- **`tan doctor` exited 4 on every fresh install.** `tan bootstrap` succeeds and
+  deliberately leaves `west` off PATH (its own next-steps block says to activate
+  the venv afterwards), so "west in the venv, absent from PATH" is not an edge
+  case -- it is the guaranteed post-bootstrap state, and the same state a
+  GUI-launched VS Code is always in. `west`'s Fail claimed "every build slice is
+  executed through it", which the build log disproved in the same workspace:
+  west resolved from the venv and the build produced a real ARM ELF while
+  `doctor` called the host broken (#299).
+- **`westResolved` now FAILS when west resolves nowhere.** Splitting the pair
+  above exposed that its Warn had rested on `west` failing first, so with both
+  warning a host where NO slice could run exited **0**. `west` answers "is it on
+  bare PATH" and is never fatal; `westResolved` answers "can a slice run at all"
+  and owns the exit code. Caught by the e2e, not by the tests.
+- **`doctor` and `bootstrap` stopped telling users to raise
+  `prerequisites.pythonMinVersion`** -- the change alp-sdk#1078 tried and
+  reverted, because that key is host-universal while the floor is Zephyr's, so
+  raising it refuses a 3.10/3.11 host for a Yocto-only project that builds
+  today. `bootstrap` emitted it *while refusing*, making it the last line a
+  blocked user read (#300).
+- **The `sdk` check names the tier it resolved through**, and a cwd checkout it
+  did not select, so a report describing a different SDK than the one you are
+  standing in is no longer indistinguishable from a wrong answer. Comparison is
+  `normcase`d -- without it, the same directory in different case reported
+  itself as unselected (#301).
+- **The macOS release asset shipped with no CA trust anchors at all.** A
+  PyInstaller freeze bundles its own `ssl` but no CA bundle and does not fall
+  back to the platform trust store, so every `urllib` HTTPS call in `sdk list
+  --online` failed `CERTIFICATE_VERIFY_FAILED` on the published
+  `tan-aarch64-apple-darwin` v0.5.0-rc2 asset -- measured on real macOS arm64
+  hardware, where `curl`, a browser and system `python3` all verified the same
+  endpoint fine in the same minute. `tan/net.py` now builds every request's
+  `SSLContext` through `truststore` (verifies via the OS's own trust store, so
+  a real corporate CA installed in the machine's keychain keeps working) and
+  falls back to `certifi`'s bundled CA list only if `truststore` is absent or
+  its platform verifier fails. The failure text also stopped asserting *"This
+  is usually a TLS-intercepting proxy or a corporate CA"* as the cause with no
+  evidence for it -- there was neither on the reporting host, and the same
+  confident wording would have sent a customer on a genuinely proxied network
+  hunting in the wrong place too. `scripts/verify_binary.sh` gains a fifth
+  proof that the freeze actually bundles both mechanisms, since no unit test
+  can catch this: a source-tree run has the developer's own trust, and the bug
+  is invisible until the frozen artifact runs (#304, release-blocker).
+- **`longPaths` read the Windows registry flag and nothing else, so `tan
+  doctor` said `pass` on a fresh install while `tan bootstrap`'s own `west
+  update` died with "Filename too long" a moment later.** Windows'
+  `LongPathsEnabled` governs manifested Win32 API calls; it does nothing for
+  git, which `west update` uses for every module clone/checkout and which
+  refuses a long path unless its OWN `core.longpaths` is set, regardless of
+  the registry -- measured on a real Windows 11 host with a genuinely fresh
+  `HOME` (no global `.gitconfig`), where `bootstrap` failed inside
+  `hal_nxp`'s `tf-psa-crypto` vendor tree even though `doctor` had just
+  reported the host fine. `longPaths` now reads BOTH axes (`git config --get
+  core.longpaths`, which resolves system/global/local precedence itself) and
+  **fails** -- not warns -- exactly when the registry says yes and git does
+  not, since that combination breaks `west update` with certainty rather
+  than merely risking it; it warns when only one axis is on, matching the
+  pre-existing severity for neither. The remedy names the exact command,
+  `git config --global core.longpaths true`. `tan bootstrap` also forces
+  `core.longpaths=true` on the `west update` child's own environment
+  (`GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0`/`GIT_CONFIG_VALUE_0`, reaching every
+  project's own `git` subprocess without writing to any `.gitconfig` the
+  workspace or the user owns), so a fresh install gets past the failure
+  outright rather than only being warned about it (#306, release-blocker).
+
+### Added
+
+- **`clean-host.yml` — the shipped-artefact gate on a genuinely clean host**
+  (#278, escalated to a release-blocker). All six defects above were found by
+  downloading the `v0.5.0-rc2` asset and running four commands on a host with
+  no alp-sdk checkout, no `~/.alp`, and an empty cwd -- a state no prior CI job
+  in this repo ever constructed, and the reason a green board shipped every
+  one of them. `getting-started.yml` proves the documented first-install path
+  works from a real `tan bootstrap`; it can never reproduce a HOST WITH NO SDK
+  REACHABLE AT ALL, which is exactly the state #292/#301/#302 need and exactly
+  the customer's actual first three commands. The new job freezes `tan` per
+  platform (`macos-15-intel`/`macos-15`/`windows-latest`/`ubuntu-latest`, same
+  shape as `release.yml`'s `build` job -- pre-tag, when these six needed to be
+  caught) and, separately, downloads the actual published asset after a
+  release goes out for a post-publish confirmation. Both legs run
+  `python/scripts/clean_host_smoke.py`'s `tan --version` / `tan doctor
+  --format json` / `tan sdk list --online` (the real GitHub API call, unmocked
+  -- the #304 CA-trust canary) / `tan bootstrap --dry-run`, twice each for
+  `doctor`/`bootstrap` -- once with `$ZEPHYR_BASE` unset, once pointed at a
+  directory that exists but carries no Zephyr markers at all, deliberately
+  bare rather than a fabricated lookalike (#286: a fixture shaped like what
+  the probe looks for proves the fixture, not the code). `doctor`'s envelope
+  is checked for internal self-consistency -- `ok`/`exitCode` agreeing with
+  `checks[]`, and no two checks named `<subject>` and
+  `<subject>Resolved`/`<subject>Provenance` (this repo's own corroborating-
+  check naming convention) disagreeing pass vs. fail -- which generalises the
+  #299 shape without grepping for `westResolved`/`west` by name. `macos-15`/
+  `macos-15-intel` are mandatory (where #304 manifested); a Windows pass on
+  `sdk list --online` is explicitly NOT read as CA-trust coverage, since
+  CPython's `ssl` on win32 already falls back to the Windows certificate store
+  where macOS and Linux have no equivalent.
+
+### Known
+
+- `tan bootstrap` still refuses the documented quickstart layout (`tan.exe` and
+  `alp-sdk/` in one directory) with "holds more than this checkout", and the
+  remedy it offers moves the user's checkout (#302).
+
 ## [0.5.0-rc2] — 2026-08-01
 
 *Everything the maintainer's first real `v0.5.0-rc1` run turned up, plus what

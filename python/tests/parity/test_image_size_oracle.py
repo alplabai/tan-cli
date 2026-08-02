@@ -39,13 +39,14 @@ from pathlib import Path
 
 import pytest
 
-from .oracle import PACKAGE_ROOT, python_command, rust_binary
+from . import oracle_fixtures
+from .oracle import PACKAGE_ROOT, missing_for_live, python_command, rust_binary
 
 RUST = rust_binary()
 
 pytestmark = pytest.mark.skipif(
-    RUST is None,
-    reason="no Rust tan to diff against; build it (cargo build) or set TAN_RUST_BINARY",
+    missing_for_live(RUST),
+    reason="TAN_PARITY_LIVE=1 needs a Rust tan; build it (cargo build) or set TAN_RUST_BINARY",
 )
 
 SOC_5M5 = '{"soc_flash_mb": 5.5, "cores": [{"id": "m55_hp", "tcm_kb": 1280}]}'
@@ -190,6 +191,22 @@ def _normalise(payload: dict) -> dict:
     return payload
 
 
+def _rust_run(
+    argv: list[str], work: Path, env_extra=None
+) -> tuple[int, dict, str]:
+    """The rust side of `assert_parity`, frozen by default (tan-cli#272) --
+    see `oracle_fixtures.resolve`. Scrubbed on `work` (both sides run in the
+    SAME directory here, so that is the only root either output can embed)
+    so the frozen answer stays replayable from a different scratch dir."""
+
+    def _live():
+        code, payload, err = _run([RUST], argv, work, work, env_extra)
+        return [code, oracle_fixtures.scrub(payload, work), oracle_fixtures.scrub(err, work)]
+
+    code, payload, err = oracle_fixtures.resolve(_live)
+    return code, payload, err
+
+
 def assert_parity(
     work: Path, argv: list[str], *, text_mode: bool = False, env_extra=None
 ) -> None:
@@ -197,11 +214,23 @@ def assert_parity(
     envelope agree. `text_mode` compares stderr verbatim instead -- the human
     table and the notice lines, which are a real user surface even though stdout
     carries no contract there."""
-    r_code, r_out, r_err = _run([RUST], argv, work, work, env_extra)
+    r_code, r_out, r_err = _rust_run(argv, work, env_extra)
     # A previous run's bundle must not decide the next one's notices.
     for build_root in work.rglob("image-bundle"):
         shutil.rmtree(build_root, ignore_errors=True)
     p_code, p_out, p_err = _run(python_command(), argv, work, work, env_extra)
+    p_out = oracle_fixtures.scrub(p_out, work)
+    p_err = oracle_fixtures.scrub(p_err, work)
+    # On a non-capture-platform replay, the separators inside any path
+    # anchored at a `scrub` placeholder are the RECORDING host's, not either
+    # binary's behaviour -- `size`/`image` reach that surface through
+    # `issues[].message` ("no system-manifest.yaml at <ORACLE-ROOT-0>\br\
+    # system-manifest.yaml"), not through a dedicated path field. A no-op on
+    # Windows and under TAN_PARITY_LIVE=1; see the function for the trade.
+    r_out = oracle_fixtures.normalise_scrubbed_path_separators(r_out)
+    p_out = oracle_fixtures.normalise_scrubbed_path_separators(p_out)
+    r_err = oracle_fixtures.normalise_scrubbed_path_separators(r_err)
+    p_err = oracle_fixtures.normalise_scrubbed_path_separators(p_err)
 
     assert r_code == p_code, (
         f"exit code: rust={r_code} python={p_code}\n"
@@ -284,6 +313,39 @@ def test_size_unknown_budget_notice(tmp_path):
     )
 
 
+def _the_size_tool_reads_this_elf(elf: Path) -> bool:
+    """Would this host's size tool actually MEASURE `elf`, or would the port
+    fall through to its section-header rung?
+
+    `data.slices[].source` reports which rung answered -- `size-tool` or
+    `pyelftools` -- so the frozen envelope encodes the CAPTURE host's tooling,
+    not tan's behaviour. `SIZE_TOOLS`' last entry is the bare name `size`, and
+    macOS ships a Mach-O `size` under it that cannot read an ARM ELF at all:
+    the port correctly drops to `pyelftools` there while the fixture (captured
+    where `size` was GNU binutils) says `size-tool`. Both are right about
+    their own host, and the measured numbers AGREE either way -- it is only
+    the label naming the rung that differs.
+
+    Probed by RUNNING the resolved tool on the ELF this test just wrote, not
+    by name-matching or `sys.platform`: the question is whether the tool
+    parses this file, and that is the only thing that answers it. `SIZE_TOOLS`
+    is imported rather than restated so the probe order cannot drift from the
+    port's.
+    """
+    from tan.commands.size_cmd import SIZE_TOOLS  # noqa: PLC0415 -- test-only seam
+
+    resolved = next((t for t in SIZE_TOOLS if shutil.which(t)), None)
+    if resolved is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [resolved, str(elf)], capture_output=True, text=True, timeout=30
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 def test_size_measures_a_real_elf(tmp_path):
     fake_sdk(
         tmp_path / "sdk",
@@ -297,7 +359,16 @@ def test_size_measures_a_real_elf(tmp_path):
         "schema_version: 1\nhw_info:\n  sku: E1M-TEST\nslices:\n"
         "- core_id: m55_hp\n  os: zephyr\n  build_dir: m55_hp-zephyr\n",
     )
-    wbytes(tmp_path / "br" / "m55_hp-zephyr" / "zephyr" / "zephyr.elf", make_elf())
+    elf = tmp_path / "br" / "m55_hp-zephyr" / "zephyr" / "zephyr.elf"
+    wbytes(elf, make_elf())
+    if not oracle_fixtures.REPLAY_IS_CAPTURE_PLATFORM and not _the_size_tool_reads_this_elf(elf):
+        pytest.skip(
+            "this host's size tool cannot read an ARM ELF (macOS ships a Mach-O "
+            "`size`), so the port answers from its section-header rung and labels "
+            f"`source: pyelftools` where the {oracle_fixtures.CAPTURE_PLATFORM} "
+            "fixture says `size-tool`; that is the HOST's tooling, not tan's "
+            "behaviour -- the measured flash/ram numbers agree either way"
+        )
     assert_parity(
         tmp_path,
         ["size", "--format", "json", "--build-root", "br", "--sdk-root", "sdk"],

@@ -14,6 +14,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.build_plan import BuildPlan
 from tan.core.plan_tokens import (
     LeftoverToken,
@@ -122,11 +123,16 @@ def apply_plan_token_substitution(
     # substitute ${SDK_ROOT}/scripts into the bare relative path /scripts,
     # sailing straight past the leftover-token guard -- refuse instead.
     if sdk_root is None:
+        # `tan sdk switch` refuses in this build (tan-cli#305) -- kept the
+        # two mechanisms `resolve_sdk_root_ladder` (this value's caller)
+        # actually walks (`--sdk-root`, the lateral discovery tail) and
+        # swapped the third for NO_SDK_NEXT_STEPS's honest "how to get a
+        # checkout at all".
         raise TokenSubstitutionError(
             "build.sdk-root-unresolved",
             "plan is `planPathMode: tokened` (needs ${SDK_ROOT} substituted with a real "
-            "path), but no alp-sdk checkout resolved -- pass `--sdk-root <PATH>`, pin one "
-            "with `tan sdk switch`, or run from a project near an alp-sdk checkout.",
+            "path), but no alp-sdk checkout resolved -- pass `--sdk-root <PATH>`, run from "
+            f"a project near an alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
         )
 
     # The two-SDK split-brain guard: whenever the plan carries a sdkCommit,

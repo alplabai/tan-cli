@@ -49,13 +49,22 @@ circular as well as forbidden.
 pin name or vendor branch.
 
 NOT PORTED, and loud about it: `install` and `switch`. Both refuse with
-`sdk.not-ported` (exit 5) rather than half-working. `switch` in particular must
-not land partially: the Rust writes the active-SDK pointer AND reconciles
-`<topdir>/.west/config`'s own `manifest.path` (tan-cli #62/#31), and a version
-that writes the pointer while silently skipping the reconciliation reports
-success while `west` keeps resolving the manifest from the stale pointer --
-which is the bug #62 reported, re-introduced invisibly. A loud refusal is
-strictly safer than that.
+`sdk.not-ported` (exit 1, see `_run_not_ported`'s own docstring for why not 5)
+rather than half-working. `switch` in particular must not land partially: the
+Rust writes the active-SDK pointer AND reconciles `<topdir>/.west/config`'s own
+`manifest.path` (tan-cli #62/#31), and a version that writes the pointer while
+silently skipping the reconciliation reports success while `west` keeps
+resolving the manifest from the stale pointer -- which is the bug #62
+reported, re-introduced invisibly. A loud refusal is strictly safer than that.
+
+**tan-cli#305: that refusal must not be a dead end.** `doctor_cmd`,
+`bootstrap_cmd`, and this module's own `sdk current` used to independently
+recommend `sdk install`/`sdk switch` as the fix for "no SDK resolved" -- three
+copies of advice naming a subcommand this build refuses, which on a clean
+host (no checkout, no cache, no pointer anywhere) left `tan bootstrap`
+unreachable by any documented path. `NO_SDK_NEXT_STEPS` below is the one
+surviving mechanism (`--sdk-root`, plus how to get a checkout at all) all
+three now read instead.
 """
 
 from __future__ import annotations
@@ -72,6 +81,7 @@ import typer
 
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.net import default_ssl_context
 
 #: GitHub Releases API endpoint for `alplabai/alp-sdk`, from
 #: `tan_core::sdk::GITHUB_RELEASES_URL`.
@@ -88,10 +98,35 @@ SDK_MARKER = ("scripts", "alp_project.py")
 #: a hung `--format json` consumer rather than an error it can render.
 NETWORK_TIMEOUT_SECONDS = 20.0
 
-#: The verbs `run` dispatches, for the unknown-subcommand text line. Verbatim
-#: from `sdk.rs`'s failure text.
+#: The verbs `run` dispatches, for the unknown-subcommand text line. Was
+#: verbatim from `sdk.rs`'s failure text until tan-cli#305: the oracle's
+#: `install`/`switch` really work, so its wording is honest there; this port's
+#: do not (`_run_not_ported` below), so repeating it unqualified here was one
+#: more site recommending a subcommand this build refuses.
 AVAILABLE_SUBCOMMANDS = (
-    "Available subcommands: list, install <version>, current, switch <version>"
+    "Available subcommands: list, current, install <version> (refuses -- not "
+    "yet ported), switch <version> (refuses -- not yet ported)"
+)
+
+#: `install`/`switch` refuse outright in this build (`_run_not_ported` below)
+#: -- the ONE fact `doctor_cmd.sdk_check` and `bootstrap_cmd`'s SDK-unresolved
+#: refusal must read instead of each independently hardcoding "run `tan sdk
+#: install <ver>`" (tan-cli#305). Three copies of that recommendation, none
+#: checking whether the build it shipped in actually has the subcommand, is
+#: how a clean host was left with no way to reach `tan bootstrap` at all.
+NOT_PORTED_SDK_SUBCOMMANDS = frozenset({"install", "switch"})
+
+#: The one accurate way to point tan at an SDK checkout in THIS build. Neither
+#: `sdk install` nor `sdk switch` works (tan-cli#305), so `--sdk-root` on the
+#: invocation itself is the only surviving mechanism, and a host with no
+#: checkout anywhere needs telling how to get one at all -- an accurate manual
+#: instruction beats naming a subcommand that exits 1. Shared by
+#: `doctor_cmd.sdk_check`, `bootstrap_cmd`'s SDK-unresolved refusal, and
+#: `_run_current` below so the three cannot drift into three different,
+#: independently-worded dead ends again.
+NO_SDK_NEXT_STEPS = (
+    "get an alp-sdk checkout (`git clone https://github.com/alplabai/alp-sdk`), "
+    "then point tan at it with `--sdk-root <path>`"
 )
 
 #: `sdk list`'s proxy/CA hint, verbatim from `tan_core::sdk::describe_network_error`.
@@ -103,9 +138,22 @@ _PROXY_HINT = (
     "could not complete the connection."
 )
 
+#: #304: this used to open "This is USUALLY a TLS-intercepting proxy or a
+#: corporate CA that this machine does not trust" -- a confident diagnosis with
+#: no evidence behind it. The v0.5.0-rc2 asset hit this exact error with no
+#: proxy and no corporate CA anywhere in sight; the real cause was the frozen
+#: binary shipping with no CA bundle at all (fixed in `tan/net.py`, but a
+#: future build that regresses that fix must not be misdiagnosed the same way
+#: again). A message naming a probable cause needs evidence for that cause or
+#: has to name the alternative -- this names both and gives the one comparison
+#: (`curl`/a browser against the same host) that tells them apart, mirroring
+#: how #304 itself was actually diagnosed.
 _TLS_HINT = (
-    "This is usually a TLS-intercepting proxy or a corporate CA that this "
-    "machine does not trust, not a broken connection."
+    "Not necessarily a broken connection -- this can mean a TLS-intercepting "
+    "proxy or a corporate CA this machine does not trust, or that this tan "
+    "build's own CA trust failed to load. If curl or a browser reach this host "
+    "fine from here, the trust store is the likelier cause; if they fail too, "
+    "the proxy/CA is."
 )
 
 
@@ -176,6 +224,36 @@ def _pointer_target(pointer: Path) -> str | None:
         return None
     value = parsed.get("sdkPath")
     return value if isinstance(value, str) else None
+
+
+def global_default_pointer_fix_hint(native_path: str) -> str:
+    """How to fix -- or safely clear -- an already-written `~/.alp/sdk-
+    default` pointer by hand, given its OS-native absolute path (the caller's
+    to compute: `_home_alp_dir() / "sdk-default"`, rendered through whatever
+    this-platform-separator helper it already has -- `bootstrap_cmd._native`
+    for its callers).
+
+    `_pointer_target` above degrades every read failure on this exact file
+    (missing, invalid JSON, list-shaped, no `sdkPath`) to `None`, and every
+    tier resolver (`resolve_sdk_tiered`) then falls through to the next tier
+    on that -- so DELETING the file is always a safe recovery, never a step
+    backwards; hand-editing its `"sdkPath"` field is the targeted fix when
+    the caller knows what it should say instead.
+
+    Shared so a caller describing this by hand cannot drift from what
+    `_pointer_target` actually reads. `bootstrap_cmd`'s workspace-relocation
+    and rollback-failure messages are why this exists (tan-cli#305 follow-
+    up): they used to send a user -- sometimes one already in a broken,
+    checkout-moved-but-rollback-incomplete state -- to `tan sdk switch
+    --global`, which refuses outright in this build. Naming the pointer file
+    directly, not the command, is also honest about the mechanism `switch`
+    itself would use once ported, so this will not go stale the moment that
+    disposition changes.
+    """
+    return (
+        f'delete {native_path} (tan falls through to the next SDK it can '
+        f'resolve), or edit its `"sdkPath"` field by hand'
+    )
 
 
 # ── readiness (tan_core::sdk::check_sdk_readiness) ──────────────────────────
@@ -446,10 +524,11 @@ def cached_sdk_versions(cache_root: Path | None = None) -> list[str]:
     """Directory names directly under the cache root that hold a real checkout,
     sorted. An unreadable or absent cache root is an empty list, never an error.
 
-    This is what lets `current`'s "nothing selected" message say `switch`
-    instead of sending the user back to `install` -- tan-cli #162, a loop with
-    no exit. Deliberately does not guess WHICH version to switch to; it lists
-    what exists and lets the user choose.
+    This is what lets `current`'s "nothing selected" message name the
+    checkouts already sitting in the cache instead of claiming none exist --
+    tan-cli #162, a loop with no exit. Deliberately does not guess WHICH
+    version to point at; it lists what exists and lets the user choose (via
+    `--sdk-root`, since `sdk switch` itself refuses -- tan-cli#305).
     """
     root = _default_cache_root() if cache_root is None else cache_root
     try:
@@ -462,15 +541,19 @@ def cached_sdk_versions(cache_root: Path | None = None) -> list[str]:
 
 
 def no_active_sdk_text(cached: list[str]) -> list[str]:
+    """`sdk current`'s "nothing is configured" guidance. Used to send an empty
+    cache to `sdk install` and a populated one to `sdk switch` -- neither
+    works in this build (tan-cli#305), so both branches now point at
+    `NO_SDK_NEXT_STEPS`, the one mechanism that does."""
     if not cached:
         return [
             "No active SDK configured for this workspace.",
-            "Run 'tan sdk install <version>' to get started.",
+            f"To get started, {NO_SDK_NEXT_STEPS}.",
         ]
     return [
         "No active SDK configured for this workspace.",
-        f"Already installed: {', '.join(cached)}",
-        "Run 'tan sdk switch <version>' to select one.",
+        f"Already installed under {_default_cache_root()}: {', '.join(cached)}",
+        "Point tan at one with `--sdk-root <path>`.",
     ]
 
 
@@ -614,7 +697,7 @@ def _fetch_releases(url: str = GITHUB_RELEASES_URL) -> tuple[list[dict[str, Any]
     )
     try:
         with urllib.request.urlopen(  # noqa: S310 -- as above
-            request, timeout=NETWORK_TIMEOUT_SECONDS
+            request, timeout=NETWORK_TIMEOUT_SECONDS, context=default_ssl_context()
         ) as response:
             raw = response.read().decode("utf-8", errors="replace")
     except Exception as err:  # noqa: BLE001 -- see the docstring
@@ -856,7 +939,13 @@ def _run_unknown(*, json_mode: bool, subcommand: str | None) -> None:
 
 def sdk(
     subcommand: str = typer.Argument(
-        None, metavar="SUBCOMMAND", help="list, install, current, or switch."
+        None,
+        metavar="SUBCOMMAND",
+        help=(
+            "list, current, install, or switch. install/switch are not yet "
+            "ported and refuse in this build -- use --sdk-root instead "
+            "(tan-cli#305)."
+        ),
     ),
     arg: str = typer.Argument(
         None, metavar="ARG", help="Version for install, version|path for switch."

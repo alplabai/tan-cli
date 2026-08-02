@@ -37,6 +37,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from tan.core.timestamp import generated_at_iso
+
 # ---------------------------------------------------------------------------
 # Hosts
 # ---------------------------------------------------------------------------
@@ -981,8 +983,15 @@ def python_floor_skew_warning(
     `tan.commands.doctor_cmd.python_floor_skew_check` -- doctor raises the same
     verdict as `doctor.pythonFloor`, and two commands describing one manifest
     defect differently is the drift this port keeps hitting. Fires on a
-    SUCCESSFUL run too: the host is fine, the manifest is not, and the fix
-    belongs in `metadata/bootstrap.json` rather than on the customer's machine.
+    SUCCESSFUL run too: the host is fine and the two declared floors disagree.
+
+    It does NOT follow that the fix belongs in `metadata/bootstrap.json` -- this
+    docstring used to say so, and the remedy below used to act on it. Raising
+    `prerequisites.pythonMinVersion` was tried and REVERTED (alp-sdk#1078): the
+    key is host-universal while this floor is Zephyr's, so raising it refuses a
+    3.10/3.11 host for a Yocto-only or metadata-only project that builds today.
+    The skew is deliberate; the message says so and points the customer at the
+    only thing that actually helps them (tan-cli#300).
 
     `from_manifest=False` (pass `facts.from_manifest`) means `manifest_floor`
     never actually came from a read `metadata/bootstrap.json` -- this SDK
@@ -998,11 +1007,21 @@ def python_floor_skew_warning(
             f"alp-sdk's {BOOTSTRAP_MANIFEST_REL_PATH} declares pythonMinVersion "
             f"{manifest_floor[0]}.{manifest_floor[1]}"
         )
+        # NOT "raise pythonMinVersion in the manifest". That was tried and
+        # REVERTED (alp-sdk#1078): the key is host-universal, and
+        # `build_readiness.rs:401` checks Python BEFORE any `os_set` branch, so
+        # raising it refuses a 3.10/3.11 host for a Yocto-only or metadata-only
+        # project that builds today -- and 3.12 is unreachable via the remedy
+        # the manifest itself offers (`sudo apt-get install -y python3`) on the
+        # Ubuntu 22.04 hosts the docs recommend. This warning fires while
+        # bootstrap is REFUSING, so it is the last line a blocked user reads and
+        # the likeliest thing they act on; it has to name something that helps
+        # them, not an SDK edit that would make things worse (tan-cli#300).
         fix = (
-            f" Raise `prerequisites.pythonMinVersion` to "
-            f"{effective_floor[0]}.{effective_floor[1]} in alp-sdk's "
-            f"{BOOTSTRAP_MANIFEST_REL_PATH} (and re-run its "
-            f"scripts/check_bootstrap_manifest.py drift gate)."
+            f" The skew is known and deliberately unresolved (alp-sdk#1078): the "
+            f"manifest key is host-universal while this floor is Zephyr's. Nothing "
+            f"to change in alp-sdk -- put a Python "
+            f"{effective_floor[0]}.{effective_floor[1]} or newer on the build path."
         )
     else:
         claim = (
@@ -1420,6 +1439,106 @@ def set_manifest_path(config: str, new_rel: str) -> str | None:
                 continue
         out.append(segment)
     return "".join(out) if rewrote else None
+
+
+# ---------------------------------------------------------------------------
+# The `<topdir>/.west/tan-workspace-sdk` record (tan-cli#292). Written by
+# `tan.commands.bootstrap_cmd.record_workspace_sdk` after a `west update` that
+# actually ran; read back by `tan.commands.doctor_cmd`'s `venvProvenance`
+# check. A record-less workspace (bootstrapped by alp-sdk's own
+# `bootstrap.sh`, `crates/tan-cli/src/venv.rs:25-27`) is NOT an error here --
+# `parse_workspace_sdk_record` only ever returns "usable" or `None`.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class WorkspaceSdkRecord:
+    """A parsed `<topdir>/.west/tan-workspace-sdk`. `sdk_path` is the only
+    field every record (even one written before tan-cli#292) carries; the
+    venv provenance fields are `None` on an older record, or one written by a
+    caller that could not compute them -- ABSENCE, never a claim, so a
+    consumer never reads a `None` as "confirmed empty"."""
+
+    sdk_path: str
+    #: The venv directory, relative to `topdir` (e.g. `.venv`) -- so a moved
+    #: workspace, or one whose `metadata/bootstrap.json` names a non-default
+    #: `venv.dirName`, still resolves without re-deriving it.
+    venv_dir_name: str | None = None
+    #: The bin-dir layout actually created (`bin` / `Scripts`, tan-cli#291) --
+    #: which directory `venv_dir_name` holds the executables under.
+    venv_layout: str | None = None
+    #: Lowercase-hex SHA-256 of the `zephyr.requirementsPath` file that
+    #: populated the venv's Python packages (`bootstrap_cmd.pip_phase`) --
+    #: the provenance stamp: the venv can be re-verified against a LATER
+    #: read of the same file without re-running pip.
+    requirements_digest: str | None = None
+
+
+def workspace_sdk_record_json(
+    sdk_path: str,
+    venv_dir_name: str | None = None,
+    venv_layout: str | None = None,
+    requirements_digest: str | None = None,
+) -> str:
+    """The `<topdir>/.west/tan-workspace-sdk` record's contents: which SDK a
+    `west update` last synced this topdir's trees to, plus (tan-cli#292) which
+    venv it populated and a content-hash provenance stamp for the Zephyr
+    requirements that filled it. `updatedAt` is `generated_at_iso()`, matching
+    `sdk_pointer_json`'s own self-contained timestamp -- `SOURCE_DATE_EPOCH`
+    wins over the clock, so a captured record is reproducible, and that helper
+    NEVER raises (an out-of-range epoch used to kill `tan init` here).
+
+    Deliberately its OWN function, not a `tan.core.scaffold.sdk_pointer_json`
+    extension: that function is the `.alp/sdk-path` PROJECT pin and
+    `~/.alp/sdk-default` GLOBAL pin -- a different record with different
+    readers (`tan init`'s scaffold, `sdk_cmd`'s resolution ladder) -- growing
+    ITS shape for this record's needs would silently add fields those readers
+    never asked for and never validate.
+
+    `venv_dir_name`/`venv_layout`/`requirements_digest` are omitted from the
+    JSON (not written as `null`) when the caller has nothing to report --
+    mirroring `Check.as_dict`'s optional fields -- so a record predating
+    tan-cli#292 and one written by a caller that could not compute a hash are
+    indistinguishable on the wire, and `parse_workspace_sdk_record` reads both
+    as "nothing to compare against" rather than a false claim.
+    """
+    payload: dict[str, str] = {"sdkPath": sdk_path, "updatedAt": generated_at_iso()}
+    if venv_dir_name is not None:
+        payload["venvDir"] = venv_dir_name
+    if venv_layout is not None:
+        payload["venvLayout"] = venv_layout
+    if requirements_digest is not None:
+        payload["requirementsDigest"] = requirements_digest
+    return json.dumps(payload, indent=2) + "\n"
+
+
+def parse_workspace_sdk_record(text: str) -> WorkspaceSdkRecord | None:
+    """Parse a `<topdir>/.west/tan-workspace-sdk` record's text. `None` on
+    anything that is not a usable record -- not JSON, not an object, or no
+    usable `sdkPath` -- so a record `doctor` cannot read is "nothing to
+    compare against", the SAME as no record at all, never a mismatch WARNING
+    against a checkout `tan` cannot even name.
+    """
+    try:
+        doc = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict):
+        return None
+    sdk_path = doc.get("sdkPath")
+    if not isinstance(sdk_path, str) or not sdk_path:
+        return None
+
+    def _opt(key: str) -> str | None:
+        value = doc.get(key)
+        return value if isinstance(value, str) and value else None
+
+    return WorkspaceSdkRecord(
+        sdk_path=sdk_path,
+        venv_dir_name=_opt("venvDir"),
+        venv_layout=_opt("venvLayout"),
+        requirements_digest=_opt("requirementsDigest"),
+    )
 
 
 # ---------------------------------------------------------------------------

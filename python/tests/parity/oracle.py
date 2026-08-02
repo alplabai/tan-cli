@@ -82,6 +82,9 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from . import oracle_fixtures
 
 #: ``python/`` -- pinned onto the subprocess ``PYTHONPATH`` so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``, mirroring the
@@ -100,6 +103,52 @@ VERSION_RE = re.compile(r"tan \d+\.\d+\.\d+\S*\Z")
 ENVELOPE = "envelope"
 VERSION = "version"
 PLAN = "plan"
+
+#: Envelope fields that carry a filesystem path and so need separator
+#: normalisation before a cross-platform diff. Verbatim from ``PATH_KEYS`` in
+#: ``crates/tan-cli/tests/contract.rs`` (frozen) -- the same set
+#: ``tests/conformance/test_contract_envelopes.py`` already mirrors for the
+#: identical reason, stated there in that Rust source's own words: "CI runs
+#: this suite on ubuntu/windows/macos runners, and
+#: `PathBuf::to_string_lossy()` renders `./board.yaml` as `.\\board.yaml` on
+#: Windows." A frozen fixture captured on Windows (``oracle_fixtures.
+#: CAPTURE_PLATFORM``) carries exactly that native rendering in these
+#: fields; a live run on a different platform renders the same value with
+#: `/`. Normalising here is NOT the blanket separator-flattening a case like
+#: ``test_clean_parity.py`` correctly refuses (see that module's own
+#: platform gate) -- it is scoped to the exact keys the frozen Rust contract
+#: test already treats as separator-INSENSITIVE, so it cannot launder a
+#: real divergence sitting in an unlisted field (``issues[].message``, or
+#: `clean`'s own ``buildRoot`` -- deliberately absent from both this set and
+#: the Rust one).
+PATH_KEYS = frozenset(
+    {
+        "root",
+        "boardYaml",
+        "boardYamlPath",
+        "destination",
+        "relativePath",
+        "sdkPath",
+        "sdkPinned",
+        "written",
+        "unchanged",
+        "launchJsonPath",
+    }
+)
+
+
+def normalise_path_separators(value: Any, key: str | None = None) -> Any:
+    """Recursively ``\\`` -> ``/`` on :data:`PATH_KEYS` fields only -- see
+    that constant's own docstring. ``key`` is the enclosing object field
+    name; a list inherits its own key, so every string in ``written: [...]``
+    is still recognised."""
+    if isinstance(value, str):
+        return value.replace("\\", "/") if key in PATH_KEYS else value
+    if isinstance(value, list):
+        return [normalise_path_separators(item, key) for item in value]
+    if isinstance(value, dict):
+        return {k: normalise_path_separators(v, k) for k, v in value.items()}
+    return value
 
 #: Top-level build-plan keys retained by ``narrow_plan``. NOT "the keys Rust
 #: emits" -- Rust emits the SDK's JSON verbatim (see the module docstring) --
@@ -180,6 +229,20 @@ def rust_binary() -> str | None:
     return None
 
 
+def missing_for_live(rust: str | None) -> bool:
+    """Whether a test must SKIP for lack of an oracle binary.
+
+    Frozen replay (the default -- ``oracle_fixtures.LIVE`` unset) never needs
+    one at all, so this is false there regardless of ``rust``: a case with no
+    committed fixture fails loudly inside :func:`oracle_fixtures.resolve`
+    instead, which is the point (tan-cli#272) -- a quiet skip here would hide
+    exactly the gap that function exists to surface. Only an explicit
+    ``TAN_PARITY_LIVE=1`` run, asked to spawn a binary that is not there,
+    skips.
+    """
+    return oracle_fixtures.LIVE and rust is None
+
+
 def python_command() -> list[str]:
     """The port under test. Defaults to the source tree so the harness runs
     without a packaging step; ``TAN_PYTHON_BINARY`` points it at the PyInstaller
@@ -258,6 +321,32 @@ def narrow_plan(payload: dict) -> dict:
     return {**payload, "data": plan}
 
 
+def rust_run(
+    argv: list[str], cwd: Path, home: Path, *, scrub_roots: tuple[Path | str, ...] | None = None
+) -> tuple[int, dict]:
+    """The rust side of a comparison, ALONE -- for a case whose assertions
+    are not a symmetric :func:`compare` (a known, pinned divergence; a
+    bespoke multi-step flow like ``init`` then ``generate``). Frozen by
+    default, exactly like :func:`compare`.
+
+    ``scrub_roots`` defaults to ``(cwd, home)``, the same pair every
+    :func:`compare` caller scrubs -- pass ``()`` explicitly for a case whose
+    assertions only ever touch small literal fields (an exit code, an issue
+    code) that cannot contain a scratch path, to skip the pointless work.
+    """
+    roots = (cwd, home) if scrub_roots is None else scrub_roots
+
+    def _live():
+        rust = rust_binary()
+        if rust is None:
+            raise RuntimeError("no Rust tan to diff against; set TAN_RUST_BINARY")
+        code, out = _run([rust], argv, cwd, home)
+        return [code, oracle_fixtures.scrub(out, *roots)]
+
+    code, out = oracle_fixtures.resolve(_live)
+    return code, out
+
+
 def compare(
     argv: list[str],
     cwd: Path,
@@ -265,19 +354,46 @@ def compare(
     surface: str = ENVELOPE,
     home: Path | None = None,
     python: list[str] | None = None,
+    extra_scrub_roots: tuple[Path | str, ...] = (),
 ) -> ParityResult:
     """Diff the two binaries on ``argv``, scoped to ``surface``.
 
     ``python`` overrides the command used for the port -- that seam is what lets
     the suite plant a known divergence and prove this comparator goes red.
-    """
-    rust = rust_binary()
-    if rust is None:
-        raise RuntimeError("no Rust tan to diff against; set TAN_RUST_BINARY")
-    home = home or cwd
 
-    r_code, r_out = _run([rust], argv, cwd, home)
+    The rust side is frozen by default (tan-cli#272) -- see
+    :func:`oracle_fixtures.resolve`. Both sides are scrubbed of ``cwd``/``home``
+    (:func:`oracle_fixtures.scrub`) before comparing: a live run relies on
+    both binaries sharing the identical scratch cwd to make an embedded
+    absolute path byte-comparable at all, and a frozen fixture was captured
+    from a DIFFERENT scratch cwd than whatever this replay is using, so the
+    substitution is what keeps that comparison meaningful in both modes.
+
+    ``extra_scrub_roots`` widens that same substitution for a case whose
+    envelope can carry a THIRD absolute path neither ``cwd`` nor ``home``
+    cover -- e.g. a checked-in fixture file (a ``--plan-from`` plan) that
+    itself embeds the path of whatever alp-sdk checkout it was captured
+    against. Empty by default, so every existing caller is unaffected.
+    """
+    home = home or cwd
+    roots = (cwd, home, *extra_scrub_roots)
+
+    r_code, r_out = rust_run(argv, cwd, home, scrub_roots=roots)
     p_code, p_out = _run(python or python_command(), argv, cwd, home)
+    p_out = oracle_fixtures.scrub(p_out, *roots)
+    # Scoped to PATH_KEYS, on BOTH sides, before the diff -- see that
+    # constant's own docstring. A no-op whenever the two sides already agree
+    # (including every case on the capture platform itself, where both are
+    # already native-Windows `\`), so this never masks a real divergence.
+    r_out = normalise_path_separators(r_out)
+    p_out = normalise_path_separators(p_out)
+    # And, on a non-capture-platform replay only, the separators INSIDE any
+    # path anchored at a `scrub` placeholder -- the redacted scratch root the
+    # harness itself made. Anchored on the token rather than a key, so it also
+    # reaches the `issues[].message`/`entries[].message` text that embeds one.
+    # See that function for what this trades away, and where it does not.
+    r_out = oracle_fixtures.normalise_scrubbed_path_separators(r_out)
+    p_out = oracle_fixtures.normalise_scrubbed_path_separators(p_out)
 
     diffs: list[str] = []
     if r_code != p_code:

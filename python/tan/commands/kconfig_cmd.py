@@ -54,6 +54,7 @@ import typer
 import yaml
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -375,8 +376,13 @@ def kconfig(
             board_path=board_path,
             exit_code=ExitCode.VALIDATION_FAILURE,
             code="kconfig.no-sdk-root",
-            message="no alp-sdk checkout found — pass `--sdk-root <PATH>`, pin one "
-            "with `tan sdk switch <version|path>`, or run `tan bootstrap` first.",
+            # `tan sdk switch` refuses in this build (tan-cli#305). Dropped
+            # "run `tan bootstrap` first" too -- bootstrap resolves an SDK
+            # through this exact same ladder, so with none resolved it
+            # refuses right back with tan-cli#305's own fix text; it is not a
+            # remedy for THIS failure, just a second site that needs one.
+            message=f"no alp-sdk checkout found — pass `--sdk-root <PATH>`, or "
+            f"{NO_SDK_NEXT_STEPS}.",
             core=None,
             json_mode=json_mode,
         )

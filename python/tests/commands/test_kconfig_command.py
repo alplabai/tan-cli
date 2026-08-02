@@ -73,10 +73,14 @@ def test_no_sdk_root_reports_kconfig_no_sdk_root(tmp_path: Path) -> None:
     assert "sdk" not in envelope
     # Finding 6: the em dash (U+2014), byte-for-byte, not a respelled `--`
     # (captured from `target/debug/tan.exe`).
+    # tan-cli#305: `tan sdk switch`/`tan bootstrap` both used to be named
+    # here and neither is a working remedy for an unresolved SDK in this
+    # build -- see NO_SDK_NEXT_STEPS's own docstring in `sdk_cmd.py`.
     assert (
         envelope["issues"][0]["message"]
-        == "no alp-sdk checkout found — pass `--sdk-root <PATH>`, pin one "
-        "with `tan sdk switch <version|path>`, or run `tan bootstrap` first."
+        == "no alp-sdk checkout found — pass `--sdk-root <PATH>`, or get an alp-sdk "
+        "checkout (`git clone https://github.com/alplabai/alp-sdk`), then point tan "
+        "at it with `--sdk-root <path>`."
     )
 
 

@@ -18,6 +18,20 @@ Zephyr's -- and where the two disagree that disagreement is itself reported
 (`pythonFloor`), naming which is which, so the fix lands in the manifest instead
 of in the customer.
 
+**"Zephyr's" used to mean whatever `$ZEPHYR_BASE` pointed at, not the
+workspace the report was actually about (tan-cli#301).** `zephyrWorkspace`
+(tan-cli#290) reads the RESOLVED west topdir (`west_workspace_dir`); until now
+`hostPython`/`pythonFloor` independently re-read `$ZEPHYR_BASE`, which is
+extremely commonly stale -- Zephyr's own docs, and this command's own
+`tan bootstrap` next-steps block, both tell a customer to export it. One
+report could then name two different Zephyrs: `zephyrWorkspace` passing
+against the real workspace while `hostPython`'s floor, and the interpreter it
+demanded, came from an unrelated tree the customer was not building against.
+`_collect` now feeds `zephyr_python_floor` the SAME resolved `workspace_path`
+`zephyrWorkspace` reports, falling back to a literal `$ZEPHYR_BASE` read only
+when no workspace resolves at all, and to `ZEPHYR_PYTHON_FLOOR` when neither
+does -- see `zephyr_python_floor`'s docstring for the three-way split.
+
 `tan bootstrap` now enforces the same effective floor on BOTH platforms, by
 calling `zephyr_python_floor` below rather than re-deriving it -- see
 `tan.commands.bootstrap_cmd.resolve_python_floor`. Keep that the ONE reader: a
@@ -95,18 +109,20 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import _abs_posix, resolve_sdk_root_ladder
-from tan.commands.sdk_cmd import parse_sdk_version_yaml, project_pin_issue
+from tan.commands.build_cmd import _abs_posix, discover_sdk_root, resolve_sdk_root_ladder
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, parse_sdk_version_yaml, project_pin_issue
 from tan.core.bootstrap import (
     MissingPrerequisite,
     PrereqFailure,
+    WorkspaceSdkRecord,
     parse_west_zephyr_pin,
+    parse_workspace_sdk_record,
     parse_zephyr_version_file,
     posix_venv_unusable,
     reported_missing,
 )
 from tan.core.timestamp import generated_at_iso
-from tan.core.venv import west_program, west_workspace_dir
+from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -332,6 +348,18 @@ def zephyr_python_floor(zephyr_base: str | None) -> tuple[tuple[int, int], str]:
     stale floor here reintroduces exactly the silent gap this command exists to
     close. `ZEPHYR_PYTHON_FLOOR` is the fallback for a host with no workspace
     yet, which is every host at `tan bootstrap` time.
+
+    `zephyr_base` is a plain path in, not necessarily `$ZEPHYR_BASE` itself --
+    THIS function has no opinion on where it came from, only `_collect` (this
+    module's `hostPython`/`pythonFloor` caller) does. As of tan-cli#301,
+    `_collect` passes the resolved workspace's `zephyr/` subtree -- the SAME
+    `tan.core.venv.west_workspace_dir` result `zephyrWorkspace` reports -- when
+    one resolved, a literal `$ZEPHYR_BASE` read only when no workspace resolved
+    at all, and `None` (landing on `ZEPHYR_PYTHON_FLOOR` below) when neither
+    does; that is the three-way split the resulting `source` string names. The
+    OTHER caller, `tan.commands.bootstrap_cmd.resolve_python_floor`, still
+    passes a literal `$ZEPHYR_BASE` read directly -- `tan bootstrap` runs before
+    any workspace can have resolved, so there is nothing else for it to prefer.
     """
     if zephyr_base:
         path = Path(zephyr_base) / "cmake" / "modules" / "python.cmake"
@@ -487,8 +515,19 @@ def python_floor_skew_check(
     Reported rather than silently reconciled. A host that satisfies the higher
     floor is fine TODAY, but the manifest is the number a customer will read and
     trust, so while the skew stands the two sources disagree about which hosts
-    are supported. Saying which number came from which file is the whole value:
-    the fix belongs in `metadata/bootstrap.json`, not on the customer's machine.
+    are supported. Saying which number came from which file is the whole value.
+
+    **Not fixed by raising the manifest (tan-cli#300).** That was tried and
+    reverted -- alp-sdk#1078: `crates/tan-core/src/build_readiness.rs:401`
+    pushes the Python check BEFORE any `os_set` branch ("EVERY backend's
+    build-plan emission runs `alp_project.py` ... not just Zephyr's"), so
+    raising the shared `pythonMinVersion` key would refuse a Yocto-only or
+    metadata-only project, on a host that builds it fine today, over a floor
+    that project never needs -- and the raised floor is unreachable via the
+    manifest's own remedy (`sudo apt-get install -y python3`) on the Ubuntu
+    22.04 hosts the docs recommend. The skew is real and known, and scoped to
+    Zephyr; the fix for a Zephyr build on a below-floor host is a newer
+    interpreter on THAT host (see `hostPython` above), not a manifest edit.
 
     `manifest_is_real` is `False` when `manifest_floor` never actually came from
     a read `metadata/bootstrap.json` -- no SDK resolved, or this SDK predates
@@ -513,9 +552,12 @@ def python_floor_skew_check(
     if manifest_is_real:
         claim = f"alp-sdk's metadata/bootstrap.json declares pythonMinVersion {_fmt(manifest_floor)}"
         fix = (
-            f"Raise `prerequisites.pythonMinVersion` to {_fmt(effective_floor)} in "
-            f"alp-sdk's metadata/bootstrap.json (and re-run its "
-            f"scripts/check_bootstrap_manifest.py drift gate)."
+            f"Known, Zephyr-scoped skew (alp-sdk#1078) -- raising "
+            f"`prerequisites.pythonMinVersion` to {_fmt(effective_floor)} was tried "
+            f"and reverted, because that key also gates Yocto-only and "
+            f"metadata-only projects, which do not need it. Building for Zephyr on "
+            f"a host below {_fmt(effective_floor)} needs a newer interpreter -- see "
+            f"the `hostPython` check above."
         )
     else:
         claim = (
@@ -524,9 +566,11 @@ def python_floor_skew_check(
             f"is standing in"
         )
         fix = (
-            "Resolve or pin an alp-sdk checkout (`tan sdk switch <version|path>`) so its "
-            "own metadata/bootstrap.json pythonMinVersion is read instead of tan's "
-            "built-in floor."
+            # `tan sdk switch` refuses in this build (tan-cli#305) -- point at
+            # the mechanism that actually resolves one instead.
+            f"Resolve an alp-sdk checkout: {NO_SDK_NEXT_STEPS}. That checkout's "
+            "own metadata/bootstrap.json pythonMinVersion is then read instead "
+            "of tan's built-in floor."
         )
     return Check(
         "pythonFloor",
@@ -635,23 +679,90 @@ def _posix_venv_capable(argv: list[str]) -> bool:
 
 
 def west_check(
-    found: str | None, version: tuple[int, int] | None, floor: tuple[int, int] | None
+    found: str | None,
+    version: tuple[int, int] | None,
+    floor: tuple[int, int] | None,
+    resolved: str | None = None,
 ) -> Check:
-    """`west` -- present, and at the manifest's floor.
+    """`west` -- present on BARE PATH, or resolvable through the SAME
+    resolver `westResolved` uses (`tan.core.venv.west_program`).
 
-    `Fail` when absent: `west` is how every slice of every plan is executed, so
-    without it nothing builds. Only WARN on an old or unreadable version -- west
-    is forward-compatible in practice and refusing a host on a version string we
-    could not parse is a worse failure than letting the real invocation report
-    its own.
+    **Now consults the resolver (tan-cli#299 second half).** This docstring
+    used to argue the opposite:
+
+        Does NOT assert that the venv resolved one: this check cannot see
+        what `westResolved` found... Name the authority instead of
+        predicting its answer.
+
+    That was deliberate at the time: `found` (bare PATH) was this check's
+    ONLY signal, so a hard `fail` here on the default post-bootstrap state --
+    `tan bootstrap` deliberately does NOT put `west` on PATH; its own
+    next-steps text tells the user to activate the venv afterwards -- was a
+    false, exit-4 refusal of a host that provably builds. Measured on the
+    published v0.5.0-rc2 binary: `tan build` produced real ELFs through the
+    resolved venv `west` while this check alone reported the host broken.
+    Downgrading that `fail` to `warn` (this file's other, earlier change on
+    this branch) fixed the exit code, but the warning still fires on every
+    correctly-bootstrapped host's very first `tan doctor` -- and a warning
+    that fires on every correct install trains users to ignore warnings,
+    which is the same defect as the false `fail`, one severity down
+    (hkngln, tan-cli#299).
+
+    So this now takes `resolved`: the SAME absolute venv path `westResolved`
+    already computed via `tan.core.venv.west_program` -- never a second,
+    independent probe of its own (`tool_in_venv` already confirmed that file
+    exists before `westResolved` ever saw it) -- and reports `pass`, naming
+    it, when bare PATH lacks `west` but the resolver found one. A bare-PATH
+    probe that cannot see the venv was never a second opinion; it was a
+    worse one. It now defers to the real one instead of contradicting it.
+
+    **Still never the FAIL owner.** When `resolved` is ALSO `None` -- west
+    absent from PATH and unresolvable anywhere -- this stays `warn`, not
+    `fail`. That severity belongs to `westResolved` alone (below), by
+    tan-cli#123's one-version-per-check contract applied to severity: making
+    both checks fatal on the same absent-everywhere fact is the two-owners
+    bug tan-cli#123 closed, and reintroducing it is exactly what let west
+    absent everywhere exit 0 the one time this branch made BOTH checks
+    non-fatal at once, before `west_resolved_check` was raised back to
+    `fail`. Keeping `west` a `warn` even in that state is what lets
+    `westResolved` be the sole, unambiguous reason `tan doctor` exits 4 on a
+    genuinely unbuildable host.
+
+    Only WARN on an old or unreadable version too -- west is forward-
+    compatible in practice and refusing a host on a version string we could
+    not parse is a worse failure than letting the real invocation report its
+    own.
     """
     if found is None:
+        if resolved is not None:
+            return Check(
+                "west",
+                "pass",
+                f"`west` is not on bare PATH, but resolves through the workspace "
+                f"venv: {resolved} -- the same binary `westResolved` above "
+                f"reports, and the one a real build actually spawns. This is the "
+                f"default state right after `tan bootstrap`, which deliberately "
+                f"does not put `west` on PATH; activating the venv (its "
+                f"`bin`/`Scripts` directory holds the `west` launcher) would "
+                f"additionally put it on bare PATH, for tools that spawn it "
+                f"directly rather than through tan.",
+            )
         return Check(
             "west",
-            "fail",
-            "`west` is not on PATH; every build slice is executed through it.",
-            "Run `tan bootstrap`, or activate the workspace venv it created "
-            "(its `bin`/`Scripts` directory holds the `west` launcher).",
+            "warn",
+            # Does NOT assert that the venv resolved one: `resolved` above
+            # already covers that case with a `pass`, so reaching here means
+            # it is genuinely `None` too -- PATH absence on its own, with
+            # nothing for the resolver to find either. Name the authority
+            # instead of predicting its answer.
+            "`west` is not on bare PATH. `westResolved` above is the check that "
+            "answers whether a build slice can run -- it reports the binary one "
+            "would actually execute. PATH absence on its own is the normal state "
+            "before the workspace venv is activated in this shell.",
+            "If `westResolved` above also could not resolve one, run `tan "
+            "bootstrap`; otherwise activate the workspace venv (its `bin`/`Scripts` "
+            "directory holds the `west` launcher) so tools invoked directly find it "
+            "too.",
         )
     if version is None:
         return Check(
@@ -689,17 +800,33 @@ def west_resolved_check(found: str | None, version: tuple[int, int] | None) -> C
     `sdk`/`workspace` beside it (`crates/tan-cli/src/commands/doctor.rs:1828`
     asserts all three together in the plain fold).
 
-    `Warn`, not `Fail`, mirroring Rust's severity for `west_available`: `west`
-    above already fails outright on a totally-absent west, so this is the
-    narrower, additive fact that the SPECIFIC binary a build would run is (or
-    is not) present.
+    **FAIL when west resolves nowhere.** This used to be a Warn, justified by
+    "`west` above already fails outright on a totally-absent west, so this is
+    the narrower, additive fact". tan-cli#299 removed that Fail -- correctly,
+    because bare PATH is the wrong question -- and thereby falsified the
+    premise this severity rested on. Measured on a real host with `west.exe`
+    renamed out of the venv and absent from PATH:
+
+        westResolved  warn   west not resolved through the workspace venv or PATH
+        west          warn   ... every build slice actually resolves it through the venv
+        12 passed, 4 warning(s), 0 failed.        EXIT=0
+
+    Exit 0 on a host where nothing can execute a single slice, and `west`'s
+    text asserting the venv resolves it while THIS check says it does not. A
+    false refusal was traded for a false pass, which is the worse of the two.
+
+    So the pair now splits cleanly: `west` answers "is it on bare PATH" and is
+    never fatal (an unactivated venv is the normal post-bootstrap state);
+    `westResolved` answers "can a build slice run at all" and is fatal when the
+    answer is no. Exactly one of them owns the exit code, which is tan-cli#123's
+    one-version-per-check contract applied to severity.
     """
     if found is None:
         return Check(
             "westResolved",
-            "warn",
-            "west not resolved through the workspace venv or PATH -- run "
-            "`tan bootstrap` to create the workspace venv.",
+            "fail",
+            "west resolved neither through the workspace venv nor PATH -- no build "
+            "slice can be executed. Run `tan bootstrap` to create the workspace venv.",
             "tan bootstrap",
         )
     if version is None:
@@ -1079,44 +1206,108 @@ def zephyr_sdk_host_check(host_os: str, arch: str) -> Check:
     return Check("zephyrSdkAvailableForHost", "fail", detail, fix)
 
 
-def long_paths_check(enabled: bool | None) -> Check:
-    """`longPaths` -- Windows only. Mirrors `tan_core::host_env::long_paths_check`.
+def _enable_long_paths_fix(key: str) -> str:
+    """The elevated one-liner that sets `LongPathsEnabled` -- shared by every
+    `long_paths_check` arm that names it, so the command cannot drift between
+    them."""
+    return (
+        "Enable long paths in an ELEVATED PowerShell, then reopen your shell and VS "
+        f"Code so new processes pick it up: New-ItemProperty -Path '{key}' -Name "
+        "LongPathsEnabled -Value 1 -PropertyType DWORD -Force"
+    )
 
-    `Warn`, not `Fail`: Windows 11 still ships `LongPathsEnabled` off by
-    default, so `Fail` would exit 4 on nearly every stock Windows host --
-    including the many that build fine because their workspace sits shallow
-    enough. It is a PROBABLE cause (a Zephyr `build/` tree nests deep enough
-    to cross the 260-character `MAX_PATH`), not a proven blocker, and the
-    failure it predicts arrives as a CMake/compiler error about a file that
-    plainly exists -- nobody connects that to a registry flag unaided.
 
-    `None` (the read failed, or this is not Windows) is ALSO `Warn`, naming
-    the uncertainty -- a `Pass` for "could not tell" would be worse than no
-    check.
+#: Fix #3 in tan-cli#306: the remedy must name this EXACT command, verbatim
+#: and runnable, no elevation needed (unlike `_enable_long_paths_fix`, which
+#: touches `HKLM`) -- the cheaper fix, and the one that unblocks the actual
+#: reported failure (`west update`'s own `git` calls).
+_GIT_LONG_PATHS_FIX = "Enable it in git: git config --global core.longpaths true"
+
+
+def long_paths_check(registry_enabled: bool | None, git_core_longpaths: bool | None) -> Check:
+    """`longPaths` -- Windows only. Mirrors
+    `tan_core::host_env::long_paths_check`.
+
+    Two independent axes, and conflating them into one is exactly the defect
+    tan-cli#306 reports. `LongPathsEnabled` (the registry) governs manifested
+    Win32 API calls (CMake, Ninja, a plain file open); it does nothing for
+    git, which refuses any path past its own limit unless ITS OWN
+    `core.longpaths` is set, regardless of the registry. `west update`
+    clones/checks out every Zephyr module with `git`, so on a fresh `HOME`
+    (no global `.gitconfig` -- a first-run customer's exact state) the
+    registry read alone reported `pass` while `west update` died on
+    `hal_nxp`'s `tf-psa-crypto` vendor tree with "Filename too long".
+
+    **`Fail`, not `Warn`, exactly when the registry reads enabled and git's
+    does not.** That combination is not a probability the way a bare
+    disabled registry flag is: `west update` runs `git`, `git` is the first
+    thing in the whole toolchain to touch a long path, and its own setting
+    says no -- the break is certain. Anything softer here would repeat the
+    exact defect this check exists to fix.
+
+    **`Warn`, not `Fail` or `Pass`, when git is set but the registry is
+    not.** Git manages long paths on its own once `core.longpaths=true` (it
+    prefixes paths with `\\\\?\\` internally and never consults the
+    registry), so the specific failure this check exists to catch will not
+    reproduce -- but `LongPathsEnabled` still governs every OTHER manifested
+    tool in the chain, so real residual risk remains.
+
+    **`Warn` when neither is set** -- the original, pre-#306 severity for a
+    bare disabled registry flag: workspace-root-depth-dependent, not
+    certain.
     """
     key = r"HKLM\SYSTEM\CurrentControlSet\Control\FileSystem"
-    if enabled is True:
-        return Check(
-            "longPaths", "pass", f"Windows long paths are enabled ({key}\\LongPathsEnabled = 1)."
+    registry_on = registry_enabled is True
+    git_on = git_core_longpaths is True
+
+    if registry_enabled is True:
+        registry_detail = f"{key}\\LongPathsEnabled = 1"
+    elif registry_enabled is False:
+        registry_detail = f"{key}\\LongPathsEnabled is 0 or unset"
+    else:
+        registry_detail = f"{key}\\LongPathsEnabled could not be read"
+
+    if git_core_longpaths is True:
+        git_detail = "git core.longpaths is true"
+    elif git_core_longpaths is False:
+        git_detail = "git core.longpaths is unset or false"
+    else:
+        git_detail = "git core.longpaths could not be determined"
+
+    if registry_on and git_on:
+        status = "pass"
+        headline = "Windows long paths are enabled at both the OS level and in git."
+        fix = None
+    elif registry_on and not git_on:
+        status = "fail"
+        headline = (
+            "Windows reports long paths enabled, but git does not honour that flag: git "
+            "has its own core.longpaths and refuses paths past its limit without it, "
+            "regardless of the registry. west update runs git, so bootstrap WILL fail on "
+            "a long Zephyr module path (e.g. hal_nxp's tf-psa-crypto vendor tree) even "
+            "though this host looks fine."
         )
-    if enabled is False:
-        return Check(
-            "longPaths",
-            "warn",
-            f"Windows long paths are disabled ({key}\\LongPathsEnabled is 0 or unset, the "
-            "Windows default). A Zephyr build/ tree nests deep enough to cross the "
-            "260-character MAX_PATH limit, and it surfaces as a CMake or compiler error "
-            "about a file that exists.",
-            "Enable long paths in an ELEVATED PowerShell, then reopen your shell and VS "
-            f"Code so new processes pick it up: New-ItemProperty -Path '{key}' -Name "
-            "LongPathsEnabled -Value 1 -PropertyType DWORD -Force",
+        fix = _GIT_LONG_PATHS_FIX
+    elif git_on:
+        status = "warn"
+        headline = (
+            "git's own core.longpaths is set, so west update's git operations are safe. "
+            "Windows' LongPathsEnabled is not, though, and every OTHER tool in the build "
+            "chain (CMake, Ninja, plain Win32 file APIs) relies on it -- a sufficiently "
+            "deep workspace can still cross MAX_PATH outside of git."
         )
-    return Check(
-        "longPaths",
-        "warn",
-        f"Could not read {key}\\LongPathsEnabled, so long-path support is unknown.",
-        f"Check it by hand: (Get-ItemProperty '{key}').LongPathsEnabled -- 1 is enabled.",
-    )
+        fix = _enable_long_paths_fix(key)
+    else:
+        status = "warn"
+        headline = (
+            "Neither Windows' LongPathsEnabled nor git's core.longpaths is set. A Zephyr "
+            "build/ tree nests deep enough to cross the 260-character MAX_PATH limit, and "
+            'it surfaces as a git "Filename too long" error during west update, or a '
+            "CMake/compiler error about a file that exists."
+        )
+        fix = f"{_GIT_LONG_PATHS_FIX}\n{_enable_long_paths_fix(key)}"
+
+    return Check("longPaths", status, f"{headline} ({registry_detail}; {git_detail}).", fix)
 
 
 def home_path_check(home: str | None) -> Check:
@@ -1183,32 +1374,61 @@ def home_path_check(home: str | None) -> Check:
 # ---------------------------------------------------------------------------
 
 
-def sdk_check(sdk_root: str | None, project_scope: str | None) -> Check:
+def sdk_check(
+    sdk_root: str | None,
+    project_scope: str | None,
+    tier: str | None = None,
+    unselected_candidate: str | None = None,
+) -> Check:
     """`sdk` -- is an alp-sdk checkout resolved at all? Mirrors
     `tan_core::preflight::build_preflight_checks`'s `sdk` check.
 
-    `project_scope` (the `--project` value, unjoined) names the SCOPED
-    `tan sdk switch` a customer actually needs: the `.alp/sdk-path` pointer
-    `tan sdk switch` writes is scoped to `--project`, so a bare
-    `tan sdk switch <path>` from a `tan --project <p> doctor` run reports
-    success and changes nothing about THIS invocation (tan-cli#101).
+    `project_scope` (the `--project` value, unjoined) used to name a SCOPED
+    `tan sdk switch <path>` fix (tan-cli#101: the `.alp/sdk-path` pointer
+    `sdk switch` writes is scoped to `--project`, so a bare `tan sdk switch
+    <path>` from a `tan --project <p> doctor` run would have reported success
+    while changing nothing about THIS invocation). That fix is moot now that
+    `sdk switch` refuses outright in every build of tan on this branch
+    (tan-cli#305, `sdk_cmd._run_not_ported`) -- recommending it, scoped or
+    not, was the actual dead end #305 reported, since the ONLY thing left
+    that resolves an SDK at all is `--sdk-root`, which needs no scoping. The
+    parameter stays (worded into the fail detail below) because `--project`
+    is still a fact worth naming, just no longer the reason for a different
+    remedy.
+
+    `tier`/`unselected_candidate` (tan-cli#301) -- a reported host named THREE
+    different roots in one report (a leftover `globalDefault`, a stale
+    `$ZEPHYR_BASE` workspace, and the checkout the user was actually standing
+    in, which appeared nowhere), and `tan doctor`/`tan bootstrap` disagreed
+    about which SDK a bare invocation meant. `GlobalDefault` outranking
+    `Discovery` is deliberate (tan-cli#263 made pins absolute on purpose) --
+    NO behaviour change here, only visibility: `tier` is the `SdkSourceTier`
+    wire spelling (`sdkRootFlag`/`projectPin`/`globalDefault`/`discovery`)
+    that answered, reported alongside the root the same way `tan sdk
+    current`'s envelope already pairs `sdkPath` with `sourceTier`.
+    `unselected_candidate` is a DIFFERENT checkout discoverable from cwd that
+    a higher tier outranked (`None` when the winning tier already IS
+    discovery, or nothing else resolves there) -- named explicitly, with how
+    to select it, so a plausible checkout sitting right there does not read
+    as unconsidered.
     """
     if sdk_root is not None:
-        return Check("sdk", "pass", f"alp-sdk at {sdk_root}")
-    if project_scope is not None:
-        fix = f"tan --project {project_scope} sdk switch <path>"
-        return Check(
-            "sdk",
-            "fail",
-            "no SDK selected -- the `.alp/sdk-path` pointer is scoped to `--project`, so "
-            f"run `{fix}` (or pass `--sdk-root <path>`)",
-            fix,
-        )
+        detail = f"alp-sdk at {sdk_root}"
+        if tier is not None:
+            detail += f" ({tier}"
+            if unselected_candidate is not None:
+                detail += (
+                    f"; a checkout at {unselected_candidate} was not selected -- "
+                    f"pass --sdk-root {unselected_candidate} to use it"
+                )
+            detail += ")"
+        return Check("sdk", "pass", detail)
+    scope_note = f" for --project {project_scope}" if project_scope is not None else ""
     return Check(
         "sdk",
         "fail",
-        "no SDK selected -- run `tan sdk switch <path>` or `tan sdk install <ver>`",
-        "tan sdk switch <path>",
+        f"no SDK selected{scope_note} -- {NO_SDK_NEXT_STEPS}",
+        "--sdk-root <path>",
     )
 
 
@@ -1294,6 +1514,57 @@ def zephyr_version_preflight_check(
         "fail",
         f"reused Zephyr v{workspace_version} != SDK pin v{sdk_pin} -- run `tan bootstrap` "
         "to refresh the workspace",
+        "tan bootstrap",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Venv provenance (tan-cli#292 consequences 1 and 3).
+# ---------------------------------------------------------------------------
+
+
+def venv_provenance_check(record: WorkspaceSdkRecord | None, sdk_root: str | None) -> Check | None:
+    """`venvProvenance` -- does the RESOLVED workspace venv's tan-written
+    record (`<topdir>/.west/tan-workspace-sdk`, tan-cli#292) name the SAME SDK
+    this report resolved against? Catches two of #292's three consequences:
+    `tan sdk switch` leaving the venv behind (consequence 3 -- the record
+    still names the SDK that last populated it), and a neighbouring project's
+    venv winning `find_workspace_venv`'s upward walk when that venv is ITSELF
+    tan-bootstrapped, just for a different SDK (consequence 1 -- its own
+    record then names a project this report was never asked about). Both
+    otherwise surface only later, as a Zephyr build failing on a
+    wrong-version package that names the SYMPTOM, not the cause.
+
+    **A WARNING, not a re-resolution (tan-cli#292 rc3 scope).** The record is
+    not yet the resolver's primary source -- `tan build` still uses whatever
+    `find_workspace_venv`'s search resolved; this only tells the customer
+    that venv's packages may not match BEFORE a build fails on it. Consequence
+    1's upward-walk case is caught only when the neighbouring venv carries its
+    OWN record; one populated by a bare `west update` with no tan involvement
+    anywhere still resolves silently -- the same gap `west_workspace_dir`'s
+    `$ZEPHYR_BASE` manifest guard cannot close for an unrelated tree with no
+    alp-sdk manifest to check against either. The full record-primary
+    resolver the issue also proposes is out of scope for this fix; see the
+    issue for the follow-up.
+
+    `None` (no check emitted, matching `zephyr_version_preflight_check`'s own
+    skip) when there is nothing to compare: no venv resolved, it carries no
+    record at all -- a workspace bootstrapped by alp-sdk's own `bootstrap.sh`
+    writes none (`crates/tan-cli/src/venv.rs:25-27`), and neither does a tan
+    predating tan-cli#292 -- or no `sdk_root` resolved to compare against.
+    """
+    if record is None or sdk_root is None:
+        return None
+    if os.path.normcase(_abs_posix(record.sdk_path)) == os.path.normcase(_abs_posix(sdk_root)):
+        return Check(
+            "venvProvenance", "pass", f"workspace venv populated for the active SDK ({record.sdk_path})"
+        )
+    return Check(
+        "venvProvenance",
+        "warn",
+        f"workspace venv was populated for a different SDK ({record.sdk_path}) than the "
+        f"one currently selected ({sdk_root}) -- Zephyr packages installed into it may not "
+        "match; run `tan bootstrap` to resync the venv",
         "tan bootstrap",
     )
 
@@ -1500,6 +1771,62 @@ def _host_os_arch_tags() -> tuple[str, str]:
     return host_os, arch
 
 
+def classify_git_core_longpaths(exit_code: int | None, stdout: str) -> bool | None:
+    """The three-way verdict for a `git config --get core.longpaths`
+    invocation -- the git-side counterpart to `_long_paths_enabled`'s
+    registry read, split out as its own pure function (mirroring
+    `tan_core::host_env::classify_git_core_longpaths`) so the exact mapping
+    tan-cli#306 argues hardest about is unit-tested without needing a real
+    `git` invocation for every case.
+
+    * exit 0 -> the stdout value, parsed with git's own boolean grammar.
+    * exit 1 -> `False`. `git config --get` documents this code as "the key
+      is not set in any scope (system/global/local)" -- git's own default,
+      and the state a fresh `HOME` is in (tan-cli#306's exact repro).
+    * anything else (`git` not on PATH, a malformed config file, a
+      permissions error) -> `None`: uncertain, not guessed.
+    """
+    if exit_code == 0:
+        value = stdout.strip().lower()
+        return value not in ("false", "no", "off", "0")
+    if exit_code == 1:
+        return False
+    return None
+
+
+def _git_core_longpaths() -> bool | None:
+    """Read git's own EFFECTIVE `core.longpaths` (system -> global -> local
+    precedence, resolved by `git config --get` itself rather than tan
+    re-implementing that precedence by hand) via a real `git` subprocess.
+
+    A SEPARATE axis from `_long_paths_enabled` on purpose (tan-cli#306): the
+    registry governs manifested Win32 API calls; it does nothing for git,
+    which `west update` uses for every project clone/checkout and which
+    refuses a long path unless ITS OWN setting says so -- the registry read
+    alone reported `pass` on a fresh `HOME` while `west update` died on
+    `hal_nxp`'s `tf-psa-crypto` tree.
+
+    Not built on this file's own `probe()`: `probe()` collapses "ran and
+    exited non-zero" (exit 1, meaning "unset") and "could not run at all"
+    (meaning "unknown") to the same `None`, and `classify_git_core_longpaths`
+    needs to tell those apart.
+    """
+    try:
+        out = subprocess.run(
+            ["git", "config", "--get", "core.longpaths"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return classify_git_core_longpaths(out.returncode, out.stdout)
+
+
 def _long_paths_enabled() -> bool | None:
     """Windows `HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\\
     LongPathsEnabled`, via the stdlib `winreg` module (Windows-only).
@@ -1587,8 +1914,8 @@ def _zephyr_sdk_scan_roots() -> list[Path]:
     ALL of them, never `HOME or USERPROFILE`.
 
     Under Git Bash/MSYS on Windows, `HOME` is a POSIX-translated path
-    (`/c/Users/caner`) while the real Zephyr SDK sits under the native
-    `%USERPROFILE%` (`C:\\Users\\caner\\zephyr-sdk-1.0.1`). `or`ing the two
+    (`/c/Users/dev`) while the real Zephyr SDK sits under the native
+    `%USERPROFILE%` (`C:\\Users\\dev\\zephyr-sdk-1.0.1`). `or`ing the two
     picks whichever is set first and silently drops the other -- proven on a
     real host: that host HAS the SDK and `_zephyr_sdk_detected()` still
     returned `False`, a hard doctor FAIL worse than the false PASS #286
@@ -1763,6 +2090,7 @@ def _collect(
     board_yaml: str | None = None,
     project_scope: str | None = None,
     workspace_root: str = ".",
+    sdk_tier: str | None = None,
 ) -> list[Check]:
     """Every probe, in report order. Nothing here may raise -- see the module
     docstring; `probe`/`on_path`/`_read_text` are the only three ways this
@@ -1779,11 +2107,14 @@ def _collect(
 
     `board_yaml`/`project_scope`/`workspace_root` feed the tan-cli#294/#290
     build-environment preflight (`sdk`/`boardYaml`/`workspace`/
-    `westResolved`/`zephyrVersion`/`zephyrWorkspace`) -- all default so every
-    existing direct caller (this file's own test suite) keeps working
-    unchanged; those checks then simply report against "no board.yaml"/"no
-    workspace resolved from `.`", which is an honest verdict, not a skipped
-    one.
+    `westResolved`/`venvProvenance`/`zephyrVersion`/`zephyrWorkspace`) -- all
+    default so every existing direct caller (this file's own test suite)
+    keeps working unchanged; those checks then simply report against "no
+    board.yaml"/"no workspace resolved from `.`", which is an honest verdict,
+    not a skipped one. `venvProvenance` (tan-cli#292) is the exception that
+    proves the rule: it emits NO check at all (not even against "no board.yaml")
+    when the resolved venv carries no provenance record, which is the common
+    case for a workspace alp-sdk's own `bootstrap.sh` set up.
 
     `boardYaml`'s severity needs one more fact: whether a project was
     actually SELECTED (`--project`/`--board-yaml` given), not merely whether
@@ -1793,13 +2124,46 @@ def _collect(
     auto-discovery only ever sets it to a path that already `is_file()`), so
     `board_yaml is not None` is a safe proxy for "explicitly given" exactly
     where it matters -- the branch where `present` is False.
+
+    `sdk_tier` -- the `SdkSourceTier` `resolve_sdk_root_ladder` answered
+    `sdk_root` with, threaded through so `sdk_check` (tan-cli#301) can name
+    it. Optional/defaulted for the same reason every other parameter here is:
+    every existing direct caller keeps working, reporting `sdk` with no tier
+    parenthetical rather than a guessed one.
     """
     checks: list[Check] = []
 
     # tan-cli#294 finding 2: build-environment preflight -- LEADS the report,
     # mirroring Rust's `prepend_doctor_checks(..., probe_build_preflight(...))`:
     # "can a build even start" outranks every host-tool probe below.
-    checks.append(sdk_check(sdk_root, project_scope))
+    #
+    # tan-cli#301: a checkout discoverable from cwd that a HIGHER tier
+    # outranked is surfaced too, but ONLY the discovery `sdk_check` itself
+    # would have used were nothing above it configured (`discover_sdk_root`,
+    # the WIDE walk `resolve_sdk_root_ladder`'s own tail already falls back
+    # to) -- reusing that exact helper instead of a second, hand-rolled scan
+    # is what keeps this a report-only addition: it can only ever name a
+    # candidate the ladder itself already knows how to reach, never invent
+    # one of its own. Skipped when the winning tier already IS discovery (or
+    # nothing): there is nothing "unselected" left to name.
+    unselected_candidate: str | None = None
+    if sdk_root is not None and sdk_tier not in (None, "discovery", "none"):
+        candidate = discover_sdk_root(Path(workspace_root))
+        # `normcase` BOTH sides. `_abs_posix` is `abspath` + slash-swap and
+        # deliberately does not resolve, so on Windows the SAME directory
+        # spelled with different case -- a `~/.alp/sdk-default` written from a
+        # differently-cased `tan sdk switch`, or a differing drive-letter case
+        # -- compared unequal and the report told the user to select the SDK
+        # that was already selected:
+        #     alp-sdk at ...\ws\ALP-SDK (globalDefault; a checkout at
+        #     ...\ws\alp-sdk was not selected -- pass --sdk-root ... to use it)
+        # A report that lies is the defect class #301 exists to close, so it
+        # must not be reintroduced by the fix for it. No-op on POSIX.
+        if candidate is not None and os.path.normcase(
+            _abs_posix(str(candidate))
+        ) != os.path.normcase(_abs_posix(sdk_root)):
+            unselected_candidate = str(candidate)
+    checks.append(sdk_check(sdk_root, project_scope, sdk_tier, unselected_candidate))
     project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
     checks.append(
         board_yaml_preflight_check(
@@ -1833,6 +2197,20 @@ def _collect(
     )
     checks.append(west_resolved_check(west_resolved_exe, west_resolved_version))
 
+    # tan-cli#292: `venvProvenance`, right beside `westResolved` -- it is a
+    # verdict on the SAME resolved venv (`find_workspace_venv`, the search
+    # `west_program` itself resolves `west` through), just reading its
+    # tan-written provenance record instead of probing the binary.
+    venv_path = find_workspace_venv(workspace_root, sdk_root)
+    venv_record: WorkspaceSdkRecord | None = None
+    if venv_path is not None:
+        record_text = _read_text(venv_path.parent / ".west" / "tan-workspace-sdk")
+        if record_text is not None:
+            venv_record = parse_workspace_sdk_record(record_text)
+    provenance_check = venv_provenance_check(venv_record, sdk_root)
+    if provenance_check is not None:
+        checks.append(provenance_check)
+
     if workspace_path is not None:
         workspace_version = None
         version_body = _read_text(workspace_path / "zephyr" / "VERSION")
@@ -1859,7 +2237,7 @@ def _collect(
     host_os, host_arch = _host_os_arch_tags()
     checks.append(zephyr_sdk_host_check(host_os, host_arch))
     if os.name == "nt":
-        checks.append(long_paths_check(_long_paths_enabled()))
+        checks.append(long_paths_check(_long_paths_enabled(), _git_core_longpaths()))
     checks.append(
         home_path_check(os.environ.get("USERPROFILE" if os.name == "nt" else "HOME"))
     )
@@ -1879,7 +2257,21 @@ def _collect(
         )
 
     manifest_floor = _manifest_floor_from_facts(facts)
-    zephyr_floor, zephyr_source = zephyr_python_floor(os.environ.get("ZEPHYR_BASE"))
+    # tan-cli#301 (second half): read the SAME resolved workspace `zephyrWorkspace`
+    # reports above (`workspace_path`, from the shared `west_workspace_dir`) --
+    # NOT a second, independent `$ZEPHYR_BASE` read. A stale exported
+    # `$ZEPHYR_BASE` is common (Zephyr's own docs, and this command's own `tan
+    # bootstrap` next-steps block, both tell a customer to export it), and
+    # reading it here regardless of the resolved workspace is how one report
+    # ended up citing two different Zephyrs. `$ZEPHYR_BASE` is consulted only as
+    # `zephyr_python_floor`'s fallback, when no workspace resolved at all --
+    # mirroring #290's fix for `zephyrWorkspace` itself.
+    zephyr_source_base = (
+        str(workspace_path / "zephyr")
+        if workspace_path is not None
+        else os.environ.get("ZEPHYR_BASE")
+    )
+    zephyr_floor, zephyr_source = zephyr_python_floor(zephyr_source_base)
     # The EFFECTIVE floor: the highest anything in the build chain enforces. The
     # manifest is not the authority here -- it is one of two claimants.
     effective_floor = max(manifest_floor, zephyr_floor)
@@ -1929,7 +2321,21 @@ def _collect(
 
     west_exe = on_path("west")
     west_version = _parse_two(probe(["west", "--version"]) or "") if west_exe else None
-    checks.append(west_check(west_exe, west_version, _parse_two(str(facts.get("_pipSpec") or ""))))
+    # tan-cli#299 second half: feed `west_check` the SAME resolved venv path
+    # `westResolved` above already computed (`resolved_west`) -- never a
+    # second, independent probe -- so "absent from bare PATH, present in the
+    # resolved venv" (the default post-bootstrap state) reports `pass`
+    # instead of a permanent warn. Only passed when it is a real venv
+    # binary (an absolute path); `west_program`'s bare-`"west"` fallback
+    # carries no information `west_exe` above does not already have.
+    checks.append(
+        west_check(
+            west_exe,
+            west_version,
+            _parse_two(str(facts.get("_pipSpec") or "")),
+            resolved_west if os.path.isabs(resolved_west) else None,
+        )
+    )
 
     # Unconditional -- not gated on `build` or a resolved board.yaml/SDK. See
     # `zephyr_sdk_check`'s docstring (tan-cli#286).
@@ -2066,6 +2472,7 @@ def doctor(
             board_yaml=board_yaml,
             project_scope=project_scope,
             workspace_root=str(workspace_root),
+            sdk_tier=sdk_tier,
         )
         exit_code = exit_code_for(checks)
         issues = checks_to_issues(checks)

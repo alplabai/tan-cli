@@ -88,9 +88,25 @@ case "${OS:-}" in Windows_NT) ADD_DATA_SEP=';' ;; esac
 # resolve `tan` without it (it puts the CWD on the analysis path), but the dir
 # it derives from the script is tan/, not the package root, so the implicit
 # resolution is an accident of running from python/ -- state it instead.
+#
+# --collect-data certifi (tan-cli#304): `certifi.where()` returns a path to
+# `certifi/cacert.pem`, a DATA file PyInstaller's static import-graph analysis
+# does not reach on its own -- the same reason `--add-data` exists for
+# `tan/templates/vendored` above. MEASURED redundant today:
+# `pyinstaller-hooks-contrib` (a hard dependency of `pyinstaller>=6.10`, not
+# something this repo controls) ships its own `hook-certifi.py` that collects
+# the same file automatically -- a build with this flag removed still bundles
+# `cacert.pem` (checked against a real freeze while writing this fix). Kept
+# explicit anyway: the alternative is `tan/net.py`'s CA-floor path depending on
+# a third-party hook nobody here declared, three packages removed from
+# anything `pyproject.toml` states -- exactly the kind of implicit dependency
+# that let `click` go undeclared until `tests/gates/test_declared_dependencies.py`
+# existed (see that gate's own docstring). `truststore` needs no equivalent
+# flag: it carries no data files, only Python + the OS's own verifier APIs.
 "${PYTHON:-python}" -m PyInstaller --onefile --name tan --clean --noconfirm \
   --console --distpath dist --workpath .build --specpath .build \
   --add-data "../tan/templates/vendored${ADD_DATA_SEP}tan/templates/vendored" \
+  --collect-data certifi \
   --paths . tan/__main__.py
 
 # Fail the BUILD, not merely the test suite, on a dirty interpreter. $PYTHON
