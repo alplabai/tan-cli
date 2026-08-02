@@ -345,6 +345,15 @@ jobs:
         if: ${{ !inputs.python_only }}
         run: python3 -m pytest tests/parity/test_seam1_field_diff.py -q
 
+      # tan-cli#320: covers _tan_reconciled_refusal, the one piece of
+      # seam1_field_diff.py that is NOT vendored-identical with alp-sdk's
+      # copy (see that module's docstring). Its own step/file rather than
+      # folded into the self-test above, which stays byte-identical with
+      # alp-sdk's copy of test_seam1_field_diff.py.
+      - name: seam1 comparator self-test (tan reconciliation, tan-cli-only)
+        if: ${{ !inputs.python_only }}
+        run: python3 -m pytest tests/parity/test_seam1_tan_reconciliation.py -q
+
       - name: seam1 field diff (live emit vs. frozen oracle)
         if: ${{ !inputs.python_only }}
         run: >
