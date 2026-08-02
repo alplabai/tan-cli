@@ -1304,6 +1304,24 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
         )
     if app_address is not None:
         validate_address(app_address, "slot0_load_address")
+        # The mramxip shape `loadbin`s the app blob at an explicit MRAM
+        # address (see below) -- correct ONLY for a raw `.bin`. `loadbin`ing
+        # anything else (e.g. `zephyr.elf`) at that address writes the
+        # artefact's own headers into MRAM instead of the app image
+        # (tan-cli#311). Unlike `plan_swd_probe`'s ELF/HEX fallback to
+        # `loadfile`, there is no fallback here: `loadfile` ignores
+        # `slot0_load_address` entirely, which would silently place the app
+        # wherever the ELF's own load addresses say rather than where this
+        # flow demands -- a refusal is the safer failure.
+        if not is_raw_bin(inp.artefact):
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: flash_args.slot0_load_address is set but the "
+                f"artefact {inp.artefact} is not a raw .bin -- refusing to loadbin "
+                "it at slot0_load_address, which would write the artefact's own "
+                "headers into MRAM instead of the app image. Point the build's "
+                "output_artefact at the slot0-linked zephyr.bin for the mramxip "
+                "shape."
+            )
 
     atoc = fa_str(fa, "atoc")
     atoc_address = fa_str_checked(fa, "atoc_address", True)

@@ -887,6 +887,27 @@ def test_flow_d_present_but_null_or_empty_slot0_load_address_refuses(bad_value):
     assert "slot0_load_address" in str(raised.value)
 
 
+def test_flow_d_mramxip_shape_refuses_a_non_raw_bin_artefact():
+    """A slot0-linked artefact that is not a raw `.bin` (e.g. `zephyr.elf`) must
+    never reach `loadbin ... slot0_load_address` -- that writes the artefact's
+    own headers into MRAM at the load address instead of the app image
+    (tan-cli#311). Unlike `plan_swd_probe`'s ELF/HEX fallback to `loadfile`,
+    there is no fallback here: `loadfile` would silently ignore
+    `slot0_load_address`, which is a worse failure than a refusal."""
+    args = {**FLOW_D_ARGS, "confirm": True}
+    with pytest.raises(FlashPlanError) as raised:
+        plan_alif_mram_jlink(
+            FlashInputs(
+                artefact="/build/zephyr/zephyr.elf", flash_args=args, core_id="m", sku="S"
+            ),
+            lambda t: True,
+        )
+    message = str(raised.value)
+    assert "zephyr.elf" in message
+    assert "zephyr.bin" in message
+    assert "slot0_load_address" in message
+
+
 def test_flow_d_holds_no_part_number_of_its_own():
     """The whole point of resolving the profile from metadata. `alif`,
     `AE822...` and the MRAM addresses must appear NOWHERE in the module -- not as
@@ -1001,6 +1022,107 @@ def test_flow_d_preflight_present_but_null_or_empty_jlink_device_refuses(bad_val
             FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
         )
     assert "jlink_device" in str(raised.value)
+
+
+def _flow_d_preflight_inputs():
+    args = {**FLOW_D_ARGS, "expect_dpidr": "0x4C013477", "jlink_device": "Generic-Attach"}
+    return FlashInputs(artefact="/b/z.bin", flash_args=args, core_id="m", sku="S")
+
+
+def _stub_flow_d_probe(monkeypatch, stdout: str, stderr: str = "", success: bool = True):
+    """Make `_flow_d_preflight` reach a fake connect banner without a real
+    J-Link on PATH or an actual spawn -- `_tool_available`/
+    `_programs_resolved_in_venv` are the tool-gate and venv-resolution steps
+    ahead of the spawn, neither of which this test cares about."""
+    monkeypatch.setattr(flash_cmd, "_tool_available", lambda *_a, **_k: True)
+    monkeypatch.setattr(flash_cmd, "_programs_resolved_in_venv", lambda argv, _venv_bin: argv)
+    monkeypatch.setattr(
+        flash_cmd,
+        "_spawn_jlink",
+        lambda *_a, **_k: flash_cmd._Outcome(success=success, stdout=stdout, stderr=stderr),
+    )
+
+
+def test_flow_d_preflight_a_different_reported_dp_id_keeps_the_wiring_message(monkeypatch):
+    """tan-cli#312, case (a): the probe DID connect and reported a real, just
+    different, SW-DP ID -- a genuine wrong-board / wiring / probe-selection
+    problem, so the original remediation stands unchanged."""
+    _stub_flow_d_probe(
+        monkeypatch,
+        stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
+    )
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None
+    assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
+    assert "re-enumerat" not in message
+
+
+def test_flow_d_preflight_no_dp_id_at_all_gets_the_re_enumeration_message(monkeypatch):
+    """tan-cli#312, case (b): measured verbatim on the rc3 bench run -- the
+    probe refused the connect outright, mid re-enumeration after a prior
+    `JLinkExe` close, and reported no SW-DP ID whatsoever. This must NOT get
+    the wiring/jlink_serial sentence: nothing was wrong with either."""
+    _stub_flow_d_probe(
+        monkeypatch,
+        stdout="Connecting to J-Link ...FAILED: Cannot connect to the probe/programmer.\n",
+        stderr="J-Link uptime (since boot): 0d 00h 00m 01s\n",
+        success=False,
+    )
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None
+    assert "re-enumerat" in message
+    assert "Check the probe selection" not in message
+    assert "0x4C013477" in message
+
+
+def test_flow_d_preflight_an_unrecognised_banner_falls_back_to_the_wiring_message(monkeypatch):
+    """Conservative by design (tan-cli#312): a banner with neither a
+    recognisable DP-ID token NOR SEGGER's own connect-refused wording is not
+    confidently "just re-enumerating" -- the detector must not guess the
+    wiring is fine, so this keeps the original sentence."""
+    _stub_flow_d_probe(monkeypatch, stdout="some unrecognised probe banner\n")
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None
+    assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
+    assert "re-enumerat" not in message
+
+
+def test_flow_d_preflight_a_target_level_cannot_connect_keeps_the_wiring_message(monkeypatch):
+    """tan-cli#312 review finding: an unplugged SWD ribbon / no board present
+    produces "Cannot connect to target." -- a genuine wiring problem, not a
+    re-enumerating probe. This must NOT get the "not a wiring... problem"
+    re-enumeration message: on a bench that would turn a real unplugged cable
+    into an infinite wait-and-retry loop instead of the correct remediation."""
+    _stub_flow_d_probe(
+        monkeypatch,
+        stdout=(
+            "Connecting to target via SWD\n"
+            "InitTarget() start\n"
+            "InitTarget() end\n"
+            "Cannot connect to target.\n"
+        ),
+        success=False,
+    )
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None
+    assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
+    assert "re-enumerat" not in message
+
+
+def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypatch):
+    """tan-cli#312 review finding: a probe that IS reachable via USB but
+    refuses the requested `flash_args.jlink_serial` prints "Cannot connect to
+    J-Link." -- a real probe-selection problem, so this keeps the original
+    wiring/`jlink_serial` remediation rather than the re-enumeration message."""
+    _stub_flow_d_probe(
+        monkeypatch,
+        stdout="Connecting to J-Link via USB...FAILED: Cannot connect to J-Link.\n",
+        success=False,
+    )
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None
+    assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
+    assert "re-enumerat" not in message
 
 
 def test_flow_d_needs_jlink_on_path_for_a_real_run():
