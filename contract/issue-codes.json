@@ -710,6 +710,1320 @@
       "emittedBy": "crates/tan-cli/src/commands/support_bundle.rs",
       "literal": "code: \"support-bundle.server-compatibility\"",
       "note": "Registered by tan-cli#219, which added the emit-site direction of the gate: every literal issue code under crates/ must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.enclosing-west-workspace",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "literal": "\"enclosing-west-workspace\"",
+      "note": "The `bootstrap.` prefix is applied by `_refusal()`; fires when the intended west topdir sits under an ANCESTOR directory that already has its own `.west` (tan-cli#284's `enclosing_west_workspace_refusal`), distinct from the `workspace-guard` sibling above it (an OCCUPIED relocation target, not an ancestor workspace). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "literal": "\"internal-failure\"",
+      "note": "Two sites share this spelling: `_refusal(ExitCode.INTERNAL_FAILURE, \"internal-failure\", ...)` for the unreachable `check_prerequisites` fallthrough, and a literal `Issue(\"bootstrap.internal-failure\", \"error\", ...)` in the command's own catch-all `except Exception` backstop. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.python-floor-skew",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/core/bootstrap.py",
+      "literal": "\"python-floor-skew\"",
+      "note": "Built by `python_floor_skew_warning()` as a bare `(code, message)` pair, prefixed to `bootstrap.` when `Log.warn(*skew)` drains it; fires whenever the manifest's declared `pythonMinVersion` and the effective (Zephyr-enforced) floor disagree, success or not (tan-cli#300). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.python-newer-than-verified",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/core/bootstrap.py",
+      "literal": "\"python-newer-than-verified\"",
+      "note": "Built by `python_ceiling_warning()`, prefixed via `Log.warn(*ceiling)`; warns (never refuses) when the resolved interpreter is newer than `PYTHON_CEILING_KNOWN_GOOD` (tan-cli#285's other half -- a too-NEW Python is not a guaranteed failure the way too-OLD is). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.venv-unusable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/core/bootstrap.py",
+      "literal": "\"venv-unusable\"",
+      "note": "Built by `posix_venv_unusable()` (Linux only: `python3` runs but its `venv` module cannot create a usable environment because `ensurepip`/`python3-venv` is missing, tan-cli#161/#294); forwarded to the wire through TWO sites -- `bootstrap_cmd.py`'s `Issue(f\"bootstrap.{refusal.code}\", ...)` and `doctor_cmd.py`'s `code=f\"bootstrap.{venv_refusal.code}\"` -- both prefixing the same bare `PrereqFailure.code`. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.workspace-relocation-rolled-back",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "literal": "\"workspace-relocation-rolled-back\"",
+      "note": "tan-cli#284: fires from `rollback_relocation_after()` when a LATER phase (venv/west) fails after the checkout was already relocated, and the rollback itself is reported -- whether the move-back and the pointer restore both succeeded, only the pointer restore failed, or the move-back itself could not complete. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "cli.command-deferred",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/deferred_cmd.py",
+      "literal": "DEFERRED_ISSUE_CODE = \"cli.command-deferred\"",
+      "note": "tan-cli#260: shared by all seven verbs this build stubs (`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`, `support-bundle`), each real in the v0.4.1 oracle and deferred to v0.6.0. Assigned to a module constant and referenced by name at the `Issue(...)` call site, not spelled inline -- see this module's own docstring for why one shared code, not seven, and why `contract/` being open again is what unblocks promoting this note. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "literal": "\"build.internal-failure\"",
+      "note": "The port's catch-all `except Exception` backstop -- an uncaught exception reported as a coded envelope instead of a bare traceback. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.missing-tool",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "literal": "\"build.missing-tool\"",
+      "note": "Severity is `\"error\"` when the slice actually failed and `\"warning\"` when it was only skipped -- both share this one code, distinguished by `issues[].severity`. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.nothing-built",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "literal": "\"build.nothing-built\"",
+      "note": "Every slice was skipped rather than any slice failing outright -- a distinct code from the `build.slice-failed` sibling beside it. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "clean.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/clean_cmd.py",
+      "literal": "\"clean.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "clean.manifest-unreadable",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/clean_cmd.py",
+      "literal": "\"clean.manifest-unreadable\"",
+      "note": "Best-effort: an unreadable or unparsable system-manifest.yaml is a warning, never fatal -- `clean` must not fail over a manifest it only consults for an optimisation. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "clean.remove-failed",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/clean_cmd.py",
+      "literal": "\"clean.remove-failed\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "clean.sdk-root-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/clean_cmd.py",
+      "literal": "\"clean.sdk-root-not-found\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "clean.unsafe-build-root",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/clean_cmd.py",
+      "literal": "\"clean.unsafe-build-root\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "clean.unsafe-target",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/clean_cmd.py",
+      "literal": "\"clean.unsafe-target\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "examples.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/examples_cmd.py",
+      "literal": "\"examples.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "literal": "\"flash.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.nothing-flashed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "literal": "\"flash.nothing-flashed\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.sdk-root-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "literal": "\"flash.sdk-root-not-found\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.slice-skipped",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "literal": "\"flash.slice-skipped\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.in-process-unavailable",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.in-process-unavailable\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "image.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/image_cmd.py",
+      "literal": "\"image.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.example-missing-board-yaml",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.example-missing-board-yaml\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "kconfig.emit-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/kconfig_cmd.py",
+      "literal": "code=\"kconfig.emit-failed\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "kconfig.no-sdk-root",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/kconfig_cmd.py",
+      "literal": "code=\"kconfig.no-sdk-root\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "kconfig.no-workspace",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/kconfig_cmd.py",
+      "literal": "code=\"kconfig.no-workspace\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "kconfig.parse-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/kconfig_cmd.py",
+      "literal": "code=\"kconfig.parse-failed\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.build-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "literal": "\"model.build-failed\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "literal": "\"model.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.unknown-subcommand",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "literal": "\"model.unknown-subcommand\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "monitor.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_cmd.py",
+      "literal": "\"monitor.failed\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "monitor.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_cmd.py",
+      "literal": "\"monitor.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "presets.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/presets_cmd.py",
+      "literal": "\"presets.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "run.exec-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/run_cmd.py",
+      "literal": "\"run.exec-failed\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "run.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/run_cmd.py",
+      "literal": "\"run.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "run.manifest-stale",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/run_cmd.py",
+      "literal": "\"run.manifest-stale\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "run.native-sim-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/run_cmd.py",
+      "literal": "\"run.native-sim-unavailable\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.fetch-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "literal": "code=\"fetch-failed\"",
+      "note": "The `sdk.` prefix is applied by `_fail()`. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "literal": "code=\"internal-failure\"",
+      "note": "The `sdk.` prefix is applied by `_fail()`. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.network-required",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "literal": "code=\"network-required\"",
+      "note": "The `sdk.` prefix is applied by `_fail()`; fires when `sdk list` is run without `--online` (this port gates the network call this repo's own oracle reaches unconditionally, so a hermetic/air-gapped run gets a coded refusal instead of a hang). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.not-ported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "literal": "code=\"not-ported\"",
+      "note": "The `sdk.` prefix is applied by `_fail()`; `sdk install`/`sdk switch` refuse outright in this build (tan-cli#305). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.project-pin-unresolved",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "literal": "\"sdk.project-pin-unresolved\"",
+      "note": "tan-cli#263: shared by every caller of `resolve_sdk_tiered` (not just `sdk current`) when `.alp/sdk-path` names a checkout that no longer resolves and the ladder fell through to another tier. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.unknown-subcommand",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/sdk_cmd.py",
+      "literal": "code=\"unknown-subcommand\"",
+      "note": "The `sdk.` prefix is applied by `_fail()`. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "size.budget-unknown",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/size_cmd.py",
+      "literal": "\"size.budget-unknown\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "size.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/size_cmd.py",
+      "literal": "\"size.internal-failure\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "size.over-budget",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/size_cmd.py",
+      "literal": "\"size.over-budget\"",
+      "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.board-yaml-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "literal": "\"board-yaml-missing\"",
+      "note": "The `validate.` prefix is applied by the local `fail()` closure. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "literal": "\"internal-failure\"",
+      "note": "The `validate.` prefix is applied by the local `fail()` closure; two call sites share it -- an unreadable/non-UTF-8 board.yaml, and `validate_board_text` raising unexpectedly. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.schema-violation",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "literal": "\"schema-violation\"",
+      "note": "The `validate.` prefix is applied by the local `fail()` closure (the `BoardShapeError` path) and, separately, by `Issue(f\"validate.{result.outcome}\", ...)` -- `result.outcome` is only ever `OUTCOME_SCHEMA_VIOLATION` (\"schema-violation\") on that path, since a clean result carries no messages to iterate. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.spawn-not-implemented",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "literal": "\"spawn-not-implemented\"",
+      "note": "The `validate.` prefix is applied by the local `fail()` closure; the full (spawn) validator is not ported yet -- run with `--offline` (tan-cli#262). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.artefact-write-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/materialise.py",
+      "literal": "\"build.artefact-write-failed\"",
+      "note": "Constructed as the whole literal at a `MaterialiseError` call site in `materialise.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.conflicting-flags",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "literal": "\"build.conflicting-flags\"",
+      "note": "Constructed as the whole literal at a `_refuse` call site in `build_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.materialise-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "literal": "\"build.materialise-failed\"",
+      "note": "Constructed as the whole literal at a `BuildError` call site in `build_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.path-escape",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/materialise.py",
+      "literal": "\"build.path-escape\"",
+      "note": "Constructed as the whole literal at a `MaterialiseError` call site in `materialise.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.plan-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/core/build_plan.py",
+      "literal": "\"build.plan-invalid\"",
+      "note": "Constructed as the whole literal at a `PlanParseError` call site in `build_plan.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.plan-token-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/token_substitution.py",
+      "literal": "\"build.plan-token-unresolved\"",
+      "note": "Constructed as the whole literal at a `TokenSubstitutionError` call site in `token_substitution.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.plan-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "literal": "\"build.plan-unavailable\"",
+      "note": "Constructed as the whole literal at a `BuildError` call site in `build_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.plan-unsupported-schema",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/core/build_plan.py",
+      "literal": "\"build.plan-unsupported-schema\"",
+      "note": "Constructed as the whole literal at a `PlanParseError` call site in `build_plan.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.project-root-mismatch",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/token_substitution.py",
+      "literal": "\"build.project-root-mismatch\"",
+      "note": "Constructed as the whole literal at a `TokenSubstitutionError` call site in `token_substitution.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.sdk-commit-mismatch",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/token_substitution.py",
+      "literal": "\"build.sdk-commit-mismatch\"",
+      "note": "Constructed as the whole literal at a `TokenSubstitutionError` call site in `token_substitution.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "build.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build/token_substitution.py",
+      "literal": "\"build.sdk-root-unresolved\"",
+      "note": "Constructed as the whole literal at a `TokenSubstitutionError` call site in `token_substitution.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "explain.ambiguous-selector",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "literal": "\"explain.ambiguous-selector\"",
+      "note": "Constructed as the whole literal at a `ExplainError` call site in `explain_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "explain.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "literal": "\"explain.internal-failure\"",
+      "note": "Constructed as the whole literal at a `ExplainError` call site in `explain_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "explain.positional-template-conflict",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "literal": "\"explain.positional-template-conflict\"",
+      "note": "Constructed as the whole literal at a `ExplainError` call site in `explain_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "explain.target-unknown",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "literal": "\"explain.target-unknown\"",
+      "note": "Constructed as the whole literal at a `ExplainError` call site in `explain_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "explain.template-unknown",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "literal": "\"explain.template-unknown\"",
+      "note": "Constructed as the whole literal at a `ExplainError` call site in `explain_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "explain.template-unreadable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/explain_cmd.py",
+      "literal": "\"explain.template-unreadable\"",
+      "note": "Constructed as the whole literal at a `ExplainError` call site in `explain_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.manifest-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "literal": "\"flash.manifest-invalid\"",
+      "note": "Constructed as the whole literal at a `_error` call site in `flash_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "flash.manifest-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/flash_cmd.py",
+      "literal": "\"flash.manifest-not-found\"",
+      "note": "Constructed as the whole literal at a `_error` call site in `flash_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.board-sku-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.board-sku-unresolved\"",
+      "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.board-yaml-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.board-yaml-missing\"",
+      "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.internal-failure\"",
+      "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.invalid-executor",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.invalid-executor\"",
+      "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.invalid-target",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.invalid-target\"",
+      "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.output-unwritable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.output-unwritable\"",
+      "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.python-too-old",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.python-too-old\"",
+      "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.sdk-root-unresolved\"",
+      "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "generate.would-overwrite",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/generate_cmd.py",
+      "literal": "\"generate.would-overwrite\"",
+      "note": "Constructed as the whole literal at a `GenerateError` call site in `generate_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "image.manifest-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/image_cmd.py",
+      "literal": "\"image.manifest-invalid\"",
+      "note": "Constructed as the whole literal at a `_error_outcome` call site in `image_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "image.manifest-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/image_cmd.py",
+      "literal": "\"image.manifest-unavailable\"",
+      "note": "Constructed as the whole literal at a `_error_outcome` call site in `image_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.board-yaml-unreadable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.board-yaml-unreadable\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.board-yaml-unsupported",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.board-yaml-unsupported\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.example-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.example-not-found\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.example-unreadable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.example-unreadable\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.internal-failure\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.invalid-cores",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.invalid-cores\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.invalid-example",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.invalid-example\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.invalid-name",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.invalid-name\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.invalid-som",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.invalid-som\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.invalid-template",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.invalid-template\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.sdk-root-unresolved\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "init.template-unreadable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/init_cmd.py",
+      "literal": "\"init.template-unreadable\"",
+      "note": "Constructed as the whole literal at a `InitError` call site in `init_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "kconfig.board-yaml-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/kconfig_cmd.py",
+      "literal": "\"kconfig.board-yaml-invalid\"",
+      "note": "Constructed as the whole literal at a `_CoreResolutionError` call site in `kconfig_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "kconfig.board-yaml-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/kconfig_cmd.py",
+      "literal": "\"kconfig.board-yaml-missing\"",
+      "note": "Constructed as the whole literal at a `_CoreResolutionError` call site in `kconfig_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "kconfig.core-ambiguous",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/kconfig_cmd.py",
+      "literal": "\"kconfig.core-ambiguous\"",
+      "note": "Constructed as the whole literal at a `_CoreResolutionError` call site in `kconfig_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.board-yaml-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "literal": "\"model.board-yaml-invalid\"",
+      "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.board-yaml-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "literal": "\"model.board-yaml-missing\"",
+      "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.build-timeout",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "literal": "\"model.build-timeout\"",
+      "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.python-too-old",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "literal": "\"model.python-too-old\"",
+      "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "model.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/model_cmd.py",
+      "literal": "\"model.sdk-root-unresolved\"",
+      "note": "Constructed as the whole literal at a `ModelError` call site in `model_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "monitor.launch-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_cmd.py",
+      "literal": "\"monitor.launch-failed\"",
+      "note": "Constructed as the whole literal at a `MonitorError` call site in `monitor_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "monitor.no-port",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_cmd.py",
+      "literal": "\"monitor.no-port\"",
+      "note": "Constructed as the whole literal at a `MonitorError` call site in `monitor_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "monitor.pyserial-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/monitor_cmd.py",
+      "literal": "\"monitor.pyserial-missing\"",
+      "note": "Constructed as the whole literal at a `MonitorError` call site in `monitor_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.argv-rejected",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.argv-rejected\"",
+      "note": "Constructed as the whole literal at a `_issue` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.binary-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.binary-missing\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.cpu-halted",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.cpu-halted\"",
+      "note": "Constructed as the whole literal at a `_issue` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.descriptor",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.descriptor\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.descriptor-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.descriptor-missing\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.elf-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.elf-missing\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.exited-nonzero",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.exited-nonzero\"",
+      "note": "Constructed as the whole literal at a `_issue` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.expect-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.expect-not-found\"",
+      "note": "Constructed as the whole literal at a `_issue` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.image-bundle-unused",
+      "status": "reserved",
+      "severity": "info",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.image-bundle-unused\"",
+      "note": "Constructed as the whole literal at a `_issue` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.manifest-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.manifest-invalid\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.manifest-schema",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.manifest-schema\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.manifest-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.manifest-unavailable\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.run-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.run-failed\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.sdk-root-not-found",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.sdk-root-not-found\"",
+      "note": "Constructed as the whole literal at a `fail` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.sku-unresolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.sku-unresolved\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "renode.slice",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/renode_cmd.py",
+      "literal": "\"renode.slice\"",
+      "note": "Constructed as the whole literal at a `fail_sdk` call site in `renode_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "size.manifest-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/size_cmd.py",
+      "literal": "\"size.manifest-invalid\"",
+      "note": "Constructed as the whole literal at a `_error_outcome` call site in `size_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "size.manifest-unavailable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/size_cmd.py",
+      "literal": "\"size.manifest-unavailable\"",
+      "note": "Constructed as the whole literal at a `_error_outcome` call site in `size_cmd.py` (`_FULL_CODE_CALLABLES` in python/tests/gates/test_every_issue_code_is_registered.py), several call frames from the eventual `Issue(err.code, ...)` re-emit -- invisible to a scan scoped to `Issue(\"family.code\", ...)`/`code=\"family.code\"` alone. Found and registered while remediating tan-cli#224's own review (the gate's first version missed this whole emit shape). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.boardYaml",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"boardYaml\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.bootstrapManifest",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"bootstrapManifest\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.homePath",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"homePath\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.hostPrerequisites",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"hostPrerequisites\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.hostPython",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"hostPython\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.jlink",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"jlink\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.longPaths",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"longPaths\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.pythonFloor",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"pythonFloor\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.sdk",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"sdk\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.sdkProvenance",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"sdkProvenance\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.setools",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"setools\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.sevenZip",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"sevenZip\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.venvProvenance",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"venvProvenance\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.west",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"west\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.westResolved",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"westResolved\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.workspace",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"workspace\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.zephyrSdk",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"zephyrSdk\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.zephyrSdkAvailableForHost",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"zephyrSdkAvailableForHost\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.zephyrVersion",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"zephyrVersion\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.zephyrWorkspace",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "\"zephyrWorkspace\"",
+      "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "migrate.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/west_forward_cmd.py",
+      "literal": ".failed",
+      "note": "The mirrored `f\"{subcommand}.failed\"` shape (family substituted, suffix fixed) at `python/tan/commands/west_forward_cmd.py`'s `_run_forward` -- the reverse of `bootstrap.`-style prefixing, and a second live call site of the exact defect tan-cli#224 reports (a code assembled by interpolation no literal scan can see) found while remediating that issue's own review. `subcommand` is closed to the three literal strings `tan migrate`'s own Typer command passes (`migrate`/`lock`/`quality`, `cli.py`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "lock.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/west_forward_cmd.py",
+      "literal": ".failed",
+      "note": "The mirrored `f\"{subcommand}.failed\"` shape (family substituted, suffix fixed) at `python/tan/commands/west_forward_cmd.py`'s `_run_forward` -- the reverse of `bootstrap.`-style prefixing, and a second live call site of the exact defect tan-cli#224 reports (a code assembled by interpolation no literal scan can see) found while remediating that issue's own review. `subcommand` is closed to the three literal strings `tan lock`'s own Typer command passes (`migrate`/`lock`/`quality`, `cli.py`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "quality.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/west_forward_cmd.py",
+      "literal": ".failed",
+      "note": "The mirrored `f\"{subcommand}.failed\"` shape (family substituted, suffix fixed) at `python/tan/commands/west_forward_cmd.py`'s `_run_forward` -- the reverse of `bootstrap.`-style prefixing, and a second live call site of the exact defect tan-cli#224 reports (a code assembled by interpolation no literal scan can see) found while remediating that issue's own review. `subcommand` is closed to the three literal strings `tan quality`'s own Typer command passes (`migrate`/`lock`/`quality`, `cli.py`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     }
   ]
 }
