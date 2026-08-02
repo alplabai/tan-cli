@@ -14,7 +14,7 @@ in between. That is deliberate: comparing in one cwd means the envelopes' absolu
 paths are literally the same strings, so nothing has to be path-normalised and no
 normalisation can hide a divergence.
 
-Three things ARE normalised, each an implementation difference rather than a
+Four things ARE normalised, each an implementation difference rather than a
 contract one, and each named at its call site:
   - the OS-error tail `size` interpolates into `size.manifest-unavailable`
     (Rust's `io::Error` Display vs Python's `OSError`);
@@ -23,7 +23,14 @@ contract one, and each named at its call site:
     cannot reproduce the Rust `tar`+`flate2` byte stream (member order, header
     fields, gzip metadata). `tests/commands/test_image_command.py` asserts the
     property that actually matters instead: each recorded hash matches the bytes
-    this run wrote at that artefact path.
+    this run wrote at that artefact path;
+  - the `(tried ...)` clause Python's `image.helper-missing` message carries
+    (alp-sdk#330) -- a DELIBERATE divergence, not a bug to reconcile: the Rust
+    oracle only ever anchors a helper's `firmware_path` under `build_root`, so
+    it rejects a real, SDK-shipped helper firmware outright and has no `sdk_root`
+    fallback (or its resolved candidates) to name in the message. Fixed only on
+    the Python side because oracle parity cannot catch an SDK-integration defect
+    the frozen oracle itself has.
 
 Two cases are xfail(strict=True) -- the deliberate I-18 divergence. Strict, so
 if the oracle ever grows the same read-side reconciliation this file FAILS and
@@ -179,6 +186,15 @@ def _normalise(payload: dict) -> dict:
             message,
             flags=re.S,
         )
+        # alp-sdk#330: only Python tries `sdk_root` as a fallback and names every
+        # candidate it tried; the Rust oracle has no such clause at all. Stripped
+        # rather than reconciled -- see the module docstring.
+        message = re.sub(
+            r" \(tried .*?\)(?=; refusing to produce an incomplete bundle)",
+            "",
+            message,
+            flags=re.S,
+        )
         issue["message"] = message
     data = payload.get("data")
     if isinstance(data, dict):
@@ -189,6 +205,18 @@ def _normalise(payload: dict) -> dict:
                 entry["sha256"] = "<ARCHIVE-SHA256>"
                 entry["size"] = "<ARCHIVE-SIZE>"
     return payload
+
+
+def _normalise_text(text: str) -> str:
+    """The `text_mode` twin of `_normalise`'s `(tried ...)` strip: the same
+    notice line reaches stderr in text mode, so it needs the same divergence
+    carved out (alp-sdk#330)."""
+    return re.sub(
+        r" \(tried .*?\)(?=; refusing to produce an incomplete bundle)",
+        "",
+        text,
+        flags=re.S,
+    )
 
 
 def _rust_run(
@@ -239,7 +267,7 @@ def assert_parity(
     if text_mode:
         assert r_out == {"__raw__": ""}, f"text mode wrote to stdout: {r_out}"
         assert p_out == {"__raw__": ""}, f"text mode wrote to stdout: {p_out}"
-        assert r_err == p_err
+        assert _normalise_text(r_err) == _normalise_text(p_err)
         return
     assert _normalise(r_out) == _normalise(p_out), (
         f"envelope differs\nrust  ={json.dumps(_normalise(r_out), indent=1)}\n"
