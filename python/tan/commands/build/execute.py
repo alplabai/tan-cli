@@ -621,10 +621,17 @@ def execute_slices(
                 zephyr_base, sdk_root_path, sl.env, sl.env_append_path, env_lookup
             ),
         ]
-        env = dict(os.environ)
-        env.update(
-            dict(assemble_slice_env(sl.env, sl.env_append_path, env_lookup, slice_gap_fillers))
+        # Bound to a name rather than inlined into the `update` call: the
+        # tan-cli#336 pop below needs to distinguish a `ZEPHYR_BASE` that
+        # something AUTHORITATIVE put here (the plan's own `env`, or
+        # tan-cli#308's gap filler) from one merely inherited off
+        # `os.environ` -- and after the `update` the merged `env` can no
+        # longer tell those apart.
+        slice_env = dict(
+            assemble_slice_env(sl.env, sl.env_append_path, env_lookup, slice_gap_fillers)
         )
+        env = dict(os.environ)
+        env.update(slice_env)
         # tan-cli#289/#106: the venv `west` spawns nested `west`/`bitbake`
         # (via `alp_orchestrate`) that resolve purely via PATH -- without
         # this they fail to find `west` exactly like the parent process
@@ -632,7 +639,7 @@ def execute_slices(
         # `tool` did not resolve to an absolute venv path above.
         env = with_venv_on_path(env, tool)
 
-        if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in sl.env:
+        if is_west and workspace_dir is not None and "ZEPHYR_BASE" not in slice_env:
             # tan-cli#336: a dangling `$ZEPHYR_BASE` inherited from the
             # ambient shell (seeded above by `dict(os.environ)`) OUTRANKS the
             # workspace tan just resolved -- west's own `set_zephyr_base`
@@ -659,9 +666,21 @@ def execute_slices(
             # exactly what already happens when `ZEPHYR_BASE` is unset
             # (verified: an unset `ZEPHYR_BASE` self-heals via the
             # manifest's "zephyr"-named project, `zephyr.base-prefer`
-            # unset). A plan that pins `ZEPHYR_BASE` on the slice's OWN
-            # `env` is left untouched -- "plan wins / CLI fills gaps"
-            # applies here too (see `assemble_slice_env`'s docstring).
+            # unset).
+            #
+            # Guarded on `slice_env`, NOT on `sl.env`: tan-cli#308's
+            # `zephyr_env_overrides` fills this key as a gap filler for
+            # precisely the slices that DON'T pin it themselves, so keying
+            # off the plan alone would pop #308's freshly-computed value on
+            # every slice #308 exists to serve and leave only the pop's
+            # weaker self-heal behind. `slice_env` holds the plan's own env
+            # AND the gap fillers merged, so "present in `slice_env`" is
+            # exactly "something authoritative decided this" -- and only an
+            # ambient, inherited `ZEPHYR_BASE` is dropped. The two fixes
+            # compose in that order: #308 supplies the right value whenever
+            # the workspace has a real `zephyr/`; #336 removes a stale
+            # ambient one for the cases #308 cannot fill (no
+            # `workspace_dir`, or a workspace not yet `west update`d).
             env.pop("ZEPHYR_BASE", None)
 
         # tan-cli#307: pin `west build` to the workspace tan resolved rather
@@ -738,7 +757,27 @@ def execute_slices(
             continue
 
         status = "succeeded" if code == 0 else "failed"
-        message = None if code == 0 else f"slice `{sl.core_id}` terminated with exit code: {code}"
+        if code == 0:
+            message = None
+        elif is_west and saw_no_workspace and workspace_dir is not None:
+            # tan-cli#336: west named no cause beyond its own exit code even
+            # though tan was holding a resolved workspace path the whole
+            # time -- name it, and the `ZEPHYR_BASE` this spawn actually saw.
+            # After tan-cli#308 that value is usually the workspace's own
+            # `zephyr/`; "unset" means #308 had nothing to fill and the #336
+            # pop above ran. Either way it is the fact that distinguishes
+            # "tan pointed west somewhere wrong" from "west never saw what
+            # tan resolved". Plain string interpolation, not `!r`: a Windows
+            # path's backslashes survive unescaped this way, matching every
+            # other path already embedded in this module's messages.
+            seen_zephyr_base = env.get("ZEPHYR_BASE") or "unset"
+            message = (
+                f"slice `{sl.core_id}` terminated with exit code: {code} -- west could not "
+                f"find a workspace; tan resolved `{workspace_dir}`, but the spawned process "
+                f"saw ZEPHYR_BASE={seen_zephyr_base}"
+            )
+        else:
+            message = f"slice `{sl.core_id}` terminated with exit code: {code}"
 
         # tan-cli#309 (upstream tan-cli #97): a core declared `os: zephyr`
         # whose CMakeLists.txt never calls `find_package(Zephyr ...)` still
@@ -778,27 +817,6 @@ def execute_slices(
         output_artefact, slice_build_dir = (
             resolve_zephyr_artefact(cwd, sl.command.args) if status == "succeeded" else (None, None)
         )
-        if code == 0:
-            message = None
-        elif is_west and saw_no_workspace and workspace_dir is not None:
-            # tan-cli#336: west named no cause beyond its own exit code even
-            # though tan was holding a resolved workspace path the whole
-            # time -- name it, and the `ZEPHYR_BASE` this spawn actually saw
-            # ("unset" is the honest state after the pop above for every
-            # slice this fix covers; a real value here means the PLAN
-            # pinned it, or `workspace_dir` didn't resolve the same
-            # workspace west itself would have). Plain string interpolation,
-            # not `!r`: a Windows path's backslashes survive unescaped this
-            # way, matching every other path already embedded in this
-            # module's messages (e.g. the sdk-switch-pristine note above).
-            seen_zephyr_base = env.get("ZEPHYR_BASE") or "unset"
-            message = (
-                f"slice `{sl.core_id}` terminated with exit code: {code} -- west could not "
-                f"find a workspace; tan resolved `{workspace_dir}`, but the spawned process "
-                f"saw ZEPHYR_BASE={seen_zephyr_base}"
-            )
-        else:
-            message = f"slice `{sl.core_id}` terminated with exit code: {code}"
         outcomes.append(
             SliceOutcome(
                 sl.core_id,

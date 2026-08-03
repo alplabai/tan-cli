@@ -978,9 +978,29 @@ def _fake_west_build_script() -> str:
     when that doesn't lead to a workspace either. `sys.argv[-1]` is the
     slice's source dir: with no trailing cmake `--` options in the test
     plans below, `_pin_west_workspace`'s rewritten args always end with it.
+
+    On each success path it also writes the `build/CMakeCache.txt`
+    `ZEPHYR_BASE:` entry a REAL successful `west build` leaves behind, which
+    tan-cli#309's `zephyr_boilerplate_loaded` guard reads as its evidence
+    that Zephyr's CMake boilerplate actually ran. Without it this shim exits
+    0 having produced nothing, and #309 correctly fails the slice -- masking
+    what #336's own assertions are about. The two fixes are orthogonal; the
+    fixture has to satisfy both for either to be measurable.
     """
     return (
         "import os, sys\n"
+        # The build dir is `-d`'s value when present, NOT `<cwd>/build`:
+        # tan-cli#307 pins the child's cwd to the WORKSPACE and injects an
+        # explicit `-d <slice dir>/build` to keep the output where it would
+        # otherwise have defaulted. A shim writing to `<cwd>/build` would
+        # write into the workspace -- which here is where this very script
+        # lives, so `makedirs` raises FileExistsError against the file.
+        "def ok():\n"
+        "    d = sys.argv[sys.argv.index('-d') + 1] if '-d' in sys.argv else os.path.join(os.getcwd(), 'build')\n"
+        "    os.makedirs(d, exist_ok=True)\n"
+        "    with open(os.path.join(d, 'CMakeCache.txt'), 'w') as fh:\n"
+        "        fh.write('ZEPHYR_BASE:PATH=/fake/zephyr\\n')\n"
+        "    sys.exit(0)\n"
         "def has_dot_west(p):\n"
         "    while True:\n"
         "        if os.path.isdir(os.path.join(p, '.west')):\n"
@@ -991,10 +1011,10 @@ def _fake_west_build_script() -> str:
         "        p = parent\n"
         "source_dir = sys.argv[-1]\n"
         "if has_dot_west(source_dir):\n"
-        "    sys.exit(0)\n"
+        "    ok()\n"
         "zb = os.environ.get('ZEPHYR_BASE') or os.path.join(os.getcwd(), 'zephyr')\n"
         "if has_dot_west(os.path.dirname(zb)):\n"
-        "    sys.exit(0)\n"
+        "    ok()\n"
         "print('FATAL ERROR: Could not find a west workspace in this or any parent directory')\n"
         "sys.exit(1)\n"
     )
