@@ -51,10 +51,14 @@ added once a real manifest needs one -- not added speculatively here.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
 import subprocess
+import tempfile
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -86,6 +90,32 @@ APP_GEN_TOC_TIMEOUT_S = 120.0
 #: are alp-sdk paths, cited here only as the authority for the fixed shape.
 _ATOC_BLOB_REL = os.path.join("build", "AppTocPackage.bin")
 _ATOC_MAP_REL = os.path.join("build", "app-package-map.txt")
+
+#: Where [`_copy_out_atoc`] parks the IMMUTABLE per-run copy of the shared
+#: blob above (tan-cli#380). Under `$SETOOLS_DIR/build/` on purpose: this
+#: module already writes `build/images/` and `build/config/` there, so the
+#: copy adds no NEW writability requirement -- by the time it runs, that tree
+#: is proven writable. tan's own directory, nothing else reads it, and it is
+#: safe to delete wholesale between flashes; nothing here prunes it, since a
+#: prune racing a concurrent run is exactly the class of bug #380 is about.
+_ATOC_COPY_REL = os.path.join("build", "tan-atoc")
+
+#: The cross-process sign lock, one per resolved `$SETOOLS_DIR` (tan-cli#380).
+#: At the install ROOT, beside `app-gen-toc` itself, not under `build/`: the
+#: `build/` tree is created BY the step this serializes, so the lock has to
+#: exist before it does. NEVER unlinked -- see [`_setools_lock`].
+_LOCK_REL = ".tan-setools-sign.lock"
+
+#: How long a queued sign step waits for that lock before refusing. DERIVED,
+#: not picked: the longest a well-behaved holder can hold it is one
+#: `APP_GEN_TOC_TIMEOUT_S` spawn (after which it is killed and the lock
+#: released) plus its file copies, so a shorter wait would refuse a perfectly
+#: healthy queued flash. The extra minute is that copy slack.
+_LOCK_WAIT_S = APP_GEN_TOC_TIMEOUT_S + 60.0
+
+#: Poll interval while waiting. Short enough that back-to-back board flashes
+#: do not visibly stall, long enough not to spin a core for two minutes.
+_LOCK_POLL_S = 0.05
 
 
 @dataclass(frozen=True)
@@ -264,6 +294,146 @@ def _map_stat(atoc_map_path: str) -> tuple[int, int] | None:
     return st.st_mtime_ns, st.st_size
 
 
+def _try_lock(fd: int) -> bool:
+    """ONE non-blocking attempt at an exclusive OS lock on `fd`'s first byte;
+    `True` when it is ours (tan-cli#380).
+
+    The two platform primitives and nothing else. Python's stdlib has no
+    portable advisory lock, and the portable third option -- an
+    `O_CREAT|O_EXCL` lockfile -- can only answer "is this lock STALE?" with a
+    heuristic (an mtime threshold, or a PID the OS may already have reused),
+    and getting that heuristic wrong on THIS path either wedges every future
+    flash or hands two processes the same SETOOLS install. An OS lock has no
+    stale state to reason about at all: **the kernel owns it, and drops it the
+    moment the holding fd closes -- including when the holder is killed, panics
+    or is `SIGKILL`ed.** A process that dies holding this lock therefore
+    releases it immediately, leaving nothing to clean up and no lockfile to
+    reap. What remains bounded by [`_LOCK_WAIT_S`] is only a LIVE holder that
+    hangs, which the caller's own `APP_GEN_TOC_TIMEOUT_S` already bounds.
+
+    Locking one byte at offset 0 of an empty file is deliberate and legal on
+    both platforms (`LockFile` may lock a range past EOF; `flock` is
+    whole-file regardless of the length argument).
+    """
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _unlock(fd: int) -> None:
+    """Drop [`_try_lock`]'s lock. Closing `fd` releases it too on both
+    platforms -- this is the EXPLICIT half, because Windows documents the
+    release-on-close path as eventual ("the time it takes ... depends upon
+    available system resources") while the next queued `tan flash` is already
+    polling for it. Swallows `OSError`: this only ever runs on the way out of
+    [`_setools_lock`], where the interesting exception is the caller's."""
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+
+
+@contextlib.contextmanager
+def _setools_lock(setools_dir: str) -> Iterator[None]:
+    """Serialize the whole `sign_slot0` critical section -- preparation,
+    spawn, AND output capture -- against one resolved `$SETOOLS_DIR`
+    (tan-cli#380, HARDWARE SAFETY).
+
+    `app-gen-toc`'s outputs (`_ATOC_MAP_REL`, `_ATOC_BLOB_REL`) are FIXED and
+    install-wide, so two `tan flash` processes sharing a SETOOLS install
+    interleave on them: one can unlink or overwrite the blob while the other
+    is signing, or after the other has already paired an address with it. The
+    result programmed into on-die MRAM is then a DIFFERENT run's ATOC at this
+    run's address, recoverable only by re-provisioning over SE-UART. Locking
+    only the subprocess would not be enough -- the pairing is what must be
+    atomic -- which is why the copy-out ([`_copy_out_atoc`]) happens inside
+    this block too, and why the address is read inside it as well.
+
+    The lock file is CREATED but never unlinked, deliberately: deleting it
+    would let the next process create a fresh inode and take a second
+    "exclusive" lock on a file the current holder no longer shares. It is an
+    empty 0-byte marker; nothing is ever written into it.
+    """
+    lock_path = os.path.join(setools_dir, _LOCK_REL)
+    try:
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o644)
+    except OSError as err:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: could not open the SETOOLS sign lock '{lock_path}': {err}"
+        ) from err
+    try:
+        deadline = time.monotonic() + _LOCK_WAIT_S
+        while not _try_lock(fd):
+            if time.monotonic() >= deadline:
+                raise FlashPlanError(
+                    f"{FLOW_D_METHOD}: another flash has held the SETOOLS sign lock "
+                    f"'{lock_path}' for more than {_LOCK_WAIT_S:.0f}s. {APP_GEN_TOC}'s "
+                    "outputs are install-wide, so tan signs one image at a time per "
+                    "SETOOLS install -- wait for the other flash to finish, or point "
+                    "this one at its own SETOOLS install with --setools-dir."
+                )
+            time.sleep(_LOCK_POLL_S)
+        try:
+            yield
+        finally:
+            _unlock(fd)
+    finally:
+        os.close(fd)
+
+
+def _copy_out_atoc(setools_dir: str, atoc_blob_path: str, entry_id: str) -> str:
+    """Copy the shared `build/AppTocPackage.bin` to a UNIQUE per-run path and
+    return that one instead (tan-cli#380).
+
+    The lock above cannot end at `sign_slot0`'s return: the caller hands the
+    returned path to J-Link, which reads it minutes later, and the shared blob
+    stays mutable that whole time -- the next run unlinks and rewrites it. So
+    the guarantee is made immutable rather than long-lived: copy inside the
+    lock, hand back the copy. Holding the lock through programming instead
+    would serialize unrelated boards for the length of an MRAM write.
+
+    `mkstemp` for the unique name rather than a hand-rolled pid/counter
+    scheme: uniqueness against a concurrent run is the entire point, and
+    `entry_id` alone is NOT unique across runs -- it is the core id (`m55_he`),
+    identical on two boards flashed side by side, which is the likeliest
+    concurrency case there is. It is only a prefix here; `validate_identifier`
+    has already vetted its charset.
+    """
+    copy_dir = os.path.join(setools_dir, _ATOC_COPY_REL)
+    try:
+        os.makedirs(copy_dir, exist_ok=True)
+        handle, dest = tempfile.mkstemp(prefix=f"{entry_id}-", suffix=".bin", dir=copy_dir)
+        os.close(handle)
+        shutil.copyfile(atoc_blob_path, dest)
+    except OSError as err:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: {APP_GEN_TOC} produced {atoc_blob_path}, but tan could not "
+            f"copy it to a per-run path under '{copy_dir}': {err} -- tan will not hand back "
+            "the shared blob, which the next sign in this SETOOLS install overwrites."
+        ) from err
+    return dest
+
+
 def sign_slot0(
     setools_dir: str,
     app_gen_toc: str,
@@ -277,7 +447,9 @@ def sign_slot0(
     `app_gen_toc -f build/config/<entry_id>-slot0.json` with
     `cwd=setools_dir` (its config path is relative to it, matching the
     bench's own `cd $SETOOLS_DIR && ./app-gen-toc -f build/config/...`), then
-    read back the ATOC placement. Returns `(atoc_blob_path, atoc_address)`.
+    read back the ATOC placement. Returns `(atoc_copy_path, atoc_address)` --
+    an IMMUTABLE per-run copy of the blob, NOT the shared
+    `build/AppTocPackage.bin` the tool wrote (tan-cli#380, below).
 
     Raises `FlashPlanError` -- naming `app-gen-toc`'s own captured output
     where there is any -- on: a filesystem failure preparing the inputs, a
@@ -310,6 +482,19 @@ def sign_slot0(
     ([`_map_stat`]): an append changes both `mtime` and `size`, so an
     UNCHANGED snapshot after a zero exit is the same soft-failure signal,
     without deleting anything.
+
+    **tan-cli#380 (BLOCKER, the concurrency half #373 left open).** That
+    snapshot guard -- and every other check here -- assumes THIS process is the
+    only one touching those install-wide outputs. Two `tan flash` processes
+    sharing one `$SETOOLS_DIR` broke that assumption outright: one could unlink
+    the blob while the other signed, or overwrite it after the other had
+    already paired an address with the path, and the mismatched ATOC went into
+    on-die MRAM. Fixed in two halves, both required:
+    [`_setools_lock`] makes preparation + spawn + capture one cross-process
+    critical section per install, and [`_copy_out_atoc`] takes an immutable
+    per-run copy BEFORE that section ends -- so the path handed back is one
+    nothing else can touch, carrying the address read in the same section from
+    the same signing run.
     """
     validate_identifier(entry_id, "the flash target id")
     setools_dir = os.path.abspath(setools_dir)
@@ -320,83 +505,91 @@ def sign_slot0(
     config_name = f"{entry_id}-slot0.json"
     atoc_map_path = os.path.join(setools_dir, _ATOC_MAP_REL)
     atoc_blob_path = os.path.join(setools_dir, _ATOC_BLOB_REL)
-    try:
-        os.makedirs(images_dir, exist_ok=True)
-        os.makedirs(config_dir, exist_ok=True)
-        shutil.copyfile(artefact_bin, os.path.join(images_dir, binary_name))
-        config_path = os.path.join(config_dir, config_name)
-        with open(config_path, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(
-                slot0_config(entry_id, binary_name, mram_address, entry_id.upper()), fh, indent=2
-            )
-            fh.write("\n")
-        # #373: NEVER deleted -- see the docstring above. Snapshotting (not
-        # removing) is what lets the post-spawn check below tell "app-gen-toc
-        # appended a fresh block" from "app-gen-toc touched nothing" without
-        # destroying whatever a prior run (this one's own, another entry's, or
-        # a hand-run) already left behind.
-        map_before = _map_stat(atoc_map_path)
-        # AppTocPackage.bin, unlike the map, is NOT append-mode: app-gen-toc
-        # (over)writes the one current blob whole every run, so there is no
-        # history in it to lose -- removing it beforehand is a safe
-        # presence-after-spawn check on THIS spawn, not a destructive one.
-        # (Two `tan flash` processes racing one SETOOLS_DIR could still both
-        # observe "present" here; not defended against, same as before.)
+    # #380: EVERYTHING below is inside the lock -- the prepare, the spawn, the
+    # map read and the copy-out. Splitting any of it out re-opens the window.
+    with _setools_lock(setools_dir):
         try:
-            os.remove(atoc_blob_path)
-        except FileNotFoundError:
-            pass
-    except OSError as err:
-        raise FlashPlanError(
-            f"{FLOW_D_METHOD}: could not prepare the SETOOLS sign step under "
-            f"'{setools_dir}': {err}"
-        ) from err
+            os.makedirs(images_dir, exist_ok=True)
+            os.makedirs(config_dir, exist_ok=True)
+            shutil.copyfile(artefact_bin, os.path.join(images_dir, binary_name))
+            config_path = os.path.join(config_dir, config_name)
+            with open(config_path, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump(
+                    slot0_config(entry_id, binary_name, mram_address, entry_id.upper()),
+                    fh,
+                    indent=2,
+                )
+                fh.write("\n")
+            # #373: NEVER deleted -- see the docstring above. Snapshotting (not
+            # removing) is what lets the post-spawn check below tell "app-gen-toc
+            # appended a fresh block" from "app-gen-toc touched nothing" without
+            # destroying whatever a prior run (this one's own, another entry's, or
+            # a hand-run) already left behind.
+            map_before = _map_stat(atoc_map_path)
+            # AppTocPackage.bin, unlike the map, is NOT append-mode: app-gen-toc
+            # (over)writes the one current blob whole every run, so there is no
+            # history in it to lose -- removing it beforehand is a safe
+            # presence-after-spawn check on THIS spawn, not a destructive one.
+            # #380: and it is now genuinely a check on THIS spawn -- under the
+            # lock no other tan process can recreate it between here and the
+            # `isfile` below.
+            try:
+                os.remove(atoc_blob_path)
+            except FileNotFoundError:
+                pass
+        except OSError as err:
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: could not prepare the SETOOLS sign step under "
+                f"'{setools_dir}': {err}"
+            ) from err
 
-    config_rel = os.path.join("build", "config", config_name)
-    try:
-        proc = subprocess.run(
-            [app_gen_toc, "-f", config_rel],
-            cwd=setools_dir,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=APP_GEN_TOC_TIMEOUT_S,
-        )
-    except subprocess.TimeoutExpired as err:
-        raise FlashPlanError(
-            f"{FLOW_D_METHOD}: {APP_GEN_TOC} timed out after "
-            f"{APP_GEN_TOC_TIMEOUT_S:.0f}s signing {config_rel}"
-        ) from err
-    except OSError as err:
-        raise FlashPlanError(f"{FLOW_D_METHOD}: could not run {app_gen_toc}: {err}") from err
-    if proc.returncode != 0:
-        raise FlashPlanError(
-            f"{FLOW_D_METHOD}: {APP_GEN_TOC} -f {config_rel} exited {proc.returncode}: "
-            f"{_tail(proc.stdout, proc.stderr)}"
-        )
+        config_rel = os.path.join("build", "config", config_name)
+        try:
+            proc = subprocess.run(
+                [app_gen_toc, "-f", config_rel],
+                cwd=setools_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=APP_GEN_TOC_TIMEOUT_S,
+            )
+        except subprocess.TimeoutExpired as err:
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: {APP_GEN_TOC} timed out after "
+                f"{APP_GEN_TOC_TIMEOUT_S:.0f}s signing {config_rel}"
+            ) from err
+        except OSError as err:
+            raise FlashPlanError(f"{FLOW_D_METHOD}: could not run {app_gen_toc}: {err}") from err
+        if proc.returncode != 0:
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: {APP_GEN_TOC} -f {config_rel} exited {proc.returncode}: "
+                f"{_tail(proc.stdout, proc.stderr)}"
+            )
 
-    # #373: the soft-failure guard's other half -- a PRE-EXISTING map whose
-    # snapshot did not move despite a zero exit was not appended to by THIS
-    # spawn, so trusting its last line would report an earlier run's address
-    # as this one's. Checked before parsing, so the message names the real
-    # problem instead of silently handing back a stale-but-well-formed value.
-    if map_before is not None and _map_stat(atoc_map_path) == map_before:
-        raise FlashPlanError(
-            f"{FLOW_D_METHOD}: {APP_GEN_TOC} exited 0 but {atoc_map_path} was not "
-            "updated (size and mtime unchanged) -- the sign step likely did not "
-            "actually run; check the SETOOLS config, or sign by hand."
-        )
-    address = read_atoc_address(setools_dir)
-    if address is None:
-        raise FlashPlanError(
-            f"{FLOW_D_METHOD}: {APP_GEN_TOC} exited 0 but "
-            f"{atoc_map_path} carries no 'APP Package Start "
-            "Address:' line -- check the SETOOLS config, or sign by hand."
-        )
-    if not os.path.isfile(atoc_blob_path):
-        raise FlashPlanError(
-            f"{FLOW_D_METHOD}: {APP_GEN_TOC} exited 0 and reported an address, but "
-            f"{atoc_blob_path} was not produced -- check the SETOOLS output."
-        )
-    return atoc_blob_path, address
+        # #373: the soft-failure guard's other half -- a PRE-EXISTING map whose
+        # snapshot did not move despite a zero exit was not appended to by THIS
+        # spawn, so trusting its last line would report an earlier run's address
+        # as this one's. Checked before parsing, so the message names the real
+        # problem instead of silently handing back a stale-but-well-formed value.
+        if map_before is not None and _map_stat(atoc_map_path) == map_before:
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: {APP_GEN_TOC} exited 0 but {atoc_map_path} was not "
+                "updated (size and mtime unchanged) -- the sign step likely did not "
+                "actually run; check the SETOOLS config, or sign by hand."
+            )
+        address = read_atoc_address(setools_dir)
+        if address is None:
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: {APP_GEN_TOC} exited 0 but "
+                f"{atoc_map_path} carries no 'APP Package Start "
+                "Address:' line -- check the SETOOLS config, or sign by hand."
+            )
+        if not os.path.isfile(atoc_blob_path):
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: {APP_GEN_TOC} exited 0 and reported an address, but "
+                f"{atoc_blob_path} was not produced -- check the SETOOLS output."
+            )
+        # #380: the address above and this copy come from the SAME signing run,
+        # both inside the lock -- pairing them is the whole point.
+        return _copy_out_atoc(setools_dir, atoc_blob_path, entry_id), address
