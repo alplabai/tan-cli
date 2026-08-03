@@ -9,17 +9,27 @@
 executes it — it is the single executor and the user command surface for
 building, flashing, and inspecting Alp Lab E1M / E1M-X firmware.
 
-`bootstrap` / `build` / `run` / `size` / `image` / `flash` / `clean` / `renode`
-run directly in `tan` — `bootstrap` included, so there is no `bash` dependency
-and native Windows is a first-class host. Only `migrate` / `lock` / `quality`
-still forward to `west alp-*`, and
-`model` / `monitor` / `new-som` / `faultdecode` to the SDK `alp` CLI. Licensed
-**Apache-2.0** (see [`LICENSE`](LICENSE); the SPDX identifier is also set in each
-`Cargo.toml` and source header).
+`bootstrap` / `build` / `run` / `size` / `image` / `flash` / `clean` / `renode` /
+`monitor` run directly in `tan` — `bootstrap` included, so there is no `bash`
+dependency and native Windows is a first-class host. So does the rest of the
+surface: `model`, `new-som`, and `faultdecode` are native ports now
+(tan-cli#253, #254, #256), not forwards to the SDK's `alp` CLI, and the seven
+verbs that used to stub out (`scaffold`, `completion`, `diff`, `pinmux`,
+`inspect`, `trace`, `support-bundle`) are real too (tan-cli#260, #257). Only
+`migrate` / `lock` / `quality` still forward, to `west alp-*`. Licensed
+**Apache-2.0** (see [`LICENSE`](LICENSE); the SPDX identifier is also set in
+each `Cargo.toml` and source header).
 
 ## Install
 
-Every version tag publishes a raw, uncompressed binary per platform.
+**From `v0.5.0`** every version tag publishes one archive per platform (`.zip`
+on Windows, `.tar.gz` on Unix) — a PyInstaller `--onedir` freeze, not a raw
+binary (tan-cli#349). **`v0.5.0` is not cut yet**: every tag published so far
+ships a raw binary instead, including `v0.4.1` (which is what `latest` resolves
+to today) and the `v0.5.0-rc4` pre-release. The install scripts read which shape
+a release publishes off that release's own `checksums.txt` and install either
+one (tan-cli#356), so the commands below work on both sides of that transition —
+you do not need to know which tag you are on.
 
 ### Automatic (recommended)
 
@@ -69,13 +79,22 @@ confident `OK`. Set the variable to an explicit `vX.Y.Z` from the
 different one. (`latest` skips pre-releases, so it is not always the highest
 version number.)
 
+> **Check the asset name against the tag you picked.** The snippets below are
+> written for the archive shape, i.e. `v0.5.0` and later. A pre-`v0.5.0` tag —
+> `v0.4.1`, `v0.5.0-rc4`, anything else published so far — names the same triple
+> with **no extension** (`.exe` on Windows) and that file **is** the executable:
+> drop the `tar -xzf` / `Expand-Archive` step and install the downloaded file
+> itself. Either way, `<tag>/checksums.txt` lists exactly what that release
+> publishes, which is where the install scripts get the answer (tan-cli#356) —
+> so it is also the fastest way to check by hand.
+
 **Linux / macOS**
 
 ```sh
 # Resolve latest ONCE (or set TAG=vX.Y.Z yourself), same redirect install.sh follows.
 TAG=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
   https://github.com/alplabai/tan-cli/releases/latest | sed 's#.*/tag/##')
-ASSET=tan-x86_64-unknown-linux-gnu   # swap for your platform; gnu, not musl -- see docs/release-contract.md's glibc floor (a PyInstaller freeze can't produce a static musl artefact; the floor is measured per-release, published in that release's notes)
+ASSET=tan-x86_64-unknown-linux-gnu.tar.gz   # swap for your platform; gnu, not musl -- see docs/release-contract.md's glibc floor (a PyInstaller freeze can't produce a static musl artefact; the floor is measured per-release, published in that release's notes)
 BASE=https://github.com/alplabai/tan-cli/releases/download/$TAG
 
 # macOS has shasum, not sha256sum -- pick whichever is present.
@@ -88,8 +107,10 @@ curl -fsSL -o "$d/checksums.txt" "$BASE/checksums.txt" &&
 line=$(awk -v a="$ASSET" '$2 == a' "$d/checksums.txt") &&
 [ -n "$line" ] &&
 printf '%s\n' "$line" | (cd "$d" && $SHA -c -) &&
-chmod +x "$d/$ASSET" &&
-sudo mv "$d/$ASSET" /usr/local/bin/tan &&
+tar -xzf "$d/$ASSET" -C "$d" &&             # unpacks to $d/tan/{tan,_internal/}
+chmod +x "$d/tan/tan" &&                    # tar preserves the bit already; cheap insurance
+sudo mv "$d/tan" /usr/local/lib/tan-cli &&
+sudo ln -sf /usr/local/lib/tan-cli/tan /usr/local/bin/tan &&
 tan --version
 ```
 
@@ -110,7 +131,7 @@ $ErrorActionPreference = 'Stop'
 
 # Resolve latest ONCE (or set $Tag = 'vX.Y.Z'), same API field install.ps1 reads.
 $Tag   = (Invoke-RestMethod -Uri 'https://api.github.com/repos/alplabai/tan-cli/releases/latest' -UseBasicParsing).tag_name
-$Asset = 'tan-x86_64-pc-windows-msvc.exe'
+$Asset = 'tan-x86_64-pc-windows-msvc.zip'
 $Base  = "https://github.com/alplabai/tan-cli/releases/download/$Tag"
 
 # Fresh dir, never the destination: a bad binary written straight to tan.exe has
@@ -132,11 +153,13 @@ $got = (Get-FileHash -LiteralPath "$d\$Asset" -Algorithm SHA256).Hash.ToLower()
 if (-not $want) { throw "$Asset is not listed in $Tag's checksums.txt -- the release is incomplete. Nothing installed." }
 if ($got -ne $want) { throw "SHA256 MISMATCH for $Asset ($Tag): expected $want, got $got. Nothing installed." }
 
-# Only now put it in place. This is where install.ps1 puts it.
+# Only now unpack it. $Asset is an archive (tan\ containing tan.exe + _internal\),
+# not a raw exe -- this is where install.ps1 puts it, minus its launcher script.
 $dest = "$env:LOCALAPPDATA\Programs\tan"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
-Move-Item -LiteralPath "$d\$Asset" -Destination "$dest\tan.exe" -Force
-& "$dest\tan.exe" --version   # add $dest to your user PATH to run `tan` from a new shell
+Expand-Archive -LiteralPath "$d\$Asset" -DestinationPath $d -Force
+Move-Item -LiteralPath "$d\tan" -Destination $dest -Force
+& "$dest\tan\tan.exe" --version   # add $dest\tan to your user PATH to run `tan` from a new shell
 ```
 
 **Stronger, when you have [`gh`](https://cli.github.com/):** every asset —
@@ -159,23 +182,27 @@ release says nothing about who built it. Run the digest check always; add the
 attestation when `gh` is available. Details in
 [`docs/release-contract.md`](docs/release-contract.md).
 
-**From source** (Rust **1.86+**, edition 2024):
+**From source** (Python **3.12+**) — the release assets are PyInstaller freezes
+of this same tree (tan-cli#271):
 
 ```sh
 git clone https://github.com/alplabai/tan-cli && cd tan-cli
-cargo install --path crates/tan-cli --locked
+pip install ./python
+tan --version
 ```
+
+`crates/` (the original Rust implementation, `cargo install --path
+crates/tan-cli`) still builds and is still tested by CI, but it is a frozen
+reference now — new features land only in `python/`, so building it produces
+the stale, v0.4.1-era program under the same `tan` name.
 
 ### Package managers
 
-**crates.io** — **works** as of `v0.4.1`. Rust **1.86+**, edition 2024. The
-published crate is named `alp-tan-cli` (`tan`/`tan-cli` were already taken on
-crates.io by an unrelated project); the installed binary is still `tan`:
-
-```sh
-cargo install alp-tan-cli --locked
-tan --version
-```
+**crates.io — do not advertise.** `cargo install alp-tan-cli` still resolves
+(it worked as of `v0.4.1`), but the `publish · crates.io` job was deleted at
+`v0.5.0` — the assets are no longer `cargo` builds, so publishing `alp-tan-cli`
+would ship a different program under the same name (docs/release-contract.md).
+Installing it today gets you the stale Rust CLI, not the current `tan`.
 
 **npm — does not resolve. Do not use these commands yet.**
 
@@ -185,8 +212,9 @@ tan --version
 > `404 Not Found`. The v0.4.1 publish job failed with `npm error code EOTP` —
 > the configured `NPM_TOKEN` requires an interactive one-time password, which no
 > CI run can supply, so it needs replacing with an npm **automation** token
-> ([#233](https://github.com/alplabai/tan-cli/issues/233)). Use a release binary
-> above, the installer, or crates.io.
+> ([#233](https://github.com/alplabai/tan-cli/issues/233)). Use a release
+> archive above or the installer -- not crates.io (see Package managers
+> above: that publish job is deleted too, and now installs the stale Rust CLI).
 >
 > The commands are recorded here only so the package naming does not change
 > under anyone later:
@@ -227,22 +255,38 @@ tan run --flash                       # build, then run (host) or program (hardw
 `tan doctor` sanity-checks the host: build readiness (SDK, Zephyr workspace,
 west) alongside debug readiness for the selected target/server — the full
 check list runs unconditionally. `--build` is accepted for compatibility
-(both `alp-sdk-vscode` call sites pass it) and changes nothing; `--fix` is
-not yet accepted (tan-cli#295). `tan completion --shell zsh` is deferred in
-this build (see Commands below) and exits 1 rather than emitting a
-completion script.
+(both `alp-sdk-vscode` call sites pass it) and changes nothing. `--fix`
+(ADR 0021, tan-cli#91) runs the SDK manifest's own install command for a
+`hostPrerequisites` tool this host is missing, but only when the command needs
+no elevation (Tier A — `winget`, `brew`, the small POSIX packages); anything
+that needs `sudo` is refused and printed verbatim instead, never run — tan
+never spawns `sudo` itself, since a password prompt has nowhere to go once
+`--format json` has captured stdio, and would hang the process forever rather
+than fail. `--fix` only ever acts in an interactive, non-CI, text-mode run:
+`--ci`, `--non-interactive`, and `--format json` each disable it on their
+own, and so does the same rule applied *unasked* — a piped or redirected
+stdin/stderr (an automated run that never thought to pass one of those flags)
+disables it exactly as hard, since a repair nobody watched happen is not
+consent either way. It never re-checks its own work: this process already
+read PATH once at start-up, so an install
+landing after that is invisible to it — the honest outcome is "installed;
+reopen your shell", not a claimed-verified pass.
 
-`bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; it
-names the missing prerequisites rather than installing system packages itself.
-The install commands come from the SDK's own `metadata/bootstrap.json`
-(`prerequisites.install`, keyed per OS), not from a table `tan` carries — so
-Windows prints the `winget install` line for a missing `git`/`cmake`/`python`/
-`ninja`, and the JSON envelope's `missingPrerequisites[].command` now carries
-real `apt-get`/`brew` commands on Linux and macOS where it used to be `null` on
+`bootstrap` itself runs natively on Linux, macOS and Windows and needs no
+`bash`; it only ever *names* the missing prerequisites rather than installing
+system packages itself — the executor lives in exactly one place, `doctor
+--fix` above, never in `bootstrap` (ADR 0021: "build my project" must never
+turn into running installs with no escape hatch). The install commands come
+from the SDK's own `metadata/bootstrap.json` (`prerequisites.install`, keyed
+per OS), not from a table `tan` carries — so Windows prints the
+`winget install` line for a missing `git`/`cmake`/`python`/`ninja`, and the
+JSON envelope's `missingPrerequisites[].command` now carries real
+`apt-get`/`brew` commands on Linux and macOS where it used to be `null` on
 every POSIX host. The *printed* POSIX refusal line is deliberately unchanged —
 it stays `bootstrap.sh`'s verbatim, naming the tools and nothing else. An SDK
 too old to carry `prerequisites.install` falls back to the same commands, so no
-host loses one.
+host loses one. The rule across both commands is ADR 0021's: never *require*
+copying a command — not "never print one".
 
 Zephyr and baremetal cores build on every host. Only a project whose cores are
 *all* Yocto is refused off Linux — a mixed board still bootstraps, with a
@@ -268,27 +312,44 @@ foreign content either.
 
 | Area | Commands |
 | --- | --- |
-| **Project** | `init` · `scaffold`† · `examples` · `explain` · `presets` · `pinmux`† |
-| **Configure & verify** | `validate` · `generate` · `diff`† · `inspect`† · `trace`† · `doctor` · `debug-config` · `support-bundle`† · `kconfig` |
-| **Build & run** (direct) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
-| **Environment** (direct) | `bootstrap` · `sdk` · `completion`† |
-| **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `model` · `monitor` · `new-som` · `faultdecode` → `python -m alp_cli` |
+| **Project** | `init` · `scaffold` · `examples` · `explain` · `presets` · `pinmux` · `new-som` |
+| **Configure & verify** | `validate` · `generate` · `diff` · `inspect` · `trace` · `doctor` · `debug-config` · `support-bundle` · `kconfig` · `faultdecode` |
+| **Build & run** (direct) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` · `monitor`‡ · `model` |
+| **Environment** (direct) | `bootstrap` · `sdk` · `completion` |
+| **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*` |
 
-† Deferred to v0.6.0 (tan-cli#260): a working command in the Rust CLI
-(tan-cli v0.4.1), but the Python port shipping this release stubs it —
-exits 1, with the issue code `cli.command-deferred` in `--format json`;
-text mode prints only the deferral message.
+All 32 registered commands run directly in `tan` except the three forwarders
+above. `scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`, and
+`support-bundle` were stubs that exited 1 with the issue code
+`cli.command-deferred` through the earlier RCs; they are ported now
+(tan-cli#260, #257). `model`, `new-som`, and `faultdecode` were thin forwards
+to `python -m alp_cli`; they are native, in-process implementations now
+(tan-cli#253, #254, #256) — `python -m alp_cli` is no longer load-bearing for
+any `tan` command.
 
-`tan <command> --help` for flags. Global flags apply to every command:
+‡ `monitor` runs entirely in `tan` — it never resolves an alp-sdk checkout,
+unlike `model`/`new-som`/`faultdecode` — but needs pyserial, which is an
+*optional* dependency (`[project.optional-dependencies] monitor`, not
+`dependencies`): `pip install "alp-tan[monitor]"` for a source install. A
+release binary bundles pyserial at build time already. Without it, `tan
+monitor` exits with the coded issue `monitor.pyserial-missing` naming the
+fix — a binary built without that extra cannot pip-install its way out.
+
+`tan <command> --help` for flags. Every command now parses the oracle's whole
+global set (tan-cli#261, one shared `tan/core/global_flags.py`) — none of
+`--project`, `--board-yaml`, `--sdk-root`, `--target`, `--all`, `--format`,
+`--verbose`, `--quiet`, `--no-color`, `--non-interactive`, `--ci` raises "no
+such option" anywhere any more; a command with no real use for one still
+accepts and drops it rather than refusing it.
 
 | Flag | Effect |
 | --- | --- |
 | `--project <PATH>` | Project root (default: current directory). |
 | `--board-yaml <PATH>` | Explicit `board.yaml`, overriding project resolution. |
 | `--sdk-root <PATH>` | alp-sdk checkout to plan against. |
+| `--target <EMIT>` / `--all` | Parse on every command now instead of erroring, but the underlying behaviour is still deferred, not silently dropped: `tan build --target …`/`--all` refuses with the coded issue `cli.command-deferred` (tan-cli#260) naming it; every other command accepts and drops both with no effect. |
 | `--format json` | Machine-readable envelope instead of text. |
-| `--non-interactive` | Not implemented in this build. Only `build --non-interactive` is even accepted, and it is itself deferred (tan-cli#260); no command changes behaviour for it yet. In the Rust CLI: never prompt, a command with a documented default takes it, one without fails naming the missing flag; applied unasked when stdin or stderr is not a terminal (#187). |
-| `--ci` | Not implemented as a global flag in this build; `size --ci` is the one live exception, and only as an alias for `--no-color` there (`size` never prompts). In the Rust CLI: implies `--non-interactive` and disables color everywhere. |
+| `--non-interactive` / `--ci` | Refuse to prompt or mutate the host without a human watching (`tan/core/consent.py`): a command with a documented default takes it, one without a default fails naming the missing flag. Applied *unasked* too — the same refusal fires when stdin or stderr is not a terminal (piped, redirected, a CI runner), not only when the flag is passed. `doctor --fix` (tan-cli#91) and `scaffold`'s prompt gate on this for real today; every other command accepts both flags without yet changing behaviour for them. |
 | `--quiet` / `--verbose` / `--no-color` | Output volume and styling. |
 
 `--format json` emits the stable envelope
@@ -296,6 +357,13 @@ text mode prints only the deferral message.
 alp-sdk-vscode extension consumes (`sdk` is optional: present only when the
 command actually resolved an alp-sdk root). Text output is for humans and may
 change; the envelope is the API.
+
+`tan flash`'s Flow D backend (`alif_mram_jlink`) can auto-sign an Alif
+Ensemble slot0 ATOC for you via a SETOOLS install you already have on disk —
+SETOOLS is license-gated and obtained directly from Alif, never redistributed
+by `tan`. See [`docs/setools.md`](docs/setools.md) for the three ways to
+point `tan` at it (`--setools-dir`, `SETOOLS_DIR`, `flash_args.setools_dir`,
+in that precedence order) and what it does with it.
 
 ## Where it sits (three repos, one executor)
 

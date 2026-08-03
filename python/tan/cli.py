@@ -26,17 +26,14 @@ from tan.commands.bootstrap_cmd import bootstrap
 from tan.commands.build_cmd import build
 from tan.commands.clean_cmd import clean
 from tan.commands.debug_config_cmd import debug_config
-from tan.commands.deferred_cmd import (
-    DEFERRED_CONTEXT_SETTINGS,
-    DEFERRED_VERBS,
-    completion,
-    diff,
-    inspect,
-    pinmux,
-    scaffold,
-    support_bundle,
-    trace,
-)
+from tan.commands.completion_cmd import completion
+from tan.commands.diff_cmd import diff
+from tan.commands.inspect_cmd import inspect
+from tan.commands.pinmux_cmd import pinmux
+from tan.commands.scaffold_cmd import scaffold
+from tan.commands.support_bundle_cmd import support_bundle
+from tan.commands.trace_cmd import trace
+from tan.commands.deferred_cmd import DEFERRED_CONTEXT_SETTINGS
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain
@@ -56,6 +53,7 @@ from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
 from tan.commands.validate_cmd import validate
 from tan.commands.west_forward_cmd import FORWARD_CONTEXT_SETTINGS, lock, migrate, quality
+from tan.core.global_flags import GLOBAL_FLAG_ARITY
 from tan.envelope import (
     Envelope,
     Issue,
@@ -78,9 +76,9 @@ app = typer.Typer(add_completion=False)
 app.command("bootstrap")(bootstrap)
 app.command("build")(build)
 app.command("clean")(clean)
-app.command("completion", context_settings=DEFERRED_CONTEXT_SETTINGS)(completion)
+app.command("completion")(completion)
 app.command("debug-config")(debug_config)
-app.command("diff", context_settings=DEFERRED_CONTEXT_SETTINGS)(diff)
+app.command("diff")(diff)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("explain")(explain)
@@ -89,23 +87,23 @@ app.command("flash")(flash)
 app.command("generate")(generate)
 app.command("image")(image)
 app.command("init")(init)
-app.command("inspect", context_settings=DEFERRED_CONTEXT_SETTINGS)(inspect)
+app.command("inspect")(inspect)
 app.command("kconfig")(kconfig)
 app.command("lock", context_settings=FORWARD_CONTEXT_SETTINGS)(lock)
 app.command("migrate", context_settings=FORWARD_CONTEXT_SETTINGS)(migrate)
 app.command("model")(model)
 app.command("monitor")(monitor)
 app.command("new-som")(new_som)
-app.command("pinmux", context_settings=DEFERRED_CONTEXT_SETTINGS)(pinmux)
+app.command("pinmux")(pinmux)
 app.command("presets")(presets)
 app.command("quality", context_settings=FORWARD_CONTEXT_SETTINGS)(quality)
 app.command("renode")(renode)
 app.command("run")(run)
-app.command("scaffold", context_settings=DEFERRED_CONTEXT_SETTINGS)(scaffold)
+app.command("scaffold")(scaffold)
 app.command("sdk")(sdk)
 app.command("size")(size)
-app.command("support-bundle", context_settings=DEFERRED_CONTEXT_SETTINGS)(support_bundle)
-app.command("trace", context_settings=DEFERRED_CONTEXT_SETTINGS)(trace)
+app.command("support-bundle")(support_bundle)
+app.command("trace")(trace)
 app.command("validate")(validate)
 
 #: Every registered subcommand name -- must track the `app.command(...)` calls
@@ -134,18 +132,14 @@ _SUBCOMMAND_NAMES = frozenset(
 #: `--version` is not here either -- it lives on `Cli` directly in clap, not
 #: `GlobalArgs`, and is root-only on both sides already.
 #: Value: the flag's arity (1 = takes a value, 0 = boolean).
-_GLOBAL_FLAG_ARITY: dict[str, int] = {
-    "--project": 1,
-    "--board-yaml": 1,
-    "--sdk-root": 1,
-    "--target": 1,
-    "--all": 0,
-    "--verbose": 0,
-    "--quiet": 0,
-    "--no-color": 0,
-    "--non-interactive": 0,
-    "--ci": 0,
-}
+#:
+#: Imported from `tan.core.global_flags` rather than hand-copied a second
+#: time (tan-cli#261): that module is also what
+#: `tan.core.global_flags.accept_global_flags` reads to decide which flags a
+#: command is missing, so this reorder table and the per-command injection
+#: list cannot drift apart the way two independent hand-written copies of
+#: clap's `GlobalArgs` field list eventually would.
+_GLOBAL_FLAG_ARITY: dict[str, int] = GLOBAL_FLAG_ARITY
 
 
 def _reorder_global_flags(argv: list[str]) -> list[str]:
@@ -304,7 +298,25 @@ def _emit_help_envelope(argv: list[str]) -> int:
 #: that module exists to eliminate. Each stub reads `ctx.obj["format"]` (see
 #: `deferred_cmd.py`).
 _HONOURS_ROOT_FORMAT = frozenset(
-    {"debug-config", "flash", "image", "size", "faultdecode", *DEFERRED_VERBS}
+    {
+        "debug-config",
+        "flash",
+        "image",
+        "size",
+        "faultdecode",
+        # tan-cli#260's seven, listed by name since they were ported and
+        # `deferred_cmd.DEFERRED_VERBS` no longer exists. Every one of them
+        # reads `ctx.obj["format"]` the way `debug_config_cmd.py` does, so
+        # every one belongs here -- the set is unchanged from when the tuple
+        # supplied it, only spelled out.
+        "completion",
+        "diff",
+        "inspect",
+        "pinmux",
+        "scaffold",
+        "support-bundle",
+        "trace",
+    }
 )
 
 
@@ -554,6 +566,28 @@ class _TeeStderr:
         return self._buffer.getvalue()
 
 
+def _reconfigure_stdio() -> None:
+    """Force UTF-8, LF-only stdout/stderr, once, at the process boundary.
+
+    Every command downstream just `print()`s -- correctness here is what
+    makes that safe. A normal Windows `TextIOWrapper` translates a written
+    `\\n` to `\\r\\n` and encodes with the process's ANSI code page, neither of
+    which the oracle's `serde_json`/`println!` output does. Both are visible
+    on stdout, not just in theory: measured, `tan completion --shell bash`
+    was 3975 bytes with 108 `\\r` where the oracle's was 3867 bytes with zero
+    -- and the emitted script is a hard syntax error when sourced in a strict
+    bash (`syntax error near unexpected token $'{\\r''`); `clean --format
+    json` and a bare `--format json` both ended `\\r\\n` too, so this is a
+    process-wide stdout-newline defect, not a completion-specific one. A
+    frozen/piped stream may not implement `.reconfigure()` (e.g. a test
+    harness's in-memory buffer) -- `hasattr` skips those rather than raising,
+    since the fix only matters for the real console/pipe case it targets.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", newline="\n")
+
+
 def main() -> None:
     """Process entrypoint.
 
@@ -575,6 +609,7 @@ def main() -> None:
     missing stdout envelope when the exit signals failure under `--format
     json`.
     """
+    _reconfigure_stdio()
     argv = _reorder_global_flags(sys.argv[1:])
     sys.argv = [sys.argv[0], *argv]
     json_mode = _wants_json(argv)

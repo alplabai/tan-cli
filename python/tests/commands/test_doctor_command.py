@@ -32,7 +32,9 @@ import time
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from tan.cli import app
 from tan.commands import doctor_cmd
 from tan.core.bootstrap import venv_layout, workspace_sdk_record_json
 
@@ -43,6 +45,15 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 #: The worktree root -- one level above ``python/`` -- so ``contract/`` fixtures
 #: can be read without re-typing a repo-relative path in every test.
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+#: In-process CLI driver, used ONLY for the `--fix` wiring tests below: they
+#: need to monkeypatch `doctor_cmd`'s own module attributes (`can_prompt`,
+#: `_collect`, `run_fix`) and observe the effect, which a real `run_tan`
+#: subprocess cannot do (the child is a different process, and its stdin/
+#: stderr are captured pipes -- never a tty -- so `can_prompt` is always
+#: `False` there regardless of flags; see `test_doctor_fix_interactive_with_
+#: nothing_resolvable_is_a_safe_no_op`'s own history for the same limit).
+runner = CliRunner()
 
 
 def _plant_zephyr_sdk(root: Path) -> None:
@@ -500,10 +511,31 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
         # every DLL that sits beside the real interpreter alongside the
         # renamed copy closes that gap; `--version` then runs the copied
         # interpreter's own, always-parseable banner.
-        interpreter_dir = Path(sys.executable).parent
+        #
+        # tan-cli#297: the source must be the BASE interpreter
+        # (`sys.base_prefix`), never `sys.executable` as such. When pytest
+        # itself runs from a project venv (`.venv\Scripts\python.exe`),
+        # `sys.executable` names a launcher stub that ships with NO sibling
+        # DLLs at all (they stay in the base install) and needs its own
+        # `pyvenv.cfg` to find them -- reproduced directly: copying that stub
+        # elsewhere and running `--version` fails outright with "No pyvenv.cfg
+        # file" (exit 106), never a parseable banner, which is exactly the
+        # "west.exe version-banner assertion" failure this closes. Reading
+        # `sys.base_prefix` instead is a no-op when pytest already runs from a
+        # base install (this host: `sys.executable == sys.base_prefix`), and
+        # resolves to the same self-contained layout either way.
+        interpreter_dir = Path(sys.base_prefix)
+        base_python = interpreter_dir / "python.exe"
+        if not base_python.is_file():
+            # A base layout with no `python.exe` (e.g. an embeddable/portable
+            # install with a differently-named executable) turns this fixture
+            # into a hard `FileNotFoundError` rather than a clean skip -- this
+            # is a fixture-construction gap, not something the test is meant
+            # to catch.
+            pytest.skip(f"no base interpreter at {base_python} to build the self-contained west.exe fixture from")
         for dll in interpreter_dir.glob("*.dll"):
             shutil.copy(dll, bin_dir / dll.name)
-        shutil.copy(sys.executable, west_path)
+        shutil.copy(base_python, west_path)
     else:
         west_path.write_text("#!/bin/sh\necho 'West version: v99.98.97'\n", encoding="utf-8")
         os.chmod(west_path, 0o755)
@@ -1686,6 +1718,117 @@ def test_collect_names_no_unselected_candidate_when_discovery_itself_answered(tm
     assert "was not selected" not in check.detail
 
 
+# --------------------------------------------------------------------------
+# tan-cli#344 -- a dangling `~/.alp/sdk-default` is a distinct fact from
+# "nothing configured": falling through stays correct, exit 4 stays correct,
+# only the `sdk` check's remedy text changes.
+# --------------------------------------------------------------------------
+
+
+def test_broken_global_default_is_none_when_nothing_is_configured():
+    assert doctor_cmd._broken_global_default() is None
+
+
+def test_broken_global_default_is_none_when_the_pointer_resolves(tmp_path):
+    target = _make_sdk_root(tmp_path / "alp-sdk")
+    _write_global_default_pointer(target)
+    assert doctor_cmd._broken_global_default() is None
+
+
+def test_broken_global_default_names_the_dangling_target(tmp_path):
+    broken_target = tmp_path / "gone"
+    _write_global_default_pointer(broken_target)
+    assert doctor_cmd._broken_global_default() == str(broken_target)
+
+
+def test_sdk_check_names_a_broken_global_default_distinctly_from_nothing_configured(
+    tmp_path,
+):
+    """The exact tan-cli#344 defect: before this, both cases printed the
+    identical `NO_SDK_NEXT_STEPS` sentence. The remedy must name the pointer
+    path, offer to delete or hand-edit it (never `tan sdk switch`, which
+    refuses outright per tan-cli#305), and still offer `--sdk-root`."""
+    broken_target = tmp_path / "gone"
+
+    nothing_configured = doctor_cmd.sdk_check(None, project_scope=None)
+    broken_default = doctor_cmd.sdk_check(
+        None, project_scope=None, broken_global_default=str(broken_target)
+    )
+
+    assert nothing_configured.status == broken_default.status == "fail"
+    assert nothing_configured.detail != broken_default.detail
+
+    assert str(broken_target) in broken_default.detail
+    assert str(broken_target) not in nothing_configured.detail
+
+    # tan-cli#305: never recommend the refused `sdk switch` subcommand.
+    assert "sdk switch" not in broken_default.detail
+    assert "sdk switch" not in broken_default.fix
+    assert "delete" in broken_default.fix
+    assert "--sdk-root" in broken_default.fix
+
+    # The plain "nothing configured" sentence is untouched.
+    assert "get an alp-sdk checkout" in nothing_configured.detail
+
+
+def test_sdk_check_ignores_broken_global_default_once_something_else_resolves():
+    """`broken_global_default` only matters in the `sdk_root is None` branch
+    -- a resolved SDK's `pass` detail must not change shape just because a
+    stale default also happens to be lying around."""
+    check = doctor_cmd.sdk_check(
+        "/opt/alp-sdk", project_scope=None, broken_global_default="/gone"
+    )
+    assert check.status == "pass"
+    assert check.detail == "alp-sdk at /opt/alp-sdk"
+
+
+def test_collect_names_a_broken_global_default_end_to_end(tmp_path):
+    """tan-cli#344 through the whole pipeline: `resolve_sdk_root_ladder`
+    falls through the broken pointer to `none` (UNCHANGED behaviour), while
+    `_collect`'s `sdk` check now says why."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    broken_target = tmp_path / "gone"
+    _write_global_default_pointer(broken_target)
+
+    resolved_root, tier, broken_pin = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    assert resolved_root is None
+    assert tier == "none"
+    assert broken_pin is None  # this is the GLOBAL default, not the project pin
+
+    checks = doctor_cmd._collect(
+        None,
+        workspace_root=str(workspace),
+        sdk_tier=tier,
+        broken_global_default=doctor_cmd._broken_global_default(),
+    )
+    sdk = next(c for c in checks if c.name == "sdk")
+    assert sdk.status == "fail"
+    assert str(broken_target) in sdk.detail
+
+
+def test_doctor_names_a_broken_global_default_end_to_end_via_the_cli(tmp_path):
+    """Real subprocess, real envelope: the exit code (4) and the fall-through
+    (no SDK selected) are both unchanged from before tan-cli#344; only the
+    `sdk` check's `detail`/`fix` differ."""
+    broken_target = tmp_path / "gone"
+    # `_write_global_default_pointer`, not a second hand-rolled copy of the
+    # same three lines -- this file already owns one (used above by
+    # `test_collect_names_a_broken_global_default_end_to_end` and friends).
+    _write_global_default_pointer(broken_target)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    proc = run_tan("doctor", "--format", "json", cwd=workspace)
+    envelope = json.loads(proc.stdout)
+    assert envelope["exitCode"] == 4
+    sdk = next(c for c in envelope["data"]["checks"] if c["name"] == "sdk")
+    assert sdk["status"] == "fail"
+    assert str(broken_target) in sdk["detail"]
+    assert "sdk switch" not in sdk["fix"]
+    assert "--sdk-root" in sdk["fix"]
+
+
 def test_board_yaml_preflight_check_passes_when_present_regardless_of_selection():
     assert doctor_cmd.board_yaml_preflight_check(True, project_selected=False).status == "pass"
     assert doctor_cmd.board_yaml_preflight_check(True, project_selected=True).status == "pass"
@@ -2142,3 +2285,423 @@ def test_collect_reports_sdk_provenance_only_when_an_sdk_resolves(tmp_path):
 
     with_sdk = doctor_cmd._collect(str(tmp_path), workspace_root=str(tmp_path))
     assert "sdkProvenance" in {c.name for c in with_sdk}
+
+
+# --------------------------------------------------------------------------
+# tan-cli#91 / ADR 0021 -- `doctor --fix` runs the manifest's own install
+# commands for a missing `hostPrerequisites` tool, MAINTAINER DECISION:
+# REFUSE AND PRINT anything needing `sudo`, never spawn it. `run_fix` is fed
+# exactly `hostPrerequisites`'s own `Check.missing` -- never a second,
+# independently recomputed tool/command list.
+# --------------------------------------------------------------------------
+
+
+def test_fix_needs_sudo_check_names_the_command_verbatim_and_never_hints_at_running_it():
+    check = doctor_cmd.fix_needs_sudo_check("git", "sudo apt-get install -y git")
+    assert check.status == "warn"
+    assert check.code == "doctor.fix-needs-sudo"
+    assert "sudo apt-get install -y git" in check.detail
+    assert check.fix == "sudo apt-get install -y git"
+
+
+def test_fix_installed_check_never_claims_the_tool_is_now_on_path():
+    check = doctor_cmd.fix_installed_check("ninja", "winget install -e --id Ninja-build.Ninja")
+    assert check.status == "warn"
+    assert check.code == "doctor.fix-installed"
+    assert "winget install -e --id Ninja-build.Ninja" in check.detail
+    # tan-cli#91: no same-process re-check -- the honest outcome is "reopen
+    # your shell", never a claimed-verified pass.
+    assert "reopen" in check.detail or "new shell" in check.detail
+
+
+def test_run_fix_refuses_a_sudo_command_and_never_spawns_it(monkeypatch):
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("run_fix must never spawn a command needing sudo")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _must_not_run)
+    monkeypatch.setattr(doctor_cmd, "on_path", _must_not_run)
+
+    results = doctor_cmd.run_fix(
+        [{"tool": "git", "command": "sudo apt-get install -y git"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-needs-sudo"
+
+
+def test_run_fix_runs_a_no_elevation_command_through_the_resolved_binary(monkeypatch, tmp_path):
+    fake_exe = tmp_path / "winget.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: str(fake_exe) if name == "winget" else None
+    )
+    captured = {}
+
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _fake_run)
+
+    results = doctor_cmd.run_fix(
+        [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-installed"
+    # Resolved through `on_path`, never the bare tool name -- the same
+    # PATH-only resolver every other spawn in this module goes through.
+    assert captured["argv"][0] == str(fake_exe)
+    assert captured["argv"][1:] == ["install", "-e", "--id", "Ninja-build.Ninja"]
+
+
+def test_run_fix_skips_a_tool_with_no_known_install_command():
+    assert doctor_cmd.run_fix([{"tool": "gperf", "command": None}]) == []
+
+
+def test_run_fix_reports_a_verdict_when_the_installer_itself_is_not_on_path(monkeypatch):
+    """tan-cli#360, replacing the test that pinned the silence
+    (`assert results == []`): an unresolved installer used to be a bare
+    `continue` -- the ONE outcome `run_fix` emitted no Check for, in a
+    function whose whole stated invariant is that every entry is run or
+    refused and every outcome becomes a check.
+
+    Reachable on exactly the hosts `--fix` exists for: the manifest installs
+    with `winget` on Windows and `brew` on macOS, so a machine without one
+    reported tools missing, ACCEPTED `--fix`, and printed the same report
+    back with no `fix:*` line anywhere -- indistinguishable from "nothing
+    needed fixing"."""
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+    results = doctor_cmd.run_fix(
+        [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-installer-not-found"
+    assert results[0].status == "warn"
+    # The installer AND the tool it blocked: naming only one of the two leaves
+    # the reader unable to act on it.
+    assert "winget" in results[0].detail
+    assert "ninja" in results[0].detail
+    # The remedy, not just "not found" -- on Windows that is App Installer.
+    assert "App Installer" in results[0].detail
+
+
+def test_run_fix_reports_one_missing_installer_once_not_once_per_tool(monkeypatch):
+    """tan-cli#360 acceptance: a fresh Mac is missing every manifest
+    prerequisite at once and every one of them installs with `brew`. Per-tool
+    reporting would print the same "install Homebrew" paragraph six times --
+    six restatements of one fact, in a report someone is reading to find out
+    what is actually wrong."""
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+    results = doctor_cmd.run_fix(
+        [
+            {"tool": "git", "command": "brew install git"},
+            {"tool": "cmake", "command": "brew install cmake"},
+            {"tool": "ninja", "command": "brew install ninja"},
+        ]
+    )
+    assert len(results) == 1
+    assert results[0].name == "fix:brew"
+    # One verdict, every tool that one absence blocked named inside it.
+    for tool in ("git", "cmake", "ninja"):
+        assert tool in results[0].detail
+    assert results[0].detail.count("brew.sh") == 1
+
+
+def test_run_fix_groups_per_installer_and_still_runs_the_ones_it_can_resolve(
+    monkeypatch, tmp_path
+):
+    """Two distinct absent installers are two distinct verdicts -- grouping
+    must not collapse unrelated remedies into one -- and a tool whose
+    installer DOES resolve is still repaired in the same pass, so the
+    grouping cannot swallow the working path."""
+    fake_exe = tmp_path / "winget.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: str(fake_exe) if name == "winget" else None
+    )
+    monkeypatch.setattr(
+        doctor_cmd.subprocess,
+        "run",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0),
+    )
+    results = doctor_cmd.run_fix(
+        [
+            {"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"},
+            {"tool": "git", "command": "brew install git"},
+            {"tool": "cmake", "command": "pixi global install cmake"},
+        ]
+    )
+    assert [c.code for c in results] == [
+        "doctor.fix-installed",
+        "doctor.fix-installer-not-found",
+        "doctor.fix-installer-not-found",
+    ]
+    assert [c.name for c in results[1:]] == ["fix:brew", "fix:pixi"]
+    # An installer this module has never heard of still gets a remedy that
+    # names it, rather than a bare "not found".
+    assert "Install `pixi`" in results[2].detail
+
+
+def test_doctor_fix_explains_a_missing_installer_in_both_text_and_json(monkeypatch, tmp_path):
+    """tan-cli#360 acceptance: BOTH output modes must say that no repair ran.
+    Driven through the real command rather than `run_fix` directly, because
+    the two modes render from different places -- JSON from `data.checks` +
+    `issues`, text from a `print` loop over `data.checks` to stderr -- and a
+    verdict reaching only one of them is the same bug wearing a different
+    hat. `can_prompt` is stubbed for the reason the section header above
+    gives: `CliRunner`'s pipes are never a tty."""
+    missing = [{"tool": "ninja", "command": "brew install ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+    monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+    monkeypatch.chdir(tmp_path)
+
+    as_json = json.loads(runner.invoke(app, ["doctor", "--fix", "--format", "json"]).output)
+    assert "doctor.fix-installer-not-found" in {i["code"] for i in as_json["issues"]}
+    json_detail = next(
+        c["detail"] for c in as_json["data"]["checks"] if c["name"] == "fix:brew"
+    )
+
+    # Text mode prints every check to stderr, envelope-free.
+    text_detail = runner.invoke(app, ["doctor", "--fix"]).stderr
+
+    for detail in (json_detail, text_detail):
+        assert "ran no repair" in detail
+        assert "brew" in detail
+        assert "ninja" in detail
+
+
+def test_run_fix_reports_a_check_when_the_install_command_exits_non_zero(monkeypatch, tmp_path):
+    """A customer who typed `--fix` and watched it do nothing must be able to
+    tell "tan tried and the install itself failed" from "tan never tried" --
+    the exact silence tan-cli#91's own review flagged (a bare `continue`
+    here). `hostPrerequisites` still names the tool separately; this Check
+    is the only place the FAILED ATTEMPT itself is reported."""
+    fake_exe = tmp_path / "winget.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: str(fake_exe))
+    monkeypatch.setattr(
+        doctor_cmd.subprocess,
+        "run",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 1),
+    )
+    results = doctor_cmd.run_fix(
+        [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-failed"
+    assert results[0].name == "fix:ninja"
+    assert "1" in results[0].detail
+
+
+def test_run_fix_reports_a_check_when_the_spawn_itself_raises(monkeypatch, tmp_path):
+    fake_exe = tmp_path / "winget.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: str(fake_exe))
+
+    def _raise(*_a, **_k):
+        raise OSError("no such file or directory")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _raise)
+    results = doctor_cmd.run_fix(
+        [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-spawn-failed"
+    assert "no such file or directory" in results[0].detail
+
+
+def test_run_fix_reports_a_check_when_the_install_command_times_out(monkeypatch, tmp_path):
+    fake_exe = tmp_path / "winget.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: str(fake_exe))
+
+    def _timeout(argv, **k):
+        raise subprocess.TimeoutExpired(argv, k.get("timeout", doctor_cmd.FIX_INSTALL_TIMEOUT_S))
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _timeout)
+    results = doctor_cmd.run_fix(
+        [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-timed-out"
+    assert str(doctor_cmd.FIX_INSTALL_TIMEOUT_S) in results[0].detail
+
+
+def test_doctor_fix_is_disabled_under_ci_non_interactive_and_json(tmp_path):
+    """tan-cli#91: `--fix` must never actually attempt a repair under
+    `--ci`, `--non-interactive`, or `--format json` -- the idiom this
+    codebase already applies to any command that would otherwise mutate the
+    host rather than merely report on it."""
+    for extra in (["--ci"], ["--non-interactive"], []):
+        proc = run_tan(
+            "doctor", "--fix", "--format", "json", *extra, cwd=tmp_path, scrub_path=True
+        )
+        envelope = json.loads(proc.stdout)
+        names = {c["name"] for c in envelope["data"]["checks"]}
+        assert not any(n.startswith("fix:") for n in names), (extra, names)
+        assert not any(
+            i["code"] in ("doctor.fix-needs-sudo", "doctor.fix-installed")
+            for i in envelope["issues"]
+        ), (extra, envelope["issues"])
+
+
+def test_doctor_fix_interactive_with_nothing_resolvable_is_a_safe_no_op(tmp_path):
+    """PATH scrubbed -- every `hostPrerequisites` tool is missing AND
+    unresolvable via `on_path`, so an interactive `--fix` (the guard is
+    satisfied: no `--ci`, no `--non-interactive`, text mode) reaches
+    `run_fix` and finds nothing it can actually run. The report must stay
+    well-formed and the exit code unchanged (still 4 -- `hostPrerequisites`
+    is still failing, `--fix` ran and genuinely fixed nothing)."""
+    proc = run_tan("doctor", "--fix", cwd=tmp_path, scrub_path=True)
+    assert "Traceback" not in proc.stderr
+    assert proc.returncode == 4
+
+
+# --------------------------------------------------------------------------
+# The `--fix` WIRING itself. `test_doctor_fix_is_disabled_under_ci_non_
+# interactive_and_json` above passes `--format json` in EVERY loop
+# iteration, so `json_mode` alone already satisfies every one of its
+# assertions regardless of `--ci`/`--non-interactive` -- it cannot tell a
+# correct guard from `if fix and not json_mode` (ignores `--ci`/
+# `--non-interactive` entirely) or `if fix or True` (guard deleted, `--fix`
+# ignored). And no `run_tan` subprocess test can ever grant consent at all:
+# `can_prompt`'s two `isatty()` checks read `False` off a captured pipe every
+# time, flags aside -- see `tan.core.consent`. In-process, via `CliRunner`
+# and monkeypatching `doctor_cmd`'s own module attributes, is the only way to
+# drive BOTH the consent-granted path and the guard's flag logic without
+# spawning a real install.
+# --------------------------------------------------------------------------
+
+
+def test_doctor_fix_invokes_run_fix_and_folds_its_checks_into_the_report_when_consent_is_granted(
+    monkeypatch, tmp_path
+):
+    """The positive case: with consent genuinely granted, `run_fix` must
+    actually be called with `hostPrerequisites`'s OWN `missing` list, and its
+    resulting Checks must reach the report -- not just "the guard didn't
+    crash". Fails red against `checks = [*checks, *run_fix(missing_for_fix)]`
+    replaced by `pass` (the feature unwired entirely): `run_fix` would never
+    be called and its Check would never reach `data.checks`/`issues`."""
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+    monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
+
+    calls = []
+
+    def _spy_run_fix(missing_arg):
+        calls.append(missing_arg)
+        return [doctor_cmd.fix_installed_check("ninja", missing[0]["command"])]
+
+    monkeypatch.setattr(doctor_cmd, "run_fix", _spy_run_fix)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["doctor", "--fix", "--format", "json"])
+    assert calls == [missing], calls
+    envelope = json.loads(result.output)
+    assert envelope["exitCode"] == 4  # hostPrerequisites is still a Fail
+    names = [c["name"] for c in envelope["data"]["checks"]]
+    assert "fix:ninja" in names, names
+    codes = [i["code"] for i in envelope["issues"]]
+    assert "doctor.fix-installed" in codes, codes
+
+
+def test_doctor_fix_guard_honours_ci_even_in_text_mode(monkeypatch, tmp_path):
+    """The negative case, through the REAL (unmonkeypatched) `can_prompt`:
+    `--fix --ci` in TEXT mode (no `--format json`) must never call `run_fix`.
+    Fails red against `if fix and not json_mode` (`--ci` plays no part in
+    that condition, and text mode makes `not json_mode` true) and against
+    `if fix or True` (guard deleted, always runs)."""
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+
+    calls = []
+    monkeypatch.setattr(doctor_cmd, "run_fix", lambda m: calls.append(m) or [])
+    monkeypatch.chdir(tmp_path)
+
+    runner.invoke(app, ["doctor", "--fix", "--ci"])
+    assert calls == [], calls
+
+
+def test_doctor_fix_guard_honours_no_tty_the_same_way_ci_does(monkeypatch, tmp_path):
+    """Same shape as the `--ci` case above, but for the "unasked" half of
+    `can_prompt` (`tan.core.consent`): even with none of `--ci`/
+    `--non-interactive`/`--format json` passed, a non-terminal stdin/stderr
+    (exactly what `CliRunner`/any captured-pipe run provides, and exactly
+    what tan-cli#91's own postmortem measured -- a CI runner that redirected
+    output but never passed `--ci`) must refuse `--fix` the same way `--ci`
+    does."""
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+
+    calls = []
+    monkeypatch.setattr(doctor_cmd, "run_fix", lambda m: calls.append(m) or [])
+    monkeypatch.chdir(tmp_path)
+
+    # No --ci, no --non-interactive, no --format json -- only `can_prompt`'s
+    # own isatty() reads (both False under CliRunner) can be refusing this.
+    runner.invoke(app, ["doctor", "--fix"])
+    assert calls == [], calls
+
+
+# --------------------------------------------------------------------------
+# tan-cli#91 P1: `--fix` suppressed must SAY SO, not silently reproduce
+# plain `tan doctor`'s report -- the oracle divergence on `doctor --fix
+# --format json` (oracle: exitCode 2, cli.parse-error; this port: used to be
+# byte-for-byte identical to plain `tan doctor`, no issue, no note).
+# --------------------------------------------------------------------------
+
+
+def test_fix_suppressed_issue_names_every_condition_that_tripped():
+    issue = doctor_cmd.fix_suppressed_issue(non_interactive=False, ci=True, json_mode=True)
+    assert issue.code == "doctor.fix-suppressed"
+    assert issue.severity == "warning"
+    assert "--ci" in issue.message
+    assert "--format json" in issue.message
+
+
+def test_fix_suppressed_issue_never_reads_isatty_under_json_mode(monkeypatch):
+    """`tan.cli.main` tees `sys.stderr` through `_TeeStderr` under
+    `--format json`, which has no `isatty()` at all -- reading it
+    unconditionally here is the exact `AttributeError` measured against a
+    real `tan doctor --fix --format json --ci` run. `json_mode=True` must
+    short-circuit past both `isatty()` reads, mirroring `can_prompt`'s own
+    order, not merely happen to avoid them under THIS monkeypatch."""
+
+    class _NoIsatty:
+        def isatty(self):
+            raise AttributeError("'_TeeStderr' object has no attribute 'isatty'")
+
+    monkeypatch.setattr(doctor_cmd.sys, "stdin", _NoIsatty())
+    monkeypatch.setattr(doctor_cmd.sys, "stderr", _NoIsatty())
+    issue = doctor_cmd.fix_suppressed_issue(non_interactive=False, ci=False, json_mode=True)
+    assert issue.code == "doctor.fix-suppressed"
+    assert "--format json" in issue.message
+
+
+def test_doctor_fix_format_json_is_no_longer_a_silent_no_op(monkeypatch, tmp_path):
+    """The exact reported shape: `doctor --fix --format json` on an
+    unhealthy host used to be byte-for-byte identical to plain `tan doctor`.
+    Now it must carry a `doctor.fix-suppressed` issue naming why, even though
+    `run_fix` itself is never called."""
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+    calls = []
+    monkeypatch.setattr(doctor_cmd, "run_fix", lambda m: calls.append(m) or [])
+    monkeypatch.chdir(tmp_path)
+
+    plain = runner.invoke(app, ["doctor", "--format", "json"])
+    fixed = runner.invoke(app, ["doctor", "--fix", "--format", "json"])
+    assert calls == [], calls
+
+    plain_envelope = json.loads(plain.output)
+    fixed_envelope = json.loads(fixed.output)
+    assert fixed_envelope["exitCode"] == plain_envelope["exitCode"] == 4
+    assert not any(i["code"] == "doctor.fix-suppressed" for i in plain_envelope["issues"])
+    suppressed = [i for i in fixed_envelope["issues"] if i["code"] == "doctor.fix-suppressed"]
+    assert len(suppressed) == 1, fixed_envelope["issues"]
+    assert "--format json" in suppressed[0]["message"]

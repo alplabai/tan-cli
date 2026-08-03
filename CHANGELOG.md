@@ -5,6 +5,116 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.6.0] — Unreleased
+
+### Added
+
+- **All seven formerly-deferred verbs are now real commands** (`scaffold`,
+  `completion`, `diff`, `pinmux`, `inspect`, `trace`, `support-bundle`
+  — tan-cli#260, CLOSED). Each used to be a uniform stub — exit 1, one shared
+  `cli.command-deferred` issue, naming this tracking issue — registered only
+  so the command resolved instead of falling through to Click's exit-2
+  unknown-command error. `tan/commands/deferred_cmd.py` keeps only the two
+  constants (`DEFERRED_ISSUE_CODE`, `DEFERRED_ISSUE_URL`) and the context
+  settings `tan build`'s own still-deferred *flags* (`--plan`, `--target`,
+  …) reuse; the stub factory and its `DEFERRED_VERBS` tuple are gone.
+  `tan/cli.py`'s `_HONOURS_ROOT_FORMAT` now spells the seven names directly
+  rather than deriving them from that removed tuple.
+- **`contract/issue-codes.json` gained 49 `"reserved"` entries** for codes
+  the seven newly-real verbs (and this wave's `doctor --fix` consent-gate
+  work) already emitted with nowhere registered to bind to:
+  `diff.board-yaml-missing`/`.internal-failure`/`.pyyaml-unavailable`/
+  `.schema-violation`; `pinmux.internal-failure`; `trace.sdk-root-unresolved`/
+  `.board-yaml-missing`/`.internal-failure`; `support-bundle.<checkName>`
+  (20 entries, mirroring the existing `doctor.<checkName>` family verbatim,
+  since `support-bundle`'s doctor section reuses `doctor_cmd`'s `Check`
+  objects unchanged); `doctor.fix-needs-sudo`/`.fix-installed`/
+  `.fix-spawn-failed`/`.fix-failed`/`.fix-timed-out`/`.fix-suppressed`;
+  `scaffold.name-required`/`.cancelled`/`.invalid-template`/`.invalid-name`/
+  `.internal-failure`; `debug-config.gdbserver-address-unresolved`; and 9
+  `renode.sim-*`/`renode.expect-ignored` codes from the `--sim-mode` gateway
+  (tan-cli#77) that had never been registered either. None of these were
+  reachable before this wave — `diff.*` had ZERO entries of any kind — so
+  none is a wire break; every one is `"reserved"`/`"consumer": "none"`,
+  costing nothing to rename later.
+- **`tan flash` can auto-sign an Alif Ensemble slot0 ATOC via SETOOLS**
+  (tan-cli#353, #365-#369, #373; `tan/core/setools.py`, new). Flow D
+  (`alif_mram_jlink`, J-Link straight over SWD, no SE-UART) needs a SIGNED
+  ATOC from Alif's own `app-gen-toc` step; a fresh AEN801 manifest's
+  `flash_args` carries only `jlink_flash_device` (measured on real silicon,
+  e1m-aen-evk-01/E8 AE822), so before this every customer had to sign by
+  hand outside `tan` and paste the result back in. `tan flash` now drives
+  `app-gen-toc` for you against a SETOOLS install you already have — three
+  precedence-ordered sources (new `--setools-dir` flag, `SETOOLS_DIR`, or
+  the least-durable `flash_args.setools_dir`, tan-cli#368), never a
+  filesystem search, and never under `--dry-run`. See
+  [`docs/setools.md`](docs/setools.md). SETOOLS itself is license-gated and
+  neither `tan` nor alp-sdk redistributes it.
+
+### Changed
+
+- **BREAKING: `tan validate`'s not-yet-ported spawn path now exits 2
+  (`VALIDATION_FAILURE`), not 1 (`RUNTIME_FAILURE`)** (tan-cli#262, TAKEN).
+  Before this release, a `board.yaml` present with an unresolvable SDK (or,
+  once the real validator spawn path lands, any post-spawn verdict failure)
+  answered `validate.spawn-not-implemented` at exit 1 — indistinguishable
+  from a genuine tan crash. Measured against the oracle
+  (`target/debug/tan.exe`): every guard-level `validate` refusal already
+  exits 2, and exit 1 there is reserved for the ONE case a spawned validator
+  returns an unmappable status — this port had flattened that distinction.
+  "The validator could not produce a verdict" is now treated as the
+  validator's own verdict everywhere, at exit 2, matching the guard cases.
+  **Who must act:** any CI step that greps this exit code and branches on
+  `-eq 1` specifically (rather than "non-zero") now sees 2 instead and will
+  silently stop matching; `alp-sdk-vscode` renders exit 2 as severity
+  "warning" and exit 1 as "error", so a consumer keyed on the old code will
+  now show a genuine validation gap as a warning rather than an error until
+  it is updated to read exit 2. A real `tan`-side crash (an unreadable
+  `board.yaml`, an unexpected internal exception) is unaffected and keeps
+  exit 5.
+
+### Fixed
+
+- **BLOCKER: the Flow D SETOOLS auto-sign's own soft-failure guard could
+  destroy a prior sign record instead of only detecting a fresh one**
+  (tan-cli#373, regression in #365's own fix). `app-package-map.txt` is
+  APPEND-mode — the accumulated sign record for the whole SETOOLS install,
+  including hand-runs done outside `tan`, per `flash-jlink.sh`/
+  `flash-jlink-mramxip.sh`/`flash-update-log-dual.sh` — but the guard
+  `os.remove`d it before every sign to detect an `app-gen-toc` exiting 0
+  without actually writing. On a manifest with two Flow D entries where one
+  pointed its own `flash_args.atoc_map` at that same file, the other
+  entry's auto-sign wiped it first: `app-gen-toc` recreated it holding only
+  the SECOND entry's block, and the first entry's `atoc_address` resolved
+  to the second entry's address — a mismatched ATOC burned into on-die
+  MRAM, recoverable only by re-provisioning over SE-UART. Replaced with a
+  size+mtime snapshot taken before the spawn: an append changes both, so an
+  unchanged snapshot after a zero exit is the same soft-failure signal,
+  without deleting anything.
+- **`tan flash --dry-run`'s SETOOLS preview still bypassed most of Flow D's
+  own validation** (tan-cli#373, #366 narrowed not closed). A `--dry-run`
+  whose `SETOOLS_DIR` resolved reported `ok:true` for a manifest with e.g. a
+  quoted `jlink_speed`, because that check lived only inside
+  `plan_alif_mram_jlink`, unreached from the preview's early return — and on
+  a REAL run the SETOOLS auto-sign (writing into the customer's install)
+  happened before that refusal was ever reached. `jlink_speed`/`confirm`
+  are now validated in `validate_flow_d_shape`, the one function both the
+  preview and the real plan-builder call before either can proceed.
+- **The wrong-DP-ID preflight remediation had replaced the wiring/
+  `jlink_serial` advice for three OTHER banners it does not apply to**
+  (tan-cli#369 regression). That fallback is shared by four cases — a
+  genuinely different SW-DP ID answering, an unrecognised banner, an
+  unplugged-SWD-ribbon `Cannot connect to target.`, and a refused
+  `jlink_serial`'s `Cannot connect to J-Link.` — but #369's rewrite gave all
+  four the cloned-serial explanation, silently deleting the original
+  "check the probe selection (jlink_serial) and the wiring" sentence
+  (tan-cli#353) for the three where `jlink_serial` genuinely IS the fix. Now
+  branched on whether a DP ID was actually read.
+- **`is_elf_artefact` only accepted `.elf`, narrowing #367(a)'s own
+  three-shape decision** (no extension, `.elf`, `.out`) with nothing
+  flagging it. `output_artefact: app` (no extension) or `app.out` now
+  resolves to its same-stem sibling `.bin` again, same as `zephyr.elf` does.
+
 ## [0.5.0-rc4] — 2026-08-02
 
 *Everything below was found by running the published `v0.5.0-rc3` binary as a
@@ -571,12 +681,16 @@ else installs by hand.
   compatibility fix. #262 is re-scoped to the one case that is a genuine
   v0.6.0 decision: `validate.failed` after a real spawn.
 
-  Still divergent, deliberately, and tracked in #262: `board.yaml` present but
-  no SDK root, where the oracle says 2 `validate.sdk-root-unresolved` and this
-  port says 1 `validate.spawn-not-implemented`. Closing it needs the real spawn
-  path. The two genuine internal failures in the same file (an unreadable
-  `board.yaml`, an unexpected exception inside the offline structural checker)
-  are unchanged at exit 5, matching the oracle's offline path exactly.
+  **Corrected 2026-08 (v0.6.0): the paragraph this replaced claimed
+  `validate.spawn-not-implemented` was still exit 1 at this port's rc1 tag.
+  That was true when written and is not true of the current tree — #262 was
+  decided and TAKEN in v0.6.0 (see that section below for the full BREAKING
+  change): `validate.spawn-not-implemented` now also emits exit 2
+  (`VALIDATION_FAILURE`), the same code the guard cases above already used,
+  closing the divergence this paragraph used to describe as open.** The two
+  genuine internal failures in the same file (an unreadable `board.yaml`, an
+  unexpected exception inside the offline structural checker) are unchanged
+  at exit 5, matching the oracle's offline path exactly.
 
 - **`tan sdk install` / `tan sdk switch` refused at exit 5 (`InternalFailure`),
   telling CI and the extension that tan had crashed.** Neither is ported; that

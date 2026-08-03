@@ -98,10 +98,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - asset: tan-x86_64-pc-windows-msvc.exe
+          - asset: tan-x86_64-pc-windows-msvc.zip
             os: windows-latest
             machine: "0x8664" # IMAGE_FILE_MACHINE_AMD64
-          - asset: tan-aarch64-pc-windows-msvc.exe
+          - asset: tan-aarch64-pc-windows-msvc.zip
             # `windows-11-arm`, and it has to be: PyInstaller freezes the
             # interpreter it is RUNNING and cannot cross-compile, so building
             # this asset on `windows-latest` would upload an x86_64 binary under
@@ -118,6 +118,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # build_binary.sh (tan-cli#349) now emits a --onedir freeze at
+      # dist/tan/tan.exe (+ dist/tan/_internal/) AND archives that folder to
+      # dist/tan.zip. The archive is the actual release-shaped asset, so it is
+      # what gets renamed/uploaded; the pre-archive dist/tan/tan.exe (with its
+      # _internal sibling still on disk right after the build) is what the
+      # `arch` and `verify` steps below read, since both need a RUNNABLE
+      # onedir tree, not a lone exe with no _internal beside it.
       - name: build
         shell: bash
         working-directory: python
@@ -126,17 +133,19 @@ jobs:
           .venv-build/Scripts/python -m pip install --quiet --upgrade pip
           .venv-build/Scripts/python -m pip install --quiet -e ".[monitor]" $BUILD_DEPS
           PYTHON=.venv-build/Scripts/python.exe bash scripts/build_binary.sh
-          cp dist/tan.exe "${{ matrix.asset }}"
+          cp dist/tan.zip "${{ matrix.asset }}"
       # Same reason the macOS job runs `file`: PyInstaller freezes the host's
       # arch, so a wrong runner label produces a correctly NAMED asset of the
       # wrong architecture, and the extension selects by name without ever
       # inspecting the file. Read the PE COFF machine field rather than shelling
       # `file`, which is a Git-for-Windows accident rather than a guarantee:
-      # 0x8664 = AMD64, 0xaa64 = ARM64.
+      # 0x8664 = AMD64, 0xaa64 = ARM64. Reads the pre-archive onedir exe
+      # (dist/tan/tan.exe), not the renamed .zip asset -- a .zip has no PE
+      # header at all.
       - name: arch
         shell: bash
         run: |
-          python - "python/${{ matrix.asset }}" "${{ matrix.machine }}" <<'PY'
+          python - "python/dist/tan/tan.exe" "${{ matrix.machine }}" <<'PY'
           import struct, sys
           path, want = sys.argv[1], int(sys.argv[2], 16)
           with open(path, "rb") as fh:
@@ -148,10 +157,20 @@ jobs:
           if machine != want:
               raise SystemExit(f"::error::{path} is not the architecture its asset name claims")
           PY
+      # Runs against the pre-archive onedir tree, not the .zip -- verify_binary.sh
+      # executes the binary (`"$BIN" --version`), which needs its _internal
+      # sibling directory on disk, not zipped up.
+      #
+      # RELATIVE arguments here, `$PWD/...` in the linux and macos jobs below,
+      # deliberately: tan-cli#361 was a script that lost a relative path across
+      # its own `cd`, and it survived because all three call sites happened to
+      # pass absolute ones. Git Bash is also the shell the fix's cd-into-dirname
+      # idiom is least obvious on. Keeping one call site on each form means the
+      # release path itself exercises both.
       - name: verify
         if: inputs.verify
         shell: bash
-        run: python/scripts/verify_binary.sh "$PWD/python/${{ matrix.asset }}" "$PWD/alp-sdk"
+        run: python/scripts/verify_binary.sh python/dist/tan/tan.exe alp-sdk
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
@@ -163,16 +182,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - asset: tan-x86_64-unknown-linux-gnu
+          - asset: tan-x86_64-unknown-linux-gnu.tar.gz
             os: ubuntu-latest
             libc: gnu
-          - asset: tan-aarch64-unknown-linux-gnu
+          - asset: tan-aarch64-unknown-linux-gnu.tar.gz
             os: ubuntu-24.04-arm
             libc: gnu
-          - asset: tan-x86_64-unknown-linux-musl
+          - asset: tan-x86_64-unknown-linux-musl.tar.gz
             os: ubuntu-latest
             libc: musl
-          - asset: tan-aarch64-unknown-linux-musl
+          - asset: tan-aarch64-unknown-linux-musl.tar.gz
             os: ubuntu-24.04-arm
             libc: musl
     runs-on: ${{ matrix.os }}
@@ -193,6 +212,12 @@ jobs:
       # got copied out during the freeze investigation with `set -e` armed. The
       # script now also quarantines an over-ceiling artifact as
       # `dist/tan.oversized` so the `cp` below cannot ship one either way.
+      #
+      # build_binary.sh (tan-cli#349) emits a --onedir freeze at
+      # dist/tan/tan (+ dist/tan/_internal/) AND archives that folder to
+      # dist/tan.tar.gz. The archive is staged under the asset name for
+      # upload; `verify` below reads the pre-archive dist/tan/tan directly,
+      # since it EXECUTES the binary and needs its _internal sibling on disk.
       - name: build (${{ matrix.libc }})
         run: |
           if [ "${{ matrix.libc }}" = musl ]; then
@@ -210,7 +235,7 @@ jobs:
               /tmp/v/bin/pip install --quiet -e ".[monitor]" '"$BUILD_DEPS"'
               PYTHON=/tmp/v/bin/python bash scripts/build_binary.sh'
           fi
-          cp python/dist/tan "python/${{ matrix.asset }}"
+          cp python/dist/tan.tar.gz "python/${{ matrix.asset }}"
       # Verified in a runtime image with NO Python installed, which is the
       # actual claim being made about a frozen binary. `debian:bullseye-slim`
       # doubles as the glibc-2.31 floor check for the -gnu assets.
@@ -220,7 +245,7 @@ jobs:
           image=debian:bullseye-slim
           [ "${{ matrix.libc }}" = musl ] && image=alpine:3.20
           docker run --rm -v "$PWD:/w" -w /w "$image" \
-            sh python/scripts/verify_binary.sh "/w/python/${{ matrix.asset }}" /w/alp-sdk
+            sh python/scripts/verify_binary.sh "/w/python/dist/tan/tan" /w/alp-sdk
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
@@ -232,7 +257,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - asset: tan-x86_64-apple-darwin
+          - asset: tan-x86_64-apple-darwin.tar.gz
             # THE INTEL LABEL, and it has to be. `macos-latest`, `macos-14` and
             # `macos-15` are all Apple silicon, and PyInstaller freezes the
             # interpreter it is RUNNING -- it cannot cross-compile. Using one of
@@ -242,7 +267,7 @@ jobs:
             # runtime (`Bad CPU type in executable`), not in CI. `file` is run on
             # the artifact below for exactly this reason.
             os: macos-15-intel
-          - asset: tan-aarch64-apple-darwin
+          - asset: tan-aarch64-apple-darwin.tar.gz
             os: macos-latest
     runs-on: ${{ matrix.os }}
     steps:
@@ -254,6 +279,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # build_binary.sh (tan-cli#349) emits a --onedir freeze at dist/tan/tan
+      # (+ dist/tan/_internal/) AND archives that folder to dist/tan.tar.gz.
+      # The archive is what gets renamed/uploaded; `arch` and `verify` below
+      # read the pre-archive dist/tan/tan directly, since both need the
+      # _internal sibling still on disk (an arch check on a lone binary would
+      # still work, but verify EXECUTES it, so keep them consistent).
       - name: build
         working-directory: python
         run: |
@@ -261,15 +292,15 @@ jobs:
           .venv-build/bin/python -m pip install --quiet --upgrade pip
           .venv-build/bin/python -m pip install --quiet -e ".[monitor]" $BUILD_DEPS
           PYTHON=.venv-build/bin/python bash scripts/build_binary.sh
-          cp dist/tan "${{ matrix.asset }}"
+          cp dist/tan.tar.gz "${{ matrix.asset }}"
       # `file` proves the arch, because a PyInstaller build cannot: it always
       # produces the host's arch, so a wrong runner label yields a correctly
       # NAMED binary of the wrong architecture.
       - name: arch
-        run: file "python/${{ matrix.asset }}"
+        run: file "python/dist/tan/tan"
       - name: verify
         if: inputs.verify
-        run: bash python/scripts/verify_binary.sh "$PWD/python/${{ matrix.asset }}" "$PWD/alp-sdk"
+        run: bash python/scripts/verify_binary.sh "$PWD/python/dist/tan/tan" "$PWD/alp-sdk"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}

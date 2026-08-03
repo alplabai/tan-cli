@@ -16,14 +16,21 @@ skeleton is either a caller-supplied argument or an explicit `TBD`.
 
 Differences from the alp_cli original, and why:
 
-* **No `--format json`.** The original has no `--format`/`--json` flag, and
-  neither does the Rust forwarder's own contract for this verb -- unlike
-  `faultdecode`, `new-som` never gets a synthesised `--json`
-  (`sdk_cli.rs::build_argv`). This stays a plain interactive/flag-driven
-  text tool; stdout carries the same human-readable lines the original
-  wrote there (skeleton validation notes, `Created <path>`, the checklist),
-  stderr the same error lines, matching `click.echo(..., err=...)`
-  verbatim rather than folding either into an envelope that never existed.
+* **No `--format json` OUTPUT.** The original has no `--format`/`--json`
+  flag. The Rust forwarder's clap `GlobalArgs` DOES parse `--format` for
+  this verb too (`global = true` -- confirmed live: `tan.exe new-som
+  --format json --sdk-root <bad>` reaches the SDK-root-unresolved failure,
+  not a parse error), but `new-som` never gets a synthesised `--json`
+  forwarded to the child the way `faultdecode`'s does
+  (`sdk_cli.rs::build_argv`), so a SUCCESSFUL run's stdout is plain text
+  either way. This file matches that split: `--format` is accepted (see the
+  hidden-option block in `new_som`'s signature, tan-cli#254/#256) so the
+  argv SURFACE agrees with the oracle, but it stays a plain
+  interactive/flag-driven text tool -- stdout carries the same
+  human-readable lines the original wrote there (skeleton validation notes,
+  `Created <path>`, the checklist), stderr the same error lines, matching
+  `click.echo(..., err=...)` verbatim rather than folding either into an
+  envelope that never existed.
 
 * **`--sdk-root`/`--project` are new, and required.** The original ran
   FROM WITHIN an alp-sdk checkout (`REPO_ROOT =
@@ -145,12 +152,22 @@ def _check_output_root(_ctx: click.Context, _param: click.Parameter, value: str 
     return value
 
 
-def _fail(message: str) -> None:
-    """Print an error to stderr and exit 1 -- the flat exit code the alp_cli
-    original's `_fail` always used (`raise SystemExit(1)`); prefix reworded
-    from `alp new-som:` to `new-som:` (RFC #837: the binary is `tan`)."""
+def _fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE) -> None:
+    """Print an error to stderr and exit -- 1 by default, the flat exit code
+    the alp_cli original's `_fail` always used (`raise SystemExit(1)`) for
+    every validation failure it can raise (bad SKU, unknown board, ...);
+    prefix reworded from `alp new-som:` to `new-som:` (RFC #837: the binary
+    is `tan`). `exit_code` overrides this for the one failure this port adds
+    that the original never had to: the `--sdk-root`/`--project` resolution
+    preflight below (the original always ran FROM WITHIN a checkout). That
+    check mirrors the Rust forwarder's own preflight
+    (`crates/tan-cli/src/commands/sdk_cli.rs::run`), which exits
+    `ExitCode::ValidationFailure` (2) for it specifically -- confirmed live:
+    `tan.exe new-som --sdk-root <bad>` exits 2, not 1 (every OTHER new-som
+    failure, including a bad-exit from the forwarded child, is RuntimeFailure
+    (1) there too, matching this default)."""
     typer.echo(f"new-som: {message}", err=True)
-    raise typer.Exit(int(ExitCode.RUNTIME_FAILURE))
+    raise typer.Exit(int(exit_code))
 
 
 def _yaml_dquote(value: str) -> str:
@@ -590,8 +607,32 @@ def new_som(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
+    board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
+    target: str = typer.Option(None, "--target", hidden=True),
+    all_targets: bool = typer.Option(False, "--all", hidden=True),
+    output_format: str = typer.Option(None, "--format", hidden=True),
+    verbose: bool = typer.Option(False, "--verbose", hidden=True),
+    quiet: bool = typer.Option(False, "--quiet", hidden=True),
+    no_color: bool = typer.Option(False, "--no-color", hidden=True),
+    non_interactive: bool = typer.Option(False, "--non-interactive", hidden=True),
+    ci: bool = typer.Option(False, "--ci", hidden=True),
 ) -> None:
     """Scaffold the metadata skeletons for porting a new SoM."""
+    # The nine options above are clap's `GlobalArgs` members (`global = true`)
+    # that the oracle accepts on EVERY verb, `new-som` included, and never
+    # reads for this one -- declared here purely so the argv SURFACE matches:
+    # `tan new-som --ci ...` exits the same as the same invocation without
+    # `--ci` on the oracle; without this, it was a Click "No such option"
+    # usage error (exit 2) instead. This is a DIFFERENT claim from the
+    # docstring's "No --format json" bullet above -- confirmed live
+    # (`tan.exe new-som --format json --sdk-root <bad>` still reaches the
+    # SDK-root-unresolved failure rather than a parse error): `--format` IS a
+    # legal flag on the oracle's `new-som`, it just never gets forwarded as a
+    # synthesised `--json` (unlike `faultdecode`'s), and a SUCCESSFUL run
+    # stays plain text on this port either way -- see `clean_cmd.clean`'s
+    # identical fix for the same port-wide gap.
+    del board_yaml, target, all_targets, output_format
+    del verbose, quiet, no_color, non_interactive, ci
     # Mirrors the original's `type=click.Choice(...)` flag-level validation --
     # a Click-usage error (exit 2) BEFORE anything else runs, same as the
     # original raised it during argument parsing itself. Written as an
@@ -616,7 +657,7 @@ def new_som(
     workspace_root = Path.cwd() / project if project else Path.cwd()
     active = resolve_sdk_tiered(sdk_root, workspace_root)
     if active.path is None or not Path(active.path).joinpath(*SDK_MARKER).exists():
-        _fail(_SDK_ROOT_UNRESOLVED)
+        _fail(_SDK_ROOT_UNRESOLVED, ExitCode.VALIDATION_FAILURE)
         return
     resolved_sdk = Path(active.path)
     # tan-cli#263 review: this command WRITES metadata skeletons into

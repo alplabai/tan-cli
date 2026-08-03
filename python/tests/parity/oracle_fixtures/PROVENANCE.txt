@@ -162,3 +162,44 @@ returns nothing, `tests/gates/test_no_leaked_host_paths.py` passes with every
 file in this directory (and this file's own new `test_oracle_fixtures.py`)
 tracked, and the other four fixture files in this directory are byte-
 identical to before this pass (`git diff --stat` on each is empty).
+
+--------------------------------------------------------------------------
+
+THE CAPTURE HOST'S TOOL INVENTORY IS PART OF THE FROZEN ANSWER
+(tan-cli#313, tan-cli#324)
+
+Eight cases branch on a `which()` probe, so their frozen answers encode which
+tools the CAPTURE host had -- not just what the oracle computes. The capture
+host had:
+
+  west       ABSENT   -- the three west_forward cases froze the
+                         "west not found on PATH" launch error
+  dd         PRESENT  -- the yocto_wic cases froze "would run dd if=..."
+  bmaptool   ABSENT   -- else those cases would have frozen a bmaptool argv
+
+Replay pins the PYTHON side's PATH to match that inventory, so the comparison
+does not silently measure the replay host instead of the port. The pins:
+
+  test_flash_oracle_parity.py  `_TOOL_PROBE_PINNED_CASES` (5 cases) ->
+    `_pin_tool_inventory`, a scratch PATH holding a stand-in `dd` only
+  test_oracle_parity.py  `test_west_forward_matches_rust[migrate|lock|quality]`
+    (3 cases) -> `oracle.empty_tool_inventory`, a scratch PATH holding nothing
+
+CONSEQUENCE FOR RE-CAPTURE, and the reason this section exists: the recipe at
+the top of this file NO LONGER WORKS AS WRITTEN for these eight. Under
+TAN_PARITY_LIVE=1 both sides genuinely spawn, so `compare()` REFUSES a
+`python_env_overrides` rather than compare one pinned side against one
+unpinned side -- deliberately, since that would be a fresh divergence rather
+than a capture. Measured:
+
+  TAN_PARITY_LIVE=1 python -m pytest \
+    "tests/parity/test_oracle_parity.py::test_west_forward_matches_rust"
+  -> 3 failed, RuntimeError: compare() got python_env_overrides under
+     TAN_PARITY_LIVE=1
+
+To re-capture any of the eight, run the capture on a host whose tool
+inventory MATCHES the table above (no `west`, no `bmaptool`, a real `dd`) and
+drop the pin for that run. Capturing on a host with `west` installed and the
+pin dropped would freeze a different answer entirely -- one that then only
+replays on hosts that also have `west`, reintroducing exactly the bug
+tan-cli#324 closed.

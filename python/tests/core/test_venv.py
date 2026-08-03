@@ -10,6 +10,7 @@ directly: `tool_in_venv`'s own file-existence + `.exe` behaviour, and
 import os
 from pathlib import Path
 
+from tan.core import venv as venv_module
 from tan.core.venv import (
     find_workspace_venv,
     tool_in_venv,
@@ -164,7 +165,14 @@ def test_tool_in_venv_appends_exe_only_on_windows_and_only_once(tmp_path):
 
 
 def test_west_program_falls_back_to_the_bare_path_name(tmp_path, monkeypatch):
+    """Pinned like `test_build_planner_python.py:74-84` pins the identical
+    `find_workspace_venv` walk on `_planner_python`'s side: `venv_bin_dir`
+    (which `west_program` calls) walks from `empty` all the way to the
+    filesystem root looking for a west-capable `.venv` -- a developer machine
+    with one anywhere above the OS temp dir would red this test for reasons
+    unrelated to the code under test."""
     monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+    monkeypatch.setattr(venv_module, "find_workspace_venv", lambda *_args: None)
     empty = tmp_path / "no-venv-here"
     empty.mkdir()
     assert west_program(str(empty), None) == "west"

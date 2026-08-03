@@ -10,7 +10,9 @@ Left unscrubbed here, the same reads make the suite non-hermetic: a
 developer who follows the documented `export ALP_SDK_ROOT=<checkout>`
 onboarding, or who has ever run `tan sdk switch --global`, gets a DIFFERENT
 SDK resolved than a clean CI runner would, and a test asserting "nothing
-resolves" observes a real checkout instead.
+resolves" observes a real checkout instead. `ZEPHYR_BASE` gets the same
+treatment for the same reason: a developer/CI shell's own value must not
+decide what a test observes any more than `ALP_SDK_ROOT` does.
 
 Autouse, function-scoped, and applied to every test in this tree -- both
 in-process calls (`resolve_sdk_root_ladder` et al., called directly) and the
@@ -86,6 +88,13 @@ REAL_ENVIRON: dict[str, str] = dict(os.environ)
 @pytest.fixture(autouse=True)
 def _scrub_sdk_discovery_env(tmp_path_factory, monkeypatch):
     monkeypatch.delenv("ALP_SDK_ROOT", raising=False)
+    # A developer/CI shell's own `$ZEPHYR_BASE` must not decide what a test
+    # observes any more than `ALP_SDK_ROOT` does -- left unscrubbed, a test
+    # asserting "no ZEPHYR_BASE workspace resolved" instead sees a real one.
+    # `test_native_sim_e2e.py` needs the REAL value for its actual `west
+    # build` subprocess; it reads that from `REAL_ENVIRON` above, not from
+    # `os.environ` inside the test body, for exactly this reason.
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
     # `SOURCE_DATE_EPOCH` wins over the clock in `tan.core.timestamp`, so a
     # developer or CI image that exports it (reproducible-build setups do)
     # changes every `generatedAt`/`updatedAt` this suite observes -- and a

@@ -95,6 +95,7 @@ import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide
 from tan.core.fs_confine import PathEscapeError, resolve_confined
+from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
@@ -955,3 +956,10 @@ def init(
         return
 
     _emit_outcome(json_mode, outcome)
+
+
+# tan-cli#261: adds the two oracle `GlobalArgs` flags this command was still
+# missing (`--ci`/`--non-interactive`) on top of the five already declared
+# above (`--verbose`/`--quiet`/`--no-color`/`--target`/`--all`, all read for
+# real); see `tan.core.global_flags`.
+init = accept_global_flags(init)

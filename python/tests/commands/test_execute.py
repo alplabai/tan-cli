@@ -93,8 +93,11 @@ def _plan(command: str, backend: str = "zephyr") -> str:
 
 
 def test_successful_slice_reports_succeeded(tmp_path):
+    # backend "baremetal", not the `_plan()` default "zephyr": this is a bare
+    # dispatch-succeeds check, no Zephyr boilerplate on disk -- a `zephyr`
+    # backend here would trip the tan-cli#309 guard and report "failed".
     cmd = f'{{"tool": {PYTHON}, "args": ["-c", "print(1)"], "cwd": null}}'
-    out = execute_slices(parse_build_plan(_plan(cmd)), build_root=tmp_path,
+    out = execute_slices(parse_build_plan(_plan(cmd, backend="baremetal")), build_root=tmp_path,
                          env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None)
     assert out[0].status == "succeeded"
     assert out[0].exit_code == 0
@@ -222,7 +225,9 @@ def test_undecodable_stdout_bytes_are_replaced_not_fatal(tmp_path):
     )
     cmd = f'{{"tool": {PYTHON}, "args": ["-c", {json.dumps(script)}], "cwd": null}}'
     lines = []
-    out = execute_slices(parse_build_plan(_plan(cmd)), build_root=tmp_path,
+    # backend "baremetal": this is a stdout-decoding concern, unrelated to
+    # Zephyr -- see the tan-cli#309 comment on the test above.
+    out = execute_slices(parse_build_plan(_plan(cmd, backend="baremetal")), build_root=tmp_path,
                          env_lookup=lambda k: None, gap_fillers=[], on_output=lines.append)
     assert out[0].status == "succeeded"
     assert lines, "expected at least one output line"
@@ -391,7 +396,10 @@ def test_mismatched_sdk_stamp_wipes_and_restamps_the_build_dir(tmp_path, monkeyp
     _configure(slice_dir, "/sdk/v0.11.0")
     cmd = f'{{"tool": {PYTHON}, "args": ["-c", "pass"], "cwd": "build/c1"}}'
     lines = []
-    out = execute_slices(parse_build_plan(_plan(cmd)), build_root=tmp_path,
+    # backend "baremetal": this test is about the sdk-switch-pristine wipe,
+    # orthogonal to Zephyr -- the `pass` command leaves no Zephyr boilerplate
+    # behind, which would otherwise trip the tan-cli#309 guard.
+    out = execute_slices(parse_build_plan(_plan(cmd, backend="baremetal")), build_root=tmp_path,
                          env_lookup=lambda k: None, gap_fillers=[], on_output=lines.append,
                          sdk_root="/sdk/v0.13.0")
     assert out[0].status == "succeeded"
@@ -602,23 +610,28 @@ def test_manifest_overlay_writes_ok_and_failed_status_for_the_right_slices(
 
     fixture_manifest = (
         "schema_version: 1\nhw_info:\n  sku: S\nslices:\n"
-        "- core_id: ok_core\n  os: zephyr\n  status: pending\n"
-        "- core_id: bad_core\n  os: zephyr\n  status: pending\n"
+        "- core_id: ok_core\n  os: baremetal\n  status: pending\n"
+        "- core_id: bad_core\n  os: baremetal\n  status: pending\n"
         "ipc: []\nhelper_mcus: []\nboot_order: []\n"
     )
     monkeypatch.setattr(planner_root, "emit", lambda *a, **k: fixture_manifest)
 
+    # backend "baremetal" on both slices, not "zephyr": this test is about
+    # `status` -> manifest wiring, not Zephyr artefact evidence -- a "zephyr"
+    # backend here would trip the tan-cli#309 guard and force ok_core's real
+    # exit-0 "pass" to read back as "failed" too, breaking the very
+    # succeeded-vs-failed distinction this test exists to pin.
     plan_json = f"""{{
       "schemaVersion": 1, "generatedBy": "g",
       "boardYaml": {json.dumps(str(tmp_path / "board.yaml"))},
       "sku": "S", "buildRoot": "build", "sharedArtefacts": [], "warnings": [],
       "executionPolicy": {{"missingTool": "skip", "nullCommand": "skip", "unknownBackend": "fail"}},
       "slices": [
-        {{"coreId": "ok_core", "backend": "zephyr", "buildDir": "build/ok_core", "appDir": "app",
+        {{"coreId": "ok_core", "backend": "baremetal", "buildDir": "build/ok_core", "appDir": "app",
           "configArtefacts": [], "toolchain": null, "artifacts": [], "debug": {{}},
           "command": {{"tool": {PYTHON}, "args": ["-c", "pass"], "cwd": null}},
           "env": {{}}, "envAppendPath": {{}}}},
-        {{"coreId": "bad_core", "backend": "zephyr", "buildDir": "build/bad_core", "appDir": "app",
+        {{"coreId": "bad_core", "backend": "baremetal", "buildDir": "build/bad_core", "appDir": "app",
           "configArtefacts": [], "toolchain": null, "artifacts": [], "debug": {{}},
           "command": {{"tool": {PYTHON}, "args": ["-c", "raise SystemExit(1)"], "cwd": null}},
           "env": {{}}, "envAppendPath": {{}}}}
@@ -897,8 +910,14 @@ def test_west_build_pins_the_resolved_workspace_over_an_ancestor_west(tmp_path, 
     argv_probe = real_ws / "argv.txt"
     script = (
         f"import os, sys\n"
+        f"args = sys.argv[1:]\n"
         f"open({json.dumps(str(probe))}, 'w').write(os.getcwd())\n"
-        f"open({json.dumps(str(argv_probe))}, 'w').write(repr(sys.argv[1:]))\n"
+        f"open({json.dumps(str(argv_probe))}, 'w').write(repr(args))\n"
+        # tan-cli#309: a real `west build` leaves Zephyr's own `zephyr/`
+        # output dir under the resolved `-d` build dir -- without this the
+        # tan-cli#309 guard (no evidence Zephyr's CMake boilerplate ran)
+        # would force this slice "failed" even though the stand-in exits 0.
+        f"os.makedirs(os.path.join(args[args.index('-d') + 1], 'zephyr'), exist_ok=True)\n"
     )
     (real_ws / "build").write_text(script, encoding="utf-8")
 
@@ -959,9 +978,29 @@ def _fake_west_build_script() -> str:
     when that doesn't lead to a workspace either. `sys.argv[-1]` is the
     slice's source dir: with no trailing cmake `--` options in the test
     plans below, `_pin_west_workspace`'s rewritten args always end with it.
+
+    On each success path it also writes the `build/CMakeCache.txt`
+    `ZEPHYR_BASE:` entry a REAL successful `west build` leaves behind, which
+    tan-cli#309's `zephyr_boilerplate_loaded` guard reads as its evidence
+    that Zephyr's CMake boilerplate actually ran. Without it this shim exits
+    0 having produced nothing, and #309 correctly fails the slice -- masking
+    what #336's own assertions are about. The two fixes are orthogonal; the
+    fixture has to satisfy both for either to be measurable.
     """
     return (
         "import os, sys\n"
+        # The build dir is `-d`'s value when present, NOT `<cwd>/build`:
+        # tan-cli#307 pins the child's cwd to the WORKSPACE and injects an
+        # explicit `-d <slice dir>/build` to keep the output where it would
+        # otherwise have defaulted. A shim writing to `<cwd>/build` would
+        # write into the workspace -- which here is where this very script
+        # lives, so `makedirs` raises FileExistsError against the file.
+        "def ok():\n"
+        "    d = sys.argv[sys.argv.index('-d') + 1] if '-d' in sys.argv else os.path.join(os.getcwd(), 'build')\n"
+        "    os.makedirs(d, exist_ok=True)\n"
+        "    with open(os.path.join(d, 'CMakeCache.txt'), 'w') as fh:\n"
+        "        fh.write('ZEPHYR_BASE:PATH=/fake/zephyr\\n')\n"
+        "    sys.exit(0)\n"
         "def has_dot_west(p):\n"
         "    while True:\n"
         "        if os.path.isdir(os.path.join(p, '.west')):\n"
@@ -972,10 +1011,10 @@ def _fake_west_build_script() -> str:
         "        p = parent\n"
         "source_dir = sys.argv[-1]\n"
         "if has_dot_west(source_dir):\n"
-        "    sys.exit(0)\n"
+        "    ok()\n"
         "zb = os.environ.get('ZEPHYR_BASE') or os.path.join(os.getcwd(), 'zephyr')\n"
         "if has_dot_west(os.path.dirname(zb)):\n"
-        "    sys.exit(0)\n"
+        "    ok()\n"
         "print('FATAL ERROR: Could not find a west workspace in this or any parent directory')\n"
         "sys.exit(1)\n"
     )

@@ -191,23 +191,85 @@ supported SKU, before a single file is planned — never a silent fall-back
 onto a hand-written generator, which would keep alive on this one path the
 exact drift issue #14 retires everywhere else.
 
-### `minimal-app` stays hand-generated (deferred, not permanent)
+### `minimal-app` stays hand-generated; tan-cli#309 fixed its CMake AND its `app:`
 
-**`minimal-app`** is semantically closest to SDK `minimal`, but its generator
-emits a plain-CMake, non-west-buildable stub (`include/app/app.h` +
-`src/CMakeLists.txt`), a structurally different shape than the SDK's
-canonical Zephyr scaffold. It is the ONLY tan wizard template left
-hand-generated after this vendoring pass — deliberately deferred, not a
-permanent gap: folding it onto the same vendored tree as `zephyr-app` would
-make the two templates byte-identical in the wizard's template picker (a
-product decision to merge/deprecate one, not something to invent here), and
-`contract/envelopes/init-preview-minimal-app/expected.json` pins its exact
-file list (owned by an in-flight contract-surface change, so it stays
-untouched until that lands). Because the stub is non-west-buildable,
-`minimal-app` is **not** the non-interactive `tan init` default —
-`zephyr-app` is (tan-cli #97). Do not restore it as the default without
-vendoring it first: a `board.yaml` declaring `os: zephyr` over a plain-CMake
-tree is exactly the silent host-binary build that issue reports.
+**`minimal-app`** is semantically closest to SDK `minimal`, but it is not
+vendored from the SDK catalog at all — it is tan's OWN generator
+(`tan/core/scaffold.py`'s `_minimal_app_files`), the ONLY tan wizard template
+left hand-generated after the vendoring pass above. Folding it onto the same
+vendored tree as `zephyr-app` would make the two templates byte-identical in
+the wizard's template picker (a product decision to merge/deprecate one, not
+something to invent here), and `contract/envelopes/init-preview-minimal-app/
+expected.json` pins its exact eight-file list/order — path + change-kind
+only, never file content or `board.yaml`'s `app:` value, so it did not need
+re-pinning for the fix below.
+
+Through v0.5.0-rc3 this template had TWO compounding bugs, and an earlier pass
+at this fix landed only the first — which, alone, turns a silent wrong-binary
+build into a hard CMake configure error, not a working one (caught by
+adversarial review before it shipped):
+
+1. **Which file `west build` even reads.** `board.yaml`'s `app:` decides this,
+   via the planner's `_zephyr_app_dir` (`tan/planner/orchestrator.py`): it
+   resolves `app:` to a directory and picks that directory ITSELF whenever it
+   holds a `CMakeLists.txt` of its own, falling back to the PARENT only when
+   it does not. This template's `src/` deliberately keeps its own
+   `CMakeLists.txt` (the two-file split below), so `app: ./src` sent `west
+   build` straight at `src/CMakeLists.txt` — the root `CMakeLists.txt`
+   (`project()` + `add_subdirectory(src)`, never `add_executable`) was dead
+   code the entire time, not the file at fault.
+2. **What that file said.** `src/CMakeLists.txt` — the file actually
+   configured — called plain `add_executable(alp_app ${ALP_APP_SOURCES})`, no
+   `find_package(Zephyr ...)` anywhere in either CMake file. CMake configures
+   and links that shape fine: measured on a real checkout, `west build -b
+   <board> <project>/src` produced a genuine PE32+ x86-64 `alp_app.exe` built
+   from `CMakeFiles/alp_app.dir/{main,features/app_bootstrap}.obj` —
+   `app_bootstrap.c` WAS compiled and linked, just into a host binary Zephyr's
+   own build machinery never touched — so `tan build` reported success for a
+   project that was never Zephyr at all.
+
+tan-cli#309 fixed both, in `tan/core/scaffold.py`: `_minimal_app_root_cmake`/
+`_minimal_app_src_cmake` now emit `find_package(Zephyr REQUIRED HINTS
+$ENV{ZEPHYR_BASE})` before `project()` in the root file, with `src/
+CMakeLists.txt` contributing via `target_sources(app PRIVATE ...)`/
+`target_include_directories(app ...)` against Zephyr's own `app` target
+instead of a second `add_executable` — the same KIND of CMake every vendored
+tree above already writes, while keeping its own smaller, hand-generated
+CONTENT; and `_minimal_app_board_yaml` now emits `app: .` (the project root)
+instead of `./src`, so `_zephyr_app_dir` resolves straight to the root file
+without ever consulting `src/`. Measured after both fixes, against a real
+CMake + Ninja + Zephyr SDK: configure reaches Zephyr's own boilerplate
+(`Loading Zephyr default modules`, board/toolchain/devicetree resolution) and
+a full build compiles `src/features/app_bootstrap.c` into `app/libapp.a`
+alongside `src/main.c`, which Zephyr's own link step pulls in whole
+(`-Wl,--whole-archive app/libapp.a`) on the way to a real `zephyr.elf`.
+
+**`crates/tan-core/src/wizard/service/c_project.rs` still emits the pre-#309
+broken shape (both bugs)** — `crates/` is frozen (`docs/ROADMAP.md`'s Standing
+Rules) and is not re-fixed here; its own `wizard/vendored/MANIFEST.md` had
+already flagged the CMake half of this ("a `board.yaml` declaring `os:
+zephyr` over a plain-CMake tree is exactly the silent host-binary build that
+issue [#14] reports") as "deliberately deferred, not a permanent gap" before
+the freeze, and the freeze is why it never got un-deferred there. `minimal-app`
+stays **not** the non-interactive `tan init` default — `zephyr-app` is
+(tan-cli #97) — an independent choice (a vendored, real-catalog scaffold vs.
+tan's own hand-generated stub) that #309 does not revisit.
+
+**A correction to tan-cli#309's own "Measured" evidence.** Its table reports
+`Machine: ARM`, a real `zephyr.elf`, `CMakeFiles/app.dir/src/main.c.obj`
+present, and no `app_bootstrap*.obj` — but under the pre-#309 shape (`app:
+./src` + `src/CMakeLists.txt`'s `add_executable(alp_app ...)`), the object
+directory is named `alp_app.dir` (the target's own name), never `app.dir`,
+and paths are relative to `src/` (already the CMake source root), so the real
+artefact is `alp_app.dir/main.obj`, not `app.dir/src/main.c.obj` — confirmed
+by reproducing that exact shape locally. `app.dir/src/main.c.obj` and a real
+ARM `zephyr.elf` are what the SAME `E1M-AEN801` plan's OTHER Zephyr slice
+(`m55_he`, which builds `${SDK_ROOT}/firmware/alp-stock-shim`, a genuine
+Zephyr app with its own unrelated `src/main.c`) would produce. The evidence
+table most likely mixed that slice's build output into the `minimal-app`
+customer slice's (`m55_hp`) row — the underlying defect (silent wrong-binary
+build) is real and independently reproduced above, but that one table
+conflates two slices.
 
 **`host-tooling-starter`** (a host-tool monorepo scaffold, not a
 firmware/board.yaml project — categorically out of the scaffold catalog's

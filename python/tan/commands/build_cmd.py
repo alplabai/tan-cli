@@ -805,12 +805,14 @@ def _dispatch(
                 replace(plan, slices=runnable),
                 build_root=build_root,
                 env_lookup=os.environ.get,
-                # NOT YET PORTED: Rust fills ZEPHYR_BASE and EXTRA_ZEPHYR_MODULES
-                # here from the resolved west workspace, so `west build -b
-                # <alp-board>` finds the SDK's boards without the user wiring
-                # -DEXTRA_ZEPHYR_MODULES. Plans emitted by the SDK carry both on
-                # the slice's own envAppendPath, so this is a gap only for a host
-                # relying on the CLI to fill them.
+                # tan-cli#308: no build_cmd.py-level gap fillers of our own --
+                # `execute_slices` fills ZEPHYR_BASE/EXTRA_ZEPHYR_MODULES
+                # itself, PER SLICE, from the west workspace it resolves
+                # internally (`tan.core.zephyr_env.zephyr_env_overrides`),
+                # exactly where the Rust oracle's own `execute_slices`
+                # computes them (`execute/mod.rs`, inside its own per-slice
+                # loop) -- not from an outer caller. This parameter stays for
+                # a caller-supplied override this port has none of yet.
                 gap_fillers=(),
                 on_output=heartbeat,
                 sdk_root=sdk_root,
@@ -1312,6 +1314,24 @@ def build(
     # walk, so `tan init`'s own pointer went unread the moment `tan build` ran
     # in the same directory.
     resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    # tan-cli#257/#258: `resolve_sdk_root_ladder` returns an explicit
+    # `--sdk-root` UNVALIDATED (I-31 terminal-for-REPORTING, matching the
+    # oracle's `resolve_sdk_tiered`) -- fine for a caller that only reports
+    # the tier, but `build` also ACTS on `resolved_sdk_root`, so a bogus flag
+    # used to sail through as `sdk.sourceTier: "sdkRootFlag"`, reach
+    # `_emit_plan` as a non-None `sdk_root`, and get refused for the NEXT
+    # missing thing (`no board.yaml found`) instead -- telling the customer
+    # their project is broken when the `--sdk-root` they just typed is what's
+    # wrong, and reporting an `sdk` key the oracle never emits on this path.
+    # Validated here, at the flag's own entry point, rather than in the
+    # shared ladder (which every other caller also relies on staying
+    # unvalidated) -- same shape as `clean_cmd.sdk_root_resolves` and
+    # `flash_cmd._resolve_sdk`, the two callers that already guard their own
+    # explicit `--sdk-root`. An unresolvable explicit root is treated as no
+    # root at all: `_emit_plan` then gives its own "no alp-sdk checkout
+    # found" refusal, and no `sdk` key is reported, matching the oracle.
+    if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk_root):
+        resolved_sdk_root = None
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the

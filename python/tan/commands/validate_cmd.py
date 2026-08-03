@@ -11,24 +11,48 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   ``scripts/validate_board_yaml.py``, spawned as a subprocess. tan does not
   reimplement alp-sdk's schema: the SDK owns ``metadata/schemas/`` and
   ADR-0017's doctrine is to consume what exists. Not ported yet, and it says
-  so -- at exit 1 (``RuntimeFailure``), not exit 5.
+  so -- at exit 2 (``ValidationFailure``), not exit 1 or exit 5.
 
-  **Exit 1 here is a DEFERRAL, not a match to the oracle.** An earlier revision
-  of this docstring claimed it matched; that claim was never measured and was
-  wrong. Measured directly, running ``target/debug/tan.exe`` (tan 0.4.1-dev)
-  with ``--format json``:
+  **tan-cli#262 (v0.6.0, TAKEN): a missing verdict is the VALIDATOR's
+  problem, not a tan crash -- exit 2, not exit 1.** An earlier revision of
+  this docstring left that an open question ("the genuine v0.6.0 decision,
+  tracked in tan-cli#262"); the maintainer has now decided it. Measured
+  directly, running ``target/debug/tan.exe`` (tan 0.4.1-dev) with
+  ``--format json``:
 
   - empty directory -> exit **2**, ``validate.board-yaml-missing``
   - ``board.yaml`` present, no SDK root -> exit **2**,
     ``validate.sdk-root-unresolved``
 
   Exit 1 is reachable in the oracle only AFTER a validator actually spawns and
-  returns an unexpected status. So the oracle draws a line this port does not
-  yet: pre-spawn guards at 2, post-spawn failure at 1. The ``board.yaml``
-  -missing guard below is now aligned with it. The remaining divergence --
-  ``board.yaml`` present but no SDK, where the oracle says 2
-  ``sdk-root-unresolved`` and this port says 1 ``spawn-not-implemented`` -- is
-  the genuine v0.6.0 decision, tracked in tan-cli#262.
+  returns an exit status the resolver cannot map to a named outcome
+  (``Outcome::Failed``, see the table below) -- the oracle's own
+  ``validation_outcome_exit_code`` (`crates/tan-cli/src/commands/validate.rs:
+  54-62`) sends that ONE case to ``RuntimeFailure`` (1) while every other
+  non-clean outcome already goes to ``ValidationFailure`` (2). alp-sdk-vscode
+  renders exit 2 as severity "warning" and exit 1 as "error", so that one
+  oracle case alone painted a genuinely-failing project red in the IDE --
+  indistinguishable from `tan` itself crashing.
+
+  This port deliberately does NOT mirror that one oracle case. "The validator
+  could not produce a verdict" is still the validator's verdict, in every
+  shape it takes here -- GENERALLY, not just for the ``spawn-not-implemented``
+  stub below. Today that stub is the only reachable instance and now emits
+  ``ExitCode.VALIDATION_FAILURE`` (2). When the real spawn path lands (also
+  tan-cli#262) and this port reaches the equivalent of the oracle's
+  ``Outcome::Failed`` (a spawned validator subprocess whose exit status is
+  outside the 0-3 range the resolver names -- see the table below), it too
+  MUST emit ``ExitCode.VALIDATION_FAILURE`` (2), not ``RuntimeFailure`` (1) --
+  do not "fix" that back to oracle parity; that parity is the bug #262 fixes.
+  A genuine `tan`-side crash is unaffected by this decision and keeps its own
+  exit code: a file that could not be read, or an unexpected exception that
+  escaped tan's own code, stays ``ExitCode.INTERNAL_FAILURE`` (5, the two
+  cases already implemented below); a future spawn-launch I/O error
+  specifically (the subprocess could not even be started) would be
+  ``ExitCode.RUNTIME_FAILURE`` (1) -- the "generic runtime failure (e.g. I/O
+  or subprocess error)" `crates/tan-cli/src/exit.rs` itself names that code
+  for. Only the validator's-verdict exit code moves; tan's own crash exit
+  codes do not.
 
   Exit 5 is wrong on every one of these paths regardless: reporting "not ported
   yet" as ``InternalFailure`` would tell CI/the extension this is a tan crash,
@@ -61,7 +85,13 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   particular not exit 2 or 3, which have their own named outcomes. A reader
   must not infer "any nonzero -> failed" from this docstring. That is a
   DIFFERENT failure shape from this port's: the oracle spawned and got back
-  nonsense, this port never spawns at all.
+  nonsense, this port never spawns at all. The ``rc`` column above is the
+  ORACLE's, measured, and stays 1 for the ``failed`` row -- that is a fact
+  about ``target/debug/tan.exe``, not a decision, and must not be edited to
+  "fix" the table. This port's OWN rc for the same row is 2, per tan-cli#262
+  above -- a divergence recorded in prose here rather than in the table
+  because the table is a record of what was measured, not of this port's
+  choices.
   Reusing ``validate.failed`` here would conflate "we attempted validation
   and the subprocess misbehaved" with "this code path does not exist yet"
   under one string, which is a worse signal for the same reason the exit-code
@@ -72,7 +102,8 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   this port. It becomes dead code the moment the real spawn path lands
   (tan-cli#262) and this branch is deleted in favour of actually spawning, at
   which point the resulting failures naturally become ``validate.failed``
-  like the oracle's.
+  like the oracle's -- KEEPING exit 2, per the decision above, not reverting
+  to the oracle's exit 1 for that row.
 
 **A wrong-shaped board.yaml is the USER's problem, not a tan crash.** The Rust
 carries a comment earned the hard way: routing a malformed file through
@@ -101,6 +132,7 @@ from typing import Any
 
 import typer
 
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 from tan.version import TAN_VERSION
@@ -429,7 +461,17 @@ def _emit(
         typer.echo(json.dumps(_sarif_document(issues, board_path), indent=2))
     else:
         stream = typer.get_text_stream("stderr")
-        if issues:
+        if len(issues) == 1 and issues[0].code == "validate.board-yaml-missing":
+            # tan-cli#350: this is not a VALIDATION failure -- there is no
+            # board.yaml to validate, so nothing was checked and found
+            # wrong. Every other non-clean outcome below still says
+            # "validate: validation failure"; only this one issue code gets
+            # its own verdict wording. `issues[0].message` (shared with
+            # `--format json`'s `issues[].message`) already names where tan
+            # looked and the remedy -- see the guard above.
+            stream.write("validate: no board.yaml to validate\n")
+            stream.write(f"{issues[0].message}\n")
+        elif issues:
             stream.write("validate: validation failure\n")
             for issue in issues:
                 stream.write(f"{issue.message}\n")
@@ -494,23 +536,49 @@ def validate(
         # that short-circuits above this check would answer "not ported yet" to
         # a question the oracle answers "your board.yaml is missing", in the one
         # case a brand-new user hits first. Cheap to keep compatible; keep it.
+        #
+        # tan-cli#350 (DELIBERATE divergence -- the oracle is byte-identical
+        # here, down to exit code and message): the oracle's own wording,
+        # "board.yaml path could not be resolved or the file does not
+        # exist.", names no remedy and, worse, is fronted in text mode by
+        # "validate: validation failure" -- a VERDICT that implies something
+        # was checked and found wrong. Nothing was validated; there is no
+        # board.yaml to validate. This is the state every user is in before
+        # `tan init`, and the old wording sent them looking for a defect in a
+        # file that does not exist. The message below names WHERE tan looked
+        # and the two remedies every sibling guard names for its own missing
+        # input (`build` names `--sdk-root`, `doctor` names `tan init` /
+        # `--board-yaml <path>` for this exact guard -- see
+        # `doctor_cmd.py`'s `_board_yaml_check`). The exit code (2) and issue
+        # CODE (`validate.board-yaml-missing`) are UNCHANGED: a
+        # found-but-invalid board.yaml still exits 2 as
+        # `validate.schema-violation` and still prints "validate: validation
+        # failure" below -- the issue code is how a machine consumer (or a
+        # human reading `--format json`) tells the two apart, since the exit
+        # code alone does not.
         fail(
             "board-yaml-missing",
-            "board.yaml path could not be resolved or the file does not exist.",
+            f"no board.yaml found at {board_path} -- run `tan init` to create "
+            "one, or pass --board-yaml <path> to point at an existing file.",
             ExitCode.VALIDATION_FAILURE,
         )
         return
 
     if not offline:
         # The SDK owns metadata/schemas/; tan does not reimplement it. The spawn
-        # path is NOT ported, so this reports a deferral. See the module
-        # docstring for why exit 1 (RuntimeFailure) rather than exit 5, and for
-        # the one divergence from the oracle it knowingly keeps (tan-cli#262).
+        # path is NOT ported, so this reports a deferral -- "no verdict is
+        # available" is still the VALIDATOR's problem, not a tan crash.
+        # tan-cli#262 (v0.6.0, TAKEN): ExitCode.VALIDATION_FAILURE (2), never
+        # ExitCode.RUNTIME_FAILURE (1), deliberately diverging from the
+        # oracle's `Outcome::Failed -> RuntimeFailure` mapping
+        # (`crates/tan-cli/src/commands/validate.rs:60`). See the module
+        # docstring for the full reasoning -- do NOT "fix" this back to
+        # RuntimeFailure for oracle parity; that parity is the bug #262 fixes.
         fail(
             "spawn-not-implemented",
             "the full (spawn) validator is not ported yet -- run with --offline, "
             "or use the SDK's scripts/validate_board_yaml.py directly.",
-            ExitCode.RUNTIME_FAILURE,
+            ExitCode.VALIDATION_FAILURE,
         )
         return
 
@@ -559,3 +627,10 @@ def validate(
         issues=issues,
         exit_code=exit_code,
     )
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`/`--verbose`) on top of `--board-yaml`, already declared and read
+# above; see `tan.core.global_flags`.
+validate = accept_global_flags(validate)

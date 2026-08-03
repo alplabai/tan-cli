@@ -124,6 +124,7 @@ from tan.core.bootstrap import (
     yocto_only_refusal,
     zephyr_requirements_hint,
 )
+from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import sdk_pointer_json
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -2648,3 +2649,10 @@ def bootstrap(
         for line in outcome.text:
             _eprint(line)
     raise typer.Exit(int(outcome.exit_code))
+
+
+# tan-cli#261: adds the two oracle `GlobalArgs` flags this command was still
+# missing (`--all`, `--target`) on top of the five already declared above
+# (`--verbose`/`--quiet`/`--no-color`/`--non-interactive`/`--ci`, all
+# `hidden=True` and dropped the same way); see `tan.core.global_flags`.
+bootstrap = accept_global_flags(bootstrap)

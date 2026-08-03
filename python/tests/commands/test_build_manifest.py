@@ -24,6 +24,7 @@ from tan.commands.build.manifest import (
     resolve_zephyr_artefact,
     write_post_build_manifest,
 )
+from tan.commands import build_cmd
 from tan.commands.build_cmd import (
     discover_sdk_root,
     resolve_sdk_root_ladder,
@@ -115,7 +116,14 @@ def test_discover_sdk_root_finds_an_ancestor(tmp_path):
     assert discover_sdk_root(nested) == tmp_path
 
 
-def test_discover_sdk_root_none_when_nothing_nearby(tmp_path):
+def test_discover_sdk_root_none_when_nothing_nearby(tmp_path, monkeypatch):
+    """Pinned like `test_build_planner_python.py:74-84` pins
+    `find_workspace_venv`: `discover_sdk_root`'s last tier walks EVERY
+    ancestor of `workspace` looking for `scripts/alp_project.py`, all the way
+    to the filesystem root -- a developer machine with an alp-sdk checkout
+    anywhere above the OS temp dir would red this test for reasons unrelated
+    to the code under test."""
+    monkeypatch.setattr(build_cmd, "_is_sdk_root", lambda _path: False)
     workspace = tmp_path / "myproj"
     workspace.mkdir()
     assert discover_sdk_root(workspace) is None

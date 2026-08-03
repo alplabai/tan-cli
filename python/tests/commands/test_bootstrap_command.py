@@ -1620,12 +1620,29 @@ def test_macos_reads_its_own_tool_list_and_falls_back_to_posix_without_one():
     assert legacy.prerequisites(MACOS) == legacy.prerequisites(LINUX)
 
 
-def test_the_posix_refusal_stays_one_line_with_two_spaces_before_install():
-    """`bootstrap.sh`'s wording, byte-for-byte. It names the tools and nothing
-    else; the per-tool commands travel in the STRUCTURED half only."""
+def test_the_posix_refusal_keeps_the_oracle_line_and_adds_the_doctor_fix_remedy():
+    """Was `..._stays_one_line_with_two_spaces_before_install`, which asserted
+    the refusal is exactly ONE line. tan-cli#355 deliberately makes it two, so
+    that assertion now encodes the wrong intent and is inverted here rather than
+    left to fail.
+
+    What is NOT negotiable, and is still pinned byte-for-byte, is `bootstrap.sh`'s
+    own first line -- including the TWO spaces before "Install", which any reflow
+    would silently eat. The per-tool commands still travel in the STRUCTURED half
+    only; that half of the original constraint is unchanged.
+
+    What is added is a second line naming `tan doctor --build --fix`. The old
+    wording predates tan having an installer at all; tan-cli#91 gave it one, and
+    a pristine `ubuntu:24.04` showed a first-time customer being handed four
+    package names with no route to them while that command sat one subcommand
+    away. Withholding a remedy tan HAS, to match an oracle that never had one,
+    is parity serving nobody."""
     install = parse_bootstrap_manifest(REAL_MANIFEST).install_for_host(LINUX)
     refusal = posix_refusal(["cmake", "ninja"], install)
-    assert refusal.lines == ("Missing required tools: cmake ninja.  Install them and re-run.",)
+    assert len(refusal.lines) == 2, refusal.lines
+    assert refusal.lines[0] == "Missing required tools: cmake ninja.  Install them and re-run."
+    assert "  Install them" in refusal.lines[0], "the oracle's double space was reflowed away"
+    assert "tan doctor --build --fix" in refusal.lines[1]
     assert [m.command for m in refusal.missing] == [
         "sudo apt-get install -y cmake", "sudo apt-get install -y ninja-build"
     ]
