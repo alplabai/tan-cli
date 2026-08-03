@@ -753,7 +753,14 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         name="_fail",
         arg_keyword="code",
-        expected_calls=5,
+        # tan-cli#351: was 5. `sdk list` without `--online` moved off `_fail`
+        # (which hardcodes exit_code=RUNTIME_FAILURE and severity "error") to a
+        # direct `_emit(...)` call with its own `warning`-severity Issue and
+        # exit_code=SUCCESS -- a normal state, not a failure. Its code,
+        # `sdk.network-required`, is still a LITERAL `Issue("sdk.network-
+        # required", ...)` first-arg site, so it is still covered, just by the
+        # plain-literal scan (shape 1) instead of this prefixing scan (shape 3).
+        expected_calls=4,
         sites=1,
     ),
     ("tan/commands/validate_cmd.py", "validate.fail"): dict(

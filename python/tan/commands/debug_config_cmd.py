@@ -71,6 +71,7 @@ from tan.core.debug_launch import (
     parse_target_kind,
     sdk_identity_overwrites,
 )
+from tan.core.global_flags import accept_global_flags
 from tan.core.jsonc_splice import pretty_json
 from tan.core.run import native_sim_exe_beside
 from tan.core.size import resolve_variant
@@ -1289,3 +1290,12 @@ def debug_config(
         for line in outcome.text:
             stream.write(f"{line}\n")
     raise typer.Exit(int(outcome.exit_code))
+
+
+# tan-cli#261: adds the six oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--target`/
+# `--verbose`) on top of `--quiet`, already declared and read above; see
+# `tan.core.global_flags`. `ctx: typer.Context` (this command's own
+# `_HONOURS_ROOT_FORMAT` seam) is untouched -- appended parameters are all
+# keyword-only Options, never repositioned relative to it.
+debug_config = accept_global_flags(debug_config)

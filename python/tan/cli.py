@@ -53,6 +53,7 @@ from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
 from tan.commands.validate_cmd import validate
 from tan.commands.west_forward_cmd import FORWARD_CONTEXT_SETTINGS, lock, migrate, quality
+from tan.core.global_flags import GLOBAL_FLAG_ARITY
 from tan.envelope import (
     Envelope,
     Issue,
@@ -131,18 +132,14 @@ _SUBCOMMAND_NAMES = frozenset(
 #: `--version` is not here either -- it lives on `Cli` directly in clap, not
 #: `GlobalArgs`, and is root-only on both sides already.
 #: Value: the flag's arity (1 = takes a value, 0 = boolean).
-_GLOBAL_FLAG_ARITY: dict[str, int] = {
-    "--project": 1,
-    "--board-yaml": 1,
-    "--sdk-root": 1,
-    "--target": 1,
-    "--all": 0,
-    "--verbose": 0,
-    "--quiet": 0,
-    "--no-color": 0,
-    "--non-interactive": 0,
-    "--ci": 0,
-}
+#:
+#: Imported from `tan.core.global_flags` rather than hand-copied a second
+#: time (tan-cli#261): that module is also what
+#: `tan.core.global_flags.accept_global_flags` reads to decide which flags a
+#: command is missing, so this reorder table and the per-command injection
+#: list cannot drift apart the way two independent hand-written copies of
+#: clap's `GlobalArgs` field list eventually would.
+_GLOBAL_FLAG_ARITY: dict[str, int] = GLOBAL_FLAG_ARITY
 
 
 def _reorder_global_flags(argv: list[str]) -> list[str]:

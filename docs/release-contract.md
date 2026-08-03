@@ -7,10 +7,12 @@ release assets. The **alp-sdk-vscode** extension downloads the matching asset on
 activation, so the tag scheme and asset names are a **stable contract** — change
 them only in lockstep with the extension's `releaseAssetForTarget`.
 
-> **From v0.5.0 the assets are PyInstaller `--onefile` freezes of `python/`**
-> (the Python port), not `cargo` builds of `crates/` — tan-cli#271. The asset
-> NAMES keep the Rust target triples, because the extension hardcodes them.
-> Four assets ship, not eight, and the crates.io publish is gone. Everything
+> **From v0.5.0 the assets are PyInstaller freezes of `python/`** (the Python
+> port), not `cargo` builds of `crates/` — tan-cli#271. The asset NAMES keep
+> the Rust target triples, because the extension hardcodes them. Four assets
+> ship, not eight, and the crates.io publish is gone. **From v0.5.0-rc4 each
+> asset is an ARCHIVE (`.zip` / `.tar.gz`) of a PyInstaller `--onedir` freeze,
+> not a raw binary** — tan-cli#349, see "Asset names" below for why. Everything
 > below is written for that release; where it describes the retired Rust
 > pipeline it says so explicitly.
 
@@ -80,12 +82,28 @@ other.
 
 ## Asset names
 
-One **raw, uncompressed binary per target triple** (no `.zip` / `.tar.gz`):
+**From v0.5.0-rc4 (tan-cli#349), one ARCHIVE per target triple** — previously
+one raw, uncompressed binary:
 
 ```
-tan-<target-triple>            # Unix   (no extension)
-tan-<target-triple>.exe        # Windows
+tan-<target-triple>.tar.gz     # Unix
+tan-<target-triple>.zip        # Windows
 ```
+
+Why an archive now: the assets are PyInstaller `--onedir` freezes, not
+`--onefile`. `--onefile` re-extracts its whole ~14 MB runtime into a fresh temp
+dir on EVERY invocation — measured 13–19 s for `--version` on the published
+v0.5.0-rc4 macOS `--onefile` asset (unsigned re-extracted `.dylib`s get
+re-verified by the OS on every load), which **exceeds alp-sdk-vscode's own 3 s
+version-probe budget** (`vscodeAdapter.ts:1406`) — that asset's `--version`
+TIMED OUT under the extension's own probe, not merely "slow". `--onedir`
+extracts once, at install time, instead of once per invocation: measured
+0.337 s mean vs 0.880 s mean for `--version` on this same host. The archive is
+the one-file-per-target shape that lets `checksums.txt` / the provenance
+attestation / `install.sh` / `install.ps1` keep dealing with a single thing per
+target even though the payload is now a directory (`tan` + `_internal/`), not
+a single file — both installers unpack it and install a thin launcher rather
+than the executable itself.
 
 Download URL is fully deterministic:
 
@@ -104,14 +122,21 @@ Plus two non-binary assets, carrying the same build-provenance attestation:
 
 **Four** assets, one per build runner:
 
-| VS Code `process.platform` | `process.arch` | Target triple               | Asset name                       | Built on        |
-| -------------------------- | -------------- | --------------------------- | -------------------------------- | --------------- |
-| `win32`                    | `x64`          | `x86_64-pc-windows-msvc`    | `tan-x86_64-pc-windows-msvc.exe` | `windows-latest` |
-| `darwin`                   | `x64`          | `x86_64-apple-darwin`       | `tan-x86_64-apple-darwin`        | `macos-15-intel` |
-| `darwin`                   | `arm64`        | `aarch64-apple-darwin`      | `tan-aarch64-apple-darwin`       | `macos-15`      |
-| `linux`                    | `x64`          | `x86_64-unknown-linux-gnu`  | `tan-x86_64-unknown-linux-gnu`   | `ubuntu-latest` + `python:3.12-slim-bullseye` |
+| VS Code `process.platform` | `process.arch` | Target triple               | Asset name                           | Built on        |
+| -------------------------- | -------------- | --------------------------- | ------------------------------------- | --------------- |
+| `win32`                    | `x64`          | `x86_64-pc-windows-msvc`    | `tan-x86_64-pc-windows-msvc.zip`     | `windows-latest` |
+| `darwin`                   | `x64`          | `x86_64-apple-darwin`       | `tan-x86_64-apple-darwin.tar.gz`     | `macos-15-intel` |
+| `darwin`                   | `arm64`        | `aarch64-apple-darwin`      | `tan-aarch64-apple-darwin.tar.gz`    | `macos-15`      |
+| `linux`                    | `x64`          | `x86_64-unknown-linux-gnu`  | `tan-x86_64-unknown-linux-gnu.tar.gz` | `ubuntu-latest` + `python:3.12-slim-bullseye` |
 
-After download on a Unix host the consumer must `chmod +x` the raw binary.
+Each archive's one top-level entry is `tan/`, containing `tan` (`tan.exe` on
+Windows) plus `_internal/` (its runtime) — `install.sh` / `install.ps1` unpack
+it to a private `tan-cli-lib/` directory and install a thin launcher script
+alongside it rather than the executable itself. A consumer not using either
+installer must unpack the archive themselves and (on Unix) `chmod +x` the
+`tan` executable inside it — the archive does not require this itself
+(`tar`/`zip` both preserve the executable bit that `build_binary.sh` sets),
+but it is cheap insurance the installers also apply unconditionally.
 
 ### Not published (accepted 404)
 
@@ -180,7 +205,7 @@ over the payload**, and how it is measured matters:
 
 | Where you look | What you get | Useful? |
 | --- | --- | --- |
-| `readelf -V` on the shipped onefile | `GLIBC_2.14`, under every image | **No.** That is PyInstaller's vendored bootloader. It is a container-INVARIANT constant — measured identical from bullseye (real floor 2.30) and trixie (real floor 2.38) — so it cannot detect the build image regressing to a newer glibc, which is the only thing the measurement is for. Lower bound only. |
+| `readelf -V` on the onedir executable | `GLIBC_2.14`, under every image | **No.** That is PyInstaller's vendored bootloader. It is a container-INVARIANT constant — measured identical from bullseye (real floor 2.30) and trixie (real floor 2.38) — so it cannot detect the build image regressing to a newer glibc, which is the only thing the measurement is for. Lower bound only. |
 | the appended payload | the real floor | **Yes.** libpython + the extension modules + their `.so` dependencies, enumerated from `.build/tan/PKG-00.toc` (a plain Python literal listing everything PyInstaller appended) and read with `pyelftools`. |
 
 The build step refuses to emit a number if the scan finds implausibly few
@@ -197,7 +222,7 @@ phenomenon is real, both numbers in it are wrong (alp-sdk-vscode#370).
 
 ## Build provenance
 
-Every release asset (all four `tan-*` binaries plus `checksums.txt` and
+Every release asset (all four `tan-*` archives plus `checksums.txt` and
 `envelope-contract.json` — the step's `subject-path` is `assets/*`) carries
 a GitHub **build-provenance attestation**, generated by
 `actions/attest-build-provenance` in the `release` job. Verify a downloaded
@@ -211,16 +236,28 @@ gh attestation verify <downloaded-file> --repo alplabai/tan-cli \
 `--repo` alone binds the artefact to *some* workflow in this repository;
 `--signer-workflow` is what pins it to the release job specifically.
 
-`checksums.txt` (sha256 of every binary) is itself a release asset and is
+`checksums.txt` (sha256 of every archive) is itself a release asset and is
 covered by the same attestation. The `release` job is the only job with
 `id-token: write` / `attestations: write` — every other job keeps the
 workflow-level `contents: write` (or, for `gates`, `contents: read`).
 
 ## Decisions
 
-- **Raw binary, not an archive.** The stripped release `tan` is small; a raw
-  asset means the downloader fetches one file and (on Unix) `chmod +x`s it — no
-  unzip step, no archive-layout assumption.
+- **Archive, not a raw binary (tan-cli#349, from v0.5.0-rc4).** The build
+  switched from PyInstaller `--onefile` to `--onedir`, so each release asset
+  is now a `.zip`/`.tar.gz` archive of a directory (`tan` + `_internal/`), not
+  a single raw executable. **Why**: `--onefile` re-extracts its whole ~14 MB
+  runtime into a fresh temp dir on EVERY invocation — measured 13–19 s for
+  `--version` on the published v0.5.0-rc4 macOS asset (unsigned re-extracted
+  `.dylib`s get re-verified by the OS on every load) — which blew past
+  alp-sdk-vscode's own 3 s version-probe budget (`vscodeAdapter.ts:1406`): that
+  asset's `--version` TIMED OUT under the extension's own probe, not merely
+  "slow". `--onedir` extracts once, at install time, instead of once per
+  invocation — measured 0.337 s mean vs 0.880 s mean for `--version` on the
+  same host, a >2x win even on Windows, which was never the platform in
+  trouble. This is a real behavioural cost, not a preference, so raw-binary
+  stays retired even though it was simpler for a consumer to fetch: `install.sh`
+  / `install.ps1` absorb the extra unpack step so most consumers never see it.
 - **Four targets, one per runner.** A PyInstaller freeze embeds the interpreter
   it ran under, so there is no cross-build to be had: the runner IS the target.
   Eight targets were possible while the binary was a `cargo` build (Windows
@@ -235,7 +272,7 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
 - **Race-free publish.** Matrix jobs upload artifacts; a single `release` job
   collates and creates the release, so parallel jobs never race on release
   creation.
-- **The GitHub release needs no secrets** — binaries, `checksums.txt`,
+- **The GitHub release needs no secrets** — archives, `checksums.txt`,
   `envelope-contract.json` and the provenance attestation all run on the default
   `GITHUB_TOKEN`. **No registry publish runs at all any more**, so neither
   `CARGO_REGISTRY_TOKEN` nor `NPM_TOKEN` is on the release path:

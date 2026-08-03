@@ -90,6 +90,48 @@ CASE_METADATA = frozenset({"args.txt", "expected.json", "expected.exit"})
 NOT_PORTED = {
 }
 
+#: Fixtures where the Python port DELIBERATELY does more than the frozen Rust
+#: oracle, so the shared golden cannot describe both sides at once.
+#:
+#: This is the opposite direction from :data:`NOT_PORTED` above -- there the
+#: port does LESS -- and it is why these five are declared rather than simply
+#: regenerated. The golden is the CROSS-LANGUAGE contract: the same file holds
+#: the Rust binary via ``crates/tan-cli/tests/contract.rs``, and ``crates/`` is
+#: frozen. Regenerating it to match the port turns the Rust conformance run red
+#: and quietly redefines "the contract" as "whatever the port last emitted".
+#: A deliberate divergence has to be DECLARED, not written into the shared file.
+#: (Measured: regenerating these five reddened ``test (ubuntu-latest)``,
+#: ``test (macos-latest)`` and ``test (windows-latest)`` on the PR.)
+#:
+#: All five are tan-cli#138. ``create_launch_draft`` restores the v0.3.1
+#: ``preLaunchTask`` default for the three build target kinds, which the frozen
+#: oracle had made opt-in in tan-cli#85. alp-sdk-vscode contributes task
+#: providers for exactly those labels and never passes ``--pre-launch-task``,
+#: so without the default its contribution is dead and build-then-debug
+#: silently stops happening. ``yocto-userspace`` is here only because its
+#: fixture asserts the whole envelope as one document; that target deliberately
+#: gains NO default -- see ``tan.core.debug_launch.DEFAULT_PRE_LAUNCH_TASK``
+#: for why naming its task would put an error dialog in front of every F5.
+#:
+#: ``strict=True`` for the same reason as above, and it carries more weight
+#: here: an XPASS means the divergence VANISHED -- someone reverted the #138
+#: restoration -- which is a regression that must fail loudly rather than
+#: quietly re-green the suite.
+DELIBERATE_DIVERGENCE = {
+    "debug-config-preview-zephyr-mcu": "tan-cli#138: restores the v0.3.1 preLaunchTask default",
+    "debug-config-preview-zephyr-mcu-sdk-identity": (
+        "tan-cli#138: restores the v0.3.1 preLaunchTask default"
+    ),
+    "debug-config-preview-baremetal-mcu": (
+        "tan-cli#138: restores the v0.3.1 preLaunchTask default"
+    ),
+    "debug-config-preview-native-host": "tan-cli#138: restores the v0.3.1 preLaunchTask default",
+    "debug-config-preview-yocto-userspace": (
+        "tan-cli#138: sibling of the four above -- this target gains NO default, but its "
+        "fixture asserts the whole envelope and the harness compares it as one document"
+    ),
+}
+
 
 def normalise(value, key, work_dir_marker):
     """Scoped ``\\`` -> ``/`` plus ``__WORKDIR__`` substitution on path-shaped
@@ -137,17 +179,33 @@ def copy_fixture_inputs(case_dir, work_dir):
             shutil.copy2(entry, work_dir / entry.name)
 
 
+def _marks_for(case: str) -> list:
+    """The xfail marks for one case, from the two declared-exception maps.
+
+    Both are `strict=True`, so an entry that stops applying FAILS rather than
+    silently reporting XPASS -- see each map's own comment. A case may appear
+    in only one: `NOT_PORTED` means the port does less, `DELIBERATE_DIVERGENCE`
+    means it does more, and both at once would be incoherent.
+    """
+    if case in NOT_PORTED and case in DELIBERATE_DIVERGENCE:
+        raise AssertionError(
+            f"{case} is declared in BOTH NOT_PORTED and DELIBERATE_DIVERGENCE; "
+            "a case cannot be simultaneously unported and deliberately ahead"
+        )
+    if case in NOT_PORTED:
+        return [pytest.mark.xfail(reason=NOT_PORTED[case], strict=True)]
+    if case in DELIBERATE_DIVERGENCE:
+        return [pytest.mark.xfail(reason=DELIBERATE_DIVERGENCE[case], strict=True)]
+    return []
+
+
 @pytest.mark.parametrize(
     "fixture",
     [
         pytest.param(
             f,
             id=f.name,
-            marks=(
-                [pytest.mark.xfail(reason=NOT_PORTED[f.name], strict=True)]
-                if f.name in NOT_PORTED
-                else []
-            ),
+            marks=_marks_for(f.name),
         )
         for f in FIXTURES
     ],

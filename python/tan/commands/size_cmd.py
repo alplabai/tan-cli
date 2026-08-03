@@ -58,6 +58,7 @@ from tan.commands.build_output import (
     resolve_project_context,
 )
 from tan.commands.sdk_cmd import project_pin_issue
+from tan.core.global_flags import accept_global_flags
 from tan.core.pending import is_pending_placeholder
 from tan.core.size import (
     MemoryBudget,
@@ -642,3 +643,12 @@ def size(
         for line in outcome.text:
             stream.write(f"{line}\n")
     raise typer.Exit(int(outcome.exit_code))
+
+
+# tan-cli#261: adds the five oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--non-interactive`/`--quiet`/`--target`/`--verbose`) on
+# top of `--no-color`/`--ci`, already declared and read above (`_use_color`);
+# see `tan.core.global_flags`. `ctx: typer.Context` (this command's own
+# `_HONOURS_ROOT_FORMAT` seam) is untouched -- appended parameters are all
+# keyword-only Options, never repositioned relative to it.
+size = accept_global_flags(size)

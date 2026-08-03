@@ -64,6 +64,7 @@ from tan.commands.build import execute
 from tan.commands.build_cmd import BuildError, _abs_posix, _build, resolve_sdk_root_ladder
 from tan.commands.sdk_cmd import project_pin_issue
 from tan.core.flash_plan import resolve_artefact_path
+from tan.core.global_flags import accept_global_flags
 from tan.core.plan_exec import normalize_path
 from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice
 from tan.core.system_manifest import SystemManifestError, parse_system_manifest
@@ -413,3 +414,10 @@ def run(
         for line in text_lines:
             print(line, file=sys.stderr)
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`/`--verbose`) on top of `--board-yaml`, already declared and read
+# above; see `tan.core.global_flags`.
+run = accept_global_flags(run)

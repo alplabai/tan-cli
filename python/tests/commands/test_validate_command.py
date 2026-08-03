@@ -194,7 +194,13 @@ def test_missing_board_yaml_is_validation_failure_on_both_paths(tmp_path, monkey
     exit 2, `validate.board-yaml-missing`, `data.outcome == "failed"`. Until
     #262 the non-offline path answered "not ported yet" at exit 1 here -- which
     is the very first thing a brand-new user sees from `tan validate`, and the
-    one place a gratuitous divergence is most expensive."""
+    one place a gratuitous divergence is most expensive.
+
+    tan-cli#350: the exit code (2) and issue CODE
+    (`validate.board-yaml-missing`) are pinned here unchanged -- the fix for
+    #350 is wording-only (see the two tests directly below), a DELIBERATE
+    divergence from the oracle's message/verdict text, not from its exit
+    code or issue code."""
     monkeypatch.chdir(tmp_path)
     for args in (
         ["validate", "--format", "json"],
@@ -206,6 +212,55 @@ def test_missing_board_yaml_is_validation_failure_on_both_paths(tmp_path, monkey
         assert envelope["exitCode"] == int(ExitCode.VALIDATION_FAILURE)
         assert envelope["data"]["outcome"] == "failed"
         assert [i["code"] for i in envelope["issues"]] == ["validate.board-yaml-missing"]
+
+
+def test_missing_board_yaml_message_names_where_and_remedy(tmp_path, monkeypatch):
+    """tan-cli#350 defects 1+2: the old wording,
+    "board.yaml path could not be resolved or the file does not exist." (still
+    the oracle's, byte-identical), names no remedy. The message carried by
+    `issues[].code == validate.board-yaml-missing` (shared verbatim with text
+    mode) must now name WHERE tan looked and BOTH remedies every sibling
+    guard names for its own missing input (`tan init`, `--board-yaml
+    <path>`) -- mirroring `doctor_cmd.py`'s own `board.yaml not found -- run
+    \\`tan init\\` or pass \\`--board-yaml <path>\\`` wording for the identical
+    guard."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["validate", "--format", "json"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    envelope = json.loads(result.output)
+    message = envelope["issues"][0]["message"]
+    assert "./board.yaml" in message
+    assert "tan init" in message
+    assert "--board-yaml <path>" in message
+    # This is not a "validation failure" -- nothing was validated.
+    assert "validation failure" not in message
+
+
+def test_missing_board_yaml_text_mode_verdict_is_not_validation_failure(tmp_path, monkeypatch):
+    """tan-cli#350 defect 1: `validate` with no board.yaml at all must not
+    print "validate: validation failure" -- that VERDICT implies something
+    was checked and found wrong, but nothing was validated. Measured on the
+    oracle (`tan 0.4.1-dev`): byte-identical wrong wording, hence this is a
+    deliberate divergence, not a parity gap."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["validate", "--offline"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    assert "validate: no board.yaml to validate" in result.output
+    assert "validate: validation failure" not in result.output
+    assert "tan init" in result.output
+
+
+def test_found_but_invalid_board_yaml_keeps_validation_failure_text(tmp_path, monkeypatch):
+    """The #350 fix is scoped to the missing-file guard only -- a board.yaml
+    that exists but does not fit the model is still, correctly, a
+    "validation failure": something WAS checked and found wrong. Regression
+    guard for the sibling branch touched by the fix above."""
+    monkeypatch.chdir(tmp_path)
+    _write(tmp_path, "som: E1M-AEN701\n")
+    result = runner.invoke(app, ["validate", "--offline"])
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
+    assert "validate: validation failure" in result.output
+    assert "no board.yaml to validate" not in result.output
 
 
 def test_validate_offline_unreadable_board_yaml_is_still_internal_failure(tmp_path, monkeypatch):

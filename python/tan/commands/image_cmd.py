@@ -70,6 +70,7 @@ from tan.commands.build_output import (
     resolve_project_context,
 )
 from tan.commands.sdk_cmd import project_pin_issue
+from tan.core.global_flags import accept_global_flags
 from tan.core.image_bundle import (
     BUNDLE_DIR,
     BUNDLE_MANIFEST,
@@ -537,3 +538,10 @@ def image(
         for line in outcome.text:
             stream.write(f"{line}\n")
     raise typer.Exit(int(outcome.exit_code))
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`/`--verbose`) on top of `--board-yaml`, already declared and read
+# above; see `tan.core.global_flags`.
+image = accept_global_flags(image)

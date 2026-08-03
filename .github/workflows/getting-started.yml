@@ -221,7 +221,18 @@ jobs:
             /tmp/venv/bin/pip install --quiet ".[monitor]" "pyinstaller>=6.10"
             PYTHON=/tmp/venv/bin/python bash scripts/build_binary.sh
           '
-          install -m 0755 python/dist/tan "$HOME/.local/bin/tan"
+          # build_binary.sh now emits a --onedir freeze (tan-cli#349):
+          # python/dist/tan/ is a DIRECTORY (tan + _internal/), not a single
+          # executable, so it can no longer be `install -m 0755`'d straight to
+          # $HOME/.local/bin/tan. The install.sh step above already installed
+          # the last RELEASE in exactly that onedir shape -- a launcher at
+          # $HOME/.local/bin/tan execing $HOME/.local/bin/tan-cli-lib/tan --
+          # so this swaps the LIBRARY TREE that launcher points at rather than
+          # inventing a second launcher here, keeping this step testing the
+          # identical layout a customer's install.sh run produces.
+          rm -rf "$HOME/.local/bin/tan-cli-lib"
+          cp -r python/dist/tan "$HOME/.local/bin/tan-cli-lib"
+          chmod +x "$HOME/.local/bin/tan-cli-lib/tan"
           command -v tan
           tan --version
 

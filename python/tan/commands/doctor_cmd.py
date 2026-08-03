@@ -131,6 +131,7 @@ from tan.core.bootstrap import (
     reported_missing,
 )
 from tan.core.consent import can_prompt
+from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -2918,3 +2919,10 @@ def doctor(
                 file=sys.stderr,
             )
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the five oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--no-color`/`--quiet`/`--target`/`--verbose`) on top of
+# `--non-interactive`/`--ci`, already declared and wired into `can_prompt`
+# above; see `tan.core.global_flags`.
+doctor = accept_global_flags(doctor)

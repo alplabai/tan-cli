@@ -1083,11 +1083,11 @@
     {
       "code": "sdk.network-required",
       "status": "reserved",
-      "severity": "error",
+      "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/sdk_cmd.py",
-      "literal": "code=\"network-required\"",
-      "note": "The `sdk.` prefix is applied by `_fail()`; fires when `sdk list` is run without `--online` (this port gates the network call this repo's own oracle reaches unconditionally, so a hermetic/air-gapped run gets a coded refusal instead of a hang). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "literal": "Issue(\"sdk.network-required\", \"warning\", ...)",
+      "note": "tan-cli#351: fires when `sdk list` is run without `--online` -- now a `warning` on a SUCCESS envelope (exit 0, `ok: true`), not an `error` on a failure. This port gates the network call the oracle itself reaches unconditionally (the oracle has no `--online` flag at all), for hermeticity; that gate is a normal, everyday state -- not a verdict on anything the caller did wrong -- so it must not exit non-zero, matching `sdk current`'s exit-0 answer to the same shape of question (`sdk-current-no-sdk`). Was `severity: \"error\"`, exit 1, emitted through `_fail()`'s `f\"sdk.{code}\"` prefixing helper (`literal: code=\"network-required\"`) until #351; now a direct literal `Issue(...)` call, still covered by the same emit-site gate under the plain-literal scan instead of the prefixing one. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "sdk.not-ported",

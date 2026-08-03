@@ -86,6 +86,7 @@ from tan.core.flash_plan import (
     tool_gate,
     validate_flow_d_preflight_args,
 )
+from tan.core.global_flags import accept_global_flags
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -1441,3 +1442,10 @@ def flash(
         for line in text_lines:
             print(line, file=sys.stderr)
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`/`--verbose`) on top of `--board-yaml`, already declared and read
+# above; see `tan.core.global_flags`.
+flash = accept_global_flags(flash)

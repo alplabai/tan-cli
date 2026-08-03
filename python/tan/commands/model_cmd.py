@@ -57,6 +57,7 @@ from tan.commands.build_cmd import _planner_python
 from tan.commands.build_output import resolve_metadata_sdk_root, resolve_project_context
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -504,3 +505,12 @@ def model(
         return
 
     finish(project_, sdk, data, issues, exit_code)
+
+
+# tan-cli#261: adds the eight oracle `GlobalArgs` flags this command was
+# missing entirely (`--all`/`--board-yaml`/`--ci`/`--no-color`/
+# `--non-interactive`/`--quiet`/`--target`/`--verbose`); see
+# `tan.core.global_flags`. All inert here: `model`'s own `--board` already
+# plays `--board-yaml`'s role for real (see `_run_build`'s comment), so the
+# newly-accepted `--board-yaml` is never consulted.
+model = accept_global_flags(model)

@@ -128,6 +128,7 @@ from tan.commands.build_cmd import resolve_sdk_root_wide
 from tan.commands.sdk_cmd import project_pin_issue
 from tan.commands.build_output import ManifestInvalid, ManifestUnavailable, load_manifest
 from tan.commands.doctor_cmd import on_path
+from tan.core.global_flags import accept_global_flags
 from tan.core.renode_plan import (
     RenodeError,
     build_renode_argv,
@@ -1393,3 +1394,10 @@ def renode(
         for line in text_lines:
             print(line, file=sys.stderr)
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`/`--verbose`) on top of `--board-yaml`, already declared and read
+# above; see `tan.core.global_flags`.
+renode = accept_global_flags(renode)

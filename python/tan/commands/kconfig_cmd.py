@@ -55,6 +55,7 @@ import yaml
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -529,3 +530,10 @@ def kconfig(
         for line in _text_lines(data, verbose):
             print(line, file=sys.stderr)
     raise typer.Exit(int(ExitCode.SUCCESS))
+
+
+# tan-cli#261: adds the six oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`) on top of `--verbose`, already declared and read above; see
+# `tan.core.global_flags`.
+kconfig = accept_global_flags(kconfig)

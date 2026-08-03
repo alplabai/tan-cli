@@ -132,6 +132,7 @@ from typing import Any
 
 import typer
 
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 from tan.version import TAN_VERSION
@@ -460,7 +461,17 @@ def _emit(
         typer.echo(json.dumps(_sarif_document(issues, board_path), indent=2))
     else:
         stream = typer.get_text_stream("stderr")
-        if issues:
+        if len(issues) == 1 and issues[0].code == "validate.board-yaml-missing":
+            # tan-cli#350: this is not a VALIDATION failure -- there is no
+            # board.yaml to validate, so nothing was checked and found
+            # wrong. Every other non-clean outcome below still says
+            # "validate: validation failure"; only this one issue code gets
+            # its own verdict wording. `issues[0].message` (shared with
+            # `--format json`'s `issues[].message`) already names where tan
+            # looked and the remedy -- see the guard above.
+            stream.write("validate: no board.yaml to validate\n")
+            stream.write(f"{issues[0].message}\n")
+        elif issues:
             stream.write("validate: validation failure\n")
             for issue in issues:
                 stream.write(f"{issue.message}\n")
@@ -525,9 +536,30 @@ def validate(
         # that short-circuits above this check would answer "not ported yet" to
         # a question the oracle answers "your board.yaml is missing", in the one
         # case a brand-new user hits first. Cheap to keep compatible; keep it.
+        #
+        # tan-cli#350 (DELIBERATE divergence -- the oracle is byte-identical
+        # here, down to exit code and message): the oracle's own wording,
+        # "board.yaml path could not be resolved or the file does not
+        # exist.", names no remedy and, worse, is fronted in text mode by
+        # "validate: validation failure" -- a VERDICT that implies something
+        # was checked and found wrong. Nothing was validated; there is no
+        # board.yaml to validate. This is the state every user is in before
+        # `tan init`, and the old wording sent them looking for a defect in a
+        # file that does not exist. The message below names WHERE tan looked
+        # and the two remedies every sibling guard names for its own missing
+        # input (`build` names `--sdk-root`, `doctor` names `tan init` /
+        # `--board-yaml <path>` for this exact guard -- see
+        # `doctor_cmd.py`'s `_board_yaml_check`). The exit code (2) and issue
+        # CODE (`validate.board-yaml-missing`) are UNCHANGED: a
+        # found-but-invalid board.yaml still exits 2 as
+        # `validate.schema-violation` and still prints "validate: validation
+        # failure" below -- the issue code is how a machine consumer (or a
+        # human reading `--format json`) tells the two apart, since the exit
+        # code alone does not.
         fail(
             "board-yaml-missing",
-            "board.yaml path could not be resolved or the file does not exist.",
+            f"no board.yaml found at {board_path} -- run `tan init` to create "
+            "one, or pass --board-yaml <path> to point at an existing file.",
             ExitCode.VALIDATION_FAILURE,
         )
         return
@@ -595,3 +627,10 @@ def validate(
         issues=issues,
         exit_code=exit_code,
     )
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`/`--verbose`) on top of `--board-yaml`, already declared and read
+# above; see `tan.core.global_flags`.
+validate = accept_global_flags(validate)
