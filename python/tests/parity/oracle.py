@@ -286,6 +286,37 @@ def rust_binary() -> str | None:
     return str(tied[0])
 
 
+def resolve_oracle_for_skipif() -> str | None:
+    """:func:`rust_binary`, but safe to call at MODULE IMPORT time.
+
+    Test modules outside ``tests/parity/`` bind their oracle at import
+    (``_ORACLE = ...`` feeding a ``pytest.mark.skipif``), and ``rust_binary``
+    deliberately RAISES on two conditions -- an mtime TIE between
+    ``target/{release,debug}`` and a set-but-missing ``TAN_RUST_BINARY``. A
+    raise while a test module is being imported is a COLLECTION error, which
+    aborts the entire pytest session rather than the file that asked; that is
+    exactly why ``pinned_oracle`` resolves inside its fixture body and not at
+    its conftest's import (see that fixture's docstring, and the measured
+    ``collected 0 items ... rc=4`` it records).
+
+    Swallowing the raise here would normally trade a loud abort for a SILENT
+    SKIP, which is worse and is the shape of the bug this whole area keeps
+    reproducing. It does not, because the session-scoped autouse
+    ``pinned_oracle`` in ``python/tests/conftest.py`` calls ``rust_binary()``
+    itself: whichever condition raised here raises there too, one fixture
+    later, and fails the run with the real message. So the deferral costs a
+    slightly later error and buys a session that still collects.
+
+    Returning ``None`` therefore means one of: nothing was built and nobody
+    named one (the ordinary skip), or a condition ``pinned_oracle`` is about to
+    fail the session over anyway.
+    """
+    try:
+        return rust_binary()
+    except RuntimeError:
+        return None
+
+
 def missing_for_live(rust: str | None) -> bool:
     """Whether a test must SKIP for lack of an oracle binary.
 

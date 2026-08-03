@@ -44,32 +44,21 @@ from tan.commands.diff_cmd import (
 )
 from tan.commands.diff_cmd import diff as diff_command
 
+from tests.parity.oracle import resolve_oracle_for_skipif
+
 app = typer.Typer()
 app.command("diff")(diff_command)
 
 runner = CliRunner()
 
-#: `target/{release,debug}/tan(.exe)` next to this checkout -- the same
-#: discovery `tests/parity/oracle.py`'s `rust_binary()` uses, kept
-#: independent here rather than imported so this file's only non-stdlib
-#: dependency stays `tan.commands.diff_cmd` (matching every other test file
-#: under `tests/commands/`). `TAN_RUST_BINARY` overrides, same env var.
-_EXE = ".exe" if sys.platform == "win32" else ""
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-def _oracle_binary() -> str | None:
-    override = os.environ.get("TAN_RUST_BINARY")
-    if override:
-        return override
-    for profile in ("release", "debug"):
-        candidate = _REPO_ROOT / "target" / profile / f"tan{_EXE}"
-        if candidate.exists():
-            return str(candidate)
-    return None
-
-
-_ORACLE = _oracle_binary()
+#: The oracle binary, resolved by the ONE resolver in the suite -- see the
+#: fuller comment on the same line in `test_pinmux_command.py`. This module
+#: carried the second, byte-identical copy of the release-first walk. Its own
+#: oracle case passed against BOTH binaries, so the stale pick was invisible
+#: here: a real `diff` envelope divergence introduced between `tan 0.3.1` and
+#: the pinned `tan 0.4.1` would have been measured against the wrong baseline
+#: and reported green (tan-cli#393).
+_ORACLE = resolve_oracle_for_skipif()
 _ORACLE_REQUIRED = pytest.mark.skipif(
     _ORACLE is None,
     reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
