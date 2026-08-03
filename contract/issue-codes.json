@@ -975,6 +975,15 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "kconfig.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/kconfig_cmd.py",
+      "literal": "\"kconfig.internal-failure\"",
+      "note": "Catch-all backstop mirroring `presets_cmd.py`'s own, added by tan-cli#396. Before it, a board.yaml that is not valid UTF-8 raised `UnicodeDecodeError` out of a guard that only caught `OSError` (UnicodeDecodeError is a ValueError), so `tan kconfig --format json` exited 1 with ZERO bytes on stdout and a PyInstaller traceback on stderr -- and `contract/README.md` records that the vscode prj.conf symbol feed fails OPEN on an unparseable answer, so the menu rendered stale or empty with no error on either side. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "kconfig.no-sdk-root",
       "status": "reserved",
       "severity": "error",
