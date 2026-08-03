@@ -622,19 +622,23 @@ def test_validate_board_yaml_missing_guard_matches_the_oracle_at_exit_2(work_dir
 
 
 @LIVE_GATE
-def test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
-    """`board.yaml` present, no SDK resolvable: the oracle's pre-spawn guard
-    answers exit 2 `validate.sdk-root-unresolved`; the port answers exit 2
-    `validate.spawn-not-implemented` (the full spawn path is simply not
-    ported yet) -- the genuine, tracked divergence `validate_cmd.py`'s own
-    docstring calls tan-cli#262. Both exit 2 since #262 landed: the port moved
-    off exit 1 deliberately ("no verdict available" is the VALIDATOR's verdict,
-    not a tan crash), so only the issue code is the real divergence now. Both
-    stay pinned rather than narrowed to "issue code only", which would hide
-    that coincidence going away. Pinned as a KNOWN divergence, following the
-    same exclude-and-pin convention `test_init_sdk_root_flag_pin_is_a_known_
-    divergence_from_the_oracle` above uses, rather than asserted as parity
-    that does not exist.
+def test_validate_no_sdk_guard_matches_the_oracle_at_exit_2(work_dir, tmp_path):
+    """`board.yaml` present, no SDK resolvable: BOTH sides answer exit 2
+    `validate.sdk-root-unresolved` -- the oracle's own pre-spawn guard 2.
+
+    Was pinned here as a KNOWN divergence (the port answered
+    `validate.spawn-not-implemented`, a code the oracle has no counterpart
+    for at all, because the spawn path was unported). tan-cli#376 ported it,
+    so this is now real parity and is asserted as such. RENAMED with the
+    behaviour, which moves its frozen-fixture key -- see this test's entry in
+    `oracle_fixtures/test_oracle_parity.json` and the rename note at the end
+    of `oracle_fixtures/PROVENANCE.txt`; the captured ORACLE answer under that
+    key is unchanged, only the port's half of the comparison moved.
+
+    Both halves of each side stay pinned (exit code AND issue code) rather
+    than narrowed to the code alone: exit 2 is also what an invalid board
+    gets, so a regression that turned this guard into a verdict would be
+    invisible to an exit-code-only assertion.
 
     `scrub_roots=(work_dir, home)`: see the sibling `test_validate_board_
     yaml_missing_guard_matches_the_oracle_at_exit_2` above for why an empty
@@ -647,7 +651,7 @@ def test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle(work_dir, t
     r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=(work_dir, home))
     p_code, p_out = _run(python_command(), argv, work_dir, home)
     assert (r_code, [i["code"] for i in r_out["issues"]]) == (2, ["validate.sdk-root-unresolved"])
-    assert (p_code, [i["code"] for i in p_out["issues"]]) == (2, ["validate.spawn-not-implemented"])
+    assert (p_code, [i["code"] for i in p_out["issues"]]) == (2, ["validate.sdk-root-unresolved"])
 
 
 @LIVE_GATE
@@ -961,19 +965,32 @@ def test_model_bare_invocation_is_a_known_divergence_from_the_oracle(work_dir, t
 
 
 @_ORACLE_REQUIRED
-def test_new_som_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
-    """tan-cli#254. The port's ``new-som`` DOES accept ``--format`` (a hidden,
-    unread option mirroring clap's ``global = true`` GlobalArgs), but it is
-    not in ``cli.py``'s ``_HONOURS_ROOT_FORMAT``, so ``--format json`` still
-    never reaches a ``new-som``-shaped envelope -- ``root`` wraps the run in
-    its generic ``command: "cli"`` / ``cli.parse-error`` envelope instead,
-    where the oracle's own ``--format json`` reaches a real
-    ``command: "new-som"`` refusal (``new-som.failed``, exit 2). The bare,
-    ``--format``-free invocation now AGREES at exit 2 on both sides: the
-    port's SDK-root-unresolved preflight moved off the flat exit 1 onto the
-    forwarder's own ``ValidationFailure``. What still differs there is the
-    wording alone -- the port adds a ``git clone`` suggestion the oracle
-    never had."""
+def test_new_som_failure_envelope_now_matches_the_oracle(work_dir, tmp_path):
+    """tan-cli#254, CLOSED (tan-cli#399 postmortem) -- was a documented
+    divergence here; this is the promotion the module docstring's own
+    convention asks for the moment a pinned XFAIL would start passing for
+    real, applied by hand since this case is a plain assertion, not an
+    ``xfail(strict=True)``.
+
+    The divergence used to be that the port's ``new-som`` accepted
+    ``--format`` (a hidden option mirroring clap's ``global = true``
+    ``GlobalArgs``) but never READ it -- ``new_som_cmd`` ``del``d the value --
+    so a failing run stayed text mode, printed no envelope of its own, and
+    ``main``'s fallback wrapped it in the generic ``command: "cli"`` /
+    ``cli.parse-error`` envelope, where the oracle's own ``--format json``
+    reaches a real ``command: "new-som"`` refusal (``new-som.failed``,
+    exit 2). ``new_som_cmd`` now emits that envelope itself (tan-cli#399), so
+    both sides agree on ``command``, ``exitCode`` and the issue code -- pinned
+    below at BOTH the bare invocation (exit 2 on each side already, before
+    tan-cli#399) and under ``--format json`` (the half that used to diverge).
+
+    NOT a flag-POSITION case: the argv below puts ``--format json`` AFTER the
+    subcommand, the position that has always parsed. What still differs, and
+    is deliberately left OUT of the comparison, is the refusal MESSAGE text --
+    the port adds a ``git clone`` suggestion the oracle never had -- which is
+    exactly why this checks ``command``/``exitCode``/issue ``code`` and not a
+    whole-envelope `compare()`.
+    """
     home = tmp_path / "home"
     r_code, _ = _run([RUST], ["new-som"], work_dir, home)
     p_code, _ = _run(python_command(), ["new-som"], work_dir, home)
@@ -981,10 +998,10 @@ def test_new_som_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     assert p_code == 2
     _, r_json_out = _run([RUST], ["new-som", "--format", "json"], work_dir, home)
     _, p_json_out = _run(python_command(), ["new-som", "--format", "json"], work_dir, home)
-    assert r_json_out["command"] == "new-som"
+    assert r_json_out["command"] == p_json_out["command"] == "new-som"
+    assert r_json_out["exitCode"] == p_json_out["exitCode"] == 2
     assert [i["code"] for i in r_json_out["issues"]] == ["new-som.failed"]
-    assert p_json_out["command"] == "cli"
-    assert [i["code"] for i in p_json_out["issues"]] == ["cli.parse-error"]
+    assert [i["code"] for i in p_json_out["issues"]] == ["new-som.failed"]
 
 
 @_ORACLE_REQUIRED
@@ -1043,6 +1060,111 @@ def test_faultdecode_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     assert [i["code"] for i in r_out["issues"]] == ["faultdecode.failed"]
     assert p_out["command"] == "cli"
     assert [i["code"] for i in p_out["issues"]] == ["cli.parse-error"]
+
+
+# --- tan-cli#398/#403: an INJECTED value-carrying global flag must be
+# accept-and-ignore, matching the oracle, not accept-and-REFUSE -------------
+#
+# `accept_global_flags` (`tan/core/global_flags.py`) injects `--board-yaml`
+# and `--target` on every command that does not already implement them, for
+# oracle-argv-parity (tan-cli#261): the oracle's clap `GlobalArgs` marks both
+# `global = true`, so `target/debug/tan.exe <any command> --board-yaml x` /
+# `... --target x` always PARSES, even on a command whose own Rust handler
+# never reads the value. tan-cli#398 changed what happens to an INJECTED
+# value-carrying flag when a value is actually supplied, from "accept and
+# drop" to "refuse, exit 2" -- reasoning (correct for exactly one flag,
+# `model`'s `--board-yaml`) that silently dropping a supplied value serves
+# the command's own default in its place. Refusing regressed every OTHER
+# (command, flag) pair below: the oracle itself accepts and ignores the same
+# flag there, so the refusal was a NEW divergence, not a fix, and put the
+# WRONG command (`cli`, `main`'s generic usage-error fallback, since the
+# refusal fires before the wrapped command -- and therefore before `emit()`
+# -- ever runs) in the JSON envelope on an argv the oracle runs cleanly.
+#
+# Hand-listed rather than derived off `_SUBCOMMAND_NAMES` x `GLOBAL_FLAGS`
+# (unlike `tests/gates/test_global_flags_gate.py`'s PARSE-only gate, which IS
+# fully derived): this table's job is different -- it is not "does the flag
+# parse" but "does the DROPPED VALUE still answer the oracle's exit code",
+# which needs a live oracle spawn per pair and is expensive enough that a
+# blind full cross product (32 commands x 10 flags) would slow this suite for
+# combinations no defect has ever touched. This is the measured tan-cli#398
+# regression set, snapshotted 2026-08: `--board-yaml` on 3 commands (`model`
+# is EXCLUDED, see below) and `--target` on 14, 17 pairs total here, alongside
+# `test_derived_pair_count_has_not_silently_shrunk` guarding against a count
+# that quietly drops to zero and stops testing anything. The regression's
+# FULL count is 18 -- `model` x `--board-yaml` was the 18th pair, and the ONE
+# that computed a genuinely wrong answer when dropped (a real board.yaml built
+# for the WRONG SKU, not a refusal); it is excluded from THIS table, not
+# untested.
+#
+# `model` carries NEITHER flag here even though `accept_global_flags` used to
+# inject `--board-yaml` for it: `model_cmd.py`'s own `--board` option now
+# declares `--board-yaml` as a second name for the SAME option (tan-cli#403),
+# so it is a REAL, read alias, not a dropped one -- covered instead by
+# `tests/commands/test_model_command.py`'s own `--board-yaml` case.
+_BOARD_YAML_DROP_COMMANDS = ("examples", "explain", "sdk")
+_TARGET_DROP_COMMANDS = (
+    "bootstrap", "debug-config", "doctor", "examples", "flash", "image",
+    "kconfig", "model", "presets", "renode", "run", "sdk", "size", "validate",
+)
+
+#: A command that needs a SUBCOMMAND before its options even parse (`model
+#: build`, `sdk current`) -- `None` for the 30 flat commands. Matches the real
+#: shape a caller would use; a bare `model --target x` fails on its OWN
+#: `model.unknown-subcommand` regardless of `--target`, which would make the
+#: pair "match" the oracle for a reason that has nothing to do with this
+#: regression (`test_model_bare_invocation_is_a_known_divergence_from_the_
+#: oracle`, above, is exactly that unrelated, already-pinned divergence).
+_REQUIRES_SUBCOMMAND = {"model": "build", "sdk": "current"}
+
+
+def _dropped_flag_pairs():
+    for command in _BOARD_YAML_DROP_COMMANDS:
+        yield command, "--board-yaml", "nonexistent/board.yaml"
+    for command in _TARGET_DROP_COMMANDS:
+        yield command, "--target", "zephyr"
+
+
+def _argv_for(command: str, flag: str, value: str) -> list[str]:
+    argv = [command]
+    sub = _REQUIRES_SUBCOMMAND.get(command)
+    if sub is not None:
+        argv.append(sub)
+    argv += [flag, value, "--format", "json"]
+    return argv
+
+
+@_ORACLE_REQUIRED
+@pytest.mark.parametrize(
+    "command,flag,value",
+    list(_dropped_flag_pairs()),
+    ids=[f"{c}-{f}" for c, f, _v in _dropped_flag_pairs()],
+)
+def test_an_injected_value_carrying_flag_exits_like_the_oracle_not_refused(
+    command, flag, value, work_dir, tmp_path
+):
+    """The regression test tan-cli#398 shipped without: probed with a
+    trailing ``--help`` (`test_global_flags_gate.py`), which Click's own
+    eager short-circuit answers before the wrapped command -- and therefore
+    before the refusal in `accept_global_flags`'s wrapper -- ever runs, so
+    that gate stayed green on both sides of the tan-cli#398 regression.
+    A REAL value on a REAL invocation is what actually reaches the refusal.
+    """
+    home = tmp_path / "home"
+    argv = _argv_for(command, flag, value)
+    r_code, _ = _run([RUST], argv, work_dir, home)
+    p_code, _ = _run(python_command(), argv, work_dir, home)
+    assert p_code == r_code, (
+        f"`tan {' '.join(argv)}` exited {p_code}, the oracle exits {r_code} -- "
+        f"an injected {flag} must be accepted and ignored, not refused."
+    )
+
+
+def test_derived_pair_count_has_not_silently_shrunk():
+    """The canary `test_global_flags_gate.py`'s own file names for the same
+    reason: a parametrised list that quietly shrinks to zero reports green
+    while checking nothing."""
+    assert len(list(_dropped_flag_pairs())) == 17
 
 
 # --- the harness must be able to go red ------------------------------------

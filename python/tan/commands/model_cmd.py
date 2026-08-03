@@ -405,7 +405,11 @@ def _run_build(
 def model(
     subcommand: str = typer.Argument(None, metavar="SUBCOMMAND", help="build."),
     board: str = typer.Option(
-        "board.yaml", "--board", metavar="PATH", help="Path to board.yaml."
+        "board.yaml",
+        "--board",
+        "--board-yaml",
+        metavar="PATH",
+        help="Path to board.yaml.",
     ),
     out: str = typer.Option(
         "build/models", "--out", metavar="PATH", help="Output directory."
@@ -507,10 +511,12 @@ def model(
     finish(project_, sdk, data, issues, exit_code)
 
 
-# tan-cli#261: adds the eight oracle `GlobalArgs` flags this command was
-# missing entirely (`--all`/`--board-yaml`/`--ci`/`--no-color`/
-# `--non-interactive`/`--quiet`/`--target`/`--verbose`); see
-# `tan.core.global_flags`. All inert here: `model`'s own `--board` already
-# plays `--board-yaml`'s role for real (see `_run_build`'s comment), so the
-# newly-accepted `--board-yaml` is never consulted.
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# missing entirely (`--all`/`--ci`/`--no-color`/`--non-interactive`/
+# `--quiet`/`--target`/`--verbose`); see `tan.core.global_flags`. `--board-yaml`
+# is NOT one of them any more (tan-cli#398/#403): `model`'s own `--board`
+# option above now declares `--board-yaml` as a second spelling of itself, so
+# `accept_global_flags` sees it already declared and never injects a second,
+# inert one -- a real alias instead of an accepted-and-dropped flag that would
+# silently build the WRONG SKU's board.yaml.
 model = accept_global_flags(model)

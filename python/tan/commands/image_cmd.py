@@ -91,7 +91,7 @@ from tan.core.system_manifest import (
     raw_passthrough,
     slice_build_dir,
 )
-from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit, null_non_finite
 from tan.exit_codes import ExitCode
 
 #: Streaming read size for the SHA-256, matching the oracle's 65536-byte buffer.
@@ -346,7 +346,20 @@ def _assemble_bundle(
         # `indent=2` + serde_json's `to_string_pretty` separators, and exactly one
         # trailing newline written with `newline=""` so a Windows host cannot
         # silently rewrite the file to CRLF (I-27).
-        document = json.dumps(bundle, indent=2) + "\n"
+        #
+        # `null_non_finite` first (tan-cli#387's "lesser half"): `hw_info` is
+        # raw-passthrough YAML (`raw_passthrough`, above), so a hand-edited
+        # `.inf`/`-.inf`/`.nan` reaches here as a real, non-finite Python float.
+        # `emit()`'s own envelope already nulls these on STDOUT (tan-cli#387),
+        # but this file write went through its OWN bare `json.dumps` with
+        # `allow_nan` left at its default -- writing the literal `Infinity` /
+        # `-Infinity` / `NaN` tokens straight into `bundle-manifest.json`, which
+        # RFC 8259 has no production for and no `JSON.parse` on the consuming
+        # side can read back. Applying the same null-out here keeps the file
+        # and the envelope reporting the identical value for the identical
+        # field, matching the oracle either way (serde_json nulls a non-finite
+        # `f64` on write, wherever it writes one).
+        document = json.dumps(null_non_finite(bundle), indent=2) + "\n"
     except (TypeError, ValueError) as err:
         # `hw_info` is verbatim YAML: a mapping key JSON cannot express reaches
         # here. The oracle hits the same wall in `Envelope::to_json` and reports

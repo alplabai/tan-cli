@@ -31,6 +31,7 @@ address, pin name -- is spelled in this port. Those live in alp-sdk
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Sequence
@@ -129,6 +130,45 @@ _CORE_RESOLVERS = (
 )
 
 
+#: The two EXPLICIT sentinel spellings inside the float alternative above --
+#: `.inf`/`-.inf`/`+.inf`/`.nan` (any case) -- as opposed to a plain decimal
+#: literal that merely OVERFLOWS f64 range (`1e400`). Both match the same
+#: `tag:yaml.org,2002:float` resolver, but serde_yaml (measured against
+#: `target/debug/tan.exe`) only actually PRODUCES a non-finite `Number` for
+#: the former; see `_construct_core_float`.
+_INF_NAN_LITERAL = re.compile(r"^(?:[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$")
+
+
+def _construct_core_float(loader, node) -> float | str:
+    """The float tag's constructor -- distinguishes the sentinel `.inf`/`.nan`
+    literals from a decimal-with-exponent literal that overflows `float()`
+    (tan-cli#387 revisited: `1e400` in a hand-edited `hw_info:`).
+
+    PyYAML's own `construct_yaml_float` would hand both the SAME `_CORE_RESOLVERS`
+    float alternative back as `float(text)`, so `1e400` became a real, silently
+    non-finite Python float indistinguishable from an EXPLICIT `.inf`. Measured
+    against the oracle, that is not what serde_yaml does with it: `target/debug/
+    tan.exe`'s `hw_info.soc_flash_mb: 1e400` reaches the wire as the STRING
+    `"1e400"`, byte for byte, on both `image`'s stdout envelope and the written
+    `bundle-manifest.json` -- an overflowing generic numeric literal is left as
+    plain text, while the sentinel spellings resolve to real Infinity/NaN
+    (and are `null` on the wire per the RFC-8259 fixup `envelope.null_non_finite`
+    / `image_cmd`'s own file write already apply). Only the SENTINEL branch
+    below returns a non-finite `float`; every other overflowing numeric string
+    falls through to `text`, unresolved, exactly as serde_yaml leaves it.
+    """
+    text = loader.construct_scalar(node)
+    if _INF_NAN_LITERAL.match(text):
+        # Python's own `float()` does not accept the YAML spellings verbatim
+        # (`float(".inf")` raises -- it wants `"inf"`, no leading dot), so the
+        # three sentinel outcomes are built directly rather than reparsed.
+        if text.lower().endswith("nan"):
+            return float("nan")
+        return float("-inf") if text.startswith("-") else float("inf")
+    value = float(text)
+    return value if math.isfinite(value) else text
+
+
 def _core_schema_loader(yaml_module):
     """A `SafeLoader` resolving plain scalars by the YAML 1.2 CORE schema, so a
     value carried verbatim into the bundle manifest matches what serde_yaml's
@@ -142,6 +182,10 @@ def _core_schema_loader(yaml_module):
     CoreSchemaLoader.yaml_implicit_resolvers = {}
     for tag, pattern, first in _CORE_RESOLVERS:
         CoreSchemaLoader.add_implicit_resolver(tag, re.compile(pattern), first)
+    # Overrides PyYAML's own `construct_yaml_float` for exactly this loader --
+    # see `_construct_core_float`'s own doc for why the default (a bare
+    # `float(text)`) is wrong for an overflowing, non-sentinel literal.
+    CoreSchemaLoader.add_constructor("tag:yaml.org,2002:float", _construct_core_float)
     return CoreSchemaLoader
 
 

@@ -9,6 +9,7 @@ __future__ import annotations`, measured before the fix below existed).
 """
 from __future__ import annotations
 
+import pytest
 import typer
 from typer.main import get_command
 from typer.testing import CliRunner
@@ -40,7 +41,9 @@ def test_global_flags_and_arity_stay_in_lockstep():
         assert GLOBAL_FLAG_ARITY[flag] in (0, 1)
 
 
-def test_injects_every_missing_flag_and_drops_them_before_the_command_runs():
+def test_injects_every_missing_boolean_flag_and_drops_it_before_the_command_runs():
+    """The arity-0 half: an injected `--verbose`/`--ci`/... is accepted and
+    dropped, and the command runs."""
     seen: dict[str, object] = {}
 
     def probe() -> None:
@@ -49,15 +52,72 @@ def test_injects_every_missing_flag_and_drops_them_before_the_command_runs():
     wrapped = accept_global_flags(probe)
     app = _make_app(wrapped)
 
-    argv = ["probe"]
-    for flag in GLOBAL_FLAGS:
-        argv.append(flag)
-        if GLOBAL_FLAG_ARITY[flag] == 1:
-            argv.append("some-value")
+    argv = ["probe", *(flag for flag in GLOBAL_FLAGS if GLOBAL_FLAG_ARITY[flag] == 0)]
 
     result = runner.invoke(app, argv)
     assert result.exit_code == 0, result.output
     assert seen.get("ran") is True
+
+
+@pytest.mark.parametrize(
+    "flag", [flag for flag in GLOBAL_FLAGS if GLOBAL_FLAG_ARITY[flag] == 1]
+)
+def test_an_injected_value_carrying_flag_is_accepted_and_dropped_too(flag):
+    """tan-cli#398 tried refusing an injected value-carrying flag the moment a
+    value was supplied, reasoning that silently dropping it serves the
+    command's own default in its place. Measured against the oracle
+    (tan-cli#403 postmortem), that refusal was wrong for every one of these
+    flags except `model`'s `--board-yaml` -- `target/debug/tan.exe` itself
+    ACCEPTS AND IGNORES a value-carrying `GlobalArgs` field a given command's
+    own handler never reads, so refusing it here was a NEW divergence, not a
+    fix: `tan doctor --target zephyr` went from the oracle's exit 4 to a
+    `typer.BadParameter` exit 2, with the wrong command (`cli`, from `main`'s
+    generic usage-error fallback) in the JSON envelope, on 17 of the 18
+    (command, flag) pairs this mechanism used to refuse.
+
+    A command that genuinely computes a wrong answer from a dropped value
+    (only `model`+`--board-yaml`, measured) is fixed by reading the real flag
+    under its own oracle-parity spelling -- `model_cmd.py`'s `--board` now
+    declares `--board-yaml` as a second name for itself, so it is no longer
+    one of the flags this module injects for `model` at all
+    (`test_a_value_carrying_flag_a_command_really_implements_is_untouched`,
+    below, covers exactly that shape). This module's job for every OTHER
+    command stays what it always was for a boolean: accept, drop, run."""
+    ran: list[str | None] = []
+
+    def probe(existing: str | None = None) -> None:
+        ran.append(existing)
+
+    app = _make_app(accept_global_flags(probe))
+
+    result = runner.invoke(app, ["probe", flag, "some/path"])
+    assert result.exit_code == 0, result.output
+    assert ran == [None], (
+        f"{flag}=some/path must be dropped before the command runs, not refused: "
+        f"{result.output}"
+    )
+
+    # And the flag stays free when not supplied at all.
+    result = runner.invoke(app, ["probe"])
+    assert result.exit_code == 0, result.output
+    assert ran == [None, None]
+
+
+def test_a_value_carrying_flag_a_command_really_implements_is_untouched():
+    """The refusal above is about INJECTED flags only. A command that declares
+    `--board-yaml` itself keeps reading it -- `accept_global_flags` never
+    touches an existing parameter, and 28 of the 32 registered commands
+    implement this one for real."""
+    seen: list[str | None] = []
+
+    def probe(board_yaml: str = typer.Option(None, "--board-yaml")) -> None:
+        seen.append(board_yaml)
+
+    app = _make_app(accept_global_flags(probe))
+
+    result = runner.invoke(app, ["probe", "--board-yaml", "real/board.yaml"])
+    assert result.exit_code == 0, result.output
+    assert seen == ["real/board.yaml"]
 
 
 def test_a_flag_already_declared_under_a_different_python_name_is_not_duplicated():

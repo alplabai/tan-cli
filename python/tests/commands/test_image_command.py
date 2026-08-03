@@ -130,6 +130,47 @@ def test_bundle_manifest_json_is_written_with_the_exact_key_order_and_one_newlin
     assert raw.decode().startswith('{\n  "schema_version": 1,\n')
 
 
+def test_non_finite_hw_info_values_write_valid_json_matching_the_stdout_envelope(tmp_path):
+    """tan-cli#387's lesser half: the envelope's own `_serialise` retry already
+    nulled a non-finite float on STDOUT, but this file was written through its
+    own bare `json.dumps(bundle, indent=2)`, `allow_nan` left at its default --
+    so the SAME `hw_info` reached disk with the literal `Infinity`/`-Infinity`/
+    `NaN` tokens RFC 8259 has no production for (measured: `json.loads` on the
+    written file raised `ValueError: Expecting value` at the first one).
+
+    `soc_flash_mb: 1e400` is the other half of the same measurement, at the
+    YAML-read layer rather than the JSON-write one: PyYAML's own float
+    constructor resolves an overflowing decimal-with-exponent literal to a
+    silently non-finite `float`, same as `.inf`/`.nan` -- but serde_yaml only
+    actually produces Infinity for the EXPLICIT sentinel spellings, leaving an
+    overflowing generic literal as its raw string (`target/debug/tan.exe`,
+    measured). Both are pinned here together because they land in the same
+    `hw_info` dict and the fix has to get both right at once, not trade one
+    for the other.
+    """
+    write(
+        tmp_path / "br" / "system-manifest.yaml",
+        "schema_version: 1\nhw_info:\n"
+        "  a: .inf\n  b: -.inf\n  c: .nan\n  soc_flash_mb: 1e400\n"
+        "slices: []\nhelper_mcus: []\nboot_order: []\n",
+    )
+    result = run_cli(tmp_path, "--format", "json", "--build-root", "br")
+    assert result.returncode == 0, result.stderr
+    stdout_doc = envelope(result)
+    assert stdout_doc["data"]["hw_info"] == {
+        "a": None, "b": None, "c": None, "soc_flash_mb": "1e400",
+    }
+
+    raw = (tmp_path / "br" / "image-bundle" / "bundle-manifest.json").read_bytes()
+    assert b"Infinity" not in raw and b"NaN" not in raw, raw
+
+    def _strict(literal):
+        raise AssertionError(f"non-JSON literal {literal!r} reached the file: {raw!r}")
+
+    file_doc = json.loads(raw, parse_constant=_strict)
+    assert file_doc["hw_info"] == {"a": None, "b": None, "c": None, "soc_flash_mb": "1e400"}
+
+
 def test_present_helper_firmware_is_copied_and_hashed(tmp_path):
     wbytes(tmp_path / "br" / "gd32_bridge.bin", b"BRIDGEFW")
     write(

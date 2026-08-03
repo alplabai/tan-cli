@@ -243,6 +243,30 @@ just the one that captured it:
 | `frozen_issue_codes` (in `contract.rs`, no fixture dir) | — | — | Source-literal assertion over `issue-codes.json`. Not a golden because the two `bootstrap.*` codes are not reachable hermetically: `yocto-host` fires only on a non-Linux host (a golden would be inert on the ubuntu CI leg) and `prerequisites-missing` only when a tool is absent from PATH. It proves the SPELLING survives at the emission site, **not** that the code still reaches the wire — that residue is stated in the test's own doc comment too. |
 | `doctor_build_data_keys_the_extension_reads` (in `contract.rs`, no fixture dir) | `doctor --build --format json` | — | KEY-SET assertion, not a value diff: doctor's values are host facts (what is on PATH, whether a Zephyr workspace exists), its key names are not. Covers `data.summary.{pass,warn,fail}`, `data.nextSteps`, `data.checks[].{name,status}` and the literal check name `workspace`. |
 
+Deliberately **outside the envelope** — not merely ungoldened, but emitting a
+document that is not a `{command,ok,exitCode,project,data,issues}` envelope at
+all: `faultdecode`. Its `--format json` is a second spelling of its own
+`--json` and prints the SDK's unwrapped fault report
+(`fault_detected`/`inputs`/`flags`/`addresses`/`root_cause`/`symbols`), which
+is the output contract it inherited: `tan faultdecode` used to be a
+stdio-inheriting forward to `python -m alp_cli faultdecode`, and the oracle
+maps the global `--format json` onto the child's `--json`
+(`crates/tan-cli/src/commands/sdk_cli.rs`). Wrapping it would change what a
+saved script or a pipe already receives. A consumer must therefore special-case
+this one verb: `isEnvelope` returns false, and with rc 0 that reads as
+`kind: "success"` / `Command completed.` with the decode unreachable. Recorded
+here rather than left silent (tan-cli#399); `new-som`, which was in the same
+state, emits a real envelope instead as of that issue.
+
+This exemption is also pinned in code, not just prose: `python/tests/
+test_cli_skeleton.py`'s `_ENVELOPE_SHAPE_EXEMPT` enumerates the registered
+command table and asserts every OTHER command's `--format json` carries the
+`{command,ok,exitCode,project,data,issues}` shape, with `faultdecode` named
+as the sole exemption and a companion test proving its SUCCESS output still
+lacks that shape on purpose. Update the exemption set and this paragraph
+together — one without the other is exactly the drift tan-cli#399 was filed
+about.
+
 Deliberately not covered: `sdk list` (hits the GitHub releases API — network),
 `build --materialise`'s `data.written` (needs a resolvable SDK + a Python
 spawn), `kconfig` (the SDK's
