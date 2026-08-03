@@ -38,13 +38,20 @@ from an un-revendored SDK change.
     consequence of the freeze, not a re-vendor bug. That test predates the
     freeze decision and asserted a lockstep the two trees can no longer keep;
     it is not this bump's call to loosen it.
-  - This is also `parity.yml`'s `PINNED_SDK_TAG`, and that pin drives all FOUR
-    parity gates — bumping it re-vendors this tree, the bootstrap manifest
-    fixture, the toolchain lock and the kconfig golden together, or the gates
-    go red. They are one atomic unit, not four independent bumps. (The
-    toolchain lock and kconfig fixture needed no byte change this round — see
-    each gate's own re-run notes; only this tree and the bootstrap manifest
-    fixture had real drift.)
+  - **The vendor ref and `parity.yml`'s `PINNED_SDK_TAG` are no longer the
+    same ref, and that is fine.** The pin moved on to `f4d87a1f` (tan-cli#320,
+    a commit past `v0.15.0-rc1` — see that variable's own comment for why),
+    while this tree stays captured at the `v0.15.0-rc1` TAG, because the links
+    below have to name a ref a customer can open in a browser. Re-measured at
+    `f4d87a1f`: `--emit scaffold` is byte-identical to this tree across all 9
+    (template, sku) pairs except the two deliberate edits below — no
+    `board.yaml`, `prj.conf`, `src/` or `CMakeLists.txt` content moved in that
+    range. That is what makes the split safe; it is not a licence to let the
+    two drift unchecked, and `scaffold_byte_parity.py` is what re-checks it.
+  - Bumping the pin still re-vendors this tree, the toolchain lock and the
+    kconfig golden together, or those gates go red. They are one atomic unit,
+    not independent bumps. (The toolchain lock and kconfig fixture needed no
+    byte change this round — see each gate's own re-run notes.)
   - Re-vendored by re-running the emit, not by editing these files. A
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
@@ -91,6 +98,57 @@ from an un-revendored SDK change.
 - Command: `PYTHONPATH=$SDK/scripts python3 scripts/alp_project.py --emit
   scaffold --template <id> --sku <SKU>`
 
+### Deliberate edits on top of the emit — the only two
+
+The rule above ("re-vendored by re-running the emit, not by editing these
+files") has exactly two standing exceptions, both because the emit's own
+output is wrong for a customer and the fix lives in alp-sdk, not here. Each is
+a real diff `tests/parity/scaffold_byte_parity.py` would otherwise report, and
+each disappears on its own the moment alp-sdk fixes it and this tree is
+re-vendored — nothing here needs unwinding by hand.
+
+**Each is DECLARED to that gate, in `scaffold_byte_parity.py`'s
+`DELIBERATE_EDITS`, and the declaration is strict in both directions.** An
+entry is not a path-level allow-list: it carries an `un_edit` that maps these
+bytes back onto what the emit is expected to say, and the byte-diff runs
+against THAT — so an unrelated change in the same file still fails the gate,
+and a declared edit that finds nothing to undo (this tree re-vendored, or
+alp-sdk fixing its emit) ALSO fails, forcing the entry out instead of leaving
+a dead excuse behind. That is the same `xfail(strict=True)` discipline
+`python/tests/parity/test_scaffold_content_oracle_parity.py` uses on the
+port-vs-oracle axis. Editing this section without editing that table (or the
+reverse) is what the strictness exists to catch.
+
+1. **Doc-link ref, all seven `README.md` files (tan-cli#384).** The emit
+   renders cross-directory links as `github.com/alplabai/alp-sdk/blob/v<SDK
+   VERSION>/…`, and this tree is vendored from a PRE-RELEASE
+   (`v0.15.0-rc1`) — so it emitted 40 links to `v0.15.0`, a tag alp-sdk has
+   never cut. Every one 404s in a scaffolded project. Rewritten to
+   `v0.15.0-rc1`, the exact ref these bytes come from; all 14 distinct link
+   targets verified present at that ref (`git cat-file -e v0.15.0-rc1:<path>`
+   for each, 14/14 OK).
+   `python/tests/core/test_template_integrity.py` holds both halves: one test
+   keeps the links and the `- Ref:` line above in step, and
+   `test_the_vendored_ref_is_a_tag_alp_sdk_actually_has` asks GitHub whether
+   that ref EXISTS — consistency is not existence, and the two agreed on
+   `v0.15.0` while all 40 links were dead. It queries the EXACT-ref endpoint
+   (`/git/ref/tags/`, singular) and carries a permanent negative control,
+   because the plural `/git/refs/tags/` prefix-matches and answers 200 for
+   `v0.15.0` with `refs/tags/v0.15.0-rc1` — a gate built on it calls every
+   dead link healthy.
+2. **`iot`'s `CMakeLists.txt`: `list(PREPEND …)`, not `APPEND` (tan-cli#379).**
+   Zephyr merges `EXTRA_CONF_FILE` in list order, last assignment wins.
+   Appending the generated `alp.conf` put it AFTER a caller's own
+   `-DEXTRA_CONF_FILE=native_sim.conf` (measured: `native_sim.conf;<build-dir>/
+   generated/alp.conf`), so the emitted `CONFIG_MBEDTLS=y` overrode the very
+   overlay that exists to turn it off — the README's documented native_sim
+   build and `testcase.yaml`'s `extra_args` were both no-ops. Prepending keeps
+   `alp.conf` winning over `prj.conf` (the whole list merges after it) and
+   lets an explicit caller overlay win. alp-sdk's own
+   `examples/connectivity/mqtt-telemetry/CMakeLists.txt` still appends;
+   the other nine vendored trees are left as emitted (none ships an overlay or
+   documents a `-DEXTRA_CONF_FILE=` build), so this is one file, not ten.
+
 ## Template x SKU matrix vendored
 
 | tan `WizardTemplateId` | SDK catalog id | Vendored SKUs | Example dir | Files |
@@ -99,12 +157,15 @@ from an un-revendored SDK change.
 | `sensor-starter` | `sensor` | `E1M-AEN801`, `E1M-V2N101` | `examples/peripheral-io/i2c-master` | 6 |
 | `edge-ai-starter` | `edge-ai` | `E1M-AEN801`, `E1M-V2N101` | `examples/ai/cold-chain-monitor` | 8 |
 | `board-diagnostics` | `diagnostics` | `E1M-AEN801`, `E1M-V2N101` | `examples/bringup/board-selftest` | 6 |
-| `iot-starter` | `iot` | `E1M-AEN801` only (`status: preview`) | `examples/connectivity/mqtt-telemetry` | 6 |
+| `iot-starter` | `iot` | `E1M-AEN801` only (`status: preview`) | `examples/connectivity/mqtt-telemetry` | 7 |
 
 Layout: `vendored/<sdk-template-id>/<sku>/<path>`, e.g.
-`vendored/minimal/E1M-AEN801/CMakeLists.txt`. `edge-ai` ships two extra files
-over the other four templates' six: `src/cold_chain.c` + `src/cold_chain.h`
-(the cold-chain-metrics core the app links against).
+`vendored/minimal/E1M-AEN801/CMakeLists.txt`. Two templates ship past the
+common six: `edge-ai` adds `src/cold_chain.c` + `src/cold_chain.h` (the
+cold-chain-metrics core the app links against), and `iot` adds
+`native_sim.conf` (tan-cli#379 — the overlay its own README build command and
+`testcase.yaml` already required; see the non-envelope-extras section at the
+end).
 
 `crates/tan-core/src/wizard/service/vendored.rs` reads these via
 `include_str!` (baked into the binary at compile time — no filesystem read at
@@ -355,12 +416,19 @@ assert the edge-ai V2N tree resolves to `m33_sm`, not `a55_cluster` — for the
 raw key lookup and for where a `--cores` splice lands its IPC endpoint,
 respectively.
 
-`testcase.yaml` is vendored alongside the scaffold envelope but is **not**
-part of `--emit scaffold`'s output — the catalog's `files.user_owned` for
-every mapped template is `board.yaml`/`prj.conf`/`CMakeLists.txt`/
-`src/main.c`/`README.md` (plus, for `edge-ai`, `src/cold_chain.c`/
-`src/cold_chain.h`) only. It's a byte-exact copy of the canonical example's
-own `testcase.yaml`
+`testcase.yaml` and `iot`'s `native_sim.conf` are vendored alongside the
+scaffold envelope but are **not** part of `--emit scaffold`'s output — the
+catalog's `files.user_owned` for every mapped template is
+`board.yaml`/`prj.conf`/`CMakeLists.txt`/`src/main.c`/`README.md` (plus, for
+`edge-ai`, `src/cold_chain.c`/`src/cold_chain.h`) only. `native_sim.conf`
+(tan-cli#379) is the same class and, for `iot`, the same PAIR:
+`testcase.yaml`'s `extra_args: EXTRA_CONF_FILE=native_sim.conf` is what loads
+it, so vendoring one without the other shipped a scaffold whose own twister
+scenario and whose own documented `west build` named a file that did not
+exist. Both are byte-diffed against the catalog example's own copy
+(`scaffold_byte_parity.py`'s `NON_ENVELOPE_EXTRAS`), not against the emit.
+`testcase.yaml` is a byte-exact copy of the canonical example's own
+`testcase.yaml`
 (`examples/peripheral-io/hello-world/testcase.yaml` for `minimal`,
 `examples/peripheral-io/i2c-master/testcase.yaml` for `sensor`,
 `examples/ai/cold-chain-monitor/testcase.yaml` for `edge-ai`,

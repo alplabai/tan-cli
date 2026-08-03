@@ -523,11 +523,16 @@ def plan_template_files(template_id: str, sku: str) -> list[PlannedFile]:
 def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     """Read a vendored scaffold tree and retarget its `board.yaml` onto `sku`.
 
-    Files come back sorted by their relative POSIX path, which is byte-for-byte
-    the order the Rust `vendored_tree!` macro lists them in for every tree
-    (`CMakeLists.txt`, `README.md`, `board.yaml`, ... -- uppercase first) -- so
-    `data.fileChanges[]` matches the shipped binary's without a hand-kept list
-    here to drift out of step with it.
+    Files come back sorted by their relative POSIX path (`CMakeLists.txt`,
+    `README.md`, `board.yaml`, ... -- uppercase first), the order the Rust
+    `vendored_tree!` macro lists them in, so `data.fileChanges[]` matches the
+    shipped binary's without a hand-kept list here to drift out of step with
+    it. `iot` is the one tree where the two LISTS differ, not just their order:
+    it carries a `native_sim.conf` the frozen Rust tree never got (tan-cli#379,
+    declared in `tests/parity/test_scaffold_content_oracle_parity.py`'s
+    `FILE_SET_DIVERGENCE`), so `tan init --template iot-starter --format json`
+    returns one `fileChanges[]` entry more than the oracle does. Sorting is
+    what keeps every file the two trees DO share in the same relative order.
 
     Sorted on that STRING, never on the `Path`: `PurePath.__lt__` compares a
     case-FOLDED key on Windows, so sorting paths ordered `board.yaml` before

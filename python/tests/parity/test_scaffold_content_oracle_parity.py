@@ -37,7 +37,10 @@ the vendor pin note going stale) FAILS the run instead of reporting a silent
 XPASS. Every entry's reason string names which side is authoritative, so a
 red here reads as either "the port regressed" (an undeclared file started
 differing) or "the divergence healed, update the declaration" (a declared
-XFAIL turned XPASS) -- never "guess which one is right".
+XFAIL turned XPASS) -- never "guess which one is right". Divergence in the
+file SET (a path only one side writes at all) is a SECOND axis with its own
+dict, `FILE_SET_DIVERGENCE`; the two are kept apart on purpose, for the reason
+its own note gives.
 
 Scoped to `DEFAULT_SOM_SKU` (`E1M-AEN801`) only: the SKU `iot-starter`
 supports exclusively, and the one every other CLI-level case in this suite
@@ -99,41 +102,90 @@ DELIBERATE_DIVERGENCE: dict[tuple[str, str], str] = {
         "is authoritative; the oracle is stale."
     ),
     # crates/ is frozen at alp-sdk v0.14.0 (`crates/tan-core/src/wizard/
-    # vendored/MANIFEST.md`); the Python port tracks `parity.yml`'s
-    # PINNED_SDK_TAG, currently v0.15.0-rc1 (`python/tan/templates/vendored/
-    # MANIFEST.md`). The ONLY difference either re-vendor introduced is the
-    # doc-version link in each README's "Further reading" section
-    # (`blob/v0.14.0/` vs `blob/v0.15.0/`) -- measured directly against a
-    # live run of both binaries, not inferred from either MANIFEST: exactly
-    # those four lines move, nothing else. PYTHON IS AUTHORITATIVE (it tracks
-    # the CURRENT pin); the oracle is a permanently frozen snapshot, per
-    # `docs/ROADMAP.md`'s Standing Rules -- expect this to keep recurring
-    # every time the vendored tree is re-pinned, not a one-time fix.
+    # vendored/MANIFEST.md`); the Python port is re-vendored at v0.15.0-rc1
+    # (`python/tan/templates/vendored/MANIFEST.md`). The ONLY difference either
+    # re-vendor introduced is the doc-version link in each README's "Further
+    # reading" section -- measured directly against a live run of both binaries,
+    # not inferred from either MANIFEST: exactly those lines move, nothing else.
+    # tan-cli#384 then moved the port's side once more, off the emit's own
+    # `blob/v0.15.0/` -- a tag that DOES NOT EXIST, because alp-sdk's link
+    # renderer drops the `-rc1` suffix, so all 40 links shipped 404 -- and onto
+    # `v0.15.0-rc1`, the exact ref this tree is vendored from
+    # (`tests/core/test_template_integrity.py` is what keeps them there).
+    # PYTHON IS AUTHORITATIVE (current pin, and links that resolve); the oracle
+    # is a permanently frozen snapshot, per `docs/ROADMAP.md`'s Standing Rules
+    # -- expect this to keep recurring every time the vendored tree is
+    # re-pinned, not a one-time fix.
     ("zephyr-app", "README.md"): (
-        "crates/ frozen at alp-sdk v0.14.0 vs the port's v0.15.0-rc1 pin -- "
-        "doc-version link only. Python is authoritative (current pin); the "
-        "oracle is a frozen historical snapshot (docs/ROADMAP.md)."
+        "crates/ frozen at alp-sdk v0.14.0 vs the port's v0.15.0-rc1 vendor "
+        "point -- doc-version link only (tan-cli#384 pins it at the ref the "
+        "tree is vendored from, which is a tag that exists). Python is "
+        "authoritative; the oracle is a frozen snapshot (docs/ROADMAP.md)."
     ),
     ("sensor-starter", "README.md"): (
-        "crates/ frozen at alp-sdk v0.14.0 vs the port's v0.15.0-rc1 pin -- "
-        "doc-version link only. Python is authoritative (current pin); the "
-        "oracle is a frozen historical snapshot (docs/ROADMAP.md)."
+        "crates/ frozen at alp-sdk v0.14.0 vs the port's v0.15.0-rc1 vendor "
+        "point -- doc-version link only (tan-cli#384 pins it at the ref the "
+        "tree is vendored from, which is a tag that exists). Python is "
+        "authoritative; the oracle is a frozen snapshot (docs/ROADMAP.md)."
     ),
     ("board-diagnostics", "README.md"): (
-        "crates/ frozen at alp-sdk v0.14.0 vs the port's v0.15.0-rc1 pin -- "
-        "doc-version link only. Python is authoritative (current pin); the "
-        "oracle is a frozen historical snapshot (docs/ROADMAP.md)."
+        "crates/ frozen at alp-sdk v0.14.0 vs the port's v0.15.0-rc1 vendor "
+        "point -- doc-version link only (tan-cli#384 pins it at the ref the "
+        "tree is vendored from, which is a tag that exists). Python is "
+        "authoritative; the oracle is a frozen snapshot (docs/ROADMAP.md)."
     ),
     ("iot-starter", "README.md"): (
-        "crates/ frozen at alp-sdk v0.14.0 vs the port's v0.15.0-rc1 pin -- "
-        "doc-version link only. Python is authoritative (current pin); the "
-        "oracle is a frozen historical snapshot (docs/ROADMAP.md)."
+        "crates/ frozen at alp-sdk v0.14.0 vs the port's v0.15.0-rc1 vendor "
+        "point -- doc-version link only (tan-cli#384 pins it at the ref the "
+        "tree is vendored from, which is a tag that exists). Python is "
+        "authoritative; the oracle is a frozen snapshot (docs/ROADMAP.md)."
+    ),
+    # tan-cli#379: `EXTRA_CONF_FILE` is merged in list order and the LAST
+    # assignment of a symbol wins, so the oracle's (and the SDK's) `list(APPEND
+    # EXTRA_CONF_FILE ${_alp_generated})` parked the generated alp.conf AFTER a
+    # caller's own `-DEXTRA_CONF_FILE=native_sim.conf` and silently overrode it
+    # -- which is exactly backwards, and made both the README's documented
+    # native_sim build and `testcase.yaml`'s `extra_args` no-ops against the
+    # `CONFIG_MBEDTLS=y` alp.conf emits. The port prepends. PYTHON IS
+    # AUTHORITATIVE; the oracle ships the order its own docs contradict.
+    ("iot-starter", "CMakeLists.txt"): (
+        "tan-cli#379: the port PREPENDS the generated alp.conf so an explicit "
+        "`-DEXTRA_CONF_FILE=` overlay wins; the frozen oracle appends it and "
+        "clobbers the caller. Python is authoritative; the oracle is stale."
     ),
     # `edge-ai-starter` is deliberately ABSENT: measured byte-identical (its
     # README carries no version-pinned link at all -- both MANIFEST.md files
     # say so; confirmed by a live diff of both binaries' output). An entry
     # appearing here later would mean it grew a real divergence, not that
     # this omission was an oversight.
+}
+
+#: The OTHER axis: `(template_id, relative_path)` a path exactly ONE side
+#: writes at all. Deliberately NOT folded into `DELIBERATE_DIVERGENCE` above --
+#: a declaration that two sides' CONTENT differs says nothing about whether
+#: both sides still WRITE the file, and reading one dict for both questions let
+#: every content-only entry above excuse a vanished file as well (proved by
+#: deleting `iot/E1M-AEN801/README.md`, which the oracle still writes: the
+#: file-list gate stayed green). Entries here excuse both gates, because a file
+#: only one side writes necessarily fails the content one too.
+FILE_SET_DIVERGENCE: dict[tuple[str, str], str] = {
+    # tan-cli#379: the `iot` scaffold's README links `native_sim.conf` and its
+    # documented native_sim build passes `-DEXTRA_CONF_FILE=native_sim.conf`;
+    # `testcase.yaml`'s `extra_args` REQUIRES it (it is what flips
+    # `CONFIG_MBEDTLS` off for the native_sim leg). The file exists in the SDK
+    # example (`examples/connectivity/mqtt-telemetry/native_sim.conf`) but is
+    # absent from the catalog's `files.user_owned`, so `--emit scaffold` never
+    # emitted it and NEITHER vendored tree ever got it -- same class as
+    # `testcase.yaml` (`tests/parity/scaffold_byte_parity.py`'s
+    # `NON_ENVELOPE_EXTRAS`, which now carries both). Vendored on the Python
+    # side only: `crates/` is frozen (`docs/ROADMAP.md`'s Standing Rules) and
+    # still ships the broken six-file tree. PYTHON IS AUTHORITATIVE; the oracle
+    # is the stale, incomplete answer.
+    ("iot-starter", "native_sim.conf"): (
+        "tan-cli#379: the port vendors the `native_sim.conf` the template's own "
+        "README + testcase.yaml require; the frozen oracle omits it entirely. "
+        "Python is authoritative; the oracle is stale."
+    ),
 }
 
 _TREE_CACHE: dict[str, tuple[dict[str, bytes], dict[str, bytes]]] = {}
@@ -189,10 +241,11 @@ def _cases():
     re-measuring that on every run, so a FUTURE file-list divergence is
     still caught even though this list itself is Python-derived.
     """
+    declared = {**DELIBERATE_DIVERGENCE, **FILE_SET_DIVERGENCE}
     for template_id in TEMPLATE_IDS:
         relpaths = sorted(f.relative_path for f in plan_template_files(template_id, DEFAULT_SOM_SKU))
         for relative_path in relpaths:
-            reason = DELIBERATE_DIVERGENCE.get((template_id, relative_path))
+            reason = declared.get((template_id, relative_path))
             marks = [pytest.mark.xfail(reason=reason, strict=True)] if reason else []
             yield pytest.param(template_id, relative_path, id=f"{template_id}::{relative_path}", marks=marks)
 
@@ -210,6 +263,17 @@ def test_scaffold_file_content_matches_the_oracle(template_id, relative_path, tm
     assert rust_files[relative_path] == python_files[relative_path]
 
 
+def _undeclared_file_set_divergence(
+    template_id: str, rust_files, python_files
+) -> list[str]:
+    """Paths exactly one side writes that `FILE_SET_DIVERGENCE` does not
+    declare. Split out of the test body so the subtraction rule itself is
+    checkable without a built oracle -- see
+    `test_a_content_divergence_does_not_excuse_a_vanished_file`."""
+    declared = {path for tid, path in FILE_SET_DIVERGENCE if tid == template_id}
+    return sorted((set(rust_files) ^ set(python_files)) - declared)
+
+
 @_SKIP_NO_ORACLE
 @pytest.mark.parametrize("template_id", TEMPLATE_IDS)
 def test_scaffold_file_list_matches_the_oracle(template_id, tmp_path_factory):
@@ -217,10 +281,42 @@ def test_scaffold_file_list_matches_the_oracle(template_id, tmp_path_factory):
     matches_the_oracle` above is parametrized off the PYTHON side's own
     planned list, so a file the port stopped writing (or the oracle stopped
     writing, or either side started writing an EXTRA one) would never
-    surface as a per-relpath case -- this is what catches that. No
-    `DELIBERATE_DIVERGENCE` entry exists for the file SET on any template
-    today (measured); if one is ever needed, add it the same way as a
-    content entry, keyed on the missing/extra path instead of a real one.
+    surface as a per-relpath case -- this is what catches that.
+
+    Only `FILE_SET_DIVERGENCE` excuses anything here. Strict CONVERGENCE
+    detection stays with the per-relpath content case -- if the oracle ever
+    grew a declared file byte-identically, that case's `xfail(strict=True)`
+    turns XPASS and reds the run, so nothing is lost by this test's
+    subtraction being one-directional.
     """
     rust_files, python_files = _scaffold_trees(template_id, tmp_path_factory)
-    assert sorted(rust_files) == sorted(python_files)
+    undeclared = _undeclared_file_set_divergence(template_id, rust_files, python_files)
+    assert not undeclared, (
+        f"--template {template_id}: {undeclared} written by exactly one side "
+        f"and not declared in FILE_SET_DIVERGENCE"
+    )
+
+
+def test_a_content_divergence_does_not_excuse_a_vanished_file():
+    """The two divergence axes must not be read from one dict.
+
+    tan-cli#379's first pass subtracted every `DELIBERATE_DIVERGENCE` path
+    from the file-set comparison, so each of the seven entries declared purely
+    for CONTENT drift also excused the file DISAPPEARING from one side. Proved
+    end-to-end at the time by deleting `iot/E1M-AEN801/README.md` -- a file the
+    frozen oracle still writes -- and watching the gate stay green. No oracle
+    needed to keep that from coming back: the subtraction is pure, so feed it a
+    synthetic pair of trees instead of spawning two binaries.
+    """
+    assert ("iot-starter", "README.md") in DELIBERATE_DIVERGENCE
+    assert ("iot-starter", "README.md") not in FILE_SET_DIVERGENCE
+    assert _undeclared_file_set_divergence(
+        "iot-starter", {"README.md": b"oracle wrote it"}, {}
+    ) == ["README.md"]
+    # ...and the file-set axis still excuses what it declares, per template.
+    assert _undeclared_file_set_divergence(
+        "iot-starter", {}, {"native_sim.conf": b"port-only, declared"}
+    ) == []
+    assert _undeclared_file_set_divergence(
+        "zephyr-app", {}, {"native_sim.conf": b"another template's declaration"}
+    ) == ["native_sim.conf"]
