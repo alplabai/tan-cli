@@ -2357,12 +2357,118 @@ def test_run_fix_skips_a_tool_with_no_known_install_command():
     assert doctor_cmd.run_fix([{"tool": "gperf", "command": None}]) == []
 
 
-def test_run_fix_skips_a_tool_it_cannot_resolve_on_path(monkeypatch):
+def test_run_fix_reports_a_verdict_when_the_installer_itself_is_not_on_path(monkeypatch):
+    """tan-cli#360, replacing the test that pinned the silence
+    (`assert results == []`): an unresolved installer used to be a bare
+    `continue` -- the ONE outcome `run_fix` emitted no Check for, in a
+    function whose whole stated invariant is that every entry is run or
+    refused and every outcome becomes a check.
+
+    Reachable on exactly the hosts `--fix` exists for: the manifest installs
+    with `winget` on Windows and `brew` on macOS, so a machine without one
+    reported tools missing, ACCEPTED `--fix`, and printed the same report
+    back with no `fix:*` line anywhere -- indistinguishable from "nothing
+    needed fixing"."""
     monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
     results = doctor_cmd.run_fix(
         [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
     )
-    assert results == []
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-installer-not-found"
+    assert results[0].status == "warn"
+    # The installer AND the tool it blocked: naming only one of the two leaves
+    # the reader unable to act on it.
+    assert "winget" in results[0].detail
+    assert "ninja" in results[0].detail
+    # The remedy, not just "not found" -- on Windows that is App Installer.
+    assert "App Installer" in results[0].detail
+
+
+def test_run_fix_reports_one_missing_installer_once_not_once_per_tool(monkeypatch):
+    """tan-cli#360 acceptance: a fresh Mac is missing every manifest
+    prerequisite at once and every one of them installs with `brew`. Per-tool
+    reporting would print the same "install Homebrew" paragraph six times --
+    six restatements of one fact, in a report someone is reading to find out
+    what is actually wrong."""
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+    results = doctor_cmd.run_fix(
+        [
+            {"tool": "git", "command": "brew install git"},
+            {"tool": "cmake", "command": "brew install cmake"},
+            {"tool": "ninja", "command": "brew install ninja"},
+        ]
+    )
+    assert len(results) == 1
+    assert results[0].name == "fix:brew"
+    # One verdict, every tool that one absence blocked named inside it.
+    for tool in ("git", "cmake", "ninja"):
+        assert tool in results[0].detail
+    assert results[0].detail.count("brew.sh") == 1
+
+
+def test_run_fix_groups_per_installer_and_still_runs_the_ones_it_can_resolve(
+    monkeypatch, tmp_path
+):
+    """Two distinct absent installers are two distinct verdicts -- grouping
+    must not collapse unrelated remedies into one -- and a tool whose
+    installer DOES resolve is still repaired in the same pass, so the
+    grouping cannot swallow the working path."""
+    fake_exe = tmp_path / "winget.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: str(fake_exe) if name == "winget" else None
+    )
+    monkeypatch.setattr(
+        doctor_cmd.subprocess,
+        "run",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0),
+    )
+    results = doctor_cmd.run_fix(
+        [
+            {"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"},
+            {"tool": "git", "command": "brew install git"},
+            {"tool": "cmake", "command": "pixi global install cmake"},
+        ]
+    )
+    assert [c.code for c in results] == [
+        "doctor.fix-installed",
+        "doctor.fix-installer-not-found",
+        "doctor.fix-installer-not-found",
+    ]
+    assert [c.name for c in results[1:]] == ["fix:brew", "fix:pixi"]
+    # An installer this module has never heard of still gets a remedy that
+    # names it, rather than a bare "not found".
+    assert "Install `pixi`" in results[2].detail
+
+
+def test_doctor_fix_explains_a_missing_installer_in_both_text_and_json(monkeypatch, tmp_path):
+    """tan-cli#360 acceptance: BOTH output modes must say that no repair ran.
+    Driven through the real command rather than `run_fix` directly, because
+    the two modes render from different places -- JSON from `data.checks` +
+    `issues`, text from a `print` loop over `data.checks` to stderr -- and a
+    verdict reaching only one of them is the same bug wearing a different
+    hat. `can_prompt` is stubbed for the reason the section header above
+    gives: `CliRunner`'s pipes are never a tty."""
+    missing = [{"tool": "ninja", "command": "brew install ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+    monkeypatch.setattr(doctor_cmd, "can_prompt", lambda **k: True)
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+    monkeypatch.chdir(tmp_path)
+
+    as_json = json.loads(runner.invoke(app, ["doctor", "--fix", "--format", "json"]).output)
+    assert "doctor.fix-installer-not-found" in {i["code"] for i in as_json["issues"]}
+    json_detail = next(
+        c["detail"] for c in as_json["data"]["checks"] if c["name"] == "fix:brew"
+    )
+
+    # Text mode prints every check to stderr, envelope-free.
+    text_detail = runner.invoke(app, ["doctor", "--fix"]).stderr
+
+    for detail in (json_detail, text_detail):
+        assert "ran no repair" in detail
+        assert "brew" in detail
+        assert "ninja" in detail
 
 
 def test_run_fix_reports_a_check_when_the_install_command_exits_non_zero(monkeypatch, tmp_path):

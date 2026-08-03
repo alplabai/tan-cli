@@ -2278,6 +2278,78 @@ def fix_timed_out_check(tool: str, command: str) -> Check:
     )
 
 
+#: Per-installer remedy for `fix_installer_not_found_check`, keyed by the first
+#: word of the manifest's install command. Only two entries because only two
+#: are reachable: `metadata/bootstrap.json`'s `prerequisites.install` produces
+#: `brew` on macOS and `winget` on Windows, and Linux's `sudo apt-get ...` is
+#: refused by `fix_needs_sudo_check` long before anything tries to resolve it
+#: (see `_fallback_install_commands` in `tan.core.bootstrap`, which is
+#: byte-pinned to the manifest). Anything else gets the generic remedy below
+#: -- a manifest is free to name a package manager this table has never heard
+#: of, and "not found" with no advice is the exact silence tan-cli#360 is
+#: about.
+INSTALLER_REMEDIES = {
+    "brew": (
+        "Homebrew is not installed -- install it from https://brew.sh, then "
+        "re-run `tan doctor --fix`."
+    ),
+    "winget": (
+        'winget comes from the App Installer package -- install "App '
+        'Installer" from the Microsoft Store (Windows 10 1809 or newer), open '
+        "a new shell so PATH picks it up, then re-run `tan doctor --fix`."
+    ),
+}
+
+
+def fix_installer_not_found_check(installer: str, tools: list[str]) -> Check:
+    """`doctor.fix-installer-not-found` -- tan-cli#360: `--fix` could not
+    resolve the program the manifest's install command starts with, so it ran
+    NO repair for the tools that command covers.
+
+    This used to be a bare `continue` in `run_fix` -- the one outcome that
+    emitted no Check at all, in a function whose whole stated invariant is
+    that every entry is either run or refused and every outcome is reported.
+    It is also the single most likely outcome on the hosts `--fix` exists
+    for: the manifest installs with `brew` on macOS and `winget` on Windows,
+    so a fresh Mac without Homebrew, or a Windows image with no usable
+    winget, reported tools missing, ACCEPTED `--fix`, and then printed
+    exactly the same report back with no `fix:*` line anywhere. The
+    least-equipped host got the least diagnostic behaviour, and could not
+    tell "nothing needed fixing" from "tan never found the installer to try
+    with".
+
+    ONE Check per installer, not per tool: a fresh Mac is missing all six
+    manifest prerequisites at once and every one of them says `brew`, so
+    per-tool would print the same "install Homebrew" paragraph six times over
+    -- six restatements of one fact, in a report a customer is reading to
+    find out what is actually wrong. `tools` therefore carries every tool
+    this one absence blocked, and `run_fix` groups them.
+
+    Named `fix:{installer}` rather than `fix:{tool}` for the same reason --
+    the subject of this verdict is the installer, and one name per absent
+    installer is what keeps the grouping legible in the text report. No
+    `fix` field: the per-tool install commands are not runnable until the
+    installer exists, and `hostPrerequisites` already carries each one
+    verbatim (`data.missingPrerequisites[].command`), so repeating a
+    command that cannot run would be worse than pointing at it.
+    """
+    named = ", ".join(tools)
+    many = len(tools) > 1
+    remedy = INSTALLER_REMEDIES.get(installer) or (
+        f"Install `{installer}`, then re-run `tan doctor --fix`."
+    )
+    return Check(
+        f"fix:{installer}",
+        "warn",
+        f"`--fix` ran no repair for {named}: the manifest installs "
+        f"{'them' if many else 'it'} with `{installer}`, which is not on "
+        f"PATH. {remedy} Or install {'those tools' if many else named} with a "
+        f"package manager this host already has -- `hostPrerequisites` above "
+        f"names {'each' if many else 'its'} exact install command.",
+        code="doctor.fix-installer-not-found",
+    )
+
+
 def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
     """`--fix`'s ADR 0021 executor (tan-cli#91): for each tool
     `hostPrerequisites` already reported missing, either run its manifest
@@ -2294,18 +2366,20 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
     yourself" advice for that case.
 
     Every outcome becomes a `Check` -- `fix_needs_sudo_check`/
-    `fix_installed_check` on the two "acted, and it's fine" paths, and (as of
+    `fix_installed_check` on the two "acted, and it's fine" paths, (as of
     the tan-cli#91 follow-up below) `fix_spawn_failed_check`/`fix_failed_check`/
-    `fix_timed_out_check` on the three "acted, and it's NOT fine" paths --
-    never a bare side effect. A customer who typed `--fix` and got the SAME
-    report back used to have no way to tell "nothing needed fixing" from "tan
-    tried and silently gave up": a spawn error, a non-zero exit, or a
-    `FIX_INSTALL_TIMEOUT_S` (300s) timeout each used to `continue` with no
-    trace at all, and text-mode output only prints after the WHOLE report
-    completes -- up to 20 minutes of silent terminal across four tools with
-    nothing to show for it. `hostPrerequisites`'s own Fail still names the
-    tool and its command either way; these Checks add the ONE fact it
-    structurally cannot carry -- what `--fix` itself did about it.
+    `fix_timed_out_check` on the three "acted, and it's NOT fine" paths, and
+    (tan-cli#360) `fix_installer_not_found_check` on the "could not act at
+    all" one -- never a bare side effect. A customer who typed `--fix` and
+    got the SAME report back used to have no way to tell "nothing needed
+    fixing" from "tan tried and silently gave up": a spawn error, a non-zero
+    exit, a `FIX_INSTALL_TIMEOUT_S` (300s) timeout, or an install command
+    whose own program is not on PATH each used to `continue` with no trace at
+    all, and text-mode output only prints after the WHOLE report completes --
+    up to 20 minutes of silent terminal across four tools with nothing to
+    show for it. `hostPrerequisites`'s own Fail still names the tool and its
+    command either way; these Checks add the ONE fact it structurally cannot
+    carry -- what `--fix` itself did about it.
 
     Only ever called from `doctor()`'s `--fix` branch, itself gated on
     `can_prompt` (`tan.core.consent`) -- the one place in this module that
@@ -2314,6 +2388,11 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
     docstring).
     """
     results: list[Check] = []
+    # installer -> every tool whose install command starts with it and that
+    # therefore went unrepaired (tan-cli#360). Insertion-ordered, so the
+    # grouped Checks appended below come out in `missing` order rather than
+    # an arbitrary one.
+    unresolved: dict[str, list[str]] = {}
     for entry in missing:
         tool = entry.get("tool")
         command = entry.get("command")
@@ -2324,6 +2403,11 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
             continue
         argv = shlex.split(command)
         if not argv:
+            # The one deliberately silent skip left (tan-cli#360 reviewed the
+            # rest): an all-whitespace install command names no program to
+            # report as absent, so there is nothing this could say beyond what
+            # `hostPrerequisites`'s own Fail already says about the tool. A
+            # manifest defect, not a host one.
             continue
         # `on_path`, never bare `subprocess.run([name, ...])`: the same
         # PATH-only, no-cwd-insertion resolver every other spawn in this
@@ -2332,6 +2416,10 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
         # runs with elevated-sounding trust.
         resolved_exe = on_path(argv[0])
         if resolved_exe is None:
+            # tan-cli#360: collected, not silently dropped. Grouped by
+            # installer because one absent `brew` blocks every macOS
+            # prerequisite at once -- see `fix_installer_not_found_check`.
+            unresolved.setdefault(argv[0], []).append(tool)
             continue
         argv[0] = resolved_exe
         try:
@@ -2355,7 +2443,10 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
             results.append(fix_installed_check(tool, command))
         else:
             results.append(fix_failed_check(tool, command, result.returncode))
-    return results
+    return [
+        *results,
+        *(fix_installer_not_found_check(i, t) for i, t in unresolved.items()),
+    ]
 
 
 def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) -> Issue:
