@@ -160,10 +160,17 @@ jobs:
       # Runs against the pre-archive onedir tree, not the .zip -- verify_binary.sh
       # executes the binary (`"$BIN" --version`), which needs its _internal
       # sibling directory on disk, not zipped up.
+      #
+      # RELATIVE arguments here, `$PWD/...` in the linux and macos jobs below,
+      # deliberately: tan-cli#361 was a script that lost a relative path across
+      # its own `cd`, and it survived because all three call sites happened to
+      # pass absolute ones. Git Bash is also the shell the fix's cd-into-dirname
+      # idiom is least obvious on. Keeping one call site on each form means the
+      # release path itself exercises both.
       - name: verify
         if: inputs.verify
         shell: bash
-        run: python/scripts/verify_binary.sh "$PWD/python/dist/tan/tan.exe" "$PWD/alp-sdk"
+        run: python/scripts/verify_binary.sh python/dist/tan/tan.exe alp-sdk
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
