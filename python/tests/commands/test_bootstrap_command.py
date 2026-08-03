@@ -749,6 +749,259 @@ def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_pa
     assert "interactively" not in message
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#389 / tan-cli#390: the two ways bootstrap destroyed something the
+# customer created. Both are gated end-to-end (a real `tan bootstrap`
+# subprocess) rather than by unit call, because both defects lived in the
+# COMPOSITION -- a guard that a flag short-circuited past, and a delete whose
+# only saving fact was resolved after it had already run.
+# ---------------------------------------------------------------------------
+
+
+def _live_workspace(tmp_path: Path, *, zephyr_version: str = "4.4.1") -> tuple[Path, Path]:
+    """A LIVE west workspace at `<tmp>/ws`, of the exact shape `west init -l
+    alp-sdk` + `west update` leaves behind: `.west/config` naming `alp-sdk` as
+    the manifest repo, and a `zephyr/` checkout carrying a VERSION file.
+
+    `zephyr_version` picks which `_select_workspace` branch a `$ZEPHYR_BASE`
+    pointed here takes: the SDK pin ("4.4.1") -> REUSE, anything else -> STALE.
+    Both set `WorkspacePlan.adopted`, and both therefore repoint `paths.venv_dir`
+    at THIS tree's `.venv` -- which is what makes them the same hazard.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    ws = sdk.parent
+    (ws / ".west").mkdir()
+    (ws / ".west" / "config").write_text(
+        "[manifest]\npath = alp-sdk\nfile = west.yml\n", encoding="utf-8"
+    )
+    (ws / "zephyr").mkdir()
+    major, minor, patch = zephyr_version.split(".")
+    (ws / "zephyr" / "VERSION").write_text(
+        f"VERSION_MAJOR = {major}\nVERSION_MINOR = {minor}\nPATCHLEVEL = {patch}\n"
+        f"EXTRAVERSION =\n",
+        encoding="utf-8",
+    )
+    return sdk, ws
+
+
+@pytest.mark.parametrize("with_zephyr_base", [True, False])
+def test_workspace_flag_refuses_to_orphan_the_workspace_it_takes_the_checkout_from(
+    with_zephyr_base, tmp_path
+):
+    """tan-cli#389. `--workspace` was the ONE input that disabled every check
+    able to see this: it short-circuits `_zephyr_base_will_adopt` (left operand
+    of the `or`) and assigns `target` directly, so `default_relocation_target`
+    -- and with it `dot_west_is_workspace` and `parent_needs_workspace_guard` --
+    never ran. The `os.rename` then fired on the manifest repo of a working
+    workspace, at exit 0.
+
+    `$ZEPHYR_BASE` is NOT what makes the defect, hence both parametrisations:
+    with the variable unset the same fixture was still moved out from under
+    `<ws>`, because the `.west/config` check that suppresses auto-relocation is
+    exactly the one `--workspace` skips.
+    """
+    sdk, ws = _live_workspace(tmp_path)
+    newhome = tmp_path / "newhome"
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), "--workspace", str(newhome),
+        cwd=sdk.parent,
+        env_extra={"ZEPHYR_BASE": str(ws / "zephyr")} if with_zephyr_base else None,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 2  # ValidationFailure
+    assert codes(env) == ["bootstrap.orphans-west-workspace"]
+    message = env["issues"][0]["message"]
+    assert bootstrap_cmd._native(str(sdk)) in message
+    assert bootstrap_cmd._native(str(ws)) in message
+    assert bootstrap_cmd._native(str(newhome)) in message
+
+    # Nothing moved, nothing created, nothing repointed -- the whole point of
+    # refusing BEFORE the relocation write rather than rolling one back.
+    assert (sdk / "scripts" / "alp_project.py").is_file()
+    assert not newhome.exists()
+    assert (ws / ".west" / "config").read_text(encoding="utf-8") == (
+        "[manifest]\npath = alp-sdk\nfile = west.yml\n"
+    )
+    assert not (tmp_path / "fake-home" / ".alp" / "sdk-default").exists()
+    # The second half of #389: tan must not blame the workspace for a manifest
+    # mismatch that only the move would have created.
+    assert "bootstrap.zephyr-base-manifest-mismatch" not in codes(env)
+
+
+def test_workspace_flag_still_relocates_when_no_workspace_depends_on_the_checkout(tmp_path):
+    """Non-vacuity for the refusal above: `--workspace` is not being disabled,
+    only stopped from orphaning a LIVE workspace. The same fixture minus the
+    `.west/config` (an ordinary clone that no workspace points at) still moves,
+    so a refusal that fired on everything would be caught here."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    newhome = tmp_path / "newhome"
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), "--workspace", str(newhome), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0
+    assert "bootstrap.workspace-relocated" in codes(env)
+    assert (newhome / sdk.name / "scripts" / "alp_project.py").is_file()
+    assert not sdk.exists()
+
+
+def test_a_workspace_pointing_at_its_own_parent_is_not_treated_as_an_orphaning_move(tmp_path):
+    """`relocate_checkout` no-ops when the checkout is already a direct child of
+    `target` -- the retry-after-success path, and `--workspace <the parent it is
+    already in>`. Refusing there would refuse a move that was never going to
+    happen, so the guard is gated on the relocation actually moving something."""
+    sdk, ws = _live_workspace(tmp_path)
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), "--workspace", str(ws), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0
+    assert "bootstrap.orphans-west-workspace" not in codes(env)
+    assert sdk.exists()
+
+
+def _venv_without_pip(root: Path) -> Path:
+    """A REAL venv whose interpreter runs and whose `pip` is absent -- `uv
+    venv`'s default shape, which is what tan-cli#390 was reported against,
+    reproduced with the stdlib so the suite needs no uv. Hermetic: `--without-pip`
+    neither downloads nor unpacks a wheel."""
+    venv = root / ".venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(venv)],
+        check=True, capture_output=True,
+    )
+    return venv
+
+
+@pytest.mark.parametrize(
+    ("zephyr_version", "adoption_code"),
+    [("4.4.1", None), ("4.3.0", "bootstrap.zephyr-base-stale")],
+)
+def test_bootstrap_never_deletes_the_venv_of_a_workspace_it_adopted(
+    zephyr_version, adoption_code, tmp_path
+):
+    """tan-cli#390. `_select_workspace`'s REUSE branch says "Never modify the
+    user's tree" and then points `paths.venv_dir` at that tree's `.venv`, where
+    `ensure_venv` removed and recreated it the moment `pip --version` did not
+    answer -- announced as a `log.line`, so no `--format json` consumer ever saw
+    the deletion at all.
+
+    Both adopting branches are covered: REUSE (on the pin) and STALE (off it).
+    STALE is the easier one to forget, and it repoints `venv_dir` identically.
+
+    `PIP_NO_INDEX` is a hermeticity belt, not part of the fixture: on a
+    REGRESSED tree this run reaches the pip installs, and this suite must not
+    reach the network even while failing.
+    """
+    sdk, ws = _live_workspace(tmp_path, zephyr_version=zephyr_version)
+    venv = _venv_without_pip(ws)
+    kept = venv / "my_private_pkg"
+    kept.mkdir()
+
+    proc = run_tan(
+        "bootstrap", "--no-pip", "--format", "json", "--sdk-root", str(sdk),
+        cwd=sdk.parent,
+        env_extra={"ZEPHYR_BASE": str(ws / "zephyr"), "PIP_NO_INDEX": "1"},
+    )
+    env = envelope(proc)
+
+    # THE assertion: the customer's venv, and what was installed into it, is
+    # still there.
+    assert kept.is_dir()
+    assert (venv / "pyvenv.cfg").is_file()
+
+    assert proc.returncode == 2  # ValidationFailure -- a refusal, not a failed step
+    assert "bootstrap.adopted-venv-unusable" in codes(env)
+    message = next(
+        i["message"] for i in env["issues"] if i["code"] == "bootstrap.adopted-venv-unusable"
+    )
+    assert bootstrap_cmd._native(str(venv)) in message
+    assert bootstrap_cmd._native(str(ws)) in message
+    assert "ensurepip" in message  # a remedy the operator runs on their OWN tree
+    # The adoption that produced this venv path is still reported alongside the
+    # refusal, or a consumer cannot tell which workspace is being talked about.
+    if adoption_code is not None:
+        assert adoption_code in codes(env)
+
+
+def test_the_delete_that_survives_is_reported_and_only_on_proof_that_pip_is_the_problem(
+    tmp_path, monkeypatch
+):
+    """The other half of tan-cli#390, over tan's OWN (non-adopted) workspace,
+    where recreating a partial venv is still the right call.
+
+    Two things are pinned. The delete is announced through `log.warn` with a
+    code, so `issues[]` carries it. And it happens ONLY on `VENV_PIP_MISSING`:
+    `probe` collapses "pip exited non-zero", "could not spawn" and "timed out"
+    into one `None`, and "no answer" must never authorise an `rmtree`.
+    """
+    ws_dir = tmp_path / "ws"
+    ws_dir.mkdir()
+    venv = _venv_without_pip(ws_dir)
+    (venv / "my_private_pkg").mkdir()
+    facts = fallback_facts((3, 12))
+    ws = bootstrap_cmd.Workspace(
+        os.name == "nt", facts, tmp_path / "ws" / "alp-sdk", ws_dir, venv
+    )
+    host = HostPython(argv=[sys.executable], version=tuple(sys.version_info[:2]))
+    # `pip install --upgrade pip wheel` is the only spawn `ensure_venv` makes
+    # past the probes; stubbed so this stays hermetic.
+    monkeypatch.setattr(bootstrap_cmd.Runner, "run", lambda self, *a, **k: None)
+
+    # The real probe over the real venv: its interpreter runs, its pip does not.
+    assert bootstrap_cmd._venv_pip_state(ws.venv_bin(), bootstrap_cmd.Runner(json=True)) == (
+        bootstrap_cmd.VENV_PIP_MISSING
+    )
+
+    log = bootstrap_cmd.Log(json_mode=True)
+    _, error, is_refusal = bootstrap_cmd.ensure_venv(
+        ws, log, bootstrap_cmd.Runner(json=True), host, adopted=False
+    )
+    assert error is None and is_refusal is False
+    assert [code for code, _ in log.warnings] == ["venv-recreated"]
+    # Recreated, so the stale content really is gone -- the behaviour this
+    # branch exists for, kept honest now that it announces itself.
+    assert not (venv / "my_private_pkg").exists()
+
+    # ... but an interpreter that cannot be spawned at all is NOT that proof.
+    gone = tmp_path / "gone"
+    unknown = bootstrap_cmd.VenvBin(gone / "python", gone / "west", "bin")
+    assert bootstrap_cmd._venv_pip_state(unknown, bootstrap_cmd.Runner(json=True)) == (
+        bootstrap_cmd.VENV_PIP_UNKNOWN
+    )
+
+
+def test_an_adopted_venv_is_refused_rather_than_deleted_even_when_it_cannot_be_probed(tmp_path):
+    """The `VENV_PIP_UNKNOWN` half of the adoption refusal: a venv whose
+    interpreter cannot be spawned (an empty file with the right name is the
+    portable stand-in for the reported timeout) still must not be deleted, and
+    the refusal must say WHICH of the two it is rather than claiming pip was
+    inspected."""
+    facts = fallback_facts((3, 12))
+    ws_dir = tmp_path / "ws"
+    venv = ws_dir / ".venv"
+    bin_dir = facts.venv_bin_dir(os.name == "nt")
+    (venv / bin_dir).mkdir(parents=True)
+    name = "python.exe" if os.name == "nt" else "python"
+    (venv / bin_dir / name).write_text("not an interpreter", encoding="utf-8")
+    ws = bootstrap_cmd.Workspace(os.name == "nt", facts, ws_dir / "alp-sdk", ws_dir, venv)
+    host = HostPython(argv=[sys.executable], version=tuple(sys.version_info[:2]))
+
+    _, error, is_refusal = bootstrap_cmd.ensure_venv(
+        ws, bootstrap_cmd.Log(json_mode=True), bootstrap_cmd.Runner(json=True), host,
+        adopted=True,
+    )
+    assert is_refusal is True
+    assert "could not be run at all" in error
+    assert (venv / bin_dir / name).is_file()
+
+
 def test_find_enclosing_west_walks_ancestors_never_the_start_itself(tmp_path):
     """`west init -l` aborts the instant an ancestor `.west` turns up while
     walking UP from the topdir -- but the topdir's OWN `.west` is the ordinary

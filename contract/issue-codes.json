@@ -771,6 +771,30 @@
       "note": "tan-cli#284: fires from `rollback_relocation_after()` when a LATER phase (venv/west) fails after the checkout was already relocated, and the rollback itself is reported -- whether the move-back and the pointer restore both succeeded, only the pointer restore failed, or the move-back itself could not complete. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "bootstrap.orphans-west-workspace",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "tan-cli#389: the `bootstrap.` prefix is applied by `_refusal()`; fires BEFORE the relocation write when the checkout about to be moved is the MANIFEST REPO of a live west workspace (`relocation_orphans_workspace_refusal`). Distinct from `enclosing-west-workspace`, which probes ancestors of the DESTINATION -- this one names the workspace the checkout would be taken OUT of, which `--workspace` used to bypass entirely by short-circuiting the adoption probe. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.adopted-venv-unusable",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "tan-cli#390: a literal `Issue(\"bootstrap.adopted-venv-unusable\", \"error\", ...)` at the `ensure_venv` call site, built from `adopted_venv_unusable_refusal()`. Fires when the workspace was ADOPTED from `$ZEPHYR_BASE` (REUSE or STALE) and its `.venv` cannot run pip -- `uv venv` and `python -m venv --without-pip` both produce exactly that shape -- where bootstrap previously deleted and recreated the venv, announced only as a `log.line` no JSON consumer could see. Distinct from `bootstrap.venv-unusable`, which is the HOST `python3-venv`/`ensurepip` refusal. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.venv-recreated",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "tan-cli#390: prefixed by `Log.warn(\"venv-recreated\", ...)` in `ensure_venv`. The one delete path that SURVIVED the fix -- tan's own (non-adopted) workspace venv, whose interpreter runs but whose pip is proven absent -- reported as a warning rather than the `log.line` it used to be, so `--format json` carries the fact that a directory's contents were removed. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "cli.command-deferred",
       "status": "reserved",
       "severity": "error",
@@ -1128,15 +1152,63 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/validate_cmd.py",
-      "note": "The `validate.` prefix is applied by the local `fail()` closure (the `BoardShapeError` path) and, separately, by `Issue(f\"validate.{result.outcome}\", ...)` -- `result.outcome` is only ever `OUTCOME_SCHEMA_VIOLATION` (\"schema-violation\") on that path, since a clean result carries no messages to iterate. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `validate.` prefix is applied by the local `fail()` closure (the `BoardShapeError` path) and, separately, by `Issue(f\"validate.{result.outcome}\", ...)` -- on the OFFLINE path `result.outcome` is only ever `OUTCOME_SCHEMA_VIOLATION` (\"schema-violation\") there, since a clean result carries no messages to iterate. Since tan-cli#376 the same template also carries it for a SPAWNED validator that exited 1 without a traceback (a real schema violation); the three other spawn outcomes have their own codes. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "validate.spawn-not-implemented",
+      "code": "validate.sdk-root-unresolved",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/validate_cmd.py",
-      "note": "The `validate.` prefix is applied by the local `fail()` closure; the full (spawn) validator is not ported yet -- run with `--offline` (tan-cli#262). Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "The `validate.` prefix is applied by the local `fail()` closure. Added by tan-cli#376, which ported the SDK-validator spawn path: this is the oracle's own pre-spawn guard 2 (`crates/tan-cli/src/commands/validate.rs::run_spawn`), reached when no alp-sdk checkout resolves for a default (non-`--offline`) run. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.python-too-old",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "note": "The `validate.` prefix is applied by the local `fail()` closure. The oracle's own pre-spawn guard 3 (`crates/tan-cli/src/commands/validate.rs:124-129`, message body `crates/tan-cli/src/util.rs:192-202`), which tan-cli#376 ported the other two guards without. alp-sdk's scripts use `@dataclass(slots=True)`, so an interpreter below the floor dies inside alp-sdk with `dataclass() got an unexpected keyword argument 'slots'` -- validator exit 1 WITH a traceback, which this command reclassifies to `validate.failed` and reports by quoting the traceback's last line. Exit 2, like guards 1 and 2, with `data.commandLine` empty: nothing ran. Two deliberate divergences from the oracle, both matching `generate_cmd`/`model_cmd`'s existing guard: the floor is the resolved SDK's declared `metadata/bootstrap.json` `pythonMinVersion` rather than a compiled-in 3.10, and the interpreter probed is `_planner_python`'s (the one that will be spawned) rather than a bare PATH `python`. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.spawn-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "note": "The `validate.` prefix is applied by the local `fail()` closure. Added by tan-cli#376. The ONE `validate` code that exits 1 (RUNTIME_FAILURE) rather than 2: the validator subprocess could not be STARTED at all (no interpreter on PATH, the script unreadable), so nothing validated anything and this is not a verdict about the board -- the exception tan-cli#262 itself carved out. A validator that started and then failed to produce a usable verdict is `validate.failed` at exit 2. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.clean",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "note": "Assembled as `Issue(f\"validate.{result.outcome}\", ...)` from `OUTCOME_CLEAN`. Added by tan-cli#376. Counter-intuitive but real, and the oracle's own shape (`to_cli_issues` maps every parsed issue to `validate.<outcome>` before its clean-and-empty early return): `scripts/validate_board_yaml.py` renders EVERY diagnostic to stderr and only exits 1 when `collector.has_errors()`, so a board carrying warnings only exits 0 with findings to report. The run is a PASS -- exit 0, `data.outcome: \"clean\"`, `ok: true` -- and each issue under this code is a `warning` (or a `note`, for a standalone `hint:` line); it never carries an `error`. A consumer must read `exitCode`/`severity`, not the presence of an issue, to decide whether the board passed. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "note": "Assembled as `Issue(f\"validate.{result.outcome}\", ...)` from `OUTCOME_FAILED`. Added by tan-cli#376. The validator ran but produced no usable verdict: an exit status outside the 0-3 range `_STATUS_OUTCOME` names, a crash (exit 1 WITH a Python traceback -- reclassified off `schema-violation` so a broken validator environment is never reported as a board defect, issue #38), or a run past `VALIDATOR_TIMEOUT_S`. Exit 2, NOT the oracle's exit 1 for the same outcome -- the deliberate tan-cli#262 divergence, documented at length in `validate_cmd.py`'s module docstring. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.missing-preset",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "note": "Assembled as `Issue(f\"validate.{result.outcome}\", ...)` from `OUTCOME_MISSING_PRESET` (validator exit 2). Added by tan-cli#376. `severity` here is the outcome's own (`severity_for_outcome`: a missing preset is the one outcome whose FAIL lines are warnings, not errors); an individual issue under this code can still be `error` (the synthesized fallback) or `note` (a standalone `hint:` line), since the validator's own per-line severity wins. Today's `scripts/validate_board_yaml.py` only ever exits 0 or 1, so this outcome is unreachable against a current SDK -- it is kept because `Outcome` is the vocabulary shared with the TS/extension side. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "validate.hardware-revision",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/validate_cmd.py",
+      "note": "Assembled as `Issue(f\"validate.{result.outcome}\", ...)` from `OUTCOME_HARDWARE_REVISION` (validator exit 3). Added by tan-cli#376. Same reachability note as `validate.missing-preset`: today's `scripts/validate_board_yaml.py` only ever exits 0 or 1, and this outcome is kept because it is part of the shared `Outcome` vocabulary. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "build.artefact-write-failed",
@@ -2249,6 +2321,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/renode_cmd.py",
       "note": "Renode's process exited before the --timeout deadline while serving the sim sockets. Faithful port of crates/tan-cli/src/commands/renode/sim.rs (tan-cli#77), diff-verified live against the shipped oracle; pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "new-som.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/new_som_cmd.py",
+      "note": "Every `tan new-som --format json` refusal: the SDK-root preflight, every argument the scaffold rejects (SKU/soc-ref/family/cores/board/hw-rev shape, an existing preset without --force), a write failure, and the two INTERNAL ERROR paths where a rendered skeleton fails its own schema self-check. One code for all of them because that is the ORACLE's own shape, measured not read: `target/debug/tan.exe new-som --format json` with no SDK resolvable answers command \"new-som\", data {\"subcommand\":\"new-som\"}, issues [{code \"new-som.failed\"}], exit 2 -- its `new-som` is a forwarder whose every failure reports this one spelling with the specifics in `message`. Added by tan-cli#399, which closes the gap where `new-som` emitted NO envelope and cli.py's generic fallback reported command \"cli\" / cli.parse-error for a refusal that really happened. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     }
   ]
 }
