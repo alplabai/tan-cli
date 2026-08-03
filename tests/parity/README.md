@@ -1,10 +1,12 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 # ADR-0020 parity gate
 
-`tan` (this repo) is the sole executor for the Alp Lab build (ADR-0020, end-state
-B). alp-sdk's planner is the fast-moving half of that split, so a planner
-change that emits fine but builds wrong must be caught before it reaches a
-release, not discovered on a bench. This directory seeds the gate ADR-0020's
+`tan` (this repo) is the sole planner/executor shipped to users. Its relocated
+planner under `python/tan/planner/` is checked against alp-sdk's original,
+fast-moving planner source, so a producer change that emits fine but builds
+wrong must be caught before it reaches a release, not discovered on a bench.
+The build-plan remains the internal planner/executor seam. This directory seeds
+the gate ADR-0020's
 2026-07-20 Amendment (alp-sdk#855) says is release-blocking: a **two-seam
 parity gate** plus a **cross-repo trigger** so alp-sdk CI can drive it on
 every planner change.
@@ -165,7 +167,7 @@ binary actually reads.** That is the point of the default: this gate measures
 a surface that tracks `PINNED_SDK_TAG`, so it must point at the tree that
 moves with the pin. The Rust wizard's copy at
 `crates/tan-core/src/wizard/vendored/` is frozen at its own v0.14.0 vendor
-point (`docs/ROADMAP.md`'s crates/contract freeze) and keeps its own SDK-free
+point (`docs/ROADMAP.md`'s `crates/` freeze) and keeps its own SDK-free
 `cargo test` for internal consistency; pass `--vendored crates/tan-core/src/
 wizard/vendored` with a v0.14.0 checkout to check it by hand.
 
@@ -184,9 +186,9 @@ python3 tests/parity/scaffold_byte_parity.py --sdk /path/to/an/alp-sdk/checkout
 ## Kconfig fixture byte-parity (alp-sdk#893/#894/#897)
 
 `kconfig_fixture_parity.py` guards the same class of drift for `tan
-kconfig`'s field contract (`crates/tan-core/src/kconfig.rs`): both that
-crate and `crates/tan-cli/src/commands/kconfig.rs` `include_str!` a vendored
-byte-copy of alp-sdk's canonical `--emit kconfig` contract anchor at
+kconfig`'s field contract. The shipping tests in
+`python/tests/commands/test_kconfig_command.py` and the frozen Rust modules
+consume a vendored byte-copy of alp-sdk's canonical `--emit kconfig` contract anchor at
 `tests/fixtures/kconfig-contract/emit-kconfig.golden.json` (same relative
 path in both repos) so `parse_kconfig`/`Envelope<KconfigData>` can be tested
 against the SDK's real field shape without a Zephyr/west workspace. This
@@ -235,7 +237,7 @@ fails that test until the constants are updated too.
 measured a frozen fixture against a moving pin — a comparison that can only
 ever fail. `contract/fixtures/bootstrap/manifest.json` is frozen at the
 v0.14.0 vendor point alongside `crates/tan-core/src/bootstrap/manifest.rs`
-(`docs/ROADMAP.md`'s crates/contract freeze), and per that document's Standing
+(`docs/ROADMAP.md`'s `crates/` freeze), and per that document's Standing
 Rules a frozen tree is measured at its OWN freeze vendor point, not at
 `PINNED_SDK_TAG`. The frozen fixture keeps its real gate: `manifest.rs`'s
 `the_fallback_matches_the_real_manifest_field_for_field` cargo test, which
