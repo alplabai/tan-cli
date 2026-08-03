@@ -38,32 +38,28 @@ from tan.commands.pinmux_cmd import (
 )
 from tan.commands.pinmux_cmd import pinmux as pinmux_command
 
+from tests.parity.oracle import resolve_oracle_for_skipif
+
 app = typer.Typer()
 app.command("pinmux")(pinmux_command)
 
 runner = CliRunner()
 
-#: `target/{release,debug}/tan(.exe)` next to this checkout -- the same
-#: discovery `tests/parity/oracle.py`'s `rust_binary()` uses, kept
-#: independent here rather than imported so this file's only non-stdlib
-#: dependency stays `tan.commands.pinmux_cmd` (matching every other test file
-#: under `tests/commands/`). `TAN_RUST_BINARY` overrides, same env var.
-_EXE = ".exe" if sys.platform == "win32" else ""
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-def _oracle_binary() -> str | None:
-    override = os.environ.get("TAN_RUST_BINARY")
-    if override:
-        return override
-    for profile in ("release", "debug"):
-        candidate = _REPO_ROOT / "target" / profile / f"tan{_EXE}"
-        if candidate.exists():
-            return str(candidate)
-    return None
-
-
-_ORACLE = _oracle_binary()
+#: The oracle binary, resolved by the ONE resolver in the suite
+#: (`tests/parity/oracle.py`'s `rust_binary()`): most-recently-built by mtime,
+#: not a fixed release-over-debug order.
+#:
+#: This used to be a private hand copy that tried `release` before `debug`
+#: unconditionally -- byte-identical to the one in `test_diff_command.py`, and
+#: a copy of exactly the resolution `rust_binary()` was rewritten to REMOVE
+#: because it "silently picked a STALE binary". On a tree carrying both
+#: profiles with `release` older, this file went red against `tan 0.3.1` with a
+#: `project.boardYaml` diff that read as a port regression, while the sibling
+#: copy stayed green measuring a divergence against that same stale oracle
+#: (tan-cli#393). The comment that used to sit here justified the duplication
+#: by keeping this module's only non-stdlib import `tan.commands.pinmux_cmd`;
+#: one importable rule is worth more than that tidiness.
+_ORACLE = resolve_oracle_for_skipif()
 _ORACLE_REQUIRED = pytest.mark.skipif(
     _ORACLE is None,
     reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
