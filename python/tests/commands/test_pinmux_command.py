@@ -445,6 +445,132 @@ def test_text_mode_no_target_shows_a_dash(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# tan-cli#359 -- `--family` may not escape `<sdkRoot>/metadata/pinmux`
+# ---------------------------------------------------------------------------
+
+#: Every `--family` shape that must be refused BEFORE any read. The Windows
+#: rows are exercised on POSIX too, deliberately: `pathlib` on POSIX treats a
+#: backslash as an ordinary filename character and `C:` as an ordinary
+#: filename, so a guard written against `os.sep` alone passes every one of
+#: these on Linux while leaving Windows wide open. The check under test reads
+#: the RAW string on every host, so these rows are meaningful everywhere --
+#: which is the whole point of running them here rather than behind a
+#: `sys.platform` skip.
+_REFUSED_FAMILIES = [
+    pytest.param("/etc/passwd", id="posix-absolute"),
+    pytest.param("../../../etc/passwd", id="posix-traversal"),
+    pytest.param("..", id="dotdot-component"),
+    pytest.param(".", id="dot-component"),
+    pytest.param("C:", id="windows-drive-relative"),
+    pytest.param("C:aen", id="windows-drive-relative-named"),
+    pytest.param("C:\\Windows\\aen", id="windows-rooted-drive"),
+    pytest.param("\\\\server\\share\\aen", id="windows-unc"),
+    pytest.param("\\aen", id="windows-rooted-no-drive"),
+    pytest.param("sub\\aen", id="backslash-separator"),
+    pytest.param("..\\..\\aen", id="backslash-traversal"),
+    pytest.param("sub/aen", id="slash-separator"),
+    pytest.param("", id="empty"),
+]
+
+
+@pytest.mark.parametrize("family", _REFUSED_FAMILIES)
+def test_family_outside_the_pinmux_dir_is_one_coded_refusal(tmp_path: Path, family: str) -> None:
+    """ONE coded issue, exit 2, no pads -- and, since a real table sits in the
+    SDK under the ordinary `aen` stem, the empty `pads` also witnesses that
+    nothing else was read in its place."""
+    sdk = _sdk_root(tmp_path, {"aen": _SAMPLE_TABLE})
+    proj = _project(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "--project", str(proj),
+            "--family", family,
+            "--sdk-root", str(sdk),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["data"]["pads"] == []
+    assert "displayName" not in envelope["data"]
+    assert [issue["code"] for issue in envelope["issues"]] == ["pinmux.family-invalid"]
+
+
+def test_absolute_family_no_longer_reads_a_second_sdk_checkout(tmp_path: Path) -> None:
+    """The issue's own reproduction, verbatim (tan-cli#359): with two alp-sdk
+    checkouts, `--sdk-root <A> --family <B>/metadata/pinmux/aen` used to exit 0
+    reporting `sdkRoot: <A>`, `pads: 96`, `issues: []` -- the envelope claiming
+    A while the table came from B. `Path(A) / "<B>/metadata/pinmux/aen.yaml"`
+    IS the B path (an absolute join discards the accumulated prefix), which is
+    exactly what made the sdkRoot field a lie rather than merely unhelpful.
+
+    B's table is a VALID one here, so a regression cannot hide behind a parse
+    error: if the read happened, `pads` is 2 and `issues` is empty."""
+    sdk_a = _sdk_root(tmp_path / "a", {})
+    sdk_b = _sdk_root(tmp_path / "b", {"aen": _SAMPLE_TABLE})
+    proj = _project(tmp_path)
+    escaping = str(sdk_b / "metadata" / "pinmux" / "aen")
+    result = runner.invoke(
+        app,
+        [
+            "--project", str(proj),
+            "--sdk-root", str(sdk_a),
+            "--family", escaping,
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["sdkRoot"] == str(sdk_a).replace("\\", "/")
+    assert envelope["data"]["pads"] == []
+    assert [issue["code"] for issue in envelope["issues"]] == ["pinmux.family-invalid"]
+
+
+def test_symlinked_table_escaping_the_pinmux_dir_is_refused(tmp_path: Path) -> None:
+    """The half the stem check structurally CANNOT see: `aen` is a perfectly
+    plain stem, and the escape lives in the filesystem instead. This is why
+    the containment re-check is a second, independent guard rather than a
+    belt-and-braces duplicate of the charset."""
+    sdk = _sdk_root(tmp_path, {})
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "aen.yaml").write_text(_SAMPLE_TABLE, encoding="utf-8")
+    link = sdk / "metadata" / "pinmux" / "aen.yaml"
+    try:
+        os.symlink(outside / "aen.yaml", link)
+    except (OSError, NotImplementedError) as err:
+        # Windows needs Developer Mode or SeCreateSymbolicLinkPrivilege; the
+        # guard is host-independent, so skipping the FIXTURE here costs no
+        # coverage of the guard itself on such a host.
+        pytest.skip(f"host cannot create a symlink: {err}")
+    proj = _project(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "--project", str(proj),
+            "--family", "aen",
+            "--sdk-root", str(sdk),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["pads"] == []
+    assert [issue["code"] for issue in envelope["issues"]] == ["pinmux.family-invalid"]
+
+
+# NON-VACUITY for the three refusals above -- a guard that refused EVERYTHING
+# would satisfy every one of them. Deliberately not a fresh unit test of the
+# private predicate: `test_family_overrides_sku_without_evaluating_it`
+# (`--family aen`, `issues == []`) and
+# `test_real_table_resolves_family_display_name_and_pads` (`--sku E1M-AEN801`
+# -> the `aen` stem, 2 pads) already assert the accepting side end to end,
+# through the same call path, and would both go red the moment the charset
+# stopped admitting an ordinary stem.
+
+
+# ---------------------------------------------------------------------------
 # Pure-function unit tests (mirrors `crates/tan-core/src/pinmux.rs`'s own
 # `#[cfg(test)]` module)
 # ---------------------------------------------------------------------------

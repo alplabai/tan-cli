@@ -52,6 +52,31 @@ SDK=${2:?usage: verify_binary.sh <binary> <alp-sdk-root>}
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
+# tan-cli#361: checks 3-5 run from a throwaway project directory (`cd "$work"`
+# below), so a RELATIVE argument -- which is exactly what the usage line above
+# documents (`dist/tan/tan`) -- stops resolving the instant that cd happens.
+# `sh scripts/verify_binary.sh ./dist/tan/tan /tmp/sdk` passed 1/5 and 2/5 and
+# then died with `./dist/tan/tan: not found` at 3/5. BOTH arguments carry the
+# bug, not just the one the issue named: $BIN is re-invoked in 3/5 and 4/5 and
+# read from disk in 5/5, and $SDK is handed to the binary as `--sdk-root` in
+# 4/5, where the binary resolves it against ITS cwd -- $work, not the caller's.
+# Every CI call site passed `$PWD/...`, which is why CI could never see it.
+#
+# Resolved HERE, once, before the first cd -- not lazily at each use site, so
+# whoever adds a check 6 does not have to remember. cd-into-dirname then `pwd`,
+# recombined with `basename`, because the one-liners do not exist everywhere
+# this runs: `readlink -f` is GNU-only (BSD readlink has no -f at all) and
+# `realpath` is absent from a stock macOS, while this script must also survive
+# busybox ash, dash, macOS bash 3.2 and Git Bash. `${bindir%/}` so a binary
+# sitting at the filesystem root comes back as `/tan` and not `//tan` -- a
+# leading `//` is implementation-defined in POSIX and Git Bash reads it as a
+# UNC share.
+[ -f "$BIN" ] || fail "no such binary: $BIN"
+[ -d "$SDK" ] || fail "no such alp-sdk checkout: $SDK"
+bindir=$(cd -- "$(dirname -- "$BIN")" && pwd)
+BIN="${bindir%/}/$(basename -- "$BIN")"
+SDK=$(cd -- "$SDK" && pwd)
+
 echo "== 1/5 $BIN --version"
 "$BIN" --version || fail "--version exited non-zero"
 

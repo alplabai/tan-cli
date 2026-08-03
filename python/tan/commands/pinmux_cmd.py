@@ -9,7 +9,8 @@ Resolves a `metadata/pinmux/<family>.yaml` family stem from an explicit
 and echoes it in the envelope -- the single source the extension/LSP consume
 instead of parsing `metadata/pinmux/<family>.yaml` themselves.
 
-**Fail-soft, deliberately, with one exception.** An unresolved SDK root, an
+**Fail-soft, deliberately, with two exceptions** -- this paragraph's, and the
+refused `--family` tan-cli#359 added below. An unresolved SDK root, an
 unknown SKU, no `--sku`/`--family` at all, or a family with no generated table
 on disk are each a `warning`-severity issue at exit 0 -- `pinmux` answers "I
 don't know" the same way for all of them, never a hard failure. A table that
@@ -17,7 +18,7 @@ DOES exist on disk but fails to parse (schema-version skew) or parses to ZERO
 pads (`pinmux-capability-v1.schema.json` requires `minItems: 1`, so an empty
 table is never a legitimate v1 document -- and, measured against the real
 `metadata/pinmux/v2n.yaml` in this checkout, an all-`"TBD"` family genuinely
-reaches this today) is the one case that is NOT fail-soft: `error` severity,
+reaches this today) is NOT fail-soft: `error` severity,
 [`tan.exit_codes.ExitCode.VALIDATION_FAILURE`].
 
 **No SDK-resolution warning for a broken project pin.** Unlike `presets`/
@@ -35,6 +36,17 @@ dropped too (the source TSV carries no E1M edge pad for that silicon pad --
 `metadata/pinmux/v2n.yaml`'s ENTIRE table is TBD-only at the time of writing,
 which is exactly what makes `pinmux.table-empty` a live path, not a
 hypothetical one).
+
+**`--family` is validated, and the resolved table path re-checked -- a
+DELIBERATE divergence from the oracle (tan-cli#359).** The oracle builds
+`sdk_root.join("metadata").join("pinmux").join(format!("{fam}.yaml"))` with no
+check on `fam` at all, and `Path::join`/`pathlib` both DISCARD the accumulated
+prefix when the joined component is absolute -- so `--family <other-sdk>/
+metadata/pinmux/aen` read a table out of a completely different checkout while
+the envelope still reported `sdkRoot` as the one it never touched (`..`
+components walked out the same way). [`_is_safe_family_stem`] and the
+[`resolve_confined`] re-check below close that; see `_resolve`'s own comment for
+why BOTH are needed rather than either alone.
 
 **A pad field is a `String` in the oracle, not a strict `serde_yaml`
 struct-typed deserialize -- refuted by running it.** Every `PinmuxPad` field
@@ -58,6 +70,7 @@ from typing import Any
 import typer
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
+from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -87,6 +100,29 @@ def pinmux_family_for_sku(sku: str) -> str | None:
         if sku.startswith(prefix):
             return stem
     return None
+
+
+def _is_safe_family_stem(family: str) -> bool:
+    """True when `family` is a plain `metadata/pinmux/<stem>.yaml` stem: ASCII
+    letters/digits/`-`/`_`, non-empty (tan-cli#359).
+
+    A CHARSET allowlist rather than a shape blocklist, the same trade
+    `tan.core.flash_plan.validate_identifier` already makes in this tree for
+    the same reason: every shape a hand-written blocklist would have to
+    enumerate carries a character this charset already rejects -- a separator
+    (`/` AND `\\`, checked in the raw string on EVERY host, because pathlib on
+    POSIX does not treat `\\` as one, so an `os.sep`-based check would protect
+    Linux and leave Windows open), a Windows drive or UNC prefix (`:`), a `.`
+    or `..` component (`.`), a NUL or a newline. Deliberately tighter than
+    `tan_core::path_guard::is_plain_relative`, which is a check for a plain
+    RELATIVE PATH: `a/b` passes that and is still not a family stem, and on
+    POSIX it also accepts `C:\\x` and `..\\..\\x` as ordinary filenames.
+
+    No dot is admitted because no `metadata/pinmux/*.yaml` stem has ever
+    contained one (`aen`, `imx93`, `v2n`); admitting one to be liberal would
+    buy nothing and hand back the `.`/`..` component this rejects outright.
+    """
+    return bool(family) and all(c.isascii() and (c.isalnum() or c in "-_") for c in family)
 
 
 @dataclass(frozen=True)
@@ -263,8 +299,57 @@ def _resolve(
     display_name: str | None = None
     pads: list[PinmuxPad] = []
 
+    # tan-cli#359. `--family` is caller-controlled and reaches this join
+    # unvalidated on the oracle: an ABSOLUTE value discards the SDK prefix
+    # entirely (`Path("/sdk-a") / "/sdk-b/metadata/pinmux/aen"` IS
+    # `/sdk-b/...`, same as Rust's `Path::join`) and `..` walks out of it, so
+    # the envelope reported `sdkRoot` = the checkout it never read. Checked
+    # here, at the ONE place a family becomes a path, so the `--sku` route is
+    # covered by construction too -- and BEFORE `sdk`/`resolved_family` are
+    # even paired, so a rejected family never reaches the read.
+    #
+    # TWO INDEPENDENT checks, because each has a hole the other covers: the
+    # stem charset cannot see a SYMLINK planted inside `metadata/pinmux/`
+    # (`aen.yaml` -> elsewhere is a perfectly plain stem), and a containment
+    # re-check alone would wave through a `../pinmux/aen`-shaped family that
+    # merely happens to land back inside. Exactly one coded issue either way;
+    # nothing else can have been appended yet at the first check (`--family`
+    # short-circuits the `--sku` lookup, and `pinmux.no-target` only fires
+    # when `resolved_family is None`).
+    if resolved_family is not None and not _is_safe_family_stem(resolved_family):
+        issues.append(
+            Issue(
+                "pinmux.family-invalid",
+                "error",
+                f"Pinmux family '{resolved_family}' is not a plain family stem "
+                "(ASCII letters, digits, '-' and '_' only) -- refusing to read a "
+                "table from outside <sdkRoot>/metadata/pinmux.",
+            )
+        )
+        return sdk, resolved_family, None, [], issues, ExitCode.VALIDATION_FAILURE
+
     if sdk is not None and resolved_family is not None:
-        table_path = Path(sdk[0]) / "metadata" / "pinmux" / f"{resolved_family}.yaml"
+        table_dir = Path(sdk[0]) / "metadata" / "pinmux"
+        try:
+            # `resolve_confined` resolves BOTH sides and compares components,
+            # so it is correct where a `str.startswith` prefix test is not
+            # (Windows case folding, `C:\proj` vs `C:\project2`) -- the same
+            # shared guard `init`/`generate`/`scaffold` use, not a fourth
+            # hand-rolled copy of the predicate. `OSError`/`ValueError` are
+            # caught per its own docstring: a path shape the host rejects
+            # outright (a Windows device-namespace path, one embedding a NUL)
+            # raises there and is a refusal just the same.
+            table_path = resolve_confined(table_dir, table_dir / f"{resolved_family}.yaml")
+        except (PathEscapeError, OSError, ValueError):
+            issues.append(
+                Issue(
+                    "pinmux.family-invalid",
+                    "error",
+                    f"Pinmux capability table for family '{resolved_family}' resolves "
+                    "outside <sdkRoot>/metadata/pinmux -- refusing to read it.",
+                )
+            )
+            return sdk, resolved_family, None, [], issues, ExitCode.VALIDATION_FAILURE
         try:
             text = table_path.read_text(encoding="utf-8")
         except OSError:
