@@ -91,7 +91,7 @@ from tan.core.system_manifest import (
     raw_passthrough,
     slice_build_dir,
 )
-from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit, json_safe_floats
 from tan.exit_codes import ExitCode
 
 #: Streaming read size for the SHA-256, matching the oracle's 65536-byte buffer.
@@ -346,7 +346,17 @@ def _assemble_bundle(
         # `indent=2` + serde_json's `to_string_pretty` separators, and exactly one
         # trailing newline written with `newline=""` so a Windows host cannot
         # silently rewrite the file to CRLF (I-27).
-        document = json.dumps(bundle, indent=2) + "\n"
+        #
+        # `json_safe_floats` for the same reason the envelope applies it, and it
+        # matters MORE here (tan-cli#387): this is a persisted artefact that
+        # downstream flashing/OTA tooling parses long after the run that wrote
+        # it. A `.inf` in `hw_info` used to leave `Infinity` on disk inside a
+        # bundle tan had just reported as successfully assembled, so every
+        # strict consumer of that file failed with nothing in the envelope
+        # saying why. It cannot be shared with the envelope's own call -- this
+        # document is written before `data` is built, and the two go through
+        # different `json.dumps` calls.
+        document = json.dumps(json_safe_floats(bundle), indent=2) + "\n"
     except (TypeError, ValueError) as err:
         # `hw_info` is verbatim YAML: a mapping key JSON cannot express reaches
         # here. The oracle hits the same wall in `Envelope::to_json` and reports
