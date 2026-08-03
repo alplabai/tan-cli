@@ -10,11 +10,19 @@ them only in lockstep with the extension's `releaseAssetForTarget`.
 > **From v0.5.0 the assets are PyInstaller freezes of `python/`** (the Python
 > port), not `cargo` builds of `crates/` — tan-cli#271. The asset NAMES keep
 > the Rust target triples, because the extension hardcodes them. Four assets
-> ship, not eight, and the crates.io publish is gone. **From v0.5.0-rc4 each
-> asset is an ARCHIVE (`.zip` / `.tar.gz`) of a PyInstaller `--onedir` freeze,
+> ship, not eight, and the crates.io publish is gone. **From v0.5.0 each asset
+> is also an ARCHIVE (`.zip` / `.tar.gz`) of a PyInstaller `--onedir` freeze,
 > not a raw binary** — tan-cli#349, see "Asset names" below for why. Everything
 > below is written for that release; where it describes the retired Rust
 > pipeline it says so explicitly.
+>
+> **v0.5.0 is the transition tag, and it is not cut yet.** Every tag published
+> so far ships a RAW binary — `v0.4.1` (currently `latest`) and `v0.5.0-rc4`
+> included. rc4 carries the `--onefile` freeze as a raw asset, which is what the
+> 13–19 s macOS measurement below was taken on; do not read "`--onedir`" or
+> "archive" as something rc4 shipped, because it shipped neither. Both
+> installers consequently support **both** shapes and decide per release
+> (tan-cli#356) — see [Which shape a release publishes](#which-shape-a-release-publishes).
 
 ## Tag scheme
 
@@ -82,12 +90,14 @@ other.
 
 ## Asset names
 
-**From v0.5.0-rc4 (tan-cli#349), one ARCHIVE per target triple** — previously
-one raw, uncompressed binary:
+**From v0.5.0 (tan-cli#349), one ARCHIVE per target triple** — up to and
+including `v0.5.0-rc4` it is one raw, uncompressed binary:
 
 ```
-tan-<target-triple>.tar.gz     # Unix
-tan-<target-triple>.zip        # Windows
+tan-<target-triple>.tar.gz     # Unix,    v0.5.0 and later
+tan-<target-triple>.zip        # Windows, v0.5.0 and later
+tan-<target-triple>            # Unix,    v0.5.0-rc4 and earlier
+tan-<target-triple>.exe        # Windows, v0.5.0-rc4 and earlier
 ```
 
 Why an archive now: the assets are PyInstaller `--onedir` freezes, not
@@ -117,6 +127,37 @@ Plus two non-binary assets, carrying the same build-provenance attestation:
 | --- | --- |
 | `checksums.txt` | sha256 of every other asset. |
 | `envelope-contract.json` | The JSON envelope contract — the frozen issue codes (`contract/issue-codes.json`) plus one golden envelope per command family (`contract/envelopes/`), so a consumer's contract test diffs against a published artefact instead of a hand-copied fixture that drifts. See [`contract/README.md`](../contract/README.md). |
+
+## Which shape a release publishes
+
+Two shapes exist in the wild and both are supported for as long as the raw tags
+are installable, so **a consumer must not assume either one**. tan-cli#356 is
+what that costs when you do: #349 pointed both installers at the archive names
+unconditionally, and since no published tag has them, `sh install.sh` —
+the documented command, with no arguments — 404'd on
+`tan-x86_64-unknown-linux-gnu.tar.gz` at `v0.4.1`.
+
+`checksums.txt` is the answer. It lists **every** asset in the release, it is
+published at every tag, and it is the integrity source a consumer has to fetch
+anyway — so it doubles as the asset manifest at zero extra cost. Both
+installers now fetch it FIRST, take `tan-<triple>.tar.gz` / `.zip` if it is
+listed there and the raw `tan-<triple>` / `.exe` if it is not, and then verify
+the download against the digest out of that same file **before** unpacking
+anything or writing to the install directory.
+
+Deliberately **not** a version comparison against `v0.5.0`. That is a second
+source of truth about the release, kept somewhere the release cannot update,
+and it has to model SemVer pre-release ordering correctly (`v0.5.0-rc4` sorts
+BELOW `v0.5.0`) in POSIX `sh` and in PowerShell, in agreement, forever. It is
+also **not** a magic-number sniff of the downloaded bytes, even though that is
+#349's own rule on the alp-sdk-vscode side: the extension holds a file it has
+already fetched, whereas an installer has to choose a NAME before there are any
+bytes to sniff.
+
+An installer that finds neither name refuses and says so, naming both — with
+`checksums.txt` doubling as the manifest, "this platform has no asset in this
+release" and "the release shipped an asset and forgot to check-sum it" arrive
+through the same door, and only the release page can tell them apart.
 
 ## Targets published
 
@@ -163,6 +204,21 @@ PyInstaller's own musllinux wheel: `bootloader/Linux-64bit-intel-musl/run`), so
 it runs **only on musl distros** — it is not the "static, runs on any libc"
 artefact the Rust `-musl` target produced, and shipping it under that name
 would break every Ubuntu/Debian/Fedora consumer.
+
+**`install.sh` refuses a musl host (e.g. Alpine) outright, for every `--version`
+— including an older tag that genuinely still publishes a `-unknown-linux-musl`
+asset**, such as `v0.4.1`. This is a deliberate, host-level refusal, not a
+per-tag one: the raw-vs-archive shape selection is genuinely per-tag
+(tan-cli#356), but musl support is not resurrected for any tag by this
+installer, past or future, regardless of what that tag's own `checksums.txt`
+lists. The alternative — working on Alpine for old tags and refusing for new
+ones, with the boundary being whichever `--version` a user happened to type —
+is a worse promise than one clear refusal every time. A musl consumer installs
+from a checkout instead (`git clone` + `pip install ./tan-cli/python`), which
+the refusal message says. Do not read this refusal as fixed by #356: it
+predates that change and is orthogonal to it, and moving it to run per-tag
+(after the `checksums.txt` lookup) is a valid future revisit, not a limitation
+inherent to musl or to PyInstaller.
 
 ### Reference `releaseAssetForTarget` (vscode side)
 
@@ -243,7 +299,7 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
 
 ## Decisions
 
-- **Archive, not a raw binary (tan-cli#349, from v0.5.0-rc4).** The build
+- **Archive, not a raw binary (tan-cli#349, from v0.5.0).** The build
   switched from PyInstaller `--onefile` to `--onedir`, so each release asset
   is now a `.zip`/`.tar.gz` archive of a directory (`tan` + `_internal/`), not
   a single raw executable. **Why**: `--onefile` re-extracts its whole ~14 MB
@@ -256,8 +312,12 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
   invocation — measured 0.337 s mean vs 0.880 s mean for `--version` on the
   same host, a >2x win even on Windows, which was never the platform in
   trouble. This is a real behavioural cost, not a preference, so raw-binary
-  stays retired even though it was simpler for a consumer to fetch: `install.sh`
-  / `install.ps1` absorb the extra unpack step so most consumers never see it.
+  stays retired for NEW tags even though it was simpler for a consumer to
+  fetch: `install.sh` / `install.ps1` absorb the extra unpack step so most
+  consumers never see it. Retired for new tags is not the same as gone: the raw
+  assets already published stay published and stay installable, which is why
+  both installers keep a working path for them and pick per release rather than
+  per version number (tan-cli#356).
 - **Four targets, one per runner.** A PyInstaller freeze embeds the interpreter
   it ran under, so there is no cross-build to be had: the runner IS the target.
   Eight targets were possible while the binary was a `cargo` build (Windows

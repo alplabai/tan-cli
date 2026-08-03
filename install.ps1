@@ -7,26 +7,45 @@
 # and update the MACHINE Path (that requires an elevated / "Run as
 # administrator" PowerShell).
 #
-# From v0.5.0-rc4 (tan-cli#349) the asset is a PyInstaller --onedir freeze
-# archived as a .zip, not a raw tan.exe: --onefile re-extracted its whole
-# runtime into a fresh temp dir on EVERY invocation, which measured 13-19 s on
-# macOS (unsigned re-extracted .dylibs get re-verified by the OS on every
-# load) and even on Windows measured >2x slower per-invocation than --onedir.
-# $Dir\tan.cmd is therefore a thin launcher now, not the executable itself --
-# the unpacked freeze lives in $Dir\tan-cli-lib\. Mirrors install.sh's shape
-# for the .tar.gz side of the same change.
+# The asset's SHAPE depends on which release you install, and this script reads
+# that off the release rather than assuming it (tan-cli#356):
+#
+#   * From v0.5.0 (tan-cli#349) the asset is a PyInstaller --onedir freeze
+#     archived as a .zip, not a raw tan.exe: --onefile re-extracted its whole
+#     runtime into a fresh temp dir on EVERY invocation, which measured 13-19 s
+#     on macOS (unsigned re-extracted .dylibs get re-verified by the OS on every
+#     load) and even on Windows measured >2x slower per-invocation than
+#     --onedir. $Dir\tan.cmd is then a thin launcher, not the executable itself
+#     -- the unpacked freeze lives in $Dir\tan-cli-lib\.
+#   * Every tag published BEFORE v0.5.0 -- including v0.4.1, which is what
+#     `latest` resolves to today, and the v0.5.0-rc4 pre-release -- publishes a
+#     raw tan.exe. That one is installed as $Dir\tan.exe, no launcher and no
+#     tan-cli-lib\.
+#
+# Mirrors install.sh's shape for the .tar.gz side of the same change.
 #
 #   irm https://raw.githubusercontent.com/alplabai/tan-cli/main/install.ps1 | iex
-#   .\install.ps1 [-Version vX.Y.Z] [-Dir <path>] [-System]
+#   .\install.ps1 [-Version vX.Y.Z] [-Dir <path>] [-System] [-NoModifyPath]
 [CmdletBinding()]
 param(
 	[string]$Version = "latest",
 	[string]$Dir = "",
-	[switch]$System
+	[switch]$System,
+	# Skip the Path update. install.sh has had --no-modify-path since it started
+	# editing rc files; this script writes to the USER (or MACHINE) environment
+	# in the registry, which is the more persistent of the two, and had no way
+	# to opt out at all. Also what lets this script's own tests run without
+	# leaving a pile of dead temp directories on the developer's Path.
+	[switch]$NoModifyPath
 )
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 $repo = "alplabai/tan-cli"
+# Where release assets are fetched from. Overridable for an internal mirror that
+# carries the same <tag>/<asset> layout (and it is how this installer's own tests
+# serve a fixture release offline). `latest` is still resolved against GitHub's
+# API -- a mirror hosts bytes, it does not decide which tag is current.
+$baseUrl = if ($env:TAN_INSTALL_BASE_URL) { $env:TAN_INSTALL_BASE_URL } else { "https://github.com/$repo/releases/download" }
 
 # host arch -> rust target arch part
 $archRaw = $env:PROCESSOR_ARCHITECTURE
@@ -36,7 +55,8 @@ switch ($archRaw) {
 	"ARM64" { $archPart = "aarch64" }
 	default { throw "install.ps1: unsupported architecture '$archRaw'" }
 }
-$asset = "tan-$archPart-pc-windows-msvc.zip"
+$archiveAsset = "tan-$archPart-pc-windows-msvc.zip"
+$rawAsset = "tan-$archPart-pc-windows-msvc.exe"
 
 # install dir + PATH scope: user-local (no admin) by default, machine with -System (admin)
 if ($System) {
@@ -97,56 +117,26 @@ if ($Version -eq "latest") {
 		exit 1
 	}
 }
-$url = "https://github.com/$repo/releases/download/$Version/$asset"
-$sumsUrl = "https://github.com/$repo/releases/download/$Version/checksums.txt"
+$sumsUrl = "$baseUrl/$Version/checksums.txt"
 
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 $LibDir = Join-Path $Dir "tan-cli-lib"
-$dest = Join-Path $Dir "tan.cmd"
 
-# A pre-#349 install left a raw tan.exe directly at $Dir\tan.exe. If it is
-# still there, it SHADOWS the new tan.cmd launcher: cmd.exe/PowerShell resolve
-# a bare `tan` by walking PATHEXT in order (.COM;.EXE;.BAT;.CMD by default),
-# so a stale tan.exe next to the new tan.cmd would keep winning and PATH would
-# silently keep running last release's binary forever. Removed unconditionally
-# before the new launcher is written, not merely overwritten, since the two
-# have different filenames.
-$legacyExe = Join-Path $Dir "tan.exe"
-if (Test-Path -LiteralPath $legacyExe) {
-	Write-Host "install.ps1: removing pre-#349 $legacyExe (would otherwise shadow the new tan.cmd launcher on PATH)."
-	Remove-Item -LiteralPath $legacyExe -Force -ErrorAction SilentlyContinue
-}
-
-# Download to a TEMP file, never straight into $Dir. Writing into the
-# destination first and checking afterwards means a mismatched archive has
-# already landed -- and on Windows it may already be locked, or already on
-# PATH, by the time the check fails. Verify, then unpack.
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ("tan-" + [Guid]::NewGuid().ToString("N") + ".zip")
-$sumsTmp = "$tmp.checksums.txt"
-$stage = Join-Path ([IO.Path]::GetTempPath()) ("tan-stage-" + [Guid]::NewGuid().ToString("N"))
-Write-Host "install.ps1: downloading tan ($archPart, $Version)..."
+# Download to TEMP, never straight into $Dir. Writing into the destination
+# first and checking afterwards means a mismatched file has already landed --
+# and on Windows it may already be locked, or already on PATH, by the time the
+# check fails. Verify, then unpack/move.
+#
+# One GUID stem for all three temp paths, so `finally` can clear them with a
+# single wildcard even though $tmp's extension is not known until the asset has
+# been chosen (Expand-Archive REFUSES a path that does not end in .zip, so the
+# extension cannot just be left off).
+$tmpBase = Join-Path ([IO.Path]::GetTempPath()) ("tan-" + [Guid]::NewGuid().ToString("N"))
+$sumsTmp = "$tmpBase.checksums.txt"
+$stage = "$tmpBase.stage"
 try {
-	# The transport error a 404 throws here says only THAT the fetch failed,
-	# never why -- and a 404 for an asset that was never published looks
-	# identical to a network/proxy outage otherwise. Name the one cause this
-	# script can actually know (there is no Windows arm64 asset, ever, from
-	# v0.5.0 -- a PyInstaller freeze cannot be cross-compiled, and this release
-	# builds on four runners, not six) and point at the source install; guess
-	# at nothing else. Mirrors install.sh's equivalent case for linux/arm64.
-	try {
-		Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
-	} catch {
-		Write-Host "install.ps1: download failed: $url" -ForegroundColor Red
-		if ($archPart -eq "aarch64") {
-			Write-Error "install.ps1: there is no prebuilt Windows arm64 asset from v0.5.0 onward. The binary is a frozen build that must be produced on the architecture it runs on, and the release builds no Windows arm64 leg. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
-		} else {
-			Write-Error "install.ps1: if this is a 404 rather than a network failure, check which assets $Version actually publishes: https://github.com/$repo/releases"
-		}
-		exit 1
-	}
-
 	# -----------------------------------------------------------------------
-	# Verify what landed against the checksums.txt published in the SAME release.
+	# Verify what lands against the checksums.txt published in the SAME release.
 	#
 	# TLS says we talked to github.com. It does not say github.com handed us the
 	# bytes we published, and it says nothing about a proxy, a cache, or a
@@ -164,27 +154,103 @@ try {
 	# not the same situation and must not read the same. (Get-FileHash is built
 	# in since PowerShell 4, so the POSIX script's fourth outcome -- no sha256
 	# tool on PATH -- cannot arise here.) Nothing reaches $Dir on any of them.
+	#
+	# checksums.txt is fetched FIRST, before the asset, because it is now also
+	# the asset MANIFEST -- see the selection block below.
 	# -----------------------------------------------------------------------
-	Write-Host "install.ps1: verifying against $Version checksums.txt..."
+	Write-Host "install.ps1: fetching $Version checksums.txt..."
 	try {
 		Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsTmp -UseBasicParsing
 	} catch {
 		# Outcome 1: the digests could not be fetched. Says nothing about the
-		# archive -- which is why it must not be worded like a mismatch.
-		Write-Error "install.ps1: could not fetch $sumsUrl`nRefusing to install -- the archive downloaded, but there is nothing to check it against. This is a fetch failure, NOT evidence the archive is bad. Retry, or check a proxy/firewall."
+		# release's contents -- which is why it must not be worded like a
+		# mismatch.
+		Write-Error "install.ps1: could not fetch $sumsUrl`nRefusing to install -- that file is both the list of assets $Version publishes and the only thing to verify a download against, so without it there is nothing to fetch and nothing to check. This is a fetch failure, NOT evidence anything is wrong with the release. Retry, or check a proxy/firewall."
 		exit 1
 	}
 
-	$want = $null
-	foreach ($line in Get-Content -LiteralPath $sumsTmp) {
-		$parts = $line -split '\s+', 2
-		if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $asset) { $want = $parts[0].Trim(); break }
+	# -----------------------------------------------------------------------
+	# WHICH SHAPE does this release publish? (tan-cli#356)
+	#
+	# From v0.5.0 the asset is a .zip of a --onedir freeze (tan-cli#349). Every
+	# tag published before it -- v0.4.1, which is what `latest` resolves to
+	# today, and the v0.5.0-rc4 pre-release -- publishes a raw tan.exe under the
+	# same triple. Requesting the .zip unconditionally 404s on every tag that
+	# exists right now, which is what #356 reported.
+	#
+	# Decided by asking the release ITSELF which name it carries, through the
+	# checksums.txt just fetched: that file lists every asset in the release, it
+	# comes from the tag already pinned above, and it is fetched unconditionally
+	# anyway because it is the integrity source. No extra request, and no second
+	# source of truth -- a release is the only authority on what it contains.
+	#
+	# Two alternatives, both rejected (install.sh rejects them for the same
+	# reasons; the two scripts must not disagree about which asset a tag has):
+	#
+	#   * Comparing $Version against v0.5.0. That is exactly the "second source
+	#     of truth that drifts" #349 rejected on the extension side, and it also
+	#     needs SemVer pre-release ordering -- v0.5.0-rc4 sorts BELOW v0.5.0,
+	#     which [version] does not model at all ([version]"0.5.0-rc4" does not
+	#     even parse). A bug there picks the wrong shape silently.
+	#   * Sniffing the downloaded bytes' magic number (PK.. vs MZ), which IS
+	#     #349's own rule for the extension. It does not transfer here: the
+	#     extension holds a file at a path it has already fetched, so its bytes
+	#     are in hand before the question is asked. These two shapes have
+	#     different NAMES, so a name must be chosen before there are any bytes.
+	#
+	# None of this weakens the integrity check: the digest still comes from this
+	# same file and is still compared BEFORE anything is expanded or written to
+	# $Dir.
+	# -----------------------------------------------------------------------
+	$sumsLines = Get-Content -LiteralPath $sumsTmp
+	function Get-DigestFor([string]$name) {
+		foreach ($line in $sumsLines) {
+			$parts = $line -split '\s+', 2
+			# Exact field match, never a substring: `tan-x86_64-pc-windows-msvc.exe`
+			# is a SUFFIX of nothing here, but `tan-x86_64-pc-windows-msvc` is a
+			# prefix of both names this script asks about.
+			if ($parts.Count -eq 2 -and $parts[1].Trim() -eq $name) { return $parts[0].Trim() }
+		}
+		return $null
+	}
+
+	# Archive first, so a release carrying both is installed in the current
+	# shape rather than the legacy one.
+	$asset = $archiveAsset
+	$layout = "archive"
+	$want = Get-DigestFor $asset
+	if (-not $want) {
+		$asset = $rawAsset
+		$layout = "raw"
+		$want = Get-DigestFor $asset
 	}
 	if (-not $want) {
-		# Outcome 2: fetched fine, but this asset is not in it. A release that
-		# shipped the archive and omitted it from checksums.txt is a release bug,
-		# and installing anyway is how it would stay one.
-		Write-Error "install.ps1: $asset is not listed in $Version's checksums.txt`nRefusing to install -- the digest file exists but does not cover this asset, so it cannot be verified. Report this against $repo; the release is incomplete."
+		# Outcome 2, widened by #356: this release lists no asset for this
+		# platform under EITHER name. It used to mean only "the release forgot
+		# to checksum an asset it shipped"; it now also covers "this platform
+		# has no asset here at all", so it must name both rather than assert the
+		# rarer one.
+		Write-Host "install.ps1: $Version lists no asset for $archPart-pc-windows-msvc in its checksums.txt -- neither $archiveAsset nor $rawAsset." -ForegroundColor Red
+		if ($archPart -eq "aarch64") {
+			Write-Error "install.ps1: there is no prebuilt Windows arm64 asset from v0.5.0 onward. The binary is a frozen build that must be produced on the architecture it runs on, and the release builds no Windows arm64 leg. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
+		} else {
+			Write-Error "install.ps1: refusing to install. Check what $Version publishes: https://github.com/$repo/releases -- if an asset for this platform IS listed there, the release is incomplete (shipped but left out of checksums.txt) and should be reported against $repo; either way there is nothing here to verify against."
+		}
+		exit 1
+	}
+
+	$tmp = if ($layout -eq "archive") { "$tmpBase.zip" } else { "$tmpBase.exe" }
+	$url = "$baseUrl/$Version/$asset"
+	Write-Host "install.ps1: downloading $asset ($Version)..."
+	try {
+		Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+	} catch {
+		# Unlike before #356 this is no longer where a "never published" 404
+		# surfaces -- the selection above already proved the release lists this
+		# asset -- so a failure here is a transport problem, or a release whose
+		# checksums.txt and uploaded assets disagree.
+		Write-Host "install.ps1: download failed: $url" -ForegroundColor Red
+		Write-Error "install.ps1: refusing to install. $Version's checksums.txt lists $asset, so the file is expected to exist -- this is most likely a network/proxy failure. If it is a 404, that release is inconsistent: https://github.com/$repo/releases"
 		exit 1
 	}
 
@@ -197,60 +263,95 @@ try {
 	Write-Host "install.ps1: sha256 OK ($got)"
 
 	# -------------------------------------------------------------------------
-	# Unpack + install a launcher (tan-cli#349). $tmp is now a verified .zip of
-	# a --onedir freeze, not an executable -- expand it into a private staging
-	# dir first (no admin needed for that either), THEN move the unpacked tree
-	# into place and write the launcher last, mirroring install.sh's shape
-	# (staging dir, unwrap, move into place, launcher last) rather than
-	# inventing a second approach.
+	# Put it in place. Two layouts (tan-cli#356), and the two names SHADOW each
+	# other on PATH, so whichever one is not being installed must be removed --
+	# not merely left alone. cmd.exe/PowerShell resolve a bare `tan` by walking
+	# PATHEXT in order (.COM;.EXE;.BAT;.CMD by default), so a leftover tan.exe
+	# always beats a tan.cmd sitting beside it. A stale tan.exe next to a fresh
+	# launcher would silently keep running the previous release forever; a stale
+	# tan.cmd next to a fresh tan.exe is the harmless direction on PATH but
+	# still points at a tan-cli-lib\ that is about to be deleted, so it goes too.
 	#
-	# The archive's one top-level entry is `tan\`, matching build_binary.sh's
-	# `shutil.make_archive(..., base_dir="tan")`, containing `tan.exe` (the real
-	# executable) plus `_internal\` (its runtime).
+	# archive (v0.5.0+, tan-cli#349): $tmp is a verified .zip of a --onedir
+	# freeze, not an executable -- expand it into a private staging dir first
+	# (no admin needed for that either), THEN move the unpacked tree into place
+	# and write the launcher last, mirroring install.sh's shape (staging dir,
+	# unwrap, move into place, launcher last) rather than inventing a second
+	# approach. The archive's one top-level entry is `tan\`, matching
+	# build_binary.sh's `shutil.make_archive(..., base_dir="tan")`, containing
+	# `tan.exe` (the real executable) plus `_internal\` (its runtime).
+	#
+	# raw (every tag before v0.5.0): $tmp already IS tan.exe and becomes
+	# $Dir\tan.exe directly -- no launcher, no tan-cli-lib\.
 	# -------------------------------------------------------------------------
-	Expand-Archive -LiteralPath $tmp -DestinationPath $stage -Force
-	$stagedExe = Join-Path $stage "tan\tan.exe"
-	if (-not (Test-Path -LiteralPath $stagedExe)) {
-		Write-Error "install.ps1: $asset did not contain tan\tan.exe after extraction -- archive layout changed?"
-		exit 1
+	$destCmd = Join-Path $Dir "tan.cmd"
+	$destExe = Join-Path $Dir "tan.exe"
+	$dest = if ($layout -eq "archive") { $destCmd } else { $destExe }
+	foreach ($stale in @($destCmd, $destExe)) {
+		if ($stale -ne $dest -and (Test-Path -LiteralPath $stale)) {
+			Write-Host "install.ps1: removing $stale left by a previous install (it would otherwise shadow $dest on PATH)."
+			Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
+		}
 	}
-
-	# A re-install replaces the old freeze wholesale rather than merging trees.
+	# Unconditional: on the raw path there is no $LibDir to create, and leaving
+	# a previous install's ~14 MB runtime behind orphans it.
 	if (Test-Path -LiteralPath $LibDir) { Remove-Item -LiteralPath $LibDir -Recurse -Force }
-	Move-Item -LiteralPath (Join-Path $stage "tan") -Destination $LibDir -Force
 
-	# A thin launcher, not a symlink (symlinks need elevation/Developer Mode on
-	# Windows by default and would not survive `-System` cleanly either): a
-	# .cmd, because PATHEXT resolves `tan` to it the same way it would an .exe,
-	# and it gives a future reader somewhere obvious to add a wrapper concern
-	# without editing the generated tree in place. `%~dp0` (the launcher's own
-	# directory) rather than a baked-in absolute path, so the launcher keeps
-	# working if $Dir is ever relocated as a unit.
-	$launcherContent = @'
+	if ($layout -eq "archive") {
+		Expand-Archive -LiteralPath $tmp -DestinationPath $stage -Force
+		$stagedExe = Join-Path $stage "tan\tan.exe"
+		if (-not (Test-Path -LiteralPath $stagedExe)) {
+			Write-Error "install.ps1: $asset did not contain tan\tan.exe after extraction -- archive layout changed?"
+			exit 1
+		}
+		Move-Item -LiteralPath (Join-Path $stage "tan") -Destination $LibDir -Force
+
+		# A thin launcher, not a symlink (symlinks need elevation/Developer Mode
+		# on Windows by default and would not survive `-System` cleanly either):
+		# a .cmd, because PATHEXT resolves `tan` to it the same way it would an
+		# .exe, and it gives a future reader somewhere obvious to add a wrapper
+		# concern without editing the generated tree in place. `%~dp0` (the
+		# launcher's own directory) rather than a baked-in absolute path, so the
+		# launcher keeps working if $Dir is ever relocated as a unit.
+		$launcherContent = @'
 @echo off
 rem Generated by tan install.ps1 (tan-cli#349) -- do not edit by hand.
 rem Re-run install.ps1 to update both this launcher and %~dp0tan-cli-lib.
 "%~dp0tan-cli-lib\tan.exe" %*
 exit /b %ERRORLEVEL%
 '@
-	# ASCII, no BOM: a BOM ahead of `@echo off` corrupts cmd.exe's parse of the
-	# first line on some Windows builds.
-	Set-Content -LiteralPath $dest -Value $launcherContent -Encoding ascii -NoNewline
+		# ASCII, no BOM: a BOM ahead of `@echo off` corrupts cmd.exe's parse of
+		# the first line on some Windows builds.
+		Set-Content -LiteralPath $dest -Value $launcherContent -Encoding ascii -NoNewline
+	} else {
+		Move-Item -LiteralPath $tmp -Destination $dest -Force
+	}
 } finally {
-	Remove-Item -LiteralPath $tmp, $sumsTmp -Force -ErrorAction SilentlyContinue
-	Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+	# One wildcard over the shared GUID stem: $tmp/$sumsTmp/$stage all hang off
+	# $tmpBase, and $tmp may not even be assigned yet if the selection above
+	# refused (Set-StrictMode makes naming an unassigned variable a throw, which
+	# inside `finally` would mask the real error).
+	Remove-Item -Path "$tmpBase*" -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # Add $Dir to the chosen PATH scope if absent. Machine scope requires admin;
 # SetEnvironmentVariable throws a clear permission error if not elevated.
 $curPath = [Environment]::GetEnvironmentVariable("Path", $scope)
 if (-not ($curPath -split ';' | Where-Object { $_ -eq $Dir })) {
-	$newPath = if ([string]::IsNullOrEmpty($curPath)) { $Dir } else { "$curPath;$Dir" }
-	[Environment]::SetEnvironmentVariable("Path", $newPath, $scope)
-	Write-Host "install.ps1: added $Dir to the $scope Path -- restart the terminal for it to take effect."
+	if ($NoModifyPath) {
+		Write-Host "install.ps1: $Dir is not on the $scope Path -- add it yourself, or re-run without -NoModifyPath."
+	} else {
+		$newPath = if ([string]::IsNullOrEmpty($curPath)) { $Dir } else { "$curPath;$Dir" }
+		[Environment]::SetEnvironmentVariable("Path", $newPath, $scope)
+		Write-Host "install.ps1: added $Dir to the $scope Path -- restart the terminal for it to take effect."
+	}
 }
 
-Write-Host "install.ps1: installed tan -> $dest (runtime: $LibDir)"
+if ($layout -eq "archive") {
+	Write-Host "install.ps1: installed tan -> $dest (runtime: $LibDir)"
+} else {
+	Write-Host "install.ps1: installed tan -> $dest"
+}
 # The sha256 check above proves the BYTES are the ones the release published;
 # it says nothing about whether THIS host can execute them. `& $dest --version`
 # with its exit code unchecked does not fail the script even when the binary
@@ -275,6 +376,10 @@ if ($verifyExit -eq 0) {
 	Write-Host "install.ps1: installed binary failed to run: $verifyOut" -ForegroundColor Red
 	Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
 	Remove-Item -LiteralPath $LibDir -Recurse -Force -ErrorAction SilentlyContinue
-	Write-Error "install.ps1: removed $dest and $LibDir -- install failed. This host may be missing a runtime dependency the binary needs, or security software may have altered it. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
+	# Names only what actually existed: on the raw layout there is no $LibDir,
+	# and telling a user a path was removed that was never there sends them
+	# looking for it.
+	$removed = if ($layout -eq "archive") { "$dest and $LibDir" } else { $dest }
+	Write-Error "install.ps1: removed $removed -- install failed. This host may be missing a runtime dependency the binary needs, or security software may have altered it. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
 	exit 1
 }
