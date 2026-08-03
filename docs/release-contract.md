@@ -32,16 +32,14 @@ v<major>.<minor>.<patch>-<pre>        e.g. v0.4.0-rc1 pre-release
 ```
 
 - SemVer, `v`-prefixed.
-- The tag (minus the `v`) MUST equal the `tan` crate version in the workspace
-  `Cargo.toml` (`[workspace.package] version`). The `verify-version` job fails
-  the release if they differ, so a mismatched tag never publishes assets. This
-  holds for a pre-release too: `v0.4.0-rc1` requires `version = "0.4.0-rc1"`.
-- **That is no longer the version the shipped binary prints.** The assets are
-  frozen from `python/`, whose version lives in `python/tan/version.py`
-  (`TAN_VERSION`) and `python/pyproject.toml`. `verify-version` does not read
-  either, so tag / `Cargo.toml` / Python version can disagree with nothing
-  catching it — reconciling the three is tracked separately (#265). Check all
-  three before tagging.
+- The tag (minus the `v`) MUST equal `TAN_VERSION` in
+  `python/tan/version.py`, the SemVer string the shipped binary prints.
+  `python/scripts/version_check.py` also requires
+  `python/pyproject.toml` to carry its PEP 440 rendering and
+  `npm-shim/package.json` to match it exactly. The `verify-version` job fails
+  before assets are built if any value disagrees.
+- `Cargo.toml` is deliberately not read by the release version gate. It versions
+  the frozen Rust oracle, not the Python release assets.
 
 ### Pre-releases
 
@@ -53,13 +51,12 @@ they cannot disagree with each other or with the tag:
 | `v0.4.0` | `false` | `true` |
 | `v0.4.0-rc1` | `true` | `false` |
 
-Neither registry publish runs any more, on any tag: `publish_crates` is deleted
-(the assets no longer come from `crates/`, so publishing `alp-tan-cli` would
-ship a different program under the same name) and `publish_npm` is
-`if: ${{ false }}` — `npm-shim/postinstall.js` still resolves two triples this
-release does not publish, and its `NPM_TOKEN` is a classic token on a 2FA
-account, so `npm publish` answers `EOTP`. Both reasons are recorded in
-`release.yml` beside the job.
+The crates.io job is deleted (the assets no longer come from `crates/`, so
+publishing `alp-tan-cli` would ship a different program under the same name),
+and there is no PyPI job. npm is final-tag-only and opt-in: the job always pack
+smokes a final tag, but publishes only when the repository variable
+`TAN_NPM_PUBLISH` is `true`. It is off by default while the configured token
+still produces `EOTP`; pre-release tags skip the npm job entirely.
 
 This is load-bearing rather than cosmetic. Both [`install.sh`](../install.sh)
 and [`install.ps1`](../install.ps1) resolve what `latest` means through GitHub,
@@ -326,21 +323,22 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
 - **Every asset is executed before it is published.** `cargo build` proved a
   binary linked; a freeze proves nothing until it runs, so each build leg runs
   `python/tests/conformance/test_packaged_binary.py` against the artefact it
-  just produced (single file, `--version` inside the extension's 3 s probe
-  budget, `tan init --preview` to prove the `--add-data` scaffold templates
+  just produced (archive layout, `--version` inside the extension's 3 s probe
+  budget, `tan init --preview` to prove the packaged scaffold templates
   survived).
 - **Race-free publish.** Matrix jobs upload artifacts; a single `release` job
   collates and creates the release, so parallel jobs never race on release
   creation.
 - **The GitHub release needs no secrets** — archives, `checksums.txt`,
   `envelope-contract.json` and the provenance attestation all run on the default
-  `GITHUB_TOKEN`. **No registry publish runs at all any more**, so neither
-  `CARGO_REGISTRY_TOKEN` nor `NPM_TOKEN` is on the release path:
+  `GITHUB_TOKEN`. crates.io is gone, PyPI is not configured, and npm is outside
+  the default path unless explicitly armed:
 
   | Job | State | Consequence |
   |---|---|---|
   | `publish · crates.io` | **deleted** | `cargo install alp-tan-cli` resolves only to the stale Rust program under that name. Do not advertise it. |
-  | `publish · npm shim` | `if: ${{ false }}` | `npm i -g @alplabai/tan` does not resolve (`E404` at every version). |
+  | `publish · PyPI` | **not configured** | `pip install alp-tan` does not resolve (`E404` at every version). |
+  | `publish · npm shim` | final tags; `TAN_NPM_PUBLISH == true` to publish | Disarmed by default; pack smoke still runs and records `published=false`. `npm i -g @alplabai/tan` does not resolve until a publish succeeds. |
 
   **Present is not the same as usable.** `NPM_TOKEN` was configured for v0.4.1
   and the job still failed — `npm error code EOTP`, because a classic/publish

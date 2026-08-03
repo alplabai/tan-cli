@@ -5,9 +5,10 @@
 [![release](https://img.shields.io/github/v/release/alplabai/tan-cli?sort=semver)](https://github.com/alplabai/tan-cli/releases/latest)
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-**The standalone Alp Lab build CLI.** `tan` consumes the alp-sdk *build-plan* and
-executes it — it is the single executor and the user command surface for
-building, flashing, and inspecting Alp Lab E1M / E1M-X firmware.
+**The standalone Alp Lab build CLI.** The shipping implementation is Python:
+`tan` contains the planner and executor, reads board metadata and schemas from an
+alp-sdk checkout, and is the user command surface for building, flashing, and
+inspecting Alp Lab E1M / E1M-X firmware.
 
 `bootstrap` / `build` / `run` / `size` / `image` / `flash` / `clean` / `renode` /
 `monitor` run directly in `tan` — `bootstrap` included, so there is no `bash`
@@ -17,8 +18,8 @@ surface: `model`, `new-som`, and `faultdecode` are native ports now
 verbs that used to stub out (`scaffold`, `completion`, `diff`, `pinmux`,
 `inspect`, `trace`, `support-bundle`) are real too (tan-cli#260, #257). Only
 `migrate` / `lock` / `quality` still forward, to `west alp-*`. Licensed
-**Apache-2.0** (see [`LICENSE`](LICENSE); the SPDX identifier is also set in
-each `Cargo.toml` and source header).
+**Apache-2.0** (see [`LICENSE`](LICENSE); the package metadata and source headers
+carry the same identifier).
 
 ## Install
 
@@ -187,7 +188,7 @@ of this same tree (tan-cli#271):
 
 ```sh
 git clone https://github.com/alplabai/tan-cli && cd tan-cli
-pip install ./python
+python3 -m pip install ./python
 tan --version
 ```
 
@@ -197,6 +198,11 @@ reference now — new features land only in `python/`, so building it produces
 the stale, v0.4.1-era program under the same `tan` name.
 
 ### Package managers
+
+**PyPI — not published.** The distribution name is reserved as `alp-tan`, but
+`pip install alp-tan` currently returns 404 because the release workflow has no
+PyPI publish job. Install from a checkout with `python3 -m pip install ./python`,
+or use a GitHub release asset or installer above.
 
 **crates.io — do not advertise.** `cargo install alp-tan-cli` still resolves
 (it worked as of `v0.4.1`), but the `publish · crates.io` job was deleted at
@@ -227,19 +233,18 @@ Installing it today gets you the stale Rust CLI, not the current `tan`.
 > The shim downloads the matching platform binary on install (see
 > [`npm-shim/`](npm-shim/)); no Rust toolchain needed.
 
-`tan` needs an **alp-sdk checkout** to plan against. It is found, in order, from
-`--sdk-root <path>`, the `.alp/sdk-path` pointer `tan sdk switch` writes, or an
-`alp-sdk/` directory beside the project. `tan sdk install <version>` only
-downloads into `~/.alp/sdk-cache` — follow it with `tan sdk switch <version>` to
-select it (which also reconciles a stale `.west/config` manifest pointer left
-over from a prior SDK version under the same workspace topdir). No VS Code
-required.
+`tan` needs an **alp-sdk checkout** for board metadata, schemas, examples, and
+tooling. It is found, in order, from `--sdk-root <path>`, an existing
+`.alp/sdk-path` pointer, or an `alp-sdk/` directory beside the project. `tan sdk
+list` and `tan sdk current` work; `tan sdk install` and `tan sdk switch` are not
+ported yet and refuse with `sdk.not-ported` (tan-cli#305). Clone or otherwise
+obtain the SDK and pass `--sdk-root` in the meantime. No VS Code required.
 
 ## Quickstart
 
 ```sh
-# Start in a directory holding an alp-sdk checkout — clone one, or
-# `tan sdk install <version> && tan sdk switch <version>`.
+# Start in a directory holding an alp-sdk checkout; sdk install/switch are not
+# ported yet, so clone or otherwise obtain the checkout first (tan-cli#305).
 tan bootstrap --sdk-root ./alp-sdk    # west + Zephyr workspace + Python deps
                                       # (Linux, macOS and native Windows alike)
 tan init --name my-app                # defaults to --template zephyr-app
@@ -365,24 +370,25 @@ by `tan`. See [`docs/setools.md`](docs/setools.md) for the three ways to
 point `tan` at it (`--setools-dir`, `SETOOLS_DIR`, `flash_args.setools_dir`,
 in that precedence order) and what it does with it.
 
-## Where it sits (three repos, one executor)
+## Where it sits (three repos, one CLI)
 
 ```
- alp-sdk-vscode  ──shells──►  tan (this repo)  ──drives──►  alp-sdk
- (VS Code ext)                (executor + CLI)              (planner + libs)
+ alp-sdk-vscode  ──shells──►  tan (this repo)  ──reads/drives──►  alp-sdk
+ (VS Code ext)                (planner + executor)              (metadata + tools)
 ```
 
-- **alp-sdk** — the planner + libraries. Emits the machine-readable *build-plan*
-  (`python -m alp_orchestrate --emit build-plan`). Ships an `alp` console script
-  (plus `alp-mcp`) and the `west alp-*` commands `tan` forwards to (see
-  Forwarders below) — it is not a user-facing CLI surface in its own right.
-- **tan** — this repo. Consumes the plan and executes each per-core slice
-  (`west` / `bitbake` / `cmake`), owns skip-vs-fail, env application, scheduling,
-  progress UX, SDK version management, and the manifest it reads back for
+- **alp-sdk** — board metadata, schemas, examples, libraries, and the `west
+  alp-*` commands `tan` still forwards to. Its original Python planner remains
+  the parity producer during the port, but the shipping CLI does not import or
+  spawn it.
+- **tan** — this repo. Its relocated in-process planner (`python/tan/planner/`)
+  produces the build plan from SDK data, then its executor runs each per-core
+  slice (`west` / `bitbake` / `cmake`). It also owns skip-vs-fail policy, env
+  application, scheduling, progress UX, SDK selection, and the manifest read by
   flash/size/image. **What a standalone SDK user installs — no VS Code needed.**
 - **alp-sdk-vscode** — a thin extension intended to shell `tan`; as of this
-  writing the extension still resolves/downloads a binary named `alp`
-  (`SUPPORTED_CLI_VERSION` 0.2.0) — the repoint to `tan` is pending.
+  writing the stable channel remains pinned to the Rust `tan` v0.4.1 line; the
+  Python release candidates are opt-in until the extension pin moves.
 
 Dependency direction is one-way: **extension → tan → alp-sdk.** Installing `tan`
 never drags in the extension. The user-facing command / binary is `tan`, not
@@ -390,9 +396,10 @@ never drags in the extension. The user-facing command / binary is `tan`, not
 
 ## The seam: the build-plan
 
-`tan` reads SDK internals through exactly one contract — the build-plan JSON
-(`metadata/schemas/build-plan-v1.schema.json` in alp-sdk). `tan-core`'s
-`build_plan.rs` models the consumer side. Two guarantees the ADR pins:
+The planner/executor seam is the build-plan JSON
+(`metadata/schemas/build-plan-v1.schema.json` in alp-sdk). The producer is
+`python/tan/planner/`; `python/tan/core/build_plan.py` models and validates the
+consumer side. Two guarantees remain load-bearing:
 
 - **Version-skew guard** — `tan` rejects a plan whose `schemaVersion` it doesn't
   support instead of silently falling back to hand-ported behaviour. That silent
@@ -408,53 +415,58 @@ read back.
 
 ## Workspace layout
 
-A Cargo workspace; pure logic lives in `tan-core`, all IO and subprocess
-execution in `tan-cli`:
+The shipping package lives under `python/`. Pure domain logic is kept in
+`tan/core`, command orchestration in `tan/commands`, and the relocated planner in
+`tan/planner`:
 
 ```
-Cargo.toml                     # [workspace] + [workspace.dependencies] + [profile.release]
-crates/
-  tan-core/                    # pure domain logic (no IO)
-    src/build_plan.rs          #   build-plan consumer contract + version-skew guard
-    src/system_manifest.rs     #   post-build manifest parse/overlay/serialize
-    src/plan_exec.rs           #   pure env-append + skip/fail-policy decisions
-    src/{flash,debug,wizard,sdk_catalogue}/   #   backends, reports, templates, presets
-  tan-cli/                     # the `tan` binary — arg parsing, IO, subprocess exec
-    src/{main,cli,envelope,exit}.rs
-    src/commands/{build,run,flash,init}/          #   module dirs
-    src/commands/{sdk,doctor,validate,…}.rs
+python/
+  pyproject.toml               # package metadata + `tan` console script
+  tan/
+    cli.py                     # Typer command registration + global JSON handling
+    commands/                  # command orchestration, IO, subprocess execution
+    core/                      # domain logic and wire/data models
+    planner/                   # relocated in-process planner
+    templates/vendored/        # generated scaffold assets shipped in the package
+  tests/                       # unit, conformance, gate, parity, and installer tests
 ```
 
-`tan-core` is `alp-core` ported faithfully (symbol names preserved; only the
-crate name and cosmetic `alp`-branding changed). `build_plan.rs` additionally
-carries the newer ADR-0020 fields the SDK now emits — per-slice
-`envAppendPath` and the top-level `executionPolicy`.
+`crates/` remains only as the frozen v0.4.1 behaviour oracle. It still builds in
+CI while parity is being captured, but release assets and new implementation
+work come from `python/`.
 
 ## Development
 
-Four gates, all of them, before every push. CI runs `fmt` + `clippy` once on
-Linux, matrixes `build` + `test` across Linux, Windows, and macOS, and adds an
-`msrv` job that re-checks the declared `rust-version` (1.86):
+Install the Python package and run its full test suite:
 
 ```sh
-cargo fmt --all --check
-cargo clippy --all-targets -- -D warnings
-cargo build --all-targets
-cargo test
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e ./python
+.venv/bin/python -m pip install pytest
+(cd python && ../.venv/bin/python -m pytest tests -q)
+python3 python/scripts/version_check.py --selftest --self
 ```
 
-House rules: keep files small, put pure logic in `tan-core` (with unit tests)
-rather than the executor, and never rename an SDK-contract string
-(`alp-sdk`, `alp_orchestrate`, `board.yaml`, `alp.conf`, `.alp/…`) — only the
+CI also runs `cargo fmt`, `cargo clippy`, `cargo build`, `cargo test`, and the
+declared Rust MSRV while `crates/` remains the oracle. Those gates protect the
+reference implementation; they are not the development path for shipping
+features.
+
+House rules: keep files small, put reusable decisions in `python/tan/core` with
+unit tests, and never rename an SDK-contract string (`alp-sdk`,
+`alp_orchestrate`, `board.yaml`, `alp.conf`, `.alp/…`) casually — only the
 user-facing binary is `tan`.
 
 ## Releases
 
-Version-tag pushes (`v<major>.<minor>.<patch>`) build per-platform `tan`
-binaries and publish them as GitHub release assets for the alp-sdk-vscode
-downloader. The tag must equal the workspace `Cargo.toml` version — CI fails the
-release otherwise. The exact tag scheme, per-target asset names, and the vscode
-`releaseAssetForTarget` mapping are the release-asset contract — see
+Version-tag pushes (`v<major>.<minor>.<patch>`) build per-platform Python `tan`
+archives and publish them as GitHub release assets for the alp-sdk-vscode
+downloader. `python/tan/version.py`'s `TAN_VERSION` is the source of truth;
+`python/scripts/version_check.py` reconciles the tag, the PEP 440 version in
+`python/pyproject.toml`, and `npm-shim/package.json`. `Cargo.toml` is deliberately
+not part of the release version check. The exact tag scheme, per-target asset
+names, and the vscode `releaseAssetForTarget` mapping are the release-asset
+contract — see
 [`docs/release-contract.md`](docs/release-contract.md).
 
 ## References

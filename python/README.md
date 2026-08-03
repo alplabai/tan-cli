@@ -5,9 +5,15 @@ MCU and MPU alike — and `tan` turns it into firmware.
 
 ## Install
 
+`alp-tan` is not published on PyPI yet. Use the repository's signed GitHub
+release assets/installers (see the [top-level README](../README.md)), or install
+from a checkout:
+
 ```bash
-python3 -m pip install alp-tan     # Linux / macOS
-py -m pip install alp-tan          # Windows
+git clone https://github.com/alplabai/tan-cli
+cd tan-cli
+python3 -m pip install ./python       # Linux / macOS
+py -3.12 -m pip install .\python      # Windows
 ```
 
 ```bash
@@ -26,16 +32,20 @@ check either passes honestly or fails with `Package 'alp-tan' requires a
 different Python`, instead of installing somewhere you will not find it.
 
 `tan init` needs no alp-sdk checkout: the scaffold templates ship inside `tan`.
+Most planning/build commands do need a checkout for metadata, schemas, examples,
+and tooling; pass it with `--sdk-root` or place it beside the project.
 
-The distribution is named `alp-tan` because `tan` is already taken on PyPI (an
-unrelated code formatter); the command you run is still `tan`.
+The package metadata uses the distribution name `alp-tan` because `tan` is
+already taken on PyPI (an unrelated code formatter); the command you run is
+still `tan`. That naming reservation does not mean a PyPI release exists.
 
 ## What it does
 
-`tan` is the executor: it consumes a build plan produced from your `board.yaml`
-and drives the right tool for each core — `west` for Zephyr on Cortex-M,
-`bitbake` for Yocto on Cortex-A, `cmake` for bare metal. You never pick an OS or
-a toolchain; both are derived from each core's architecture.
+`tan` contains both the relocated planner and the executor. It produces a build
+plan from your `board.yaml` plus alp-sdk metadata, then drives the right tool for
+each core — `west` for Zephyr on Cortex-M, `bitbake` for Yocto on Cortex-A,
+`cmake` for bare metal. You never pick an OS or a toolchain; both are derived
+from each core's architecture.
 
 ## Requirements
 

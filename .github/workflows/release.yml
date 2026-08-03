@@ -8,9 +8,9 @@
 # ===========================================================================
 #
 #   Tag scheme : v<major>.<minor>.<patch>   (SemVer, e.g. v0.1.0)
-#                The tag MUST equal the `tan` crate version in the workspace
-#                Cargo.toml ([workspace.package] version) — the verify-version
-#                job below fails the release if it does not.
+#                The tag MUST equal `python/tan/version.py`'s TAN_VERSION.
+#                `python/scripts/version_check.py` also reconciles the PEP 440
+#                pyproject version and npm-shim/package.json before any build.
 #
 #   Assets     : one ARCHIVE per target triple (tan-cli#349 — was one raw
 #                uncompressed binary; see below), named
@@ -135,7 +135,8 @@ permissions:
   contents: write # create the release + upload assets (default GITHUB_TOKEN only)
 
 jobs:
-  # Fail fast: the tag must match the crate version before we build 8 targets.
+  # Fail fast: the tag and all Python/npm version spellings must agree before
+  # we build four target archives.
   verify-version:
     runs-on: ubuntu-latest
     steps:
@@ -206,7 +207,7 @@ jobs:
 
   # ci.yml's own `python` job runs the general `python/tests` suite (see
   # `gates` above), but only with `ALP_SDK_ROOT` bound when THIS caller passes
-  # `sdk_parity: true` — off above — and even then it never ran
+  # `sdk_parity: true` — enabled above — and even then it never ran
   # `python/tests/gates` against the alp-sdk commit tan/planner/ was actually
   # audited against (it checks out alp-sdk's default branch, not a pinned
   # audit SHA). `python_only: true` is what actually confines parity.yml's
@@ -614,7 +615,7 @@ jobs:
 
   # The crates.io job is GONE (tan-cli#271). It published `alp-tan-cli` from
   # `crates/`, and no asset in this release comes from `crates/` any more -- the
-  # four binaries above are PyInstaller freezes of `python/`. Keeping it behind
+  # four archives above are PyInstaller freezes of `python/`. Keeping it behind
   # a false `if:` would have left a `cargo publish` in the release path shipping
   # a different program under the same name; deleting it is the only version of
   # "must not run" that is actually true. The PyPI equivalent (`pip install
