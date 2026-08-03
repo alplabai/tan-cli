@@ -1065,7 +1065,9 @@ def _flow_d_preflight(
     return (
         f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
         "-- refusing to write MRAM to an unidentified board. Check the probe "
-        "selection (flash_args.jlink_serial) and the wiring."
+        "selection (flash_args.jlink_serial) and the wiring. If jlink_serial is "
+        "unset the script selects NO probe, which on a host carrying more than "
+        "one J-Link cannot connect at all (tan-cli#353)."
     )
 
 

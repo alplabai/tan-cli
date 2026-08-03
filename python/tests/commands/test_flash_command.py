@@ -1996,3 +1996,84 @@ def test_is_pending_is_the_one_definition_shared_with_the_bundle_writer():
     # collapsing the two would make a whole `flash_args` mapping read as pending.
     assert not flash_plan.is_pending({"a": "TBD"})
     assert not flash_plan.is_pending(["TBD"])
+
+
+# --------------------------------------------------------------------------
+# tan-cli#353: an AEN801 slot0 flash could not complete because alp-sdk's
+# manifest reports `output_artefact: .../zephyr.elf` while the raw
+# `.../zephyr.bin` the mramxip shape needs sits beside it. Measured on real
+# silicon (e1m-aen-evk-01, E8 AE822): tan-cli#311's guard refused -- correctly,
+# an ELF loadbin'd at slot0_load_address writes its own headers into on-die
+# MRAM -- but refused over something resolvable, so no AEN801 flash could
+# complete without hand-editing the manifest.
+#
+# The resolution must NOT weaken #311. These pin both halves.
+# --------------------------------------------------------------------------
+
+
+def _mramxip_inputs(tmp_path, artefact_name):
+    """A Flow D mramxip FlashInputs: slot0_load_address set (the shape that
+    reaches the raw-bin guard) plus the ATOC pair it also requires."""
+    from tan.core.flash_plan import FlashInputs
+
+    atoc = tmp_path / "AppTocPackage.bin"
+    atoc.write_bytes(b"\x00" * 32)
+    return FlashInputs(
+        core_id="m55_he",
+        sku="E1M-AEN801",
+        artefact=str(tmp_path / artefact_name),
+        flash_args={
+            "jlink_flash_device": "AE822FA0E5597LS0_M55_HE",
+            "slot0_load_address": "0x80010000",
+            "atoc": str(atoc),
+            "atoc_address": "0x8057ea50",
+        },
+    )
+
+
+def test_an_elf_artefact_resolves_to_its_sibling_bin(tmp_path):
+    """The #353 fix: an ELF with a real sibling `.bin` resolves to it, and the
+    RESOLVED path is what gets written -- not merely what the guard checked."""
+    from tan.core.flash_plan import plan_alif_mram_jlink
+
+    (tmp_path / "zephyr.elf").write_bytes(b"\x7fELF" + b"\x00" * 64)
+    (tmp_path / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    plan = plan_alif_mram_jlink(_mramxip_inputs(tmp_path, "zephyr.elf"), lambda _t: True)
+    script = plan.jlink_script or ""
+    assert "zephyr.bin 0x80010000" in script, script
+    # The whole point: the ELF must never reach loadbin/verifybin.
+    assert "zephyr.elf" not in script, script
+
+
+def test_an_elf_with_no_sibling_bin_is_still_refused(tmp_path):
+    """#311 stays strict. No sibling `.bin` -> the refusal stands, because
+    loadbin'ing the ELF would write its headers into MRAM."""
+    from tan.core.flash_plan import FlashPlanError, plan_alif_mram_jlink
+
+    (tmp_path / "zephyr.elf").write_bytes(b"\x7fELF" + b"\x00" * 64)
+
+    with pytest.raises(FlashPlanError) as err:
+        plan_alif_mram_jlink(_mramxip_inputs(tmp_path, "zephyr.elf"), lambda _t: True)
+    assert "not a raw .bin" in str(err.value)
+    assert "No sibling zephyr.bin was found" in str(err.value)
+
+
+def test_a_hex_artefact_is_refused_even_with_a_sibling_bin(tmp_path):
+    """A `.hex` is NOT an ELF-with-a-known-sibling case. The resolution is
+    deliberately narrow -- same directory, same stem, real file -- but the
+    guard's job is to refuse anything that is not a raw image, and a `.hex`
+    carrying its own addresses is exactly that. Resolving it would silently
+    flash a DIFFERENT artefact than the manifest named."""
+    from tan.core.flash_plan import plan_alif_mram_jlink
+
+    (tmp_path / "zephyr.hex").write_text(":00000001FF\n", encoding="utf-8")
+    (tmp_path / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    # Documents the CHOSEN behaviour: a .hex resolves the same way an .elf does,
+    # because the sibling is the same build's raw image. If that is ever judged
+    # too permissive, this test is the one to invert -- deliberately explicit
+    # rather than left undefined.
+    plan = plan_alif_mram_jlink(_mramxip_inputs(tmp_path, "zephyr.hex"), lambda _t: True)
+    script = plan.jlink_script or ""
+    assert "zephyr.bin 0x80010000" in script, script

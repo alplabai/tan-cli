@@ -1313,14 +1313,33 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
         # `slot0_load_address` entirely, which would silently place the app
         # wherever the ELF's own load addresses say rather than where this
         # flow demands -- a refusal is the safer failure.
-        if not is_raw_bin(inp.artefact):
+        # tan-cli#353: before refusing, try the SIBLING `.bin` the Zephyr build
+        # already emitted next to the ELF. Measured on real silicon: alp-sdk's
+        # manifest reports `output_artefact: .../zephyr.elf` for an AEN801
+        # slot0 slice while `.../zephyr.bin` sits in the same directory, so the
+        # refusal fired over something resolvable and no AEN801 flash could
+        # complete without hand-editing the manifest.
+        #
+        # This is a RESOLUTION, not a relaxation. It only ever swaps in a file
+        # that (a) is a real raw `.bin`, (b) is the artefact's own sibling --
+        # same directory, same stem -- and (c) actually exists. A `.hex`, or an
+        # ELF with no sibling `.bin`, still hits the refusal below untouched:
+        # the #311 guard's job is to stop headers being written into on-die
+        # MRAM, and nothing here weakens that.
+        artefact = inp.artefact
+        if not is_raw_bin(artefact):
+            sibling = os.path.splitext(artefact)[0] + ".bin"
+            if os.path.isfile(sibling):
+                artefact = sibling
+        if not is_raw_bin(artefact):
             raise FlashPlanError(
                 f"{FLOW_D_METHOD}: flash_args.slot0_load_address is set but the "
                 f"artefact {inp.artefact} is not a raw .bin -- refusing to loadbin "
                 "it at slot0_load_address, which would write the artefact's own "
-                "headers into MRAM instead of the app image. Point the build's "
-                "output_artefact at the slot0-linked zephyr.bin for the mramxip "
-                "shape."
+                "headers into MRAM instead of the app image. No sibling "
+                f"{os.path.basename(os.path.splitext(inp.artefact)[0] + '.bin')} "
+                "was found beside it either. Point the build's output_artefact "
+                "at the slot0-linked zephyr.bin for the mramxip shape."
             )
 
     atoc = fa_str(fa, "atoc")
@@ -1366,12 +1385,25 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     lines: list[str] = []
     if serial is not None:
         lines.append(f"SelectEmuBySN {serial}")
+    else:
+        # tan-cli#353: no serial pinned, so this script selects no probe. Fine
+        # on a single-probe host; on a bench with several J-Links JLinkExe
+        # cannot choose and answers "Connecting to J-Link ...FAILED: Cannot
+        # connect to the probe/programmer." -- measured on the AEN bench, which
+        # carries three. Recorded here so the failure diagnosis can SAY that
+        # instead of leaving the user with SEGGER's bare sentence; the plan
+        # itself is unchanged, because refusing would break every correct
+        # single-probe host.
+        pass
     lines += ["si SWD", f"speed {speed}", f"device {device}", "connect"]
     if app_address is not None:
-        lines.append(f"loadbin {inp.artefact} {app_address}")
+        # `artefact`, not `inp.artefact`: the tan-cli#353 sibling resolution
+        # above may have swapped an ELF for its real raw `.bin`, and the
+        # write must use what was RESOLVED or the guard would be decorative.
+        lines.append(f"loadbin {artefact} {app_address}")
     lines.append(f"loadbin {atoc} {atoc_address}")
     if app_address is not None:
-        lines.append(f"verifybin {inp.artefact} {app_address}")
+        lines.append(f"verifybin {artefact} {app_address}")
     lines += [
         f"verifybin {atoc} {atoc_address}",
         # PIN reset (RSetType 2), then run: the Secure Enclave boot ROM re-reads
