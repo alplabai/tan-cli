@@ -428,6 +428,18 @@ def _spawn_pipeline(
     OS pipe buffer its `write()` blocks forever, it never reaches EOF on stdout,
     dd's `read()` blocks too, and the `wait()` never returns.
 
+    **tan-cli#401.** The drain thread used to be joined only in the outer
+    `finally`, AFTER the `_Outcome` was already built -- so `drained` was read
+    before it could ever be filled, and a decompressor failure (`gunzip:
+    unexpected end of file`, rc 1) was silently reported as `dd`'s rc 0 and
+    throughput stats. Both are fixed here: the drain thread is joined BEFORE
+    the outcome is built, and the returned `stderr` folds both halves in,
+    each on its own `decompressor: `/`dd: ` labelled lines -- `dd`'s own
+    stats are real and worth keeping, but a reader must not have to guess
+    which process spoke. `returncode` reports the first non-zero of the two
+    (the decompressor's, when it is the one that failed), matching the
+    existing `success=(second.returncode == 0) and left_ok` fold.
+
     `venv_bin`/`workspace`: see [`_spawn`] -- the same PATH-prepend/cwd
     threading, applied to BOTH halves of the pipeline (tan-cli#289/#59/#61).
     """
@@ -490,11 +502,27 @@ def _spawn_pipeline(
         except subprocess.TimeoutExpired:
             _terminate(first)
             left_ok = False
+        # Join BEFORE reading `drained` (tan-cli#401) -- the old `finally`-only
+        # join ran after the `_Outcome` below was already built, so the
+        # decompressor's stderr was always empty at the point it mattered.
+        if drain is not None:
+            drain.join(timeout=2.0)
+        left_rc = first.returncode if first.returncode is not None else -1
+        right_rc = second.returncode if second.returncode is not None else -1
+        combined_lines = _label_lines("dd", _text(err_text))
+        # The decompressor's lines go LAST: `_capture_tail` keeps only the
+        # last 4 non-empty lines, and when the decompressor is the one that
+        # failed its (usually short) diagnosis is the actual cause -- dd's
+        # multi-line throughput stats must not be the thing that survives the
+        # truncation instead.
+        combined_lines += _label_lines("decompressor", _text(b"".join(drained)))
         return _Outcome(
             success=(second.returncode == 0) and left_ok,
             stdout=_text(out),
-            stderr=_text(err_text),
-            returncode=second.returncode if second.returncode is not None else -1,
+            stderr="\n".join(combined_lines),
+            # The first non-zero of the two -- today's bug reported `dd`'s 0
+            # even when the decompressor was the one that failed.
+            returncode=left_rc if left_rc != 0 else right_rc,
             captured=capture,
         )
     finally:
@@ -520,6 +548,14 @@ def _text(raw: Any) -> str:
     if isinstance(raw, bytes):
         return raw.decode("utf-8", errors="replace")
     return str(raw)
+
+
+def _label_lines(label: str, text: str) -> list[str]:
+    """Every non-empty line of `text`, prefixed `"{label}: "` (tan-cli#401) --
+    line-by-line, not once on the whole blob, so a multi-line decompressor
+    error (`gunzip: ...unexpected end of file` + `gunzip: uncompress failed`)
+    doesn't leave its second line unattributed."""
+    return [f"{label}: {line}" for line in text.splitlines() if line.strip()]
 
 
 def _spawn_jlink(

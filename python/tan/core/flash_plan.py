@@ -22,9 +22,13 @@ reintroduce a tolerant bool/int reader here.
 
 **No hardware facts (I-26 / ADR-0017).** Nothing in this module names a SKU, an
 address, a pin, an I2C address, a probe serial or a vendor branch. Every such
-value arrives in ``flash_args``, passed through from alp-sdk ``metadata/``. The
-ONE exception is inherited verbatim from the Rust oracle and flagged at its
-definition (``_DEFAULT_JLINK_DEVICE``); do not add a second.
+value arrives in ``flash_args``, passed through from alp-sdk ``metadata/``.
+TWO values are inherited verbatim from the Rust oracle and flagged at their
+definitions -- ``_DEFAULT_JLINK_DEVICE`` and ``_DEFAULT_BASE`` (tan-cli#402:
+the oracle itself declares both, back to back, at ``builders.rs:16-17`` -- "the
+ONE exception" below was already inaccurate). Do not add a third; both apply
+ONLY when ``flash_args`` omits the matching key, and both go away once every
+SoM preset supplies it explicitly.
 """
 from __future__ import annotations
 
@@ -39,15 +43,27 @@ from tan.core.pending import PENDING_PLACEHOLDER as PENDING_SENTINEL, is_pending
 #: `system_manifest.rs::SYSTEM_MANIFEST_SCHEMA_VERSION`.
 SYSTEM_MANIFEST_SCHEMA_VERSION = 1
 
+#: INHERITED HARDWARE FACT, not a new one (tan-cli#402). `builders.rs:16`'s
+#: `DEFAULT_BASE` -- the ARM Cortex-M internal-flash base address shared by
+#: every part this module has targeted so far (STM32/GD32 both map internal
+#: flash here), not a SKU-specific value like `_DEFAULT_JLINK_DEVICE` below,
+#: but still an address per the letter of the rule above. Kept for byte-parity
+#: with the oracle: `tests/parity/oracle_fixtures/test_flash_oracle_parity.json`
+#: pins this exact string for an `openocd` plan whose `flash_args` carries no
+#: `base`. The correct fix is the same as `_DEFAULT_JLINK_DEVICE`'s -- every
+#: SoM preset supplies `flash_args.base` explicitly, after which this becomes
+#: unreachable and can be deleted alongside it.
 _DEFAULT_BASE = "0x08000000"
-#: INHERITED HARDWARE FACT, not a new one. `builders.rs:15`'s
-#: `DEFAULT_JLINK_DEVICE`. This is a part number in tan, which ADR-0017 / I-26
-#: forbids, and it is already shipped in the Rust binary -- changing or dropping
-#: it here would make the port disagree with the oracle on every `swd_probe`
-#: entry whose `flash_args` omits `jlink_device`. Kept byte-identical and
-#: quarantined to this one constant; the correct fix is for the SoM preset to
-#: always supply `flash_args.jlink_device` (E1M-V2N101 already does not), after
-#: which this default becomes unreachable and can be deleted on BOTH sides.
+#: INHERITED HARDWARE FACT (tan-cli#402: the module docstring above used to
+#: claim this was the ONE such exception; it is not -- see `_DEFAULT_BASE`
+#: just above, which the oracle declares right next to this one at
+#: `builders.rs:16-17`). `builders.rs:17`'s `DEFAULT_JLINK_DEVICE`. This is a
+#: part number in tan, which ADR-0017 / I-26 forbids, and it is already shipped
+#: in the Rust binary -- changing or dropping it here would make the port
+#: disagree with the oracle on every `swd_probe` entry whose `flash_args`
+#: omits `jlink_device`. The correct fix is for the SoM preset to always
+#: supply `flash_args.jlink_device` (E1M-V2N101 already does not), after which
+#: this default becomes unreachable and can be deleted on BOTH sides.
 _DEFAULT_JLINK_DEVICE = "GD32G553MEY7TR"
 _DEFAULT_JLINK_SPEED = 4000
 _JLINK_BINARIES = ("JLinkExe", "JLink")
@@ -883,7 +899,27 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
         else:
             jlink = next((n for n in _JLINK_BINARIES if which(n)), None)
     if jlink is not None:
-        device = _default(fa_str_checked(fa, "jlink_device", False), _DEFAULT_JLINK_DEVICE)
+        device = fa_str_checked(fa, "jlink_device", False)
+        if device is None:
+            # tan-cli#402: `flash_args.target` (read below, for the
+            # openocd/pyocd branch) is a DIFFERENT namespace -- OpenOCD/pyOCD's
+            # own `target/<name>.cfg` identifier (e.g. "stm32h7x") -- from a
+            # J-Link `-device` name (SEGGER's own device database, e.g.
+            # "STM32H747XI_M7"). Substituting one for the other would trade
+            # today's silent-GD32 bug for a silent-wrong-guess one; a SoM that
+            # declared `target` without `jlink_device` must say so, not have
+            # tan invent an equivalence between the two namespaces.
+            target_hint = fa_str_checked(fa, "target", False)
+            if target_hint:
+                raise FlashPlanError(
+                    "swd_probe: flash_args.target is set "
+                    f"({target_hint!r}) but flash_args.jlink_device is not -- "
+                    "a J-Link device name is a different namespace (SEGGER's "
+                    "device database) than an OpenOCD/pyOCD target, so tan will "
+                    "not guess one from the other. Set flash_args.jlink_device "
+                    "explicitly."
+                )
+            device = _DEFAULT_JLINK_DEVICE
         speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
         return FlashPlan(
             argv=(
@@ -891,9 +927,9 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
                 "-AutoConnect", "1", "-ExitOnError", "1", "-NoGui", "1",
                 "-CommanderScript",
             ),
-            ok_message=(
-                f"swd_probe[{core}]: GD32G553 flashed via J-Link ({device}) @ {base}"
-            ),
+            # tan-cli#402: name what was actually resolved, not a literal SKU
+            # this run may not have programmed.
+            ok_message=f"swd_probe[{core}]: {device} flashed via J-Link @ {base}",
             jlink_script=jlink_commander_script(inp.artefact, base, do_reset),
         )
 
@@ -934,7 +970,10 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
             "swd_probe: no flash tool found -- install SEGGER J-Link (preferred), "
             "or `openocd`, or `pyocd`."
         )
-    return FlashPlan(argv=argv, ok_message=f"swd_probe[{core}]: GD32G553 flashed @ {base}")
+    # tan-cli#402: name the resolved `target`, not a literal SKU -- this
+    # branch is reached for any part the SoM declared via
+    # `flash_args.target`, not only the GD32 bridge.
+    return FlashPlan(argv=argv, ok_message=f"swd_probe[{core}]: {target} flashed @ {base}")
 
 
 def _default(value, fallback):
