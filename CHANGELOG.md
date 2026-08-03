@@ -37,6 +37,19 @@ All notable changes to `tan` are documented here. Format follows
   reachable before this wave — `diff.*` had ZERO entries of any kind — so
   none is a wire break; every one is `"reserved"`/`"consumer": "none"`,
   costing nothing to rename later.
+- **`tan flash` can auto-sign an Alif Ensemble slot0 ATOC via SETOOLS**
+  (tan-cli#353, #365-#369, #373; `tan/core/setools.py`, new). Flow D
+  (`alif_mram_jlink`, J-Link straight over SWD, no SE-UART) needs a SIGNED
+  ATOC from Alif's own `app-gen-toc` step; a fresh AEN801 manifest's
+  `flash_args` carries only `jlink_flash_device` (measured on real silicon,
+  e1m-aen-evk-01/E8 AE822), so before this every customer had to sign by
+  hand outside `tan` and paste the result back in. `tan flash` now drives
+  `app-gen-toc` for you against a SETOOLS install you already have — three
+  precedence-ordered sources (new `--setools-dir` flag, `SETOOLS_DIR`, or
+  the least-durable `flash_args.setools_dir`, tan-cli#368), never a
+  filesystem search, and never under `--dry-run`. See
+  [`docs/setools.md`](docs/setools.md). SETOOLS itself is license-gated and
+  neither `tan` nor alp-sdk redistributes it.
 
 ### Changed
 
@@ -59,6 +72,48 @@ All notable changes to `tan` are documented here. Format follows
   it is updated to read exit 2. A real `tan`-side crash (an unreadable
   `board.yaml`, an unexpected internal exception) is unaffected and keeps
   exit 5.
+
+### Fixed
+
+- **BLOCKER: the Flow D SETOOLS auto-sign's own soft-failure guard could
+  destroy a prior sign record instead of only detecting a fresh one**
+  (tan-cli#373, regression in #365's own fix). `app-package-map.txt` is
+  APPEND-mode — the accumulated sign record for the whole SETOOLS install,
+  including hand-runs done outside `tan`, per `flash-jlink.sh`/
+  `flash-jlink-mramxip.sh`/`flash-update-log-dual.sh` — but the guard
+  `os.remove`d it before every sign to detect an `app-gen-toc` exiting 0
+  without actually writing. On a manifest with two Flow D entries where one
+  pointed its own `flash_args.atoc_map` at that same file, the other
+  entry's auto-sign wiped it first: `app-gen-toc` recreated it holding only
+  the SECOND entry's block, and the first entry's `atoc_address` resolved
+  to the second entry's address — a mismatched ATOC burned into on-die
+  MRAM, recoverable only by re-provisioning over SE-UART. Replaced with a
+  size+mtime snapshot taken before the spawn: an append changes both, so an
+  unchanged snapshot after a zero exit is the same soft-failure signal,
+  without deleting anything.
+- **`tan flash --dry-run`'s SETOOLS preview still bypassed most of Flow D's
+  own validation** (tan-cli#373, #366 narrowed not closed). A `--dry-run`
+  whose `SETOOLS_DIR` resolved reported `ok:true` for a manifest with e.g. a
+  quoted `jlink_speed`, because that check lived only inside
+  `plan_alif_mram_jlink`, unreached from the preview's early return — and on
+  a REAL run the SETOOLS auto-sign (writing into the customer's install)
+  happened before that refusal was ever reached. `jlink_speed`/`confirm`
+  are now validated in `validate_flow_d_shape`, the one function both the
+  preview and the real plan-builder call before either can proceed.
+- **The wrong-DP-ID preflight remediation had replaced the wiring/
+  `jlink_serial` advice for three OTHER banners it does not apply to**
+  (tan-cli#369 regression). That fallback is shared by four cases — a
+  genuinely different SW-DP ID answering, an unrecognised banner, an
+  unplugged-SWD-ribbon `Cannot connect to target.`, and a refused
+  `jlink_serial`'s `Cannot connect to J-Link.` — but #369's rewrite gave all
+  four the cloned-serial explanation, silently deleting the original
+  "check the probe selection (jlink_serial) and the wiring" sentence
+  (tan-cli#353) for the three where `jlink_serial` genuinely IS the fix. Now
+  branched on whether a DP ID was actually read.
+- **`is_elf_artefact` only accepted `.elf`, narrowing #367(a)'s own
+  three-shape decision** (no extension, `.elf`, `.out`) with nothing
+  flagging it. `output_artefact: app` (no extension) or `app.out` now
+  resolves to its same-stem sibling `.bin` again, same as `zephyr.elf` does.
 
 ## [0.5.0-rc4] — 2026-08-02
 

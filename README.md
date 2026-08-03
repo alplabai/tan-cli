@@ -22,9 +22,14 @@ each `Cargo.toml` and source header).
 
 ## Install
 
-Every version tag publishes one archive per platform (`.zip` on Windows,
-`.tar.gz` on Unix) — a PyInstaller `--onedir` freeze, not a raw binary
-(tan-cli#349).
+**From `v0.5.0`** every version tag publishes one archive per platform (`.zip`
+on Windows, `.tar.gz` on Unix) — a PyInstaller `--onedir` freeze, not a raw
+binary (tan-cli#349). **`v0.5.0` is not cut yet**: every tag published so far
+ships a raw binary instead, including `v0.4.1` (which is what `latest` resolves
+to today) and the `v0.5.0-rc4` pre-release. The install scripts read which shape
+a release publishes off that release's own `checksums.txt` and install either
+one (tan-cli#356), so the commands below work on both sides of that transition —
+you do not need to know which tag you are on.
 
 ### Automatic (recommended)
 
@@ -73,6 +78,15 @@ confident `OK`. Set the variable to an explicit `vX.Y.Z` from the
 [releases page](https://github.com/alplabai/tan-cli/releases) to pick a
 different one. (`latest` skips pre-releases, so it is not always the highest
 version number.)
+
+> **Check the asset name against the tag you picked.** The snippets below are
+> written for the archive shape, i.e. `v0.5.0` and later. A pre-`v0.5.0` tag —
+> `v0.4.1`, `v0.5.0-rc4`, anything else published so far — names the same triple
+> with **no extension** (`.exe` on Windows) and that file **is** the executable:
+> drop the `tar -xzf` / `Expand-Archive` step and install the downloaded file
+> itself. Either way, `<tag>/checksums.txt` lists exactly what that release
+> publishes, which is where the install scripts get the answer (tan-cli#356) —
+> so it is also the fastest way to check by hand.
 
 **Linux / macOS**
 
@@ -343,6 +357,13 @@ accepts and drops it rather than refusing it.
 alp-sdk-vscode extension consumes (`sdk` is optional: present only when the
 command actually resolved an alp-sdk root). Text output is for humans and may
 change; the envelope is the API.
+
+`tan flash`'s Flow D backend (`alif_mram_jlink`) can auto-sign an Alif
+Ensemble slot0 ATOC for you via a SETOOLS install you already have on disk —
+SETOOLS is license-gated and obtained directly from Alif, never redistributed
+by `tan`. See [`docs/setools.md`](docs/setools.md) for the three ways to
+point `tan` at it (`--setools-dir`, `SETOOLS_DIR`, `flash_args.setools_dir`,
+in that precedence order) and what it does with it.
 
 ## Where it sits (three repos, one executor)
 

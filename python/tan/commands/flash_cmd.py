@@ -68,6 +68,7 @@ from tan.core.flash_plan import (
     FlashPlan,
     FlashPlanError,
     FlashTarget,
+    FlowDShape,
     ManifestError,
     backend_for,
     display_argv,
@@ -76,7 +77,6 @@ from tan.core.flash_plan import (
     flash_args_has_tbd,
     flow_d_preflight_script,
     is_pending,
-    is_raw_bin,
     is_rust_absolute,
     parse_atoc_start_address,
     parse_system_manifest,
@@ -86,6 +86,7 @@ from tan.core.flash_plan import (
     select_flash_method,
     tool_gate,
     validate_flow_d_preflight_args,
+    validate_flow_d_shape,
 )
 from tan.core.global_flags import accept_global_flags
 from tan.core.setools import (
@@ -670,6 +671,12 @@ class _Context:
     #: flash` can see alp-sdk's out-of-tree runners. `None` keeps the old
     #: app-dir cwd, matching the oracle exactly.
     workspace: str | None = None
+    #: `--setools-dir` (tan-cli#368) -- the HIGHEST-precedence SETOOLS
+    #: source, ahead of `SETOOLS_DIR` and `flash_args.setools_dir`; see
+    #: `tan.core.setools.resolve_setools_dir`. `None` when the flag was not
+    #: given, in which case resolution falls through to the other two exactly
+    #: as before.
+    setools_dir: str | None = None
 
 
 def _resolve_flow_d_atoc_address(flash_args: Any, build_root: str, sdk_root: str) -> Any:
@@ -771,7 +778,7 @@ def _resolve_flow_d_atoc_path(flash_args: Any, build_root: str, sdk_root: str) -
 
 
 def _resolve_flow_d_atoc_via_setools(
-    flash_args: Any, artefact_path: str, ctx: _Context, entry_id: str
+    flash_args: Any, shape: FlowDShape, ctx: _Context, entry_id: str
 ) -> tuple[Any, str | None]:
     """tan-cli#353's remaining half: when Flow D still has no `atoc`/
     `atoc_address` after the explicit-value and `atoc_map` resolutions above
@@ -782,22 +789,40 @@ def _resolve_flow_d_atoc_via_setools(
     fresh AEN801 manifest hits today, since alp-sdk's own emit carries only
     `flash_args.jlink_flash_device`.
 
-    Returns `(flash_args, preview_message)`. `preview_message` is `None` on
-    every path that leaves `flash_args` fully resolved for
-    `plan_alif_mram_jlink` to consume -- an already-resolved no-op, or a REAL
-    sign that filled `atoc`/`atoc_address` in -- and non-`None` only for the
-    one `--dry-run` path that intentionally leaves both still absent: signing
+    `shape` is `validate_flow_d_shape`'s result -- the caller (`_flash_entry`,
+    tan-cli#366/#367) validates + resolves it BEFORE this function ever runs,
+    so `shape.artefact` is ALREADY the raw `.bin` to hand `app-gen-toc` (the
+    same ELF-only sibling resolution `plan_alif_mram_jlink` uses for the
+    eventual `loadbin`, from the ONE shared definition,
+    `flash_plan.resolve_slot0_binary`) and a manifest that would fail that
+    check has already failed BEFORE reaching this function, real run or
+    `--dry-run` alike -- this function no longer re-derives or re-checks
+    either.
+
+    Returns `(flash_args, note)`. `note` is `None` on the one path that never
+    touched SETOOLS at all -- an already-resolved no-op (an explicit `atoc`/
+    `atoc_map`, or `atoc_address` already present). Every path that DOES touch
+    SETOOLS returns a non-`None` `note` naming `setools.path`/`setools.source`
+    (tan-cli#373): under `--dry-run` it describes what WOULD be signed and
+    `flash_args` is left with `atoc`/`atoc_address` still absent (signing
     writes real files into the customer's SETOOLS install and spawns a real
-    tool, and `--dry-run`'s own contract ("planning only") forbids that
-    regardless of how harmless the ATOC step is next to the MRAM write it
-    feeds.
+    tool, which `--dry-run`'s "planning only" contract forbids regardless of
+    how harmless the ATOC step is next to the MRAM write it feeds); on a real
+    run it instead describes what WAS just signed, with `flash_args` fully
+    resolved for `plan_alif_mram_jlink` to consume. The caller (`_flash_entry`)
+    tells the two apart by `ctx.dry_run`, which it already has: the dry-run
+    note is the entry's own terminal message, the real-sign note is an EXTRA
+    line ahead of the real write's own ok/fail message -- previously
+    `setools.source` reached a customer only via a FAILURE
+    (`missing_tool_message`/`unresolved_message`), never on a run that
+    succeeded.
 
     Raises `FlashPlanError` for: SETOOLS unresolved, resolved but not a real
     install, no `flash_args.slot0_load_address` to give `app-gen-toc` as its
-    `mramAddress`, no raw `.bin` to sign, or the sign step itself failing --
-    the caller's existing `except FlashPlanError` arm (mirroring
-    `_resolve_flow_d_atoc_address`/`_resolve_flow_d_atoc_path` above) reports
-    it as the entry's `flash.entry-failed` message.
+    `mramAddress`, or the sign step itself failing -- the caller's existing
+    `except FlashPlanError` arm (mirroring `_resolve_flow_d_atoc_address`/
+    `_resolve_flow_d_atoc_path` above) reports it as the entry's
+    `flash.entry-failed` message.
 
     **Only when the manifest points at NOTHING signing-related at all.** A
     customer who already supplied an explicit `atoc` (a blob they signed
@@ -812,7 +837,7 @@ def _resolve_flow_d_atoc_via_setools(
     if fa_str_checked(flash_args, "atoc_address", True) is not None:
         return flash_args, None
 
-    setools = resolve_setools_dir(flash_args, os.environ)
+    setools = resolve_setools_dir(flash_args, os.environ, ctx.setools_dir)
     if setools is None:
         raise FlashPlanError(unresolved_message())
     app_gen_toc = find_app_gen_toc(setools.path)
@@ -823,11 +848,10 @@ def _resolve_flow_d_atoc_via_setools(
     # from `atoc_address` (the SIGNED PACKAGE's placement, derived below from
     # its own build report). tan has no source for it besides this already-
     # documented Flow D key (`plan_alif_mram_jlink`'s optional
-    # `slot0_load_address`) -- there is nothing to guess it from, so a
-    # manifest that omits it falls through to `plan_alif_mram_jlink`'s own
-    # "both required" refusal rather than a confusing SETOOLS-shaped one.
-    mram_address = fa_str_checked(flash_args, "slot0_load_address", True)
-    if mram_address is None:
+    # `slot0_load_address`, already extracted into `shape.app_address`) --
+    # there is nothing to guess it from, so a manifest that omits it refuses
+    # here rather than falling through to a confusing generic message.
+    if shape.app_address is None:
         raise FlashPlanError(
             f"{FLOW_D_METHOD}: flash_args.slot0_load_address is required to auto-sign "
             "via SETOOLS (it becomes app-gen-toc's mramAddress) -- supply the app's "
@@ -839,32 +863,21 @@ def _resolve_flow_d_atoc_via_setools(
         # Planning only -- report what WOULD be signed without touching the
         # customer's SETOOLS install or spawning a real tool.
         return flash_args, (
-            f"would sign {artefact_path} with SETOOLS at {setools.path} (via "
+            f"would sign {shape.artefact} with SETOOLS at {setools.path} (via "
             f"{setools.source}) -> build/config/{entry_id}-slot0.json, then run "
             "app-gen-toc -- not run under --dry-run"
         )
 
-    # SETOOLS signs a raw `.bin`, same as `plan_alif_mram_jlink`'s own
-    # mramxip-shape guard (tan-cli#311/#353). Repeated here rather than shared:
-    # this resolves the artefact SETOOLS needs to COPY, before
-    # `plan_alif_mram_jlink` ever sees this entry -- the two usually coincide,
-    # but nothing here assumes it.
-    binary = artefact_path
-    if not is_raw_bin(binary):
-        sibling = os.path.splitext(binary)[0] + ".bin"
-        if _is_file(sibling):
-            binary = sibling
-    if not is_raw_bin(binary):
-        raise FlashPlanError(
-            f"{FLOW_D_METHOD}: SETOOLS needs a raw .bin to sign, but {artefact_path} is "
-            "not one and no sibling .bin was found beside it."
-        )
-
-    atoc_path, address = sign_slot0(setools.path, app_gen_toc, binary, entry_id, mram_address)
+    atoc_path, address = sign_slot0(
+        setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address
+    )
     merged = dict(flash_args)
     merged["atoc"] = atoc_path
     merged["atoc_address"] = address
-    return merged, None
+    return merged, (
+        f"signed {shape.artefact} with SETOOLS at {setools.path} (via "
+        f"{setools.source}) -> {atoc_path} @ {address}"
+    )
 
 
 def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[str]]:
@@ -994,38 +1007,68 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         return 1, entry(method, "failed", 1, gate.message), lines
 
     flash_args = target.flash_args
+    # Set only on the Flow D SETOOLS-auto-sign path below, and only when THIS
+    # run's own sign actually ran -- carried past the `if` block so the
+    # eventual success message (tan-cli#373) can name which SETOOLS install
+    # signed it, the same way `setools_note is not None` decides the
+    # `--dry-run` early return just below.
+    setools_note: str | None = None
     if method == FLOW_D_METHOD:
-        # THREE places `flash_args` is augmented before dispatch: the ATOC
-        # address is a build-time output, so it may need resolving from a
-        # build artefact rather than arriving on the manifest already (see
-        # `_resolve_flow_d_atoc_address`; a supplied-but-unusable `atoc_map`
-        # raises there rather than silently deferring to `plan_alif_mram_jlink`'s
-        # generic refusal, caught here the same way `meta.build`'s is below);
-        # the ATOC blob path itself is anchored on `build_root`/`sdk_root`
-        # (`_resolve_flow_d_atoc_path`) before it can reach the Commander
-        # script unresolved; and, tan-cli#353's remaining half, SETOOLS signs
-        # one from scratch (`_resolve_flow_d_atoc_via_setools`) when the first
-        # two leave `atoc`/`atoc_address` still absent.
+        # FOUR things happen to `flash_args`/its shape before dispatch, in an
+        # order tan-cli#366/#367's review fixed: the ATOC address may need
+        # resolving from a build artefact rather than arriving on the
+        # manifest already (`_resolve_flow_d_atoc_address`; a
+        # supplied-but-unusable `atoc_map` raises there rather than silently
+        # deferring to `plan_alif_mram_jlink`'s generic refusal, caught here
+        # the same way); the ATOC blob path itself is anchored on
+        # `build_root`/`sdk_root` (`_resolve_flow_d_atoc_path`) before it can
+        # reach the Commander script unresolved; EVERYTHING ELSE about the
+        # entry's shape that does NOT depend on `atoc`/`atoc_address` --
+        # `jlink_flash_device`, and (when armed) the slot0 artefact's own
+        # ELF-sibling-`.bin` resolution -- is validated NOW, via
+        # `validate_flow_d_shape`, the SAME function `plan_alif_mram_jlink`
+        # itself calls, so there is exactly one definition of "does this
+        # artefact resolve" (#367); the DPIDR preflight args are validated
+        # now too, for the same plan-time-not-real-write-time reason `tan
+        # flash --dry-run` needs any of this validated at all; and only THEN,
+        # tan-cli#353's remaining half, does SETOOLS sign one from scratch
+        # (`_resolve_flow_d_atoc_via_setools`) when the first two leave
+        # `atoc`/`atoc_address` still absent.
+        #
+        # **#366: this order is the fix.** A malformed/half-armed manifest
+        # used to be caught only by `meta.build`/`validate_flow_d_preflight_
+        # args` FURTHER DOWN -- both unreachable from the `setools_note`
+        # early-return below, so a `--dry-run` whose `SETOOLS_DIR` happened to
+        # resolve reported `ok:true` for a manifest that would refuse a real
+        # (or SETOOLS-less) run outright. Validating first means that early
+        # return can only ever fire for an entry that has already passed
+        # everything checkable without `atoc`/`atoc_address`.
         try:
             flash_args = _resolve_flow_d_atoc_address(flash_args, ctx.build_root, ctx.sdk_root)
             flash_args = _resolve_flow_d_atoc_path(flash_args, ctx.build_root, ctx.sdk_root)
-            flash_args, setools_preview = _resolve_flow_d_atoc_via_setools(
-                flash_args, artefact_path, ctx, entry_id
+            shape = validate_flow_d_shape(flash_args, artefact_path, _is_file)
+            validate_flow_d_preflight_args(flash_args)
+            flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
+                flash_args, shape, ctx, entry_id
             )
         except FlashPlanError as err:
             msg = str(err)
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
             lines.append(f"  FAIL: {msg}")
             return 1, entry(method, "failed", 1, msg), lines
-        if setools_preview is not None:
+        if setools_note is not None and ctx.dry_run:
             # `--dry-run` only (see the helper's own docstring): nothing was
             # signed, so there is no `atoc`/`atoc_address` to hand
             # `plan_alif_mram_jlink` -- report the preview directly rather
             # than reaching its "both required" refusal over a field this
-            # entry was never asked to fill in by hand.
+            # entry was never asked to fill in by hand. A REAL sign (the
+            # `else` this `and ctx.dry_run` now excludes -- tan-cli#373)
+            # leaves `setools_note` set too, but must NOT return here: it
+            # falls through to `meta.build` like every other Flow D entry,
+            # carrying the note to the eventual ok message below instead.
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
-            lines.append(f"  {setools_preview}")
-            return 0, entry(method, "ok", 0, setools_preview), lines
+            lines.append(f"  {setools_note}")
+            return 0, entry(method, "ok", 0, setools_note), lines
 
     inputs = FlashInputs(
         artefact=artefact_path,
@@ -1044,23 +1087,6 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         return 1, entry(method, "failed", 1, msg), lines
 
     lines.append(f"flash: {kind} '{entry_id}' -> {method}")
-
-    # Flow D's DPIDR preflight args (`expect_dpidr`/`jlink_device`) are
-    # validated here too -- PLAN-TIME, before the confirm/dry-run gate below --
-    # not only in `_flow_d_preflight` at real-write time. Without this, `tan
-    # flash --dry-run` (or any unconfirmed run) on a half-armed or malformed
-    # manifest reports `status: planned`/`ok` with no diagnostic, and the
-    # customer only learns their manifest is wrong once they actually confirm
-    # a write. This calls the same validate-only half `_flow_d_preflight`
-    # calls (via `flow_d_preflight_script`); it builds no script and touches
-    # no J-Link binary, so it is safe to run unconditionally here.
-    if method == FLOW_D_METHOD:
-        try:
-            validate_flow_d_preflight_args(flash_args)
-        except FlashPlanError as err:
-            msg = str(err)
-            lines.append(f"  FAIL: {msg}")
-            return 1, entry(method, "failed", 1, msg), lines
 
     if plan.planning_only or ctx.dry_run:
         shown = display_argv(plan)
@@ -1093,8 +1119,15 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
 
     outcome = _execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace)
     if outcome.success:
-        lines.append(f"  ok: {plan.ok_message}")
-        return 0, entry(method, "ok", 0, plan.ok_message), lines
+        # tan-cli#373: `setools_note` is set here only when THIS run's own
+        # SETOOLS auto-sign actually ran (the dry-run preview above always
+        # returns before reaching this line) -- prefixed onto the real
+        # write's own `ok_message` so `setools.source` reaches a customer on
+        # a SUCCESSFUL sign too, not only via `missing_tool_message`/
+        # `unresolved_message` on a failure.
+        ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
+        lines.append(f"  ok: {ok_message}")
+        return 0, entry(method, "ok", 0, ok_message), lines
     msg = _execute_message(outcome, method, entry_id)
     lines.append(f"  FAIL: {msg}")
     return 1, entry(method, "failed", 1, msg), lines
@@ -1181,6 +1214,40 @@ def _flow_d_preflight(
             "re-enumerating after a previous JLinkExe session closed, not a wiring "
             "or probe-selection problem -- wait a couple of seconds and retry."
         )
+    # tan-cli#373 (regression in #369): this point is reached by FOUR distinct
+    # banners, and only ONE of them is the cloned-serial mismatch #369 was
+    # filed over -- a board DID answer, with a DIFFERENT SW-DP ID than
+    # expected. #369's rewrite gave all four this one sentence, silently
+    # deleting the original wiring/`jlink_serial` advice for the other three
+    # (an unrecognised banner shape, and the two `_CONNECT_FAILED_TARGET_RE`
+    # shapes -- an unplugged ribbon's "Cannot connect to target." and a
+    # refused `jlink_serial`'s "Cannot connect to J-Link.") even though #369
+    # scoped itself explicitly to the wrong-DP-ID case alone.
+    if _dp_id_reported(banner):
+        # A real board answered but with a DIFFERENT SW-DP ID than expected --
+        # the bench mismatch #369 actually measured. A USB serial can be
+        # CLONED across two separate physical probes (a real OEM J-Link clone
+        # measured sharing one with a GD32 bridge probe on a different board
+        # entirely), so `jlink_serial` alone cannot disambiguate them even
+        # when set -- `JLinkExe` selects by serial only, with no USB-port
+        # selector. The SW-DP ID this preflight already reads IS the true
+        # per-silicon discriminator; this remediation says so instead of
+        # pointing at the one field that cannot fix this.
+        return (
+            f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
+            "-- refusing to write MRAM to an unidentified board. Check the wiring and "
+            "which board is physically attached -- do NOT treat pinning "
+            "flash_args.jlink_serial alone as the fix: some OEM J-Link probes share a "
+            "CLONED serial across more than one physical unit, so jlink_serial cannot "
+            "disambiguate them even when set. The SW-DP ID is the real per-silicon "
+            "discriminator -- this preflight already checks it via "
+            "flash_args.expect_dpidr; if more than one board is reachable, confirm "
+            "which one answered by its own reported ID, not by serial alone."
+        )
+    # An unrecognised banner, or a genuine TARGET-level connect refusal (no DP
+    # ID was even read to compare against the cloned-serial case above) --
+    # `jlink_serial` pinning a probe IS the actual fix here when it is unset
+    # on a multi-probe host (tan-cli#353), so the original sentence survives.
     return (
         f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
         "-- refusing to write MRAM to an unidentified board. Check the probe "
@@ -1270,6 +1337,7 @@ def _run(
     skip_missing_tools: bool,
     capture: bool,
     cwd: str,
+    setools_dir_arg: str | None = None,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -1372,6 +1440,7 @@ def _run(
         capture=capture,
         venv_bin=venv_bin,
         workspace=workspace,
+        setools_dir=setools_dir_arg,
     )
     for target in plan.targets:
         rc, entry, lines = _flash_entry(target, ctx)
@@ -1507,6 +1576,16 @@ def flash(
         help="When a backend's required tools are all absent from PATH, warn + skip "
         "the entry instead of failing it. No effect under --dry-run.",
     ),
+    setools_dir: str = typer.Option(
+        None,
+        "--setools-dir",
+        metavar="PATH",
+        help="Alif SETOOLS install used to auto-sign a Flow D slot0 ATOC "
+        "(license-gated; obtained from Alif, never redistributed by tan). "
+        "Precedence: this flag, then the SETOOLS_DIR environment variable, "
+        "then flash_args.setools_dir in the manifest (lowest -- and rebuilt "
+        "over by the next `tan build`, see docs/setools.md).",
+    ),
     output_format: str = typer.Option(
         None, "--format", metavar="FORMAT", help="Output format: text or json."
     ),
@@ -1547,6 +1626,7 @@ def flash(
             skip_missing_tools=skip_missing_tools,
             capture=json_mode,
             cwd=cwd,
+            setools_dir_arg=setools_dir,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an
