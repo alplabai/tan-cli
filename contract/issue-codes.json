@@ -2080,6 +2080,15 @@
       "note": "The catch-all exception handler in pinmux(): any unexpected failure resolving or reading the pinmux capability table. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "pinmux.family-invalid",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/pinmux_cmd.py",
+      "literal": "\"pinmux.family-invalid\"",
+      "note": "tan-cli#359: `--family` was joined onto the SDK root unvalidated, so an absolute value discarded the prefix (`Path(sdk) / \"/other/metadata/pinmux/aen\"` IS the other path) and `..` walked out of it -- the envelope still reported the sdkRoot it never read from. Emitted for BOTH halves of the fix: a `--family` that is not a plain stem (rejected before any IO), and a resolved table path that leaves `<sdkRoot>/metadata/pinmux` anyway (a symlink inside the SDK, which the stem check structurally cannot see). Exit code 2 (VALIDATION_FAILURE), and the target is never read. The Rust oracle has no equivalent check -- a deliberate divergence, not a port gap. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "trace.sdk-root-unresolved",
       "status": "reserved",
       "severity": "error",
@@ -2113,25 +2122,43 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
       "literal": "f\"support-bundle.{c.name}\" where c.name == \"boardYaml\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.boardYaml` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): the DEBUG-focused report's own `boardYaml` check (tan-cli#357), built by `_board_yaml_check` in support_bundle_cmd.py directly -- reports the resolved board.yaml PATH as its detail, unlike the build-checklist's `doctor.boardYaml`, which reports \"board.yaml found\" instead. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "support-bundle.bootstrapManifest",
       "status": "reserved",
-      "severity": "error",
+      "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
       "literal": "f\"support-bundle.{c.name}\" where c.name == \"bootstrapManifest\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.bootstrapManifest` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.bootstrapManifest` verbatim. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). tan-cli#374 finding 5: the oracle has no `bootstrapManifest` CHECK at all -- it folds a rejected metadata/bootstrap.json into `hostPrerequisites`'s own detail instead -- so this code is a documented port-only divergence with no oracle counterpart, always `warn` (never `fail`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "support-bundle.gdb",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
+      "literal": "f\"support-bundle.{c.name}\" where c.name == \"gdb\"",
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): the DEBUG-focused report's `yocto-userspace` tool check (tan-cli#357), built by `_target_checks` in support_bundle_cmd.py -- `warn` when no local gdb/arm-none-eabi-gdb is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "support-bundle.gdbserverBackend",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
+      "literal": "f\"support-bundle.{c.name}\" where c.name == \"gdbserverBackend\"",
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"gdbserver\". NOT reachable through today's target/server pairing (debug_launch._SERVER_CHOICES only pairs gdbserver with yocto-userspace, which uses the separate `gdb` check instead), but `server` is a plain str parameter with nothing narrower enforcing that at this call site -- registered now (tan-cli#374 finding 3) so a future widening of that pairing table cannot put an unregistered code on the wire with nothing here to catch it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "support-bundle.homePath",
       "status": "reserved",
-      "severity": "error",
+      "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
       "literal": "f\"support-bundle.{c.name}\" where c.name == \"homePath\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.homePath` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.homePath` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "support-bundle.hostPrerequisites",
@@ -2140,124 +2167,61 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
       "literal": "f\"support-bundle.{c.name}\" where c.name == \"hostPrerequisites\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.hostPrerequisites` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.hostPrerequisites` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.hostPython",
+      "code": "support-bundle.jlinkBackend",
       "status": "reserved",
-      "severity": "error",
+      "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"hostPython\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.hostPython` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.jlink",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"jlink\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.jlink` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "literal": "f\"support-bundle.{c.name}\" where c.name == \"jlinkBackend\"",
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"jlink\", when --target-kind zephyr-mcu/baremetal-mcu --server jlink -- `warn` when no JLinkGDBServerCL/JLinkGDBServer is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "support-bundle.longPaths",
       "status": "reserved",
-      "severity": "error",
+      "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
       "literal": "f\"support-bundle.{c.name}\" where c.name == \"longPaths\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.longPaths` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357). tan-cli#306 widened doctor_cmd.long_paths_check with a Windows-only `fail` arm the oracle cannot reach at all (its own long_paths_check takes only the registry axis and never returns worse than warn); tan-cli#374 finding 1 found that arm reaching THIS command's verdict made a first-run customer host (registry LongPathsEnabled on, no global .gitconfig) exit 4 where the oracle exits 0. `support_bundle_cmd._demote_long_paths_fail` now caps it at `warn` before it is ever harvested here, so `error` severity is structurally unreachable from support-bundle (unlike from `tan doctor`, which keeps the real fail arm -- see the sibling doctor.longPaths entry). Severity corrected warning<-error here for that reason (tan-cli#374). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
-      "code": "support-bundle.pythonFloor",
+      "code": "support-bundle.noneBackend",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
+      "literal": "f\"support-bundle.{c.name}\" where c.name == \"noneBackend\"",
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"none\". NOT reachable through today's target/server pairing (debug_launch._SERVER_CHOICES only pairs none with native-host, which uses the separate `lldb` check instead, always `pass`, #131), but `server` is a plain str parameter with nothing narrower enforcing that at this call site -- registered now (tan-cli#374 finding 3) so a future widening of that pairing table cannot put an unregistered code on the wire with nothing here to catch it. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "support-bundle.openocdBackend",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
+      "literal": "f\"support-bundle.{c.name}\" where c.name == \"openocdBackend\"",
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"openocd\", when --target-kind zephyr-mcu/baremetal-mcu --server openocd -- `warn` when no openocd is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "support-bundle.pyocdBackend",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
+      "literal": "f\"support-bundle.{c.name}\" where c.name == \"pyocdBackend\"",
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): `_target_checks`'s `f\"{server}Backend\"` (tan-cli#357) for server == \"pyocd\", when --target-kind zephyr-mcu/baremetal-mcu --server pyocd -- `warn` when no pyocd is on PATH. tan-cli#374 finding 3: reachable and emitted on the wire before this code existed in the registry, missed because the gate's own declared value space (_FORWARDER_SUFFIXES) still described the pre-#357 build checklist. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "support-bundle.sdkRoot",
       "status": "reserved",
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"pythonFloor\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.pythonFloor` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.sdk",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"sdk\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.sdk` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.sdkProvenance",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"sdkProvenance\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.sdkProvenance` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.setools",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"setools\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.setools` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.sevenZip",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"sevenZip\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.sevenZip` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.venvProvenance",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"venvProvenance\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.venvProvenance` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.west",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"west\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.west` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.westResolved",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"westResolved\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.westResolved` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.workspace",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"workspace\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.workspace` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.zephyrSdk",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"zephyrSdk\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.zephyrSdk` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "literal": "f\"support-bundle.{c.name}\" where c.name == \"sdkRoot\"",
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): the DEBUG-focused report's own `sdkRoot` check (tan-cli#357), built directly in `_debug_doctor_report` -- `fail` when no alp-sdk checkout resolved, mirroring the oracle's `status_pass_fail(has_sdk)`. tan-cli#374 finding 3: reachable and emitted at ERROR severity on the wire before this code existed in the registry -- the exact gap that finding names (measured: a fresh project with no resolvable SDK put this code on the wire with `pytest tests/gates/ -q` reporting all green). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "support-bundle.zephyrSdkAvailableForHost",
@@ -2266,25 +2230,7 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/support_bundle_cmd.py",
       "literal": "f\"support-bundle.{c.name}\" where c.name == \"zephyrSdkAvailableForHost\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.zephyrSdkAvailableForHost` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.zephyrVersion",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"zephyrVersion\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.zephyrVersion` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "support-bundle.zephyrWorkspace",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/support_bundle_cmd.py",
-      "literal": "f\"support-bundle.{c.name}\" where c.name == \"zephyrWorkspace\"",
-      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): mirrors `doctor.zephyrWorkspace` verbatim, since _doctor_section reuses doctor_cmd._collect's identical Check objects rather than re-deriving its own -- see the sibling doctor.* entry for what this check verifies. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "Assembled by _doctor_issues's `f\"support-bundle.{c.name}\"` (prefix template): one of `_HOST_CHECK_ORDER`'s five names, harvested BY NAME from doctor_cmd._collect(...)'s own Check objects by `_host_checks_from_doctor` (tan-cli#357) -- mirrors `doctor.zephyrSdkAvailableForHost` verbatim; see the sibling doctor.* entry for what this check verifies. `_doctor_section`, the function an earlier version of this note cited, was deleted by the #357 diff (tan-cli#374 finding 4). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.fix-needs-sudo",
@@ -2330,6 +2276,15 @@
       "emittedBy": "python/tan/commands/doctor_cmd.py",
       "literal": "code=\"doctor.fix-timed-out\"",
       "note": "A tool's install command did not finish inside FIX_INSTALL_TIMEOUT_S (300s) and was killed -- fix_timed_out_check reports this so a hang does not read as up to 5 minutes of silent terminal (text mode only prints after the whole report completes). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "doctor.fix-installer-not-found",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "literal": "code=\"doctor.fix-installer-not-found\"",
+      "note": "tan-cli#360: --fix could not resolve the program a manifest install command starts with (`brew` on a Mac with no Homebrew, `winget` on a Windows image with no App Installer), so no repair ran for the tools that command covers -- fix_installer_not_found_check names the installer AND every tool it blocked, plus the remedy for that specific installer. Emitted ONCE PER INSTALLER, not per tool: one absent `brew` blocks every macOS prerequisite at once, and six identical 'install Homebrew' paragraphs would bury the report. Before this the path was a bare `continue`, so the least-equipped hosts -- exactly the audience --fix exists for -- got the same report back with no fix:* line at all. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "doctor.fix-suppressed",

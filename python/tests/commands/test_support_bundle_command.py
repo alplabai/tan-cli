@@ -2,28 +2,31 @@
 """`tan support-bundle` -- port of `crates/tan-cli/src/commands/support_bundle.rs`.
 
 Envelope/exit-code shapes below were measured against a freshly-built oracle
-(`cargo build -p alp-tan-cli --bin tan` from THIS worktree's `crates/`). The
-DOCTOR SECTION's check names/content are a deliberate, documented divergence
-from the oracle (this port reuses `doctor_cmd`'s own build/flash-readiness
-checks rather than re-implementing the oracle's separate debug-flavoured
-doctor -- see `support_bundle_cmd`'s module docstring) -- tests here assert
-`doctor_cmd`'s own checks are wired in correctly (via a monkeypatched,
-deterministic check list, so these tests do not depend on this host's own
-Zephyr/tool state), not that they match the oracle's check names.
+(`cargo build -p alp-tan-cli --bin tan` from THIS worktree's `crates/`).
 
-**Exit code matches the oracle, decoupled from the reused doctor checklist.**
-Measured on a normal project with a resolved SDK: oracle rc=0 issues=[]. A
-bundle that WRITES successfully exits 0 regardless of what its embedded
-doctor section found -- the doctor checks still surface as
-`support-bundle.<name>` issues, they just no longer flip the exit code (see
-`test_a_failing_check_becomes_a_support_bundle_coded_issue_but_stays_exit_zero`).
-The one exception is the target/server incompatibility precondition, which is
-this command's OWN failure, not the reused checklist's, and still exits
-`DOCTOR_FAILURE` (4) (see `test_server_incompatible_with_target_is_doctor_failure`).
+**The bundled doctor section is the oracle's DEBUG-focused report**
+(tan-cli#357): `workspaceRoot`/`sdkRoot`/`boardYaml`, the per-target-kind
+extension + tool pair, then the host checks. Before #357 this module
+substituted `doctor_cmd._collect`'s whole build/flash-readiness checklist and
+declared that a deliberate divergence; a bundle attached to a debug failure
+therefore carried no debugger state at all. The four host checks are still
+`doctor_cmd`'s own -- harvested by name from `_collect` -- so they are
+monkeypatched here with a deterministic list, keeping these tests independent
+of this host's Zephyr/tool state.
 
-`support-bundle` is not yet registered in `tan.cli.app` (the orchestrator's to
-wire), so these tests build a throwaway local Typer app around the ported
-command function directly.
+**Exit follows the oracle's rule: `summary.fail > 0` -> `DOCTOR_FAILURE` (4),
+`ok: false`.** A warn does NOT flip it, and the bundle file is written on the
+failing path either way. The live cross-check against the real oracle lives in
+`tests/parity/test_support_bundle_oracle_parity.py`; these cases pin the same
+rule without needing a built Rust binary.
+
+`support-bundle` IS registered in `tan.cli.app` (`tan/cli.py:34,105` -- and
+`tests/parity/test_support_bundle_oracle_parity.py` depends on that
+registration to spawn it). tan-cli#374 finding 8: an earlier version of this
+note claimed otherwise. These tests still build a throwaway local Typer app
+around the ported command function directly, the same lighter-weight harness
+`test_trace_command.py`/`test_inspect_command.py` use for their own
+already-registered commands -- not a workaround for missing registration.
 """
 from __future__ import annotations
 
@@ -62,9 +65,14 @@ def sdk_at(root):
 
 
 def _clean_checks(*, fail=False, warn=False):
-    """A deterministic doctor check list, standing in for whatever this real
-    host's tools/Zephyr workspace happen to report -- keeps the end-to-end
-    tests below independent of CI/dev-machine state."""
+    """A deterministic `doctor_cmd._collect` return, standing in for whatever
+    this real host's tools/Zephyr workspace happen to report -- keeps the
+    end-to-end tests below independent of CI/dev-machine state.
+
+    The `sdk` entry is deliberately one the bundle must DROP: only the five
+    names in `_HOST_CHECK_ORDER` are harvested, and `sdk` is the build
+    checklist's own SDK verdict, superseded here by the debug report's
+    `sdkRoot`."""
     status = "fail" if fail else ("warn" if warn else "pass")
     checks = [doctor_cmd.Check("sdk", "pass", "alp-sdk at /sdk")]
     if fail or warn:
@@ -339,52 +347,268 @@ def test_unknown_generation_target_is_an_internal_failure(tmp_path, monkeypatch)
 # ---------------------------------------------------------------------------
 
 
-def test_clean_doctor_checks_mean_success_and_no_issues(tmp_path, monkeypatch):
+def _healthy(tmp_path, monkeypatch, **kwargs):
+    """A project whose DEBUG report's own three base checks all pass: a
+    board.yaml on disk and a resolvable SDK. Without the SDK, `sdkRoot` fails
+    and the exit code is 4 for a reason that has nothing to do with the
+    harvested host checks under test."""
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    sdk = tmp_path / "alp-sdk"
+    sdk_at(sdk)
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks(**kwargs))
+    return ["support-bundle", "--sdk-root", str(sdk), "--format", "json"]
 
-    result = runner.invoke(app, ["support-bundle", "--format", "json"])
+
+def test_clean_doctor_checks_mean_success_and_no_issues(tmp_path, monkeypatch):
+    argv = _healthy(tmp_path, monkeypatch)
+    result = runner.invoke(app, argv)
     assert result.exit_code == 0
     doc = json.loads(result.stdout)
     assert doc["ok"] is True
     assert doc["issues"] == []
 
 
-def test_a_failing_check_becomes_a_support_bundle_coded_issue_but_stays_exit_zero(
-    tmp_path, monkeypatch
-):
-    """Matches the oracle: the bundle EXPORT succeeded, so exit stays 0 even
-    though the reused doctor checklist found a `fail`-status check -- the
-    doctor section is DATA inside the bundle, not this command's verdict (see
-    `support_bundle_cmd`'s module docstring). The failing check still surfaces
-    as an error-severity issue for a human reading the envelope; only the
-    exit code is decoupled from it."""
-    monkeypatch.chdir(tmp_path)
-    write(tmp_path / "board.yaml", "x")
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks(fail=True))
+def test_a_failing_check_is_a_doctor_failure_not_a_silent_success(tmp_path, monkeypatch):
+    """tan-cli#357, the regression this file exists to hold. The oracle's rule
+    is `if doctor.summary.fail > 0 { ExitCode::DoctorFailure }`; this port
+    hardcoded `SUCCESS`, so automation read `ok: true` and exit 0 out of the
+    same envelope that carried an error-severity issue. Measured against the
+    oracle on the identical failing host: rc=4, ok=false, exitCode=4.
 
-    result = runner.invoke(app, ["support-bundle", "--format", "json"])
+    The three assertions are one invariant, not three: process exit code ==
+    `envelope.exitCode` == `not ok`. Fixing any one of them alone leaves a
+    consumer trusting whichever it happens to read."""
+    argv = _healthy(tmp_path, monkeypatch, fail=True)
+    result = runner.invoke(app, argv)
+    assert result.exit_code == 4
+    doc = json.loads(result.stdout)
+    assert doc["exitCode"] == 4
+    assert doc["ok"] is False
+    issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.hostPrerequisites")
+    assert issue["severity"] == "error"
+    assert issue["message"] == "missing from PATH: ninja."
+    # The bundle file is still written on a doctor failure -- it is precisely
+    # what the user attaches, and the failure is why they are attaching it.
+    assert doc["data"]["outputPath"] != ""
+    assert os.path.isfile(doc["data"]["outputPath"])
+
+
+def test_a_warning_check_becomes_a_warning_issue_and_stays_exit_zero(tmp_path, monkeypatch):
+    """`summary.fail > 0`, never `warn > 0`: the oracle counts warns and
+    ignores them for the exit code, so a bundle from a merely-degraded host
+    still exports cleanly."""
+    argv = _healthy(tmp_path, monkeypatch, warn=True)
+    result = runner.invoke(app, argv)
     assert result.exit_code == 0
     doc = json.loads(result.stdout)
     assert doc["ok"] is True
     issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.hostPrerequisites")
-    assert issue["severity"] == "error"
-    assert issue["message"] == "missing from PATH: ninja."
-    # The bundle file is still written on a doctor failure.
-    assert doc["data"]["outputPath"] != ""
+    assert issue["severity"] == "warning"
 
 
-def test_a_warning_check_becomes_a_warning_issue_but_stays_exit_zero(tmp_path, monkeypatch):
+def test_an_unresolved_sdk_root_fails_the_bundle(tmp_path, monkeypatch):
+    """The oracle's `sdkRoot` check is `status_pass_fail(has_sdk)` -- a hard
+    fail, so a bundle taken with no alp-sdk checkout exits 4. Measured against
+    the oracle from a project with no resolvable SDK: rc=4, issues include
+    `support-bundle.sdkRoot` at error severity."""
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
-    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks(warn=True))
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
 
     result = runner.invoke(app, ["support-bundle", "--format", "json"])
-    assert result.exit_code == 0
+    assert result.exit_code == 4
     doc = json.loads(result.stdout)
-    issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.hostPrerequisites")
-    assert issue["severity"] == "warning"
+    assert doc["ok"] is False
+    issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.sdkRoot")
+    assert issue["severity"] == "error"
+    assert issue["message"] == "No alp-sdk checkout resolved."
+
+
+# ---------------------------------------------------------------------------
+# The DEBUG-focused doctor report (tan-cli#357)
+# ---------------------------------------------------------------------------
+
+
+def _bundle(result):
+    return json.loads(open(json.loads(result.stdout)["data"]["outputPath"], encoding="utf-8").read())
+
+
+def test_the_bundle_carries_the_debug_report_not_the_build_checklist(tmp_path, monkeypatch):
+    """The other half of #357: the check LIST. `_collect`'s build/flash-
+    readiness names (`sdk`, `setools`, `jlink`, `west`, ...) are not what a
+    debug bundle is for, and substituting them dropped `codeLLDBExtension`/
+    `lldb` -- the debugger facts this command exists to collect."""
+    argv = _healthy(tmp_path, monkeypatch)
+    names = [c["name"] for c in _bundle(runner.invoke(app, argv))["doctor"]["checks"]]
+    assert names == [
+        "workspaceRoot",
+        "sdkRoot",
+        "boardYaml",
+        "codeLLDBExtension",
+        "lldb",
+        "hostPrerequisites",
+    ]
+    # `sdk` is in the monkeypatched `_collect` list and must NOT ride along --
+    # only the five harvested host names do.
+    assert "sdk" not in names
+
+
+def test_the_real_collect_produces_the_oracle_shaped_check_list(tmp_path, monkeypatch):
+    """tan-cli#374 finding 7: every OTHER test in this module monkeypatches
+    `doctor_cmd._collect` with the 2-check `_clean_checks()` stub, so none of
+    them would notice a check entering or leaving the bundle -- exactly how
+    findings 1 (`longPaths`'s undue `fail` arm) and 5 (the undeclared
+    `bootstrapManifest` divergence) reached production with no unit test
+    failing.
+
+    This one runs the REAL `_collect`, against a resolvable SDK carrying a
+    real, readable `metadata/bootstrap.json` (so `bootstrapManifest` -- a
+    documented, separately-tracked port-only divergence, finding 5 -- does
+    not fire and inflate the count), and pins the check-NAME list only: the
+    oracle's own shape (`longPaths` is Windows-only, hence the platform
+    branch), regardless of what THIS host's real tools/registry answer each
+    one with -- unlike `_healthy`'s deterministic stub, a real status here
+    would be host-dependent and not this test's job to pin.
+    """
+    monkeypatch.chdir(tmp_path)
+    write(tmp_path / "board.yaml", "x")
+    sdk = tmp_path / "alp-sdk"
+    sdk_at(sdk)
+    write(
+        sdk / "metadata" / "bootstrap.json",
+        json.dumps(
+            {
+                "prerequisites": {
+                    "posix": [],
+                    "windows": [],
+                    "pythonMinVersion": "3.10",
+                    "install": {},
+                }
+            }
+        ),
+    )
+
+    result = runner.invoke(app, ["support-bundle", "--sdk-root", str(sdk), "--format", "json"])
+    names = [c["name"] for c in _bundle(result)["doctor"]["checks"]]
+    expected = [
+        "workspaceRoot",
+        "sdkRoot",
+        "boardYaml",
+        "codeLLDBExtension",
+        "lldb",
+        "hostPrerequisites",
+        "zephyrSdkAvailableForHost",
+    ]
+    if os.name == "nt":
+        expected.append("longPaths")
+    expected.append("homePath")
+    assert names == expected
+    assert "bootstrapManifest" not in names
+
+
+def test_the_extension_checks_are_unknown_and_count_toward_nothing(tmp_path, monkeypatch):
+    """#102: the standalone binary cannot enumerate VS Code's extensions, so
+    `codeLLDBExtension` must not claim an install state nobody probed, must
+    not join the pass total, and must raise no issue -- otherwise it could
+    move an exit code off a question that was never asked."""
+    argv = _healthy(tmp_path, monkeypatch)
+    result = runner.invoke(app, argv)
+    doctor = _bundle(result)["doctor"]
+    check = next(c for c in doctor["checks"] if c["name"] == "codeLLDBExtension")
+    assert check["status"] == "unknown"
+    assert "is installed" not in check["detail"]
+    assert "fix" not in check
+    assert sum(doctor["summary"].values()) < len(doctor["checks"])
+    assert not [i for i in json.loads(result.stdout)["issues"] if "Extension" in i["code"]]
+
+
+def test_lldb_passes_even_with_none_on_path(tmp_path, monkeypatch):
+    """#131: `vadimcn.vscode-lldb` ships its own LLDB and never reads PATH, so
+    a bare-PATH miss must not warn or offer an install remedy that fixes
+    nothing."""
+    argv = _healthy(tmp_path, monkeypatch)
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: None)
+    check = next(
+        c for c in _bundle(runner.invoke(app, argv))["doctor"]["checks"] if c["name"] == "lldb"
+    )
+    assert check["status"] == "pass"
+    assert "fix" not in check
+    assert "ships its own LLDB" in check["detail"]
+
+
+def test_a_zephyr_target_swaps_in_the_cortex_and_backend_checks(tmp_path, monkeypatch):
+    """`--target-kind`/`--server` genuinely change the report now -- before
+    #357 the bundled checklist never branched on either."""
+    argv = _healthy(tmp_path, monkeypatch)
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: None)
+    result = runner.invoke(
+        app, [*argv, "--target-kind", "zephyr-mcu", "--server", "jlink"]
+    )
+    checks = {c["name"]: c for c in _bundle(result)["doctor"]["checks"]}
+    assert "cortexDebugExtension" in checks
+    assert checks["jlinkBackend"]["status"] == "warn"
+    assert checks["jlinkBackend"]["detail"] == "No jlink executable was found on PATH."
+    # A warn, so the bundle still exports cleanly.
+    assert result.exit_code == 0
+
+
+def test_a_yocto_target_swaps_in_the_cpptools_and_gdb_checks(tmp_path, monkeypatch):
+    argv = _healthy(tmp_path, monkeypatch)
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda name: name if name == "gdb" else None)
+    # `gdbserver` explicitly: `none` is not a supported server for this target,
+    # and the pairing guard would refuse before any report is built.
+    result = runner.invoke(
+        app, [*argv, "--target-kind", "yocto-userspace", "--server", "gdbserver"]
+    )
+    checks = {c["name"]: c for c in _bundle(result)["doctor"]["checks"]}
+    assert "cppToolsExtension" in checks
+    assert checks["gdb"]["status"] == "pass"
+    assert checks["gdb"]["detail"] == "gdb"
+
+
+def test_the_context_carries_project_selected_and_debugger_extensions(tmp_path, monkeypatch):
+    """Both were omitted before #357 as "IDE-extension-host concepts with no
+    standalone reader". `projectSelected` is derived from this invocation's
+    own flags, and `debuggerExtensions` carries `observable: false`, which
+    says in the file itself that nothing probed the three flags."""
+    argv = _healthy(tmp_path, monkeypatch)
+    context = _bundle(runner.invoke(app, argv))["inspect"]["context"]
+    assert context["projectSelected"] is False
+    assert context["debuggerExtensions"] == {
+        "cortexDebug": True,
+        "cppTools": True,
+        "codeLLDB": True,
+        "observable": False,
+    }
+
+    selected = _bundle(runner.invoke(app, [*argv, "--project", str(tmp_path)]))
+    assert selected["inspect"]["context"]["projectSelected"] is True
+
+
+def test_a_missing_board_yaml_warns_until_a_project_is_selected(tmp_path, monkeypatch):
+    """#100: `tan bootstrap` sends every new customer to run tan from the SDK
+    checkout root, which has no board.yaml and needs none -- so a missing one
+    is a hard failure only once `--project`/`--board-yaml` NAMED a project.
+    The exit code follows: warn keeps the bundle at 0, fail takes it to 4."""
+    monkeypatch.chdir(tmp_path)
+    sdk = tmp_path / "alp-sdk"
+    sdk_at(sdk)
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
+    argv = ["support-bundle", "--sdk-root", str(sdk), "--format", "json"]
+
+    unselected = runner.invoke(app, argv)
+    check = next(
+        c for c in _bundle(unselected)["doctor"]["checks"] if c["name"] == "boardYaml"
+    )
+    assert check["status"] == "warn"
+    assert "no project selected" in check["detail"]
+    assert unselected.exit_code == 0
+
+    selected = runner.invoke(app, [*argv, "--project", str(tmp_path)])
+    check = next(c for c in _bundle(selected)["doctor"]["checks"] if c["name"] == "boardYaml")
+    assert check["status"] == "fail"
+    assert selected.exit_code == 4
 
 
 # ---------------------------------------------------------------------------

@@ -779,21 +779,26 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # non-literal, 20 distinct camelCase names (`_is_code_suffix` admits
         # camelCase for exactly this reason -- see its own docstring).
         # 54, not 48, as of tan-cli#91's `--fix` consent-gate work: 9 of the
-        # 54 also pass an explicit `code=` override (the frozen `bootstrap.*`
-        # spellings this class's own docstring documents, plus five NEW
-        # `doctor.fix-*` checks whose `name` is a dynamic `f"fix:{tool}"`,
-        # never a code-shaped literal at all) -- `skip_if_keyword="code"`
-        # excludes exactly those 9 from this scan, since `check.code or
-        # f"doctor.{check.name}"` never evaluates their `name` for the code
-        # position at runtime; their real codes are captured separately by
-        # the plain `code=` keyword scan, the same mechanism every other
-        # literal `code=` site in this file already goes through.
+        # 54 also passed an explicit `code=` override (the frozen
+        # `bootstrap.*` spellings this class's own docstring documents, plus
+        # five NEW `doctor.fix-*` checks whose `name` is a dynamic
+        # `f"fix:{tool}"`, never a code-shaped literal at all) --
+        # `skip_if_keyword="code"` excludes exactly those from this scan,
+        # since `check.code or f"doctor.{check.name}"` never evaluates their
+        # `name` for the code position at runtime; their real codes are
+        # captured separately by the plain `code=` keyword scan, the same
+        # mechanism every other literal `code=` site in this file already
+        # goes through.
+        # 55, and 10 skipped, as of tan-cli#360: `fix_installer_not_found_check`
+        # is the sixth `doctor.fix-*` Check, named `f"fix:{installer}"` (one
+        # per ABSENT INSTALLER, not per tool) and carrying an explicit
+        # `code="doctor.fix-installer-not-found"`.
         prefix="doctor.",
         expr="check.name",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
-        expected_calls=54,
+        expected_calls=55,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
@@ -903,37 +908,62 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     ("tan/commands/diff_cmd.py", "failure.code"): dict(
         suffixes=frozenset({"pyyaml-unavailable", "schema-violation"}), sites=1
     ),
-    # `Issue(f"support-bundle.{c.name}", ...)` in `_doctor_issues()` --
-    # `checks` there is `doctor_cmd._collect(...)`'s own output, reused
-    # verbatim (`_doctor_section`'s docstring), so `c.name`'s value space is
-    # the SAME 20 distinct `Check(...)` names `_RESOLVABLE_HELPERS[("tan/
-    # commands/doctor_cmd.py", "checks_to_issues")]` already resolves --
-    # re-declared here (not re-derived) because that entry's scan is scoped to
-    # doctor_cmd.py alone, one file per `_RESOLVABLE_HELPERS`/`_resolve_helper`
-    # key.
+    # `Issue(f"support-bundle.{c.name}", ...)` in `_doctor_issues()` -- tan-cli
+    # #374 findings 3/4 rewrote this entry. `checks` there is
+    # `_debug_doctor_report(...)`'s own output (tan-cli#357; `_doctor_section`,
+    # the function this comment used to cite, was DELETED by that same diff),
+    # not `doctor_cmd._collect(...)`'s whole build/flash-readiness list -- so
+    # `c.name`'s real value space is NOT the 20-ish names
+    # `_RESOLVABLE_HELPERS[("tan/commands/doctor_cmd.py", "checks_to_issues")]`
+    # resolves for `tan doctor` at all. Re-derived from
+    # `_debug_doctor_report`'s own construction (`support_bundle_cmd.py`),
+    # narrowed to names whose `Check` can ever leave `pass`/`unknown` --
+    # `_doctor_issues` only turns a `warn`/`fail` status into a wire issue, so
+    # a name that can never carry either (`workspaceRoot`: hardcoded `pass`;
+    # `lldb`: hardcoded `pass`, #131; the three `_extension_check(...)` names:
+    # hardcoded `unknown`, #102) would register a code this command can
+    # structurally never put on the wire:
+    #   * `sdkRoot`, `boardYaml` -- the report's own fixed checks (fail/warn
+    #     arms exist for both).
+    #   * `jlinkBackend`/`openocdBackend`/`pyocdBackend` -- `_target_checks`'s
+    #     `f"{server}Backend"` for the three servers `debug_launch._SERVER_
+    #     CHOICES` actually pairs with `zephyr-mcu`/`baremetal-mcu` today.
+    #     `gdbserverBackend`/`noneBackend` are the SAME `f"{server}Backend"`
+    #     construction for the other two `SERVER_KINDS` members -- not
+    #     reachable through TODAY's `_SERVER_CHOICES` pairing (`is_server_
+    #     supported_for_target` refuses `--target-kind zephyr-mcu --server
+    #     gdbserver` before `_target_checks` ever runs), but `server` is a
+    #     plain `str` parameter with no narrower type at this call site, so a
+    #     future widening of that pairing table would put either straight on
+    #     the wire with nothing here to catch it. Declared now rather than
+    #     left for the NEXT audit to rediscover.
+    #   * `gdb` -- `_target_checks`'s `yocto-userspace` branch (warn arm
+    #     exists).
+    #   * `bootstrapManifest`, `hostPrerequisites`, `zephyrSdkAvailableForHost`,
+    #     `longPaths`, `homePath` -- `_HOST_CHECK_ORDER`'s five names, harvested
+    #     BY NAME from `doctor_cmd._collect(...)` (`_host_checks_from_doctor`).
+    #     Also a genuine subset of doctor_cmd.py's own 20-ish resolved names
+    #     (unsurprising: they are the identical `Check` objects, not a copy),
+    #     but declared here independently rather than intersected from there,
+    #     because `_HOST_CHECK_ORDER` -- support_bundle_cmd.py's own tuple --
+    #     is the thing that actually bounds what this command can harvest, and
+    #     is the one artefact a reviewer changing that tuple will see.
     ("tan/commands/support_bundle_cmd.py", "c.name"): dict(
         suffixes=frozenset(
             {
+                "sdkRoot",
                 "boardYaml",
+                "jlinkBackend",
+                "openocdBackend",
+                "pyocdBackend",
+                "gdbserverBackend",
+                "noneBackend",
+                "gdb",
                 "bootstrapManifest",
-                "homePath",
                 "hostPrerequisites",
-                "hostPython",
-                "jlink",
-                "longPaths",
-                "pythonFloor",
-                "sdk",
-                "sdkProvenance",
-                "setools",
-                "sevenZip",
-                "venvProvenance",
-                "west",
-                "westResolved",
-                "workspace",
-                "zephyrSdk",
                 "zephyrSdkAvailableForHost",
-                "zephyrVersion",
-                "zephyrWorkspace",
+                "longPaths",
+                "homePath",
             }
         ),
         sites=1,

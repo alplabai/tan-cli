@@ -6,44 +6,41 @@ Port of `crates/tan-cli/src/commands/support_bundle.rs`. Composes three
 sections into one written file: the resolved debug context + its resolved
 values (`inspect_cmd`'s own model), the generation-trace decisions
 (`trace_cmd`'s own model), and a doctor report -- then returns a stdout
-envelope naming the written path + a decision count. Exit matches the oracle:
-a bundle that WRITES successfully exits `SUCCESS` (0) regardless of what its
-embedded doctor section found -- the doctor checks still surface as
-`support-bundle.<name>` issues (see [`_doctor_issues`]), but they are DATA
-inside the bundle, not this command's verdict, and no longer flip the exit
-code (measured: a normal project with a resolved SDK gets oracle rc=0
-issues=[]; matching that here needed decoupling `exit_code` from
-`doctor_cmd.exit_code_for`, which this port's `_doctor_section` reuses only
-for its `checks`/`summary`/`nextSteps`, not for exit). An unsupported
-target/server pairing -> `DOCTOR_FAILURE` (4) still, since that is this
-command's OWN precondition failure, not the reused doctor checklist's; a bad
-`--target-kind`/`--server` value -> `INTERNAL_FAILURE` (5).
+envelope naming the written path + a decision count. Exit follows the
+oracle's rule verbatim: `DOCTOR_FAILURE` (4) when the bundled doctor
+section's `summary.fail > 0` (`support_bundle.rs`: `let exit = if
+doctor.summary.fail > 0 { ExitCode::DoctorFailure }`), else `SUCCESS` (0).
+The bundle file is still written either way. An unsupported target/server
+pairing -> `DOCTOR_FAILURE` (4) too; a bad `--target-kind`/`--server` value
+-> `INTERNAL_FAILURE` (5).
 
-**The doctor section is this port's `tan doctor` verdict, not the oracle's.**
-The Rust `support_bundle.rs` embeds `build_doctor_report` -- a SEPARATE,
-debug-flavoured check list (`workspaceRoot`/`sdkRoot`/`boardYaml`/
-`codeLLDBExtension`/`lldb`/`hostPrerequisites`(old flavour)/
-`zephyrSdkAvailableForHost`/`longPaths`/`homePath`) that ONLY `support-bundle`
-and the not-yet-ported debug half of `tan doctor` itself produce; it is
-distinct from the build/flash-readiness check list `doctor_cmd._collect`
-implements (`sdk`/`boardYaml`/`workspace`/`westResolved`/`zephyrSdk`/
-`hostPrerequisites`(this port's flavour)/`setools`/`jlink`/...), which is what
-THIS port's `tan doctor` produces and the only doctor logic this port owns.
-Per this unit's own instructions, that logic is reused here verbatim via
-`doctor_cmd._collect`/`summarise`/`next_steps` (never `exit_code_for` -- see
-below) -- never copied or re-implemented -- so this bundle's `doctor` section
-reports the SAME facts a `tan doctor` run against the same project would, under
-`support-bundle.<name>`-coded issues instead of `doctor.<name>`-coded ones.
-This is a deliberate, known divergence from the oracle's own bundled doctor
-section, not an oversight: building a THIRD, debug-flavoured check list here
-would duplicate checks doctor_cmd.py already owns in a different shape --
-exactly the drift this whole architecture exists to avoid -- and
-`doctor_cmd.py`'s own module docstring already names the debug half as
-"needs context this port has no command to produce yet" (written before this
-unit existed). `--target-kind`/`--server` are still parsed and validated
-exactly like the oracle (`is_server_supported_for_target`); they simply do not
-change which checks the bundled doctor section runs, because this port's
-`_collect` never branches on either.
+**The doctor section is the DEBUG-focused report, not this port's `tan
+doctor` checklist** (tan-cli#357). Until that issue this module substituted
+`doctor_cmd._collect`'s build/flash-readiness list and pinned the exit at
+`SUCCESS`, so a bundle attached to a debug failure carried no debugger state
+at all while automation read `ok: true` next to error-severity issues.
+Measured against the oracle (empty PATH, no SDK): rust rc=4 ok=false
+issues=[`support-bundle.sdkRoot`, `support-bundle.hostPrerequisites`]; the
+port answered rc=0 ok=true with six error issues.
+
+[`_debug_doctor_report`] is therefore the port of `tan_core::debug::doctor::
+build_doctor_report` + `tan-cli`'s two appends (`append_host_prerequisites`,
+`append_host_environment`). The base/target-branch checks are written here
+because nothing else in this port produces them -- `support-bundle` is this
+port's ONLY debug-report consumer, the debug half of `tan doctor` still
+being unported (`doctor_cmd.py`'s own module docstring). The four host
+checks are NOT rewritten: they are harvested by name from
+`doctor_cmd._collect`, which already owns each one, so a change there
+reaches the bundle with no second copy to drift (see
+[`_host_checks_from_doctor`]). `--target-kind`/`--server` now genuinely
+change the report, exactly as they do in the oracle.
+
+**One harvested check is capped, not passed through raw** (tan-cli#374
+finding 1): `doctor_cmd`'s `longPaths` carries a Windows-only `fail` arm
+(tan-cli#306) the oracle cannot reach, and feeding it straight into this
+command's verdict made a first-run customer host (registry `LongPathsEnabled`
+on, no global `.gitconfig`) exit 4 where the oracle exits 0 with no issues,
+on every target/server shape. See [`_demote_long_paths_fail`].
 
 REDACTION POLICY (this port's own decision -- the oracle does not redact at
 all; verified: a fresh bundle from a freshly-built `target/debug/tan.exe`
@@ -69,7 +66,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import typer
@@ -86,8 +83,15 @@ from tan.commands.trace_cmd import (
     resolve_trace_targets,
 )
 from tan.core.debug_launch import (
+    BAREMETAL_MCU,
+    GDBSERVER,
+    JLINK,
     NATIVE_HOST,
+    OPENOCD,
+    PYOCD,
     SERVER_NONE,
+    YOCTO_USERSPACE,
+    ZEPHYR_MCU,
     DebugConfigError,
     is_server_supported_for_target,
     parse_server_kind,
@@ -201,36 +205,201 @@ def _create_bundle_trace_decisions(
     return decisions
 
 
-def _doctor_section(
-    context: ResolvedDebugContext,
-    project_arg: str | None,
-    board_yaml_arg: str | None,
-    target: str,
-    server: str,
-) -> tuple[dict[str, Any], list[doctor_cmd.Check]]:
-    """This bundle's doctor section, reusing `doctor_cmd`'s own build/flash-
-    readiness checks verbatim -- see the module docstring for why this
-    diverges from the oracle's debug-flavoured one.
+#: The `DebuggerExtensionsState` the standalone binary reports, verbatim from
+#: `crates/tan-cli/src/commands/doctor.rs::standalone_debugger_extensions`.
+#: The three flags are an inherited assumption from the VS Code extension --
+#: only an extension host can enumerate its own marketplace extensions -- and
+#: `observable: false` is what stops anything reading them as facts: every
+#: derived check renders `unknown` instead of claiming "vadimcn.vscode-lldb is
+#: installed." on a headless container (#102).
+STANDALONE_DEBUGGER_EXTENSIONS = {
+    "cortexDebug": True,
+    "cppTools": True,
+    "codeLLDB": True,
+    "observable": False,
+}
 
-    `board_yaml` is passed to `_collect` only when it was either explicitly
-    given (`--board-yaml`) or really exists -- mirroring `doctor_cmd.doctor`'s
-    own preprocessing rule (`_collect`'s docstring: "the only way it is
-    non-`None` while its file does NOT exist is an explicitly-given
-    `--board-yaml`"), so `boardYaml`'s `project_selected` severity split reads
-    the same signal a real `tan doctor` invocation would.
+#: Per-server executable candidates, first hit on PATH wins -- port of
+#: `tan_core::debug::context::collect_runtime_capabilities_from_commands`. The
+#: reported value is the COMMAND NAME, not the resolved path: that is what the
+#: oracle puts in the check detail (`.map(|c| (*c).to_string())`).
+_RUNTIME_EXECUTABLES: dict[str, tuple[str, ...]] = {
+    JLINK: ("JLinkGDBServerCL", "JLinkGDBServer"),
+    OPENOCD: ("openocd",),
+    PYOCD: ("pyocd",),
+    GDBSERVER: ("gdb", "arm-none-eabi-gdb"),
+    SERVER_NONE: ("lldb-dap", "lldb"),
+}
+
+#: The host checks the oracle appends to the pure report AFTER building it
+#: (`append_host_prerequisites` then `append_host_environment`), in that
+#: order. `bootstrapManifest` has no oracle counterpart as a CHECK -- Rust
+#: folds a rejected `metadata/bootstrap.json` into `hostPrerequisites`'
+#: own detail via `manifest_error`, this port reports it as a sibling warn --
+#: so it rides here rather than being dropped: a bundle whose prerequisite
+#: list came from tan's fallback instead of the SDK's manifest must say so.
+#: `longPaths` is Windows-only and simply absent elsewhere. Its `fail` status
+#: is demoted before it ever reaches this command's verdict -- see
+#: [`_demote_long_paths_fail`].
+_HOST_CHECK_ORDER = (
+    "bootstrapManifest",
+    "hostPrerequisites",
+    "zephyrSdkAvailableForHost",
+    "longPaths",
+    "homePath",
+)
+
+
+def _demote_long_paths_fail(check: doctor_cmd.Check) -> doctor_cmd.Check:
+    """tan-cli#374 finding 1. tan-cli#306 widened `doctor_cmd.long_paths_check`
+    with a Windows-only `fail` arm (registry `LongPathsEnabled` on, git's own
+    `core.longpaths` not) that the oracle cannot reach at all: Rust's
+    `long_paths_check` (`crates/tan-core/src/host_env.rs:300-330`) takes only
+    the registry axis and never returns worse than `Warn` -- confirmed by
+    RUNNING the oracle, not by reading it. Every OTHER `longPaths` state
+    (`warn`/`pass`) already matches the oracle's own verdict for that state
+    and is left alone; only this one, oracle-unreachable combination is
+    downgraded.
+
+    Feeding the undemoted check into this command's verdict was exactly the
+    bug: on a first-run customer host (registry on, no global `.gitconfig`,
+    so git's own flag is unset) it made `support-bundle` exit 4 -- doctor
+    failure -- where the oracle exits 0 with no issues at all, on every
+    target/server shape. `tan doctor` KEEPS the fail arm unchanged (that is
+    #306's real fix, for the command that actually gates a build and where
+    "fail fast on a certain west-update break" is the right call); this
+    command only ever attaches a debug snapshot, and its own acceptance bar
+    is matching the oracle's axes, which do not include this one.
+
+    Demoting here (not filtering the check out of the report) keeps the
+    written bundle, `doctor.summary`, `nextSteps` and the wire verdict all
+    reading the SAME check list -- a maintainer opening the file still sees
+    the real git/registry mismatch (the `detail`/`fix` text is untouched),
+    just at the severity this command can actually promise the oracle
+    agrees with.
+    """
+    if check.name == "longPaths" and check.status == "fail":
+        return replace(check, status="warn")
+    return check
+
+
+def _first_on_path(names: tuple[str, ...]) -> str | None:
+    return next((name for name in names if doctor_cmd.on_path(name) is not None), None)
+
+
+def _extension_check(name: str, extension_id: str) -> doctor_cmd.Check:
+    """One VS Code extension-presence check, always `unknown` here -- port of
+    `doctor.rs::extension_check`'s `None` arm, which is the only arm the
+    standalone binary can reach (`observable: false`). Not `warn`: a warning
+    says something is wrong, and nothing is -- the question was not askable.
+    `unknown` is counted in no summary bucket and raises no issue, so it can
+    never move this command's exit code.
+
+    The dash in `detail` is a real U+2014 EM DASH, not `--` (tan-cli#374
+    finding 6): the oracle's own literal
+    (`crates/tan-core/src/debug/doctor.rs:132`) uses one, and this string is a
+    verbatim port of it -- unlike this file's own prose/comments, which use
+    `--` throughout, an emitted user-facing detail string copies its source of
+    truth byte for byte."""
+    return doctor_cmd.Check(
+        name,
+        "unknown",
+        f"{extension_id}: unknown — the standalone tan binary cannot see "
+        "VS Code's installed extensions.",
+    )
+
+
+def _host_checks_from_doctor(
+    context: ResolvedDebugContext, project_arg: str | None, board_yaml_arg: str | None
+) -> list[doctor_cmd.Check]:
+    """The host half of the bundled report, harvested BY NAME from
+    `doctor_cmd._collect` rather than re-probed here.
+
+    The oracle appends these with `append_host_prerequisites` /
+    `append_host_environment`, both `pub(crate)` in `tan-cli` precisely so
+    `support_bundle.rs` can share `doctor.rs`'s copy. This port has the same
+    four checks -- `prerequisites_check`, `zephyr_sdk_host_check`,
+    `long_paths_check`, `home_path_check`, plus `bootstrapManifest` (see
+    `_HOST_CHECK_ORDER`) -- but their IO (manifest load,
+    effective-Python-floor arithmetic, registry read) is inline in `_collect`,
+    so calling `_collect` and picking the checks out is what keeps ONE copy of
+    each. Re-probing them here would be ~40 duplicated lines that drift the
+    first time `tan doctor` changes a verdict.
+
+    KNOWN CEILING: `_collect` runs the WHOLE build/flash-readiness checklist
+    (west/JLink/SETOOLS probes included) to yield these five. It is the same
+    call this command already made before tan-cli#357, so the cost is
+    unchanged and the discarded checks are exactly the ones the oracle's
+    bundle never carried -- but if the probe cost ever matters, the fix is a
+    `doctor_cmd.host_environment_checks()` seam both callers share, not a
+    second copy of the probes here.
+
+    `board_yaml` is passed only when explicitly given (`--board-yaml`) or the
+    file really exists, mirroring `doctor_cmd.doctor`'s own preprocessing rule
+    -- irrelevant to the five checks kept here, but passing a path that does
+    not exist would misreport `_collect`'s own `boardYaml`, and a future
+    reader harvesting one more name should not inherit a lie.
     """
     board_yaml_for_doctor = (
         context.board_yaml_path
         if (board_yaml_arg is not None or context.board_yaml_exists)
         else None
     )
-    checks = doctor_cmd._collect(
+    collected = doctor_cmd._collect(
         context.sdk_root,
         board_yaml=board_yaml_for_doctor,
         project_scope=project_arg,
         workspace_root=context.workspace_root,
         sdk_tier=context.sdk_tier,
     )
+    by_name = {check.name: check for check in collected}
+    return [
+        _demote_long_paths_fail(by_name[name])
+        for name in _HOST_CHECK_ORDER
+        if name in by_name
+    ]
+
+
+def _debug_doctor_report(
+    context: ResolvedDebugContext,
+    project_arg: str | None,
+    board_yaml_arg: str | None,
+    project_selected: bool,
+    target: str,
+    server: str,
+) -> tuple[dict[str, Any], list[doctor_cmd.Check]]:
+    """The bundle's DEBUG-focused doctor section (tan-cli#357) -- port of
+    `tan_core::debug::doctor::build_doctor_report` plus `tan-cli`'s two host
+    appends. See the module docstring for what it replaced and why.
+
+    No `serverCompatibility` check: the oracle's builder emits one and then
+    short-circuits, but `support_bundle.rs` refuses an unsupported pairing
+    with its own `support-bundle.server-compatibility` issue BEFORE building
+    any report (`_server_incompatible` here does the same), so that arm is
+    unreachable from this command. Verified against the oracle:
+    `--target-kind yocto-userspace --server jlink` writes no bundle at all.
+
+    `workspaceRoot` has no fail arm for the same reason `inspect_cmd`'s
+    resolved-values rows have none: `resolve_debug_project_context` always
+    resolves a workspace root (cwd, or `--project` joined onto it), so Rust's
+    `is_present(&context.workspace_root)` is always true in this port's
+    construction. Left as a reported check because the oracle reports it and
+    a bundle reader looks for it.
+    """
+    checks = [
+        doctor_cmd.Check("workspaceRoot", "pass", context.workspace_root),
+        doctor_cmd.Check(
+            "sdkRoot",
+            "pass" if context.sdk_root else "fail",
+            context.sdk_root or "No alp-sdk checkout resolved.",
+            None
+            if context.sdk_root
+            else "Run `tan sdk switch <path>` or pass `--sdk-root <path>`.",
+        ),
+        _board_yaml_check(context, project_selected),
+        *_target_checks(target, server),
+        *_host_checks_from_doctor(context, project_arg, board_yaml_arg),
+    ]
     missing_prerequisites = next(
         (c.missing for c in checks if c.name == "hostPrerequisites"), None
     )
@@ -244,6 +413,81 @@ def _doctor_section(
         "missingPrerequisites": missing_prerequisites,
     }
     return report, checks
+
+
+def _board_yaml_check(
+    context: ResolvedDebugContext, project_selected: bool
+) -> doctor_cmd.Check:
+    """Port of `doctor.rs::board_yaml_check` -- the DEBUG report's `boardYaml`,
+    which reports the resolved PATH as its detail (this port's build-checklist
+    `board_yaml_preflight_check` reports "board.yaml found" instead, and stays
+    where it is).
+
+    A missing `board.yaml` is a hard failure only once the user NAMED a
+    project: with neither `--project` nor `--board-yaml` the path is a guess
+    at the working directory, and `tan bootstrap` sends every new customer to
+    run `tan doctor` from the SDK checkout root, which has no `board.yaml` and
+    needs none (#100).
+    """
+    if context.board_yaml_exists:
+        return doctor_cmd.Check("boardYaml", "pass", context.board_yaml_path)
+    if project_selected:
+        return doctor_cmd.Check(
+            "boardYaml",
+            "fail",
+            context.board_yaml_path,
+            "Create board.yaml or pass `--board-yaml <path>`.",
+        )
+    return doctor_cmd.Check(
+        "boardYaml",
+        "warn",
+        f"no project selected -- no board.yaml at {context.board_yaml_path}",
+        "Select a project with `--project <dir>` (or `--board-yaml <path>`) to check one.",
+    )
+
+
+def _target_checks(target: str, server: str) -> list[doctor_cmd.Check]:
+    """The per-target-kind arm of `build_doctor_report`: one extension check
+    plus one tool check, both driven by `--target-kind`/`--server`.
+
+    `lldb` always passes, with no `fix` (#131): `vadimcn.vscode-lldb` ships
+    its own complete LLDB inside the extension directory and never consults
+    PATH, so warning that none was found and telling the user to install one
+    is a remedy for a tool the product does not need. The resolved executable
+    is still REPORTED when present -- that is real information; only the
+    verdict and the advice were wrong.
+    """
+    if target in (ZEPHYR_MCU, BAREMETAL_MCU):
+        found = _first_on_path(_RUNTIME_EXECUTABLES[server])
+        return [
+            _extension_check("cortexDebugExtension", "marus25.cortex-debug"),
+            doctor_cmd.Check(
+                f"{server}Backend",
+                "pass" if found else "warn",
+                found or f"No {server} executable was found on PATH.",
+                None if found else f"Install {server} and make sure it is on PATH.",
+            ),
+        ]
+    if target == YOCTO_USERSPACE:
+        gdb = _first_on_path(_RUNTIME_EXECUTABLES[GDBSERVER])
+        return [
+            _extension_check("cppToolsExtension", "ms-vscode.cpptools"),
+            doctor_cmd.Check(
+                "gdb",
+                "pass" if gdb else "warn",
+                gdb or "No local gdb executable was found on PATH.",
+                None if gdb else "Install gdb locally for symbolized remote debugging.",
+            ),
+        ]
+    lldb = _first_on_path(_RUNTIME_EXECUTABLES[SERVER_NONE])
+    return [
+        _extension_check("codeLLDBExtension", "vadimcn.vscode-lldb"),
+        doctor_cmd.Check(
+            "lldb",
+            "pass",
+            lldb or "vadimcn.vscode-lldb ships its own LLDB, so none is needed on PATH.",
+        ),
+    ]
 
 
 def _doctor_issues(checks: list[doctor_cmd.Check]) -> list[Issue]:
@@ -384,8 +628,14 @@ def _run(
     except TraceTargetError as err:
         return _internal_failure(generated_at, str(err), target, server, context.sdk)
 
-    doctor_report, checks = _doctor_section(
-        context, project_arg, board_yaml_arg, target, server
+    # Port of `doctor.rs::project_selected`: `--project`/`--board-yaml` are the
+    # whole selection surface, so with neither given the resolved board.yaml
+    # path is a guess at the cwd, not a request.
+    project_selected = any(
+        (arg or "").strip() for arg in (project_arg, board_yaml_arg)
+    )
+    doctor_report, checks = _debug_doctor_report(
+        context, project_arg, board_yaml_arg, project_selected, target, server
     )
     doctor_report["generatedAt"] = generated_at
 
@@ -400,14 +650,16 @@ def _run(
         "inspect": {
             "schemaVersion": DATA_SCHEMA_VERSION,
             "generatedAt": generated_at,
-            # A reduced form of the oracle's `DebugWorkspaceContext`: the six
-            # fields this port actually resolves. `projectSelected`/
-            # `debuggerExtensions` are omitted -- both are IDE-extension-host
-            # concepts (`tan_core::debug::DebuggerExtensionsState`) with no
-            # standalone-CLI reader anywhere in this port (see
-            # `inspect_cmd.ResolvedDebugContext`'s own docstring), so
-            # fabricating a value for either would be an invented, not a
-            # resolved, fact.
+            # The oracle's `DebugWorkspaceContext`, key for key (tan-cli#357).
+            # `projectSelected`/`debuggerExtensions` are NOT fabricated: the
+            # first is derived from this invocation's own flags (see
+            # `project_selected` above, and `doctor.rs::project_selected`), the
+            # second is the standalone binary's own declared, self-describing
+            # state -- `observable: false` says in the file itself that the
+            # three flags were never probed. Omitting them cost the bundle the
+            # two facts that explain WHY its `boardYaml` and extension checks
+            # read the way they do, in the artifact a debug failure gets
+            # attached to.
             "context": {
                 "generatedAt": generated_at,
                 "workspaceRoot": context.workspace_root,
@@ -416,6 +668,8 @@ def _run(
                 "westCwd": context.west_cwd,
                 "pythonBinary": context.python_binary,
                 "boardYamlExists": context.board_yaml_exists,
+                "projectSelected": project_selected,
+                "debuggerExtensions": STANDALONE_DEBUGGER_EXTENSIONS,
             },
             "resolvedValues": collect_resolved_values(context),
         },
@@ -434,19 +688,17 @@ def _run(
     except OSError as err:
         return _internal_failure(generated_at, str(err), target, server, context.sdk)
 
-    # The doctor section is DATA inside the bundle, not this command's verdict
-    # -- matches the oracle: a `support-bundle` run against a normal project
-    # with a resolved SDK exits 0 with `issues=[]` even though the same
-    # project's bundled doctor section (and a bare `tan doctor`) would warn or
-    # fail. The bundle-write is what this command promises to do, and it did
-    # it; the doctor section's own warn/fail checks stay visible as
-    # `support-bundle.<name>` issues for a human reading the envelope, but
-    # they no longer drive the exit code (that would make `support-bundle`
-    # fail merely because the reused `doctor_cmd._collect` checklist found
-    # something to warn about, converting an export success into a fixable-
-    # setup mystery for the caller).
+    # tan-cli#357: the doctor summary IS this command's verdict, exactly as in
+    # the oracle (`if doctor.summary.fail > 0 { ExitCode::DoctorFailure }`).
+    # `exit_code_for` is `any(status == "fail")` over the same list, so it is
+    # that rule spelled in this port's vocabulary -- and it keeps the CLI-wide
+    # invariant `process exit code == envelope.exitCode == (not ok)` intact,
+    # which the previous hardcoded SUCCESS broke: automation saw `ok: true`
+    # and exit 0 beside error-severity issues in the same envelope. The bundle
+    # file is still written on the failing path -- it is what the user
+    # attaches, and a doctor failure is the reason they are attaching it.
     issues = _doctor_issues(checks)
-    exit_code = ExitCode.SUCCESS
+    exit_code = doctor_cmd.exit_code_for(checks)
 
     data = {
         "schemaVersion": DATA_SCHEMA_VERSION,
