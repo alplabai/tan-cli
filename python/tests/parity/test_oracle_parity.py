@@ -193,6 +193,23 @@ args:
 
 
 @LIVE_GATE
+@pytest.mark.xfail(
+    strict=True,
+    reason="tan-cli#391/#395, deliberate. `_run_forward` no longer matches "
+    "`workspace.rs::run` two ways, both permanent: (1) tan-cli#391 -- the "
+    "retired app-path positional injection is replaced with a `--board "
+    "<project>/board.yaml` flag for `migrate`/`lock` (the only two that "
+    "declare one), so `data.args` there carries the injected flag while the "
+    "oracle's `BuildData.args` is always the raw, uninjected passthrough, "
+    "even on the run where it silently ran the retired positional; (2) "
+    "tan-cli#395 -- `data.stdout`/`data.stderr`/`data.westExitCode` are new "
+    "keys the frozen `BuildData` struct never had, for all three verbs "
+    "including `quality`, which #391's fix does not touch. See "
+    "`_run_forward`'s own DELIBERATE DIVERGENCE 1/2 comments in "
+    "`west_forward_cmd.py`. Strict: if the oracle is ever un-frozen and "
+    "regains either behaviour, this XPASSes and fails the run, which is the "
+    "signal to retire the divergence note.",
+)
 @pytest.mark.parametrize("verb", ["migrate", "lock", "quality"])
 def test_west_forward_matches_rust(verb, work_dir, tmp_path):
     """`west_forward_cmd.py`'s three verbs, run inside a real `.west` workspace
