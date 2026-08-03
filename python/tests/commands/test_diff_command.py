@@ -25,9 +25,12 @@ only pins THIS port's own (documented, self-consistent) behaviour.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import typer
 from typer.testing import CliRunner
 
@@ -45,6 +48,39 @@ app = typer.Typer()
 app.command("diff")(diff_command)
 
 runner = CliRunner()
+
+#: `target/{release,debug}/tan(.exe)` next to this checkout -- the same
+#: discovery `tests/parity/oracle.py`'s `rust_binary()` uses, kept
+#: independent here rather than imported so this file's only non-stdlib
+#: dependency stays `tan.commands.diff_cmd` (matching every other test file
+#: under `tests/commands/`). `TAN_RUST_BINARY` overrides, same env var.
+_EXE = ".exe" if sys.platform == "win32" else ""
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _oracle_binary() -> str | None:
+    override = os.environ.get("TAN_RUST_BINARY")
+    if override:
+        return override
+    for profile in ("release", "debug"):
+        candidate = _REPO_ROOT / "target" / profile / f"tan{_EXE}"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+_ORACLE = _oracle_binary()
+_ORACLE_REQUIRED = pytest.mark.skipif(
+    _ORACLE is None,
+    reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
+)
+
+
+def _run_oracle(argv: list[str], cwd: Path) -> tuple[int, dict]:
+    proc = subprocess.run(
+        [_ORACLE, *argv], capture_output=True, text=True, encoding="utf-8", cwd=cwd
+    )
+    return proc.returncode, json.loads(proc.stdout)
 
 
 def _project(tmp_path: Path, board_yaml_text: str) -> Path:
@@ -174,6 +210,167 @@ def test_e1m_routes_non_string_key_is_a_schema_violation(tmp_path: Path) -> None
     assert result.exit_code == 2
     envelope = json.loads(result.stdout)
     assert envelope["issues"][0]["code"] == "diff.schema-violation"
+
+
+# ---------------------------------------------------------------------------
+# Oracle divergences fixed this round (tan-cli diff/pinmux batch) -- byte
+# match confirmed against `target/debug/tan.exe` for every case below except
+# `test_iot_wrong_type_message_is_a_known_divergence_from_the_oracle`, which
+# is the one still-approximate message.
+# ---------------------------------------------------------------------------
+
+
+def test_yaml_1_1_only_bool_literal_is_a_string_not_a_type_error(tmp_path: Path) -> None:
+    """BLOCKER regression: PyYAML's stock `SafeLoader` resolves YAML 1.1's
+    `on`/`off`/`yes`/`no`/`y`/`n` to `bool`; `_Yaml12BoolLoader` narrows that
+    to the YAML 1.2 core-schema set (`true`/`True`/`TRUE`/`false`/`False`/
+    `FALSE` only), matching `serde_yaml`. Byte-matches the oracle: `os: on`
+    at `schemaVersion: 1` never even reaches the `os` check (v1 leaves `os`
+    alone), so the only visible effect here is `libraries: []` still pruning
+    -- exactly what used to exit 2 `diff.schema-violation` before this fix.
+    """
+    proj = _project(tmp_path, "schemaVersion: 1\nos: on\nlibraries: []\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is True
+    assert envelope["data"]["changes"] == [{"path": "libraries", "kind": "removed", "before": []}]
+
+
+def test_yaml_1_1_only_bool_literal_survives_into_a_v2_os_diff(tmp_path: Path) -> None:
+    """The same narrowing, exercised on the field it actually guards: at
+    `schemaVersion: 2`, `os` IS read, and `on` must survive as the string
+    `"on"` in the emitted diff entry, not a boolean. Byte-matches the oracle.
+    """
+    proj = _project(tmp_path, "schemaVersion: 2\nos: on\nsom:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["changes"] == [{"path": "os", "kind": "removed", "before": "on"}]
+
+
+def test_iot_wrong_type_is_a_schema_violation_not_a_false_accept(tmp_path: Path) -> None:
+    """`iot: {wifi: "yes"}` used to false-ACCEPT with a FABRICATED `iot`
+    removal entry: `_typed_field(doc, "iot", dict, ...)` only checked `iot`
+    itself was a mapping, never that its four toggles were `bool`, so
+    `_iot_any_enabled`/`_iot_pruned` treated the wrong-typed `wifi` as just
+    another falsy-but-present value and pruned the whole group.
+    `_check_iot_field_types` now rejects it before `compute_diff_entries`
+    ever asks whether the group is prunable."""
+    proj = _project(tmp_path, 'schemaVersion: 1\niot:\n  wifi: "yes"\n')
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["data"]["changes"] == []
+    assert envelope["issues"][0]["code"] == "diff.schema-violation"
+    assert envelope["issues"][0]["message"] == (
+        "board.yaml is not valid YAML: iot.wifi: expected a boolean, got a string"
+    )
+
+
+@_ORACLE_REQUIRED
+def test_iot_wrong_type_message_is_a_known_divergence_from_the_oracle(tmp_path: Path) -> None:
+    """Exit code and issue CODE now match the oracle exactly (see
+    `test_iot_wrong_type_is_a_schema_violation_not_a_false_accept` for the
+    behavioural fix). The MESSAGE does not, and is not expected to:
+    `_typed_nested` reports the same generic `expected X, got Y` shape every
+    OTHER `_typed_field` check in this module uses (see its module
+    docstring's scope note -- none of them claims to reproduce `serde_yaml`'s
+    exact wording), where the oracle's struct-typed deserialize embeds the
+    offending value and a line/column. Pinned literally on BOTH sides'
+    message, per this repo's own convention for a deliberate divergence
+    (`tests/parity/test_oracle_parity.py`'s `..._is_a_known_divergence_from_
+    the_oracle` cases) -- a change to either wording, or the two converging,
+    must fail this test rather than pass it silently.
+    """
+    proj = _project(tmp_path, 'schemaVersion: 1\niot:\n  wifi: "yes"\n')
+    argv = ["--project", str(proj), "--format", "json"]
+    result = runner.invoke(app, argv)
+    p_out = json.loads(result.stdout)
+    r_code, r_out = _run_oracle(["diff", *argv], tmp_path)
+
+    assert result.exit_code == r_code == 2
+    assert p_out["issues"][0]["code"] == r_out["issues"][0]["code"] == "diff.schema-violation"
+    assert r_out["issues"][0]["message"] == (
+        'board.yaml is not valid YAML: iot.wifi: invalid type: string "yes", '
+        "expected a boolean at line 3 column 9"
+    )
+    assert p_out["issues"][0]["message"] != r_out["issues"][0]["message"]
+    # Everything OUTSIDE the message is a real match, not coincidentally
+    # unchecked -- exit code (asserted above), the issue code (asserted
+    # above), and `data` (unchanged: false, no changes, same schema version).
+    assert p_out["data"] == r_out["data"]
+
+
+def test_inference_backend_non_string_scalar_is_not_falsely_pruned(tmp_path: Path) -> None:
+    """`inference: {backend: 5}` used to false-ACCEPT with a FABRICATED
+    `inference` removal entry: `_inference_is_empty` defaulted any non-`str`
+    `backend` to `""` for its emptiness check, treating a present, non-empty
+    `backend` as blank. The oracle's `backend` is a `String` field that
+    coerces ANY scalar to non-empty text (`5` -> `"5"`), so it is never
+    prunable here -- `unchanged: true`, matching the oracle exactly.
+    """
+    proj = _project(tmp_path, "schemaVersion: 1\ninference:\n  backend: 5\n")
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["data"]["unchanged"] is True
+    assert envelope["data"]["changes"] == []
+
+
+def test_inference_default_arena_kib_wrong_type_is_a_schema_violation(tmp_path: Path) -> None:
+    """Unlike `backend`, `default_arena_kib` is a real `u32` field: a
+    non-integer, a bool, or a value outside `[0, u32::MAX]` is a genuine type
+    mismatch on the oracle, not a leniently-coerced string. Byte-matches the
+    oracle's exit code and issue code (message approximated, as elsewhere)."""
+    proj = _project(tmp_path, 'schemaVersion: 1\ninference:\n  default_arena_kib: "512"\n')
+    result = runner.invoke(app, ["--project", str(proj), "--format", "json"])
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "diff.schema-violation"
+
+
+def test_diff_sdk_root_populates_sdk_block_on_success(tmp_path: Path) -> None:
+    """BLOCKER regression: `--sdk-root` used to be accepted and silently
+    dropped -- `diff` now resolves it and echoes `sdk.root`/`sdk.sourceTier`
+    on the success envelope, matching the oracle (byte-matched, including the
+    `"sdkRootFlag"` source tier spelling `resolve_sdk` already shares with
+    `pinmux`)."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    proj = _project(tmp_path, "som:\n  sku: E1M-AEN701\n")
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["sdk"] == {
+        "root": str(sdk).replace("\\", "/"),
+        "sourceTier": "sdkRootFlag",
+    }
+
+
+def test_diff_sdk_root_populates_sdk_block_on_board_yaml_missing_failure(tmp_path: Path) -> None:
+    """The same fix, on the FAILURE envelope -- measured against the oracle:
+    `diff --sdk-root <path>` against a missing board.yaml still reports the
+    `sdk` block on the exit-2 envelope, not just on success."""
+    sdk = tmp_path / "sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    result = runner.invoke(
+        app, ["--project", str(empty), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["sdk"] == {
+        "root": str(sdk).replace("\\", "/"),
+        "sourceTier": "sdkRootFlag",
+    }
+    assert envelope["issues"][0]["code"] == "diff.board-yaml-missing"
 
 
 def test_text_mode_reports_no_differences(tmp_path: Path) -> None:

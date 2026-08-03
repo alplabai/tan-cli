@@ -34,10 +34,19 @@ is DROPPED (never an error), and a row's `e1m_pad == "TBD"` sentinel is
 dropped too (the source TSV carries no E1M edge pad for that silicon pad --
 `metadata/pinmux/v2n.yaml`'s ENTIRE table is TBD-only at the time of writing,
 which is exactly what makes `pinmux.table-empty` a live path, not a
-hypothetical one). A pad field present with the WRONG YAML kind (e.g. a
-number where a string belongs) is treated as a document-level parse failure,
-matching `serde_yaml`'s struct-typed deserialize -- one malformed field fails
-the whole table, not just that row.
+hypothetical one).
+
+**A pad field is a `String` in the oracle, not a strict `serde_yaml`
+struct-typed deserialize -- refuted by running it.** Every `PinmuxPad` field
+is `String`, and (measured against the oracle) `String` fields coerce ANY
+scalar to its own YAML-spelled text rather than rejecting a wrong-looking
+one: `owner: 7` reads back `"7"`, `silicon_pad: true` reads back `"true"`,
+both at exit 0 with no issue -- an earlier version of this module treated any
+non-`str` scalar there as a hard parse failure, which was simply wrong, not a
+documented divergence. Only a genuine compound value (`owner: [a, b]`,
+`e1m_pad: {a: b}`) is a real type mismatch no `String` field can absorb, and
+that half stayed a document-level `PinmuxParseError` -- one malformed
+sequence/mapping field still fails the whole table, not just that row.
 """
 
 from __future__ import annotations
@@ -69,9 +78,6 @@ _FAMILY_PREFIX_TABLE = (
     ("E1M-V2N", "v2n"),
     ("E1M-V2M", "v2n"),
 )
-
-#: The pad struct fields, in `PinmuxPad`'s serialized wire order.
-_PAD_FIELDS = ("e1m_pad", "e1m_function", "owner", "silicon_peripheral", "silicon_pad")
 
 
 def pinmux_family_for_sku(sku: str) -> str | None:
@@ -131,6 +137,26 @@ def _yaml_kind(value: Any) -> str:
     return type(value).__name__
 
 
+def _pad_field(row: dict, field: str) -> str | None:
+    """`row[field]` coerced to its YAML-spelled string, or `None` when the
+    key is absent/null. Raises `PinmuxParseError` for a sequence/mapping
+    value -- the one shape a `String` pad field can never absorb; every
+    OTHER scalar (bool/int/float, in addition to an actual string) takes its
+    YAML-spelled text instead, matching the oracle's own `String`-field
+    coercion (measured: `owner: 7` -> `"7"`, `silicon_pad: true` -> `"true"`,
+    both at exit 0 -- see the module docstring)."""
+    value = row.get(field)
+    if value is None:
+        return None
+    if isinstance(value, (list, dict)):
+        raise PinmuxParseError(f"pads[].{field}: expected a string, got {_yaml_kind(value)}")
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return value
+    return str(value)
+
+
 def parse_pinmux_table_checked(text: str) -> PinmuxTable:
     """Parse a `pinmux-capability-v1` YAML document. Raises `PinmuxParseError`
     for a document that does not parse, is not a mapping, or does not declare
@@ -165,13 +191,8 @@ def parse_pinmux_table_checked(text: str) -> PinmuxTable:
     for row in raw_pads or []:
         if not isinstance(row, dict):
             raise PinmuxParseError(f"pads[]: expected a mapping, got {_yaml_kind(row)}")
-        for field in _PAD_FIELDS:
-            value = row.get(field)
-            if value is not None and not isinstance(value, str):
-                kind = _yaml_kind(value)
-                raise PinmuxParseError(f"pads[].{field}: expected a string, got {kind}")
-        e1m_pad = row.get("e1m_pad")
-        e1m_function = row.get("e1m_function")
+        e1m_pad = _pad_field(row, "e1m_pad")
+        e1m_function = _pad_field(row, "e1m_function")
         if e1m_pad is None or e1m_function is None:
             continue  # `p.e1m_pad?`/`p.e1m_function?` -- missing key, drop the row
         if e1m_pad == "TBD":
@@ -180,9 +201,9 @@ def parse_pinmux_table_checked(text: str) -> PinmuxTable:
             PinmuxPad(
                 e1m_pad=e1m_pad,
                 e1m_function=e1m_function,
-                owner=row.get("owner") or "",
-                silicon_peripheral=row.get("silicon_peripheral") or "",
-                silicon_pad=row.get("silicon_pad") or "",
+                owner=_pad_field(row, "owner") or "",
+                silicon_peripheral=_pad_field(row, "silicon_peripheral") or "",
+                silicon_pad=_pad_field(row, "silicon_pad") or "",
             )
         )
 

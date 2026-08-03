@@ -22,14 +22,14 @@ needs a bench with a device on it.
 to know which (tan-cli#255).** `ci.yml` installs `-e ./python` with NO extras
 on purpose -- that is the shape a customer's `pip install alp-tan` gives, and
 the only one in which `tests/gates/test_declared_dependencies.py` can catch an
-extras-only import escaping to module scope -- while `python-binaries.yml` and
+extras-only import escaping to a top-level-module import -- while `python-binaries.yml` and
 `parity.yml` install `[monitor]`. The six cases below that exercise
 `_run_monitor`'s real refusal/spawn logic used to SKIP outright in the
 extras-less shape (`@needs_pyserial`), which silently dropped exactly the
 coverage they were written for on the one install shape `ci.yml` actually
 runs. `_stub_pyserial_if_absent()` replaces that: it plants an empty `serial`
 module in `sys.modules` when the real one is not importable, so
-`_run_monitor`'s precheck (a bare, module-scope `import serial`) succeeds
+`_run_monitor`'s precheck (a bare, function-local `import serial`) succeeds
 either way. That is safe, not a fake pass, because every test that calls it
 also replaces `_available_ports` with a canned list before `_run_monitor` ever
 reaches pyserial's actual API -- a placeholder module with no attributes is
@@ -267,6 +267,50 @@ def test_a_bad_format_value_is_a_usage_error_not_a_traceback():
     result = runner.invoke(app, ["--format", "xml"])
     assert result.exit_code == 2
     assert "Traceback" not in (result.output or "")
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        ["--project", "."],
+        ["--board-yaml", "board.yaml"],
+        ["--sdk-root", "."],
+        ["--target", "zephyr-conf"],
+        ["--all"],
+        ["--verbose"],
+        ["--quiet"],
+        ["--no-color"],
+        ["--non-interactive"],
+        ["--ci"],
+    ],
+)
+def test_the_globals_the_oracle_ignores_are_accepted_not_rejected(flag, monkeypatch):
+    """tan-cli#255: the oracle's clap `GlobalArgs` are declared on EVERY verb,
+    `monitor` included, and never read by it (confirmed live against
+    `tan.exe monitor`: each flag alone reaches the identical port-resolution
+    failure a bare `tan.exe monitor --port COM7` does). Without them declared
+    here, `tan monitor --sdk-root <path> --port COM7` was a Click "No such
+    option" usage error at exit 2 where the oracle exits 0/1 -- so a caller
+    forwarding the global set unconditionally (the extension, a saved script)
+    could never open a console."""
+    _stub_pyserial_if_absent(monkeypatch)
+    monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
+
+    class _Completed:
+        returncode = 0
+
+    monkeypatch.setattr(
+        monitor_cmd.subprocess, "run", lambda argv, **kwargs: _Completed()
+    )
+
+    result = runner.invoke(app, ["--port", "COM7", *flag, "--format", "json"])
+    assert result.exit_code == 0, result.output
+    assert envelope(result)["command"] == "monitor"
+
+
+def test_an_unknown_flag_is_still_a_usage_error():
+    """The accepted-globals list above must not turn into "accept anything"."""
+    assert runner.invoke(app, ["--not-a-real-flag"]).exit_code == 2
 
 
 def _block_pyserial(monkeypatch):

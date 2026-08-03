@@ -2229,6 +2229,54 @@ def fix_installed_check(tool: str, command: str) -> Check:
     )
 
 
+def fix_spawn_failed_check(tool: str, command: str, err: Exception) -> Check:
+    """`doctor.fix-spawn-failed` -- `--fix` resolved `{tool}`'s install
+    command on PATH (`on_path` already succeeded) but starting it raised
+    (`OSError`/`ValueError`/`subprocess.SubprocessError` other than a
+    timeout). Distinct from silence: without this, a customer watching
+    `--fix` do nothing cannot tell "the OS refused to start it" from "tan
+    never tried"."""
+    return Check(
+        f"fix:{tool}",
+        "warn",
+        f"`--fix` could not start `{command}` for {tool}: {err}. Run it "
+        f"yourself, then re-run `tan doctor`.",
+        command,
+        code="doctor.fix-spawn-failed",
+    )
+
+
+def fix_failed_check(tool: str, command: str, returncode: int) -> Check:
+    """`doctor.fix-failed` -- `--fix` ran `{tool}`'s install command and the
+    child exited non-zero. `hostPrerequisites` above still reports `{tool}`
+    missing in THIS report (same no-same-process-recheck honesty as
+    `fix_installed_check`) -- this Check is the only place a customer learns
+    the install itself failed, rather than merely "still missing"."""
+    return Check(
+        f"fix:{tool}",
+        "warn",
+        f"`--fix` ran `{command}` for {tool}; it exited {returncode}. Run it "
+        f"yourself to see the full output, then re-run `tan doctor`.",
+        command,
+        code="doctor.fix-failed",
+    )
+
+
+def fix_timed_out_check(tool: str, command: str) -> Check:
+    """`doctor.fix-timed-out` -- `{tool}`'s install command did not finish
+    inside `FIX_INSTALL_TIMEOUT_S` (300s) and was killed. Without this, a
+    hang here reads as up to 20 minutes of silent terminal: text-mode output
+    only prints after the WHOLE report completes."""
+    return Check(
+        f"fix:{tool}",
+        "warn",
+        f"`--fix` killed `{command}` for {tool} after {FIX_INSTALL_TIMEOUT_S}s "
+        f"with no result. Run it yourself, then re-run `tan doctor`.",
+        command,
+        code="doctor.fix-timed-out",
+    )
+
+
 def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
     """`--fix`'s ADR 0021 executor (tan-cli#91): for each tool
     `hostPrerequisites` already reported missing, either run its manifest
@@ -2244,20 +2292,25 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
     existing `hostPrerequisites` Fail already carries the honest "install it
     yourself" advice for that case.
 
-    Every outcome becomes a `Check` (`fix_needs_sudo_check`/
-    `fix_installed_check`), never a bare side effect -- a customer who typed
-    `--fix` and got the SAME report back has no way to tell "nothing needed
-    fixing" from "tan tried and silently gave up". A command that fails to
-    run at all (spawn error, non-zero exit, timeout) produces NEITHER check:
-    `hostPrerequisites`'s own Fail already names it and its command, and a
-    second, vaguer "something went wrong" notice would only compete with
-    that one for the customer's attention.
+    Every outcome becomes a `Check` -- `fix_needs_sudo_check`/
+    `fix_installed_check` on the two "acted, and it's fine" paths, and (as of
+    the tan-cli#91 follow-up below) `fix_spawn_failed_check`/`fix_failed_check`/
+    `fix_timed_out_check` on the three "acted, and it's NOT fine" paths --
+    never a bare side effect. A customer who typed `--fix` and got the SAME
+    report back used to have no way to tell "nothing needed fixing" from "tan
+    tried and silently gave up": a spawn error, a non-zero exit, or a
+    `FIX_INSTALL_TIMEOUT_S` (300s) timeout each used to `continue` with no
+    trace at all, and text-mode output only prints after the WHOLE report
+    completes -- up to 20 minutes of silent terminal across four tools with
+    nothing to show for it. `hostPrerequisites`'s own Fail still names the
+    tool and its command either way; these Checks add the ONE fact it
+    structurally cannot carry -- what `--fix` itself did about it.
 
     Only ever called from `doctor()`'s `--fix` branch, itself gated on
-    `not non_interactive and not ci and not json_mode` -- the one place in
-    this module that mutates the host rather than merely observing it, so it
-    is confined exactly there, never folded into `_collect` (pure probes,
-    see the module docstring).
+    `can_prompt` (`tan.core.consent`) -- the one place in this module that
+    mutates the host rather than merely observing it, so it is confined
+    exactly there, never folded into `_collect` (pure probes, see the module
+    docstring).
     """
     results: list[Check] = []
     for entry in missing:
@@ -2291,11 +2344,61 @@ def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
                 timeout=FIX_INSTALL_TIMEOUT_S,
                 check=False,
             )
-        except (OSError, ValueError, subprocess.SubprocessError):
+        except subprocess.TimeoutExpired:
+            results.append(fix_timed_out_check(tool, command))
+            continue
+        except (OSError, ValueError, subprocess.SubprocessError) as err:
+            results.append(fix_spawn_failed_check(tool, command, err))
             continue
         if result.returncode == 0:
             results.append(fix_installed_check(tool, command))
+        else:
+            results.append(fix_failed_check(tool, command, result.returncode))
     return results
+
+
+def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) -> Issue:
+    """`doctor.fix-suppressed` -- tan-cli#91 P1, measured against the oracle:
+    `tan doctor --fix --format json` on an unhealthy host used to be a
+    byte-for-byte silent no-op vs. plain `tan doctor` -- no issue, no note,
+    exit code unchanged -- indistinguishable from a `--fix` that genuinely
+    found nothing to do. The oracle's own equivalent refuses outright
+    (`cli.parse-error`, exit 2); this port instead reports HONESTLY: `--fix`
+    was requested, the `can_prompt` consent gate (`tan.core.consent`) refused
+    it, and here is which of its conditions actually tripped -- not just that
+    nothing happened.
+
+    Only ever called from `doctor()`, and only when `fix` is set and
+    `can_prompt` returned `False` for these same three flags -- never the
+    other way around, so this can only ever explain a REAL suppression.
+
+    The `isatty()` pair is read ONLY when `not json_mode`, mirroring
+    `can_prompt`'s own short-circuit order (`... and not json_mode and
+    sys.stdin.isatty() and sys.stderr.isatty()`) rather than a coincidence:
+    under `--format json`, `tan.cli.main` tees `sys.stderr` through
+    `_TeeStderr`, which has no `isatty()` at all -- reading it unconditionally
+    here crashes this exact suppressed-fix report with
+    `AttributeError: '_TeeStderr' object has no attribute 'isatty'` (measured
+    against a real `tan doctor --fix --format json --ci` run). `json_mode`
+    is already a complete, accurate reason on its own; there is nothing the
+    tty state could add under it.
+    """
+    reasons = []
+    if json_mode:
+        reasons.append("`--format json` (no terminal to prompt on)")
+    if ci:
+        reasons.append("`--ci`")
+    if non_interactive:
+        reasons.append("`--non-interactive`")
+    if not json_mode and not (sys.stdin.isatty() and sys.stderr.isatty()):
+        reasons.append("no interactive terminal (stdin/stderr not a tty -- piped, redirected, or CI)")
+    return Issue(
+        "doctor.fix-suppressed",
+        "warning",
+        "`--fix` was requested but not run: " + "; ".join(reasons) + ". Re-run "
+        "`tan doctor --fix` from a real, interactive terminal, without "
+        "--ci/--non-interactive/--format json, to allow it.",
+    )
 
 
 def _collect(
@@ -2740,7 +2843,8 @@ def doctor(
         # stderr is not a terminal -- piped, redirected, or a CI runner").
         # See that module for why BOTH handles matter, and why `stdout`
         # deliberately does not.
-        if fix and can_prompt(non_interactive=non_interactive, ci=ci, json_mode=json_mode):
+        fix_allowed = fix and can_prompt(non_interactive=non_interactive, ci=ci, json_mode=json_mode)
+        if fix_allowed:
             missing_for_fix = next(
                 (c.missing for c in checks if c.name == "hostPrerequisites"), None
             )
@@ -2748,6 +2852,16 @@ def doctor(
                 checks = [*checks, *run_fix(missing_for_fix)]
         exit_code = exit_code_for(checks)
         issues = checks_to_issues(checks)
+        # tan-cli#91 P1: `--fix` requested and consent refused used to be a
+        # SILENT no-op, byte-for-byte identical to plain `tan doctor` --
+        # measured against the oracle (`doctor --fix --format json`, which the
+        # oracle instead refuses to parse outright). SAY SO instead: name
+        # every condition of `can_prompt`'s that actually tripped.
+        if fix and not fix_allowed:
+            issues = [
+                *issues,
+                fix_suppressed_issue(non_interactive=non_interactive, ci=ci, json_mode=json_mode),
+            ]
         # tan-cli#294 finding 4 (#203/#210, alp-sdk-vscode#347, ADR 0021 P0a):
         # `hostPrerequisites` is the only check that ever carries a
         # `{tool, command}` pair, so it is the only place this reads from --
@@ -2789,8 +2903,11 @@ def doctor(
         emit(Envelope("doctor", project, data, issues, exit_code, sdk=sdk))
     else:
         for check in (data or {}).get("checks", []):
-            fix = f"\n    fix: {check['fix']}" if "fix" in check else ""
-            print(f"[{check['status']:>7}] {check['name']}: {check['detail']}{fix}", file=sys.stderr)
+            # `fix_line`, never `fix`: this loop runs after the `fix: bool`
+            # parameter is done being read, but shadowing it here is a trap
+            # for the next edit that needs it further down.
+            fix_line = f"\n    fix: {check['fix']}" if "fix" in check else ""
+            print(f"[{check['status']:>7}] {check['name']}: {check['detail']}{fix_line}", file=sys.stderr)
         if data is None:
             for issue in issues:
                 print(f"{issue.severity}: {issue.message}", file=sys.stderr)

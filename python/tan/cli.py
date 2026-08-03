@@ -569,6 +569,28 @@ class _TeeStderr:
         return self._buffer.getvalue()
 
 
+def _reconfigure_stdio() -> None:
+    """Force UTF-8, LF-only stdout/stderr, once, at the process boundary.
+
+    Every command downstream just `print()`s -- correctness here is what
+    makes that safe. A normal Windows `TextIOWrapper` translates a written
+    `\\n` to `\\r\\n` and encodes with the process's ANSI code page, neither of
+    which the oracle's `serde_json`/`println!` output does. Both are visible
+    on stdout, not just in theory: measured, `tan completion --shell bash`
+    was 3975 bytes with 108 `\\r` where the oracle's was 3867 bytes with zero
+    -- and the emitted script is a hard syntax error when sourced in a strict
+    bash (`syntax error near unexpected token $'{\\r''`); `clean --format
+    json` and a bare `--format json` both ended `\\r\\n` too, so this is a
+    process-wide stdout-newline defect, not a completion-specific one. A
+    frozen/piped stream may not implement `.reconfigure()` (e.g. a test
+    harness's in-memory buffer) -- `hasattr` skips those rather than raising,
+    since the fix only matters for the real console/pipe case it targets.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", newline="\n")
+
+
 def main() -> None:
     """Process entrypoint.
 
@@ -590,6 +612,7 @@ def main() -> None:
     missing stdout envelope when the exit signals failure under `--format
     json`.
     """
+    _reconfigure_stdio()
     argv = _reorder_global_flags(sys.argv[1:])
     sys.argv = [sys.argv[0], *argv]
     json_mode = _wants_json(argv)

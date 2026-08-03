@@ -5,6 +5,61 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.6.0] — Unreleased
+
+### Added
+
+- **All seven formerly-deferred verbs are now real commands** (`scaffold`,
+  `completion`, `diff`, `pinmux`, `inspect`, `trace`, `support-bundle`
+  — tan-cli#260, CLOSED). Each used to be a uniform stub — exit 1, one shared
+  `cli.command-deferred` issue, naming this tracking issue — registered only
+  so the command resolved instead of falling through to Click's exit-2
+  unknown-command error. `tan/commands/deferred_cmd.py` keeps only the two
+  constants (`DEFERRED_ISSUE_CODE`, `DEFERRED_ISSUE_URL`) and the context
+  settings `tan build`'s own still-deferred *flags* (`--plan`, `--target`,
+  …) reuse; the stub factory and its `DEFERRED_VERBS` tuple are gone.
+  `tan/cli.py`'s `_HONOURS_ROOT_FORMAT` now spells the seven names directly
+  rather than deriving them from that removed tuple.
+- **`contract/issue-codes.json` gained 49 `"reserved"` entries** for codes
+  the seven newly-real verbs (and this wave's `doctor --fix` consent-gate
+  work) already emitted with nowhere registered to bind to:
+  `diff.board-yaml-missing`/`.internal-failure`/`.pyyaml-unavailable`/
+  `.schema-violation`; `pinmux.internal-failure`; `trace.sdk-root-unresolved`/
+  `.board-yaml-missing`/`.internal-failure`; `support-bundle.<checkName>`
+  (20 entries, mirroring the existing `doctor.<checkName>` family verbatim,
+  since `support-bundle`'s doctor section reuses `doctor_cmd`'s `Check`
+  objects unchanged); `doctor.fix-needs-sudo`/`.fix-installed`/
+  `.fix-spawn-failed`/`.fix-failed`/`.fix-timed-out`/`.fix-suppressed`;
+  `scaffold.name-required`/`.cancelled`/`.invalid-template`/`.invalid-name`/
+  `.internal-failure`; `debug-config.gdbserver-address-unresolved`; and 9
+  `renode.sim-*`/`renode.expect-ignored` codes from the `--sim-mode` gateway
+  (tan-cli#77) that had never been registered either. None of these were
+  reachable before this wave — `diff.*` had ZERO entries of any kind — so
+  none is a wire break; every one is `"reserved"`/`"consumer": "none"`,
+  costing nothing to rename later.
+
+### Changed
+
+- **BREAKING: `tan validate`'s not-yet-ported spawn path now exits 2
+  (`VALIDATION_FAILURE`), not 1 (`RUNTIME_FAILURE`)** (tan-cli#262, TAKEN).
+  Before this release, a `board.yaml` present with an unresolvable SDK (or,
+  once the real validator spawn path lands, any post-spawn verdict failure)
+  answered `validate.spawn-not-implemented` at exit 1 — indistinguishable
+  from a genuine tan crash. Measured against the oracle
+  (`target/debug/tan.exe`): every guard-level `validate` refusal already
+  exits 2, and exit 1 there is reserved for the ONE case a spawned validator
+  returns an unmappable status — this port had flattened that distinction.
+  "The validator could not produce a verdict" is now treated as the
+  validator's own verdict everywhere, at exit 2, matching the guard cases.
+  **Who must act:** any CI step that greps this exit code and branches on
+  `-eq 1` specifically (rather than "non-zero") now sees 2 instead and will
+  silently stop matching; `alp-sdk-vscode` renders exit 2 as severity
+  "warning" and exit 1 as "error", so a consumer keyed on the old code will
+  now show a genuine validation gap as a warning rather than an error until
+  it is updated to read exit 2. A real `tan`-side crash (an unreadable
+  `board.yaml`, an unexpected internal exception) is unaffected and keeps
+  exit 5.
+
 ## [0.5.0-rc4] — 2026-08-02
 
 *Everything below was found by running the published `v0.5.0-rc3` binary as a
@@ -571,12 +626,16 @@ else installs by hand.
   compatibility fix. #262 is re-scoped to the one case that is a genuine
   v0.6.0 decision: `validate.failed` after a real spawn.
 
-  Still divergent, deliberately, and tracked in #262: `board.yaml` present but
-  no SDK root, where the oracle says 2 `validate.sdk-root-unresolved` and this
-  port says 1 `validate.spawn-not-implemented`. Closing it needs the real spawn
-  path. The two genuine internal failures in the same file (an unreadable
-  `board.yaml`, an unexpected exception inside the offline structural checker)
-  are unchanged at exit 5, matching the oracle's offline path exactly.
+  **Corrected 2026-08 (v0.6.0): the paragraph this replaced claimed
+  `validate.spawn-not-implemented` was still exit 1 at this port's rc1 tag.
+  That was true when written and is not true of the current tree — #262 was
+  decided and TAKEN in v0.6.0 (see that section below for the full BREAKING
+  change): `validate.spawn-not-implemented` now also emits exit 2
+  (`VALIDATION_FAILURE`), the same code the guard cases above already used,
+  closing the divergence this paragraph used to describe as open.** The two
+  genuine internal failures in the same file (an unreadable `board.yaml`, an
+  unexpected exception inside the offline structural checker) are unchanged
+  at exit 5, matching the oracle's offline path exactly.
 
 - **`tan sdk install` / `tan sdk switch` refused at exit 5 (`InternalFailure`),
   telling CI and the extension that tan had crashed.** Neither is ported; that

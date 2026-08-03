@@ -21,7 +21,9 @@ output, not derived from a live command graph here, so there is no
 independent flag table this port could drift out of sync with.
 
 Every value in this file was confirmed against the built oracle
-(`target/debug/tan.exe`, reports `tan 0.4.1-dev`): `tan completion --shell
+(`target/debug/tan.exe`, reports `tan 0.4.1` -- see
+`tests/parity/oracle.py:219`'s `PINNED_ORACLE_VERSION`, the one place that
+spelling is owned): `tan completion --shell
 <bash|zsh|fish> [--format json]`, `tan completion --shell <bogus>
 [--format json]`, and the JSON `data.script` values these tests assert
 `BASH_SCRIPT`/`ZSH_SCRIPT`/`FISH_SCRIPT` equal were extracted byte-for-byte

@@ -184,5 +184,12 @@ def test_json_format_stdout_carries_no_heartbeat_bytes(project):
     # `Envelope.to_json` is compact (`separators=(",", ":")`, no indent) plus
     # the one trailing newline `print()` adds -- exactly one line, byte for
     # byte, nothing appended or interleaved around it.
+    #
+    # `ensure_ascii=False` mirrors `Envelope.to_json`: the oracle emits raw
+    # UTF-8 (an em dash goes out as `e2 80 94`), so the port stopped escaping
+    # it to `—`. This expectation has to be built the way production
+    # builds it or the test measures `json.dumps`'s DEFAULT rather than what
+    # tan actually wrote -- which is what it was doing, and why it reddened on
+    # a message carrying an em dash rather than on any framing change.
     assert proc.stdout.count("\n") == 1
-    assert proc.stdout == json.dumps(env, separators=(",", ":")) + "\n"
+    assert proc.stdout == json.dumps(env, separators=(",", ":"), ensure_ascii=False) + "\n"

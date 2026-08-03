@@ -567,12 +567,15 @@ def _gdbserver_address_unresolved_issue() -> Issue:
     explicitly is the whole point of this issue rather than leaving F5 to fail
     silently at connect.
 
-    tan-cli#138 interaction: this profile's `preLaunchTask` now also defaults
-    to `"alp: deploy and start gdbserver"` (restored from v0.3.1). tan has no
-    deploy mechanism of its own -- naming that task is a reminder that the
-    deploy-and-start step is still manual, not a claim that anything runs it
-    automatically. Said here, alongside the address gap, rather than as a
-    second issue: both point at the same manual step.
+    tan-cli#138 vs #321: unlike the other three target classes, this profile's
+    `preLaunchTask` carries NO restored default -- see
+    `tan.core.debug_launch.DEFAULT_PRE_LAUNCH_TASK`'s own doc comment for why:
+    alp-sdk-vscode registers no working task for yocto-userspace (the only one
+    that exists exits 1 by design), so naming one here would put the
+    "preLaunchTask terminated with exit code 1" dialog in front of every F5.
+    Said here, alongside the address gap, rather than as a second issue: both
+    point at the same manual deploy-and-start-gdbserver step, and a customer
+    who wants a reminder can still opt one in explicitly.
     """
     return Issue(
         "debug-config.gdbserver-address-unresolved",
@@ -582,12 +585,13 @@ def _gdbserver_address_unresolved_issue() -> Issue:
         "are a runtime property of the deployed board that no build can "
         "resolve. Fill it in by hand in launch.json once you know it, or pass "
         "`--gdbserver-address host:port` next time you regenerate this "
-        'profile. Its `preLaunchTask` also defaults to "alp: deploy and start '
-        'gdbserver" (tan-cli#138): tan has no deploy mechanism of its own, so '
-        "deploying the binary and starting gdbserver on the target is still a "
-        "manual step -- treat the task name as a reminder, not something that "
-        "runs it for you. Pass `--pre-launch-task ''` to drop the reminder, "
-        "or a task name of your own.",
+        "profile. tan has no deploy mechanism of its own, so deploying the "
+        "binary and starting gdbserver on the target before F5 is still a "
+        "manual step; this profile carries no `preLaunchTask` reminder of "
+        "that by default (tan-cli#138 vs #321 -- the extension's only "
+        "registered task for this target exits 1 by design, so naming it "
+        "would fail before every F5). Pass `--pre-launch-task '<name>'` to "
+        "add a reminder of your own.",
     )
 
 
@@ -1172,9 +1176,11 @@ def debug_config(
             "Emit preLaunchTask: <TASK> on the generated configuration. "
             "Defaults to the v0.3.1 task name for this target (tan-cli#138): "
             "'alp: build active target' (zephyr-mcu), 'alp: build baremetal "
-            "target' (baremetal-mcu), 'alp: deploy and start gdbserver' "
-            "(yocto-userspace), 'alp: build native_sim target' (native-host). "
-            "Pass an empty string to omit the key entirely."
+            "target' (baremetal-mcu), 'alp: build native_sim target' "
+            "(native-host). yocto-userspace carries no default (tan-cli#321: "
+            "the extension's only registered task for it exits 1 by design) "
+            "-- pass this flag explicitly to add a reminder. Pass an empty "
+            "string to omit the key entirely."
         ),
     ),
     gdbserver_address: str = typer.Option(

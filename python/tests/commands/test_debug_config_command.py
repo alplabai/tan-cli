@@ -860,16 +860,41 @@ def test_yocto_preview_reports_the_gdbserver_address_info_issue_by_default(tmp_p
     )
     assert env["exitCode"] == 0
     assert env["data"]["configuration"]["miDebuggerServerAddress"] == "<host>:<port>"
-    # tan-cli#138 interaction: the restored default also names the manual
-    # deploy-and-start-gdbserver task; the issue message must say so rather
-    # than leaving it implicit.
+    # tan-cli#138 vs #321: yocto-userspace carries NO restored preLaunchTask
+    # default (unlike the other three target classes -- DEFAULT_PRE_LAUNCH_
+    # TASK in tan/core/debug_launch.py deliberately omits it), so the issue
+    # message must say so rather than claiming a default that does not exist.
+    assert "preLaunchTask" not in env["data"]["configuration"]
     issue = next(
         (i for i in env["issues"] if i["code"] == "debug-config.gdbserver-address-unresolved"),
         None,
     )
     assert issue is not None and issue["severity"] == "info"
     assert "--gdbserver-address" in issue["message"]
-    assert "alp: deploy and start gdbserver" in issue["message"]
+    assert "carries no `preLaunchTask` reminder" in issue["message"]
+    assert "--pre-launch-task" in issue["message"]
+
+
+def test_yocto_write_reports_the_gdbserver_address_info_issue_too(tmp_path):
+    """The write-path counterpart of the preview test above (tan-cli#321): the
+    issue is built from the FINAL `configuration` in both branches of the
+    `success()` closure in `debug_config_cmd.py`, not only the `--preview`
+    one -- a mutation collapsing the write branch's own check (`if target ==
+    YOCTO_USERSPACE` -> `if False`) killed no test before this, because
+    every assertion of this issue firing lived on the `--preview` case
+    only."""
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER, "--format", "json")
+    )
+    assert env["exitCode"] == 0
+    assert env["data"]["preview"] is False
+    assert env["data"]["configuration"]["miDebuggerServerAddress"] == "<host>:<port>"
+    codes = [i["code"] for i in env["issues"]]
+    assert "debug-config.gdbserver-address-unresolved" in codes
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert (
+        on_disk["configurations"][0]["miDebuggerServerAddress"] == "<host>:<port>"
+    )
 
 
 def test_gdbserver_address_flag_fills_the_field_and_drops_the_issue(tmp_path):

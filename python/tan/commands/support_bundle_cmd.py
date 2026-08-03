@@ -6,10 +6,18 @@ Port of `crates/tan-cli/src/commands/support_bundle.rs`. Composes three
 sections into one written file: the resolved debug context + its resolved
 values (`inspect_cmd`'s own model), the generation-trace decisions
 (`trace_cmd`'s own model), and a doctor report -- then returns a stdout
-envelope naming the written path + a decision count. Exit follows the doctor
-summary: any `fail` check -> `DOCTOR_FAILURE` (4); an unsupported
-target/server pairing -> `DOCTOR_FAILURE` too; a bad `--target-kind`/`--server`
-value -> `INTERNAL_FAILURE` (5).
+envelope naming the written path + a decision count. Exit matches the oracle:
+a bundle that WRITES successfully exits `SUCCESS` (0) regardless of what its
+embedded doctor section found -- the doctor checks still surface as
+`support-bundle.<name>` issues (see [`_doctor_issues`]), but they are DATA
+inside the bundle, not this command's verdict, and no longer flip the exit
+code (measured: a normal project with a resolved SDK gets oracle rc=0
+issues=[]; matching that here needed decoupling `exit_code` from
+`doctor_cmd.exit_code_for`, which this port's `_doctor_section` reuses only
+for its `checks`/`summary`/`nextSteps`, not for exit). An unsupported
+target/server pairing -> `DOCTOR_FAILURE` (4) still, since that is this
+command's OWN precondition failure, not the reused doctor checklist's; a bad
+`--target-kind`/`--server` value -> `INTERNAL_FAILURE` (5).
 
 **The doctor section is this port's `tan doctor` verdict, not the oracle's.**
 The Rust `support_bundle.rs` embeds `build_doctor_report` -- a SEPARATE,
@@ -22,9 +30,9 @@ implements (`sdk`/`boardYaml`/`workspace`/`westResolved`/`zephyrSdk`/
 `hostPrerequisites`(this port's flavour)/`setools`/`jlink`/...), which is what
 THIS port's `tan doctor` produces and the only doctor logic this port owns.
 Per this unit's own instructions, that logic is reused here verbatim via
-`doctor_cmd._collect`/`summarise`/`exit_code_for`/`next_steps` -- never
-copied or re-implemented -- so this bundle's `doctor` section reports the
-SAME facts a `tan doctor` run against the same project would, under
+`doctor_cmd._collect`/`summarise`/`next_steps` (never `exit_code_for` -- see
+below) -- never copied or re-implemented -- so this bundle's `doctor` section
+reports the SAME facts a `tan doctor` run against the same project would, under
 `support-bundle.<name>`-coded issues instead of `doctor.<name>`-coded ones.
 This is a deliberate, known divergence from the oracle's own bundled doctor
 section, not an oversight: building a THIRD, debug-flavoured check list here
@@ -78,6 +86,8 @@ from tan.commands.trace_cmd import (
     resolve_trace_targets,
 )
 from tan.core.debug_launch import (
+    NATIVE_HOST,
+    SERVER_NONE,
     DebugConfigError,
     is_server_supported_for_target,
     parse_server_kind,
@@ -363,7 +373,7 @@ def _run(
         server = parse_server_kind(server_arg)
     except DebugConfigError as err:
         return _internal_failure(
-            generated_at, str(err), target_kind_arg or "native-host", server_arg or "none", context.sdk
+            generated_at, str(err), NATIVE_HOST, SERVER_NONE, context.sdk
         )
 
     if not is_server_supported_for_target(target, server):
@@ -424,8 +434,19 @@ def _run(
     except OSError as err:
         return _internal_failure(generated_at, str(err), target, server, context.sdk)
 
+    # The doctor section is DATA inside the bundle, not this command's verdict
+    # -- matches the oracle: a `support-bundle` run against a normal project
+    # with a resolved SDK exits 0 with `issues=[]` even though the same
+    # project's bundled doctor section (and a bare `tan doctor`) would warn or
+    # fail. The bundle-write is what this command promises to do, and it did
+    # it; the doctor section's own warn/fail checks stay visible as
+    # `support-bundle.<name>` issues for a human reading the envelope, but
+    # they no longer drive the exit code (that would make `support-bundle`
+    # fail merely because the reused `doctor_cmd._collect` checklist found
+    # something to warn about, converting an export success into a fixable-
+    # setup mystery for the caller).
     issues = _doctor_issues(checks)
-    exit_code = doctor_cmd.exit_code_for(checks)
+    exit_code = ExitCode.SUCCESS
 
     data = {
         "schemaVersion": DATA_SCHEMA_VERSION,
@@ -534,8 +555,8 @@ def support_bundle(
         outcome = _internal_failure(
             generated_at_iso(millis=True),
             f"support-bundle failed unexpectedly: {err.__class__.__name__}: {err}",
-            target_kind or "native-host",
-            server or "none",
+            NATIVE_HOST,
+            SERVER_NONE,
             None,
         )
 

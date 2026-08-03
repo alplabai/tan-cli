@@ -9,11 +9,11 @@
 executes it — it is the single executor and the user command surface for
 building, flashing, and inspecting Alp Lab E1M / E1M-X firmware.
 
-`bootstrap` / `build` / `run` / `size` / `image` / `flash` / `clean` / `renode`
-run directly in `tan` — `bootstrap` included, so there is no `bash` dependency
-and native Windows is a first-class host. Only `migrate` / `lock` / `quality`
-still forward to `west alp-*`, and
-`model` / `monitor` / `new-som` / `faultdecode` to the SDK `alp` CLI. Licensed
+`bootstrap` / `build` / `run` / `size` / `image` / `flash` / `clean` / `renode` /
+`monitor` run directly in `tan` — `bootstrap` included, so there is no `bash`
+dependency and native Windows is a first-class host. Only `migrate` / `lock` /
+`quality` still forward to `west alp-*`, and
+`model` / `new-som` / `faultdecode` to the SDK `alp` CLI. Licensed
 **Apache-2.0** (see [`LICENSE`](LICENSE); the SPDX identifier is also set in each
 `Cargo.toml` and source header).
 
@@ -234,10 +234,13 @@ no elevation (Tier A — `winget`, `brew`, the small POSIX packages); anything
 that needs `sudo` is refused and printed verbatim instead, never run — tan
 never spawns `sudo` itself, since a password prompt has nowhere to go once
 `--format json` has captured stdio, and would hang the process forever rather
-than fail. `--fix` only ever acts in an interactive, non-CI, text-mode run
-(`--ci`, `--non-interactive`, and `--format json` each disable it on their
-own — a repair nobody watched happen is not consent), and it never re-checks
-its own work: this process already read PATH once at start-up, so an install
+than fail. `--fix` only ever acts in an interactive, non-CI, text-mode run:
+`--ci`, `--non-interactive`, and `--format json` each disable it on their
+own, and so does the same rule applied *unasked* — a piped or redirected
+stdin/stderr (an automated run that never thought to pass one of those flags)
+disables it exactly as hard, since a repair nobody watched happen is not
+consent either way. It never re-checks its own work: this process already
+read PATH once at start-up, so an install
 landing after that is invisible to it — the honest outcome is "installed;
 reopen your shell", not a claimed-verified pass. `tan completion --shell zsh`
 is deferred in this build (see Commands below) and exits 1 rather than
@@ -285,14 +288,22 @@ foreign content either.
 | --- | --- |
 | **Project** | `init` · `scaffold`† · `examples` · `explain` · `presets` · `pinmux`† |
 | **Configure & verify** | `validate` · `generate` · `diff`† · `inspect`† · `trace`† · `doctor` · `debug-config` · `support-bundle`† · `kconfig` |
-| **Build & run** (direct) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` |
+| **Build & run** (direct) | `build` · `run` · `flash` · `image` · `size` · `clean` · `renode` · `monitor`‡ |
 | **Environment** (direct) | `bootstrap` · `sdk` · `completion`† |
-| **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `model` · `monitor` · `new-som` · `faultdecode` → `python -m alp_cli` |
+| **Forwarders** | `migrate` · `lock` · `quality` → `west alp-*`; `model` · `new-som` · `faultdecode` → `python -m alp_cli` |
 
 † Deferred to v0.6.0 (tan-cli#260): a working command in the Rust CLI
 (tan-cli v0.4.1), but the Python port shipping this release stubs it —
 exits 1, with the issue code `cli.command-deferred` in `--format json`;
 text mode prints only the deferral message.
+
+‡ `monitor` runs entirely in `tan` — it never resolves an alp-sdk checkout,
+unlike `model`/`new-som`/`faultdecode` — but needs pyserial, which is an
+*optional* dependency (`[project.optional-dependencies] monitor`, not
+`dependencies`): `pip install "alp-tan[monitor]"` for a source install. A
+release binary bundles pyserial at build time already. Without it, `tan
+monitor` exits with the coded issue `monitor.pyserial-missing` naming the
+fix — a binary built without that extra cannot pip-install its way out.
 
 `tan <command> --help` for flags. Global flags apply to every command:
 

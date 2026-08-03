@@ -11,6 +11,16 @@ doctor -- see `support_bundle_cmd`'s module docstring) -- tests here assert
 deterministic check list, so these tests do not depend on this host's own
 Zephyr/tool state), not that they match the oracle's check names.
 
+**Exit code matches the oracle, decoupled from the reused doctor checklist.**
+Measured on a normal project with a resolved SDK: oracle rc=0 issues=[]. A
+bundle that WRITES successfully exits 0 regardless of what its embedded
+doctor section found -- the doctor checks still surface as
+`support-bundle.<name>` issues, they just no longer flip the exit code (see
+`test_a_failing_check_becomes_a_support_bundle_coded_issue_but_stays_exit_zero`).
+The one exception is the target/server incompatibility precondition, which is
+this command's OWN failure, not the reused checklist's, and still exits
+`DOCTOR_FAILURE` (4) (see `test_server_incompatible_with_target_is_doctor_failure`).
+
 `support-bundle` is not yet registered in `tan.cli.app` (the orchestrator's to
 wire), so these tests build a throwaway local Typer app around the ported
 command function directly.
@@ -78,14 +88,14 @@ def _clean_checks(*, fail=False, warn=False):
 
 def test_redact_replaces_every_occurrence_recursively():
     payload = {
-        "a": "prefix C:\\Users\\jdoe\\proj suffix",
-        "b": ["C:\\Users\\jdoe\\one", "unrelated"],
-        "c": {"d": "C:/Users/jdoe/posix/path"},
+        "a": "prefix C:\\Users\\alice\\proj suffix",
+        "b": ["C:\\Users\\alice\\one", "unrelated"],
+        "c": {"d": "C:/Users/alice/posix/path"},
         "e": True,
         "f": None,
         "g": 3,
     }
-    redacted = _redact(payload, ("C:\\Users\\jdoe", "C:/Users/jdoe"))
+    redacted = _redact(payload, ("C:\\Users\\alice", "C:/Users/alice"))
     assert redacted["a"] == "prefix <home>\\proj suffix"
     assert redacted["b"] == ["<home>\\one", "unrelated"]
     assert redacted["c"]["d"] == "<home>/posix/path"
@@ -96,18 +106,18 @@ def test_redact_replaces_every_occurrence_recursively():
 
 
 def test_redact_is_a_noop_with_no_home_variants():
-    payload = {"a": "C:\\Users\\jdoe\\proj"}
+    payload = {"a": "C:\\Users\\alice\\proj"}
     assert _redact(payload, ()) == payload
 
 
 def test_home_variants_covers_native_and_posix_spelling(monkeypatch):
     env_key = "USERPROFILE" if os.name == "nt" else "HOME"
-    monkeypatch.setenv(env_key, "C:\\Users\\jdoe" if os.name == "nt" else "/home/jdoe")
+    monkeypatch.setenv(env_key, "C:\\Users\\alice" if os.name == "nt" else "/home/alice")
     variants = _home_variants()
     assert len(variants) >= 1
     if os.name == "nt":
-        assert "C:\\Users\\jdoe" in variants
-        assert "C:/Users/jdoe" in variants
+        assert "C:\\Users\\alice" in variants
+        assert "C:/Users/alice" in variants
 
 
 def test_home_variants_empty_when_unset(monkeypatch):
@@ -225,13 +235,47 @@ def test_invalid_target_kind_is_an_internal_failure(tmp_path, monkeypatch):
     doc = json.loads(result.stdout)
     assert doc["issues"][0]["code"] == "support-bundle.internal-failure"
     assert "bogus" in doc["issues"][0]["message"]
+    # Measured against the oracle: the raw invalid value is never echoed back
+    # into data.targetKind/data.server -- both report the defaults.
+    assert doc["data"]["targetKind"] == "native-host"
+    assert doc["data"]["server"] == "none"
 
 
 def test_invalid_server_is_an_internal_failure(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["support-bundle", "--server", "bogus", "--format", "json"])
     assert result.exit_code == 5
-    assert json.loads(result.stdout)["issues"][0]["code"] == "support-bundle.internal-failure"
+    doc = json.loads(result.stdout)
+    assert doc["issues"][0]["code"] == "support-bundle.internal-failure"
+    # Measured against the oracle: --server bogus alone still reports the
+    # DEFAULT server ("none"), not the raw invalid "bogus" value.
+    assert doc["data"]["targetKind"] == "native-host"
+    assert doc["data"]["server"] == "none"
+
+
+def test_a_valid_target_kind_with_an_invalid_server_still_reports_defaults_for_both(
+    tmp_path, monkeypatch
+):
+    """Measured against the oracle: `--target-kind zephyr-mcu --server bogus`
+    -> rc=5 targetKind="native-host" server="none" -- a partial parse failure
+    resets BOTH fields to their defaults, not just the one that failed."""
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "support-bundle",
+            "--target-kind",
+            "zephyr-mcu",
+            "--server",
+            "bogus",
+            "--format",
+            "json",
+        ],
+    )
+    assert result.exit_code == 5
+    doc = json.loads(result.stdout)
+    assert doc["data"]["targetKind"] == "native-host"
+    assert doc["data"]["server"] == "none"
 
 
 # ---------------------------------------------------------------------------
@@ -307,17 +351,23 @@ def test_clean_doctor_checks_mean_success_and_no_issues(tmp_path, monkeypatch):
     assert doc["issues"] == []
 
 
-def test_a_failing_check_becomes_a_support_bundle_coded_issue_and_doctor_failure(
+def test_a_failing_check_becomes_a_support_bundle_coded_issue_but_stays_exit_zero(
     tmp_path, monkeypatch
 ):
+    """Matches the oracle: the bundle EXPORT succeeded, so exit stays 0 even
+    though the reused doctor checklist found a `fail`-status check -- the
+    doctor section is DATA inside the bundle, not this command's verdict (see
+    `support_bundle_cmd`'s module docstring). The failing check still surfaces
+    as an error-severity issue for a human reading the envelope; only the
+    exit code is decoupled from it."""
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks(fail=True))
 
     result = runner.invoke(app, ["support-bundle", "--format", "json"])
-    assert result.exit_code == 4
+    assert result.exit_code == 0
     doc = json.loads(result.stdout)
-    assert doc["ok"] is False
+    assert doc["ok"] is True
     issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.hostPrerequisites")
     assert issue["severity"] == "error"
     assert issue["message"] == "missing from PATH: ninja."

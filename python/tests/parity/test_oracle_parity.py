@@ -22,6 +22,7 @@ forces the one-line promotion instead of letting a landed command sit
 mis-classified as "not ported" forever.
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -83,15 +84,6 @@ CASES = [
     # message string, across both implementations.
     (
         ["--format", "json", "debug-config", "--target-kind", "bogus"],
-        ENVELOPE,
-        None,
-    ),
-    # …and `--format` BEFORE the subcommand, which is how the four goldens
-    # invoke it (clap's `global = true`). Worth its own case: Click gives the
-    # group only what precedes the subcommand, so this position is a separate
-    # code path in the port and not in Rust.
-    (
-        ["--format", "json", "debug-config", "--target-kind", "native-host", "--preview"],
         ENVELOPE,
         None,
     ),
@@ -251,24 +243,36 @@ def test_west_forward_matches_rust(verb, work_dir, tmp_path):
 
 @LIVE_GATE
 @pytest.mark.parametrize(
-    "target,server",
+    "target,server,expected_pre_launch_task",
     [
         # J-Link resolves `device` + `gdbPath`; OpenOCD resolves
         # `serverpath`/`searchDir`/`configFiles`; pyOCD resolves NOTHING (the
         # board registers no such runner) and must keep its placeholder AND gain
         # the "registers no runner" note; native-host must take the native_sim
         # slice's sibling `.exe`, not the first `os: zephyr` slice's ELF.
-        ("zephyr-mcu", "jlink"),
-        ("zephyr-mcu", "openocd"),
-        ("zephyr-mcu", "pyocd"),
-        ("native-host", "none"),
+        #
+        # `expected_pre_launch_task` is tan-cli#138's restored default, a
+        # DELIBERATE, PERMANENT divergence from the frozen `crates/` oracle:
+        # #138 predates the oracle's freeze and it never emits this key.
+        # Measured live against `tan --format json debug-config ...` for every
+        # combination below -- not inferred from source.
+        ("zephyr-mcu", "jlink", "alp: build active target"),
+        ("zephyr-mcu", "openocd", "alp: build active target"),
+        ("zephyr-mcu", "pyocd", "alp: build active target"),
+        ("native-host", "none", "alp: build native_sim target"),
     ],
 )
-def test_debug_config_resolution_matches_rust(target, server, work_dir, tmp_path):
+def test_debug_config_resolution_matches_rust(target, server, expected_pre_launch_task, work_dir, tmp_path):
     """The `<resolved-...>` overlay read off this project's OWN build output
-    (#66/#83), diffed against the oracle. `--preview` only: `compare` runs both
-    binaries in the SAME cwd, so a write-mode case would have the second run
-    merge into what the first one wrote."""
+    (#66/#83), diffed against the oracle. `--preview` only: both sides run in
+    the SAME cwd, so a write-mode case would have the second run merge into
+    what the first one wrote.
+
+    NOT a plain `compare()` (tan-cli#138 vs the frozen oracle): the restored
+    `preLaunchTask` default is a permanent divergence `compare()`'s whole-key
+    equality would flag as a false failure, so this does `compare()`'s own
+    scrub/normalise recipe by hand, strips `preLaunchTask` from the python
+    side after asserting its value, and diffs everything else."""
     root = str(work_dir).replace("\\", "/")
     build = work_dir / "build"
     build.mkdir()
@@ -279,13 +283,70 @@ def test_debug_config_resolution_matches_rust(target, server, work_dir, tmp_path
     zephyr.mkdir(parents=True)
     (zephyr / "runners.yaml").write_text(PARITY_RUNNERS, encoding="utf-8")
 
-    result = compare(
-        ["debug-config", "--target-kind", target, "--server", server,
-         "--preview", "--format", "json"],
-        cwd=work_dir,
-        home=tmp_path / "home",
-    )
-    assert result.matches, "\n".join(result.diffs)
+    argv = ["debug-config", "--target-kind", target, "--server", server, "--preview", "--format", "json"]
+    home = tmp_path / "home"
+    roots = (work_dir, home)
+    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=roots)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    p_out = oracle_fixtures.scrub(p_out, *roots)
+    r_out = normalise_path_separators(r_out)
+    p_out = normalise_path_separators(p_out)
+    r_out = oracle_fixtures.normalise_scrubbed_path_separators(r_out)
+    p_out = oracle_fixtures.normalise_scrubbed_path_separators(p_out)
+
+    assert r_code == p_code, (r_code, p_code, r_out, p_out)
+    r_config = r_out.get("data", {}).get("configuration") or {}
+    assert "preLaunchTask" not in r_config, r_config
+    p_config = p_out.get("data", {}).get("configuration") or {}
+    assert p_config.get("preLaunchTask") == expected_pre_launch_task, p_config
+
+    p_out_stripped = json.loads(json.dumps(p_out))  # deep copy
+    del p_out_stripped["data"]["configuration"]["preLaunchTask"]
+    diffs = [
+        f"{key}: rust={r_out.get(key)!r} python={p_out_stripped.get(key)!r}"
+        for key in sorted(set(r_out) | set(p_out_stripped))
+        if r_out.get(key) != p_out_stripped.get(key)
+    ]
+    assert not diffs, "\n".join(diffs)
+
+
+@LIVE_GATE
+def test_debug_config_native_host_preview_global_format_matches_rust(work_dir, tmp_path):
+    """`--format` BEFORE the subcommand (`["--format", "json", "debug-config",
+    "--target-kind", "native-host", "--preview"]`), which is how the four
+    `debug-config` goldens invoke it (clap's `global = true`). Worth its own
+    case: Click gives the group only what precedes the subcommand, so this
+    position is a separate code path in the port and not in Rust. Used to be a
+    plain `CASES` entry (whole-envelope `compare()`), but tan-cli#138's
+    restored `preLaunchTask` default is a DELIBERATE, PERMANENT divergence
+    from the frozen `crates/` oracle (which predates #138 and never emits the
+    key) -- see `test_debug_config_resolution_matches_rust`'s own docstring
+    for why this needs the manual `rust_run`/`_run` diff instead."""
+    argv = ["--format", "json", "debug-config", "--target-kind", "native-host", "--preview"]
+    home = tmp_path / "home"
+    roots = (work_dir, home)
+    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=roots)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    p_out = oracle_fixtures.scrub(p_out, *roots)
+    r_out = normalise_path_separators(r_out)
+    p_out = normalise_path_separators(p_out)
+    r_out = oracle_fixtures.normalise_scrubbed_path_separators(r_out)
+    p_out = oracle_fixtures.normalise_scrubbed_path_separators(p_out)
+
+    assert r_code == p_code, (r_code, p_code, r_out, p_out)
+    r_config = r_out.get("data", {}).get("configuration") or {}
+    assert "preLaunchTask" not in r_config, r_config
+    p_config = p_out.get("data", {}).get("configuration") or {}
+    assert p_config.get("preLaunchTask") == "alp: build native_sim target", p_config
+
+    p_out_stripped = json.loads(json.dumps(p_out))  # deep copy
+    del p_out_stripped["data"]["configuration"]["preLaunchTask"]
+    diffs = [
+        f"{key}: rust={r_out.get(key)!r} python={p_out_stripped.get(key)!r}"
+        for key in sorted(set(r_out) | set(p_out_stripped))
+        if r_out.get(key) != p_out_stripped.get(key)
+    ]
+    assert not diffs, "\n".join(diffs)
 
 
 @LIVE_GATE
@@ -796,12 +857,43 @@ def test_size_missing_manifest_is_a_known_divergence_from_the_oracle(work_dir, t
     assert r_code == p_code == 1
     assert [i["code"] for i in r_out["issues"]] == ["size.manifest-unavailable"]
     assert [i["code"] for i in p_out["issues"]] == ["size.manifest-unavailable"]
-    manifest_path = str(work_dir / "build" / "system-manifest.yaml")
+    # Both sides render this path the same way, and it is NOT `str(Path)`:
+    # the project root arrives as the POSIX-ish string the caller passed and
+    # is kept verbatim, then the `build/system-manifest.yaml` tail is joined
+    # with the platform separator -- so on Windows the real message carries
+    # `C:/.../root\build\system-manifest.yaml`, mixed on purpose. Rebuilding
+    # it as `str(work_dir / ...)` gives an all-backslash path that NEITHER
+    # binary emits: a defect in the expectation, not in either side. The two
+    # agree with each other here, which is the thing this test measures.
+    manifest_path = os.path.join(work_dir.as_posix(), "build", "system-manifest.yaml")
     prefix = f"no system-manifest.yaml at {manifest_path}; run `tan build` first ("
     r_message = r_out["issues"][0]["message"]
     p_message = p_out["issues"][0]["message"]
-    assert r_message == prefix + "No such file or directory (os error 2))."
-    assert p_message == prefix + f"[Errno 2] No such file or directory: '{manifest_path}')."
+    # The Rust tail is PLATFORM-dependent, and pinning only the POSIX
+    # rendering made this a Linux-only pass -- it reddens on Windows against
+    # a completely healthy tree. The missing component here is the `build`
+    # DIRECTORY, not merely the leaf file, and Windows distinguishes those
+    # two: it returns ERROR_PATH_NOT_FOUND (3), "The system cannot find the
+    # path specified.", where POSIX reports plain ENOENT (2) for both cases.
+    # Measured on this host against the shipped oracle, not inferred.
+    #
+    # Python's `OSError` draws no such distinction on either platform -- it
+    # says `[Errno 2] No such file or directory` for both -- and that is
+    # itself part of the divergence this test exists to pin, so the Python
+    # side stays one literal. Both tails are still pinned exactly; this
+    # widens the expectation by PLATFORM, never to "exit code only".
+    rust_tail = (
+        "The system cannot find the path specified. (os error 3))."
+        if os.name == "nt"
+        else "No such file or directory (os error 2))."
+    )
+    assert r_message == prefix + rust_tail
+    # `!r`, not `'{...}'`: `OSError.__str__` interpolates the filename with
+    # `%r`, so on Windows every separator in it comes back DOUBLED
+    # (`...\\build\\system-manifest.yaml`). Hand-quoting reproduced the POSIX
+    # rendering only. `!r` is what the runtime itself does, so it is right on
+    # both platforms and cannot drift from it.
+    assert p_message == prefix + f"[Errno 2] No such file or directory: {manifest_path!r})."
     # Everything OUTSIDE the message -- exit code, `data`, the issue code --
     # is a real match, not just coincidentally unchecked here.
     assert {**r_out, "issues": []} == {**p_out, "issues": []}
@@ -911,9 +1003,10 @@ def test_monitor_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     this authoring host happened to hit (tan-cli#313/#324 is exactly the
     class of bug that would be).
 
-    This is NOT the same tool-inventory gap `_DEFERRED_VERBS` pins PATH
-    against: pyserial is an interpreter PACKAGE, invisible to any PATH pin.
-    The either-or is real and stays real across this repo's own two CI legs,
+    This is NOT the same tool-inventory gap `empty_tool_inventory` pins PATH
+    against for the (now-real, tan-cli#260) `support-bundle` verb: pyserial is
+    an interpreter PACKAGE, invisible to any PATH pin. The either-or is real
+    and stays real across this repo's own two CI legs,
     named explicitly rather than left as an unexplained widening:
     `parity.yml`'s `python-tests` job installs `-e ".[monitor]"` (pyserial
     present -> `monitor.no-port`), `ci.yml`'s `python` job installs the bare
@@ -950,107 +1043,6 @@ def test_faultdecode_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     assert [i["code"] for i in r_out["issues"]] == ["faultdecode.failed"]
     assert p_out["command"] == "cli"
     assert [i["code"] for i in p_out["issues"]] == ["cli.parse-error"]
-
-
-#: ``(verb, rust_exit_code, rust_issue_codes)`` -- measured directly against
-#: the oracle in an empty project with no alp-sdk resolvable, not inferred.
-#: Every one of these is a REAL, distinct outcome per verb; the port
-#: collapses all seven to the identical ``cli.command-deferred`` shape
-#: (tan-cli#260).
-#:
-#: ``support-bundle``'s third issue, ``support-bundle.hostPrerequisites``, is a
-#: TOOL PROBE -- the oracle checks a built-in fallback tool list (measured:
-#: ``git cmake python3 ninja xz wget``) against ``PATH`` and only raises it when
-#: something is missing. On a host where every one of those happens to resolve
-#: it does not fire at all (two issues, not three); under a stripped
-#: ``PATH=/usr/bin:/bin`` (has everything but ``ninja``) it fires naming just
-#: ``ninja``; under a truly empty ``PATH`` it fires naming all six. This is
-#: exactly tan-cli#313/#324's class of bug reintroduced -- pinning ``[sdkRoot,
-#: boardYaml]`` here silently encoded THIS capture host's tool inventory. Fixed
-#: by pinning to `empty_tool_inventory` below, the same fixture
-#: `test_west_forward_matches_rust` already uses for the identical class of
-#: bug -- the one outcome that does not depend on what happens to be
-#: installed on whichever host runs this suite.
-#:
-#: The three-code answer below is now a GENUINE "all six absent" measurement,
-#: not an artefact: on POSIX the oracle's tool probe resolves each name by
-#: SPAWNING ``which <tool>``, and a PATH pointing at a directory that is
-#: literally empty can't resolve ``which`` either, so every probe failed
-#: before it ever ran for real -- measured directly, a PATH holding all six
-#: required tools but not ``which`` still reported all six missing, which
-#: means the pin used to read the right three codes for the wrong reason.
-#: `empty_tool_inventory` now seeds its directory with a working ``which``
-#: symlink for exactly this reason (see that function's own docstring); the
-#: three codes here are unchanged after re-measuring against the fixed pin --
-#: ``git cmake python3 ninja xz wget`` still resolve to nothing in a
-#: directory holding only ``which`` -- so this is a correctness fix to HOW
-#: the answer is produced, not a change to the answer itself.
-#:
-#: Measured directly (not asserted) that the other six verbs are PATH-inert:
-#: run each one's argv under this host's real PATH and under the pinned PATH,
-#: rust and python both, and diff -- identical on every one of the twelve
-#: (six verbs x two sides) except this row. Only `support-bundle` branches on
-#: a tool probe among the seven; the pin below is applied to all seven anyway
-#: (cheap, and it is what keeps the whole parametrized set on one
-#: deterministic footing) rather than special-cased to just this one row.
-_DEFERRED_VERBS = [
-    ("scaffold", 2, ["scaffold.name-required"]),
-    ("completion", 0, []),
-    ("diff", 2, ["diff.board-yaml-missing"]),
-    ("pinmux", 0, ["pinmux.no-target", "pinmux.sdk-root-unresolved"]),
-    ("inspect", 0, ["inspect.board-yaml-missing"]),
-    ("trace", 2, ["trace.sdk-root-unresolved"]),
-    (
-        "support-bundle",
-        4,
-        [
-            "support-bundle.sdkRoot",
-            "support-bundle.boardYaml",
-            "support-bundle.hostPrerequisites",
-        ],
-    ),
-]
-
-
-@_ORACLE_REQUIRED
-@pytest.mark.parametrize(
-    "verb, rust_exit, rust_issue_codes", _DEFERRED_VERBS, ids=[v[0] for v in _DEFERRED_VERBS]
-)
-def test_deferred_verb_is_a_known_divergence_from_the_oracle(
-    verb, rust_exit, rust_issue_codes, work_dir, tmp_path
-):
-    """tan-cli#260: the seven verbs v0.6.0 names as "entirely-unported".
-    Every one is registered in ``tan/cli.py`` (each appears in
-    ``tan --help``), but the command body is a uniform stub: exit 1, issue
-    ``cli.command-deferred``, a message naming this tracking issue --
-    verified identical in shape across all seven, not just asserted to
-    differ from whatever the oracle happens to say. The oracle, by
-    contrast, answers each verb for real, and no two of the seven share an
-    outcome (a warning-only success, three different flavours of exit 2,
-    and one exit 4) -- each pinned here from an actual run, not copied from
-    a docstring.
-
-    Both sides spawn under ``PATH`` pinned to `empty_tool_inventory`'s scratch
-    directory (empty of every PROBEABLE tool, seeded with only a working
-    ``which`` -- see that function's own docstring for why the seed matters),
-    SYMMETRICALLY -- unlike `compare()`'s ``python_env_overrides`` (which
-    only ever pins the python side, because in frozen-replay mode the rust
-    side never spawns at all), this test spawns both binaries live on every
-    run, so pinning only one side would not even keep them on the same
-    footing, let alone a host-independent one. See `_DEFERRED_VERBS`'s own
-    comment for what this pin is actually for: ``support-bundle`` alone,
-    among the seven, branches on a tool probe (tan-cli#313/#324's class of
-    bug)."""
-    home = tmp_path / "home"
-    argv = [verb, "--format", "json"]
-    env_overrides = {"PATH": empty_tool_inventory(tmp_path)}
-    r_code, r_out = _run([RUST], argv, work_dir, home, env_overrides=env_overrides)
-    p_code, p_out = _run(python_command(), argv, work_dir, home, env_overrides=env_overrides)
-    assert r_code == rust_exit, (verb, r_out)
-    assert [i["code"] for i in r_out["issues"]] == rust_issue_codes, (verb, r_out)
-    assert p_code == 1, (verb, p_out)
-    assert [i["code"] for i in p_out["issues"]] == ["cli.command-deferred"], (verb, p_out)
-    assert "tan-cli/issues/260" in p_out["issues"][0]["message"]
 
 
 # --- the harness must be able to go red ------------------------------------

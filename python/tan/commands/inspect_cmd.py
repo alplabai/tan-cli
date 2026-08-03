@@ -17,10 +17,10 @@ a wrong answer here twice already. Every shape below (the six rows, their
 `source`/`detail` strings, the JSON key order, the mixed-separator `outputPath`
 shape `trace`/`support-bundle` share) was measured against a freshly-built
 oracle from THIS worktree's `crates/` (`cargo build -p alp-tan-cli --bin tan`),
-not the possibly-stale `E:/GitHub/tan-cli` `dev`-branch binary -- the two
-disagree on `Project.boardYaml`'s existence-filtering (tan-cli#236, landed on
-this worktree's branch, not yet on `dev`), which is exactly the kind of
-mismatch RUNNING catches and reading `crates/` alone would not.
+not a possibly-stale `dev`-branch checkout's binary -- the two disagree on
+`Project.boardYaml`'s existence-filtering (tan-cli#236, landed on this
+worktree's branch, not yet on `dev`), which is exactly the kind of mismatch
+RUNNING catches and reading `crates/` alone would not.
 
 **Which SDK ladder.** `inspect`/`trace` are two of the thirteen commands
 `build_cmd.resolve_sdk_root_ladder`'s own docstring names -- measured against

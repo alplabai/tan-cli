@@ -22,8 +22,12 @@ than depending on that fact staying true.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import typer
 from typer.testing import CliRunner
 
@@ -38,6 +42,39 @@ app = typer.Typer()
 app.command("pinmux")(pinmux_command)
 
 runner = CliRunner()
+
+#: `target/{release,debug}/tan(.exe)` next to this checkout -- the same
+#: discovery `tests/parity/oracle.py`'s `rust_binary()` uses, kept
+#: independent here rather than imported so this file's only non-stdlib
+#: dependency stays `tan.commands.pinmux_cmd` (matching every other test file
+#: under `tests/commands/`). `TAN_RUST_BINARY` overrides, same env var.
+_EXE = ".exe" if sys.platform == "win32" else ""
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _oracle_binary() -> str | None:
+    override = os.environ.get("TAN_RUST_BINARY")
+    if override:
+        return override
+    for profile in ("release", "debug"):
+        candidate = _REPO_ROOT / "target" / profile / f"tan{_EXE}"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+_ORACLE = _oracle_binary()
+_ORACLE_REQUIRED = pytest.mark.skipif(
+    _ORACLE is None,
+    reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
+)
+
+
+def _run_oracle(argv: list[str], cwd: Path) -> tuple[int, dict]:
+    proc = subprocess.run(
+        [_ORACLE, *argv], capture_output=True, text=True, encoding="utf-8", cwd=cwd
+    )
+    return proc.returncode, json.loads(proc.stdout)
 
 _SAMPLE_TABLE = """\
 schemaVersion: pinmux-capability-v1
@@ -221,6 +258,131 @@ def test_real_table_resolves_family_display_name_and_pads(tmp_path: Path) -> Non
         },
     ]
     assert envelope["issues"] == []
+
+
+def test_non_string_scalar_pad_fields_coerce_instead_of_refusing(tmp_path: Path) -> None:
+    """BLOCKER regression: `owner`/`silicon_peripheral`/`silicon_pad` used to
+    hard-refuse (exit 2) any non-`str` PyYAML scalar. Every `PinmuxPad` field
+    is a `String` on the oracle, which coerces ANY scalar to its own text
+    instead of rejecting it -- byte-matches the oracle: `owner: 7` -> `"7"`,
+    `silicon_peripheral: 3.5` -> `"3.5"`, `silicon_pad: true` -> `"true"`, all
+    at exit 0."""
+    table = (
+        "schemaVersion: pinmux-capability-v1\nfamily: v2n\npads:\n"
+        "  - { e1m_pad: A1, e1m_function: GPIO, owner: 7, silicon_peripheral: 3.5, "
+        "silicon_pad: true }\n"
+    )
+    sdk = _sdk_root(tmp_path, {"v2n": table})
+    proj = _project(tmp_path)
+    result = runner.invoke(
+        app,
+        ["--project", str(proj), "--family", "v2n", "--sdk-root", str(sdk), "--format", "json"],
+    )
+    assert result.exit_code == 0
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"] == []
+    assert envelope["data"]["pads"] == [
+        {
+            "e1mPad": "A1",
+            "e1mFunction": "GPIO",
+            "owner": "7",
+            "siliconPeripheral": "3.5",
+            "siliconPad": "true",
+        }
+    ]
+
+
+def test_compound_pad_fields_still_refuse(tmp_path: Path) -> None:
+    """The one type mismatch a `String` field can never absorb, unaffected by
+    the leniency above: `owner: [a, b]` and `e1m_pad: {a: b}` both still exit
+    2 on the oracle, and still do here."""
+    sequence_owner = (
+        "schemaVersion: pinmux-capability-v1\nfamily: v2n\npads:\n"
+        "  - { e1m_pad: A1, e1m_function: GPIO, owner: [a, b], silicon_peripheral: X, "
+        "silicon_pad: Y }\n"
+    )
+    sdk = _sdk_root(tmp_path, {"v2n": sequence_owner})
+    proj = _project(tmp_path)
+    result = runner.invoke(
+        app,
+        ["--project", str(proj), "--family", "v2n", "--sdk-root", str(sdk), "--format", "json"],
+    )
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "pinmux.schema-version-unsupported"
+
+    mapping_pad = (
+        "schemaVersion: pinmux-capability-v1\nfamily: v2n\npads:\n"
+        "  - { e1m_pad: {a: b}, e1m_function: GPIO, owner: x, silicon_peripheral: X, "
+        "silicon_pad: Y }\n"
+    )
+    (sdk / "metadata" / "pinmux" / "v2n.yaml").write_text(mapping_pad, encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["--project", str(proj), "--family", "v2n", "--sdk-root", str(sdk), "--format", "json"],
+    )
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "pinmux.schema-version-unsupported"
+
+
+@_ORACLE_REQUIRED
+def test_capitalized_bool_pad_literal_is_a_known_divergence_from_the_oracle(
+    tmp_path: Path,
+) -> None:
+    """Both sides accept the row (exit 0, one pad). The oracle preserves the
+    RAW YAML source spelling of a coerced scalar (`owner: True` -> `"True"`,
+    `silicon_peripheral: on` -> `"on"`, `silicon_pad: yes` -> `"yes"`) --
+    there is no equivalent recovery available to this port: PyYAML's stock
+    (unmodified, per the module docstring) `SafeLoader` has already collapsed
+    `True`/`On`/`Yes` to a single Python `bool True` by the time `_pad_field`
+    ever sees it, with no way back to which of those spellings the document
+    used. `_pad_field` prints the YAML-CANONICAL spelling instead
+    (`"true"`, lowercase) -- correct for the common case (a lowercase
+    `true`/`false` in a real generated table), divergent only for a
+    capitalized or `on`/`off`/`yes`/`no`-style pad value, which no real
+    `metadata/pinmux/*.yaml` table in this repo has ever contained.
+    """
+    table = (
+        "schemaVersion: pinmux-capability-v1\nfamily: aen\npads:\n"
+        '  - { e1m_pad: "A3", e1m_function: "PWM6", owner: True, '
+        "silicon_peripheral: on, silicon_pad: yes }\n"
+    )
+    sdk = _sdk_root(tmp_path, {"aen": table})
+    proj = _project(tmp_path)
+    argv = [
+        "--project", str(proj),
+        "--family", "aen",
+        "--sdk-root", str(sdk),
+        "--format", "json",
+    ]
+    result = runner.invoke(app, argv)
+    p_out = json.loads(result.stdout)
+    r_code, r_out = _run_oracle(["pinmux", *argv], tmp_path)
+
+    assert result.exit_code == r_code == 0
+    assert p_out["issues"] == r_out["issues"] == []
+    r_pad, p_pad = r_out["data"]["pads"][0], p_out["data"]["pads"][0]
+    assert r_pad == {
+        "e1mPad": "A3",
+        "e1mFunction": "PWM6",
+        "owner": "True",
+        "siliconPeripheral": "on",
+        "siliconPad": "yes",
+    }
+    assert p_pad == {
+        "e1mPad": "A3",
+        "e1mFunction": "PWM6",
+        "owner": "true",
+        "siliconPeripheral": "true",
+        "siliconPad": "true",
+    }
+    # Every OTHER field on the envelope is a real match, not coincidentally
+    # unchecked.
+    assert {**r_out, "data": {**r_out["data"], "pads": []}} == {
+        **p_out,
+        "data": {**p_out["data"], "pads": []},
+    }
 
 
 def test_table_empty_after_tbd_filtering_is_a_validation_failure(tmp_path: Path) -> None:

@@ -215,8 +215,34 @@ def monitor(
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
+    project: str = typer.Option(None, "--project", hidden=True),
+    board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
+    sdk_root: str = typer.Option(None, "--sdk-root", hidden=True),
+    target: str = typer.Option(None, "--target", hidden=True),
+    all_targets: bool = typer.Option(False, "--all", hidden=True),
+    verbose: bool = typer.Option(False, "--verbose", hidden=True),
+    quiet: bool = typer.Option(False, "--quiet", hidden=True),
+    no_color: bool = typer.Option(False, "--no-color", hidden=True),
+    non_interactive: bool = typer.Option(False, "--non-interactive", hidden=True),
+    ci: bool = typer.Option(False, "--ci", hidden=True),
 ) -> None:
     """Open a serial console to the board."""
+    # The ten options above are clap's `GlobalArgs` members (`global = true`)
+    # that the oracle accepts on EVERY verb, `monitor` included, and never
+    # reads for this one -- confirmed live (`tan.exe monitor --non-interactive
+    # --ci --target zephyr-conf --all --project . --board-yaml x --sdk-root x
+    # --port COM7` reaches the identical "port not found" failure a bare
+    # `tan.exe monitor --port COM7` does). Declared here purely so the argv
+    # SURFACE matches: `tan monitor --sdk-root <path> --port COM7` exited 2 as
+    # a Click "No such option" usage error without this, breaking any caller
+    # (or saved script) forwarding the global set unconditionally -- unlike
+    # `model`/`new-som`/`faultdecode`, `monitor` never resolves an SDK root at
+    # all (see the module docstring), so `--project`/`--board-yaml`/
+    # `--sdk-root` are genuinely unread here too, not merely deferred. Hidden
+    # from `--help` because they do nothing. Same port-wide gap as
+    # `clean_cmd.clean`/`new_som_cmd.new_som`.
+    del project, board_yaml, sdk_root, target, all_targets
+    del verbose, quiet, no_color, non_interactive, ci
     if output_format not in ("text", "json"):
         raise typer.BadParameter(
             f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"

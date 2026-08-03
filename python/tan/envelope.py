@@ -113,7 +113,18 @@ class Envelope:
         depends on that shape.
         """
         try:
-            return json.dumps(self._as_dict(), separators=(",", ":")), self.exit_code
+            # `ensure_ascii=False`: the default (True) escapes every non-ASCII
+            # codepoint as `\uXXXX`, which is valid JSON but not what the
+            # oracle emits -- `serde_json::to_string` writes raw UTF-8 bytes
+            # verbatim (measured: `scaffold --name "Sensör Ölçüm"` on the
+            # Rust CLI puts the literal `Sensör Ölçüm` on the wire, not
+            # `Sensör...`). A consumer that byte-compares tan's envelope
+            # against the oracle's, or that greps stdout for a raw non-ASCII
+            # string, saw a divergence stdout never had a reason to carry.
+            return (
+                json.dumps(self._as_dict(), separators=(",", ":"), ensure_ascii=False),
+                self.exit_code,
+            )
         except Exception as err:  # noqa: BLE001 -- no payload may ever crash stdout
             fallback_code = int(ExitCode.INTERNAL_FAILURE)
             fallback = {
@@ -132,7 +143,10 @@ class Envelope:
                     f"failed to serialize command output: {err}",
                 ).as_dict()
             ]
-            return json.dumps(fallback, separators=(",", ":")), fallback_code
+            return (
+                json.dumps(fallback, separators=(",", ":"), ensure_ascii=False),
+                fallback_code,
+            )
 
 
 #: Whether this process has already written its one envelope to stdout.

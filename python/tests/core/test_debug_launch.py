@@ -29,42 +29,53 @@ from tan.core.debug_launch import (
 )
 
 #: Every (target, server) pair paired with the v0.3.1 default that target
-#: restores (tan-cli#138) -- exactly the task's own six lines. The default is
-#: keyed by TARGET alone, so zephyr-mcu's three servers all share one string;
-#: see `test_the_baremetal_default_is_the_same_across_every_server` for the
-#: same invariant on the two baremetal servers the task's table left implicit.
+#: restores (tan-cli#138). The default is keyed by TARGET alone, so
+#: zephyr-mcu's three servers all share one string; see
+#: `test_the_baremetal_default_is_the_same_across_every_server` for the same
+#: invariant on the two baremetal servers left implicit here.
+#:
+#: `YOCTO_USERSPACE` is deliberately ABSENT: three of the four target classes
+#: get a restored default, not four (the #138-vs-#321 resolution --
+#: `DEFAULT_PRE_LAUNCH_TASK`'s own doc comment in `tan/core/debug_launch.py`
+#: has the full quotation). `test_yocto_userspace_gets_no_default_pre_launch_
+#: task` below covers that target on its own.
 DEFAULTED_PROFILES = [
     (ZEPHYR_MCU, JLINK, "alp: build active target"),
     (ZEPHYR_MCU, OPENOCD, "alp: build active target"),
     (ZEPHYR_MCU, PYOCD, "alp: build active target"),
     (BAREMETAL_MCU, JLINK, "alp: build baremetal target"),
-    (YOCTO_USERSPACE, GDBSERVER, "alp: deploy and start gdbserver"),
     (NATIVE_HOST, SERVER_NONE, "alp: build native_sim target"),
 ]
 
 
 def test_default_pre_launch_task_table_is_the_v031_literals():
-    """`DEFAULT_PRE_LAUNCH_TASK` keyed by TARGET alone -- the four target
-    classes, no more, no fewer, each holding the exact v0.3.1 string
+    """`DEFAULT_PRE_LAUNCH_TASK` keyed by TARGET alone -- three target
+    classes, not four, each holding the exact v0.3.1 string
     (`crates/tan-core/src/debug_launch.rs` before tan-cli#85 made the key
-    opt-in)."""
+    opt-in). `YOCTO_USERSPACE` is deliberately absent: alp-sdk-vscode
+    registers no working task for it (the only one that exists exits 1 by
+    design), so restoring that one label would put the "preLaunchTask
+    terminated with exit code 1" dialog in front of every F5 -- the
+    #138-vs-#321 resolution `DEFAULT_PRE_LAUNCH_TASK`'s own doc comment
+    records."""
     assert DEFAULT_PRE_LAUNCH_TASK == {
         ZEPHYR_MCU: "alp: build active target",
         BAREMETAL_MCU: "alp: build baremetal target",
-        YOCTO_USERSPACE: "alp: deploy and start gdbserver",
         NATIVE_HOST: "alp: build native_sim target",
     }
+    assert YOCTO_USERSPACE not in DEFAULT_PRE_LAUNCH_TASK
 
 
 # Formerly `no_profile_names_a_pre_launch_task_by_default`
 # (`crates/tan-core/src/debug_launch.rs`): that Rust test pinned "no default
 # preLaunchTask" as the Bug-1 regression fix (tan-cli#85). tan-cli#138 is a
-# MAINTAINER DECISION that inverts the intent -- alp-sdk-vscode has since
-# registered all four labels as real tasks, so the v0.3.1 defaults are
-# restored -- so THIS is the corrected assertion for the SAME six profiles,
-# not a new, unrelated test. Its Rust sibling still asserts the old, now
-# superseded, behaviour: `crates/` is a frozen oracle this port no longer
-# tracks (see `python/tan/commands/debug_config_cmd.py`'s module docstring).
+# MAINTAINER DECISION that inverts the intent for three of the four target
+# classes -- alp-sdk-vscode has since registered those three labels as real
+# tasks, so the v0.3.1 defaults are restored for them -- so THIS is the
+# corrected assertion for those five profiles, not a new, unrelated test. Its
+# Rust sibling still asserts the old, now superseded, behaviour: `crates/` is
+# a frozen oracle this port no longer tracks (see
+# `python/tan/commands/debug_config_cmd.py`'s module docstring).
 @pytest.mark.parametrize("target,server,expected_task", DEFAULTED_PROFILES)
 def test_every_profile_names_its_v031_pre_launch_task_by_default(target, server, expected_task):
     draft = create_launch_draft(target, server, None)
@@ -72,6 +83,29 @@ def test_every_profile_names_its_v031_pre_launch_task_by_default(target, server,
     # Belt and braces, mirroring the Rust test's own: a `null` would still
     # serialize as a key, so absence from the rendered JSON is the real proof.
     assert '"preLaunchTask"' in json.dumps(draft)
+
+
+def test_yocto_userspace_gets_no_default_pre_launch_task():
+    """The flip side of `test_default_pre_launch_task_table_is_the_v031_
+    literals` at the draft level: yocto-userspace's only registered task
+    exits 1 by design (alp-sdk-vscode#406), so a plain run with no
+    `--pre-launch-task` must NOT reach for a default the way the other three
+    targets do -- the trailing `del` in `create_launch_draft` fires on `None`
+    here exactly as it did for every target before tan-cli#138 restored the
+    other three.
+
+    An explicit `--pre-launch-task ''` reaches the identical `del`, not a
+    distinct path, now that yocto-userspace has no default entry left to opt
+    out of -- checked here too rather than only via the trimmed
+    `DEFAULTED_PROFILES` parametrize above, which no longer names this
+    target at all.
+    """
+    draft = create_launch_draft(YOCTO_USERSPACE, GDBSERVER, None)
+    assert "preLaunchTask" not in draft
+    assert '"preLaunchTask"' not in json.dumps(draft)
+
+    draft_explicit_empty = create_launch_draft(YOCTO_USERSPACE, GDBSERVER, "")
+    assert "preLaunchTask" not in draft_explicit_empty
 
 
 def test_the_baremetal_default_is_the_same_across_every_server():

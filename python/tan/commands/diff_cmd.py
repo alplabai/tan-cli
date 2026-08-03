@@ -38,6 +38,21 @@ build with no PyYAML installed refuses with `diff.pyyaml-unavailable`
 (`RUNTIME_FAILURE`, matching `validate_cmd`'s `spawn-not-implemented`
 precedent for "this build cannot do that yet") rather than guessing.
 
+**YAML 1.1 vs 1.2 boolean literals.** PyYAML's default `SafeLoader` resolves
+YAML 1.1's full loose bool vocabulary (`on`/`off`/`yes`/`no`/`y`/`n`, any
+case) to `bool`; `serde_yaml` (YAML 1.2 core schema) resolves only the six
+canonical `true`/`True`/`TRUE`/`false`/`False`/`FALSE` spellings and leaves
+everything else a plain string -- measured against the oracle:
+`schemaVersion: 1` + `os: on` is `changes: [{"path":"libraries",...}]` at exit
+0 there (`os` is a `String` field, untouched at schema version 1), but the
+stock loader hands `_parse_fields` a Python `bool` for `os` and every
+`_typed_field(..., str, ...)` check refuses it as exit 2
+`diff.schema-violation` -- a live false-refusal for every YAML-1.1-only
+boolean spelling in ANY string-typed field (`os`, `preset`), not just this
+one example. `_load_document` therefore parses with `_Yaml12BoolLoader`, a
+`SafeLoader` subclass with the YAML 1.1 bool resolver's `on`/`off`/`yes`/`no`/
+`y`/`n` patterns removed, rather than plain `yaml.safe_load`.
+
 **Scope of the structural checks below.** `_parse_fields` validates the
 TOP-LEVEL type of every known `BoardModel` field (is `cores:` a mapping, is
 `ipc:` a list, ...) because a real Rust type mismatch anywhere in the document
@@ -47,11 +62,24 @@ validate the shape of values `diff` never reads (`cores.*.peripherals`,
 `e1m_routes.*`, ...) -- those fields are never touched by
 `normalize_board_model` and never enter this module's output; going a level
 deeper than "top-level key has the right YAML kind" would just be more parser
-tan does not need for the one question this command answers. This means a
-narrow class of nested-only type errors (e.g. `iot: {wifi: "yes"}`, a string
-where a bool belongs) that the oracle refuses is not caught here -- it
-diverges by silently passing the value through the way `prune_nulls` treats
-any non-null value.
+tan does not need for the one question this command answers.
+
+`iot`'s four toggles and `inference.backend`/`inference.default_arena_kib` are
+the one exception: they gate `compute_diff_entries`'s pruning decision
+directly, so an unchecked wrong type there does not just under-refuse -- it
+mis-classifies pruning and fabricates a diff entry the oracle never emits
+(measured: `iot: {wifi: "yes"}` used to report `ok:true` with a manufactured
+`{"path":"iot","kind":"removed",...}` entry; the oracle is exit 2
+`diff.schema-violation`). `iot`'s four toggles must each be `bool` or absent.
+`inference.default_arena_kib` must be a non-negative integer (`u32` range) or
+absent. `inference.backend` is the one `String` field checked here at all --
+and, matching the `os`/`preset` leniency above, it is checked only for the
+compound shapes (`list`/`dict`) no `String` field can ever hold; any other
+scalar PyYAML resolves it to (even a bare `5` or `true`) is accepted as
+non-empty, exactly as the oracle's own String-field coercion treats it
+(measured: `inference: {backend: 5}` is `unchanged: true` at exit 0 on the
+oracle, never pruned) -- only `_inference_is_empty`'s stringification needed
+fixing to stop miscounting a non-`str` truthy `backend` as blank.
 
 `som:`'s own shape (must be a mapping, not a bare SKU string) is checked with
 the exact oracle wording via Python's own `repr()` -- which is actually the
@@ -59,21 +87,22 @@ the exact oracle wording via Python's own `repr()` -- which is actually the
 Python's `repr()` from a `serde_yaml` (YAML 1.2) value and has one known gap
 against real Python semantics on YAML 1.1-vs-1.2 boolean/null resolution
 (`tan_core::validate` module docs); this module calls `repr()` on a value
-PyYAML (YAML 1.1, the same rules Python's ecosystem uses) actually parsed, so
-there is nothing left to approximate.
+`_Yaml12BoolLoader` (YAML 1.2's narrower bool vocabulary, the same rules
+`serde_yaml` uses) actually parsed, so there is nothing left to approximate.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import typer
 
-from tan.commands.presets_cmd import resolve_project_paths
-from tan.envelope import Envelope, Issue, Project, emit
+from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
+from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
 #: `data.schemaVersion` for this command's payload -- the envelope payload's
@@ -118,6 +147,45 @@ class DiffEntry:
         return out
 
 
+#: YAML 1.2 core schema bool literals -- `true`/`True`/`TRUE`/`false`/`False`/
+#: `FALSE` only. Everything YAML 1.1 additionally resolved to bool (`on`/
+#: `off`/`yes`/`no`/`y`/`n`, any case) is deliberately absent: those are the
+#: exact patterns `_yaml_1_2_bool_loader` strips from PyYAML's own resolver,
+#: so `re.compile` never sees them either -- one list, not two that could
+#: drift apart.
+_YAML_1_2_BOOL_PATTERN = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
+
+
+def _yaml_1_2_bool_loader(yaml_module: Any) -> type:
+    """A `yaml_module.SafeLoader` subclass with the YAML 1.1-only loose bool
+    literals removed from implicit resolution, so a scalar like `on`/`off`/
+    `yes`/`no`/`y`/`n` (any case) parses as a plain STRING -- matching
+    `serde_yaml`'s YAML 1.2 core-schema bool tag (see the module docstring's
+    "YAML 1.1 vs 1.2 boolean literals" note). Takes the imported `yaml`
+    module rather than importing it itself, so a build with no PyYAML
+    installed never touches `yaml.SafeLoader` at all -- `_load_document`
+    only calls this after its own optional import already succeeded.
+    """
+
+    class Yaml12BoolLoader(yaml_module.SafeLoader):
+        pass
+
+    # `add_implicit_resolver` only APPENDS; the stock YAML-1.1 bool resolver
+    # would still match first and win. Copy the resolver table with every
+    # existing bool entry stripped, then append the narrower one, so this
+    # loader's `tag:yaml.org,2002:bool` entries are exactly the six literals
+    # above -- nothing from the base `SafeLoader` (used unmodified everywhere
+    # else in tan) is touched.
+    Yaml12BoolLoader.yaml_implicit_resolvers = {
+        first: [pair for pair in resolvers if pair[0] != "tag:yaml.org,2002:bool"]
+        for first, resolvers in yaml_module.SafeLoader.yaml_implicit_resolvers.items()
+    }
+    Yaml12BoolLoader.add_implicit_resolver(
+        "tag:yaml.org,2002:bool", _YAML_1_2_BOOL_PATTERN, list("tTfF")
+    )
+    return Yaml12BoolLoader
+
+
 def _load_document(text: str) -> Any:
     """The raw YAML document, or a `ParseFailure` matching `ParseError`'s two
     reachable variants on this path (`Yaml`, and the `som:`-shape pre-check).
@@ -136,7 +204,7 @@ def _load_document(text: str) -> Any:
             ExitCode.RUNTIME_FAILURE,
         ) from err
     try:
-        return yaml.safe_load(text)
+        return yaml.load(text, Loader=_yaml_1_2_bool_loader(yaml))
     except Exception as err:  # noqa: BLE001 -- yaml.YAMLError and anything a loader raises
         raise ParseFailure("schema-violation", f"board.yaml is not valid YAML: {err}") from err
 
@@ -170,6 +238,63 @@ def _typed_field(doc: dict, key: str, expected: type, label: str) -> Any:
         "schema-violation",
         f"board.yaml is not valid YAML: {key}: expected {label}, got {_yaml_kind(value)}",
     )
+
+
+#: `u32::MAX` -- the upper bound `inference.default_arena_kib` (`u32` in the
+#: Rust model) accepts. Measured against the oracle: `4294967295` is exit 0,
+#: `4294967296` is exit 2 `inference.default_arena_kib: ... expected u32`.
+_U32_MAX = 0xFFFFFFFF
+
+
+def _typed_nested(mapping: dict, key: str, path: str, expected: type, label: str) -> Any:
+    """Like `_typed_field`, but for a key nested one level under an
+    already-`dict`-shaped `mapping` -- `path` is the dotted diagnostic path
+    (`"iot.wifi"`) rather than a bare top-level key."""
+    value = mapping.get(key)
+    if value is None or isinstance(value, expected):
+        return value
+    raise ParseFailure(
+        "schema-violation",
+        f"board.yaml is not valid YAML: {path}: expected {label}, got {_yaml_kind(value)}",
+    )
+
+
+def _check_iot_field_types(iot: dict | None) -> None:
+    """Each of `iot`'s four toggles must be `bool` or absent -- checked
+    before `compute_diff_entries` ever asks whether the group is prunable
+    (see the module docstring's "scope of the structural checks" note)."""
+    if iot is None:
+        return
+    for field in _IOT_FIELDS:
+        _typed_nested(iot, field, f"iot.{field}", bool, "a boolean")
+
+
+def _check_inference_field_types(inference: dict | None) -> None:
+    """`inference.default_arena_kib` must be a non-negative `u32`-range
+    integer or absent. `inference.backend` is a `String` field: matching the
+    `os`/`preset` leniency documented at the top of the module, only the
+    compound shapes (`list`/`dict`) no `String` field can ever hold are
+    rejected here -- every other scalar PyYAML resolves it to is accepted,
+    same as the oracle's own coercion (`_inference_is_empty` is what needed
+    fixing to stop mis-treating a non-`str` truthy `backend` as blank)."""
+    if inference is None:
+        return
+    backend = inference.get("backend")
+    if isinstance(backend, (list, dict)):
+        raise ParseFailure(
+            "schema-violation",
+            f"board.yaml is not valid YAML: inference.backend: expected a string, "
+            f"got {_yaml_kind(backend)}",
+        )
+    arena = inference.get("default_arena_kib")
+    if arena is not None and (
+        isinstance(arena, bool) or not isinstance(arena, int) or not 0 <= arena <= _U32_MAX
+    ):
+        raise ParseFailure(
+            "schema-violation",
+            "board.yaml is not valid YAML: inference.default_arena_kib: expected a "
+            f"non-negative 32-bit integer, got {_yaml_kind(arena)}",
+        )
 
 
 def _parse_fields(doc: Any) -> tuple[int, str | None, list | None, dict | None, dict | None]:
@@ -208,6 +333,8 @@ def _parse_fields(doc: Any) -> tuple[int, str | None, list | None, dict | None, 
     libraries = _typed_field(doc, "libraries", list, "a sequence")
     iot = _typed_field(doc, "iot", dict, "a mapping")
     inference = _typed_field(doc, "inference", dict, "a mapping")
+    _check_iot_field_types(iot)
+    _check_inference_field_types(inference)
 
     # Fields `diff` never reads (never touched by normalize_board_model, so
     # never contribute a diff entry either way) -- top-level shape checked
@@ -232,9 +359,19 @@ def _iot_pruned(iot: dict) -> dict:
 
 
 def _inference_is_empty(inference: dict) -> bool:
+    """`backend` is empty only when absent or an explicit empty string --
+    any OTHER present scalar (`_check_inference_field_types` has already
+    rejected the compound shapes) counts as non-empty regardless of its YAML
+    type, matching the oracle's own `String`-field coercion (measured:
+    `inference: {backend: 5}` is `unchanged: true`, never pruned). Naively
+    defaulting a non-`str` `backend` to `""` here -- as this used to -- is
+    exactly the bug: it silently treated a present, non-empty `backend` as
+    blank and let `compute_diff_entries` fabricate a diff entry the oracle
+    never emits."""
     backend = inference.get("backend")
-    backend_str = backend if isinstance(backend, str) else ""
-    return backend_str == "" and inference.get("default_arena_kib") is None
+    if backend is not None and backend != "":
+        return False
+    return inference.get("default_arena_kib") is None
 
 
 def _inference_pruned(inference: dict) -> dict:
@@ -328,6 +465,7 @@ def _emit_failure(
     message: str,
     exit_code: ExitCode,
     text_lines: list[str],
+    sdk: SdkInfo | None = None,
 ) -> None:
     """Mirrors `diff.rs`'s `failure(...)`: the JSON issue message and the
     text-mode lines are independent strings, not one derived from the other
@@ -337,6 +475,13 @@ def _emit_failure(
     `_render_text`, these lines are NOT filtered by `--quiet` -- measured
     against the oracle: `diff --quiet` on every failure prints the identical
     lines a plain `diff` does.
+
+    `sdk` is the resolved `--sdk-root` block, carried through to the failure
+    envelope exactly as the success envelope carries it -- measured against
+    the oracle: `diff --sdk-root <path>` against a missing board.yaml still
+    reports `sdk.root`/`sdk.sourceTier` on the exit-2 envelope; dropping it
+    on the failure path (as this used to) is a real divergence, not just an
+    asymmetry with the success path.
     """
     if json_mode:
         emit(
@@ -346,6 +491,7 @@ def _emit_failure(
                 _data(board_path, [], unchanged=False),
                 [Issue(f"diff.{code}", "error", message)],
                 exit_code,
+                sdk=sdk,
             )
         )
     else:
@@ -366,7 +512,7 @@ def diff(
         metavar="PATH",
         help="Explicit board.yaml path (overrides project resolution).",
     ),
-    sdk_root: str = typer.Option(  # accepted, not read; diff never resolves an SDK
+    sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
     target: str = typer.Option(  # accepted, not read
@@ -399,14 +545,17 @@ def diff(
 ) -> None:
     """Show how board.yaml normalization changes the effective config.
 
-    `--sdk-root`/`--target`/`--all`/`--verbose`/`--no-color`/`--non-interactive`/
-    `--ci` are declared, not consumed: `diff` reads only the project's own
-    board.yaml (`crates/tan-cli/src/commands/diff.rs` never touches
-    `GlobalArgs::sdk_root`/`target`/`all`/`verbose`), but the oracle's clap
-    `GlobalArgs` are `global = true`, so every verb accepts all of them and a
-    caller passing one through unconditionally must not get a parse error.
+    `--target`/`--all`/`--verbose`/`--no-color`/`--non-interactive`/`--ci` are
+    declared, not consumed: `diff` reads only the project's own board.yaml
+    plus, now, `--sdk-root` -- solely to echo the resolved SDK in the
+    envelope's `sdk` block, matching the oracle (measured: `diff --sdk-root
+    <path>` reports `sdk.root`/`sdk.sourceTier` on both the success AND the
+    board-yaml-missing failure envelope; `diff` still never READS anything
+    from the checkout). The oracle's clap `GlobalArgs` are `global = true`,
+    so every verb accepts all of them and a caller passing one through
+    unconditionally must not get a parse error.
     """
-    del sdk_root, target, all_targets, verbose, no_color, non_interactive, ci
+    del target, all_targets, verbose, no_color, non_interactive, ci
     resolved_format = (
         output_format if output_format is not None else (ctx.obj or {}).get("format") or "text"
     )
@@ -417,6 +566,8 @@ def diff(
     json_mode = resolved_format == "json"
 
     root, board_path = resolve_project_paths(project, board_yaml)
+    sdk = resolve_sdk(sdk_root, root)
+    sdk_info = SdkInfo(sdk[0], sdk[1]) if sdk is not None else None
     board_file = Path(board_path)
 
     if not board_file.exists():
@@ -428,6 +579,7 @@ def diff(
             message="board.yaml path could not be resolved or the file does not exist.",
             exit_code=ExitCode.VALIDATION_FAILURE,
             text_lines=["diff: board.yaml path is unresolved or missing."],
+            sdk=sdk_info,
         )
         return
 
@@ -442,6 +594,7 @@ def diff(
             message=f"could not read board.yaml: {err}",
             exit_code=ExitCode.INTERNAL_FAILURE,
             text_lines=["diff: internal failure", str(err)],
+            sdk=sdk_info,
         )
         return
 
@@ -464,6 +617,7 @@ def diff(
             message=failure.message,
             exit_code=failure.exit_code,
             text_lines=[header, failure.message],
+            sdk=sdk_info,
         )
         return
     except Exception as err:  # noqa: BLE001 -- the envelope IS the error contract
@@ -476,6 +630,7 @@ def diff(
             message=message,
             exit_code=ExitCode.INTERNAL_FAILURE,
             text_lines=["diff: internal failure", message],
+            sdk=sdk_info,
         )
         return
 
@@ -489,6 +644,7 @@ def diff(
                 _data(board_path, entries),
                 [],
                 ExitCode.SUCCESS,
+                sdk=sdk_info,
             )
         )
     else:
