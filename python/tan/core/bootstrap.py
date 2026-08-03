@@ -854,12 +854,21 @@ def hint_line(tool: str, install: dict[str, str]) -> str:
     return f"  {tool}  ->  install `{tool}` and put it on PATH"
 
 
+#: tan-cli#355, added as a SECOND line on the refusals below -- the oracle's own
+#: first line is left byte-identical. See `posix_refusal` for why.
+_DOCTOR_FIX_HINT = "Or run `tan doctor --build --fix` to install them from the SDK's manifest."
+
+
 def windows_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
     """`bootstrap.ps1`'s `$Prereqs` loop: header, one `hint_line` each, the
     reopen-PowerShell tail."""
     lines = ["Missing required tools:"]
     lines.extend(hint_line(tool, install) for tool in missing)
     lines.append("Install the tools above (then reopen PowerShell) and re-run.")
+    # tan-cli#355: same gap as the POSIX refusal -- name the installer tan ships.
+    # The Windows wording is tan's own (it already carries per-tool hints the
+    # POSIX one may not), so this is an addition, not a divergence.
+    lines.append(_DOCTOR_FIX_HINT)
     return PrereqFailure(
         "prerequisites-missing", tuple(lines), _structured_missing(missing, install)
     )
@@ -869,10 +878,35 @@ def posix_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
     """`bootstrap.sh`'s one line: the tool names and nothing else -- TWO spaces
     before "Install". The oracle prints no per-tool commands and neither may
     this; alp-sdk#959 changed what the STRUCTURED half carries, not what a POSIX
-    user reads."""
+    user reads.
+
+    **tan-cli#355 adds a SECOND line, and only a second line.** The oracle's
+    first line is still emitted byte for byte, two spaces and all, and a parity
+    test pins it so the match stays provable. What is added is the sentence
+    naming `tan doctor --build --fix`.
+
+    A DELIBERATE divergence from the oracle, recorded here so nobody restores
+    the silence. "The oracle prints no per-tool commands and neither may this"
+    was right when tan had no installer of its own; tan-cli#91 changed that
+    fact, and `doctor --build --fix` now runs exactly the manifest-owned
+    install commands these missing tools need. Measured in a pristine
+    `ubuntu:24.04`, a first-time customer got
+
+        Missing required tools: cmake ninja xz wget.  Install them and re-run.
+
+    and nothing else, while the command that would install them sat one
+    subcommand away, unmentioned. Withholding a remedy tan HAS, to match an
+    oracle that never had one, is parity serving nobody.
+
+    The per-tool commands themselves still stay OUT of the prose -- that half of
+    the original constraint holds, and they remain where alp-sdk#959 put them,
+    in the structured payload's `{tool, command}` pairs."""
     return PrereqFailure(
         "prerequisites-missing",
-        (f"Missing required tools: {' '.join(missing)}.  Install them and re-run.",),
+        (
+            f"Missing required tools: {' '.join(missing)}.  Install them and re-run.",
+            _DOCTOR_FIX_HINT,
+        ),
         _structured_missing(missing, install),
     )
 

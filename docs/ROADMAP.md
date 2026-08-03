@@ -105,11 +105,15 @@ Gated on Target 1 green on silicon.
 `SUPPORTED_CLI_VERSION` moves; the Python `tan` becomes what customers get.
 Gated on the RC having soaked, not on a date.
 
-### tan — `v0.6.0` · full command-surface parity
+### tan — `v0.6.0` · known oracle divergences
 
-The verbs deliberately left out of the RC: `model`, `new-som`, `monitor`,
-`faultdecode`, the introspection set, `renode`, and the seven entirely-unported
-commands. Also the known oracle divergences filed during the port.
+The full command surface landed inside the `v0.5.0` RC cycle instead of
+waiting for this milestone: the seven verbs that shipped as stubs at rc1
+(`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`,
+`support-bundle` — tan-cli#260, #257), `model` (#253), `new-som` (#254),
+`monitor` (#255), `faultdecode` (#256), and `renode --sim-mode` (#77) are all
+real by `v0.5.0-rc4`. What is still deferred to `v0.6.0` is narrower — the
+known oracle divergences filed during the port (see the `deferred` label).
 
 Deferred is not a bug backlog — the `deferred` label means *chosen*, and each
 issue records what the oracle does so the choice can be re-read later.

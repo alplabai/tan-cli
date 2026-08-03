@@ -76,6 +76,7 @@ from tan.core.flash_plan import (
     flash_args_has_tbd,
     flow_d_preflight_script,
     is_pending,
+    is_raw_bin,
     is_rust_absolute,
     parse_atoc_start_address,
     parse_system_manifest,
@@ -87,6 +88,13 @@ from tan.core.flash_plan import (
     validate_flow_d_preflight_args,
 )
 from tan.core.global_flags import accept_global_flags
+from tan.core.setools import (
+    find_app_gen_toc,
+    missing_tool_message,
+    resolve_setools_dir,
+    sign_slot0,
+    unresolved_message,
+)
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -762,6 +770,103 @@ def _resolve_flow_d_atoc_path(flash_args: Any, build_root: str, sdk_root: str) -
     return merged
 
 
+def _resolve_flow_d_atoc_via_setools(
+    flash_args: Any, artefact_path: str, ctx: _Context, entry_id: str
+) -> tuple[Any, str | None]:
+    """tan-cli#353's remaining half: when Flow D still has no `atoc`/
+    `atoc_address` after the explicit-value and `atoc_map` resolutions above
+    (`_resolve_flow_d_atoc_address`/`_resolve_flow_d_atoc_path`), sign one via
+    SETOOLS instead of handing `plan_alif_mram_jlink`'s bare "both required"
+    refusal to a customer who has never heard of `app-gen-toc`. Measured on
+    real silicon (e1m-aen-evk-01, E8 AE822): that refusal is exactly what a
+    fresh AEN801 manifest hits today, since alp-sdk's own emit carries only
+    `flash_args.jlink_flash_device`.
+
+    Returns `(flash_args, preview_message)`. `preview_message` is `None` on
+    every path that leaves `flash_args` fully resolved for
+    `plan_alif_mram_jlink` to consume -- an already-resolved no-op, or a REAL
+    sign that filled `atoc`/`atoc_address` in -- and non-`None` only for the
+    one `--dry-run` path that intentionally leaves both still absent: signing
+    writes real files into the customer's SETOOLS install and spawns a real
+    tool, and `--dry-run`'s own contract ("planning only") forbids that
+    regardless of how harmless the ATOC step is next to the MRAM write it
+    feeds.
+
+    Raises `FlashPlanError` for: SETOOLS unresolved, resolved but not a real
+    install, no `flash_args.slot0_load_address` to give `app-gen-toc` as its
+    `mramAddress`, no raw `.bin` to sign, or the sign step itself failing --
+    the caller's existing `except FlashPlanError` arm (mirroring
+    `_resolve_flow_d_atoc_address`/`_resolve_flow_d_atoc_path` above) reports
+    it as the entry's `flash.entry-failed` message.
+
+    **Only when the manifest points at NOTHING signing-related at all.** A
+    customer who already supplied an explicit `atoc` (a blob they signed
+    themselves) or `atoc_map` (pointing at their own `app-gen-toc` run) gets
+    NONE of this -- even if that path did not fully resolve (e.g. the map has
+    not materialised yet) `plan_alif_mram_jlink`'s own precise refusal is the
+    right one, not a fresh SETOOLS sign silently overriding what they already
+    pointed tan at.
+    """
+    if fa_str(flash_args, "atoc") is not None or fa_str(flash_args, "atoc_map") is not None:
+        return flash_args, None
+    if fa_str_checked(flash_args, "atoc_address", True) is not None:
+        return flash_args, None
+
+    setools = resolve_setools_dir(flash_args, os.environ)
+    if setools is None:
+        raise FlashPlanError(unresolved_message())
+    app_gen_toc = find_app_gen_toc(setools.path)
+    if app_gen_toc is None:
+        raise FlashPlanError(missing_tool_message(setools))
+
+    # `mramAddress` -- app-gen-toc's own placement for the app itself, distinct
+    # from `atoc_address` (the SIGNED PACKAGE's placement, derived below from
+    # its own build report). tan has no source for it besides this already-
+    # documented Flow D key (`plan_alif_mram_jlink`'s optional
+    # `slot0_load_address`) -- there is nothing to guess it from, so a
+    # manifest that omits it falls through to `plan_alif_mram_jlink`'s own
+    # "both required" refusal rather than a confusing SETOOLS-shaped one.
+    mram_address = fa_str_checked(flash_args, "slot0_load_address", True)
+    if mram_address is None:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.slot0_load_address is required to auto-sign "
+            "via SETOOLS (it becomes app-gen-toc's mramAddress) -- supply the app's "
+            "real MRAM slot0 address, or sign by hand and set flash_args.atoc / "
+            "flash_args.atoc_address yourself."
+        )
+
+    if ctx.dry_run:
+        # Planning only -- report what WOULD be signed without touching the
+        # customer's SETOOLS install or spawning a real tool.
+        return flash_args, (
+            f"would sign {artefact_path} with SETOOLS at {setools.path} (via "
+            f"{setools.source}) -> build/config/{entry_id}-slot0.json, then run "
+            "app-gen-toc -- not run under --dry-run"
+        )
+
+    # SETOOLS signs a raw `.bin`, same as `plan_alif_mram_jlink`'s own
+    # mramxip-shape guard (tan-cli#311/#353). Repeated here rather than shared:
+    # this resolves the artefact SETOOLS needs to COPY, before
+    # `plan_alif_mram_jlink` ever sees this entry -- the two usually coincide,
+    # but nothing here assumes it.
+    binary = artefact_path
+    if not is_raw_bin(binary):
+        sibling = os.path.splitext(binary)[0] + ".bin"
+        if _is_file(sibling):
+            binary = sibling
+    if not is_raw_bin(binary):
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: SETOOLS needs a raw .bin to sign, but {artefact_path} is "
+            "not one and no sibling .bin was found beside it."
+        )
+
+    atoc_path, address = sign_slot0(setools.path, app_gen_toc, binary, entry_id, mram_address)
+    merged = dict(flash_args)
+    merged["atoc"] = atoc_path
+    merged["atoc_address"] = address
+    return merged, None
+
+
 def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[str]]:
     """Dispatch + run one target. Returns `(rc, entry, text-lines)`."""
     kind, entry_id = target.kind, target.id
@@ -890,23 +995,37 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
 
     flash_args = target.flash_args
     if method == FLOW_D_METHOD:
-        # The two places `flash_args` is augmented before dispatch: the ATOC
+        # THREE places `flash_args` is augmented before dispatch: the ATOC
         # address is a build-time output, so it may need resolving from a
         # build artefact rather than arriving on the manifest already (see
         # `_resolve_flow_d_atoc_address`; a supplied-but-unusable `atoc_map`
         # raises there rather than silently deferring to `plan_alif_mram_jlink`'s
-        # generic refusal, caught here the same way `meta.build`'s is below) --
-        # and the ATOC blob path itself is anchored on `build_root`/`sdk_root`
+        # generic refusal, caught here the same way `meta.build`'s is below);
+        # the ATOC blob path itself is anchored on `build_root`/`sdk_root`
         # (`_resolve_flow_d_atoc_path`) before it can reach the Commander
-        # script unresolved.
+        # script unresolved; and, tan-cli#353's remaining half, SETOOLS signs
+        # one from scratch (`_resolve_flow_d_atoc_via_setools`) when the first
+        # two leave `atoc`/`atoc_address` still absent.
         try:
             flash_args = _resolve_flow_d_atoc_address(flash_args, ctx.build_root, ctx.sdk_root)
             flash_args = _resolve_flow_d_atoc_path(flash_args, ctx.build_root, ctx.sdk_root)
+            flash_args, setools_preview = _resolve_flow_d_atoc_via_setools(
+                flash_args, artefact_path, ctx, entry_id
+            )
         except FlashPlanError as err:
             msg = str(err)
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
             lines.append(f"  FAIL: {msg}")
             return 1, entry(method, "failed", 1, msg), lines
+        if setools_preview is not None:
+            # `--dry-run` only (see the helper's own docstring): nothing was
+            # signed, so there is no `atoc`/`atoc_address` to hand
+            # `plan_alif_mram_jlink` -- report the preview directly rather
+            # than reaching its "both required" refusal over a field this
+            # entry was never asked to fill in by hand.
+            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(f"  {setools_preview}")
+            return 0, entry(method, "ok", 0, setools_preview), lines
 
     inputs = FlashInputs(
         artefact=artefact_path,

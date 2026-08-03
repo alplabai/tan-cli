@@ -47,20 +47,25 @@ git config --global core.longpaths true 2>/dev/null || true
 # exits 4, and the ARM-ELF leg cannot run at all. Binding it is what a real
 # user has; NOT binding it would make the build leg untestable rather than
 # rigorous.
+# Candidates are DERIVED, never a hardcoded account. This repo is public and
+# its history is permanent, so `/home/<someone>` in a tracked file is a leak --
+# tests/gates/test_no_leaked_host_paths.py caught exactly that here. Export
+# ZEPHYR_SDK_INSTALL_DIR to skip the search entirely.
+ZEPHYR_SDK_VERSION="${ZEPHYR_SDK_VERSION:-1.0.1}"
 for cand in \
-  /home/caner/zephyr-sdk-1.0.1 \
-  /opt/zephyr-sdk-1.0.1 \
-  "/c/Users/Caner/zephyr-sdk-1.0.1" \
-  "/c/zephyr-sdk-1.0.1" \
-  "$HOME/zephyr-sdk-1.0.1" \
-  "$HOME/../zephyr-sdk-1.0.1"
+  "${ZEPHYR_SDK_INSTALL_DIR:-}" \
+  "$HOME/zephyr-sdk-$ZEPHYR_SDK_VERSION" \
+  "$HOME/../zephyr-sdk-$ZEPHYR_SDK_VERSION" \
+  "/opt/zephyr-sdk-$ZEPHYR_SDK_VERSION" \
+  "/usr/local/zephyr-sdk-$ZEPHYR_SDK_VERSION" \
+  "/c/zephyr-sdk-$ZEPHYR_SDK_VERSION"
 do
   if [ -f "$cand/sdk_version" ]; then export ZEPHYR_SDK_INSTALL_DIR="$cand"; break; fi
 done
 # `west sdk install` records the location in ~/.cmake/packages/Zephyr-sdk; on
 # Windows that is the only place it lands, so a hardcoded path list misses it.
 if [ -z "${ZEPHYR_SDK_INSTALL_DIR:-}" ]; then
-  for reg in "$HOME/.cmake/packages/Zephyr-sdk"/* "/c/Users/Caner/.cmake/packages/Zephyr-sdk"/*; do
+  for reg in "$HOME/.cmake/packages/Zephyr-sdk"/*; do
     [ -f "$reg" ] || continue
     cand=$(tr -d '\r\n' < "$reg")
     [ -f "$cand/sdk_version" ] && { export ZEPHYR_SDK_INSTALL_DIR="$cand"; break; }
@@ -186,9 +191,23 @@ jrun sdklist sdk list --online --format json
 [ "$RC" -eq 0 ] && ok "sdk list --online: exit 0 over real TLS" || bad "sdk list --online: exit $RC"
 
 hdr "clone alp-sdk (quickstart layout)"
-git clone --quiet --depth 1 https://github.com/alplabai/alp-sdk alp-sdk 2>"$WORK/clone.err" \
-  && ok "alp-sdk cloned ($(find alp-sdk -type f | wc -l | tr -d ' ') files)" \
-  || { bad "alp-sdk clone failed"; note "$(head -c 200 "$WORK/clone.err")"; }
+if git clone --quiet --depth 1 https://github.com/alplabai/alp-sdk alp-sdk 2>"$WORK/clone.err"; then
+  ok "alp-sdk cloned ($(find alp-sdk -type f | wc -l | tr -d ' ') files)"
+else
+  # ABORT, never continue. Every check below needs this checkout, so carrying on
+  # turns ONE environmental failure into eight misattributed ones -- measured in
+  # a CA-less container, where the clone failed and the harness then reported
+  # "#323: checkout was MOVED by a dry run" about a checkout that had never
+  # existed. Same misattribution the $TAN guard above exists to prevent, and
+  # worse here because it accuses the product for git's problem.
+  bad "alp-sdk clone failed -- ABORTING; every check below needs the checkout"
+  note "$(head -c 300 "$WORK/clone.err")"
+  note "on a host with no CA store this is GIT's own trust, not tan's --"
+  note "tan's HTTPS is self-sufficient since tan-cli#354; git needs ca-certificates."
+  echo
+  echo "=== $(uname -s): $PASS passed, $FAIL failed (ABORTED at the clone) ==="
+  exit 1
+fi
 
 hdr "#322 doctor and bootstrap resolve the SAME root"
 jrun doc2 doctor --format json

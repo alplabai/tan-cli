@@ -1368,6 +1368,191 @@ boot_order: []
     assert "flash_args.atoc_address" in entry["message"]
 
 
+# ── tan-cli#353's remaining half: SETOOLS integration for the AEN801 slot0
+# flash. The alp-sdk manifest measured on real silicon (e1m-aen-evk-01, E8
+# AE822) emits ONLY `flash_args.jlink_flash_device` -- no `atoc`/`atoc_map`/
+# `atoc_address` at all -- so a customer used to hit `plan_alif_mram_jlink`'s
+# bare "both required" refusal with no path from there to a working flash.
+# These three prove the maintainer's minimum bar: (a) a resolved SETOOLS path
+# signs for real and the derived `atoc_address` reaches the actual
+# `loadbin`/`verifybin` pair; (b) an unresolved one refuses with the SETOOLS
+# guidance, not the bare field error; (c) `--dry-run` signs nothing.
+
+
+def _setools_script_name() -> str:
+    """`.bat` on Windows -- a batch-content file needs the extension to be
+    directly spawnable via `subprocess.run(..., shell=False)` (measured:
+    an extension-less same-content file fails with WinError 193) -- the real
+    bare `app-gen-toc` name (`tan.core.setools.APP_GEN_TOC`) everywhere else,
+    where a POSIX shebang script IS spawnable extension-less."""
+    return "app-gen-toc.bat" if os.name == "nt" else "app-gen-toc"
+
+
+def _write_working_app_gen_toc(dest: Path, address: str = "0x8057ea50") -> str:
+    """A fake `app-gen-toc` that writes a real `build/app-package-map.txt` +
+    `build/AppTocPackage.bin` under its OWN cwd and exits 0 -- proves the
+    WIRING (`tan.core.setools.sign_slot0`'s own tests cover the failure
+    shapes), never a real SETOOLS (license-gated, not redistributed, and not
+    needed to prove this)."""
+    if os.name == "nt":
+        dest.write_text(
+            "@echo off\r\n"
+            "if not exist build mkdir build\r\n"
+            f">build\\app-package-map.txt echo APP Package Start Address: {address}\r\n"
+            "echo fake-atoc-bytes> build\\AppTocPackage.bin\r\n"
+            "exit /b 0\r\n",
+            encoding="utf-8",
+        )
+    else:
+        dest.write_text(
+            "#!/bin/sh\n"
+            "mkdir -p build\n"
+            f'printf "APP Package Start Address: {address}\\n" > build/app-package-map.txt\n'
+            'printf "fake-atoc-bytes\\n" > build/AppTocPackage.bin\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        os.chmod(dest, 0o755)
+    return str(dest)
+
+
+def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related(
+    tmp_path, monkeypatch
+):
+    """(a) A manifest carrying ONLY `jlink_flash_device` + `slot0_load_address`
+    -- alp-sdk's real current AEN801 emit plus the one key tan cannot derive,
+    measured -- gets a REAL SETOOLS sign when `flash_args.setools_dir`
+    resolves, and the DERIVED `atoc_address` reaches
+    `plan_alif_mram_jlink`'s actual `loadbin`/`verifybin` pair -- not just
+    `_resolve_flow_d_atoc_via_setools`'s own return value."""
+    from tan.commands.flash_cmd import _Context, _resolve_flow_d_atoc_via_setools
+    from tan.core import setools as setools_module
+
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    name = _setools_script_name()
+    if name != setools_module.APP_GEN_TOC:
+        # `find_app_gen_toc`'s OWN lookup runs unmodified below -- only the
+        # name it looks for changes, to the one filename THIS host can
+        # actually spawn (see `_setools_script_name`'s own docstring).
+        monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
+    script = _write_working_app_gen_toc(setools_dir / name)
+
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    artefact = build_root / "zephyr.bin"
+    artefact.write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    flash_args = {
+        "jlink_flash_device": "PART_PROFILE",
+        "slot0_load_address": "0x80010000",
+        "setools_dir": str(setools_dir),
+    }
+    ctx = _Context(
+        sku="S",
+        build_root=str(build_root),
+        sdk_root=str(tmp_path),
+        dry_run=False,
+        skip_missing_tools=False,
+        force_confirm=False,
+        capture=True,
+    )
+    merged, preview = _resolve_flow_d_atoc_via_setools(flash_args, str(artefact), ctx, "m55_he")
+
+    assert preview is None, "a real (non-dry-run) sign must not leave a preview message"
+    assert merged["atoc_address"] == "0x8057ea50"
+    assert Path(merged["atoc"]).is_file()
+    assert Path(script).is_file()  # the fake tool itself was never deleted/moved
+
+    plan = plan_alif_mram_jlink(
+        FlashInputs(artefact=str(artefact), flash_args=merged, core_id="m55_he", sku="S"),
+        lambda _t: True,
+    )
+    script_text = plan.jlink_script or ""
+    assert f"loadbin {merged['atoc']} 0x8057ea50" in script_text, script_text
+    assert f"verifybin {merged['atoc']} 0x8057ea50" in script_text, script_text
+
+
+def test_flow_d_end_to_end_refuses_with_setools_guidance_when_unresolved(tmp_path):
+    """(b) The FIRST failure the ticket measures on real silicon: a fresh
+    AEN801 manifest carrying only `jlink_flash_device`, no `SETOOLS_DIR` and
+    no `flash_args.setools_dir` anywhere. Must surface the SETOOLS guidance
+    refusal -- naming that a signed ATOC is needed, that SETOOLS is
+    license-gated, and how to point tan at it -- not
+    `plan_alif_mram_jlink`'s bare 'flash_args.atoc ... required' field
+    message. `--dry-run`: the SAME reason every other CLI-level Flow D
+    refusal test above uses it -- it bypasses the JLinkExe PATH gate, which
+    is not what this test is about."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "SETOOLS" in entry["message"]
+    assert "license-gated" in entry["message"]
+    assert "SETOOLS_DIR=" in entry["message"]
+    assert "flash_args.setools_dir" in entry["message"]
+    # NOT the old bare field message a customer has never heard of app-gen-toc
+    # from.
+    assert "both required" not in entry["message"]
+    assert codes(payload) == ["flash.entry-failed"]
+
+
+def test_flow_d_dry_run_signs_nothing_via_setools(tmp_path):
+    """(c) `--dry-run` must NOT invoke `app-gen-toc`, even though SETOOLS
+    fully resolves here -- planning only. Proven two ways: the entry reports
+    a WOULD-sign preview (`status: ok`, not `planned`/`failed`), and nothing
+    a real sign would produce (`build/AppTocPackage.bin`, `build/config/`)
+    exists afterwards -- if `--dry-run` ever DID invoke the fake tool below,
+    it would either fail loudly (the file has no execute bit on POSIX) or, on
+    a host where it somehow ran, leave exactly the files these assertions
+    check for."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    # Present, but NEVER executed under --dry-run -- a real script would prove
+    # nothing extra here (see (a) above for that), so the placeholder is
+    # deliberately not spawnable at all (posix: no execute bit).
+    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000"}}
+helper_mcus: []
+boot_order: []
+"""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "ok"
+    assert "would sign" in entry["message"]
+    assert "app-gen-toc" in entry["message"]
+    assert not payload["issues"], payload["issues"]
+    # The real signing side effects a live run would produce -- absent.
+    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
+    assert not (setools_dir / "build" / "config").exists()
+
+
 # ── pure helpers with edge cases the oracle diff does not reach ─────────────
 
 

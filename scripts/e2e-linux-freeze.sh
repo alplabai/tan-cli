@@ -19,15 +19,18 @@
 # Invoke as:  MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -- bash <this file>
 
 set -uo pipefail
-cd /home/caner/tan-cli || exit 2
+# Derived, never a hardcoded account: this repo is public and its history is
+# permanent. Override with TAN_CHECKOUT when the clone lives elsewhere.
+TAN_CHECKOUT="${TAN_CHECKOUT:-$HOME/tan-cli}"
+cd "$TAN_CHECKOUT" || exit 2
 git fetch --quiet origin feat/v06-batch || exit 2
 git checkout --quiet -B v06 origin/feat/v06-batch || exit 2
 echo "  linux tree @ $(git log --oneline -1)"
 cd python || exit 2
 rm -rf dist .build
-PY="/home/caner/tan-cli/python/.venv-build/bin/python"
+PY="$TAN_CHECKOUT/python/.venv-build/bin/python"
 [ -x "$PY" ] || { echo "  ABORT: no venv interpreter at $PY"; exit 2; }
-PYTHON="$PY" VIRTUAL_ENV="/home/caner/tan-cli/python/.venv-build" \
+PYTHON="$PY" VIRTUAL_ENV="$TAN_CHECKOUT/python/.venv-build" \
   bash scripts/build_binary.sh 2>&1 | tail -3
 if [ -x dist/tan/tan ]; then
   echo "  freeze OK: $(dist/tan/tan --version)"
