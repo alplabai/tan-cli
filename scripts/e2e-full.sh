@@ -156,24 +156,70 @@ echo "=== tan e2e: $(uname -s) $(uname -m) ==="
 echo "  tan:  $TAN"
 echo "  HOME: $HOME"
 
-# One parseable envelope on stdout, zero bytes on stderr. RC is exported.
-jrun() {
-  local label="$1"; shift
-  local o="$WORK/$label.out" e="$WORK/$label.err"
-  "$TAN" "$@" >"$o" 2>"$e"; RC=$?
-  local esz; esz=$(wc -c <"$e" | tr -d ' ')
-  [ "$esz" -eq 0 ] || { bad "$label: stderr $esz bytes"; note "$(head -c 200 "$e")"; }
-  python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$o" 2>/dev/null \
-    || { bad "$label: stdout not a single JSON envelope"; note "$(head -c 200 "$o")"; }
-  [ "$esz" -eq 0 ] && python3 -c "import json,sys;json.load(open(sys.argv[1]))" "$o" 2>/dev/null \
-    && ok "$label: one envelope, 0-byte stderr (exit $RC)"
-}
 jget() { python3 -c "import json,sys;d=json.load(open(sys.argv[1]));
 import functools;
 p=sys.argv[2].split('.');v=d
 for k in p:
     v = (v or {}).get(k) if isinstance(v,dict) else None
 print(v if v is not None else 'NONE')" "$1" "$2" 2>/dev/null || echo NONE; }
+
+# One parseable envelope on stdout, zero bytes on stderr, and -- the part
+# tan-cli#358 was missing -- a verdict that is actually CHECKED.
+#
+# `jrun` used to score a call PASS on "stdout parsed as JSON and stderr was
+# empty", never reading RC, `ok` or `exitCode`. So a `flash` that returned
+# ok:false / exitCode 1 with `flash.manifest-not-found` printed
+# `PASS flash: one envelope, 0-byte stderr (exit 1)` and counted toward
+# "23 passed, 0 failed". A harness that cannot fail is not evidence, and this
+# one had been reporting a green line for a broken command for two rounds.
+#
+# Usage: jrun <label> <expect> <tan args...>
+#
+# <expect> is the required process exit code, or `any` where the correct answer
+# legitimately depends on what the host has installed -- a bare container's
+# `doctor` exits 4 and a fully provisioned one exits 0, and pinning either
+# number would make this harness lie on the other host. `any` waives the exact
+# NUMBER and nothing else: every invariant below is enforced on every call,
+# `any` included.
+#
+#   * stderr is empty and stdout is exactly one JSON envelope;
+#   * envelope.exitCode EQUALS the process exit code -- the CLI-wide invariant.
+#     Checking it here is what makes a silent divergence impossible to score as
+#     a pass, whatever the expectation;
+#   * envelope.ok is true if and only if the process exited 0.
+#
+# Every failure reason is accumulated and reported together rather than the
+# first one winning: "expected exit 0, got 1" alone sends you looking in the
+# wrong place when the envelope also disagreed with itself. RC is exported.
+jrun() {
+  local label="$1" expect="$2"; shift 2
+  local o="$WORK/$label.out" e="$WORK/$label.err"
+  "$TAN" "$@" >"$o" 2>"$e"; RC=$?
+  local esz; esz=$(wc -c <"$e" | tr -d ' ')
+  local why="" env_rc env_ok
+  [ "$esz" -eq 0 ] || why="stderr $esz bytes"
+  env_rc=$(jget "$o" exitCode); env_ok=$(jget "$o" ok)
+  if [ "$env_rc" = "NONE" ]; then
+    why="${why:+$why; }stdout is not a single JSON envelope"
+  else
+    [ "$env_rc" = "$RC" ] ||
+      why="${why:+$why; }envelope.exitCode=$env_rc but the process exited $RC"
+    if [ "$RC" -eq 0 ]; then
+      [ "$env_ok" = "True" ] || why="${why:+$why; }exit 0 but ok=$env_ok"
+    else
+      [ "$env_ok" = "False" ] || why="${why:+$why; }exit $RC but ok=$env_ok"
+    fi
+  fi
+  [ "$expect" = "any" ] || [ "$RC" -eq "$expect" ] ||
+    why="${why:+$why; }expected exit $expect, got $RC"
+  if [ -n "$why" ]; then
+    bad "$label: $why"
+    note "$(head -c 300 "$o")"
+    [ "$esz" -eq 0 ] || note "$(head -c 200 "$e")"
+  else
+    ok "$label: one envelope, 0-byte stderr, ok/exitCode agree (exit $RC)"
+  fi
+}
 
 ########################  FRESH HOST  ########################
 echo; echo "############ FRESH HOST ############"
@@ -184,15 +230,28 @@ hdr "version"
 note "$(tr -d '\r\n' <"$WORK/v.out")"
 
 hdr "doctor, nothing configured"
-jrun doctor doctor --format json
+jrun doctor any doctor --format json
 
 hdr "sdk list --online (real HTTPS, the #304 CA canary)"
-jrun sdklist sdk list --online --format json
-[ "$RC" -eq 0 ] && ok "sdk list --online: exit 0 over real TLS" || bad "sdk list --online: exit $RC"
+# Hard 0: reaching the release index over real TLS is the #304 CA canary and
+# has exactly one correct answer on every host. `jrun` now owns the assertion.
+jrun sdklist 0 sdk list --online --format json
 
 hdr "clone alp-sdk (quickstart layout)"
-if git clone --quiet --depth 1 https://github.com/alplabai/alp-sdk alp-sdk 2>"$WORK/clone.err"; then
+# tan-cli#358: the SDK revision is EXPLICIT and RECORDED. An unpinned shallow
+# clone of whatever the default branch happened to be that hour makes a result
+# unreproducible from the tan SHA alone -- a red leg six weeks later cannot be
+# told apart from an SDK that moved under it. `ALP_SDK_REF` pins a tag/branch/SHA
+# (a bare SHA needs the unshallow fetch below, since `clone --branch` will not
+# take one); either way the resolved SHA is printed with the result.
+ALP_SDK_REF="${ALP_SDK_REF:-dev}"
+if git clone --quiet --depth 1 --branch "$ALP_SDK_REF" \
+     https://github.com/alplabai/alp-sdk alp-sdk 2>"$WORK/clone.err" ||
+   { git clone --quiet https://github.com/alplabai/alp-sdk alp-sdk 2>>"$WORK/clone.err" &&
+     git -C alp-sdk checkout --quiet "$ALP_SDK_REF" 2>>"$WORK/clone.err"; }; then
+  ALP_SDK_SHA=$(git -C alp-sdk rev-parse HEAD 2>/dev/null || echo UNKNOWN)
   ok "alp-sdk cloned ($(find alp-sdk -type f | wc -l | tr -d ' ') files)"
+  note "alp-sdk ref=$ALP_SDK_REF sha=$ALP_SDK_SHA"
 else
   # ABORT, never continue. Every check below needs this checkout, so carrying on
   # turns ONE environmental failure into eight misattributed ones -- measured in
@@ -210,11 +269,25 @@ else
 fi
 
 hdr "#322 doctor and bootstrap resolve the SAME root"
-jrun doc2 doctor --format json
-jrun bs2 bootstrap --dry-run --format json
+jrun doc2 any doctor --format json
+jrun bs2 any bootstrap --dry-run --format json
 D=$(jget "$WORK/doc2.out" sdk.root); B=$(jget "$WORK/bs2.out" data.sdkRoot)
 note "doctor=$D"; note "bootstrap=$B"
-if [ "$D" != "NONE" ] && [ "$B" != "NONE" ] && [ "$B" != "" ]; then ok "#322: both resolve an SDK"; else bad "#322: doctor='$D' bootstrap='$B'"; fi
+# tan-cli#358: this compared the two values for NON-EMPTINESS, which is not what
+# #322 is about. A real run printed doctor=.../proj/alp-sdk against
+# bootstrap=.../proj/alp-workspace/alp-sdk -- two DIFFERENT checkouts, the exact
+# disagreement #322 exists to catch -- and scored `PASS #322: both resolve an
+# SDK`. The assertion is equality; anything weaker cannot fail for the reason it
+# is named after.
+if [ "$D" = "NONE" ] || [ "$B" = "NONE" ] || [ -z "$B" ]; then
+  bad "#322: one side resolved nothing -- doctor='$D' bootstrap='$B'"
+elif [ "$D" != "$B" ]; then
+  bad "#322: doctor and bootstrap resolved DIFFERENT roots"
+  note "doctor    = $D"
+  note "bootstrap = $B"
+else
+  ok "#322: doctor and bootstrap resolve the same root ($D)"
+fi
 
 hdr "#323 --dry-run MUTATES NOTHING"
 "$TAN" bootstrap --dry-run --sdk-root ./alp-sdk --format json >"$WORK/bsdry.out" 2>"$WORK/bsdry.err"
@@ -230,7 +303,7 @@ note "exit=$RC stderr=$(wc -c <"$WORK/bs.err"|tr -d ' ')B"
 WS=$(jget "$WORK/bs.out" data.workspaceDir); note "workspace=$WS"
 
 hdr "#299 doctor AFTER bootstrap: west must not be the reason it is unhappy"
-jrun doc3 doctor --format json
+jrun doc3 any doctor --format json
 # #299 is NOT "exit 4 never happens after bootstrap". Exit 4 is CORRECT when a
 # genuinely required toolchain is absent -- e.g. zephyrSdk fail with
 # ZEPHYR_SDK_INSTALL_DIR unset, which is the honest state of an isolated HOME.
@@ -272,7 +345,23 @@ if [ -n "$ELF" ]; then
 else bad "no zephyr.elf produced"; fi
 
 hdr "flash --dry-run"
-jrun flash flash --dry-run --format json
+# tan-cli#358: this ran from the PARENT directory with no `--project`, so it
+# planned against `$WORK/proj` -- which has no board.yaml -- and returned
+# ok:false / exitCode 1 / `flash.manifest-not-found`. The old jrun scored that
+# PASS. It has to target the project that was actually built, or it measures
+# nothing about flash.
+jrun flash any flash --project blinky-e2e --dry-run --format json
+# The exit code here legitimately depends on whether the build leg above
+# produced an artefact, so `any` is right -- but WHICH PROJECT it planned
+# against does not depend on the host at all, and that was the defect. Assert
+# it directly.
+FP=$(jget "$WORK/flash.out" project.root); FB=$(jget "$WORK/flash.out" project.boardYaml)
+case "$FP" in
+  */blinky-e2e) ok "flash: planned against the project that was built ($FP)" ;;
+  *)            bad "flash: planned against '$FP', not the built blinky-e2e" ;;
+esac
+[ "$FB" != "NONE" ] && ok "flash: resolved the project's board.yaml" \
+  || bad "flash: no board.yaml resolved -- it is not looking at the built project"
 
 ########################  DIRTY HOST  ########################
 echo; echo "############ DIRTY HOST ############"
@@ -284,7 +373,7 @@ note "stale ~/.alp/sdk-default -> $WORK/ghost-sdk (does not exist)"
 note "stale ZEPHYR_BASE -> $ZEPHYR_BASE (does not exist)"
 
 hdr "doctor survives a dangling global default"
-jrun ddoc doctor --format json
+jrun ddoc any doctor --format json
 DR=$(jget "$WORK/ddoc.out" sdk.root); DT=$(jget "$WORK/ddoc.out" sdk.sourceTier)
 note "resolved=$DR tier=$DT"
 # NOT "must still resolve an SDK". Discovery is deliberately BOUNDED -- the only

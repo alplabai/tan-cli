@@ -19,13 +19,26 @@
 # Invoke as:  MSYS_NO_PATHCONV=1 wsl -d Ubuntu-24.04 -- bash <this file>
 
 set -uo pipefail
-# Derived, never a hardcoded account: this repo is public and its history is
-# permanent. Override with TAN_CHECKOUT when the clone lives elsewhere.
-TAN_CHECKOUT="${TAN_CHECKOUT:-$HOME/tan-cli}"
+# Operates on ITS OWN checkout by default -- the repo this file is in, resolved
+# from its own location, never a hardcoded account path (this repo is public and
+# its history is permanent). tan-cli#358: defaulting to a fixed `$HOME/tan-cli`
+# meant that invoking the script from an isolated worktree silently froze a
+# DIFFERENT tree than the one under test, and the version banner it printed gave
+# no hint of it. Override with TAN_CHECKOUT to build a clone elsewhere.
+TAN_CHECKOUT="${TAN_CHECKOUT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$TAN_CHECKOUT" || exit 2
-git fetch --quiet origin feat/v06-batch || exit 2
-git checkout --quiet -B v06 origin/feat/v06-batch || exit 2
-echo "  linux tree @ $(git log --oneline -1)"
+
+# Freezes WHAT IS CHECKED OUT, including uncommitted work. It used to
+# unconditionally `git fetch` + `git checkout -B v06 origin/feat/v06-batch`,
+# which meant it measured what had been PUSHED rather than what was being
+# tested -- so a local fix could pass the e2e it had not actually been built
+# into. Set TAN_E2E_REF to opt back into fetching an explicit ref.
+if [ -n "${TAN_E2E_REF:-}" ]; then
+  git fetch --quiet origin "$TAN_E2E_REF" || exit 2
+  git checkout --quiet --detach FETCH_HEAD || exit 2
+fi
+echo "  linux tree @ $TAN_CHECKOUT"
+echo "  linux tree @ $(git log --oneline -1)$(git diff --quiet || echo '  [+ uncommitted changes]')"
 cd python || exit 2
 rm -rf dist .build
 PY="$TAN_CHECKOUT/python/.venv-build/bin/python"
