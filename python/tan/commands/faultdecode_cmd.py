@@ -4,13 +4,26 @@
 Port of `alp_cli/faultdecode.py` (alp-sdk `scripts/alp_cli/faultdecode.py`).
 Until now `tan faultdecode` was a thin forwarder to `python -m alp_cli
 faultdecode` (`crates/tan-cli/src/commands/sdk_cli.rs`); this is the native
-replacement, so its OUTPUT CONTRACT is that forward's own: the SDK's `--json`
-report shape (`fault_detected`/`inputs`/`flags`/`addresses`/`root_cause`/
-`symbols`), unwrapped, on stdout -- NOT tan's `{command,ok,exitCode,project,
-data,issues}` envelope. `sdk_cli.rs`'s success path streamed the child's
-stdio through untouched; this command reproduces exactly what a caller
-already received through that pipe, in text or `--json` form, so nothing
-downstream (a saved script, the extension) observes a change.
+replacement, so `--json`'s OUTPUT CONTRACT is that forward's own: the SDK's
+`--json` report shape (`fault_detected`/`inputs`/`flags`/`addresses`/
+`root_cause`/`symbols`), unwrapped, on stdout. `sdk_cli.rs`'s success path
+streamed the child's stdio through untouched; `--json` reproduces exactly what
+a caller already received through that pipe, so nothing downstream (a saved
+script, the forwarder itself) observes a change.
+
+`--format json` is a DIFFERENT surface, and tan-cli#399 is the decision to
+make it one: it emits tan's `{command,ok,exitCode,project,data,issues}`
+envelope with the report as `data`. `--format json` is what the vscode
+extension drives (`contract/README.md:4-8`), and its `isEnvelope` guard
+(`alp-sdk-vscode src/alpCli/service.ts:705-716`) requires `command`, `ok`,
+`exitCode` and `issues[]` -- the unwrapped report has none of them, so
+`parseEnvelope` returned `null`, `classifyOutcome` saw rc 0, and a successful
+decode rendered as the literal string `Command completed.` with `root_cause`
+on the wire and unreachable. The v0.4.1 oracle maps the global `--format json`
+onto the child's `--json` and therefore prints the raw report for both
+spellings; that divergence is deliberate and is the whole content of the fix.
+`--json` wins when both are given, so an existing caller cannot have its shape
+changed by a `--format json` something else in the chain added.
 
 A firmware engineer pastes the fault registers a HardFault prints (CFSR, HFSR,
 optionally DFSR, BFAR, MMFAR) and gets back the human-readable cause plus, when
@@ -33,6 +46,7 @@ original's `click.BadParameter`/`click.UsageError`, both exit 2).
 from __future__ import annotations
 
 import json as _json
+import select
 import shutil
 import subprocess
 import sys
@@ -48,6 +62,7 @@ from tan.core.faultdecode import (
     render_human,
 )
 from tan.env import no_color_requested
+from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 
 _ADDR2LINE_TOOLS = ("arm-zephyr-eabi-addr2line", "llvm-addr2line", "addr2line")
@@ -112,19 +127,70 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
         ) from err
 
 
-def _read_dump(file_: str | None) -> str:
-    """Read a pasted dump from --file, '-' (stdin), or piped stdin."""
+#: How long the IMPLICIT stdin auto-consume waits for a non-TTY stdin to offer
+#: something -- bytes, or EOF, both of which make it readable -- before giving
+#: up and decoding from the flags alone (tan-cli#388).
+#:
+#: Not 0: `producer | tan faultdecode` races the producer's first write against
+#: this process's own startup, and losing that race would drop a dump the user
+#: really did pipe. Not unbounded either -- unbounded is the defect. A quarter
+#: second is far longer than a scheduler hiccup and far shorter than the
+#: indefinite block a held-open pipe used to cause.
+_STDIN_READY_TIMEOUT_S = 0.25
+
+
+def _stdin_offers_input() -> bool:
+    """Whether reading `sys.stdin` will terminate promptly (tan-cli#388).
+
+    `sys.stdin.read()` returns at EOF, and a pipe reaches EOF only when its
+    last writer CLOSES it -- not when the writer merely stops writing. Every
+    caller that spawns `tan` as a child with `stdin=PIPE` and does not close
+    the write end (the default shape of `subprocess.Popen(..., stdin=PIPE)`)
+    therefore used to block the child forever, with zero bytes on stdout and
+    stderr and no exit code: worse than a malformed report, because there is
+    nothing for the caller to classify.
+
+    `select` reports a pipe readable both when bytes are buffered and when the
+    writer has closed, so a real `echo ... | tan faultdecode` still reads its
+    dump and only the open-and-idle pipe falls through.
+
+    `True` when readiness cannot be determined -- `select.select` on Windows
+    accepts sockets only, and an in-memory `CliRunner` stdin has no `fileno`
+    (`io.UnsupportedOperation` derives from both `OSError` and `ValueError`).
+    Falling back to the read is the conservative direction: it preserves the
+    documented `... | tan faultdecode` behaviour everywhere, and the primary
+    fix for tan-cli#388 -- not reading stdin at all when the registers came in
+    on the command line -- is platform-independent and covers the invocation
+    the extension actually makes.
+    """
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], _STDIN_READY_TIMEOUT_S)
+    except (OSError, ValueError):
+        return True
+    return bool(ready)
+
+
+def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
+    """Read a pasted dump from --file, '-' (stdin), or piped stdin.
+
+    `--file -` is the EXPLICIT opt-in and always reads stdin to EOF, whatever
+    else is on the command line: the caller asked for that read by name, and a
+    dump has no terminator other than EOF. `auto_consume_stdin` gates only the
+    IMPLICIT read, and the caller passes `False` once any fault register was
+    supplied as a flag -- there is nothing left for a dump to contribute, so
+    there is no reason to wait on a pipe for one (tan-cli#388).
+    """
+    if file_ == "-":
+        return sys.stdin.read()
     if file_ is not None:
-        if file_ == "-":
-            return sys.stdin.read()
         return Path(file_).read_text(encoding="utf-8", errors="ignore")
     # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works.
-    if not sys.stdin.isatty():
-        try:
-            return sys.stdin.read()
-        except (OSError, ValueError):  # pragma: no cover - env-dependent
-            return ""
-    return ""
+    if not auto_consume_stdin or sys.stdin.isatty() or not _stdin_offers_input():
+        return ""
+    try:
+        return sys.stdin.read()
+    except (OSError, ValueError):  # pragma: no cover - env-dependent
+        return ""
 
 
 def _check_elf_path(value: str | None) -> Path | None:
@@ -217,12 +283,15 @@ def faultdecode(
     `--format` is accepted BEFORE the subcommand too (`tan --format json
     faultdecode ...`), same as `debug-config`; the root callback records it on
     `ctx.obj` and this option overrides it when repeated after the command
-    name. Unlike `debug-config`'s `--format json` (tan's own envelope), the
-    oracle maps the global `--format json` onto the child's `--json`
-    (`crates/tan-cli/src/commands/sdk_cli.rs`) -- this command's `--json`
-    already IS the unwrapped SDK report (see the module docstring), so
-    `--format json` is simply another spelling of `--json`, not a second,
-    enveloped output shape.
+    name. Both positions land on the same shape: tan's own envelope, with the
+    decode report as `data`, exactly like `debug-config`'s (tan-cli#399). The
+    oracle instead maps the global `--format json` onto the forwarded child's
+    `--json` (`crates/tan-cli/src/commands/sdk_cli.rs`) and prints the
+    unwrapped report for both spellings -- a deliberate divergence, taken
+    because `--format json` is the surface the vscode extension parses and it
+    rejects any document without `command`/`ok`/`exitCode`/`issues[]`. The
+    unwrapped report is unchanged and still one flag away: `--json`, which
+    also wins when both are given.
     """
     del board_yaml, target, all_targets, verbose, quiet, non_interactive, ci
     resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
@@ -230,17 +299,17 @@ def faultdecode(
         raise typer.BadParameter(
             f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
         )
-    as_json = as_json or resolved_format == "json"
+    # `--json` wins over `--format json`: it is the older, unwrapped surface
+    # every saved script and the Rust forwarder use (tan-cli#399).
+    envelope_mode = resolved_format == "json" and not as_json
 
     elf_path = _check_elf_path(elf)
     file_value = _check_file_path(file_)
 
-    # 1. Gather registers: start from a parsed dump, then let explicit flags win.
-    parsed: dict[str, int] = {}
-    dump_text = _read_dump(file_value)
-    if dump_text:
-        parsed = parse_dump(dump_text)
-
+    # 1. Gather registers. The FLAGS are parsed first, before any dump is read
+    #    (tan-cli#388): reading stdin first meant `--cfsr 0x8200` -- the
+    #    primary documented invocation, where no dump is needed or wanted --
+    #    still blocked on a stdin nobody was ever going to write to.
     cfsr_i = _parse_hexint("cfsr", cfsr)
     hfsr_i = _parse_hexint("hfsr", hfsr)
     dfsr_i = _parse_hexint("dfsr", dfsr)
@@ -251,6 +320,16 @@ def faultdecode(
     ufsr_i = _parse_hexint("ufsr", ufsr)
     pc_i = _parse_hexint("pc", pc)
     lr_i = _parse_hexint("lr", lr)
+
+    # `--pc`/`--lr` are addresses to symbolicate, not status registers, and
+    # neither satisfies the "something to analyse" check below -- so neither
+    # counts as a reason to skip the dump.
+    registers_given = any(
+        value is not None
+        for value in (cfsr_i, hfsr_i, dfsr_i, bfar_i, mmfar_i, mmfsr_i, bfsr_i, ufsr_i)
+    )
+    dump_text = _read_dump(file_value, auto_consume_stdin=not registers_given)
+    parsed: dict[str, int] = parse_dump(dump_text) if dump_text else {}
 
     def pick(name: str, flag_val: int | None) -> int | None:
         return flag_val if flag_val is not None else parsed.get(name)
@@ -274,11 +353,26 @@ def faultdecode(
     # No status registers at all => bad input (this is an analysis tool, but it
     # needs *something* to analyse). Exit nonzero with a usage hint.
     if cfsr_v is None and hfsr_v is None and dfsr_v is None:
-        typer.echo(
-            "Error: no fault registers supplied -- pass --cfsr/--hfsr/--dfsr "
-            "or pipe a dump via --file/-/stdin.",
-            err=True,
+        no_registers = (
+            "no fault registers supplied -- pass --cfsr/--hfsr/--dfsr "
+            "or pipe a dump via --file/-/stdin."
         )
+        if envelope_mode:
+            # The refusal has to agree with the success path about whether
+            # stdout is an envelope (tan-cli#399); leaving it to `cli.main`'s
+            # generic fallback gave the consumer `command: "cli"` here and
+            # `command: "faultdecode"` one invocation later.
+            emit(
+                Envelope(
+                    "faultdecode",
+                    Project(root=None, board_yaml=None),
+                    None,
+                    [Issue("faultdecode.no-registers", "error", no_registers)],
+                    ExitCode.VALIDATION_FAILURE,
+                )
+            )
+        else:
+            typer.echo(f"Error: {no_registers}", err=True)
         raise typer.Exit(int(ExitCode.VALIDATION_FAILURE))
 
     report = decode(
@@ -300,6 +394,20 @@ def faultdecode(
 
     if as_json:
         typer.echo(_json.dumps(report_to_json(report, symbols or None), indent=2))
+    elif envelope_mode:
+        # `project` is hardcoded null/null, not resolved: this command reads no
+        # board.yaml and drives no checkout (see the docstring's
+        # declared-not-consumed list), so reporting a root here would claim a
+        # resolution that never happened.
+        emit(
+            Envelope(
+                "faultdecode",
+                Project(root=None, board_yaml=None),
+                report_to_json(report, symbols or None),
+                [],
+                ExitCode.SUCCESS,
+            )
+        )
     else:
         color = _use_color(no_color)
         typer.echo(render_human(report, symbols or None, color))
