@@ -84,6 +84,24 @@ jobs:
   # pytest's exit status already means exactly "nothing failed" -- skips and
   # xfails are green. Pinning a number would turn every landed port into a red
   # build.
+  #
+  # tan-cli#372: this is also the ONLY place in CI that runs `python/tests/gates`
+  # (which includes the frozen-issue-code delegate `test_frozen_issue_codes.py`)
+  # on a non-Linux host -- and it does not, since this job is `ubuntu-latest`
+  # only. `parity.yml`'s cross-OS `python-tests` job explicitly
+  # `--ignore=tests/gates` (that suite already runs, always, in `parity.yml`'s
+  # `seam1-plan-shape` job -- also `ubuntu-latest` only). Recorded as a
+  # decision, not an oversight: `tests/gates` is pure source parsing (`ast`
+  # over `python/tan/**`, text scans over the same), with no OS-dependent
+  # behaviour to lose by staying single-platform -- the path handling it does
+  # do is verified platform-clean (`_rel` in `test_frozen_issue_codes.py`
+  # normalises `\`->`/`; every cross-file assembled suffix resolves via
+  # `_ASSEMBLED_SUFFIXES` regardless of host). Adding a second or third OS here
+  # would cost real CI minutes for zero coverage this scan can lose on Windows
+  # or macOS specifically. Revisit if a future gate under `tests/gates` reads
+  # something host-dependent (a real path separator, a subprocess, PATH
+  # resolution) -- that gate would need its own cross-OS run, not a blanket
+  # widening of this job.
   python:
     runs-on: ubuntu-latest
     steps:
