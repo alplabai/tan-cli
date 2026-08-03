@@ -3,9 +3,16 @@
 refuse an `os: zephyr` slice whose CMake configure never loaded Zephyr's
 boilerplate, whatever the tool's own exit code says -- reproduces the
 reported defect (`tan init --template minimal-app` -> `tan build` reporting
-`[+] ok` for a plain host binary) at the `execute_slices` layer, since the
-scaffold's own CMake shape is a separate, explicitly out-of-scope fix (see
-`python/tan/templates/vendored/MANIFEST.md:194-210`)."""
+`[+] ok` for a plain host binary) at the `execute_slices` layer. The guard
+stays regardless of whether any one template's own CMake is correct today --
+it is the safety net for every `os: zephyr` slice, not a substitute for a
+correct scaffold. `minimal-app`'s own CMake shape (root `find_package(Zephyr
+...)` + `project()`, `src/CMakeLists.txt` contributing via `target_sources(app
+...)`, and `board.yaml`'s `app:` pointed at the directory that actually holds
+`find_package`) is fixed at the source in `tan/core/scaffold.py`; see
+`python/tan/templates/vendored/MANIFEST.md`'s "`minimal-app`" section for the
+two-part defect (CMake shape, then `app:` target) and why this guard is still
+worth keeping regardless."""
 import json
 import sys
 
