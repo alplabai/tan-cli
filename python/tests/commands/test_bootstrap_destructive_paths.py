@@ -86,30 +86,25 @@ def _pinned_zephyr(topdir: Path) -> Path:
     return zephyr
 
 
-def _venv_without_pip(venv_dir: Path, *, marker: str = "my_private_pkg") -> Path:
-    """A venv-shaped directory whose interpreter RUNS but has no pip.
+def _venv_holding_user_content(venv_dir: Path, *, marker: str = "my_private_pkg") -> Path:
+    """A directory `venv_present()` accepts, holding content only the user put there.
 
-    Byte-for-byte the situation `uv venv` leaves behind (uv installs no pip by
-    default) and the one `python -m venv --without-pip` creates on purpose.
-    `venv_present()` accepts it, and `python -m pip --version` exits non-zero --
-    which is what `ensure_venv` used to read as "wreckage, delete it".
+    Shaped, not spawned: `venv_present()` tests `_is_file` on the interpreter, so
+    a placeholder file is enough to reach the branch under test. The VERDICT is
+    injected by the caller rather than provoked from this interpreter, because
+    provoking it is not portable -- a POSIX `#!/bin/sh ... exit 1` stand-in
+    reports `PIP_ABSENT`, while the same fixture on Windows must copy a real
+    `python.exe`, which (with no `pyvenv.cfg` beside it) resolves to the host
+    installation and answers `pip --version` SUCCESSFULLY. That would silently
+    test a different branch on one platform than on the others. `_probe_venv_pip`
+    keeps its own direct, `subprocess.run`-level cover below.
 
     Returns the marker path, so a caller can assert the user's own content
     survived rather than only that the directory still exists.
     """
     bin_dir = venv_dir / BIN_DIR
     bin_dir.mkdir(parents=True)
-    python = bin_dir / PYTHON_NAME
-    if sys.platform == "win32":
-        # A .bat cannot stand in for `python.exe`; copy the real interpreter and
-        # let the missing pip come from the empty site-packages beside it.
-        python.write_bytes(Path(sys.executable).read_bytes())
-    else:
-        python.write_text(
-            "#!/bin/sh\n# no pip in this venv, exactly like `uv venv`\nexit 1\n",
-            encoding="utf-8",
-        )
-        python.chmod(0o755)
+    (bin_dir / PYTHON_NAME).write_text("placeholder interpreter\n", encoding="utf-8")
     held = venv_dir / "lib" / marker
     held.mkdir(parents=True)
     (held / "keep-me.txt").write_text("the user's own package\n", encoding="utf-8")
@@ -131,13 +126,18 @@ def _workspace(topdir: Path, sdk: Path) -> Workspace:
 # ---------------------------------------------------------------------------
 
 
-def test_an_adopted_workspaces_pipless_venv_is_refused_not_deleted(tmp_path):
+def test_an_adopted_workspaces_pipless_venv_is_refused_not_deleted(tmp_path, monkeypatch):
     """The defect verbatim: `_select_workspace`'s REUSE branch repoints
     `paths.venv_dir` at the USER's `<topdir>/.venv` and returns
     `adopted=True`, and `ensure_venv` then deleted it because pip did not
-    answer. `plan.adopted` was not read until after the delete."""
+    answer. `plan.adopted` was not read until after the delete.
+
+    `PIP_ABSENT` is the `uv venv` / `--without-pip` verdict, injected rather
+    than provoked -- see `_venv_holding_user_content` for why provoking it is
+    not portable."""
     sdk, topdir = _live_workspace(tmp_path)
-    held = _venv_without_pip(topdir / ".venv")
+    held = _venv_holding_user_content(topdir / ".venv")
+    monkeypatch.setattr(bootstrap_cmd, "_probe_venv_pip", lambda *_a, **_k: PIP_ABSENT)
     log = Log(json_mode=True)
 
     venv, error = ensure_venv(
@@ -166,7 +166,7 @@ def test_a_probe_that_never_answered_does_not_authorise_a_delete(tmp_path, monke
     change which BRANCH runs instead of which verdict reaches it.
     """
     sdk, topdir = _live_workspace(tmp_path)
-    held = _venv_without_pip(topdir / ".venv")
+    held = _venv_holding_user_content(topdir / ".venv")
     monkeypatch.setattr(bootstrap_cmd, "_probe_venv_pip", lambda *_a, **_k: PIP_INCONCLUSIVE)
     log = Log(json_mode=True)
 
@@ -182,13 +182,14 @@ def test_a_probe_that_never_answered_does_not_authorise_a_delete(tmp_path, monke
     assert (held / "keep-me.txt").exists()
 
 
-def test_tans_own_workspace_still_recreates_a_genuinely_pipless_venv(tmp_path):
+def test_tans_own_workspace_still_recreates_a_genuinely_pipless_venv(tmp_path, monkeypatch):
     """The recreate is not removed, only gated: on a workspace tan built
     itself, a venv whose pip RAN and reported itself broken is still the
     wreckage the retry must not inherit -- and it now says so with a CODE, so
     a `--format json` consumer sees the deletion in `issues[]`."""
     sdk, topdir = _live_workspace(tmp_path)
-    held = _venv_without_pip(topdir / ".venv")
+    held = _venv_holding_user_content(topdir / ".venv")
+    monkeypatch.setattr(bootstrap_cmd, "_probe_venv_pip", lambda *_a, **_k: PIP_ABSENT)
 
     # Dry run first: the verdict is reached, but nothing is ever deleted.
     log = Log(json_mode=True)
@@ -209,7 +210,7 @@ def test_the_pip_probe_separates_a_verdict_from_no_answer(
 ):
     """`probe()` collapses both into `None`; this one must not."""
     sdk, topdir = _live_workspace(tmp_path)
-    _venv_without_pip(topdir / ".venv")
+    _venv_holding_user_content(topdir / ".venv")
     completed = subprocess.CompletedProcess(args=[], returncode=returncode, stdout="", stderr="")
     monkeypatch.setattr(bootstrap_cmd.subprocess, "run", lambda *a, **k: completed)
     assert _probe_venv_pip(_workspace(topdir, sdk).venv_bin(), Runner(json=True)) == expected
@@ -217,7 +218,7 @@ def test_the_pip_probe_separates_a_verdict_from_no_answer(
 
 def test_the_pip_probe_reports_inconclusive_when_the_spawn_fails(tmp_path, monkeypatch):
     sdk, topdir = _live_workspace(tmp_path)
-    _venv_without_pip(topdir / ".venv")
+    _venv_holding_user_content(topdir / ".venv")
 
     def boom(*_a, **_k):
         raise OSError("cannot spawn")
@@ -230,7 +231,7 @@ def test_a_timeout_is_inconclusive_not_a_verdict(tmp_path, monkeypatch):
     """`PROBE_TIMEOUT_S` is 120 s, so this is rare -- but a machine under load
     that blows it must not have its venv deleted for being slow."""
     sdk, topdir = _live_workspace(tmp_path)
-    _venv_without_pip(topdir / ".venv")
+    _venv_holding_user_content(topdir / ".venv")
 
     def slow(*_a, **_k):
         raise subprocess.TimeoutExpired(cmd="pip", timeout=120)
