@@ -3004,6 +3004,27 @@ def doctor(
             for issue in issues:
                 print(f"{issue.severity}: {issue.message}", file=sys.stderr)
         else:
+            # tan-cli#375: an Issue with no backing Check -- a suppressed
+            # `--fix` (`fix_suppressed_issue`) or a broken `.alp/sdk-path`
+            # pin (`project_pin_issue`, tan-cli#263) -- used to vanish here
+            # completely: this branch (the non-exception path) printed only
+            # the summary line, never `issues`. `--fix`'s consent gate
+            # (tan-cli#91) is right to suppress silently TOWARDS THE HOST --
+            # it must never mutate anything unwatched -- but silence towards
+            # the CUSTOMER is a different bug: the JSON envelope already
+            # carried `doctor.fix-suppressed`/`sdk.project-pin-unresolved`
+            # and text mode carried neither. `checks_to_issues(checks)`
+            # already turned every warn/fail Check into an Issue, and each of
+            # those already printed above as a `[  warn]`/`[  fail]` line --
+            # reprinting them here would duplicate the whole report, so this
+            # filters down to exactly the codes no Check line already named.
+            # Printed AFTER every check line and BEFORE the summary: findable
+            # without being buried mid-report, and the report still ends on
+            # the summary line.
+            checked_codes = {c.code or f"doctor.{c.name}" for c in checks}
+            for issue in issues:
+                if issue.code not in checked_codes:
+                    print(f"{issue.severity}: {issue.message}", file=sys.stderr)
             s = data["summary"]
             print(
                 f"\n{s['pass']} passed, {s['warn']} warning(s), {s['fail']} failed.",
