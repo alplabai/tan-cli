@@ -134,38 +134,33 @@ def test_run_no_sdk_is_a_known_divergence_from_the_oracle(tmp_path):
 
 
 @_ORACLE_REQUIRED
-def test_run_sdk_root_invalid_is_a_known_divergence_from_the_oracle(tmp_path):
-    """A materially BIGGER divergence than the bare no-SDK case above, and
-    the one the old `xfail(strict=True, reason="run not yet registered")`
-    was actually hiding: `--sdk-root ./nowhere` reaches a completely
-    different refusal on each side, not just different wording for the same
-    one.
+def test_run_sdk_root_invalid_now_matches_the_oracle(tmp_path):
+    """Was `test_run_sdk_root_invalid_is_a_known_divergence_from_the_oracle`,
+    pinning a real defect; the defect is FIXED (tan-cli#257/#258) and this now
+    pins the parity instead.
 
-    The oracle validates `--sdk-root` before anything else and refuses with
-    the SAME `build.plan-unavailable` "no alp-sdk checkout found" it gives
-    with no `--sdk-root` at all -- an unresolvable explicit root is treated
-    as no root. The port's `--sdk-root` ladder
-    (`build_cmd.resolve_sdk_root_ladder`) is TERMINAL but UNVALIDATED for
-    the flag tier (matching the oracle's own `resolve_sdk_tiered`, "terminal
-    for REPORTING" -- see that function's docstring): `nowhere` is carried
-    straight through as `sdk.sourceTier: "sdkRootFlag"` with no existence or
-    marker check, so the run falls through to the NEXT missing thing --
-    there is no `board.yaml` in this scratch dir either -- and reports
-    `build.plan-unavailable` for THAT instead, with an extra `sdk` key the
-    oracle's envelope never carries here.
+    The divergence: the oracle treats an unresolvable explicit `--sdk-root` as
+    no root at all and refuses with `build.plan-unavailable` / "no alp-sdk
+    checkout found". The port carried `nowhere` straight through as
+    `sdk.sourceTier: "sdkRootFlag"` -- `resolve_sdk_root_ladder` is TERMINAL
+    but UNVALIDATED for the flag tier, matching the oracle's own
+    `resolve_sdk_tiered` ("terminal for REPORTING") -- and so fell through to
+    the NEXT missing thing, reporting "no board.yaml found" plus an `sdk` key
+    the oracle never emits here. It told the customer their project was broken
+    when the flag they had just typed was what was wrong.
 
-    Traced, not inferred: `tan build --sdk-root ./nowhere` in an identical
-    empty directory shows the byte-identical mismatch, so this is
-    `build_cmd._build`'s shared engine, not something `run_cmd.py` adds --
-    out of scope for this unit (tan-cli#257, the introspection set) to fix,
-    since `build` is the essential command that owns it (tan-cli#258: only
-    the essential set had to be gap-free for 0.5.0, and `build` is on that
-    list). `clean_cmd.sdk_root_resolves` and `flash_cmd.py`'s own
-    `--sdk-root` guard (see `test_flash_oracle_parity.py`'s
-    `sdk-root-invalid` case) are the two commands that DO validate
-    `--sdk-root` explicitly and could be the model for closing this in
-    `build_cmd.py`. Pinned here literally so neither side drifting further
-    passes silently."""
+    Fixed in BOTH `build_cmd.build` and `run_cmd.run`: the guard sits at each
+    flag's own entry point rather than inside the shared ladder, since every
+    other caller depends on that staying unvalidated -- the same placement
+    `clean_cmd.sdk_root_resolves` and `flash_cmd._resolve_sdk` already chose.
+    `run`'s copy mattered on its own account: its resolution line was a
+    VERBATIM COPY of `build`'s, so fixing only `build` would have left the
+    twin live under `tan run`.
+
+    The `message` wording still differs -- the oracle names three remedies
+    where the port names two -- so that one field stays pinned literally on
+    both sides rather than narrowed away, per this file's own rule against
+    weakening a comparison to make it pass. Everything else must now AGREE."""
     home = tmp_path / "home"
     work = tmp_path / "root"
     work.mkdir()
@@ -175,17 +170,19 @@ def test_run_sdk_root_invalid_is_a_known_divergence_from_the_oracle(tmp_path):
     assert r_code == p_code == 1
     assert [i["code"] for i in r_out["issues"]] == ["build.plan-unavailable"]
     assert [i["code"] for i in p_out["issues"]] == ["build.plan-unavailable"]
+    # The heart of the fix: an unresolvable explicit root is no root, so
+    # NEITHER side reports an `sdk` block. The port used to carry
+    # `{"root": "nowhere", "sourceTier": "sdkRootFlag"}` here.
     assert "sdk" not in r_out
-    assert p_out["sdk"] == {"root": "nowhere", "sourceTier": "sdkRootFlag"}
+    assert p_out.get("sdk") is None
     assert r_out["issues"][0]["message"] == (
         "no alp-sdk checkout found — pass `--sdk-root <PATH>`, pin one "
         "with `tan sdk switch <version|path>`, set it in settings, or run "
         "`tan bootstrap`. The build-plan comes from the SDK's "
         "`alp_orchestrate --emit build-plan`."
     )
-    assert p_out["issues"][0]["message"] == (
-        "no board.yaml found -- pass `--board-yaml <PATH>` or run from a "
-        "project."
-    )
+    # Same REFUSAL as the oracle now (no alp-sdk checkout), different wording.
+    assert "no alp-sdk checkout found" in p_out["issues"][0]["message"]
+    assert "no board.yaml found" not in p_out["issues"][0]["message"]
     assert r_out["data"] is None
     assert p_out["data"] is None
