@@ -27,6 +27,7 @@ without this file caring (and so importing this cannot cycle back into it).
 from __future__ import annotations
 
 import functools
+import hashlib
 import os
 import subprocess
 from collections.abc import Iterator
@@ -97,6 +98,36 @@ def head_build_input_commit(repo_root: Path) -> str | None:
     checkout the pin is current for; when it does not, the pin -- and the
     frozen fixtures behind it -- are what moved on."""
     return git(repo_root, "log", "-1", "--format=%H", "--", *BUILD_INPUT_PATHSPEC) or None
+
+
+def build_input_digest(repo_root: Path) -> str | None:
+    """A content digest of every tracked build input, or ``None`` without git.
+
+    This, not a commit SHA, is what pins the oracle. The SHA version of this
+    check (`git log -1 --format=%H -- <BUILD_INPUT_PATHSPEC>`) could never pass
+    on a pull request: GitHub builds a synthetic MERGE ref, and a path-limited
+    `git log -1` there answers with the merge commit itself. Measured on
+    tan-cli#414 -- "crates/ build inputs moved to 7ab4c99 Merge <head> into
+    <base>; the parity suite is still pinned to ac79d4c" -- on a branch whose
+    diff touches no build input at all. A gate that fails by construction on
+    every PR is worse than no gate: it trains a reader to wave it through.
+
+    Rebases, cherry-picks and squash-merges rewrite SHAs without changing one
+    byte the compiler sees, and all three are normal here. Content answers the
+    question the fixtures actually ask -- "were you captured from THIS crates/
+    state?" -- and is immune to every one of them.
+
+    `git ls-files -s` is the whole implementation on purpose: the blob SHAs it
+    prints ARE git's own content hashes, already computed, so this neither
+    re-reads the files nor invents a second hashing rule that could disagree
+    with git about line endings. Same reasoning
+    `tests/gates/test_planner_relocation_freshness.py` records for its own
+    upstream comparison -- "deliberately a content hash".
+    """
+    listing = git(repo_root, "ls-files", "-s", "--", *BUILD_INPUT_PATHSPEC)
+    if not listing:
+        return None
+    return hashlib.sha256(listing.encode("utf-8")).hexdigest()
 
 
 def crates_commits_since(repo_root: Path, sha: str) -> str | None:

@@ -242,6 +242,17 @@ PINNED_ORACLE_VERSION = "tan 0.4.1"
 #: 'crates/*/Cargo.toml' Cargo.toml Cargo.lock``.
 PINNED_ORACLE_CRATES_COMMIT = "ac79d4c7ffe00e43f26f3b7c6265436afbff5b0e"
 
+#: The CONTENT of the build inputs the frozen fixtures were captured against,
+#: as `sha256(git ls-files -s -- <BUILD_INPUT_PATHSPEC>)`. This is the pin the
+#: freshness gate asserts on; :data:`PINNED_ORACLE_CRATES_COMMIT` above stays
+#: as the human-readable "which commit was that" and backs the sidecar /
+#: `$TAN_ORACLE_COMMIT` declaration path. Content, not a SHA, because a SHA
+#: cannot survive a PR merge ref, a rebase, a cherry-pick or a squash --
+#: none of which change a byte the compiler reads (tan-cli#414).
+PINNED_ORACLE_BUILD_INPUT_DIGEST = (
+    "d3dc3b8bbb24d2cd05ab5944e0438ac7490828f57de11288366260d45c99f6a0"
+)
+
 
 def build_output_root() -> Path:
     """``<repo>/target`` -- cargo's output tree, and the only place a binary

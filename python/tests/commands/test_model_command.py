@@ -447,7 +447,12 @@ def test_board_yaml_spelling_reads_the_file_it_names_trailing_form(tmp_path):
         "`--board-yaml` was accepted and dropped, so the default "
         "`<project>/board.yaml` was packaged instead of the file named"
     )
-    assert doc["project"]["boardYaml"] == str(other_board)
+    # `.as_posix()`, not `str()`: `project.boardYaml` is POSIX-normalised
+    # before it is emitted, so `str()` matches on a POSIX host only and this
+    # assertion was green on macOS/ubuntu and red on windows-latest alone
+    # (tan-cli#414). Normalise the filesystem side; the envelope is the
+    # contract.
+    assert doc["project"]["boardYaml"] == other_board.as_posix()
 
 
 def test_board_yaml_spelling_reads_the_file_it_names_leading_form(tmp_path):
@@ -476,7 +481,12 @@ def test_board_yaml_spelling_reads_the_file_it_names_leading_form(tmp_path):
     assert result.exit_code == 0, result.stdout
     doc = envelope(result)
     assert doc["data"]["sku"] == "E1M-V2N101"
-    assert doc["project"]["boardYaml"] == str(other_board)
+    # `.as_posix()`, not `str()`: `project.boardYaml` is POSIX-normalised
+    # before it is emitted, so `str()` matches on a POSIX host only and this
+    # assertion was green on macOS/ubuntu and red on windows-latest alone
+    # (tan-cli#414). Normalise the filesystem side; the envelope is the
+    # contract.
+    assert doc["project"]["boardYaml"] == other_board.as_posix()
 
 
 def test_board_and_board_yaml_are_the_same_option(tmp_path):

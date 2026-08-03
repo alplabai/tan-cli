@@ -35,6 +35,7 @@ import pytest
 
 from tests.parity import oracle, oracle_provenance
 from tests.parity.oracle import (
+    PINNED_ORACLE_BUILD_INPUT_DIGEST,
     PINNED_ORACLE_CRATES_COMMIT,
     PINNED_ORACLE_VERSION,
     oracle_provenance_drift,
@@ -253,22 +254,68 @@ def test_a_tree_with_no_crates_directory_is_not_drift(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_the_pinned_commit_is_this_checkouts_newest_build_input_commit():
+def test_the_pinned_digest_is_this_checkouts_build_input_content():
     """A pin nobody re-checks is the failure this issue is about, one level
     up: a `crates/` change with no matching pin bump means the fixtures and
     the binary they were captured from have parted company. Bump
-    `PINNED_ORACLE_CRATES_COMMIT` and re-verify the fixtures against a rebuilt
-    oracle (`TAN_PARITY_LIVE=1`), or re-capture them.
+    `PINNED_ORACLE_BUILD_INPUT_DIGEST` and re-verify the fixtures against a
+    rebuilt oracle (`TAN_PARITY_LIVE=1`), or re-capture them.
+
+    Asserts on CONTENT, not on a commit SHA. The SHA form of this check could
+    not pass on a pull request at all: GitHub builds a synthetic merge ref, and
+    a path-limited `git log -1` there answers with the merge commit -- measured
+    on tan-cli#414 as "build inputs moved to 7ab4c99 Merge <head> into <base>"
+    on a branch touching no build input. See `build_input_digest` for the rest
+    of the reasoning; a gate that reddens by construction on every PR teaches
+    people to ignore it, which is the opposite of what this one is for.
     """
-    head = oracle_provenance.head_build_input_commit(oracle.REPO_ROOT)
-    if head is None:
+    digest = oracle_provenance.build_input_digest(oracle.REPO_ROOT)
+    if digest is None:
         pytest.skip("no git in this environment, or no crates/ left to pin (tan-cli#269)")
-    assert head == PINNED_ORACLE_CRATES_COMMIT, (
-        f"crates/ build inputs moved to {_describe(head)}; the parity suite is still "
-        f"pinned to {_describe(PINNED_ORACLE_CRATES_COMMIT)}. Re-verify the frozen "
-        "fixtures against a rebuilt oracle and advance the pin (both live in "
-        "tests/parity/), or re-capture them."
+    assert digest == PINNED_ORACLE_BUILD_INPUT_DIGEST, (
+        f"crates/ build inputs have content digest {digest[:12]}; the parity suite is "
+        f"still pinned to {PINNED_ORACLE_BUILD_INPUT_DIGEST[:12]} (captured at "
+        f"{_describe(PINNED_ORACLE_CRATES_COMMIT)}). Re-verify the frozen fixtures "
+        "against a rebuilt oracle and advance the pin (both live in tests/parity/), "
+        "or re-capture them."
     )
+
+
+def test_the_digest_ignores_history_shape_but_not_content(tmp_path):
+    """The property that makes the digest the right pin: it answers about the
+    TREE, so a merge/rebase/squash that rewrites SHAs without touching a build
+    input leaves it unchanged -- while a one-byte edit to a build input moves
+    it."""
+    before = oracle_provenance.build_input_digest(oracle.REPO_ROOT)
+    if before is None:
+        pytest.skip("no git in this environment")
+    # Same tree, asked twice: stable, and not accidentally time- or
+    # cwd-dependent.
+    assert oracle_provenance.build_input_digest(oracle.REPO_ROOT) == before
+    # `git ls-files -s` prints blob SHAs, so a changed byte in any listed file
+    # changes the listing and therefore the digest. Proved on a scratch repo
+    # rather than by editing crates/ under a live suite.
+    import subprocess
+
+    scratch = tmp_path / "repo"
+    (scratch / "crates" / "x" / "src").mkdir(parents=True)
+    (scratch / "crates" / "x" / "src" / "main.rs").write_text("fn main() {}\n", encoding="utf-8")
+    (scratch / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
+    for argv in (
+        ["init", "-q"],
+        ["config", "user.email", "t@example.invalid"],
+        ["config", "user.name", "t"],
+        ["add", "-A"],
+        ["commit", "-qm", "one"],
+    ):
+        subprocess.run(["git", "-C", str(scratch), *argv], check=True, capture_output=True)
+    first = oracle_provenance.build_input_digest(scratch)
+    assert first is not None
+    (scratch / "crates" / "x" / "src" / "main.rs").write_text(
+        "fn main() { /* moved */ }\n", encoding="utf-8"
+    )
+    subprocess.run(["git", "-C", str(scratch), "add", "-A"], check=True, capture_output=True)
+    assert oracle_provenance.build_input_digest(scratch) != first
 
 
 #: The two machine-read lines in `oracle_fixtures/PROVENANCE.txt`. They are
