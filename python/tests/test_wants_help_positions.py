@@ -89,9 +89,23 @@ def _argv_for(subcommand: str, flag: str, destination: Path) -> list[str]:
 
 
 def _written_files(destination: Path) -> set[str]:
+    """The files actually on disk, spelled the way the ENVELOPE spells them.
+
+    `data.written` carries POSIX separators on every host -- `tan` normalises
+    before emitting, so a consumer parsing the envelope sees
+    `include/modules/help.h` whatever it is running on. `Path.relative_to`
+    renders the HOST's separator, so comparing the two raw sets is green on
+    POSIX and red on Windows alone -- measured on windows-latest as
+    `assert {'include/mod.../help/help.c'} == {'include\\mo...help\\help.c'}`.
+
+    Normalise the filesystem side, never the envelope side: the envelope is the
+    contract, and a test that rewrote it would be asserting the wrong thing.
+    """
     if not destination.exists():
         return set()
-    return {str(p.relative_to(destination)) for p in destination.rglob("*") if p.is_file()}
+    return {
+        p.relative_to(destination).as_posix() for p in destination.rglob("*") if p.is_file()
+    }
 
 
 @pytest.mark.parametrize("subcommand, flag", _VALUE_FLAG_CASES)

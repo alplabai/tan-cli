@@ -252,10 +252,15 @@ def test_tan_build_carries_the_divergence_warning_in_its_envelope(tmp_path):
     env = _envelope(_run_tan("build", "--format", "json", cwd=workspace))
 
     assert env["sdk"]["sourceTier"] == "discovery"
-    assert env["sdk"]["root"] == str(lateral)
+    # `.as_posix()`, not `str()`: every path the envelope carries is POSIX-
+    # normalised before it is emitted, so `str(lateral)` matches on a POSIX
+    # host only. The `divergence["message"]` line below already knew that and
+    # spelled its own normalisation by hand; this one did not, and the gap was
+    # invisible until windows-latest ran it (tan-cli#413).
+    assert env["sdk"]["root"] == lateral.as_posix()
     divergence = next(i for i in env["issues"] if i["code"] == DIVERGENCE_CODE)
     assert divergence["severity"] == "warning"
-    assert str(child).replace("\\", "/") in divergence["message"]
+    assert child.as_posix() in divergence["message"]
 
 
 def test_a_workspace_with_one_checkout_gets_no_divergence_warning_from_tan_build(tmp_path):
