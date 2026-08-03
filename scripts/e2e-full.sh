@@ -101,19 +101,24 @@ if [ -d "$_src_dir/_internal" ]; then
   # newlines, which is how this block broke once already.
   case "$_bin_name" in
     *.exe)
-      # Invoke the onedir EXE directly, not through a `.cmd` launcher: Git Bash
-      # cannot exec a `.cmd` given by absolute path and every call returns 127,
-      # which reddened 23 checks for a reason that has nothing to do with tan.
-      # The launcher is still WRITTEN (install.ps1 ships one, and a cmd.exe user
-      # gets it), it just is not what this POSIX harness drives. The exe still
-      # needs its `_internal/` sibling, so this exercises the same onedir shape.
+      # TWO DISTINCT PATHS, and conflating them destroyed the real binary once:
+      # `_launcher` is what install.ps1 ships for a cmd.exe user, `TAN` is what
+      # THIS POSIX harness drives. An earlier revision pointed `TAN` into the
+      # lib dir but left the launcher `echo`s writing to `$TAN`, so it
+      # overwrote `tan-cli-lib/tan.exe` with a 40-byte `@echo off` script --
+      # every call then failed `line 1: @echo: command not found`, which reads
+      # nothing like "the harness clobbered the binary".
+      _launcher="$WORK/proj/tan.cmd"
       TAN="$WORK/proj/tan-cli-lib/$_bin_name"
       # `_bs` holds the separator rather than inlining a backslash: inside
       # double quotes bash parses `\\$` as an escaped `$`, so the obvious
       # `...tan-cli-lib\\${_bin_name}...` emits a LITERAL `${_bin_name}`.
       _q='"'; _bs='\'
-      echo "@echo off"                                    >  "$TAN"
-      echo "${_q}%~dp0tan-cli-lib${_bs}${_bin_name}${_q} %*" >> "$TAN"
+      echo "@echo off"                                       >  "$_launcher"
+      echo "${_q}%~dp0tan-cli-lib${_bs}${_bin_name}${_q} %*"  >> "$_launcher"
+      # Git Bash cannot exec a `.cmd` by absolute path (exit 127), so the
+      # harness drives the onedir exe directly. Same shape either way: the exe
+      # still needs its `_internal/` sibling.
       ;;
     *)
       TAN="$WORK/proj/tan"
@@ -123,6 +128,18 @@ if [ -d "$_src_dir/_internal" ]; then
       ;;
   esac
   echo "  shape: --onedir tree + launcher (tan-cli#349)"
+  # PROVE the installed binary actually runs before asserting anything about
+  # tan's behaviour. Every red run in this harness's history -- the missing
+  # `_internal/`, the nested `tan-cli-lib/tan/`, the clobbered exe -- produced
+  # a wall of failures whose real cause was that `$TAN` was not a working
+  # binary. Failing HERE names it in one line instead of 20+ misattributed
+  # assertion failures.
+  if ! "$TAN" --version >/dev/null 2>&1; then
+    echo "ABORT: the installed tan does not run: $TAN" >&2
+    echo "       size: $(wc -c <"$TAN" 2>/dev/null) bytes" >&2
+    echo "       error: $("$TAN" --version 2>&1 | head -2)" >&2
+    exit 2
+  fi
 else
   # Pre-#349 single-file freeze, and any published asset up to v0.5.0-rc4.
   cp "$SRC_BIN" "./$_bin_name"
