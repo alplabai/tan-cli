@@ -10,10 +10,22 @@ There is no safe cross-platform guess for the port itself (COMx vs
 one does not exist -- this command lists every serial port pyserial can see
 and refuses instead of hanging on a wrong device.
 
-Board-context port resolution (a `console:` block in the project's
-`system-manifest.yaml`) is deliberately NOT implemented here either: the board
-schema and orchestrator do not emit one today. Teach this verb to read it once
-they do.
+Board-context port resolution -- filling in `--port` from the current project
+instead of asking for it -- is deliberately NOT implemented here, and it is
+not simply unstarted (tan-cli#255): the build-plan already carries a
+`slices[].debug.console` selector per slice (`build-plan-v1.schema.json`,
+issue #610 §4; computed here too, at `tan/planner/buildplan.py::_slice_debug`,
+and independently in alp-sdk's own `scripts/alp_orchestrate/buildplan.py`),
+resolving to `"uart"` / `"ram"` / `"linux"` / `null`. That is a console
+BACKEND CLASS, not a port: it says a slice's console is a UART (as opposed to
+a RAM console read over SWD, or a Linux tty), never which host-visible device
+that UART shows up as. Nothing in `board.yaml` or the build-plan carries a
+VID:PID, serial number, or platform-specific device path for a board's
+console UART, so `debug.console == "uart"` still leaves every USB-serial
+adapter on the bench indistinguishable to this host OS -- reading it would not
+let this command fill in `--port`. Teach this verb to read a real per-board
+physical-port fact once metadata carries one; `debug.console` alone is not
+that fact.
 
 **No alp-sdk checkout required, unlike `model`.** The oracle's `monitor.py`
 imports nothing from alp-sdk beyond `alp_cli._workspace.python_exe`, itself

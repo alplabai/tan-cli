@@ -13,30 +13,45 @@ CODED, ACTIONABLE `renode.binary-missing` issue naming what to install
 (https://renode.io) -- never a traceback, never a silent `ok: true`. Mirrors
 `flash_cmd.py`'s own refusal shape for a missing hardware tool.
 
-**SCOPE: this file is the PLAIN (non-`--sim-mode`) headless smoke only.**
-`--sim-mode` -- the studio hardware-simulator gateway that serves a control +
-UART socket pair for `alp-sdk-vscode`'s `RealRenodeAdapter` -- is a
-substantial separate subsystem in the oracle (`crates/tan-cli/src/commands/
-renode/sim.rs` + `monitor.rs`, ~1100 lines, plus its own pure half in
-`crates/tan-core/src/renode/sim.rs`). It is deliberately NOT ported here: the
-flag is simply not declared, so `tan renode --sim-mode` is a Click usage error
-(exit 2) rather than a half-working or silently-wrong gateway. Refusing at the
-parser is the honest shape for an unported subsystem -- an ACCEPTED flag that
-quietly did nothing would be worse, because the customer would believe the
-gateway came up.
+**This file now covers BOTH the plain headless smoke and `--sim-mode`, the
+studio hardware-simulator gateway** that serves a control + UART socket pair
+for `alp-sdk-vscode`'s `RealRenodeAdapter` (`tan-cli#77`). The plain path's
+pre-flight *decisions* stay pure in `tan.core.renode_plan`; `--sim-mode`'s own
+pure half (the `sim-descriptor.json` document, the generated boot script, the
+control-line protocol, the monitor-line classifier) is
+`tan.core.renode_sim`. This module resolves paths, probes PATH for the
+`renode` binary, and owns every bit of IO: spawning + teeing the plain smoke,
+and -- for `--sim-mode` -- binding the two ephemeral listeners, writing the
+descriptor + boot script, spawning Renode with its monitor on a pipe, and
+serving both sockets.
 
-(An earlier draft of this paragraph justified the cut by claiming
-`doctor_cmd.py` likewise does not declare `tan doctor`'s `--build`. That was
-false -- `doctor_cmd.py:894` declares `--build` -- and the claim is removed
-rather than corrected, because the cut stands on its own reasoning above and
-did not need a precedent.)
-Porting `--sim-mode` is its own bounded unit of work. This is a DELIBERATE,
-NAMED gap, not an oversight: the follow-up unit is "port `--sim-mode`" --
-`crates/tan-cli/src/commands/renode/sim.rs` + `monitor.rs` (the socket
-gateway) and `crates/tan-core/src/renode/sim.rs` (its pure half).
+`--sim-mode` is a faithful port of `crates/tan-cli/src/commands/renode/
+{sim,monitor}.rs` + `crates/tan-core/src/renode/sim.rs` (landed as
+`5152fd4 feat(renode): implement the --sim-mode socket contract (#77) (#96)`),
+itself ported from the retired Python `west alp-renode --sim-mode`
+(`scripts/west_commands/alp_renode.py`, deleted in `alp-sdk@df312cec` under
+ADR-0020 Phase 4). Every wire decision below was diff-verified against the
+shipped `tan.exe` oracle driven live through the full pipeline -- every
+pre-flight refusal code, the generated `sim-descriptor.json` and
+`.sim-boot.resc` byte-for-byte, a real control-socket round trip, the
+`renode.cpu-halted` latch, and `renode.sim-exited-early` -- not inferred from
+source alone.
+
+SCOPE (`tan-cli#77`, socket half): ports + descriptor + readiness marker + the
+three-verb control protocol. DEFERRED to a follow-up on the same issue: the
+`ram_console_buf` RAM-ring -> UART-socket streamer, the wired-UART console
+path, and the per-SKU sim profiles behind the descriptor's
+`framebuffers`/`peripherals` -- which stay `[]` here, with every run carrying
+`renode.sim-profile-deferred` as a warning issue so an empty descriptor is
+never mistaken for success. See `tan.core.renode_sim`'s module docstring for
+the fuller account, including why this issue's own "no reference
+implementation exists" framing does not hold: a Rust port of exactly this
+contract already exists (frozen, but readable and CI-verified) and this file
+is a faithful Python port of it, not a fresh re-derivation from issue prose.
 
 Divergences from the Rust oracle worth flagging, both verified against the
-shipped `tan.exe` rather than inferred from source:
+shipped `tan.exe` rather than inferred from source. First, the ones shared
+with (already documented for) the plain smoke:
   * `data.repl`/`data.resc`/`data.elf`/`data.logPath` and `project.root` are
     all reported in the HOST's NATIVE path style (backslashes on Windows,
     unconverted), NOT forward-slash-normalised -- unlike most other `tan`
@@ -65,11 +80,41 @@ shipped `tan.exe` rather than inferred from source:
     reports the unnormalised `.../renodefx/./alp-sdk`. Only the `--project .`
     discovery path is affected -- `--sdk-root` itself is reported raw (see
     above).
+
+`--sim-mode`-specific behaviour, pinned by driving the oracle live rather
+than only reading `sim.rs`/`monitor.rs`:
+  * `data.logPath` starts as the PLAIN smoke's own default
+    (`<build_root>/renode.log`, computed before the sim/plain branch even
+    though sim mode never uses a build root) and only becomes the
+    sim-specific default (`<image-bundle>/renode-sim.log`) once the run gets
+    far enough to resolve it -- AFTER `repl`/`elf`/`descriptor`/the socket
+    ports are all already known. A pre-flight failure up to and including
+    `renode.binary-missing` therefore reports the PLAIN default in
+    `data.logPath`, not the sim one -- verified: `tan renode --sim-mode
+    --image-bundle <dir> --sdk-root <sdk> --board <sku>` with `renode`
+    missing from PATH reports `logPath` as `<app_path>/build/renode.log`.
+  * The readiness marker (`tan.core.renode_sim.ready_marker`) and, in text
+    mode only, five human-readable header lines (`sku`/elf, `descriptor`,
+    `control`, `uart`, and the `renode.sim-profile-deferred` warning's own
+    text) are printed DIRECTLY to a real stream the moment they are known --
+    stdout in text mode, and (for the readiness marker only; the header
+    lines are text-mode-only) stderr in JSON mode -- rather than being
+    buffered into the text/issues the envelope machinery below prints once
+    at the very end. This is because `--sim-mode` blocks for `--timeout`
+    seconds serving sockets: an operator or a studio launcher needs the
+    descriptor and ports the instant they exist, not once the whole run
+    finishes. Verified with the streams captured separately.
+  * `--expect` is accepted (for global-flag parity, like `--image-bundle` on
+    the plain smoke) but reported back via an INFO issue
+    (`renode.expect-ignored`) rather than acted on: sim mode routes the
+    console to the UART socket, not to a scannable text stream.
 """
 from __future__ import annotations
 
+import json
 import os
 import queue
+import socket
 import subprocess
 import sys
 import threading
@@ -93,6 +138,16 @@ from tan.core.renode_plan import (
     renode_rejected_argv,
     select_sku,
     zephyr_elf_from_manifest,
+)
+from tan.core.renode_sim import (
+    MonitorLine,
+    build_sim_descriptor,
+    build_sim_renode_argv,
+    build_sim_resc_text,
+    classify_monitor_line,
+    dispatch_control_line,
+    ready_marker,
+    sim_profile_deferred_message,
 )
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -171,9 +226,9 @@ def _data(**overrides: Any) -> dict[str, Any]:
         "expect": None,
         "expectFound": False,
         "renodeArgv": [],
-        # `--sim-mode` only (not ported here -- see the module docstring):
-        # always present and empty/zero on the plain smoke, matching the
-        # oracle's own `RenodeReport::default()` fields.
+        # `--sim-mode` only: always present and empty/zero on the plain
+        # smoke (and on a sim failure before each is resolved), matching
+        # the oracle's own `RenodeReport::default()` fields.
         "descriptor": "",
         "controlPort": 0,
         "uartPort": 0,
@@ -349,6 +404,374 @@ def _best_effort_vtor(elf_path: str) -> int | None:
     return elf_vector_table_base(data)
 
 
+# ── --sim-mode: the monitor bridge ──────────────────────────────────────────
+
+#: Per-command deadline. A wedged-but-alive Renode must not strand a client.
+_COMMAND_TIMEOUT_S = 15.0
+#: Total budget for the boot drain, split across `_DRAIN_ATTEMPTS`.
+_DRAIN_TIMEOUT_S = 90.0
+#: On a loaded runner the pinned Renode's monitor can be slow to first
+#: respond, and a single lost sync would strand the whole session.
+_DRAIN_ATTEMPTS = 3
+#: Every `RenodeMonitor` failure path reports this once broken. Reused for a
+#: broken-latch race: a client thread that failed mid-command may have left
+#: unread lines in the queue, so the next command could otherwise capture
+#: *its* output -- indistinguishable from a correct reply, which is the one
+#: outcome worth refusing outright.
+_MONITOR_UNUSABLE = "Renode monitor is unusable after an earlier failure."
+#: How long teardown waits for Renode to act on `quit` before killing it.
+#: This is a teardown, not a graceful-shutdown protocol -- the process is
+#: going away either way; one second is enough for the emulation to close
+#: its sockets and flush its log.
+_QUIT_GRACE_S = 1.0
+
+
+class RenodeMonitor:
+    """Drives Renode's monitor over the child's stdin/stdout for `tan renode
+    --sim-mode`. Plumbing ONLY -- every decision about what a monitor line
+    means is `tan.core.renode_sim.classify_monitor_line`, unit-tested there;
+    this class owns the pipes, the reader thread and the deadline.
+
+    Port of `crates/tan-cli/src/commands/renode/monitor.rs`'s
+    `RenodeMonitor<W>`. `command` writes the line plus an `echo "<sentinel>"`
+    marker and drains stdout until the bare sentinel comes back; the pump
+    thread + queue-with-timeout is what lets the per-command deadline
+    actually fire, rather than a blocking read hanging forever on a wedged
+    Renode. `command`/`quit`/`drain_boot` all serialise on `self._lock`,
+    matching the Rust `Mutex<MonitorInner<W>>` -- a client sending two
+    commands concurrently must not interleave their sentinels.
+    """
+
+    def __init__(self, stdin: Any, stdout: Any) -> None:
+        self._stdin = stdin
+        self._lock = threading.Lock()
+        self._seq = 0
+        self._broken = False
+        self._cpu_halted_flag = False
+        self._lines: "queue.Queue[object]" = queue.Queue()
+        raw: "queue.Queue[object]" = queue.Queue()
+        threading.Thread(target=_pump_lossy_lines, args=(stdout, raw), daemon=True).start()
+        threading.Thread(target=self._forward, args=(raw,), daemon=True).start()
+
+    def _forward(self, raw: "queue.Queue[object]") -> None:
+        """Two hops: the shared lossy-line pump, then this forwarder, which
+        inspects every line for the halt marker (issue #64) before handing
+        it on -- this is what makes the latch window-independent, catching a
+        `CPU was halted` line that lands between two client commands (or
+        after the last one), which belongs to no command's collection
+        window at all."""
+        while True:
+            item = raw.get()
+            if item is _EOF:
+                self._lines.put(_EOF)
+                return
+            line = item  # type: ignore[assignment]
+            if renode_cpu_halted(line):
+                self._cpu_halted_flag = True
+            self._lines.put(line)
+
+    def cpu_halted(self) -> bool:
+        """Whether Renode ever reported the CPU halted, wherever that line
+        landed. Read at teardown: the halt does not fail the command it
+        happens to interleave with, it fails the RUN."""
+        return self._cpu_halted_flag
+
+    def command(self, cmd: str) -> str:
+        """Run one monitor command and return its captured output. Raises
+        `RuntimeError` (message = the failure reason) on a write failure,
+        timeout, EOF, or a monitor-reported `[ERROR]` for this command."""
+        return self._command_within(cmd, _COMMAND_TIMEOUT_S)
+
+    def _command_within(self, cmd: str, timeout_s: float) -> str:
+        with self._lock:
+            if self._broken:
+                raise RuntimeError(_MONITOR_UNUSABLE)
+            self._seq += 1
+            sentinel = f"__ALP_SIM_DONE_{self._seq}__"
+            try:
+                # The marker is QUOTED on purpose: Renode >= 1.16 reads a
+                # bare `echo TOKEN` as an element lookup ("No such emulation
+                # element").
+                self._stdin.write(f"{cmd}\n".encode())
+                self._stdin.write(f'echo "{sentinel}"\n'.encode())
+                self._stdin.flush()
+            except (OSError, ValueError) as err:
+                self._broken = True
+                raise RuntimeError(
+                    f"Renode monitor write failed for {_rust_debug_str(cmd)}: {err}"
+                ) from err
+
+            deadline = time.monotonic() + timeout_s
+            out: list[str] = []
+            errors: list[str] = []
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._broken = True
+                    raise RuntimeError(
+                        f"timed out after {int(timeout_s)}s awaiting Renode "
+                        f"response to {_rust_debug_str(cmd)}."
+                    )
+                try:
+                    item = self._lines.get(timeout=remaining)
+                except queue.Empty:
+                    self._broken = True
+                    raise RuntimeError(
+                        f"timed out after {int(timeout_s)}s awaiting Renode "
+                        f"response to {_rust_debug_str(cmd)}."
+                    )
+                if item is _EOF:
+                    self._broken = True
+                    raise RuntimeError(
+                        f"Renode monitor closed while awaiting response to "
+                        f"{_rust_debug_str(cmd)}."
+                    )
+                line = item  # type: ignore[assignment]
+                kind = classify_monitor_line(line, sentinel, cmd)
+                if kind is MonitorLine.DONE:
+                    # Reaching the sentinel with errors collected does NOT
+                    # latch `broken`: the monitor itself is fine, this one
+                    # command failed.
+                    if errors:
+                        raise RuntimeError(
+                            f"Renode reported an error for {_rust_debug_str(cmd)}: "
+                            + " | ".join(errors)
+                        )
+                    return "\n".join(out)
+                if kind is MonitorLine.ERROR:
+                    errors.append(line.strip())
+                elif kind is MonitorLine.IGNORE:
+                    pass
+                else:
+                    out.append(line)
+
+    def drain_boot(self) -> None:
+        """Swallow the boot-time monitor output so the first real client
+        command gets a clean reply. Retried: each attempt sends a fresh
+        `version` with its own sentinel, which re-syncs, and clears the
+        `broken` latch the previous attempt's timeout set. Raises
+        `RuntimeError` after `_DRAIN_ATTEMPTS` failures."""
+        per = max(10.0, _DRAIN_TIMEOUT_S / max(_DRAIN_ATTEMPTS, 1))
+        last = f"drain_boot failed after {_DRAIN_ATTEMPTS} attempts"
+        for _ in range(_DRAIN_ATTEMPTS):
+            with self._lock:
+                self._broken = False
+            try:
+                self._command_within("version", per)
+                return
+            except RuntimeError as err:
+                last = str(err)
+        raise RuntimeError(last)
+
+    def quit(self) -> None:
+        """Best-effort `quit` on teardown. This only ASKS; whether Renode
+        gets time to shut its emulation down depends on the caller polling
+        for the exit afterwards (`_teardown_sim` does, briefly)."""
+        with self._lock:
+            try:
+                self._stdin.write(b"quit\n")
+                self._stdin.flush()
+            except (OSError, ValueError):
+                pass
+
+
+def _bind_sim_listeners() -> tuple[socket.socket, socket.socket, int, int]:
+    """Bind the control + UART listeners on ephemeral `127.0.0.1` ports and
+    read the assigned port numbers back. Both stay held (LISTENING), so the
+    ports cannot be taken from under us and are distinct by construction.
+    Returns `(control, uart, control_port, uart_port)`.
+
+    BIND BEFORE ADVERTISING is the whole point: by the time a caller writes
+    `sim-descriptor.json` naming these ports, both listeners are already
+    accepting, so a studio client that reads the descriptor and connects at
+    once can never race into an ECONNREFUSED -- the kernel backlogs the
+    connection pre-accept.
+    """
+    ctrl = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        ctrl.bind(("127.0.0.1", 0))
+        ctrl.listen()
+        uart = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            uart.bind(("127.0.0.1", 0))
+            uart.listen()
+        except OSError:
+            uart.close()
+            raise
+    except OSError:
+        ctrl.close()
+        raise
+    return ctrl, uart, ctrl.getsockname()[1], uart.getsockname()[1]
+
+
+def _close_quietly(*socks: socket.socket) -> None:
+    for s in socks:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _serve_control(listener: socket.socket, monitor: RenodeMonitor) -> None:
+    """Accept control clients forever, each on its own thread. The listener
+    is already bound + listening by the time the descriptor advertises its
+    port."""
+    while True:
+        try:
+            conn, _addr = listener.accept()
+        except OSError:
+            return
+        threading.Thread(
+            target=_handle_control_client, args=(conn, monitor), daemon=True
+        ).start()
+
+
+def _handle_control_client(conn: socket.socket, monitor: RenodeMonitor) -> None:
+    """One control client: line-oriented, ONE request line -> ONE reply
+    line, until the peer closes. A bad line never kills the connection --
+    `dispatch_control_line` answers it with `ERR <reason>` so the framing
+    invariant holds for the rest of the session. A blank line is skipped
+    without a reply, verbatim from the retired Python."""
+    try:
+        reader = conn.makefile("rb")
+        while True:
+            raw = reader.readline()
+            if not raw:
+                return  # peer closed, or a real IO error
+            # Lossy, not strict: a stray non-UTF-8 byte must not drop the
+            # session.
+            line = raw.decode("utf-8", errors="replace").strip()
+            if not line:
+                continue
+            reply = dispatch_control_line(line, monitor.command)
+            try:
+                conn.sendall(f"{reply}\n".encode())
+            except OSError:
+                return
+    except OSError:
+        return
+    finally:
+        _close_quietly(conn)
+
+
+def _serve_uart_silent(listener: socket.socket) -> None:
+    """Accept UART clients and hold each connection open, streaming
+    nothing.
+
+    This is the socket half of a channel whose CONTENT is deferred
+    (`tan-cli#77`): the `ram_console_buf` RAM-ring streamer that fills it is
+    a follow-up. Accepting-and-silent is exactly what the retired Python did
+    when an image carried no `ram_console_buf` symbol, so a studio client's
+    serial view connects successfully and simply stays empty rather than
+    failing to connect."""
+    while True:
+        try:
+            conn, _addr = listener.accept()
+        except OSError:
+            return
+        threading.Thread(target=_hold_uart_client, args=(conn,), daemon=True).start()
+
+
+def _hold_uart_client(conn: socket.socket) -> None:
+    """Output-only to studio; read solely to detect the close and reap."""
+    try:
+        while True:
+            data = conn.recv(256)
+            if not data:
+                return
+    except OSError:
+        return
+    finally:
+        _close_quietly(conn)
+
+
+def _spawn_renode_sim(argv: list[str], log_path: str) -> subprocess.Popen:
+    """Spawn headless Renode with stdio wired for the monitor bridge: stdin
+    + stdout are pipes the bridge drives, stderr goes straight to the log
+    file (verbatim from the retired Python's `stderr=logf`)."""
+    parent = os.path.dirname(log_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(log_path, "wb") as logf:
+        return subprocess.Popen(
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=logf
+        )
+
+
+def _teardown_sim(monitor: RenodeMonitor, proc: subprocess.Popen) -> None:
+    """Ask Renode to `quit`, give it `_QUIT_GRACE_S` to actually do it, then
+    make sure it is gone. `quit` on its own is only a REQUEST: killing the
+    child microseconds after the flush would leave the emulation no time to
+    close its sockets or flush its log."""
+    monitor.quit()
+    deadline = time.monotonic() + _QUIT_GRACE_S
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return  # quit worked; poll() already reaped it
+        time.sleep(0.025)
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait()
+    except OSError:
+        pass
+
+
+def _announce_ready(json_mode: bool, timeout: int) -> None:
+    """Print the readiness marker. The LINE is
+    `tan.core.renode_sim.ready_marker` -- it carries the consumer's `ready
+    (timeout` poll token and is pinned by a test there, since a reword
+    strands every consumer. The only decision left here is the STREAM:
+    stdout in text mode (where the retired Python printed it), stderr in
+    JSON mode, where stdout carries the single Envelope line and nothing
+    else. A consumer teeing only stdout to a log file therefore will not see
+    it in JSON mode -- poll the merged output, or poll for
+    `sim-descriptor.json` and the port it names."""
+    line = ready_marker(timeout)
+    if json_mode:
+        print(line, file=sys.stderr)
+        sys.stderr.flush()
+    else:
+        print(line)
+        sys.stdout.flush()
+
+
+def _resolve_bundle_elf(bundle_dir: str, manifest: Any, core: str | None) -> str:
+    """Resolve the firmware ELF inside a pre-built `--image-bundle` dir: the
+    bundle's `system-manifest.yaml` (reusing the slice resolver) ->
+    `<bundle>/zephyr/zephyr.elf` -> the single `*.elf` in the bundle. Raises
+    `RenodeError` on every failure -- the caller maps all of them to
+    `renode.elf-missing`, matching the oracle's `resolve_bundle_elf`."""
+    if manifest is not None:
+        return zephyr_elf_from_manifest(manifest, bundle_dir, core)
+    direct = os.path.join(bundle_dir, "zephyr", "zephyr.elf")
+    if os.path.isfile(direct):
+        return direct
+    try:
+        names = os.listdir(bundle_dir)
+    except OSError as err:
+        raise RenodeError(f"could not read --image-bundle {bundle_dir}: {err}") from err
+    elfs = sorted(
+        name
+        for name in names
+        if name.endswith(".elf") and os.path.isfile(os.path.join(bundle_dir, name))
+    )
+    if len(elfs) == 1:
+        return os.path.join(bundle_dir, elfs[0])
+    if not elfs:
+        raise RenodeError(
+            f"no firmware ELF in --image-bundle {bundle_dir} (looked for "
+            "system-manifest.yaml, zephyr/zephyr.elf, *.elf)."
+        )
+    names_repr = "[" + ", ".join(_rust_debug_str(e) for e in elfs) + "]"
+    raise RenodeError(
+        f"multiple *.elf in --image-bundle {bundle_dir} ({names_repr}); "
+        "can't pick one automatically."
+    )
+
+
 # ── the command ─────────────────────────────────────────────────────────────
 
 
@@ -365,6 +788,7 @@ def _run(
     expect: str | None,
     json_mode: bool,
     cwd: str,
+    sim_mode_arg: bool = False,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None, Project]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk, project)`."""
@@ -389,6 +813,29 @@ def _run(
 
     def fail(code: str, message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE):
         return exit_code, data(), [_issue(code, "error", message)], [f"renode: {message}"], None, project
+
+    # `--sim-mode` branches FIRST, resolving everything from `--image-bundle`
+    # instead of the build root below -- mirrors the oracle's `mod.rs::run`,
+    # which constructs its `RenodeReport` with this same PLAIN-mode
+    # `log_path` default before handing off to `sim::run`, so a pre-flight
+    # sim failure up to and including `renode.binary-missing` still reports
+    # THIS `log_path`, not the sim-specific one (see the module docstring).
+    if sim_mode_arg:
+        return _run_sim(
+            app_path=app_path,
+            image_bundle_arg=image_bundle_arg,
+            board_arg=board_arg,
+            core_arg=core_arg,
+            sdk_root_arg=sdk_root_arg,
+            project_arg=project_arg,
+            log_arg=log_arg,
+            timeout=timeout,
+            expect=expect,
+            json_mode=json_mode,
+            cwd=cwd,
+            project=project,
+            base_log_path=log_path,
+        )
 
     # SDK-root guard: `cli_workspace_root(g)` is `cwd` joined with `--project`
     # (the GLOBAL flag) -- NOT `app_path`. See the module docstring for why
@@ -547,6 +994,278 @@ def _run(
     )
 
 
+def _run_sim(
+    *,
+    app_path: str,
+    image_bundle_arg: str | None,
+    board_arg: str | None,
+    core_arg: str | None,
+    sdk_root_arg: str | None,
+    project_arg: str | None,
+    log_arg: str | None,
+    timeout: int,
+    expect: str | None,
+    json_mode: bool,
+    cwd: str,
+    project: Project,
+    base_log_path: str,
+) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None, Project]:
+    """`tan renode --sim-mode`: the studio hardware-simulator gateway. Port
+    of `crates/tan-cli/src/commands/renode/sim.rs::run`. Returns the same
+    6-tuple shape `_run` does; `base_log_path` is the PLAIN smoke's own
+    `log_path` default, reported in `data.logPath` until this function
+    resolves its own sim-specific default further down (see the module
+    docstring)."""
+    # `logPath` starts as the PLAIN smoke's default and lives in `known` (not
+    # a hardcoded `data()` kwarg) precisely so the later `known["logPath"] =
+    # log_path` overwrite below can replace it without a duplicate-keyword
+    # collision against `**known`.
+    known: dict[str, Any] = {"logPath": base_log_path}
+
+    def data(**overrides: Any) -> dict[str, Any]:
+        return _data(timeout=timeout, expect=expect, **known, **overrides)
+
+    def fail(code: str, message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE):
+        return exit_code, data(), [_issue(code, "error", message)], [f"renode: {message}"], None, project
+
+    if image_bundle_arg is None:
+        return fail("renode.sim-bundle-required", "--sim-mode requires --image-bundle <dir>.")
+    bundle_dir = _normalize_join(cwd, image_bundle_arg)
+    if not os.path.isdir(bundle_dir):
+        return fail(
+            "renode.sim-bundle-missing", f"--image-bundle {bundle_dir} is not a directory."
+        )
+
+    # SDK-root guard: the SAME wide ladder + workspace root the plain smoke
+    # uses -- the oracle's `sim::run` calls the identical `resolve_sdk_root`
+    # the plain `mod.rs::run` does, with no sim-specific branching.
+    workspace_root = os.path.join(cwd, project_arg) if project_arg else cwd
+    sdk_root, sdk_tier, sdk_broken_pin = _resolve_sdk_root_and_tier(sdk_root_arg, workspace_root)
+    if sdk_root is None:
+        return fail("renode.sdk-root-not-found", "Cannot locate alp-sdk root.")
+    sdk = SdkInfo(sdk_root, sdk_tier or "none")
+
+    def fail_sdk(code: str, message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE):
+        return exit_code, data(), [_issue(code, "error", message)], [f"renode: {message}"], sdk, project
+
+    # The bundle's own manifest, when it has one: it supplies both the SKU
+    # and the slice -> ELF resolution. Absent is fine (a bare bundle of
+    # ELFs) -- unlike the plain smoke, a missing manifest is NOT an error
+    # here.
+    manifest_path = os.path.join(bundle_dir, "system-manifest.yaml")
+    manifest = None
+    if os.path.isfile(manifest_path):
+        try:
+            _text, manifest = load_manifest(bundle_dir)
+        except ManifestUnavailable as err:
+            return fail_sdk("renode.manifest-unavailable", f"{manifest_path}: {err.detail}")
+        except ManifestInvalid as err:
+            message = f"{err.path}: {err.detail}"
+            if err.detail.startswith(_SCHEMA_VERSION_PREFIX):
+                return fail_sdk("renode.manifest-schema", message, ExitCode.VALIDATION_FAILURE)
+            return fail_sdk("renode.manifest-invalid", message)
+
+    board = (board_arg or "").strip()
+    if board:
+        sku = board
+    else:
+        manifest_sku = (manifest.sku or "").strip() if manifest is not None else ""
+        if not manifest_sku:
+            return fail_sdk(
+                "renode.sku-unresolved",
+                "--sim-mode could not determine the board: pass --board <SKU> "
+                "(no hw_info.sku in the bundle manifest).",
+            )
+        sku = manifest_sku
+    known["sku"] = sku
+
+    try:
+        elf = _resolve_bundle_elf(bundle_dir, manifest, core_arg)
+    except RenodeError as err:
+        return fail_sdk("renode.elf-missing", err.message)
+    if not os.path.isfile(elf):
+        return fail_sdk("renode.elf-missing", f"firmware ELF not found at {elf}.")
+    known["elf"] = elf
+
+    # Only the `.repl` matters here: unlike the plain smoke, sim mode
+    # GENERATES its own boot script rather than including the SDK's `.resc`.
+    try:
+        repl, _resc_unused = platform_files_for_sku(sku, sdk_root)
+    except RenodeError as err:
+        return fail_sdk("renode.descriptor", err.message)
+    if not os.path.isfile(repl):
+        return fail_sdk("renode.descriptor-missing", f"missing Renode descriptor {repl}.")
+    known["platformStem"] = platform_stem_for_sku(sku)
+    known["repl"] = repl
+
+    renode_bin = on_path("renode")
+    if renode_bin is None:
+        return fail_sdk(
+            "renode.binary-missing",
+            "`renode` binary not found on PATH. Install Renode (https://renode.io). "
+            "tan renode does not silently pass when Renode is missing.",
+        )
+
+    # BIND BEFORE ADVERTISING -- see `_bind_sim_listeners`'s own docstring.
+    try:
+        ctrl_sock, uart_sock, control_port, uart_port = _bind_sim_listeners()
+    except OSError as err:
+        return fail_sdk("renode.sim-bind-failed", f"could not bind a sim socket: {err}")
+
+    descriptor_path = os.path.join(bundle_dir, "sim-descriptor.json")
+    descriptor_text = json.dumps(build_sim_descriptor(control_port, uart_port), indent=2) + "\n"
+    try:
+        with open(descriptor_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(descriptor_text)
+    except OSError as err:
+        _close_quietly(ctrl_sock, uart_sock)
+        return fail_sdk(
+            "renode.sim-descriptor-failed", f"could not write {descriptor_path}: {err}"
+        )
+    # Recorded in `data` so a JSON consumer is not left assuming the file
+    # name and re-deriving the ports out of the descriptor it has to find
+    # first.
+    known["descriptor"] = descriptor_path
+    known["controlPort"] = control_port
+    known["uartPort"] = uart_port
+
+    # Best-effort, exactly like the plain smoke: an unreadable or unexpected
+    # ELF seeds no VTOR and leaves Renode's own guess alone.
+    vtor = _best_effort_vtor(elf)
+    resc_path = os.path.join(bundle_dir, ".sim-boot.resc")
+    try:
+        with open(resc_path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(build_sim_resc_text(repl, elf, vtor))
+    except OSError as err:
+        _close_quietly(ctrl_sock, uart_sock)
+        return fail_sdk("renode.sim-boot-script-failed", f"could not write {resc_path}: {err}")
+    known["resc"] = resc_path
+
+    log_path = _resolve_root_arg(log_arg, cwd, os.path.join(bundle_dir, "renode-sim.log"))
+    # From here on, `data()`'s `logPath` is THIS sim-specific value, not
+    # `base_log_path` -- mirrors the oracle's `report.log_path = ...`
+    # overwrite, which happens at this exact point (after repl/elf/
+    # descriptor/ports are already known, before the argv is built).
+    known["logPath"] = log_path
+
+    argv = build_sim_renode_argv(renode_bin, resc_path)
+    known["renodeArgv"] = argv
+
+    issues: list[Issue] = []
+    text: list[str] = []
+    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier or "none")
+    if pin_issue is not None:
+        issues.append(pin_issue)
+    # The descriptor's `framebuffers`/`peripherals` are empty and the UART
+    # is silent while the per-SKU profile half of `tan-cli#77` is deferred.
+    # Saying so is not optional -- see `sim_profile_deferred_message`'s own
+    # docstring.
+    deferred = sim_profile_deferred_message(sku)
+    issues.append(_issue("renode.sim-profile-deferred", "warning", deferred))
+    if expect is not None:
+        # Say so rather than ignoring it: sim mode routes the console to a
+        # socket, so there is no console text here for `--expect` to scan.
+        issues.append(
+            _issue(
+                "renode.expect-ignored",
+                "info",
+                "renode: --expect is ignored in --sim-mode (the console is served "
+                "on the UART socket, not scanned).",
+            )
+        )
+
+    if not json_mode:
+        # Printed DIRECTLY (not appended to `text`, which text mode prints
+        # once at the very end): sim mode blocks for `--timeout` seconds
+        # serving sockets, and an operator needs the descriptor + ports the
+        # instant they exist. Verified stream-separated against the oracle.
+        print(f"tan renode --sim-mode: {sku} booting {os.path.basename(elf)}")
+        print(f"  descriptor : {descriptor_path}")
+        print(f"  control    : tcp://127.0.0.1:{control_port}")
+        print(
+            f"  uart       : tcp://127.0.0.1:{uart_port} "
+            "(silent — the ram_console bridge is deferred, tan-cli#77)"
+        )
+        # Text mode drops `issues`, so the warning has to be printed too or
+        # a human sees only the reassuring four lines above.
+        print(deferred)
+        sys.stdout.flush()
+
+    try:
+        proc = _spawn_renode_sim(argv, log_path)
+    except OSError as err:
+        _close_quietly(ctrl_sock, uart_sock)
+        return fail_sdk("renode.run-failed", f"failed to run renode: {err}")
+    if proc.stdin is None or proc.stdout is None:
+        try:
+            proc.kill()
+            proc.wait()
+        except OSError:
+            pass
+        _close_quietly(ctrl_sock, uart_sock)
+        return fail_sdk(
+            "renode.run-failed",
+            "failed to run renode: the child's stdio pipes were not created.",
+        )
+
+    monitor = RenodeMonitor(proc.stdin, proc.stdout)
+    # Swallow the boot output FIRST and exclusively, THEN start accepting
+    # clients -- otherwise a client command races the boot drain for the
+    # monitor and captures boot text as its reply.
+    try:
+        monitor.drain_boot()
+    except RuntimeError as err:
+        _teardown_sim(monitor, proc)
+        _close_quietly(ctrl_sock, uart_sock)
+        return fail_sdk(
+            "renode.sim-monitor-failed",
+            f"Renode monitor never became ready: {err} (see {log_path}).",
+        )
+
+    threading.Thread(target=_serve_control, args=(ctrl_sock, monitor), daemon=True).start()
+    threading.Thread(target=_serve_uart_silent, args=(uart_sock,), daemon=True).start()
+
+    _announce_ready(json_mode, timeout)
+
+    # Hold the sockets open until the timeout, failing if Renode dies first.
+    early_exit: int | None = None
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        code = proc.poll()
+        if code is not None:
+            early_exit = code
+            break
+        time.sleep(0.25)
+
+    _teardown_sim(monitor, proc)
+    _close_quietly(ctrl_sock, uart_sock)
+
+    if early_exit is not None:
+        return fail_sdk(
+            "renode.sim-exited-early",
+            f"Renode exited early ({_exit_status_desc(early_exit)}); see {log_path}.",
+        )
+    # Checked LAST and independently of everything above, exactly like the
+    # plain smoke's identical latch (issue #64): a Renode that boots, halts
+    # the CPU on its first instruction fetch and then sits there until the
+    # timeout looks -- to every other signal here -- like a healthy
+    # session. Renode's stdout is consumed by the monitor in this mode, so
+    # without the latch the halt would at best resurface as an `ERR` on
+    # whichever client command came next, and `tan` would still exit 0. The
+    # sim path is where a mis-seeded VTOR shows up this way.
+    if monitor.cpu_halted():
+        msg = (
+            "renode: the CPU halted on its first instruction fetch — no firmware "
+            f"code ever ran, even though the sim session came up (see {log_path})."
+        )
+        issues.append(_issue("renode.cpu-halted", "error", msg))
+        if not json_mode:
+            text.append(msg)
+        return ExitCode.RUNTIME_FAILURE, data(), issues, text, sdk, project
+
+    return ExitCode.SUCCESS, data(), issues, text, sdk, project
+
+
 def renode(
     app_path: str = typer.Argument(
         ".",
@@ -617,6 +1336,13 @@ def renode(
         help="If set, stop early (exit 0) when this substring appears in any console "
         "line; exit 1 if the run ends without it.",
     ),
+    sim_mode: bool = typer.Option(
+        False,
+        "--sim-mode",
+        help="Studio hardware-simulator mode: boot --image-bundle's firmware headless "
+        "and serve the control + UART sockets named by the bundle's "
+        "sim-descriptor.json. Requires --image-bundle; --expect is ignored.",
+    ),
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
@@ -650,6 +1376,7 @@ def renode(
             expect=expect,
             json_mode=json_mode,
             cwd=cwd,
+            sim_mode_arg=sim_mode,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, reported as one with an

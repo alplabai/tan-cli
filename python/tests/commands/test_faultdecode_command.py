@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
 import sys
 import tempfile
 from pathlib import Path
@@ -31,6 +30,7 @@ import typer
 from typer.testing import CliRunner
 
 from tan.commands.faultdecode_cmd import faultdecode
+from tests.conftest import REAL_ENVIRON
 
 app = typer.Typer()
 app.command("faultdecode")(faultdecode)
@@ -42,8 +42,16 @@ def _resolve_oracle_path() -> Path | None:
     `tests/core/test_faultdecode.py::_resolve_oracle_path`: `ALP_SDK_ROOT` if
     set (a set-but-missing value RAISES rather than skipping), else an
     `alp-sdk` checkout sitting next to this repo at any ancestor level.
-    Returns `None` only when neither is present."""
-    override = os.environ.get("ALP_SDK_ROOT")
+    Returns `None` only when neither is present.
+
+    Reads `REAL_ENVIRON` (captured at collection time in `tests/conftest.py`),
+    NOT `os.environ` -- this function runs from inside test bodies (via
+    `_load_oracle_command`), by which point the autouse
+    `_scrub_sdk_discovery_env` fixture has already deleted `ALP_SDK_ROOT`
+    from the live process environment, so an `os.environ` read here always
+    saw it gone and every oracle-parity test below skipped unconditionally
+    (tan-cli#254/#256 fix)."""
+    override = REAL_ENVIRON.get("ALP_SDK_ROOT")
     if override:
         candidate = Path(override) / "scripts" / "alp_cli" / "faultdecode.py"
         if not candidate.is_file():
@@ -205,6 +213,33 @@ def test_project_and_sdk_root_are_accepted_but_unused():
         app, ["--cfsr", "0x8200", "--project", "/tmp/x", "--sdk-root", "/tmp/sdk"]
     )
     assert result.exit_code == 0
+
+
+def test_full_global_flag_set_is_accepted_even_when_meaningless():
+    """The oracle's clap `GlobalArgs` are `global = true`, so `faultdecode`
+    accepts `--board-yaml`/`--target`/`--all`/`--verbose`/`--quiet`/
+    `--non-interactive`/`--ci` even though it never reads any of them --
+    confirmed live: `tan.exe faultdecode --sdk-root <bad> --board-yaml x
+    --target t --all --verbose --quiet --non-interactive --ci --cfsr
+    0x8200` is a forwarder-shaped SDK-root-unresolved refusal, not a parse
+    error, on the oracle; this port's native `faultdecode` needs no SDK root
+    at all (see the module docstring) so the SAME argv succeeds outright.
+    Regression for the Click "No such option" usage error (exit 2) this
+    port used to raise for each of these instead (tan-cli#256)."""
+    result = runner.invoke(
+        app,
+        [
+            "--board-yaml", "x.yaml",
+            "--target", "zephyr-conf",
+            "--all",
+            "--verbose",
+            "--quiet",
+            "--non-interactive",
+            "--ci",
+            "--cfsr", "0x8200",
+        ],
+    )
+    assert result.exit_code == 0, result.output
 
 
 def test_format_json_after_subcommand_is_equivalent_to_json_flag():

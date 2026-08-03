@@ -18,23 +18,34 @@ where they need to observe or control the spawn's outcome. The one path this
 file cannot prove is that a REAL board's bytes make it to the terminal; that
 needs a bench with a device on it.
 
-**pyserial may or may not be installed, and both shapes are legitimate.**
-`ci.yml` installs `-e ./python` with NO extras on purpose -- that is the shape
-a customer's `pip install alp-tan` gives, and the only one in which
-`tests/gates/test_declared_dependencies.py` can catch an extras-only import
-escaping to module scope -- while `python-binaries.yml` and `parity.yml`
-install `[monitor]`. So the cases that need pyserial for real carry
-`@needs_pyserial` and SKIP in the extras-less shape rather than fail; the ones
-that assert the pyserial-ABSENT behaviour are deliberately NOT gated, since
-that behaviour is the whole point of them and they simulate the absence
-themselves. Adding the extra to `ci.yml` to make the first group run is the
-wrong repair: it would blind the dependency gate.
+**pyserial may or may not be genuinely installed, and this file does not need
+to know which (tan-cli#255).** `ci.yml` installs `-e ./python` with NO extras
+on purpose -- that is the shape a customer's `pip install alp-tan` gives, and
+the only one in which `tests/gates/test_declared_dependencies.py` can catch an
+extras-only import escaping to module scope -- while `python-binaries.yml` and
+`parity.yml` install `[monitor]`. The six cases below that exercise
+`_run_monitor`'s real refusal/spawn logic used to SKIP outright in the
+extras-less shape (`@needs_pyserial`), which silently dropped exactly the
+coverage they were written for on the one install shape `ci.yml` actually
+runs. `_stub_pyserial_if_absent()` replaces that: it plants an empty `serial`
+module in `sys.modules` when the real one is not importable, so
+`_run_monitor`'s precheck (a bare, module-scope `import serial`) succeeds
+either way. That is safe, not a fake pass, because every test that calls it
+also replaces `_available_ports` with a canned list before `_run_monitor` ever
+reaches pyserial's actual API -- a placeholder module with no attributes is
+indistinguishable from the real one to the code under test. Only the tests
+that assert the pyserial-ABSENT behaviour still force the real `ImportError`
+themselves (`_block_pyserial`), since producing that failure honestly is the
+whole point of them. Installing the extra in `ci.yml` instead was considered
+and rejected: it would blind `test_declared_dependencies.py` to the shape a
+bare `pip install alp-tan` actually produces.
 """
 from __future__ import annotations
 
 import importlib.util
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -49,14 +60,17 @@ app.command("monitor")(monitor)
 
 runner = CliRunner()
 
-#: `_run_monitor`'s precheck imports `serial` in-process whenever the spawn
-#: would be THIS interpreter, and `_available_ports` imports it unconditionally,
-#: so every case that gets past either one needs pyserial genuinely importable.
-#: Monkeypatching `_available_ports` is not enough -- the precheck runs first.
-needs_pyserial = pytest.mark.skipif(
-    importlib.util.find_spec("serial") is None,
-    reason="pyserial absent: the optional `monitor` extra is not installed",
-)
+
+def _stub_pyserial_if_absent(monkeypatch) -> None:
+    """Make a bare `import serial` succeed even when pyserial genuinely is not
+    installed, so the test calling this exercises `_run_monitor`'s real logic
+    in every environment `ci.yml` runs in -- not only the `[monitor]` extras
+    shape. `_run_monitor`'s precheck imports `serial` in-process whenever the
+    spawn would be THIS interpreter, and does nothing more with it (the actual
+    port-listing call, `_available_ports`, is always monkeypatched away by the
+    caller before this matters), so a bare placeholder module satisfies it."""
+    if importlib.util.find_spec("serial") is None:
+        monkeypatch.setitem(sys.modules, "serial", types.ModuleType("serial"))
 
 
 @pytest.fixture(autouse=True)
@@ -79,8 +93,8 @@ def envelope(result):
     return json.loads(result.stdout)
 
 
-@needs_pyserial
 def test_no_port_given_lists_available_ports_and_refuses(monkeypatch):
+    _stub_pyserial_if_absent(monkeypatch)
     monkeypatch.setattr(
         monitor_cmd, "_available_ports", lambda: [("COM7", "USB Serial"), ("COM8", "")]
     )
@@ -97,8 +111,8 @@ def test_no_port_given_lists_available_ports_and_refuses(monkeypatch):
     ]
 
 
-@needs_pyserial
 def test_no_port_given_and_none_detected_says_so(monkeypatch):
+    _stub_pyserial_if_absent(monkeypatch)
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [])
     result = runner.invoke(app, ["--format", "json"])
     assert result.exit_code == 1
@@ -107,8 +121,8 @@ def test_no_port_given_and_none_detected_says_so(monkeypatch):
     assert doc["data"]["availablePorts"] == []
 
 
-@needs_pyserial
 def test_port_not_in_the_detected_list_refuses(monkeypatch):
+    _stub_pyserial_if_absent(monkeypatch)
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
     result = runner.invoke(app, ["--port", "COM9", "--format", "json"])
     assert result.exit_code == 1
@@ -117,8 +131,8 @@ def test_port_not_in_the_detected_list_refuses(monkeypatch):
     assert "'COM9' not found" in doc["issues"][0]["message"]
 
 
-@needs_pyserial
 def test_a_present_port_spawns_miniterm_and_reports_success(monkeypatch):
+    _stub_pyserial_if_absent(monkeypatch)
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
 
     captured = {}
@@ -173,11 +187,11 @@ def test_frozen_interpreter_spawns_a_path_python_not_sys_executable(monkeypatch)
     assert captured["argv"][0] != sys.executable
 
 
-@needs_pyserial
 def test_a_nonzero_miniterm_exit_maps_to_runtime_failure_not_the_raw_code(monkeypatch):
     """Mirrors the shipped Rust forwarder's `s.code().unwrap_or(1)` ->
     `ExitCode::RuntimeFailure` mapping -- NOT the oracle's literal
     `raise SystemExit(rc)`."""
+    _stub_pyserial_if_absent(monkeypatch)
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
 
     captured = {}
@@ -200,11 +214,11 @@ def test_a_nonzero_miniterm_exit_maps_to_runtime_failure_not_the_raw_code(monkey
     assert captured["argv"][0] == sys.executable
 
 
-@needs_pyserial
 def test_default_baud_is_the_sdk_wide_console_default(monkeypatch):
     """`--baud` omitted must fall back to `DEFAULT_BAUD` (115200), matching
     the oracle's `monitor.py::DEFAULT_BAUD` -- a silent drift here garbles
     every console session on the bench."""
+    _stub_pyserial_if_absent(monkeypatch)
     monkeypatch.setattr(monitor_cmd, "_available_ports", lambda: [("COM7", "")])
 
     captured = {}

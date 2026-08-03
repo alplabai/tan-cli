@@ -160,24 +160,28 @@ def test_text_and_json_formats_are_unchanged(tmp_path, monkeypatch):
     assert envelope["data"]["outcome"] == "clean"
 
 
-def test_validate_without_offline_is_runtime_failure_not_internal(tmp_path, monkeypatch):
+def test_validate_without_offline_is_validation_failure_not_internal(tmp_path, monkeypatch):
     """A `tan validate` without `--offline`, on a project whose board.yaml
     EXISTS, cannot produce a real verdict -- the spawn path is not ported yet
     -- but that is not a tan bug, so it must not exit 5.
 
-    Exit 1 here is a deliberate DEFERRAL (tan-cli#262), NOT a match to the
-    oracle. An earlier revision of this docstring claimed the oracle returns 1
-    for this case; that was never measured, and it is false. Measured on
-    `tan 0.4.1-dev` with `--format json`: board.yaml present but no SDK root
-    exits **2** `validate.sdk-root-unresolved`. Closing that gap needs the real
-    spawn path, which is what #262 tracks. What IS aligned with the oracle is
-    the missing-board.yaml guard -- see the test below."""
+    tan-cli#262 (v0.6.0, TAKEN): exit 2, not exit 1. "No verdict available" is
+    still the VALIDATOR's problem, not a tan runtime crash -- alp-sdk-vscode
+    renders exit 2 as "warning" and exit 1 as "error", so a failing project
+    used to show red instead of yellow. This is a DELIBERATE divergence from
+    the oracle's own `Outcome::Failed -> RuntimeFailure` mapping
+    (`crates/tan-cli/src/commands/validate.rs:60`), not a parity claim -- see
+    `validate_cmd.py`'s module docstring for the full measured comparison.
+    Measured on `tan 0.4.1-dev` with `--format json`: board.yaml present but
+    no SDK root exits 2 `validate.sdk-root-unresolved` (a different guard this
+    port doesn't implement yet; not what this test pins). What IS aligned with
+    the oracle is the missing-board.yaml guard -- see the test below."""
     monkeypatch.chdir(tmp_path)
     _write(tmp_path, "som:\n  sku: E1M-AEN701\npreset: e1m-evk\n")
     result = runner.invoke(app, ["validate", "--format", "json"])
-    assert result.exit_code == int(ExitCode.RUNTIME_FAILURE), result.output
+    assert result.exit_code == int(ExitCode.VALIDATION_FAILURE), result.output
     envelope = json.loads(result.output)
-    assert envelope["exitCode"] == int(ExitCode.RUNTIME_FAILURE)
+    assert envelope["exitCode"] == int(ExitCode.VALIDATION_FAILURE)
     assert [i["code"] for i in envelope["issues"]] == ["validate.spawn-not-implemented"]
 
 

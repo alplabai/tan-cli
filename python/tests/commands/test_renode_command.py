@@ -94,7 +94,16 @@ def _write_fake_renode(
         body += f"print({line!r})\n"
     body += f"sys.exit({exit_code})\n"
     impl.write_text(body, encoding="utf-8")
+    _write_renode_wrapper(bin_dir, impl)
 
+
+def _write_renode_wrapper(bin_dir: Path, impl: Path) -> None:
+    """The `renode`/`renode.cmd` launcher shim shared by every fake-binary
+    helper in this file: shells out to THIS SAME Python interpreter via its
+    full `sys.executable` path rather than an external tool resolved
+    through PATH, because `run_renode_cmd` overrides the child's PATH to
+    just the fake bin dir (`path_override`) -- a bare external command would
+    fail to resolve there."""
     python = sys.executable
     if os.name == "nt":
         script = bin_dir / "renode.cmd"
@@ -105,6 +114,76 @@ def _write_fake_renode(
         script = bin_dir / "renode"
         script.write_text(f'#!/bin/sh\nexec "{python}" "{impl}"\n', encoding="utf-8")
         os.chmod(script, 0o755)
+
+
+def _write_fake_sim_renode(
+    bin_dir: Path,
+    *,
+    preamble: list[str] | None = None,
+    exit_after_s: float | None = None,
+    exit_code: int = 0,
+) -> None:
+    """A fake `renode` on PATH for `--sim-mode` tests: an interactive stub
+    that answers just enough of the monitor line protocol for
+    `RenodeMonitor.drain_boot`/`command` and a real control-socket round
+    trip to work, so `renode_cmd.py`'s sim IO (bind/spawn/monitor/serve/
+    teardown, and the post-spawn `renode.sim-exited-early` /
+    `renode.cpu-halted` outcomes) is reachable without a real Renode
+    install.
+
+    Understands: `echo "TOKEN"` (prints `TOKEN` -- the sentinel protocol
+    every `RenodeMonitor.command` relies on), `quit` (exits 0), `sysbus
+    WriteByte <addr> <val>` / `sysbus ReadBytes <addr> <count>` (a tiny
+    byte-addressed memory, mirroring `_FakeMonitor` in
+    `tests/core/test_renode_sim.py`), and silently ignores anything else
+    (so `version`, the initial `-e "i @..."` boot argv, etc. never wedge
+    the loop).
+
+    `preamble` lines are printed UNPROMPTED before the command loop starts
+    -- used to inject an async `CPU was halted` line the way real Renode's
+    own boot chatter would. `exit_after_s` starts a BACKGROUND timer that
+    exits `exit_code` that many seconds after startup regardless of the
+    (still-running, still-answering) command loop -- used to reproduce
+    `renode.sim-exited-early` on a session whose `drain_boot` already
+    succeeded, distinct from `renode.sim-monitor-failed` (which fires when
+    the child is gone before `drain_boot` ever gets a reply).
+    """
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    impl = bin_dir / "_fake_sim_renode_impl.py"
+    preamble_src = "\n".join(f"print({line!r}); sys.stdout.flush()" for line in (preamble or []))
+    timer_src = (
+        f"threading.Thread(target=lambda: (time.sleep({exit_after_s}), os._exit({exit_code})), "
+        "daemon=True).start()\n"
+        if exit_after_s is not None
+        else ""
+    )
+    body = f'''\
+import os, sys, time, threading
+
+{preamble_src}
+{timer_src}
+mem = {{}}
+while True:
+    raw = sys.stdin.readline()
+    if not raw:
+        break
+    s = raw.rstrip("\\r\\n").strip()
+    if s.startswith('echo "') and s.endswith('"'):
+        print(s[6:-1]); sys.stdout.flush(); continue
+    if s == "quit":
+        sys.exit(0)
+    parts = s.split()
+    if len(parts) == 4 and parts[0] == "sysbus" and parts[1] == "WriteByte":
+        mem[int(parts[2], 0)] = int(parts[3], 0) & 0xFF
+        continue
+    if len(parts) == 4 and parts[0] == "sysbus" and parts[1] == "ReadBytes":
+        addr, count = int(parts[2], 0), int(parts[3], 0)
+        body = ", ".join(f"0x{{mem.get(addr + i, 0):02X}}" for i in range(count))
+        print(f"[\\n{{body}}, \\n]"); sys.stdout.flush(); continue
+    continue
+'''
+    impl.write_text(body, encoding="utf-8")
+    _write_renode_wrapper(bin_dir, impl)
 
 
 def _write_unspawnable_binary(bin_dir: Path) -> None:
@@ -304,16 +383,18 @@ def test_multiple_zephyr_slices_without_core_is_a_coded_refusal(tmp_path: Path):
     assert "--core" in envelope["issues"][0]["message"]
 
 
-def test_sim_mode_is_a_click_usage_error_not_a_silent_no_op(tmp_path: Path):
-    """`--sim-mode` is deliberately NOT ported here (see the module docstring
-    in `renode_cmd.py`): the flag is simply not declared, so Click refuses it
-    outright rather than accepting it and doing nothing, or doing something
-    half-implemented."""
+def test_sim_mode_without_image_bundle_is_a_coded_refusal(tmp_path: Path):
+    """`--sim-mode` IS ported (tan-cli#77): it requires `--image-bundle`, and
+    refuses with a coded issue -- never a Click usage error, never a silent
+    no-op -- when it is missing."""
     _scaffold(tmp_path, with_elf=True, with_descriptors=True)
-    exit_code, stdout, stderr = run_renode_cmd(tmp_path, "--sim-mode", path_override="")
-    assert exit_code == 2
-    assert stdout == ""
-    assert "--sim-mode" in stderr
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path, "--sim-mode", "--format", "json", path_override=""
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.sim-bundle-required"
+    assert "--image-bundle" in envelope["issues"][0]["message"]
 
 
 def test_one_json_document_on_stdout_nothing_else(tmp_path: Path):
@@ -568,3 +649,353 @@ def test_run_failed_still_reports_the_argv_that_could_not_be_started(tmp_path: P
     assert exit_code == 1
     assert envelope["issues"][0]["code"] == "renode.run-failed"
     assert len(envelope["data"]["renodeArgv"]) == 10
+
+
+# ── --sim-mode (tan-cli#77): the studio hardware-simulator gateway ──────────
+#
+# Every envelope shape and stream-separation assertion below was diff-verified
+# by driving the shipped `tan.exe` oracle live through the full `--sim-mode`
+# pipeline (see `renode_cmd.py`'s module docstring) -- not inferred from
+# `sim.rs`/`monitor.rs` alone.
+
+
+def _scaffold_sim_bundle(
+    work: Path, *, manifest: str | None = None, with_elf: bool = True
+) -> Path:
+    """An SDK checkout (loader script + the V2N101 Renode descriptor) plus an
+    `--image-bundle` directory under `work`. Returns the bundle dir."""
+    (work / "sdk" / "scripts").mkdir(parents=True, exist_ok=True)
+    (work / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    renode_dir = work / "sdk" / "metadata" / "renode"
+    renode_dir.mkdir(parents=True, exist_ok=True)
+    (renode_dir / "renesas_rzv2n.repl").write_bytes(b"")
+    (renode_dir / "renesas_rzv2n.resc").write_bytes(b"")
+    bundle = work / "bundle"
+    bundle.mkdir(exist_ok=True)
+    if manifest is not None:
+        (bundle / "system-manifest.yaml").write_text(manifest, encoding="utf-8", newline="")
+    if with_elf:
+        (bundle / "app.elf").write_bytes(b"")
+    return bundle
+
+
+def test_sim_bundle_missing_dir_is_a_coded_refusal(tmp_path: Path):
+    _scaffold_sim_bundle(tmp_path)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "nope",
+        "--format",
+        "json",
+        path_override="",
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.sim-bundle-missing"
+
+
+def test_sim_mode_sku_unresolved_without_board_or_manifest(tmp_path: Path):
+    _scaffold_sim_bundle(tmp_path)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--format",
+        "json",
+        path_override="",
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.sku-unresolved"
+    assert "--board" in envelope["issues"][0]["message"]
+
+
+def test_sim_mode_elf_missing_names_what_was_looked_for(tmp_path: Path):
+    _scaffold_sim_bundle(tmp_path, with_elf=False)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--format",
+        "json",
+        path_override="",
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.elf-missing"
+    assert "zephyr.elf" in envelope["issues"][0]["message"]
+
+
+def test_sim_mode_binary_missing_reports_the_plain_mode_log_path_default(tmp_path: Path):
+    """The oracle-verified divergence: a pre-flight sim failure up to and
+    including `renode.binary-missing` reports `data.logPath` as the PLAIN
+    smoke's OWN default (`<app_path>/build/renode.log`), because the
+    sim-specific default is only resolved much later -- see the module
+    docstring in `renode_cmd.py`."""
+    _scaffold_sim_bundle(tmp_path)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--format",
+        "json",
+        path_override="",
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.binary-missing"
+    log_path = envelope["data"]["logPath"].replace("\\", "/")
+    assert log_path.endswith("build/renode.log"), log_path
+    # Resolved BEFORE the binary gate: sku/platformStem/repl/elf all report.
+    assert envelope["data"]["sku"] == "E1M-V2N101"
+    assert envelope["data"]["platformStem"] == "renesas_rzv2n"
+    assert envelope["data"]["elf"] != ""
+    # Not yet resolved (post-binary-gate): the sim-only fields stay empty/0.
+    assert envelope["data"]["descriptor"] == ""
+    assert envelope["data"]["controlPort"] == 0
+    assert envelope["data"]["uartPort"] == 0
+
+
+def test_sim_mode_descriptor_missing_when_the_repl_is_absent(tmp_path: Path):
+    (tmp_path / "sdk" / "scripts").mkdir(parents=True)
+    (tmp_path / "sdk" / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "app.elf").write_bytes(b"")
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--format",
+        "json",
+        path_override="",
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.descriptor-missing"
+
+
+def test_sim_mode_success_writes_descriptor_and_serves_control_socket(tmp_path: Path):
+    """The full happy path: pre-flight resolves, the descriptor + boot
+    script land on disk with the right shape, the control socket answers a
+    real WriteBytes/ReadBytes round trip while the run is live, and the
+    envelope reports success with only the deferred-profile warning."""
+    import socket
+
+    bundle = _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(fake_bin)
+
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _HARNESS,
+            "--sdk-root",
+            "./sdk",
+            "--sim-mode",
+            "--image-bundle",
+            "bundle",
+            "--board",
+            "E1M-V2N101",
+            "--timeout",
+            "6",
+            "--format",
+            "json",
+        ],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "HOME": str(tmp_path),
+            "USERPROFILE": str(tmp_path),
+            "PATH": str(fake_bin),
+            "PYTHONPATH": str(PACKAGE_ROOT),
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+        errors="replace",
+    )
+    try:
+        descriptor_path = bundle / "sim-descriptor.json"
+        deadline = time.monotonic() + 15
+        while not descriptor_path.is_file() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+        assert list(descriptor.keys()) == [
+            "control_socket",
+            "uart_socket",
+            "framebuffers",
+            "peripherals",
+        ]
+        control_port = int(descriptor["control_socket"].rsplit(":", 1)[1])
+
+        with socket.create_connection(("127.0.0.1", control_port), timeout=5) as sock:
+            reader = sock.makefile("rb")
+
+            def send(line: str) -> str:
+                sock.sendall((line + "\n").encode())
+                return reader.readline().decode().rstrip("\r\n")
+
+            assert send("sysbus WriteBytes 0x08010000 0xde 0xad 0xbe 0xef") == "ok"
+            assert send("sysbus ReadBytes 0x08010000 4") == "0xde 0xad 0xbe 0xef"
+
+        # The UART socket is deferred-SILENT but must stay CONNECTED: studio's
+        # serial view has to open and simply stay empty, never fail to connect
+        # and never see an EOF. Mirrors the oracle's own
+        # `uart_socket_accepts_and_holds_the_connection_open_while_silent`
+        # (crates/tan-cli/src/commands/renode/sim.rs), which had no Python
+        # counterpart -- `_serve_uart_silent` could drop every connection with
+        # the whole suite still green.
+        uart_port = int(descriptor["uart_socket"].rsplit(":", 1)[1])
+        with socket.create_connection(("127.0.0.1", uart_port), timeout=5) as uart:
+            uart.settimeout(0.25)
+            uart_deadline = time.monotonic() + 2
+            while time.monotonic() < uart_deadline:
+                try:
+                    chunk = uart.recv(16)
+                except TimeoutError:
+                    continue  # connected-and-silent: the only correct outcome
+                assert chunk != b"", (
+                    "the UART socket closed the connection instead of holding it open"
+                )
+                raise AssertionError(
+                    f"the UART socket streamed {len(chunk)} bytes; the streamer "
+                    "is deferred (tan-cli#77)"
+                )
+
+        resc_text = (bundle / ".sim-boot.resc").read_text(encoding="utf-8")
+        assert 'mach create "v2n_sim"' in resc_text
+        assert "sysbus LoadELF" in resc_text
+
+        stdout, stderr = proc.communicate(timeout=20)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=10)
+
+    assert proc.returncode == 0, (stdout, stderr)
+    assert "tan renode --sim-mode: ready (timeout 6s)." in stderr
+    envelope = json.loads(stdout)
+    assert envelope["ok"] is True
+    assert envelope["exitCode"] == 0
+    assert envelope["data"]["sku"] == "E1M-V2N101"
+    assert envelope["data"]["descriptor"] == str(descriptor_path)
+    assert envelope["data"]["controlPort"] == control_port
+    assert envelope["data"]["uartPort"] != 0
+    assert [i["code"] for i in envelope["issues"]] == ["renode.sim-profile-deferred"]
+
+
+def test_sim_mode_text_mode_prints_the_header_immediately_to_stdout(tmp_path: Path):
+    """The header lines (sku/elf, descriptor, control, uart, the deferred
+    warning) and the readiness marker print DIRECTLY to stdout in text
+    mode, not buffered until the run ends -- verified stream-separated
+    against the oracle."""
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(fake_bin)
+    exit_code, stdout, stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "1",
+        path_override=str(fake_bin),
+    )
+    assert exit_code == 0, stderr
+    assert "tan renode --sim-mode: E1M-V2N101 booting app.elf" in stdout
+    assert "descriptor :" in stdout
+    assert "control    :" in stdout
+    assert "uart       :" in stdout
+    assert "tan-cli#77" in stdout  # the deferred-profile warning, printed too
+    assert "ready (timeout 1s)" in stdout
+    assert stderr == ""
+
+
+def test_sim_mode_cpu_halted_is_latched_even_though_the_session_comes_up(tmp_path: Path):
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(
+        fake_bin,
+        preamble=["cpu: PC does not lay in memory or PC and SP are equal to zero. CPU was halted."],
+    )
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "1",
+        "--format",
+        "json",
+        path_override=str(fake_bin),
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    codes = [i["code"] for i in envelope["issues"]]
+    assert "renode.cpu-halted" in codes
+
+
+def test_sim_mode_exited_early_after_drain_boot_succeeded(tmp_path: Path):
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(fake_bin, exit_after_s=1.0, exit_code=9)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "5",
+        "--format",
+        "json",
+        path_override=str(fake_bin),
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 1
+    assert envelope["issues"][0]["code"] == "renode.sim-exited-early"
+    assert "exit code 9" in envelope["issues"][0]["message"]
+
+
+def test_sim_mode_expect_is_ignored_with_an_info_issue(tmp_path: Path):
+    _scaffold_sim_bundle(tmp_path)
+    fake_bin = tmp_path / "fakebin"
+    _write_fake_sim_renode(fake_bin)
+    exit_code, stdout, _stderr = run_renode_cmd(
+        tmp_path,
+        "--sim-mode",
+        "--image-bundle",
+        "bundle",
+        "--board",
+        "E1M-V2N101",
+        "--timeout",
+        "1",
+        "--expect",
+        "NEVER-SCANNED",
+        "--format",
+        "json",
+        path_override=str(fake_bin),
+    )
+    envelope = json.loads(stdout)
+    assert exit_code == 0, envelope
+    codes = [i["code"] for i in envelope["issues"]]
+    assert "renode.expect-ignored" in codes
+    assert "renode.sim-profile-deferred" in codes

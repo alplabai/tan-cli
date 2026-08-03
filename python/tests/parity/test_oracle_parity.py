@@ -563,10 +563,14 @@ def test_validate_board_yaml_missing_guard_matches_the_oracle_at_exit_2(work_dir
 @LIVE_GATE
 def test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     """`board.yaml` present, no SDK resolvable: the oracle's pre-spawn guard
-    answers exit 2 `validate.sdk-root-unresolved`; the port answers exit 1
+    answers exit 2 `validate.sdk-root-unresolved`; the port answers exit 2
     `validate.spawn-not-implemented` (the full spawn path is simply not
     ported yet) -- the genuine, tracked divergence `validate_cmd.py`'s own
-    docstring calls tan-cli#262. Pinned as a KNOWN divergence, following the
+    docstring calls tan-cli#262. Both exit 2 since #262 landed: the port moved
+    off exit 1 deliberately ("no verdict available" is the VALIDATOR's verdict,
+    not a tan crash), so only the issue code is the real divergence now. Both
+    stay pinned rather than narrowed to "issue code only", which would hide
+    that coincidence going away. Pinned as a KNOWN divergence, following the
     same exclude-and-pin convention `test_init_sdk_root_flag_pin_is_a_known_
     divergence_from_the_oracle` above uses, rather than asserted as parity
     that does not exist.
@@ -582,7 +586,7 @@ def test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle(work_dir, t
     r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=(work_dir, home))
     p_code, p_out = _run(python_command(), argv, work_dir, home)
     assert (r_code, [i["code"] for i in r_out["issues"]]) == (2, ["validate.sdk-root-unresolved"])
-    assert (p_code, [i["code"] for i in p_out["issues"]]) == (1, ["validate.spawn-not-implemented"])
+    assert (p_code, [i["code"] for i in p_out["issues"]]) == (2, ["validate.spawn-not-implemented"])
 
 
 @LIVE_GATE
@@ -866,21 +870,23 @@ def test_model_bare_invocation_is_a_known_divergence_from_the_oracle(work_dir, t
 
 @_ORACLE_REQUIRED
 def test_new_som_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
-    """tan-cli#254. The port's ``new-som`` declares no ``--format`` option at
-    all (only ``--sku``/``--soc-ref``/…/``--force``; confirmed via
-    ``new-som --help``), so ``--format json`` never reaches a
-    ``new-som``-shaped envelope -- Click raises a USAGE error the ROOT
-    handler wraps as ``command: "cli"`` / ``cli.parse-error`` instead, where
-    the oracle's own ``--format json`` reaches a real ``command: "new-som"``
-    refusal (``new-som.failed``, exit 2). Even the bare, ``--format``-free
-    invocation both sides genuinely answer disagrees: exit 2 vs exit 1, and
-    the message is not the same sentence reworded -- the port adds a
-    ``git clone`` suggestion the oracle never had."""
+    """tan-cli#254. The port's ``new-som`` DOES accept ``--format`` (a hidden,
+    unread option mirroring clap's ``global = true`` GlobalArgs), but it is
+    not in ``cli.py``'s ``_HONOURS_ROOT_FORMAT``, so ``--format json`` still
+    never reaches a ``new-som``-shaped envelope -- ``root`` wraps the run in
+    its generic ``command: "cli"`` / ``cli.parse-error`` envelope instead,
+    where the oracle's own ``--format json`` reaches a real
+    ``command: "new-som"`` refusal (``new-som.failed``, exit 2). The bare,
+    ``--format``-free invocation now AGREES at exit 2 on both sides: the
+    port's SDK-root-unresolved preflight moved off the flat exit 1 onto the
+    forwarder's own ``ValidationFailure``. What still differs there is the
+    wording alone -- the port adds a ``git clone`` suggestion the oracle
+    never had."""
     home = tmp_path / "home"
     r_code, _ = _run([RUST], ["new-som"], work_dir, home)
     p_code, _ = _run(python_command(), ["new-som"], work_dir, home)
     assert r_code == 2
-    assert p_code == 1
+    assert p_code == 2
     _, r_json_out = _run([RUST], ["new-som", "--format", "json"], work_dir, home)
     _, p_json_out = _run(python_command(), ["new-som", "--format", "json"], work_dir, home)
     assert r_json_out["command"] == "new-som"

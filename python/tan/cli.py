@@ -26,17 +26,14 @@ from tan.commands.bootstrap_cmd import bootstrap
 from tan.commands.build_cmd import build
 from tan.commands.clean_cmd import clean
 from tan.commands.debug_config_cmd import debug_config
-from tan.commands.deferred_cmd import (
-    DEFERRED_CONTEXT_SETTINGS,
-    DEFERRED_VERBS,
-    completion,
-    diff,
-    inspect,
-    pinmux,
-    scaffold,
-    support_bundle,
-    trace,
-)
+from tan.commands.completion_cmd import completion
+from tan.commands.diff_cmd import diff
+from tan.commands.inspect_cmd import inspect
+from tan.commands.pinmux_cmd import pinmux
+from tan.commands.scaffold_cmd import scaffold
+from tan.commands.support_bundle_cmd import support_bundle
+from tan.commands.trace_cmd import trace
+from tan.commands.deferred_cmd import DEFERRED_CONTEXT_SETTINGS
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain
@@ -78,9 +75,9 @@ app = typer.Typer(add_completion=False)
 app.command("bootstrap")(bootstrap)
 app.command("build")(build)
 app.command("clean")(clean)
-app.command("completion", context_settings=DEFERRED_CONTEXT_SETTINGS)(completion)
+app.command("completion")(completion)
 app.command("debug-config")(debug_config)
-app.command("diff", context_settings=DEFERRED_CONTEXT_SETTINGS)(diff)
+app.command("diff")(diff)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("explain")(explain)
@@ -89,23 +86,23 @@ app.command("flash")(flash)
 app.command("generate")(generate)
 app.command("image")(image)
 app.command("init")(init)
-app.command("inspect", context_settings=DEFERRED_CONTEXT_SETTINGS)(inspect)
+app.command("inspect")(inspect)
 app.command("kconfig")(kconfig)
 app.command("lock", context_settings=FORWARD_CONTEXT_SETTINGS)(lock)
 app.command("migrate", context_settings=FORWARD_CONTEXT_SETTINGS)(migrate)
 app.command("model")(model)
 app.command("monitor")(monitor)
 app.command("new-som")(new_som)
-app.command("pinmux", context_settings=DEFERRED_CONTEXT_SETTINGS)(pinmux)
+app.command("pinmux")(pinmux)
 app.command("presets")(presets)
 app.command("quality", context_settings=FORWARD_CONTEXT_SETTINGS)(quality)
 app.command("renode")(renode)
 app.command("run")(run)
-app.command("scaffold", context_settings=DEFERRED_CONTEXT_SETTINGS)(scaffold)
+app.command("scaffold")(scaffold)
 app.command("sdk")(sdk)
 app.command("size")(size)
-app.command("support-bundle", context_settings=DEFERRED_CONTEXT_SETTINGS)(support_bundle)
-app.command("trace", context_settings=DEFERRED_CONTEXT_SETTINGS)(trace)
+app.command("support-bundle")(support_bundle)
+app.command("trace")(trace)
 app.command("validate")(validate)
 
 #: Every registered subcommand name -- must track the `app.command(...)` calls
@@ -304,7 +301,25 @@ def _emit_help_envelope(argv: list[str]) -> int:
 #: that module exists to eliminate. Each stub reads `ctx.obj["format"]` (see
 #: `deferred_cmd.py`).
 _HONOURS_ROOT_FORMAT = frozenset(
-    {"debug-config", "flash", "image", "size", "faultdecode", *DEFERRED_VERBS}
+    {
+        "debug-config",
+        "flash",
+        "image",
+        "size",
+        "faultdecode",
+        # tan-cli#260's seven, listed by name since they were ported and
+        # `deferred_cmd.DEFERRED_VERBS` no longer exists. Every one of them
+        # reads `ctx.obj["format"]` the way `debug_config_cmd.py` does, so
+        # every one belongs here -- the set is unchanged from when the tuple
+        # supplied it, only spelled out.
+        "completion",
+        "diff",
+        "inspect",
+        "pinmux",
+        "scaffold",
+        "support-bundle",
+        "trace",
+    }
 )
 
 

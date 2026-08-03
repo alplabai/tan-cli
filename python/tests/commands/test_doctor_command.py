@@ -500,10 +500,24 @@ def test_west_resolved_reproduces_and_closes_tan_cli_123(tmp_path):
         # every DLL that sits beside the real interpreter alongside the
         # renamed copy closes that gap; `--version` then runs the copied
         # interpreter's own, always-parseable banner.
-        interpreter_dir = Path(sys.executable).parent
+        #
+        # tan-cli#297: the source must be the BASE interpreter
+        # (`sys.base_prefix`), never `sys.executable` as such. When pytest
+        # itself runs from a project venv (`.venv\Scripts\python.exe`),
+        # `sys.executable` names a launcher stub that ships with NO sibling
+        # DLLs at all (they stay in the base install) and needs its own
+        # `pyvenv.cfg` to find them -- reproduced directly: copying that stub
+        # elsewhere and running `--version` fails outright with "No pyvenv.cfg
+        # file" (exit 106), never a parseable banner, which is exactly the
+        # "west.exe version-banner assertion" failure this closes. Reading
+        # `sys.base_prefix` instead is a no-op when pytest already runs from a
+        # base install (this host: `sys.executable == sys.base_prefix`), and
+        # resolves to the same self-contained layout either way.
+        interpreter_dir = Path(sys.base_prefix)
+        base_python = interpreter_dir / "python.exe"
         for dll in interpreter_dir.glob("*.dll"):
             shutil.copy(dll, bin_dir / dll.name)
-        shutil.copy(sys.executable, west_path)
+        shutil.copy(base_python, west_path)
     else:
         west_path.write_text("#!/bin/sh\necho 'West version: v99.98.97'\n", encoding="utf-8")
         os.chmod(west_path, 0o755)
@@ -1686,6 +1700,121 @@ def test_collect_names_no_unselected_candidate_when_discovery_itself_answered(tm
     assert "was not selected" not in check.detail
 
 
+# --------------------------------------------------------------------------
+# tan-cli#344 -- a dangling `~/.alp/sdk-default` is a distinct fact from
+# "nothing configured": falling through stays correct, exit 4 stays correct,
+# only the `sdk` check's remedy text changes.
+# --------------------------------------------------------------------------
+
+
+def test_broken_global_default_is_none_when_nothing_is_configured():
+    assert doctor_cmd._broken_global_default() is None
+
+
+def test_broken_global_default_is_none_when_the_pointer_resolves(tmp_path):
+    target = _make_sdk_root(tmp_path / "alp-sdk")
+    _write_global_default_pointer(target)
+    assert doctor_cmd._broken_global_default() is None
+
+
+def test_broken_global_default_names_the_dangling_target(tmp_path):
+    broken_target = tmp_path / "gone"
+    _write_global_default_pointer(broken_target)
+    assert doctor_cmd._broken_global_default() == str(broken_target)
+
+
+def test_sdk_check_names_a_broken_global_default_distinctly_from_nothing_configured(
+    tmp_path,
+):
+    """The exact tan-cli#344 defect: before this, both cases printed the
+    identical `NO_SDK_NEXT_STEPS` sentence. The remedy must name the pointer
+    path, offer to delete or hand-edit it (never `tan sdk switch`, which
+    refuses outright per tan-cli#305), and still offer `--sdk-root`."""
+    broken_target = tmp_path / "gone"
+
+    nothing_configured = doctor_cmd.sdk_check(None, project_scope=None)
+    broken_default = doctor_cmd.sdk_check(
+        None, project_scope=None, broken_global_default=str(broken_target)
+    )
+
+    assert nothing_configured.status == broken_default.status == "fail"
+    assert nothing_configured.detail != broken_default.detail
+
+    assert str(broken_target) in broken_default.detail
+    assert str(broken_target) not in nothing_configured.detail
+
+    # tan-cli#305: never recommend the refused `sdk switch` subcommand.
+    assert "sdk switch" not in broken_default.detail
+    assert "sdk switch" not in broken_default.fix
+    assert "delete" in broken_default.fix
+    assert "--sdk-root" in broken_default.fix
+
+    # The plain "nothing configured" sentence is untouched.
+    assert "get an alp-sdk checkout" in nothing_configured.detail
+
+
+def test_sdk_check_ignores_broken_global_default_once_something_else_resolves():
+    """`broken_global_default` only matters in the `sdk_root is None` branch
+    -- a resolved SDK's `pass` detail must not change shape just because a
+    stale default also happens to be lying around."""
+    check = doctor_cmd.sdk_check(
+        "/opt/alp-sdk", project_scope=None, broken_global_default="/gone"
+    )
+    assert check.status == "pass"
+    assert check.detail == "alp-sdk at /opt/alp-sdk"
+
+
+def test_collect_names_a_broken_global_default_end_to_end(tmp_path):
+    """tan-cli#344 through the whole pipeline: `resolve_sdk_root_ladder`
+    falls through the broken pointer to `none` (UNCHANGED behaviour), while
+    `_collect`'s `sdk` check now says why."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    broken_target = tmp_path / "gone"
+    _write_global_default_pointer(broken_target)
+
+    resolved_root, tier, broken_pin = doctor_cmd.resolve_sdk_root_ladder(None, workspace)
+    assert resolved_root is None
+    assert tier == "none"
+    assert broken_pin is None  # this is the GLOBAL default, not the project pin
+
+    checks = doctor_cmd._collect(
+        None,
+        workspace_root=str(workspace),
+        sdk_tier=tier,
+        broken_global_default=doctor_cmd._broken_global_default(),
+    )
+    sdk = next(c for c in checks if c.name == "sdk")
+    assert sdk.status == "fail"
+    assert str(broken_target) in sdk.detail
+
+
+def test_doctor_names_a_broken_global_default_end_to_end_via_the_cli(tmp_path):
+    """Real subprocess, real envelope: the exit code (4) and the fall-through
+    (no SDK selected) are both unchanged from before tan-cli#344; only the
+    `sdk` check's `detail`/`fix` differ."""
+    broken_target = tmp_path / "gone"
+    home = Path(os.environ["USERPROFILE" if os.name == "nt" else "HOME"])
+    pointer = home / ".alp" / "sdk-default"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(
+        json.dumps({"sdkPath": str(broken_target), "updatedAt": "1970-01-01T00:00:00Z"}),
+        encoding="utf-8",
+        newline="",
+    )
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    proc = run_tan("doctor", "--format", "json", cwd=workspace)
+    envelope = json.loads(proc.stdout)
+    assert envelope["exitCode"] == 4
+    sdk = next(c for c in envelope["data"]["checks"] if c["name"] == "sdk")
+    assert sdk["status"] == "fail"
+    assert str(broken_target) in sdk["detail"]
+    assert "sdk switch" not in sdk["fix"]
+    assert "--sdk-root" in sdk["fix"]
+
+
 def test_board_yaml_preflight_check_passes_when_present_regardless_of_selection():
     assert doctor_cmd.board_yaml_preflight_check(True, project_selected=False).status == "pass"
     assert doctor_cmd.board_yaml_preflight_check(True, project_selected=True).status == "pass"
@@ -2142,3 +2271,128 @@ def test_collect_reports_sdk_provenance_only_when_an_sdk_resolves(tmp_path):
 
     with_sdk = doctor_cmd._collect(str(tmp_path), workspace_root=str(tmp_path))
     assert "sdkProvenance" in {c.name for c in with_sdk}
+
+
+# --------------------------------------------------------------------------
+# tan-cli#91 / ADR 0021 -- `doctor --fix` runs the manifest's own install
+# commands for a missing `hostPrerequisites` tool, MAINTAINER DECISION:
+# REFUSE AND PRINT anything needing `sudo`, never spawn it. `run_fix` is fed
+# exactly `hostPrerequisites`'s own `Check.missing` -- never a second,
+# independently recomputed tool/command list.
+# --------------------------------------------------------------------------
+
+
+def test_fix_needs_sudo_check_names_the_command_verbatim_and_never_hints_at_running_it():
+    check = doctor_cmd.fix_needs_sudo_check("git", "sudo apt-get install -y git")
+    assert check.status == "warn"
+    assert check.code == "doctor.fix-needs-sudo"
+    assert "sudo apt-get install -y git" in check.detail
+    assert check.fix == "sudo apt-get install -y git"
+
+
+def test_fix_installed_check_never_claims_the_tool_is_now_on_path():
+    check = doctor_cmd.fix_installed_check("ninja", "winget install -e --id Ninja-build.Ninja")
+    assert check.status == "warn"
+    assert check.code == "doctor.fix-installed"
+    assert "winget install -e --id Ninja-build.Ninja" in check.detail
+    # tan-cli#91: no same-process re-check -- the honest outcome is "reopen
+    # your shell", never a claimed-verified pass.
+    assert "reopen" in check.detail or "new shell" in check.detail
+
+
+def test_run_fix_refuses_a_sudo_command_and_never_spawns_it(monkeypatch):
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("run_fix must never spawn a command needing sudo")
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _must_not_run)
+    monkeypatch.setattr(doctor_cmd, "on_path", _must_not_run)
+
+    results = doctor_cmd.run_fix(
+        [{"tool": "git", "command": "sudo apt-get install -y git"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-needs-sudo"
+
+
+def test_run_fix_runs_a_no_elevation_command_through_the_resolved_binary(monkeypatch, tmp_path):
+    fake_exe = tmp_path / "winget.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        doctor_cmd, "on_path", lambda name: str(fake_exe) if name == "winget" else None
+    )
+    captured = {}
+
+    def _fake_run(argv, **kwargs):
+        captured["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(doctor_cmd.subprocess, "run", _fake_run)
+
+    results = doctor_cmd.run_fix(
+        [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    )
+    assert len(results) == 1
+    assert results[0].code == "doctor.fix-installed"
+    # Resolved through `on_path`, never the bare tool name -- the same
+    # PATH-only resolver every other spawn in this module goes through.
+    assert captured["argv"][0] == str(fake_exe)
+    assert captured["argv"][1:] == ["install", "-e", "--id", "Ninja-build.Ninja"]
+
+
+def test_run_fix_skips_a_tool_with_no_known_install_command():
+    assert doctor_cmd.run_fix([{"tool": "gperf", "command": None}]) == []
+
+
+def test_run_fix_skips_a_tool_it_cannot_resolve_on_path(monkeypatch):
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: None)
+    results = doctor_cmd.run_fix(
+        [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    )
+    assert results == []
+
+
+def test_run_fix_reports_nothing_when_the_install_command_fails(monkeypatch, tmp_path):
+    fake_exe = tmp_path / "winget.exe"
+    fake_exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(doctor_cmd, "on_path", lambda _name: str(fake_exe))
+    monkeypatch.setattr(
+        doctor_cmd.subprocess,
+        "run",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 1),
+    )
+    results = doctor_cmd.run_fix(
+        [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    )
+    # `hostPrerequisites`'s own Fail already names it; a second, vaguer
+    # "something went wrong" notice would only compete with that one.
+    assert results == []
+
+
+def test_doctor_fix_is_disabled_under_ci_non_interactive_and_json(tmp_path):
+    """tan-cli#91: `--fix` must never actually attempt a repair under
+    `--ci`, `--non-interactive`, or `--format json` -- the idiom this
+    codebase already applies to any command that would otherwise mutate the
+    host rather than merely report on it."""
+    for extra in (["--ci"], ["--non-interactive"], []):
+        proc = run_tan(
+            "doctor", "--fix", "--format", "json", *extra, cwd=tmp_path, scrub_path=True
+        )
+        envelope = json.loads(proc.stdout)
+        names = {c["name"] for c in envelope["data"]["checks"]}
+        assert not any(n.startswith("fix:") for n in names), (extra, names)
+        assert not any(
+            i["code"] in ("doctor.fix-needs-sudo", "doctor.fix-installed")
+            for i in envelope["issues"]
+        ), (extra, envelope["issues"])
+
+
+def test_doctor_fix_interactive_with_nothing_resolvable_is_a_safe_no_op(tmp_path):
+    """PATH scrubbed -- every `hostPrerequisites` tool is missing AND
+    unresolvable via `on_path`, so an interactive `--fix` (the guard is
+    satisfied: no `--ci`, no `--non-interactive`, text mode) reaches
+    `run_fix` and finds nothing it can actually run. The report must stay
+    well-formed and the exit code unchanged (still 4 -- `hostPrerequisites`
+    is still failing, `--fix` ran and genuinely fixed nothing)."""
+    proc = run_tan("doctor", "--fix", cwd=tmp_path, scrub_path=True)
+    assert "Traceback" not in proc.stderr
+    assert proc.returncode == 4

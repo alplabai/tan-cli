@@ -227,22 +227,37 @@ tan run --flash                       # build, then run (host) or program (hardw
 `tan doctor` sanity-checks the host: build readiness (SDK, Zephyr workspace,
 west) alongside debug readiness for the selected target/server — the full
 check list runs unconditionally. `--build` is accepted for compatibility
-(both `alp-sdk-vscode` call sites pass it) and changes nothing; `--fix` is
-not yet accepted (tan-cli#295). `tan completion --shell zsh` is deferred in
-this build (see Commands below) and exits 1 rather than emitting a
-completion script.
+(both `alp-sdk-vscode` call sites pass it) and changes nothing. `--fix`
+(ADR 0021, tan-cli#91) runs the SDK manifest's own install command for a
+`hostPrerequisites` tool this host is missing, but only when the command needs
+no elevation (Tier A — `winget`, `brew`, the small POSIX packages); anything
+that needs `sudo` is refused and printed verbatim instead, never run — tan
+never spawns `sudo` itself, since a password prompt has nowhere to go once
+`--format json` has captured stdio, and would hang the process forever rather
+than fail. `--fix` only ever acts in an interactive, non-CI, text-mode run
+(`--ci`, `--non-interactive`, and `--format json` each disable it on their
+own — a repair nobody watched happen is not consent), and it never re-checks
+its own work: this process already read PATH once at start-up, so an install
+landing after that is invisible to it — the honest outcome is "installed;
+reopen your shell", not a claimed-verified pass. `tan completion --shell zsh`
+is deferred in this build (see Commands below) and exits 1 rather than
+emitting a completion script.
 
-`bootstrap` runs natively on Linux, macOS and Windows and needs no `bash`; it
-names the missing prerequisites rather than installing system packages itself.
-The install commands come from the SDK's own `metadata/bootstrap.json`
-(`prerequisites.install`, keyed per OS), not from a table `tan` carries — so
-Windows prints the `winget install` line for a missing `git`/`cmake`/`python`/
-`ninja`, and the JSON envelope's `missingPrerequisites[].command` now carries
-real `apt-get`/`brew` commands on Linux and macOS where it used to be `null` on
+`bootstrap` itself runs natively on Linux, macOS and Windows and needs no
+`bash`; it only ever *names* the missing prerequisites rather than installing
+system packages itself — the executor lives in exactly one place, `doctor
+--fix` above, never in `bootstrap` (ADR 0021: "build my project" must never
+turn into running installs with no escape hatch). The install commands come
+from the SDK's own `metadata/bootstrap.json` (`prerequisites.install`, keyed
+per OS), not from a table `tan` carries — so Windows prints the
+`winget install` line for a missing `git`/`cmake`/`python`/`ninja`, and the
+JSON envelope's `missingPrerequisites[].command` now carries real
+`apt-get`/`brew` commands on Linux and macOS where it used to be `null` on
 every POSIX host. The *printed* POSIX refusal line is deliberately unchanged —
 it stays `bootstrap.sh`'s verbatim, naming the tools and nothing else. An SDK
 too old to carry `prerequisites.install` falls back to the same commands, so no
-host loses one.
+host loses one. The rule across both commands is ADR 0021's: never *require*
+copying a command — not "never print one".
 
 Zephyr and baremetal cores build on every host. Only a project whose cores are
 *all* Yocto is refused off Linux — a mixed board still bootstraps, with a
