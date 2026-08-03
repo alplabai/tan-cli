@@ -400,14 +400,35 @@ def test_current_names_an_unresolvable_project_pin_instead_of_reporting_it_silen
     ]
 
 
-def test_list_refuses_without_online_and_touches_no_network(tmp_path, isolated_home):
+def test_list_without_online_answers_offline_and_touches_no_network(tmp_path, isolated_home):
+    """tan-cli#351: bare `sdk list` is a NORMAL state, matching `sdk current`'s
+    "nothing configured" -- exit 0, `ok: true` -- not a failure. The oracle has
+    no `--online` flag and always reaches the network for `sdk list`; gating it
+    is this port's own hermeticity addition (I-23), so the gate itself must not
+    read as an error. `sdk.network-required` survives as a `warning`-severity
+    issue (still present, still the code a consumer can key on), not an
+    `error` on a passing envelope."""
     proc = run_tan("sdk", "list", "--format", "json", cwd=tmp_path)
-    assert proc.returncode == 1
+    assert proc.returncode == 0
     env = envelope(proc)
+    assert env["ok"] is True
     assert env["issues"][0]["code"] == "sdk.network-required"
-    # The `list`-shaped payload survives the refusal: the extension reads
-    # `data.releases` with a `?? []` fallback.
+    assert env["issues"][0]["severity"] == "warning"
+    assert "upstream" in env["issues"][0]["message"].lower()
+    assert "--online" in env["issues"][0]["message"]
+    # The `list`-shaped payload survives: the extension reads `data.releases`
+    # with a `?? []` fallback.
     assert env["data"] == {"subcommand": "list", "releases": []}
+
+
+def test_list_without_online_text_mode_names_upstream_and_the_flag(tmp_path, isolated_home):
+    """Text mode gets the same "this is normal, here's the switch" framing as
+    JSON, not the old "this command needs network access" wording that read
+    like a broken host rather than a plain missing flag."""
+    proc = run_tan("sdk", "list", cwd=tmp_path)
+    assert proc.returncode == 0
+    assert "upstream" in proc.stderr.lower()
+    assert "--online" in proc.stderr
 
 
 @pytest.mark.parametrize("verb", ["install", "switch"])
@@ -449,3 +470,87 @@ def test_a_bad_format_value_is_a_usage_error_not_a_traceback(tmp_path, isolated_
     proc = run_tan("sdk", "current", "--format", "yaml", cwd=tmp_path)
     assert proc.returncode == 2
     assert "Traceback" not in proc.stderr
+
+
+# --- format_release_table (#316) ---------------------------------------------
+#
+# This table had NO test at all before #316 -- which is how a release body's
+# newline came to be printed straight into the middle of a row and shipped in
+# v0.5.0-rc1 through -rc3.
+
+
+def _release(tag, summary, *, draft=False, prerelease=False):
+    return {
+        "tag": tag,
+        "publishedAt": "2026-07-06T00:00:00Z",
+        "releaseNotesSummary": summary,
+        "draft": draft,
+        "prerelease": prerelease,
+    }
+
+
+def test_a_multi_line_release_body_stays_on_one_row():
+    """The #316 defect verbatim: a body whose FIRST line is short (`##
+    Highlights`) used to emit a literal newline mid-row, so the row spilled
+    onto a second, unindented line."""
+    from tan.commands.sdk_cmd import format_release_table  # noqa: PLC0415
+
+    body = "## Highlights\n- **`alp` CLI as the single front door** - `bu`\n- more"
+    lines = format_release_table([_release("v0.9.0", body)])
+
+    assert len(lines) == 2, f"header + exactly one row expected, got {lines!r}"
+    assert "\n" not in lines[1]
+    assert lines[1].startswith("  v0.9.0")
+    # The collapsed text is what the 60-char budget is spent on, so content
+    # from BEYOND the first line now reaches the cell.
+    assert "## Highlights - **`alp` CLI" in lines[1]
+
+
+def test_the_flags_suffix_stays_attached_to_its_own_row():
+    """The consequence that made this more than cosmetic: with the row split,
+    `[prerelease]` landed after the spilled text, describing nothing."""
+    from tan.commands.sdk_cmd import format_release_table  # noqa: PLC0415
+
+    lines = format_release_table(
+        [_release("v0.9.0", "## Highlights\n- something", prerelease=True)]
+    )
+
+    assert len(lines) == 2
+    assert lines[1].endswith(" [prerelease]")
+
+
+@pytest.mark.parametrize(
+    "summary, expected_present",
+    [
+        ("plain one-liner", "plain one-liner"),
+        ("tabs\tand\nnewlines   collapse", "tabs and newlines collapse"),
+        ("   leading and trailing   ", "leading and trailing"),
+    ],
+    ids=["single-line-untouched", "all-whitespace-collapses", "edges-stripped"],
+)
+def test_whitespace_is_collapsed_not_just_newlines(summary, expected_present):
+    from tan.commands.sdk_cmd import format_release_table  # noqa: PLC0415
+
+    lines = format_release_table([_release("v1.0.0", summary)])
+    assert expected_present in lines[1]
+
+
+@pytest.mark.parametrize(
+    "summary", [None, ""], ids=["missing-summary", "empty-summary"]
+)
+def test_a_release_with_no_notes_renders_without_them(summary):
+    """`releaseNotesSummary` is absent or empty for a release with no body --
+    the collapse must not turn that into a crash or a stray column."""
+    from tan.commands.sdk_cmd import format_release_table  # noqa: PLC0415
+
+    lines = format_release_table([_release("v1.0.0", summary)])
+    assert lines[1].rstrip() == "  v1.0.0       2026-07-06"
+
+
+def test_the_notes_cell_is_still_truncated_to_sixty_characters():
+    """Collapsing must not become a licence to print the whole body."""
+    from tan.commands.sdk_cmd import format_release_table  # noqa: PLC0415
+
+    lines = format_release_table([_release("v1.0.0", "x" * 200)])
+    assert "x" * 60 in lines[1]
+    assert "x" * 61 not in lines[1]

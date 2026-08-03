@@ -32,12 +32,10 @@ from an un-revendored SDK change.
     `crates/` is frozen (`docs/ROADMAP.md`'s Standing Rules — the Rust `tan` is
     the retired oracle, not touched again) and stays pinned at `v0.14.0`
     (`ef79eab0`); this tree is the one a Python `tan` binary actually reads, so
-    it tracks `PINNED_SDK_TAG` and the Rust tree does not. That makes
-    `python/tests/core/test_scaffold.py::test_the_vendored_tree_is_byte_identical_to_the_rust_one`
-    fail on the same seven files this bump touched — an expected, permanent
-    consequence of the freeze, not a re-vendor bug. That test predates the
-    freeze decision and asserted a lockstep the two trees can no longer keep;
-    it is not this bump's call to loosen it.
+    it tracks `PINNED_SDK_TAG` and the Rust tree does not. The obsolete
+    Python-vs-Rust byte-identity test was retired; the shipping tree is guarded
+    by its LF-only unit test and by `tests/parity/scaffold_byte_parity.py`
+    against the live pinned SDK instead.
   - This is also `parity.yml`'s `PINNED_SDK_TAG`, and that pin drives all FOUR
     parity gates — bumping it re-vendors this tree, the bootstrap manifest
     fixture, the toolchain lock and the kconfig golden together, or the gates
@@ -106,9 +104,10 @@ Layout: `vendored/<sdk-template-id>/<sku>/<path>`, e.g.
 over the other four templates' six: `src/cold_chain.c` + `src/cold_chain.h`
 (the cold-chain-metrics core the app links against).
 
-`crates/tan-core/src/wizard/service/vendored.rs` reads these via
-`include_str!` (baked into the binary at compile time — no filesystem read at
-`tan init` runtime) and:
+`python/tan/core/scaffold.py::_vendored_files` reads these through the packaged
+`tan.templates.VENDORED_ROOT`. Setuptools includes the tree in a wheel/source
+install and the PyInstaller build includes it in the frozen distribution. The
+reader:
 
 - picks the SKU-family bucket (`E1M-V2N*`/`E1M-V2M*` -> the `E1M-V2N101`
   tree, everything else -> the `E1M-AEN801` tree, mirroring
@@ -123,8 +122,8 @@ over the other four templates' six: `src/cold_chain.c` + `src/cold_chain.h`
   one; `retarget_board_yaml_som` replaces only the value token, not the rest
   of the line);
 - splices `--cores` companions (+ a default RPMsg channel to the first active
-  one) into the vendored `cores:` block, mirroring the retired
-  `gen_board_yaml`'s companion-core loop.
+  one) into the vendored `cores:` block via `splice_companion_cores`, mirroring
+  the retired Rust `gen_board_yaml` companion-core loop.
 
 ## Template-id mapping: resolved vs. deferred (maintainer decision)
 
@@ -161,8 +160,9 @@ Renesas `m33_sm`/`a55_cluster`. alp-sdk#877 (the same fix that resolved
 vendored at v0.13.0: `E1M-V2N101`'s tree correctly keys the app core on
 `m33_sm` (companion `a55_cluster`, `os: "off"`). It is also the FIRST
 HETEROGENEOUS (multi-core) vendored template — its `board.yaml` lists the
-companion core BEFORE the app core, which is why `vendored_app_core_key`
-(`vendored.rs`) reads the core that OWNS an `app:` key rather than trusting
+companion core BEFORE the app core, which is why
+`python/tan/core/scaffold.py::vendored_app_core_key` reads the core that OWNS
+an `app:` key rather than trusting
 positional "first child under `cores:`" (correct for `minimal`/`sensor` only
 because they are single-core).
 
@@ -183,31 +183,93 @@ scaffold's own "Customer workflow" comment).
 transport is the CC3501E Wi-Fi6+BLE bridge, silicon-validated only on that
 SKU; `E1M-V2N101`'s Murata Wi-Fi (`murata_lbee5hy2fy`) is `hil_silicon:
 untested` with an unmerged Linux data path. Unlike every other mapped
-template, there is no `_V2N` tree, no `FamilyTrees` tuple, and no
-`family_bucket` call for `iot` (`vendored.rs`'s `IOT_STARTER_SUPPORTED_SKU`).
-`tan init`'s upfront guard (`commands/init/mod.rs`) rejects any `--som` other
-than `E1M-AEN801` for this template with `init.invalid-som`, naming the
+template, there is no `_V2N` tree and no `_family_bucket` call for `iot`
+(`python/tan/core/scaffold.py` uses `IOT_STARTER_SUPPORTED_SKU` directly).
+`tan init`'s upfront guard (`python/tan/commands/init_cmd.py`) rejects any
+`--som` other than `E1M-AEN801` for this template with `init.invalid-som`, naming the
 supported SKU, before a single file is planned — never a silent fall-back
 onto a hand-written generator, which would keep alive on this one path the
 exact drift issue #14 retires everywhere else.
 
-### `minimal-app` stays hand-generated (deferred, not permanent)
+### `minimal-app` stays hand-generated; tan-cli#309 fixed its CMake AND its `app:`
 
-**`minimal-app`** is semantically closest to SDK `minimal`, but its generator
-emits a plain-CMake, non-west-buildable stub (`include/app/app.h` +
-`src/CMakeLists.txt`), a structurally different shape than the SDK's
-canonical Zephyr scaffold. It is the ONLY tan wizard template left
-hand-generated after this vendoring pass — deliberately deferred, not a
-permanent gap: folding it onto the same vendored tree as `zephyr-app` would
-make the two templates byte-identical in the wizard's template picker (a
-product decision to merge/deprecate one, not something to invent here), and
-`contract/envelopes/init-preview-minimal-app/expected.json` pins its exact
-file list (owned by an in-flight contract-surface change, so it stays
-untouched until that lands). Because the stub is non-west-buildable,
-`minimal-app` is **not** the non-interactive `tan init` default —
-`zephyr-app` is (tan-cli #97). Do not restore it as the default without
-vendoring it first: a `board.yaml` declaring `os: zephyr` over a plain-CMake
-tree is exactly the silent host-binary build that issue reports.
+**`minimal-app`** is semantically closest to SDK `minimal`, but it is not
+vendored from the SDK catalog at all — it is tan's OWN generator
+(`tan/core/scaffold.py`'s `_minimal_app_files`), the ONLY tan wizard template
+left hand-generated after the vendoring pass above. Folding it onto the same
+vendored tree as `zephyr-app` would make the two templates byte-identical in
+the wizard's template picker (a product decision to merge/deprecate one, not
+something to invent here), and `contract/envelopes/init-preview-minimal-app/
+expected.json` pins its exact eight-file list/order — path + change-kind
+only, never file content or `board.yaml`'s `app:` value, so it did not need
+re-pinning for the fix below.
+
+Through v0.5.0-rc3 this template had TWO compounding bugs, and an earlier pass
+at this fix landed only the first — which, alone, turns a silent wrong-binary
+build into a hard CMake configure error, not a working one (caught by
+adversarial review before it shipped):
+
+1. **Which file `west build` even reads.** `board.yaml`'s `app:` decides this,
+   via the planner's `_zephyr_app_dir` (`tan/planner/orchestrator.py`): it
+   resolves `app:` to a directory and picks that directory ITSELF whenever it
+   holds a `CMakeLists.txt` of its own, falling back to the PARENT only when
+   it does not. This template's `src/` deliberately keeps its own
+   `CMakeLists.txt` (the two-file split below), so `app: ./src` sent `west
+   build` straight at `src/CMakeLists.txt` — the root `CMakeLists.txt`
+   (`project()` + `add_subdirectory(src)`, never `add_executable`) was dead
+   code the entire time, not the file at fault.
+2. **What that file said.** `src/CMakeLists.txt` — the file actually
+   configured — called plain `add_executable(alp_app ${ALP_APP_SOURCES})`, no
+   `find_package(Zephyr ...)` anywhere in either CMake file. CMake configures
+   and links that shape fine: measured on a real checkout, `west build -b
+   <board> <project>/src` produced a genuine PE32+ x86-64 `alp_app.exe` built
+   from `CMakeFiles/alp_app.dir/{main,features/app_bootstrap}.obj` —
+   `app_bootstrap.c` WAS compiled and linked, just into a host binary Zephyr's
+   own build machinery never touched — so `tan build` reported success for a
+   project that was never Zephyr at all.
+
+tan-cli#309 fixed both, in `tan/core/scaffold.py`: `_minimal_app_root_cmake`/
+`_minimal_app_src_cmake` now emit `find_package(Zephyr REQUIRED HINTS
+$ENV{ZEPHYR_BASE})` before `project()` in the root file, with `src/
+CMakeLists.txt` contributing via `target_sources(app PRIVATE ...)`/
+`target_include_directories(app ...)` against Zephyr's own `app` target
+instead of a second `add_executable` — the same KIND of CMake every vendored
+tree above already writes, while keeping its own smaller, hand-generated
+CONTENT; and `_minimal_app_board_yaml` now emits `app: .` (the project root)
+instead of `./src`, so `_zephyr_app_dir` resolves straight to the root file
+without ever consulting `src/`. Measured after both fixes, against a real
+CMake + Ninja + Zephyr SDK: configure reaches Zephyr's own boilerplate
+(`Loading Zephyr default modules`, board/toolchain/devicetree resolution) and
+a full build compiles `src/features/app_bootstrap.c` into `app/libapp.a`
+alongside `src/main.c`, which Zephyr's own link step pulls in whole
+(`-Wl,--whole-archive app/libapp.a`) on the way to a real `zephyr.elf`.
+
+**`crates/tan-core/src/wizard/service/c_project.rs` still emits the pre-#309
+broken shape (both bugs)** — `crates/` is frozen (`docs/ROADMAP.md`'s Standing
+Rules) and is not re-fixed here; its own `wizard/vendored/MANIFEST.md` had
+already flagged the CMake half of this ("a `board.yaml` declaring `os:
+zephyr` over a plain-CMake tree is exactly the silent host-binary build that
+issue [#14] reports") as "deliberately deferred, not a permanent gap" before
+the freeze, and the freeze is why it never got un-deferred there. `minimal-app`
+stays **not** the non-interactive `tan init` default — `zephyr-app` is
+(tan-cli #97) — an independent choice (a vendored, real-catalog scaffold vs.
+tan's own hand-generated stub) that #309 does not revisit.
+
+**A correction to tan-cli#309's own "Measured" evidence.** Its table reports
+`Machine: ARM`, a real `zephyr.elf`, `CMakeFiles/app.dir/src/main.c.obj`
+present, and no `app_bootstrap*.obj` — but under the pre-#309 shape (`app:
+./src` + `src/CMakeLists.txt`'s `add_executable(alp_app ...)`), the object
+directory is named `alp_app.dir` (the target's own name), never `app.dir`,
+and paths are relative to `src/` (already the CMake source root), so the real
+artefact is `alp_app.dir/main.obj`, not `app.dir/src/main.c.obj` — confirmed
+by reproducing that exact shape locally. `app.dir/src/main.c.obj` and a real
+ARM `zephyr.elf` are what the SAME `E1M-AEN801` plan's OTHER Zephyr slice
+(`m55_he`, which builds `${SDK_ROOT}/firmware/alp-stock-shim`, a genuine
+Zephyr app with its own unrelated `src/main.c`) would produce. The evidence
+table most likely mixed that slice's build output into the `minimal-app`
+customer slice's (`m55_hp`) row — the underlying defect (silent wrong-binary
+build) is real and independently reproduced above, but that one table
+conflates two slices.
 
 **`host-tooling-starter`** (a host-tool monorepo scaffold, not a
 firmware/board.yaml project — categorically out of the scaffold catalog's
@@ -250,31 +312,16 @@ e.g. `alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33`). Confirmed for `minimal`:
 and `README.md`; `prj.conf`, `src/main.c`, and `testcase.yaml` (not part of
 the scaffold envelope, see below) stay byte-identical between the two.
 
-The vendored `minimal`/`sensor`/`edge-ai`/`diagnostics` scaffolds' `cores:`
-key is `m33_sm` for `E1M-V2N101`/`E1M-V2M101` and `m55_hp` for `E1M-AEN801` —
-agreeing with `app_core_for_sku`. `iot` has no per-SKU variance at all (only
-one vendored SKU); its app core is always `m55_hp`. `vendored.rs` still
-derives the `--cores` companion-splice target from EACH template's OWN
-vendored `board.yaml` `cores:` key (`vendored_app_core_key`/
-`vendored_app_core_for_sku`/`vendored_sensor_app_core_for_sku`/
-`vendored_edge_ai_app_core_for_sku`/`vendored_diagnostics_app_core_for_sku`/
-`vendored_iot_app_core_for_sku`) rather than calling `app_core_for_sku`
-directly, so a *future* re-vendor that (again) derives a different core for a
-vendored SKU fails `cargo test`
-(`vendored_app_core_matches_each_familys_board_yaml`/
-`vendored_sensor_app_core_matches_each_familys_board_yaml`/
-`vendored_edge_ai_app_core_matches_each_familys_board_yaml`/
-`vendored_diagnostics_app_core_matches_each_familys_board_yaml`/
-`vendored_iot_app_core_is_m55_hp`) instead of silently drifting. `tan init`'s
-upfront `--cores` validation (`commands/init/resolve.rs`'s
-`app_core_for_template`) now calls `vendored_app_core_for_sku`/
-`vendored_sensor_app_core_for_sku`/`vendored_edge_ai_app_core_for_sku`/
-`vendored_diagnostics_app_core_for_sku`/`vendored_iot_app_core_for_sku` for
-the `zephyr-app`/`sensor-starter`/`edge-ai-starter`/`board-diagnostics`/
-`iot-starter` templates specifically (`minimal-app`, the only template left
-hand-generated, still uses `app_core_for_sku`, matching its own
-`gen_board_yaml`), so the CLI-level check can never again independently
-disagree with what `create_wizard_plan_with_cores` actually plans.
+The vendored `minimal`/`sensor`/`edge-ai`/`diagnostics` scaffolds' `cores:` key
+is `m33_sm` for `E1M-V2N101`/`E1M-V2M101` and `m55_hp` for `E1M-AEN801`. `iot`
+has no per-SKU variance; its app core is always `m55_hp`. The shipping Python
+reader derives the `--cores` companion-splice target from each planned
+`board.yaml` through `vendored_app_core_key`, rather than re-deriving it from
+`app_core_for_sku`. `plan_template_files` reads and retargets the tree first;
+`splice_companion_cores` then operates on those actual bytes. Unit tests in
+`python/tests/core/test_scaffold.py` cover the family mapping, companion splice,
+and heterogeneous app-owner selection, so a future re-vendor cannot silently
+move the app core while the CLI keeps using an independent table.
 
 ### Heterogeneous `cores:` — `vendored_app_core_key` reads the `app:` owner
 
@@ -286,12 +333,10 @@ with its app core being the only entry. `vendored_app_core_key` therefore
 scans every child under `cores:`, tracking the current `  <core>:` key, and
 returns whichever one owns a `    app:` line, instead of positionally
 trusting the first indented child (which used to be correct only because
-`minimal`/`sensor` are single-core). Two `vendored.rs` unit tests are the
-regression guards for this: `vendored_app_core_key_finds_the_app_core_not_the_first_listed_core`
-and `edge_ai_cores_splice_targets_the_real_app_core_not_the_companion` both
-assert the edge-ai V2N tree resolves to `m33_sm`, not `a55_cluster` — for the
-raw key lookup and for where a `--cores` splice lands its IPC endpoint,
-respectively.
+`minimal`/`sensor` are single-core). Python's
+`test_vendored_app_core_key_skips_a_pre_declared_companion_listed_first` and
+`test_splice_adds_a_companion_and_a_default_rpmsg_channel` are the regression
+guards for the lookup and for where a `--cores` splice lands its IPC endpoint.
 
 `testcase.yaml` is vendored alongside the scaffold envelope but is **not**
 part of `--emit scaffold`'s output — the catalog's `files.user_owned` for

@@ -393,6 +393,7 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/commands/image_cmd.py", "_error_outcome"): 3,
     ("tan/commands/image_cmd.py", "_Notice"): 0,
     ("tan/commands/size_cmd.py", "_error_outcome"): 2,
+    ("tan/commands/scaffold_cmd.py", "ScaffoldError"): 0,
 }
 
 #: `(file, exact unparsed expression)` -> declared as a KNOWN forward, never
@@ -434,6 +435,17 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
         ("tan/commands/renode_cmd.py", "code"),  # `_issue(code, ...)` inside `fail`/`fail_sdk`'s OWN
         # bodies, forwarding THEIR OWN `code` parameter -- `fail`/`fail_sdk`
         # are themselves in `_FULL_CODE_CALLABLES`, so their call sites carry it.
+        ("tan/commands/scaffold_cmd.py", "err.code"),  # <- ScaffoldError
+        ("tan/commands/diff_cmd.py", "failure.code"),  # <- ParseFailure. NOT a whole code (it is a
+        # bare suffix, e.g. "schema-violation" -- ParseFailure is deliberately
+        # NOT in _FULL_CODE_CALLABLES, since _is_code_literal requires a dot
+        # and a bare suffix has none). This entry only silences the generic
+        # `code=` keyword scan below; the actual literal is captured by the
+        # PREFIX-TEMPLATE mechanism instead (`_FORWARDER_SUFFIXES[("tan/commands
+        # /diff_cmd.py", "failure.code")]`, consulted from inside
+        # `_resolve_helper` while scanning `_emit_failure(...)`'s own call
+        # sites) -- "captured elsewhere in this same scan" still holds, just
+        # in the sibling scan this file also runs.
     }
 )
 
@@ -652,7 +664,7 @@ def _prefix_templates(path: pathlib.Path) -> list[tuple[int, str, str, str, str]
 #: response the reviewer's exploit relied on. One coarse, whole-tree tripwire
 #: plus precise per-key tripwires is not the same overlap as two detectors
 #: both hand-bumped for the SAME fact; dropping either narrows real coverage.
-EXPECTED_TEMPLATE_COUNT = 11
+EXPECTED_TEMPLATE_COUNT = 14
 
 #: `(file, enclosing qualname)` -> how to recover the missing half, for every
 #: template resolvable by scanning one declared callable's call sites.
@@ -741,7 +753,14 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         name="_fail",
         arg_keyword="code",
-        expected_calls=5,
+        # tan-cli#351: was 5. `sdk list` without `--online` moved off `_fail`
+        # (which hardcodes exit_code=RUNTIME_FAILURE and severity "error") to a
+        # direct `_emit(...)` call with its own `warning`-severity Issue and
+        # exit_code=SUCCESS -- a normal state, not a failure. Its code,
+        # `sdk.network-required`, is still a LITERAL `Issue("sdk.network-
+        # required", ...)` first-arg site, so it is still covered, just by the
+        # plain-literal scan (shape 1) instead of this prefixing scan (shape 3).
+        expected_calls=4,
         sites=1,
     ),
     ("tan/commands/validate_cmd.py", "validate.fail"): dict(
@@ -759,11 +778,27 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # every one passing its `name` positionally and literally, zero
         # non-literal, 20 distinct camelCase names (`_is_code_suffix` admits
         # camelCase for exactly this reason -- see its own docstring).
+        # 54, not 48, as of tan-cli#91's `--fix` consent-gate work: 9 of the
+        # 54 also passed an explicit `code=` override (the frozen
+        # `bootstrap.*` spellings this class's own docstring documents, plus
+        # five NEW `doctor.fix-*` checks whose `name` is a dynamic
+        # `f"fix:{tool}"`, never a code-shaped literal at all) --
+        # `skip_if_keyword="code"` excludes exactly those from this scan,
+        # since `check.code or f"doctor.{check.name}"` never evaluates their
+        # `name` for the code position at runtime; their real codes are
+        # captured separately by the plain `code=` keyword scan, the same
+        # mechanism every other literal `code=` site in this file already
+        # goes through.
+        # 55, and 10 skipped, as of tan-cli#360: `fix_installer_not_found_check`
+        # is the sixth `doctor.fix-*` Check, named `f"fix:{installer}"` (one
+        # per ABSENT INSTALLER, not per tool) and carrying an explicit
+        # `code="doctor.fix-installer-not-found"`.
         prefix="doctor.",
         expr="check.name",
         name="Check",
         arg_index=0,
-        expected_calls=48,
+        skip_if_keyword="code",
+        expected_calls=55,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
@@ -785,6 +820,36 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         arg_index=0,
         expected_calls=3,
         sites=2,
+    ),
+    ("tan/commands/diff_cmd.py", "_emit_failure"): dict(
+        # `Issue(f"diff.{code}", ...)` inside `_emit_failure()` -- `code` is
+        # `_emit_failure`'s OWN keyword-only parameter, fed by 4 call sites in
+        # `diff()`: 2 literal suffixes (`board-yaml-missing`, `internal-failure`
+        # x2) and one forward, `code=failure.code` (the `except ParseFailure as
+        # failure` handler) -- `failure.code` is a bare suffix read off
+        # `ParseFailure`'s own raise sites (`pyyaml-unavailable`,
+        # `schema-violation`), declared in `_FORWARDER_SUFFIXES` below since
+        # `_resolve_helper` cannot read a plain (non-Starred) forwarded
+        # attribute directly.
+        prefix="diff.",
+        expr="code",
+        name="_emit_failure",
+        arg_keyword="code",
+        expected_calls=4,
+        sites=1,
+    ),
+    ("tan/commands/trace_cmd.py", "trace.fail"): dict(
+        # `Issue(f"trace.{code}", ...)` inside `fail()`, a nested function of
+        # the `trace` command -- `code` is `fail`'s own 2nd positional
+        # parameter (`exit_code, code, message, data, text_lines`), all 3 call
+        # sites literal (`sdk-root-unresolved`, `board-yaml-missing`,
+        # `internal-failure`).
+        prefix="trace.",
+        expr="code",
+        name="fail",
+        arg_index=1,
+        expected_calls=3,
+        sites=1,
     ),
 }
 
@@ -831,6 +896,78 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     # from `posix_venv_unusable()` (doctor_cmd.py:2342) -- a strictly
     # narrower value space than the bootstrap_cmd.py forward above.
     ("tan/commands/doctor_cmd.py", "venv_refusal.code"): dict(suffixes=frozenset({"venv-unusable"}), sites=1),
+    # `code=failure.code` in `diff()`'s `except ParseFailure as failure:`
+    # handler, forwarded to `_emit_failure(...)`. Unlike every entry above,
+    # this key is matched from INSIDE `_resolve_helper`'s own call-site scan
+    # (see its docstring), not from a direct f-string occurrence
+    # `_prefix_templates` finds -- `failure.code` never appears in an f-string
+    # at all, it is a plain `code=` keyword value at one of `_emit_failure`'s
+    # 4 call sites. `sites=1` counts that one call site. The two suffixes are
+    # every literal `ParseFailure(...)` is raised with, read from source
+    # (diff_cmd.py's `_load_document`/`_parse_fields` raise sites).
+    ("tan/commands/diff_cmd.py", "failure.code"): dict(
+        suffixes=frozenset({"pyyaml-unavailable", "schema-violation"}), sites=1
+    ),
+    # `Issue(f"support-bundle.{c.name}", ...)` in `_doctor_issues()` -- tan-cli
+    # #374 findings 3/4 rewrote this entry. `checks` there is
+    # `_debug_doctor_report(...)`'s own output (tan-cli#357; `_doctor_section`,
+    # the function this comment used to cite, was DELETED by that same diff),
+    # not `doctor_cmd._collect(...)`'s whole build/flash-readiness list -- so
+    # `c.name`'s real value space is NOT the 20-ish names
+    # `_RESOLVABLE_HELPERS[("tan/commands/doctor_cmd.py", "checks_to_issues")]`
+    # resolves for `tan doctor` at all. Re-derived from
+    # `_debug_doctor_report`'s own construction (`support_bundle_cmd.py`),
+    # narrowed to names whose `Check` can ever leave `pass`/`unknown` --
+    # `_doctor_issues` only turns a `warn`/`fail` status into a wire issue, so
+    # a name that can never carry either (`workspaceRoot`: hardcoded `pass`;
+    # `lldb`: hardcoded `pass`, #131; the three `_extension_check(...)` names:
+    # hardcoded `unknown`, #102) would register a code this command can
+    # structurally never put on the wire:
+    #   * `sdkRoot`, `boardYaml` -- the report's own fixed checks (fail/warn
+    #     arms exist for both).
+    #   * `jlinkBackend`/`openocdBackend`/`pyocdBackend` -- `_target_checks`'s
+    #     `f"{server}Backend"` for the three servers `debug_launch._SERVER_
+    #     CHOICES` actually pairs with `zephyr-mcu`/`baremetal-mcu` today.
+    #     `gdbserverBackend`/`noneBackend` are the SAME `f"{server}Backend"`
+    #     construction for the other two `SERVER_KINDS` members -- not
+    #     reachable through TODAY's `_SERVER_CHOICES` pairing (`is_server_
+    #     supported_for_target` refuses `--target-kind zephyr-mcu --server
+    #     gdbserver` before `_target_checks` ever runs), but `server` is a
+    #     plain `str` parameter with no narrower type at this call site, so a
+    #     future widening of that pairing table would put either straight on
+    #     the wire with nothing here to catch it. Declared now rather than
+    #     left for the NEXT audit to rediscover.
+    #   * `gdb` -- `_target_checks`'s `yocto-userspace` branch (warn arm
+    #     exists).
+    #   * `bootstrapManifest`, `hostPrerequisites`, `zephyrSdkAvailableForHost`,
+    #     `longPaths`, `homePath` -- `_HOST_CHECK_ORDER`'s five names, harvested
+    #     BY NAME from `doctor_cmd._collect(...)` (`_host_checks_from_doctor`).
+    #     Also a genuine subset of doctor_cmd.py's own 20-ish resolved names
+    #     (unsurprising: they are the identical `Check` objects, not a copy),
+    #     but declared here independently rather than intersected from there,
+    #     because `_HOST_CHECK_ORDER` -- support_bundle_cmd.py's own tuple --
+    #     is the thing that actually bounds what this command can harvest, and
+    #     is the one artefact a reviewer changing that tuple will see.
+    ("tan/commands/support_bundle_cmd.py", "c.name"): dict(
+        suffixes=frozenset(
+            {
+                "sdkRoot",
+                "boardYaml",
+                "jlinkBackend",
+                "openocdBackend",
+                "pyocdBackend",
+                "gdbserverBackend",
+                "noneBackend",
+                "gdb",
+                "bootstrapManifest",
+                "hostPrerequisites",
+                "zephyrSdkAvailableForHost",
+                "longPaths",
+                "homePath",
+            }
+        ),
+        sites=1,
+    ),
     # `Issue(f"validate.{result.outcome}", ...)` at validate_cmd.py:546 only
     # ever fires inside `for message in result.messages`, and
     # `outcome = OUTCOME_CLEAN if not messages else OUTCOME_SCHEMA_VIOLATION`
@@ -895,6 +1032,7 @@ def _resolve_helper(
     name: str | None = None,
     arg_index: int | None = None,
     arg_keyword: str | None = None,
+    skip_if_keyword: str | None = None,
     expected_calls: int,
 ) -> tuple[set[str], list[str], dict[tuple[str, str], list[int]]]:
     """Scan every call to the declared helper in `path`, read the code
@@ -907,17 +1045,37 @@ def _resolve_helper(
     `expected_calls` is asserted EXACTLY, mirroring `PREFIXING_SITES`'s own
     pinned per-file counts (`contract.rs:663-682`) for the identical reason:
     a floor lets a call site disappear unnoticed as long as enough others
-    remain to clear it.
+    remain to clear it. `skip_if_keyword`, when given, EXCLUDES a call from
+    both `parts` and `unresolved` (but still counts toward `expected_calls`)
+    when that call ALSO passes the named keyword -- `doctor_cmd.py`'s
+    `Check(name, ..., code=...)`: `checks_to_issues()`'s own
+    `check.code or f"doctor.{check.name}"` never evaluates `name` for the
+    code position once `code` is set, so scanning `name` there would either
+    misclassify a dynamic non-literal (`f"fix:{tool}"`) as unresolved or
+    (worse) quietly add a name that was never the emitted code to `parts` --
+    this is a fact about THAT call, not a license to skip counting it.
 
     A `Starred` argument (`log.warn(*skew)`, unpacking a 2-tuple rather than
     passing the code positionally) is looked up in `_FORWARDER_SUFFIXES` by
-    `f"{opener}(*{expr})"`; anything else non-literal is reported UNRESOLVED
-    -- never a silent skip. Every matched Starred call's lineno is also
-    recorded against its `_FORWARDER_SUFFIXES` key in the returned dict, so
+    `f"{opener}(*{expr})"`. A non-`Starred`, non-literal argument (a plain
+    `Name`/`Attribute`, e.g. `code=failure.code`) is looked up the same table
+    by its bare unparsed text (`(rel, expr)`) -- the SAME key space
+    `_classify_and_resolve` already uses for a template whose substitution IS
+    the forward directly; here the forward sits one level further out, behind
+    a declared helper's OWN call site, so `_resolve_helper` is what has to
+    make the lookup instead. Anything neither resolves is reported UNRESOLVED
+    -- never a silent skip. Every matched forward's lineno (Starred or plain)
+    is recorded against its `_FORWARDER_SUFFIXES` key in the returned dict, so
     `_classify_and_resolve` can feed it into the SAME `_check_site_counts`
-    that pins `_RESOLVABLE_HELPERS`/`_ACKNOWLEDGED_CEILINGS` -- this is the
-    ONLY place a Starred forward's `sites` count can be measured from, since
-    [`_prefix_templates`] never sees a Starred call (it is not an f-string).
+    that pins `_RESOLVABLE_HELPERS`/`_ACKNOWLEDGED_CEILINGS` -- for a Starred
+    forward this is the ONLY place its `sites` count can be measured from,
+    since [`_prefix_templates`] never sees a Starred call (it is not an
+    f-string); a plain forward CAN also be found directly by
+    [`_prefix_templates`] when the f-string substitutes it immediately (the
+    `refusal.code`/`venv_refusal.code`/`result.outcome` entries already in
+    `_FORWARDER_SUFFIXES`), but `failure.code` here never does -- the f-string
+    substitutes `_emit_failure`'s OWN `code` parameter, not `failure.code`
+    directly, so THIS scan is the only place that hit is ever counted.
     """
     opener = attr or name
     rel = _rel(path)
@@ -933,6 +1091,9 @@ def _resolve_helper(
     unresolved: list[str] = []
     forwarder_hits: dict[tuple[str, str], list[int]] = {}
     for call in calls:
+        if skip_if_keyword is not None and any(kw.arg == skip_if_keyword for kw in call.keywords):
+            continue
+
         arg: ast.expr | None
         if arg_keyword is not None:
             arg = next((kw.value for kw in call.keywords if kw.arg == arg_keyword), None)
@@ -957,6 +1118,13 @@ def _resolve_helper(
                 parts |= declared["suffixes"]
                 forwarder_hits.setdefault(key, []).append(call.lineno)
             continue
+        if arg is not None and not isinstance(arg, ast.Constant):
+            plain_key = (rel, ast.unparse(arg))
+            declared = _FORWARDER_SUFFIXES.get(plain_key)
+            if declared is not None:
+                parts |= declared["suffixes"]
+                forwarder_hits.setdefault(plain_key, []).append(call.lineno)
+                continue
         got = ast.unparse(arg) if arg is not None else "no matching argument"
         unresolved.append(
             f"{rel}:{call.lineno} -- `{opener}(...)`'s code argument is not a literal "
@@ -1119,6 +1287,7 @@ def _classify_and_resolve(
             name=spec.get("name"),
             arg_index=spec.get("arg_index"),
             arg_keyword=spec.get("arg_keyword"),
+            skip_if_keyword=spec.get("skip_if_keyword"),
             expected_calls=spec["expected_calls"],
         )
         codes |= site_codes

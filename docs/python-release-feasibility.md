@@ -1,5 +1,19 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# Can the Python `tan` ship as the eight release assets?
+# Historical audit: can the Python `tan` ship as release assets?
+
+> **Historical measurement record — not the current release contract.** This
+> document captures the investigation that enabled the Python release and keeps
+> intermediate failures/results verbatim. It therefore mentions an eight-asset
+> experiment, `--onefile`, open blockers, and requested fixes that were later
+> resolved. Current releases build four `--onedir` archives; use
+> [`docs/release-contract.md`](release-contract.md), the root README, and
+> `.github/workflows/release.yml` for current instructions.
+>
+> Current state: `python/pyproject.toml` installs correctly, `monitor_cmd.py` is
+> committed, the planner omits unset `firmware_path`, release CI runs with
+> `sdk_parity: true`, and neither `alp-tan` on PyPI nor `@alplabai/tan` on npm is
+> published. Apparent contradictions below are chronology within the audit, not
+> current work items.
 
 **Yes — all eight assets now exist, built and verified in CI.** Run
 [30555358227](https://github.com/alplabai/tan-cli/actions/runs/30555358227):
@@ -122,7 +136,11 @@ CONTENT, so the call is yours — and note it only hides §0.2 rather than fixin
 it: a source install still takes the guarded path, and a frozen build with the
 extra never reaches the unguarded one.
 
-### What I still need from you
+### Historical requests (all resolved)
+
+The four requests below were the handoff at this point in the audit. They are
+retained as evidence of what was blocking that snapshot; none remains an open
+instruction.
 
 1. **`python/pyproject.toml`: move `[project.optional-dependencies]` below the
    `classifiers` array** (or move `classifiers` above line 72). One table

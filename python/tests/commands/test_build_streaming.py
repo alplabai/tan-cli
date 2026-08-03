@@ -102,9 +102,23 @@ def test_enabled_heartbeat_ticks_after_silence_then_clears_on_output(monkeypatch
     """Armed (TTY, text mode): silent for longer than the threshold ->
     prints a `still building` line; a real line arriving afterwards blanks
     it (a `\\r`-clear) before relaying, so it never mixes into the stream it
-    was standing in for."""
+    was standing in for.
+
+    `shutil.get_terminal_size` is pinned wide (see
+    `test_heartbeat_line_never_wraps_on_a_narrow_terminal` for the narrow
+    case this test does NOT cover): unpinned, it reads the REAL terminal --
+    `COLUMNS`, on a host/CI runner that exports one, or the actual tty width
+    otherwise -- and a value narrower than the ~110-char message below would
+    truncate `"still building"` itself out of the line before this test's own
+    content assertion ever runs, failing for a reason unrelated to the code
+    under test."""
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_SILENCE_THRESHOLD_S", 0.05)
     monkeypatch.setattr(build_cmd, "_HEARTBEAT_TICK_S", 0.02)
+    monkeypatch.setattr(
+        build_cmd.shutil,
+        "get_terminal_size",
+        lambda fallback=(80, 24): os.terminal_size((120, 24)),
+    )
     fake_stderr = io.StringIO()
     monkeypatch.setattr(sys, "stderr", fake_stderr)
 
@@ -184,5 +198,12 @@ def test_json_format_stdout_carries_no_heartbeat_bytes(project):
     # `Envelope.to_json` is compact (`separators=(",", ":")`, no indent) plus
     # the one trailing newline `print()` adds -- exactly one line, byte for
     # byte, nothing appended or interleaved around it.
+    #
+    # `ensure_ascii=False` mirrors `Envelope.to_json`: the oracle emits raw
+    # UTF-8 (an em dash goes out as `e2 80 94`), so the port stopped escaping
+    # it to `—`. This expectation has to be built the way production
+    # builds it or the test measures `json.dumps`'s DEFAULT rather than what
+    # tan actually wrote -- which is what it was doing, and why it reddened on
+    # a message carrying an em dash rather than on any framing change.
     assert proc.stdout.count("\n") == 1
-    assert proc.stdout == json.dumps(env, separators=(",", ":")) + "\n"
+    assert proc.stdout == json.dumps(env, separators=(",", ":"), ensure_ascii=False) + "\n"

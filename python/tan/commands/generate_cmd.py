@@ -95,6 +95,7 @@ from tan.commands.build_cmd import _planner_python, resolve_sdk_root_wide
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, project_pin_issue
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -1026,3 +1027,11 @@ def generate(
         engine=engine,
         exit_code=ExitCode.SUCCESS if not failed else ExitCode.WRITE_FAILURE,
     )
+
+
+# tan-cli#261: adds the two oracle `GlobalArgs` flags this command was still
+# missing (`--ci`/`--no-color`) on top of the five already declared above
+# (`--target`/`--all`/`--quiet`/`--verbose` read for real; `--non-interactive`
+# accepted and dropped the same way these two now are); see
+# `tan.core.global_flags`.
+generate = accept_global_flags(generate)

@@ -189,17 +189,30 @@ def faultdecode(
     output_format: str = typer.Option(
         None, "--format", metavar="FORMAT", help="Output format: text or json."
     ),
+    board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
+    target: str = typer.Option(None, "--target", hidden=True),
+    all_targets: bool = typer.Option(False, "--all", hidden=True),
+    verbose: bool = typer.Option(False, "--verbose", hidden=True),
+    quiet: bool = typer.Option(False, "--quiet", hidden=True),
+    non_interactive: bool = typer.Option(False, "--non-interactive", hidden=True),
+    ci: bool = typer.Option(False, "--ci", hidden=True),
 ) -> None:
     """Decode an ARM Cortex-M (ARMv8-M) fault dump.
 
     Supply registers as flags, and/or paste a dump via ``--file``/stdin and it
     greps the register names out. Explicit flags win over a parsed dump.
 
-    `--project`/`--sdk-root` are declared, not consumed: this command reads no
-    board.yaml and drives no alp-sdk checkout -- it is pure ARMv8-M register
-    arithmetic, same as the SDK original it replaces -- but tan's other
-    commands accept both as global flags, so a caller (or a saved script) that
-    passes them through unconditionally must not get a parse error.
+    `--project`/`--sdk-root`/`--board-yaml`/`--target`/`--all`/`--verbose`/
+    `--quiet`/`--non-interactive`/`--ci` are declared, not consumed: this
+    command reads no board.yaml and drives no alp-sdk checkout -- it is pure
+    ARMv8-M register arithmetic, same as the SDK original it replaces -- but
+    the oracle's clap `GlobalArgs` are `global = true`, so every verb
+    (`faultdecode` included) accepts all of them; a caller (or a saved
+    script) that passes any through unconditionally must not get a parse
+    error -- `tan faultdecode --ci ...` exits the same with or without `--ci`
+    on the oracle. `--no-color` is the one exception in this group with real
+    meaning (see `_use_color`), and `--format` is documented separately
+    below.
 
     `--format` is accepted BEFORE the subcommand too (`tan --format json
     faultdecode ...`), same as `debug-config`; the root callback records it on
@@ -211,6 +224,7 @@ def faultdecode(
     `--format json` is simply another spelling of `--json`, not a second,
     enveloped output shape.
     """
+    del board_yaml, target, all_targets, verbose, quiet, non_interactive, ci
     resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
     if resolved_format not in ("text", "json"):
         raise typer.BadParameter(

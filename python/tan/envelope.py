@@ -98,13 +98,39 @@ class Envelope:
         return out
 
     def to_json(self) -> str:
+        return self._serialise()[0]
+
+    def _serialise(self) -> tuple[str, int]:
+        """The JSON text plus the exit code THAT TEXT actually reports.
+
+        The two differ only when serialisation itself fails: the fallback
+        below substitutes `ExitCode.INTERNAL_FAILURE` (5) for whatever
+        `self.exit_code` was, so a caller that wants the wire invariant
+        `process exit code == envelope.exitCode` to hold (tan-cli#327) must
+        read the code from HERE, not from `self.exit_code` -- `emit()` does
+        exactly that. `to_json()` stays a plain `str` return -- every existing
+        caller (`test_envelope.py`'s `json.loads(env.to_json())` assertions)
+        depends on that shape.
+        """
         try:
-            return json.dumps(self._as_dict(), separators=(",", ":"))
+            # `ensure_ascii=False`: the default (True) escapes every non-ASCII
+            # codepoint as `\uXXXX`, which is valid JSON but not what the
+            # oracle emits -- `serde_json::to_string` writes raw UTF-8 bytes
+            # verbatim (measured: `scaffold --name "Sensör Ölçüm"` on the
+            # Rust CLI puts the literal `Sensör Ölçüm` on the wire, not
+            # `Sensör...`). A consumer that byte-compares tan's envelope
+            # against the oracle's, or that greps stdout for a raw non-ASCII
+            # string, saw a divergence stdout never had a reason to carry.
+            return (
+                json.dumps(self._as_dict(), separators=(",", ":"), ensure_ascii=False),
+                self.exit_code,
+            )
         except Exception as err:  # noqa: BLE001 -- no payload may ever crash stdout
+            fallback_code = int(ExitCode.INTERNAL_FAILURE)
             fallback = {
                 "command": self.command,
                 "ok": False,
-                "exitCode": int(ExitCode.INTERNAL_FAILURE),
+                "exitCode": fallback_code,
                 "project": self.project.as_dict(),
             }
             if self.sdk is not None:
@@ -117,16 +143,24 @@ class Envelope:
                     f"failed to serialize command output: {err}",
                 ).as_dict()
             ]
-            return json.dumps(fallback, separators=(",", ":"))
+            return (
+                json.dumps(fallback, separators=(",", ":"), ensure_ascii=False),
+                fallback_code,
+            )
 
 
 #: Whether this process has already written its one envelope to stdout.
 #: Process-global because the thing it guards is process-global: stdout.
 _emitted = False
 
+#: The exit code the LAST-emitted envelope's own JSON actually reports --
+#: `None` until `emit()` runs once. See `envelope_emitted_exit_code()`.
+_emitted_exit_code: int | None = None
 
-def emit(envelope: Envelope) -> None:
-    """Write THE envelope to stdout, and record that it went out.
+
+def emit(envelope: Envelope) -> int:
+    """Write THE envelope to stdout, record that it went out, and return the
+    exit code that JSON just reported.
 
     A command signals failure by exiting non-zero, and `tan.cli.main` wraps
     the whole dispatch to add a `cli.parse-error` envelope when a `--format
@@ -135,11 +169,33 @@ def emit(envelope: Envelope) -> None:
     fallback also fires after a command that ALREADY printed its own
     envelope, putting two JSON documents on stdout: valid JSON lines, and a
     consumer that parses stdout whole gets neither.
+
+    The returned code (also stashed in `_emitted_exit_code`, read back by
+    `envelope_emitted_exit_code()`) is `envelope.exit_code` UNLESS
+    serialisation itself fell back to `envelope.serialize-failed` -- in which
+    case it is the fallback's `ExitCode.INTERNAL_FAILURE` (5), not the
+    command's original code. tan-cli#327: a caller that already committed to
+    its own `typer.Exit(<original code>)` before calling this needs a way to
+    learn the fallback happened; `tan.cli.main`'s process boundary is that
+    caller, so the wire invariant `process exit code == envelope.exitCode`
+    holds even when serialisation fails.
     """
-    global _emitted
-    print(envelope.to_json())
+    global _emitted, _emitted_exit_code
+    text, exit_code = envelope._serialise()
+    print(text)
     _emitted = True
+    _emitted_exit_code = exit_code
+    return exit_code
 
 
 def envelope_emitted() -> bool:
     return _emitted
+
+
+def envelope_emitted_exit_code() -> int | None:
+    """The exit code the one emitted envelope's JSON reports, or `None` if
+    nothing has been emitted yet this process. `tan.cli.main` reads this at
+    the process boundary to catch a serialize-failure fallback that changed
+    the reported code out from under a command's own `typer.Exit` (tan-cli#327)
+    -- carried directly from `emit()`, never re-derived by parsing stdout back."""
+    return _emitted_exit_code

@@ -52,6 +52,7 @@ import typer
 
 from tan.commands.build_cmd import resolve_sdk_root_wide
 from tan.commands.sdk_cmd import project_pin_issue
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -401,3 +402,13 @@ def examples(
         for issue in issues:
             print(f"examples: {issue.message}", file=sys.stderr)
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--board-yaml`/`--ci`/`--no-color`/
+# `--non-interactive`/`--quiet`/`--target`) on top of `--verbose`, already
+# declared and read above; see `tan.core.global_flags`. Every one of them is
+# genuinely inert for `examples` -- its envelope's `project` is always
+# `Project(root=None, board_yaml=None)`, an SDK-wide catalogue with no
+# project of its own to anchor a `--board-yaml`/`--target` on.
+examples = accept_global_flags(examples)

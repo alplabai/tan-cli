@@ -26,17 +26,14 @@ from tan.commands.bootstrap_cmd import bootstrap
 from tan.commands.build_cmd import build
 from tan.commands.clean_cmd import clean
 from tan.commands.debug_config_cmd import debug_config
-from tan.commands.deferred_cmd import (
-    DEFERRED_CONTEXT_SETTINGS,
-    DEFERRED_VERBS,
-    completion,
-    diff,
-    inspect,
-    pinmux,
-    scaffold,
-    support_bundle,
-    trace,
-)
+from tan.commands.completion_cmd import completion
+from tan.commands.diff_cmd import diff
+from tan.commands.inspect_cmd import inspect
+from tan.commands.pinmux_cmd import pinmux
+from tan.commands.scaffold_cmd import scaffold
+from tan.commands.support_bundle_cmd import support_bundle
+from tan.commands.trace_cmd import trace
+from tan.commands.deferred_cmd import DEFERRED_CONTEXT_SETTINGS
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain
@@ -56,7 +53,15 @@ from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
 from tan.commands.validate_cmd import validate
 from tan.commands.west_forward_cmd import FORWARD_CONTEXT_SETTINGS, lock, migrate, quality
-from tan.envelope import Envelope, Issue, Project, emit, envelope_emitted
+from tan.core.global_flags import GLOBAL_FLAG_ARITY
+from tan.envelope import (
+    Envelope,
+    Issue,
+    Project,
+    emit,
+    envelope_emitted,
+    envelope_emitted_exit_code,
+)
 from tan.exit_codes import ExitCode
 from tan.version import TAN_VERSION
 
@@ -71,9 +76,9 @@ app = typer.Typer(add_completion=False)
 app.command("bootstrap")(bootstrap)
 app.command("build")(build)
 app.command("clean")(clean)
-app.command("completion", context_settings=DEFERRED_CONTEXT_SETTINGS)(completion)
+app.command("completion")(completion)
 app.command("debug-config")(debug_config)
-app.command("diff", context_settings=DEFERRED_CONTEXT_SETTINGS)(diff)
+app.command("diff")(diff)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("explain")(explain)
@@ -82,23 +87,23 @@ app.command("flash")(flash)
 app.command("generate")(generate)
 app.command("image")(image)
 app.command("init")(init)
-app.command("inspect", context_settings=DEFERRED_CONTEXT_SETTINGS)(inspect)
+app.command("inspect")(inspect)
 app.command("kconfig")(kconfig)
 app.command("lock", context_settings=FORWARD_CONTEXT_SETTINGS)(lock)
 app.command("migrate", context_settings=FORWARD_CONTEXT_SETTINGS)(migrate)
 app.command("model")(model)
 app.command("monitor")(monitor)
 app.command("new-som")(new_som)
-app.command("pinmux", context_settings=DEFERRED_CONTEXT_SETTINGS)(pinmux)
+app.command("pinmux")(pinmux)
 app.command("presets")(presets)
 app.command("quality", context_settings=FORWARD_CONTEXT_SETTINGS)(quality)
 app.command("renode")(renode)
 app.command("run")(run)
-app.command("scaffold", context_settings=DEFERRED_CONTEXT_SETTINGS)(scaffold)
+app.command("scaffold")(scaffold)
 app.command("sdk")(sdk)
 app.command("size")(size)
-app.command("support-bundle", context_settings=DEFERRED_CONTEXT_SETTINGS)(support_bundle)
-app.command("trace", context_settings=DEFERRED_CONTEXT_SETTINGS)(trace)
+app.command("support-bundle")(support_bundle)
+app.command("trace")(trace)
 app.command("validate")(validate)
 
 #: Every registered subcommand name -- must track the `app.command(...)` calls
@@ -127,18 +132,14 @@ _SUBCOMMAND_NAMES = frozenset(
 #: `--version` is not here either -- it lives on `Cli` directly in clap, not
 #: `GlobalArgs`, and is root-only on both sides already.
 #: Value: the flag's arity (1 = takes a value, 0 = boolean).
-_GLOBAL_FLAG_ARITY: dict[str, int] = {
-    "--project": 1,
-    "--board-yaml": 1,
-    "--sdk-root": 1,
-    "--target": 1,
-    "--all": 0,
-    "--verbose": 0,
-    "--quiet": 0,
-    "--no-color": 0,
-    "--non-interactive": 0,
-    "--ci": 0,
-}
+#:
+#: Imported from `tan.core.global_flags` rather than hand-copied a second
+#: time (tan-cli#261): that module is also what
+#: `tan.core.global_flags.accept_global_flags` reads to decide which flags a
+#: command is missing, so this reorder table and the per-command injection
+#: list cannot drift apart the way two independent hand-written copies of
+#: clap's `GlobalArgs` field list eventually would.
+_GLOBAL_FLAG_ARITY: dict[str, int] = GLOBAL_FLAG_ARITY
 
 
 def _reorder_global_flags(argv: list[str]) -> list[str]:
@@ -297,32 +298,154 @@ def _emit_help_envelope(argv: list[str]) -> int:
 #: that module exists to eliminate. Each stub reads `ctx.obj["format"]` (see
 #: `deferred_cmd.py`).
 _HONOURS_ROOT_FORMAT = frozenset(
-    {"debug-config", "flash", "image", "size", "faultdecode", *DEFERRED_VERBS}
+    {
+        "debug-config",
+        "flash",
+        "image",
+        "size",
+        "faultdecode",
+        # tan-cli#260's seven, listed by name since they were ported and
+        # `deferred_cmd.DEFERRED_VERBS` no longer exists. Every one of them
+        # reads `ctx.obj["format"]` the way `debug_config_cmd.py` does, so
+        # every one belongs here -- the set is unchanged from when the tuple
+        # supplied it, only spelled out.
+        "completion",
+        "diff",
+        "inspect",
+        "pinmux",
+        "scaffold",
+        "support-bundle",
+        "trace",
+    }
 )
+
+
+def _format_callback(ctx: typer.Context, value: str | None) -> str | None:
+    """Validates `--format`'s value the moment Click parses it. Marked
+    `is_eager=True` on the option below, alongside `--version`
+    (`_version_callback`), so the two race on ARGV POSITION rather than on
+    `root`'s declaration order -- Click sorts eager params by the order they
+    actually appeared on the command line, not by where they're declared
+    (`click.core.iter_params_for_processing`). Verified against the oracle
+    (`target/debug/tan.exe`): `tan --format bogus --version` exits 2 on the
+    bad value without ever reaching `--version` (`--format` comes first in
+    argv); `tan --version --format bogus` instead prints the version and
+    exits 0, never validating the value that comes after it (`--version` wins
+    the race and exits before `--format` is ever processed). Without
+    `is_eager=True` here, `--version`'s own eager callback would ALWAYS run
+    first regardless of position -- eager beats non-eager unconditionally --
+    which would have broken the already-tested `--format json --version` /
+    `--format=json --version` cases (`test_version_under_format_json_is_an_
+    envelope_not_a_bare_line`): `--version`'s callback would fire before
+    `--format`'s value had even been parsed.
+
+    clap validates `--format`'s VALUE eagerly too -- measured: `tan --format
+    bogus`, `tan --format bogus --version`, and `tan --format "" build` (an
+    empty value counts as invalid: clap says "a value is required for
+    '--format <FORMAT>' but none was supplied") all exit 2 on the value
+    itself. Without this, a root-position `--format ""` silently defaulted to
+    text mode for every command in `_HONOURS_ROOT_FORMAT` (rc 1, diverging
+    from the oracle's rc 2) instead of being refused here. `ctx.fail()` gives
+    the same Click UsageError shape (exit 2) every other CLI mistake here
+    already gets.
+    """
+    if value is not None and value not in ("text", "json"):
+        ctx.fail(f"'{value}' is not one of 'text', 'json'")
+    return value
+
+
+def _version_callback(ctx: typer.Context, value: bool) -> bool:
+    """Genuinely eager `--version`, via Typer's own `is_eager=True` +
+    `callback=` mechanism (the option below; the same idiom
+    `click.version_option()` uses) -- not a hand-rolled `sys.exit` scattered
+    through `root`'s body.
+
+    tan-cli#326: a bare `return` from inside `root`'s function BODY does not
+    stop Click's own group dispatch. `click.core.MultiCommand.invoke`
+    resolves the subcommand and calls the group callback's body BEFORE it
+    invokes the subcommand, so a body that just `return`s (the pre-fix shape)
+    falls straight through to the subcommand running anyway -- `tan --version
+    init --template zephyr-app --destination <dir>` printed the version AND
+    created the project. Raising `typer.Exit` from an EAGER option's own
+    callback instead stops the run during argument PARSING itself
+    (`Command.parse_args`, called from `make_context`), which happens before
+    `MultiCommand.invoke` -- and therefore before subcommand resolution -- is
+    ever reached; `Command.main` wraps `make_context` and `invoke` in the SAME
+    try/except Exit, so this is caught and converted to a real process exit
+    exactly the same way a `typer.Exit` raised from the body would be
+    (verified empirically: a `CliRunner` probe with a dummy subcommand behind
+    two eager options confirms the subcommand never runs when the earlier one
+    raises).
+
+    `ctx.resilient_parsing` guards the same case Click's own `version_option`
+    guards: shell-completion parsing, which must not have side effects (not
+    reachable here today -- `add_completion=False` -- but the guard is the
+    documented idiom, kept for when that changes).
+
+    The envelope-vs-plain-text choice below is a raw scan of the real argv
+    (`_wants_json`, the SAME textual scan `main()` uses to route `--help`),
+    not `ctx.params.get("output_format")` -- deliberately, and NOT what a
+    first pass at this fix reached for. `--format`'s own callback is eager
+    too, but Click only races two eager options against each other while
+    BOTH are options of the SAME command (`root`); `tan --version sdk current
+    --format json` puts `--format json` on the OTHER side of the subcommand
+    boundary entirely -- Click hands `root` only `["--version"]` and leaves
+    `["sdk", "current", "--format", "json"]` as protected args for `sdk`'s own
+    parser, so `root`'s `output_format` parameter is `None` there regardless
+    of processing order; `ctx.params` genuinely never has the answer. Yet the
+    oracle DOES fold that trailing `--format json` into one JSON version
+    envelope (tan-cli#326's own repro; verified against `target/debug/tan.exe
+    --version sdk current --format json`) -- clap's real version handling
+    reads the format value from a scan of the whole process argv at the
+    moment it fires, not from however far its own structured parse had
+    gotten. A raw scan is what reaches that value from here too. It also
+    keeps the three narrower, Click-parseable cases correct as a side effect
+    (verified against the oracle for all four): `--format json --version` and
+    `--version --format json` both choose JSON (the literal text is present
+    either way); `--version --format bogus` chooses plain text (the literal
+    "json" is absent, so this never even asks whether "bogus" is a valid
+    value -- matching the oracle exactly, which also never validates it once
+    `--version` has already won).
+    """
+    if not value or ctx.resilient_parsing:
+        return value
+    if _wants_json(sys.argv[1:]):
+        # Under `--format json`, stdout is the envelope channel even for
+        # `--version`: Rust routes clap's version output through
+        # `emit_parse_error` (main.rs), giving exit 0, no `issues`, and the
+        # rendered line as `data.message`.
+        emit(
+            Envelope(
+                "cli",
+                Project(root=None, board_yaml=None),
+                {"message": f"tan {TAN_VERSION}"},
+                [],
+                ExitCode.SUCCESS,
+            )
+        )
+    else:
+        # MUST match /^tan \d+\.\d+\.\d+/ -- the extension rejects the binary
+        # otherwise (alp-sdk-vscode/src/alpCli/service.ts:107-121).
+        typer.echo(f"tan {TAN_VERSION}")
+    raise typer.Exit()
 
 
 @app.callback(invoke_without_command=True)
 def root(
     ctx: typer.Context,
-    version: bool = typer.Option(False, "--version"),
+    version: bool = typer.Option(
+        False, "--version", callback=_version_callback, is_eager=True
+    ),
     output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
+        None,
+        "--format",
+        metavar="FORMAT",
+        help="Output format: text or json.",
+        callback=_format_callback,
+        is_eager=True,
     ),
 ) -> None:
     """tan CLI -- board configuration, generation, and project tooling."""
-    if output_format is not None and output_format not in ("text", "json"):
-        # clap validates `--format`'s VALUE eagerly, ahead of everything else
-        # in this callback -- measured: `tan --format bogus`, `tan --format
-        # bogus --version`, and `tan --format "" build` (an empty value counts
-        # as invalid: clap says "a value is required for '--format <FORMAT>'
-        # but none was supplied") all exit 2 on the value itself, never
-        # reaching `--version` or the bare-invocation check below. Without this,
-        # a root-position `--format ""` silently defaulted to text mode for
-        # every command in `_HONOURS_ROOT_FORMAT` (rc 1, diverging from the
-        # oracle's rc 2) instead of being refused here. `ctx.fail()` gives the
-        # same Click UsageError shape (exit 2) every other CLI mistake here
-        # already gets.
-        ctx.fail(f"'{output_format}' is not one of 'text', 'json'")
     # Rust's `--format` is `global = true`, so clap accepts it on EITHER side of
     # the subcommand name; four committed goldens invoke `tan --format json
     # debug-config ...`. Click gives the group only what precedes the subcommand,
@@ -331,28 +454,6 @@ def root(
     # after the command name) still wins -- that is the position every other
     # golden uses.
     ctx.obj = {"format": output_format}
-    if version:
-        if output_format == "json":
-            # Under `--format json`, stdout is the envelope channel even for
-            # `--version`: Rust routes clap's version output through
-            # `emit_parse_error` (main.rs), giving exit 0, no `issues`, and the
-            # rendered line as `data.message`. Reachable only now that `--format`
-            # is a root option -- before, this argv was a Click usage error -- so
-            # honouring it here is part of adding the flag, not a separate change.
-            emit(
-                Envelope(
-                    "cli",
-                    Project(root=None, board_yaml=None),
-                    {"message": f"tan {TAN_VERSION}"},
-                    [],
-                    ExitCode.SUCCESS,
-                )
-            )
-            return
-        # MUST match /^tan \d+\.\d+\.\d+/ -- the extension rejects the binary
-        # otherwise (alp-sdk-vscode/src/alpCli/service.ts:107-121).
-        typer.echo(f"tan {TAN_VERSION}")
-        return
     if ctx.invoked_subcommand is None:
         # Bare invocation. Rust's clap requires a subcommand and exits 2 with
         # help on stderr (crates/tan-cli/src/cli.rs); invoke_without_command
@@ -465,6 +566,28 @@ class _TeeStderr:
         return self._buffer.getvalue()
 
 
+def _reconfigure_stdio() -> None:
+    """Force UTF-8, LF-only stdout/stderr, once, at the process boundary.
+
+    Every command downstream just `print()`s -- correctness here is what
+    makes that safe. A normal Windows `TextIOWrapper` translates a written
+    `\\n` to `\\r\\n` and encodes with the process's ANSI code page, neither of
+    which the oracle's `serde_json`/`println!` output does. Both are visible
+    on stdout, not just in theory: measured, `tan completion --shell bash`
+    was 3975 bytes with 108 `\\r` where the oracle's was 3867 bytes with zero
+    -- and the emitted script is a hard syntax error when sourced in a strict
+    bash (`syntax error near unexpected token $'{\\r''`); `clean --format
+    json` and a bare `--format json` both ended `\\r\\n` too, so this is a
+    process-wide stdout-newline defect, not a completion-specific one. A
+    frozen/piped stream may not implement `.reconfigure()` (e.g. a test
+    harness's in-memory buffer) -- `hasattr` skips those rather than raising,
+    since the fix only matters for the real console/pipe case it targets.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", newline="\n")
+
+
 def main() -> None:
     """Process entrypoint.
 
@@ -486,6 +609,7 @@ def main() -> None:
     missing stdout envelope when the exit signals failure under `--format
     json`.
     """
+    _reconfigure_stdio()
     argv = _reorder_global_flags(sys.argv[1:])
     sys.argv = [sys.argv[0], *argv]
     json_mode = _wants_json(argv)
@@ -546,8 +670,24 @@ def main() -> None:
                 code = int(ExitCode.SUCCESS)
             elif not isinstance(code, int):
                 code = int(ExitCode.RUNTIME_FAILURE)
-            if code != 0 and not envelope_emitted():
-                print(_usage_error_envelope(code, captured_stderr.getvalue()))
+            if not envelope_emitted():
+                if code != 0:
+                    print(_usage_error_envelope(code, captured_stderr.getvalue()))
+                raise
+            # tan-cli#327: `Envelope.to_json()`'s serialize-failure fallback
+            # can report a different `exitCode` (5, `envelope.serialize-
+            # failed`) than the command's own `typer.Exit(code)` -- the
+            # command chose `code` BEFORE `emit()` ever tried to encode the
+            # envelope, so a fallback there leaves `code` stale. The wire
+            # invariant is `process exit code == envelope.exitCode`
+            # (mirrors the Rust `json_exit_code` boundary and its
+            # `json_exit_code_follows_serialize_failure_fallback_not_stale_
+            # run_exit` test); `emit()` is the one place that already knows
+            # the REAL code, so read it back rather than re-deriving
+            # anything from the JSON this process just printed.
+            emitted_code = envelope_emitted_exit_code()
+            if emitted_code is not None and emitted_code != code:
+                sys.exit(emitted_code)
             raise
     finally:
         sys.stderr = real_stderr

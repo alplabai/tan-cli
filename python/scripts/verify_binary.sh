@@ -6,8 +6,11 @@
 #   sh scripts/verify_binary.sh <path-to-binary> <path-to-alp-sdk-checkout>
 #
 # A binary that starts is not a binary that works. Each check below is here
-# because it is a real failure mode of a PyInstaller onefile build, and every
-# one of them was hit while establishing this path:
+# because it is a real failure mode of a PyInstaller freeze, and every one of
+# them was hit while establishing this path. From tan-cli#349 the freeze is
+# --onedir, not --onefile: $BIN is the executable inside the onedir tree
+# (e.g. dist/tan/tan or dist/tan/tan.exe), with a `_internal/` sibling
+# directory that check 5/5 below depends on.
 #
 #   1. --version            -- import graph resolves at all. `python/tan/cli.py`
 #                              imports `click.testing`, which typer 0.27 no
@@ -48,6 +51,31 @@ BIN=${1:?usage: verify_binary.sh <binary> <alp-sdk-root>}
 SDK=${2:?usage: verify_binary.sh <binary> <alp-sdk-root>}
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
+
+# tan-cli#361: checks 3-5 run from a throwaway project directory (`cd "$work"`
+# below), so a RELATIVE argument -- which is exactly what the usage line above
+# documents (`dist/tan/tan`) -- stops resolving the instant that cd happens.
+# `sh scripts/verify_binary.sh ./dist/tan/tan /tmp/sdk` passed 1/5 and 2/5 and
+# then died with `./dist/tan/tan: not found` at 3/5. BOTH arguments carry the
+# bug, not just the one the issue named: $BIN is re-invoked in 3/5 and 4/5 and
+# read from disk in 5/5, and $SDK is handed to the binary as `--sdk-root` in
+# 4/5, where the binary resolves it against ITS cwd -- $work, not the caller's.
+# Every CI call site passed `$PWD/...`, which is why CI could never see it.
+#
+# Resolved HERE, once, before the first cd -- not lazily at each use site, so
+# whoever adds a check 6 does not have to remember. cd-into-dirname then `pwd`,
+# recombined with `basename`, because the one-liners do not exist everywhere
+# this runs: `readlink -f` is GNU-only (BSD readlink has no -f at all) and
+# `realpath` is absent from a stock macOS, while this script must also survive
+# busybox ash, dash, macOS bash 3.2 and Git Bash. `${bindir%/}` so a binary
+# sitting at the filesystem root comes back as `/tan` and not `//tan` -- a
+# leading `//` is implementation-defined in POSIX and Git Bash reads it as a
+# UNC share.
+[ -f "$BIN" ] || fail "no such binary: $BIN"
+[ -d "$SDK" ] || fail "no such alp-sdk checkout: $SDK"
+bindir=$(cd -- "$(dirname -- "$BIN")" && pwd)
+BIN="${bindir%/}/$(basename -- "$BIN")"
+SDK=$(cd -- "$SDK" && pwd)
 
 echo "== 1/5 $BIN --version"
 "$BIN" --version || fail "--version exited non-zero"
@@ -102,14 +130,36 @@ grep -q '"ok":true' gen.json || fail "generate envelope not ok: $(cat gen.json)"
 [ -s ./out/alp.conf ] || fail "generate wrote no --output file"
 grep -q "^CONFIG_" ./out/alp.conf || fail "emitted file carries no CONFIG_ lines"
 
-# STRUCTURAL, not a live network call. PyInstaller's onefile archive stores
-# each embedded file/module's ORIGINAL NAME as plain ASCII in its TOC, right
-# next to the (possibly zlib-compressed) entry it names -- grepping the raw
-# executable for these names is a real proof of what got bundled, verified
-# against a real freeze while writing this check (`grep -c cacert.pem
-# dist/tan.exe` -> 1; `grep -o 'truststore[a-z._]*' dist/tan.exe` -> all four
-# platform backends, on every OS this is built on -- `truststore/__init__.py`
-# imports them unconditionally and lets `ssl` pick the live one).
+# STRUCTURAL, not a live network call. Two different proofs for two different
+# kinds of bundled thing, because tan-cli#349 (--onedir) split them apart:
+#
+#   * `truststore` is pure-Python module CODE, no data files. PyInstaller
+#     still compresses pure-Python module code into a PYZ archive embedded
+#     INSIDE the executable itself, under --onedir exactly as it did under
+#     --onefile -- externalising to `_internal/` only applies to DATA/BINARY/
+#     EXTENSION entries, not the PYZ. The PYZ's directory table stores each
+#     module's ORIGINAL NAME as plain ASCII right next to its (possibly
+#     zlib-compressed) entry, so grepping the executable for the name is a
+#     real proof of what got bundled -- verified against a real --onedir
+#     freeze while fixing this check for #349: `grep -o
+#     'truststore[a-z._]*' dist/tan/tan.exe` still finds all four platform
+#     backends (`truststore/__init__.py` imports them unconditionally and
+#     lets `ssl` pick the live one). UNCHANGED by #349.
+#
+#   * `certifi`'s `cacert.pem` is a DATA file (collected via `--collect-data
+#     certifi` in build_binary.sh, not import-graph-reachable code), and DATA
+#     files are exactly what --onedir stops embedding in the executable:
+#     externalising them to disk ONCE at build time, instead of re-extracting
+#     them from inside the exe on every launch, is the entire point of
+#     --onedir. So `grep cacert.pem` on the executable now finds NOTHING --
+#     measured on a real --onedir freeze, `grep -c cacert.pem dist/tan/tan.exe`
+#     -> 0 -- while the same freeze passed under --onefile. Grepping the exe
+#     here would pass or fail for the wrong reason: not proof of a real defect,
+#     proof of the wrong file. The real bundled bytes are a loose file at
+#     `_internal/certifi/cacert.pem`, a sibling of $BIN, so this check now
+#     asserts on THAT path directly (existence + non-empty, not a byte-content
+#     grep -- a PEM bundle's own content has no reason to contain the literal
+#     string "cacert.pem").
 #
 # Chosen over `"$BIN" sdk list --online` against the real endpoint (the fix
 # the #304 issue itself suggested) because it does NOT discriminate on every
@@ -119,19 +169,20 @@ grep -q "^CONFIG_" ./out/alp.conf || fail "emitted file carries no CONFIG_ lines
 # `create_default_context()`, a fallback macOS and Linux do not have, which is
 # exactly why the shipped defect was a macOS asset. A live-network check on
 # this platform would pass green on a build missing the fix entirely. This
-# check has no such blind spot: it looks for the SAME bundled names on every
+# check has no such blind spot: it looks for the SAME bundled things on every
 # OS, so it goes red the moment either mechanism drops out of the freeze,
 # consistently, and needs no network to do it.
 #
 # Proves: the CA bundle `certifi.where()` resolves at runtime, and
-# `truststore`'s platform backends, are physically in this archive. Does NOT
+# `truststore`'s platform backends, are physically in this freeze. Does NOT
 # prove: that `ssl.create_default_context()` actually verifies a real
 # certificate chain at runtime, or that the endpoint is reachable -- #304 was
 # reachable-but-untrusted, not unreachable, so only a live call proves THAT,
 # and this check trades it for one that cannot be masked by which OS built it.
 echo "== 5/5 CA trust anchors are bundled (tan-cli#304)"
-grep -q "cacert.pem" "$BIN" ||
-  fail "no certifi cacert.pem embedded -- check --collect-data certifi in build_binary.sh (tan-cli#304 would recur)"
+CA_BUNDLE="$(dirname "$BIN")/_internal/certifi/cacert.pem"
+[ -s "$CA_BUNDLE" ] ||
+  fail "no certifi CA bundle at $CA_BUNDLE -- check --collect-data certifi in build_binary.sh (tan-cli#304 would recur)"
 grep -q "truststore" "$BIN" ||
   fail "no truststore module embedded -- tan/net.py's preferred CA mechanism is missing from this freeze (tan-cli#304 would recur)"
 

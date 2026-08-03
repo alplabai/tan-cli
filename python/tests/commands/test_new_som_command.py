@@ -250,6 +250,12 @@ def test_hw_rev_cross_checked_against_real_family_file(tmp_path):
 
 
 def test_sdk_root_unresolved_fails_loud(tmp_path):
+    """Exit code 2 (VALIDATION_FAILURE), not the flat 1 every other new-som
+    failure uses: this is the ONE failure the port adds that the alp_cli
+    original never had (it always ran from within a checkout), and it
+    mirrors the Rust forwarder's own preflight
+    (`sdk_cli.rs::run`) -- confirmed live: `tan.exe new-som --sdk-root <bad>`
+    exits 2."""
     result = runner.invoke(
         app,
         [
@@ -264,7 +270,7 @@ def test_sdk_root_unresolved_fails_loud(tmp_path):
             "fam",
         ],
     )
-    assert result.exit_code == 1
+    assert result.exit_code == 2
     assert "alp-sdk root is unresolved" in result.output
 
 
@@ -332,6 +338,40 @@ def test_output_root_pointing_at_a_regular_file_is_a_usage_error(tmp_path):
     )
     assert result.exit_code == 2
     assert "is a file" in result.output
+
+
+def test_full_global_flag_set_is_accepted_even_when_meaningless(tmp_path):
+    """The oracle's clap `GlobalArgs` are `global = true`, so `new-som`
+    accepts `--board-yaml`/`--target`/`--all`/`--verbose`/`--quiet`/
+    `--no-color`/`--non-interactive`/`--ci`/`--format` even though it never
+    reads any of them -- confirmed live: `tan.exe new-som --board-yaml x
+    --target t --all --verbose --quiet --no-color --non-interactive --ci
+    --format json --sdk-root <bad>` still reaches the SDK-root-unresolved
+    failure, not a parse error. Regression for the Click "No such option"
+    usage error (exit 2) this port used to raise for each of these instead
+    (tan-cli#254)."""
+    result = runner.invoke(
+        app,
+        [
+            "--board-yaml", "x.yaml",
+            "--target", "zephyr-conf",
+            "--all",
+            "--verbose",
+            "--quiet",
+            "--no-color",
+            "--non-interactive",
+            "--ci",
+            "--format", "json",
+            "--dry-run",
+            "--sdk-root", str(_SDK_ROOT),
+            "--output-root", str(tmp_path),
+            "--sku", "E1M-XTST6",
+            "--soc-ref", "test:testfam:testpart6",
+            "--family", "test-fam",
+            "--default-board", "E1M-EVK",
+        ],
+    )
+    assert result.exit_code == 0, result.output
 
 
 # ---------------------------------------------------------------------------
@@ -468,6 +508,71 @@ def test_cores_option_produces_exactly_the_given_topology_keys(tmp_path):
         encoding="utf-8"
     )
     assert "topology:\n  core_a: {}\n  core_b: {}\n" in preset_text
+
+
+# ---------------------------------------------------------------------------
+# Acceptance (tan-cli#254): a new SoC/vendor onboards with NO tan release.
+# ---------------------------------------------------------------------------
+
+
+def test_new_vendor_onboards_through_metadata_alone_with_no_tan_release(tmp_path):
+    """The whole point of the metadata-driven porting kit: a vendor/SoC `tan`
+    has never heard of scaffolds and validates through `new-som` + the SDK's
+    schemas alone -- no `tan` source change, and so no `tan` release, is
+    needed to onboard it.
+
+    Proven two ways, not just exercised:
+
+    1. A vendor/family/part triple invented FOR THIS TEST is asserted absent
+       from `tan`'s own source tree first -- if onboarding this vendor needed
+       special-casing, that string would already have to be there for the
+       assertion below to hold, and it is not. (This is the same shape as
+       `tests/gates/test_no_new_hardware_facts.py`'s allowlist gate, run here
+       against one concrete, never-before-seen vendor rather than the fixed
+       patterns that gate already knows to look for.)
+    2. The scaffold this genuinely-new vendor produces validates against the
+       REAL `som-preset-v1`/`soc-spec-v1` schemas end to end (dry-run AND a
+       real write), the same as every other SKU in this file -- proving the
+       whole `new-som` -> schema-validate -> `pr-metadata-validate` pipeline
+       needs nothing vendor-specific to accept it.
+    """
+    novel_vendor, novel_family, novel_part = "quixotic", "novaspark", "ns1"
+    tan_src = Path(__file__).resolve().parents[2] / "tan"
+    hits = [
+        p
+        for p in tan_src.rglob("*.py")
+        if novel_vendor in p.read_text(encoding="utf-8", errors="replace")
+    ]
+    assert not hits, (
+        f"{novel_vendor!r} already appears in {hits} -- this proves nothing about "
+        "onboarding a genuinely new vendor; pick a different invented slug"
+    )
+
+    soc_ref = f"{novel_vendor}:{novel_family}:{novel_part}"
+    common = [
+        "--sdk-root", str(_SDK_ROOT),
+        "--sku", "E1M-QUIX1",
+        "--soc-ref", soc_ref,
+        "--family", f"{novel_vendor}-{novel_family}",
+        "--default-board", "E1M-EVK",
+    ]
+
+    dry = runner.invoke(app, ["--dry-run", "--output-root", str(tmp_path / "dry"), *common])
+    assert dry.exit_code == 0, dry.output
+    assert "Preset skeleton validates against som-preset-v1" in dry.output
+    assert "SoC spec skeleton validates against soc-spec-v1" in dry.output
+
+    written = runner.invoke(app, ["--output-root", str(tmp_path / "written"), *common])
+    assert written.exit_code == 0, written.output
+    preset_path = tmp_path / "written" / "metadata" / "e1m_modules" / "E1M-QUIX1.yaml"
+    soc_path = (
+        tmp_path / "written" / "metadata" / "socs" / novel_vendor / novel_family
+        / f"{novel_part}.json"
+    )
+    assert preset_path.is_file()
+    assert soc_path.is_file()
+    assert f"silicon: {soc_ref}" in preset_path.read_text(encoding="utf-8")
+    assert json.loads(soc_path.read_text(encoding="utf-8"))["vendor"] == novel_vendor
 
 
 def test_interactive_prompts_ask_same_questions_in_order(monkeypatch, tmp_path):

@@ -657,6 +657,39 @@ def test_a_deleted_working_directory_still_produces_an_envelope(monkeypatch, cap
     assert payload["issues"], "a failure must always carry an issue"
 
 
+# ── swd_probe Commander script quoting (tan-cli#369, test gap per #373) ────
+
+
+def test_jlink_commander_script_quotes_a_spaced_loadbin_path():
+    """tan-cli#369 fixed `commander_path` (unquoted whitespace silently
+    truncates SEGGER's line, e.g. `C:\\Program Files\\...` -> `C:\\Program`)
+    but shipped with no test exercising `jlink_commander_script` -- the
+    `swd_probe` generator that is the only real caller -- against a spaced
+    path at all (tan-cli#373). A raw `.bin` takes the `loadbin` line."""
+    script = flash_plan.jlink_commander_script(
+        "C:\\Program Files\\alp\\build\\zephyr.bin", "0x08000000", True
+    )
+    assert 'loadbin "C:\\Program Files\\alp\\build\\zephyr.bin", 0x08000000' in script
+
+
+def test_jlink_commander_script_quotes_a_spaced_loadfile_path():
+    """The non-`.bin` (`loadfile`) branch must quote a spaced path too -- the
+    same SEGGER whitespace-split hazard applies to it, and `commander_path`
+    is shared by both `jlink_commander_script` branches."""
+    script = flash_plan.jlink_commander_script(
+        "C:\\Program Files\\alp\\build\\zephyr.elf", "0x08000000", False
+    )
+    assert 'loadfile "C:\\Program Files\\alp\\build\\zephyr.elf"' in script
+
+
+def test_jlink_commander_script_leaves_an_unspaced_path_unquoted():
+    """The common case -- every already-measured oracle/bench script path --
+    must render byte-identical to before tan-cli#369's quoting fix."""
+    script = flash_plan.jlink_commander_script("/build/zephyr.bin", "0x08000000", True)
+    assert "loadbin /build/zephyr.bin, 0x08000000" in script
+    assert '"' not in script
+
+
 # ── Flow D: no oracle counterpart, so it is pinned entirely here ────────────
 
 FLOW_D_ARGS = {
@@ -795,6 +828,28 @@ def test_flow_d_script_writes_both_blobs_verifies_and_pin_resets():
         "alif_mram_jlink[m55_he]: app -> 0x80010000, signed ATOC -> 0x8057F5B0 "
         "via J-Link (PART_PROFILE); verified and PIN-reset"
     )
+
+
+def test_flow_d_script_quotes_a_path_containing_a_space(tmp_path):
+    """tan-cli#369: SEGGER's J-Link Commander splits an unquoted script line
+    on whitespace, so an unquoted `loadbin C:\\Program Files\\...` truncates
+    to `C:\\Program` -- a normal Windows SETOOLS install path. `atoc` under a
+    directory with a space must be quoted; the no-space `artefact` line
+    (proven byte-identical above) must NOT be, so this only widens the
+    render, never narrows it."""
+    spaced_dir = tmp_path / "Program Files" / "alif" / "setools" / "build"
+    spaced_dir.mkdir(parents=True)
+    atoc = spaced_dir / "AppTocPackage.bin"
+    atoc.write_bytes(b"\x00" * 8)
+
+    plan = plan_alif_mram_jlink(
+        flow_d_inputs(atoc=str(atoc), confirm=True), lambda t: t == "JLinkExe"
+    )
+    script = plan.jlink_script or ""
+    assert f'loadbin "{atoc}" 0x8057F5B0' in script, script
+    assert f'verifybin "{atoc}" 0x8057F5B0' in script, script
+    # The unquoted no-space artefact line is untouched.
+    assert "loadbin /build/zephyr/zephyr.bin 0x80010000" in script, script
 
 
 def test_flow_d_is_confirm_gated_like_every_other_persistent_write():
@@ -1053,8 +1108,27 @@ def test_flow_d_preflight_a_different_reported_dp_id_keeps_the_wiring_message(mo
     )
     message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
     assert message is not None
-    assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
+    assert "Check the wiring and which board is physically attached" in message
     assert "re-enumerat" not in message
+
+
+def test_flow_d_preflight_wrong_dp_id_names_the_sw_dp_id_not_jlink_serial(monkeypatch):
+    """tan-cli#369: the wrong-DP-ID remediation used to read as "pin
+    jlink_serial to fix this" -- wrong on the bench this preflight actually
+    caught a mismatch on, where a cloned/shared USB serial made jlink_serial
+    ambiguous between two physical probes. The remediation must name the
+    SW-DP ID as the real discriminator and say plainly that a shared/cloned
+    serial cannot be disambiguated by jlink_serial alone."""
+    _stub_flow_d_probe(
+        monkeypatch,
+        stdout="Connecting to target via SWD\nFound SW-DP with ID 0x2BA01477\n",
+    )
+    message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
+    assert message is not None
+    assert "SW-DP ID is the real" in message
+    assert "cannot disambiguate" in message
+    assert "CLONED serial" in message
+    assert "jlink_serial" in message
 
 
 def test_flow_d_preflight_no_dp_id_at_all_gets_the_re_enumeration_message(monkeypatch):
@@ -1079,12 +1153,18 @@ def test_flow_d_preflight_an_unrecognised_banner_falls_back_to_the_wiring_messag
     """Conservative by design (tan-cli#312): a banner with neither a
     recognisable DP-ID token NOR SEGGER's own connect-refused wording is not
     confidently "just re-enumerating" -- the detector must not guess the
-    wiring is fine, so this keeps the original sentence."""
+    wiring is fine, so this keeps the original sentence.
+
+    **tan-cli#373**: no DP ID was reported here, so this must get the
+    ORIGINAL probe-selection/`jlink_serial` sentence -- not #369's
+    cloned-serial text, which only applies when a board DID answer with a
+    different ID (the wrong-DP-ID test below covers that one)."""
     _stub_flow_d_probe(monkeypatch, stdout="some unrecognised probe banner\n")
     message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "re-enumerat" not in message
+    assert "CLONED serial" not in message
 
 
 def test_flow_d_preflight_a_target_level_cannot_connect_keeps_the_wiring_message(monkeypatch):
@@ -1092,7 +1172,12 @@ def test_flow_d_preflight_a_target_level_cannot_connect_keeps_the_wiring_message
     produces "Cannot connect to target." -- a genuine wiring problem, not a
     re-enumerating probe. This must NOT get the "not a wiring... problem"
     re-enumeration message: on a bench that would turn a real unplugged cable
-    into an infinite wait-and-retry loop instead of the correct remediation."""
+    into an infinite wait-and-retry loop instead of the correct remediation.
+
+    **tan-cli#373**: no DP ID was reported here either, so the ORIGINAL
+    probe-selection sentence is correct, not the cloned-serial text -- #369's
+    rewrite gave this banner the cloned-serial message too, which never
+    applies (no ID was even read to compare)."""
     _stub_flow_d_probe(
         monkeypatch,
         stdout=(
@@ -1107,13 +1192,23 @@ def test_flow_d_preflight_a_target_level_cannot_connect_keeps_the_wiring_message
     assert message is not None
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
     assert "re-enumerat" not in message
+    assert "CLONED serial" not in message
 
 
 def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypatch):
     """tan-cli#312 review finding: a probe that IS reachable via USB but
     refuses the requested `flash_args.jlink_serial` prints "Cannot connect to
     J-Link." -- a real probe-selection problem, so this keeps the original
-    wiring/`jlink_serial` remediation rather than the re-enumeration message."""
+    wiring/`jlink_serial` remediation rather than the re-enumeration message.
+
+    **tan-cli#373**: this is the regression #367's own review pattern warned
+    about -- this test's docstring already promised the ORIGINAL wiring/
+    `jlink_serial` sentence, but its body asserted a phrase that actually
+    belongs to #369's cloned-serial rewrite (both messages happen to share
+    the words "Check the wiring...physically attached"). No DP ID was
+    reported here, so the ORIGINAL sentence -- naming `jlink_serial`
+    explicitly as the fix on a multi-probe host -- is correct; the
+    cloned-serial text does not apply."""
     _stub_flow_d_probe(
         monkeypatch,
         stdout="Connecting to J-Link via USB...FAILED: Cannot connect to J-Link.\n",
@@ -1122,7 +1217,9 @@ def test_flow_d_preflight_a_wrong_jlink_serial_keeps_the_wiring_message(monkeypa
     message = flash_cmd._flow_d_preflight(_flow_d_preflight_inputs())
     assert message is not None
     assert "Check the probe selection (flash_args.jlink_serial) and the wiring" in message
+    assert "tan-cli#353" in message
     assert "re-enumerat" not in message
+    assert "CLONED serial" not in message
 
 
 def test_flow_d_needs_jlink_on_path_for_a_real_run():
@@ -1366,6 +1463,343 @@ boot_order: []
     # `flash_args.atoc_address` -- a prefix match cannot tell which required
     # field the refusal was actually about.
     assert "flash_args.atoc_address" in entry["message"]
+
+
+# ── tan-cli#353's remaining half: SETOOLS integration for the AEN801 slot0
+# flash. The alp-sdk manifest measured on real silicon (e1m-aen-evk-01, E8
+# AE822) emits ONLY `flash_args.jlink_flash_device` -- no `atoc`/`atoc_map`/
+# `atoc_address` at all -- so a customer used to hit `plan_alif_mram_jlink`'s
+# bare "both required" refusal with no path from there to a working flash.
+# These three prove the maintainer's minimum bar: (a) a resolved SETOOLS path
+# signs for real and the derived `atoc_address` reaches the actual
+# `loadbin`/`verifybin` pair; (b) an unresolved one refuses with the SETOOLS
+# guidance, not the bare field error; (c) `--dry-run` signs nothing.
+
+
+def _setools_script_name() -> str:
+    """`.bat` on Windows -- a batch-content file needs the extension to be
+    directly spawnable via `subprocess.run(..., shell=False)` (measured:
+    an extension-less same-content file fails with WinError 193) -- the real
+    bare `app-gen-toc` name (`tan.core.setools.APP_GEN_TOC`) everywhere else,
+    where a POSIX shebang script IS spawnable extension-less."""
+    return "app-gen-toc.bat" if os.name == "nt" else "app-gen-toc"
+
+
+def _write_working_app_gen_toc(dest: Path, address: str = "0x8057ea50") -> str:
+    """A fake `app-gen-toc` that writes a real `build/app-package-map.txt` +
+    `build/AppTocPackage.bin` under its OWN cwd and exits 0 -- proves the
+    WIRING (`tan.core.setools.sign_slot0`'s own tests cover the failure
+    shapes), never a real SETOOLS (license-gated, not redistributed, and not
+    needed to prove this)."""
+    if os.name == "nt":
+        dest.write_text(
+            "@echo off\r\n"
+            "if not exist build mkdir build\r\n"
+            f">build\\app-package-map.txt echo APP Package Start Address: {address}\r\n"
+            "echo fake-atoc-bytes> build\\AppTocPackage.bin\r\n"
+            "exit /b 0\r\n",
+            encoding="utf-8",
+        )
+    else:
+        dest.write_text(
+            "#!/bin/sh\n"
+            "mkdir -p build\n"
+            f'printf "APP Package Start Address: {address}\\n" > build/app-package-map.txt\n'
+            'printf "fake-atoc-bytes\\n" > build/AppTocPackage.bin\n'
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        os.chmod(dest, 0o755)
+    return str(dest)
+
+
+def test_flow_d_setools_signs_when_the_manifest_supplies_nothing_signing_related(
+    tmp_path, monkeypatch
+):
+    """(a) A manifest carrying ONLY `jlink_flash_device` + `slot0_load_address`
+    -- alp-sdk's real current AEN801 emit plus the one key tan cannot derive,
+    measured -- gets a REAL SETOOLS sign when `flash_args.setools_dir`
+    resolves, and the DERIVED `atoc_address` reaches
+    `plan_alif_mram_jlink`'s actual `loadbin`/`verifybin` pair -- not just
+    `_resolve_flow_d_atoc_via_setools`'s own return value."""
+    from tan.commands.flash_cmd import _Context, _is_file, _resolve_flow_d_atoc_via_setools
+    from tan.core import setools as setools_module
+    from tan.core.flash_plan import validate_flow_d_shape
+
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    name = _setools_script_name()
+    if name != setools_module.APP_GEN_TOC:
+        # `find_app_gen_toc`'s OWN lookup runs unmodified below -- only the
+        # name it looks for changes, to the one filename THIS host can
+        # actually spawn (see `_setools_script_name`'s own docstring).
+        monkeypatch.setattr(setools_module, "APP_GEN_TOC", name)
+    script = _write_working_app_gen_toc(setools_dir / name)
+
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+    artefact = build_root / "zephyr.bin"
+    artefact.write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    flash_args = {
+        "jlink_flash_device": "PART_PROFILE",
+        "slot0_load_address": "0x80010000",
+        "setools_dir": str(setools_dir),
+    }
+    ctx = _Context(
+        sku="S",
+        build_root=str(build_root),
+        sdk_root=str(tmp_path),
+        dry_run=False,
+        skip_missing_tools=False,
+        force_confirm=False,
+        capture=True,
+    )
+    shape = validate_flow_d_shape(flash_args, str(artefact), _is_file)
+    merged, note = _resolve_flow_d_atoc_via_setools(flash_args, shape, ctx, "m55_he")
+
+    # tan-cli#373: a real (non-dry-run) sign now returns an informational
+    # NOTE (not `None`) naming which SETOOLS install actually signed --
+    # `setools.source` used to reach a customer only via a FAILURE message.
+    # `flash_args.setools_dir` is what resolved it here, so its OWN value
+    # names the source, matching `resolve_setools_dir`'s own precedence text.
+    assert note is not None
+    assert str(setools_dir) in note
+    assert "flash_args.setools_dir" in note
+    assert merged["atoc_address"] == "0x8057ea50"
+    assert Path(merged["atoc"]).is_file()
+    assert Path(script).is_file()  # the fake tool itself was never deleted/moved
+
+    plan = plan_alif_mram_jlink(
+        FlashInputs(artefact=str(artefact), flash_args=merged, core_id="m55_he", sku="S"),
+        lambda _t: True,
+    )
+    script_text = plan.jlink_script or ""
+    assert f"loadbin {merged['atoc']} 0x8057ea50" in script_text, script_text
+    assert f"verifybin {merged['atoc']} 0x8057ea50" in script_text, script_text
+
+
+def test_flow_d_end_to_end_refuses_with_setools_guidance_when_unresolved(tmp_path):
+    """(b) The FIRST failure the ticket measures on real silicon: a fresh
+    AEN801 manifest carrying only `jlink_flash_device`, no `SETOOLS_DIR` and
+    no `flash_args.setools_dir` anywhere. Must surface the SETOOLS guidance
+    refusal -- naming that a signed ATOC is needed, that SETOOLS is
+    license-gated, and how to point tan at it -- not
+    `plan_alif_mram_jlink`'s bare 'flash_args.atoc ... required' field
+    message. `--dry-run`: the SAME reason every other CLI-level Flow D
+    refusal test above uses it -- it bypasses the JLinkExe PATH gate, which
+    is not what this test is about."""
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: AE822FA0E5597LS0_M55_HE}}
+helper_mcus: []
+boot_order: []
+"""
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": ""},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "SETOOLS" in entry["message"]
+    assert "license-gated" in entry["message"]
+    assert "--setools-dir" in entry["message"]
+    assert "SETOOLS_DIR=" in entry["message"]
+    assert "flash_args.setools_dir" in entry["message"]
+    # NOT the old bare field message a customer has never heard of app-gen-toc
+    # from.
+    assert "both required" not in entry["message"]
+    assert codes(payload) == ["flash.entry-failed"]
+
+
+def test_flow_d_setools_dir_precedence_is_flag_then_env_then_manifest(tmp_path):
+    """tan-cli#368's acceptance criterion: with all three sources set to
+    DIFFERENT (all app-gen-toc-less) directories, the flag wins; with only
+    the environment and the manifest set, the environment wins. Proven via
+    `missing_tool_message`'s own source-naming (`setools.source`), not a real
+    sign -- none of the three directories holds a working `app-gen-toc`, so
+    `tan flash` always refuses, but WHICH directory (and which source phrase)
+    it names proves which one actually resolved."""
+    manifest_dir = tmp_path / "from-manifest"
+    env_dir = tmp_path / "from-env"
+    flag_dir = tmp_path / "from-flag"
+    for d in (manifest_dir, env_dir, flag_dir):
+        d.mkdir()
+
+    manifest = f"""schema_version: 1
+hw_info: {{sku: S}}
+slices:
+- {{core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {{jlink_flash_device: PART_PROFILE,
+                setools_dir: "{manifest_dir.as_posix()}"}}}}
+helper_mcus: []
+boot_order: []
+"""
+    # All three set -> the flag wins.
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", "--setools-dir", str(flag_dir),
+        manifest=manifest, env={"SETOOLS_DIR": str(env_dir)},
+    )
+    payload = envelope(out)
+    entry = payload["data"]["entries"][0]
+    assert exit_code == 1
+    assert "the --setools-dir flag" in entry["message"]
+    assert str(flag_dir) in entry["message"]
+    assert str(env_dir) not in entry["message"]
+    assert str(manifest_dir) not in entry["message"]
+
+    # No flag -> the environment beats the manifest.
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run",
+        manifest=manifest, env={"SETOOLS_DIR": str(env_dir)},
+    )
+    payload = envelope(out)
+    entry = payload["data"]["entries"][0]
+    assert exit_code == 1
+    assert "the SETOOLS_DIR environment variable" in entry["message"]
+    assert str(env_dir) in entry["message"]
+    assert str(manifest_dir) not in entry["message"]
+
+
+def test_flow_d_dry_run_signs_nothing_via_setools(tmp_path):
+    """(c) `--dry-run` must NOT invoke `app-gen-toc`, even though SETOOLS
+    fully resolves here -- planning only. Proven two ways: the entry reports
+    a WOULD-sign preview (`status: ok`, not `planned`/`failed`), and nothing
+    a real sign would produce (`build/AppTocPackage.bin`, `build/config/`)
+    exists afterwards -- if `--dry-run` ever DID invoke the fake tool below,
+    it would either fail loudly (the file has no execute bit on POSIX) or, on
+    a host where it somehow ran, leave exactly the files these assertions
+    check for."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    # Present, but NEVER executed under --dry-run -- a real script would prove
+    # nothing extra here (see (a) above for that), so the placeholder is
+    # deliberately not spawnable at all (posix: no execute bit).
+    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000"}}
+helper_mcus: []
+boot_order: []
+"""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir)},
+    )
+    payload = envelope(out)
+    assert exit_code == 0
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "ok"
+    assert "would sign" in entry["message"]
+    assert "app-gen-toc" in entry["message"]
+    assert not payload["issues"], payload["issues"]
+    # The real signing side effects a live run would produce -- absent.
+    assert not (setools_dir / "build" / "AppTocPackage.bin").exists()
+    assert not (setools_dir / "build" / "config").exists()
+
+
+def test_flow_d_dry_run_with_setools_still_surfaces_a_half_armed_preflight(tmp_path):
+    """#366: the SETOOLS auto-sign preview used to return BEFORE `meta.build`
+    and BEFORE `validate_flow_d_preflight_args` ever ran, so a `--dry-run`
+    whose `SETOOLS_DIR` happens to resolve reported `ok:true` / exit 0 for a
+    manifest that would refuse a real (or SETOOLS-less) run outright -- a
+    disarmed SW-DP IDR guard passing a dry run. Same half-armed
+    `expect_dpidr`/`jlink_device` pair
+    `test_flow_d_dry_run_surfaces_a_half_armed_preflight_as_a_failure` proves
+    for the non-SETOOLS (`atoc` already supplied) path; this is the SETOOLS
+    path that bug actually lived in -- `SETOOLS_DIR` resolves, `app-gen-toc`
+    is found, and the manifest supplies neither `atoc` nor `atoc_map`."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    # Present, but must never be reached -- validation has to fail BEFORE any
+    # SETOOLS spawn is even considered.
+    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                expect_dpidr: "0x4C013477"}}
+helper_mcus: []
+boot_order: []
+"""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir)},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "expect_dpidr" in entry["message"]
+    assert "jlink_device" in entry["message"]
+    # Never got far enough to preview a sign.
+    assert "would sign" not in entry["message"]
+    codes = {issue["code"] for issue in payload["issues"]}
+    assert "flash.entry-failed" in codes
+
+
+def test_flow_d_dry_run_with_setools_still_surfaces_a_malformed_jlink_speed(tmp_path):
+    """tan-cli#373: #366 moved `jlink_flash_device`/`slot0_load_address`
+    validation ahead of the SETOOLS preview short-circuit, but not
+    `jlink_speed` -- that stayed checked only deep inside
+    `plan_alif_mram_jlink`, unreachable from the preview return exactly like
+    the `expect_dpidr`/`jlink_device` case above. Measured: `--dry-run` on
+    this manifest used to report `ok:true` / exit 0 despite `jlink_speed`
+    being a quoted string, and on a REAL run the SETOOLS auto-sign (writing
+    into the customer's install) would have happened before this refusal was
+    ever reached. `jlink_speed` is hoisted into `validate_flow_d_shape`
+    (shared by both the preview and `plan_alif_mram_jlink` itself), so it now
+    surfaces here too, before any SETOOLS spawn is even considered -- same
+    shape as the `expect_dpidr` fix above, different field."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    # Present, but must never be reached -- validation has to fail BEFORE any
+    # SETOOLS spawn is even considered.
+    (setools_dir / "app-gen-toc").write_text("", encoding="utf-8")
+
+    manifest = """schema_version: 1
+hw_info: {sku: S}
+slices:
+- {core_id: m55_he, os: zephyr, output_artefact: zephyr.bin, status: ok,
+   flash_method: zephyr_west_flash,
+   flash_args: {jlink_flash_device: PART_PROFILE, slot0_load_address: "0x80010000",
+                jlink_speed: "fast"}}
+helper_mcus: []
+boot_order: []
+"""
+    (tmp_path / "build").mkdir(exist_ok=True)
+    (tmp_path / "build" / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+    exit_code, out, _ = run_flash(
+        tmp_path, "--format", "json", "--dry-run", manifest=manifest,
+        env={"SETOOLS_DIR": str(setools_dir)},
+    )
+    payload = envelope(out)
+    assert exit_code == 1
+    entry = payload["data"]["entries"][0]
+    assert entry["status"] == "failed"
+    assert "flash_args.jlink_speed" in entry["message"]
+    assert "bare number" in entry["message"]
+    # Never got far enough to preview a sign.
+    assert "would sign" not in entry["message"]
+    codes = {issue["code"] for issue in payload["issues"]}
+    assert "flash.entry-failed" in codes
 
 
 # ── pure helpers with edge cases the oracle diff does not reach ─────────────
@@ -1996,3 +2430,121 @@ def test_is_pending_is_the_one_definition_shared_with_the_bundle_writer():
     # collapsing the two would make a whole `flash_args` mapping read as pending.
     assert not flash_plan.is_pending({"a": "TBD"})
     assert not flash_plan.is_pending(["TBD"])
+
+
+# --------------------------------------------------------------------------
+# tan-cli#353: an AEN801 slot0 flash could not complete because alp-sdk's
+# manifest reports `output_artefact: .../zephyr.elf` while the raw
+# `.../zephyr.bin` the mramxip shape needs sits beside it. Measured on real
+# silicon (e1m-aen-evk-01, E8 AE822): tan-cli#311's guard refused -- correctly,
+# an ELF loadbin'd at slot0_load_address writes its own headers into on-die
+# MRAM -- but refused over something resolvable, so no AEN801 flash could
+# complete without hand-editing the manifest.
+#
+# The resolution must NOT weaken #311. These pin both halves.
+# --------------------------------------------------------------------------
+
+
+def _mramxip_inputs(tmp_path, artefact_name):
+    """A Flow D mramxip FlashInputs: slot0_load_address set (the shape that
+    reaches the raw-bin guard) plus the ATOC pair it also requires."""
+    from tan.core.flash_plan import FlashInputs
+
+    atoc = tmp_path / "AppTocPackage.bin"
+    atoc.write_bytes(b"\x00" * 32)
+    return FlashInputs(
+        core_id="m55_he",
+        sku="E1M-AEN801",
+        artefact=str(tmp_path / artefact_name),
+        flash_args={
+            "jlink_flash_device": "AE822FA0E5597LS0_M55_HE",
+            "slot0_load_address": "0x80010000",
+            "atoc": str(atoc),
+            "atoc_address": "0x8057ea50",
+        },
+    )
+
+
+def test_an_elf_artefact_resolves_to_its_sibling_bin(tmp_path):
+    """The #353 fix: an ELF with a real sibling `.bin` resolves to it, and the
+    RESOLVED path is what gets written -- not merely what the guard checked."""
+    from tan.core.flash_plan import plan_alif_mram_jlink
+
+    (tmp_path / "zephyr.elf").write_bytes(b"\x7fELF" + b"\x00" * 64)
+    (tmp_path / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    plan = plan_alif_mram_jlink(_mramxip_inputs(tmp_path, "zephyr.elf"), lambda _t: True)
+    script = plan.jlink_script or ""
+    assert "zephyr.bin 0x80010000" in script, script
+    # The whole point: the ELF must never reach loadbin/verifybin.
+    assert "zephyr.elf" not in script, script
+
+
+def test_an_elf_with_no_sibling_bin_is_still_refused(tmp_path):
+    """#311 stays strict. No sibling `.bin` -> the refusal stands, because
+    loadbin'ing the ELF would write its headers into MRAM."""
+    from tan.core.flash_plan import FlashPlanError, plan_alif_mram_jlink
+
+    (tmp_path / "zephyr.elf").write_bytes(b"\x7fELF" + b"\x00" * 64)
+
+    with pytest.raises(FlashPlanError) as err:
+        plan_alif_mram_jlink(_mramxip_inputs(tmp_path, "zephyr.elf"), lambda _t: True)
+    assert "not a raw .bin" in str(err.value)
+    assert "No sibling zephyr.bin was found" in str(err.value)
+
+
+def test_a_no_extension_artefact_resolves_to_its_sibling_bin(tmp_path):
+    """tan-cli#373 (item 4): #367(a) named THREE "plausibly ELF" shapes -- no
+    extension, `.elf`, `.out` -- but `is_elf_artefact` only ever implemented
+    the first of the three, silently narrowing #367's own decision. A
+    toolchain that names its ELF output bare (`app`, no suffix) must resolve
+    to its same-stem sibling `.bin` exactly like `zephyr.elf` does."""
+    from tan.core.flash_plan import plan_alif_mram_jlink
+
+    (tmp_path / "app").write_bytes(b"\x7fELF" + b"\x00" * 64)
+    (tmp_path / "app.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    plan = plan_alif_mram_jlink(_mramxip_inputs(tmp_path, "app"), lambda _t: True)
+    script = plan.jlink_script or ""
+    assert "app.bin 0x80010000" in script, script
+
+
+def test_an_out_artefact_resolves_to_its_sibling_bin(tmp_path):
+    """tan-cli#373 (item 4): the second of #367(a)'s three named shapes --
+    `.out` -- must also resolve, not just `.elf`."""
+    from tan.core.flash_plan import plan_alif_mram_jlink
+
+    (tmp_path / "zephyr.out").write_bytes(b"\x7fELF" + b"\x00" * 64)
+    (tmp_path / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    plan = plan_alif_mram_jlink(_mramxip_inputs(tmp_path, "zephyr.out"), lambda _t: True)
+    script = plan.jlink_script or ""
+    assert "zephyr.bin 0x80010000" in script, script
+    assert "zephyr.out" not in script, script
+
+
+def test_a_hex_artefact_is_refused_even_with_a_sibling_bin(tmp_path):
+    """#367: a `.hex` is NOT a plausibly-ELF-with-a-known-sibling case. The
+    resolution (`flash_plan.resolve_slot0_binary`) is deliberately narrow --
+    a plausibly-ELF artefact's (no extension, `.elf`, `.out` -- tan-cli#373
+    widened this from `.elf`-only) same-stem `.bin`, the Zephyr build's
+    known-good pair -- and a `.hex` carries its own load addresses; silently
+    swapping in an unrelated same-stem `.bin` would flash a DIFFERENT
+    artefact than the manifest named. #353's decision (a): refuse, never
+    resolve. (This test used to assert the opposite of both its own name
+    and its own docstring -- its body proved resolution while its
+    title/intro promised a refusal; #367 caught the contradiction.)"""
+    from tan.core.flash_plan import FlashPlanError, plan_alif_mram_jlink
+
+    (tmp_path / "zephyr.hex").write_text(":00000001FF\n", encoding="utf-8")
+    (tmp_path / "zephyr.bin").write_bytes(b"\x50\x42\x00\x20" + b"\x00" * 64)
+
+    with pytest.raises(FlashPlanError) as raised:
+        plan_alif_mram_jlink(_mramxip_inputs(tmp_path, "zephyr.hex"), lambda _t: True)
+    message = str(raised.value)
+    assert "not a raw .bin" in message
+    assert "zephyr.hex" in message
+    assert "slot0_load_address" in message
+    # Proves this is the "wrong shape" refusal, not the "ELF with no sibling"
+    # one -- a sibling .bin DOES exist here, and it must still not be used.
+    assert "Only a plausibly-ELF artefact's" in message

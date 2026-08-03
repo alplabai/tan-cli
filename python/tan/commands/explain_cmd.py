@@ -57,6 +57,7 @@ from dataclasses import dataclass, field
 
 import typer
 
+from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import TemplateDataError, vendored_library_names_for
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -695,3 +696,13 @@ def _fail(json_mode: bool, err: ExplainError) -> None:
         [Issue(err.code, "error", err.message)],
         err.exit_code,
     )
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--board-yaml`/`--ci`/`--no-color`/
+# `--non-interactive`/`--quiet`/`--verbose`) on top of `--target`, already
+# declared and read above; see `tan.core.global_flags`. `--project`/
+# `--sdk-root` are ALSO declared already (accepted, not read -- see
+# `explain`'s own docstring); the decorator leaves both untouched the same
+# way it leaves `--target` untouched.
+explain = accept_global_flags(explain)

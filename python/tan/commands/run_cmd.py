@@ -61,9 +61,16 @@ import typer
 
 from tan.commands import flash_cmd
 from tan.commands.build import execute
-from tan.commands.build_cmd import BuildError, _abs_posix, _build, resolve_sdk_root_ladder
+from tan.commands.build_cmd import (
+    BuildError,
+    _abs_posix,
+    _build,
+    _is_sdk_root,
+    resolve_sdk_root_ladder,
+)
 from tan.commands.sdk_cmd import project_pin_issue
 from tan.core.flash_plan import resolve_artefact_path
+from tan.core.global_flags import accept_global_flags
 from tan.core.plan_exec import normalize_path
 from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, native_sim_slice
 from tan.core.system_manifest import SystemManifestError, parse_system_manifest
@@ -371,6 +378,25 @@ def run(
     # `ALP_SDK_ROOT` tier (tried and reverted -- see `resolve_sdk_root_ladder`'s
     # own docstring).
     resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    # tan-cli#257/#258 -- the exact guard `build_cmd.build` applies, for the
+    # exact same reason: this line was a VERBATIM COPY of the one that carried
+    # the defect, so fixing only `build` would have left its twin here.
+    # `resolve_sdk_root_ladder` returns an explicit `--sdk-root` UNVALIDATED
+    # (I-31 terminal-for-REPORTING, matching the oracle's
+    # `resolve_sdk_tiered`), which is correct for a caller that only reports
+    # the tier and wrong for one that ACTS on the path: a bogus `--sdk-root`
+    # sailed through as `sdk.sourceTier: "sdkRootFlag"` and was then refused
+    # for the NEXT missing thing, telling the customer their project is broken
+    # when the flag they had just typed is what was wrong.
+    #
+    # Guarded HERE rather than inside the shared ladder because every other
+    # caller depends on it staying unvalidated -- the same placement
+    # `build_cmd`, `clean_cmd.sdk_root_resolves` and `flash_cmd._resolve_sdk`
+    # already chose. An unresolvable explicit root is treated as no root at
+    # all, so the refusal downstream is the honest "no alp-sdk checkout found"
+    # and no `sdk` key is emitted, matching the oracle.
+    if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk_root):
+        resolved_sdk_root = None
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Same normalized, workspace-root-anchored stamp identity `build_cmd.build`
@@ -413,3 +439,10 @@ def run(
         for line in text_lines:
             print(line, file=sys.stderr)
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`/`--verbose`) on top of `--board-yaml`, already declared and read
+# above; see `tan.core.global_flags`.
+run = accept_global_flags(run)

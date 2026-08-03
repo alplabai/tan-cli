@@ -53,9 +53,10 @@ unreadable-input cases):
 
 ## Why this needed re-measuring rather than reading a comment
 
-`contract/issue-codes.json` (frozen, `crates/tan-cli/tests/contract.rs`
-gates it) already carries this exact answer, registered against the Rust
-oracle:
+`contract/issue-codes.json` already carries this exact answer. The Rust oracle
+originally supplied the registry entry; the shipping Python emission is now
+covered by `python/tests/gates/test_every_issue_code_is_registered.py` and
+`test_frozen_issue_codes.py`:
 
 ```
 "code": "bootstrap.manifest",
@@ -77,16 +78,15 @@ registered siblings (a bare `"manifest"` literal, `bootstrap.`-prefixed at
 the framing site, matching e.g. `bootstrap.workspace-guard`,
 `bootstrap.sdk-root-unresolved`) — nothing here needs correcting.
 
-## Why this doc, not `contract/issue-codes.json`
+## Registry status
 
-`contract/` is frozen (`docs/ROADMAP.md` Standing Rules: "Never edit `crates/`
-or `contract/`"). `bootstrap.manifest` is already registered there, correctly,
-at `status: "reserved"` — no consumer binds it with `===` yet, so nothing
-about the wire contract is unsafe to leave as-is. Registering the ~120
-Python-emitted codes the Rust registry never saw (including confirming this
-one's Python emission site) is separate, larger work than this issue asks
-for; this file exists so the answer tan-cli#111 asked for is on record
-somewhere non-frozen in the meantime.
+`bootstrap.manifest` remains registered at `status: "reserved"` — no consumer
+binds it with `===` yet, so the spelling is not frozen as a compatibility
+promise. The earlier version of this report said `contract/` could not be
+edited and that the Python emit sites were not registered. That transition is
+complete: the shared registry now contains every statically discoverable Python
+issue code, and the Python source↔registry gates run in CI. This report remains
+useful for the runtime ordering measurement that a static gate cannot prove.
 
 ## For a consumer (e.g. alp-sdk-vscode)
 
@@ -94,7 +94,5 @@ The spelling is safe to match on **today**, empirically, on both the Rust
 `v0.4.x` line and the Python `v0.5.x` line. It is not yet a `frozen`
 contractual promise — `status: "reserved"` means a rename would currently
 cost nothing on tan's side of the wire by policy, even though none has
-occurred in practice. Promoting it to `frozen` once a real consumer binds to
-it (per `contract/issue-codes.json`'s own promotion rule) is a `contract/`
-edit and therefore blocked until the freeze lifts or an explicit exception is
-made for it.
+occurred in practice. Promote it to `frozen` once a real consumer binds to it,
+filling in the consumer and effect fields as required by the registry policy.

@@ -64,6 +64,7 @@ from pathlib import Path
 import typer
 
 from tan.commands.sdk_cmd import SDK_MARKER, project_pin_issue, resolve_sdk_tiered
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 
@@ -638,3 +639,10 @@ def presets(
         for line in render_presets_text(skus, board_libraries, verbose):
             print(line, file=sys.stderr)
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the six oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`) on top of `--board-yaml`/`--verbose`, already declared and read
+# above; see `tan.core.global_flags`.
+presets = accept_global_flags(presets)

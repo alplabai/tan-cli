@@ -8,16 +8,17 @@
 # ===========================================================================
 #
 #   Tag scheme : v<major>.<minor>.<patch>   (SemVer, e.g. v0.1.0)
-#                The tag MUST equal the `tan` crate version in the workspace
-#                Cargo.toml ([workspace.package] version) — the verify-version
-#                job below fails the release if it does not.
+#                The tag MUST equal `python/tan/version.py`'s TAN_VERSION.
+#                `python/scripts/version_check.py` also reconciles the PEP 440
+#                pyproject version and npm-shim/package.json before any build.
 #
-#   Assets     : one RAW (uncompressed) binary per target triple, named
-#                   tan-<target-triple>        (Unix: no extension)
-#                   tan-<target-triple>.exe     (Windows)
+#   Assets     : one ARCHIVE per target triple (tan-cli#349 — was one raw
+#                uncompressed binary; see below), named
+#                   tan-<target-triple>.tar.gz  (Unix)
+#                   tan-<target-triple>.zip     (Windows)
 #                Download URL is therefore deterministic:
 #                   https://github.com/alplabai/tan-cli/releases/download/<tag>/<asset>
-#                Plus `checksums.txt` (sha256 of every binary),
+#                Plus `checksums.txt` (sha256 of every archive),
 #                `envelope-contract.json` (the WHOLE issue-code registry, all
 #                three statuses and not a frozen-only subset — a consumer reads
 #                `status` to decide what each code promises — plus one golden
@@ -25,23 +26,33 @@
 #                GitHub build-provenance attestation covering all of the above —
 #                verify with `gh attestation verify <file> --repo alplabai/tan-cli`.
 #
-#   The binaries are PyInstaller --onefile freezes of `python/` (the Python
-#   port), NOT cargo builds of `crates/` — tan-cli#271. `--onefile` is required,
-#   not a preference: the extension downloads a raw binary to ONE cached path
-#   and has no unpack step anywhere in it
-#   (alp-sdk-vscode/src/alpCli/service.ts:295). The ASSET NAMES keep the RUST
-#   target triples because service.ts:34-46 hardcodes them and builds the
-#   download URL from them; python/scripts/build_binary.sh:33-35 documents the
-#   same rename-on-upload from its own side.
+#   The binaries are PyInstaller --onedir freezes of `python/` (the Python
+#   port), archived for distribution, NOT cargo builds of `crates/` —
+#   tan-cli#271 (the Python port) / tan-cli#349 (onedir + archive). --onedir,
+#   not --onefile: --onefile re-extracts its ~14 MB runtime into a fresh temp
+#   dir on EVERY invocation, and on macOS each extracted .dylib is unsigned
+#   (the parent's ad-hoc signature does not cover extracted copies), so the OS
+#   re-verifies every one of them on every launch — measured 13.25-19.74 s for
+#   `--version` on the published v0.5.0-rc4 macOS asset, which TIMED OUT
+#   against alp-sdk-vscode's own 3 s version-probe budget
+#   (vscodeAdapter.ts:1406). The old "REQUIRED, not a preference" reasoning
+#   here — that the extension downloads a raw binary to ONE cached path with
+#   no unpack step anywhere in it (service.ts:295) — is exactly the stale
+#   opposite-of-the-code comment tan-cli#259 warns about now that this
+#   pipeline emits an archive; unpacking it on the extension side is a
+#   SEPARATE unit of #349 landing independently in that repo. The ASSET NAMES
+#   keep the RUST target triples because service.ts:34-46 hardcodes them and
+#   builds the download URL from them; python/scripts/build_binary.sh
+#   documents the same rename-on-upload from its own side.
 #
-#   Targets    : win32  x64   -> tan-x86_64-pc-windows-msvc.exe
-#                darwin x64   -> tan-x86_64-apple-darwin
-#                darwin arm64 -> tan-aarch64-apple-darwin
-#                linux  x64   -> tan-x86_64-unknown-linux-gnu
+#   Targets    : win32  x64   -> tan-x86_64-pc-windows-msvc.zip
+#                darwin x64   -> tan-x86_64-apple-darwin.tar.gz
+#                darwin arm64 -> tan-aarch64-apple-darwin.tar.gz
+#                linux  x64   -> tan-x86_64-unknown-linux-gnu.tar.gz
 #
 #   DELIBERATELY NOT PUBLISHED — an accepted 404 on those two hosts, not an
-#   oversight: tan-aarch64-pc-windows-msvc.exe and
-#   tan-aarch64-unknown-linux-musl (or -gnu). PyInstaller cannot cross-compile:
+#   oversight: tan-aarch64-pc-windows-msvc.zip and
+#   tan-aarch64-unknown-linux-musl.tar.gz (or -gnu). PyInstaller cannot cross-compile:
 #   every asset must be frozen on its own architecture (build_binary.sh:36).
 #   The reason is NOT "no arm64 runner exists" — `windows-11-arm` and
 #   `ubuntu-24.04-arm` are current hosted labels — it is that adding two more
@@ -76,13 +87,15 @@
 #   Rust asset.
 #
 #   The floor in the release notes is MEASURED over the PAYLOAD, inside the
-#   build container, and never off the outer ELF. `readelf -V dist/tan` reads
-#   only PyInstaller's vendored bootloader, whose own floor is GLIBC_2.14 no
-#   matter what image built it (measured: bullseye and trixie both report 2.14
-#   there while the real floors are 2.30 and 2.38) — a constant that cannot
-#   detect the image regressing to a newer glibc, which is the entire point of
-#   measuring. The real floor lives in the appended archive: libpython plus the
-#   extension modules, enumerated from .build/tan/PKG-00.toc.
+#   build container, and never off the outer ELF. `readelf -V dist/tan/tan`
+#   reads only PyInstaller's vendored bootloader, whose own floor is
+#   GLIBC_2.14 no matter what image built it (measured: bullseye and trixie
+#   both report 2.14 there while the real floors are 2.30 and 2.38) — a
+#   constant that cannot detect the image regressing to a newer glibc, which
+#   is the entire point of measuring. The real floor lives in the collected
+#   onedir payload: libpython plus the extension modules, enumerated from
+#   .build/tan/PKG-00.toc (unchanged by --onedir vs --onefile — PyInstaller
+#   writes this TOC before the final packaging step either way).
 #
 #   service.ts:34-46 still maps linux/x64 to the MUSL triple, so the extension
 #   cannot download this asset. Deliberate, for this tag: SUPPORTED_CLI_VERSION
@@ -122,7 +135,8 @@ permissions:
   contents: write # create the release + upload assets (default GITHUB_TOKEN only)
 
 jobs:
-  # Fail fast: the tag must match the crate version before we build 8 targets.
+  # Fail fast: the tag and all Python/npm version spellings must agree before
+  # we build four target archives.
   verify-version:
     runs-on: ubuntu-latest
     steps:
@@ -193,7 +207,7 @@ jobs:
 
   # ci.yml's own `python` job runs the general `python/tests` suite (see
   # `gates` above), but only with `ALP_SDK_ROOT` bound when THIS caller passes
-  # `sdk_parity: true` — off above — and even then it never ran
+  # `sdk_parity: true` — enabled above — and even then it never ran
   # `python/tests/gates` against the alp-sdk commit tan/planner/ was actually
   # audited against (it checks out alp-sdk's default branch, not a pinned
   # audit SHA). `python_only: true` is what actually confines parity.yml's
@@ -230,9 +244,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # asset now carries the archive extension directly (tan-cli#349):
+          # the release ships one archive per target, not a raw binary, so
+          # `matrix.asset` is already the final filename and needs no rename
+          # step beyond staging it out of `dist/`.
           - os: windows-latest
-            asset: tan-x86_64-pc-windows-msvc.exe
-            ext: .exe
+            asset: tan-x86_64-pc-windows-msvc.zip
+            archive_ext: zip
           # macos-15-intel / macos-15, NOT macos-13 / macos-14: the macOS 13
           # image is retired (gone from actions/runner-images, so `runs-on:
           # macos-13` matches no runner and the job never schedules) and macOS
@@ -240,16 +258,16 @@ jobs:
           # Apple-silicon labels of the SAME OS version, which is what keeps the
           # two darwin assets comparable.
           - os: macos-15-intel
-            asset: tan-x86_64-apple-darwin
-            ext: ""
+            asset: tan-x86_64-apple-darwin.tar.gz
+            archive_ext: tar.gz
           - os: macos-15
-            asset: tan-aarch64-apple-darwin
-            ext: ""
+            asset: tan-aarch64-apple-darwin.tar.gz
+            archive_ext: tar.gz
           # `container` both routes this leg through the docker step below AND
           # is the single place the build image is named.
           - os: ubuntu-latest
-            asset: tan-x86_64-unknown-linux-gnu
-            ext: ""
+            asset: tan-x86_64-unknown-linux-gnu.tar.gz
+            archive_ext: tar.gz
             container: python:3.12-slim-bullseye
     runs-on: ${{ matrix.os }}
     steps:
@@ -271,7 +289,7 @@ jobs:
       # hand-copied set that can drift from it.
       #
       # `.[monitor]`, WITH the extra. An extra is optional for a wheel because a
-      # wheel user can add it later; a customer holding a --onefile binary never
+      # wheel user can add it later; a customer holding a frozen binary never
       # can, and `tan monitor` is a command that binary advertises. Omitting it
       # ships a dead command whose own error text says so
       # (`monitor.pyserial-missing`: "A frozen `tan` binary bundles it at build
@@ -383,7 +401,7 @@ jobs:
 
       - name: stage asset
         shell: bash
-        run: cp "python/dist/tan${{ matrix.ext }}" "${{ matrix.asset }}"
+        run: cp "python/dist/tan.${{ matrix.archive_ext }}" "${{ matrix.asset }}"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
@@ -535,11 +553,16 @@ jobs:
 
           ## Release assets
 
-          Four binaries, each a single-file freeze of the Python `tan`:
+          Four archives, each a PyInstaller --onedir freeze of the Python
+          `tan` (tan-cli#349 -- was a single-file --onefile freeze; --onedir
+          fixes a 13-19s macOS startup regression caused by --onefile
+          re-extracting its runtime on every invocation). Unpack the archive
+          and run the `tan`/`tan.exe` inside; `install.sh`/`install.ps1` do
+          this for you.
 
-          - `tan-x86_64-pc-windows-msvc.exe` -- Windows x64
-          - `tan-x86_64-apple-darwin` / `tan-aarch64-apple-darwin` -- macOS
-          - `tan-x86_64-unknown-linux-gnu` -- Linux x64, frozen on Debian 11.
+          - `tan-x86_64-pc-windows-msvc.zip` -- Windows x64
+          - `tan-x86_64-apple-darwin.tar.gz` / `tan-aarch64-apple-darwin.tar.gz` -- macOS
+          - `tan-x86_64-unknown-linux-gnu.tar.gz` -- Linux x64, frozen on Debian 11.
             It requires **__GLIBC_FLOOR__** or newer -- measured from the
             binary's own bundled payload at build time, not assumed from the
             build image. Debian 11+ / Ubuntu 20.04+ / RHEL 9+ are comfortably
@@ -551,7 +574,7 @@ jobs:
           you need an arm64 Linux or arm64 Windows `tan`, install from source
           (`pip install ./python`) and say so on the issue tracker.
 
-          - Every binary + `checksums.txt` carries a GitHub build-provenance
+          - Every archive + `checksums.txt` carries a GitHub build-provenance
             attestation. Verify with:
             `gh attestation verify <downloaded-file> --repo alplabai/tan-cli`
           NOTES
@@ -592,7 +615,7 @@ jobs:
 
   # The crates.io job is GONE (tan-cli#271). It published `alp-tan-cli` from
   # `crates/`, and no asset in this release comes from `crates/` any more -- the
-  # four binaries above are PyInstaller freezes of `python/`. Keeping it behind
+  # four archives above are PyInstaller freezes of `python/`. Keeping it behind
   # a false `if:` would have left a `cargo publish` in the release path shipping
   # a different program under the same name; deleting it is the only version of
   # "must not run" that is actually true. The PyPI equivalent (`pip install

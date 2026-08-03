@@ -941,3 +941,276 @@ def test_west_build_pins_the_resolved_workspace_over_an_ancestor_west(tmp_path, 
     assert argv_probe.read_text(encoding="utf-8") == repr(
         ["-d", original_build_dir, "-b", "board", "/app"]
     )
+
+
+# ---------------------------------------------------------- tan-cli#336 -----
+# A dangling `$ZEPHYR_BASE` fails the SECOND Zephyr slice of a multi-core
+# build while the first succeeds. Root cause (verified against a real
+# bootstrapped Zephyr SDK 1.0.1 workspace and a real dual-core E1M-AEN801
+# build, `docs/` not needed -- see this repro's own commit message): the
+# `_pin_west_workspace` cwd pin (tan-cli#307, above) only fixes west's OWN
+# startup topdir search. The zephyr `build` extension command makes a
+# SEPARATE, later `west_topdir(self.source_dir)` call
+# (`scripts/west_commands/build.py`) that walks from the SLICE'S OWN app
+# directory, not cwd. An app bundled inside the workspace tree (an
+# SDK-provided shim) still resolves via that walk regardless of
+# `ZEPHYR_BASE`; the user's own project -- a SIBLING of the workspace, the
+# shape `tan init` always scaffolds, never nested inside it -- has no
+# ancestor `.west` at all, so that walk falls through to `$ZEPHYR_BASE` and
+# inherits whatever this process saw. West's own `set_zephyr_base`
+# (`west/app/main.py`) trusts an already-set `ZEPHYR_BASE` unconditionally,
+# with no existence check, so a stale value is never self-corrected --
+# unlike an UNSET one, which self-heals to the correct workspace zephyr via
+# the manifest. A single-slice test cannot see this: it would only ever
+# exercise the "app inside the workspace" shape or the "app outside it"
+# shape, never both in the same process the way a real multi-core build
+# does, and either shape alone happens to pass.
+
+
+def _fake_west_build_script() -> str:
+    """A minimal, faithful stand-in for zephyr's `build.py`'s own
+    `west_topdir(self.source_dir)` call -- NOT a real west/CMake, but the
+    one piece of its behaviour this bug lives in: an app under an ancestor
+    `.west` resolves regardless of `ZEPHYR_BASE`; an app with no ancestor
+    `.west` falls back to `ZEPHYR_BASE` (self-healing to `<cwd>/zephyr`,
+    exactly as west's own `set_zephyr_base` does, when unset; trusted
+    verbatim, unchecked, when set) and fails with west's OWN literal message
+    when that doesn't lead to a workspace either. `sys.argv[-1]` is the
+    slice's source dir: with no trailing cmake `--` options in the test
+    plans below, `_pin_west_workspace`'s rewritten args always end with it.
+
+    On each success path it also writes the `build/CMakeCache.txt`
+    `ZEPHYR_BASE:` entry a REAL successful `west build` leaves behind, which
+    tan-cli#309's `zephyr_boilerplate_loaded` guard reads as its evidence
+    that Zephyr's CMake boilerplate actually ran. Without it this shim exits
+    0 having produced nothing, and #309 correctly fails the slice -- masking
+    what #336's own assertions are about. The two fixes are orthogonal; the
+    fixture has to satisfy both for either to be measurable.
+    """
+    return (
+        "import os, sys\n"
+        # The build dir is `-d`'s value when present, NOT `<cwd>/build`:
+        # tan-cli#307 pins the child's cwd to the WORKSPACE and injects an
+        # explicit `-d <slice dir>/build` to keep the output where it would
+        # otherwise have defaulted. A shim writing to `<cwd>/build` would
+        # write into the workspace -- which here is where this very script
+        # lives, so `makedirs` raises FileExistsError against the file.
+        "def ok():\n"
+        "    d = sys.argv[sys.argv.index('-d') + 1] if '-d' in sys.argv else os.path.join(os.getcwd(), 'build')\n"
+        "    os.makedirs(d, exist_ok=True)\n"
+        "    with open(os.path.join(d, 'CMakeCache.txt'), 'w') as fh:\n"
+        "        fh.write('ZEPHYR_BASE:PATH=/fake/zephyr\\n')\n"
+        "    sys.exit(0)\n"
+        "def has_dot_west(p):\n"
+        "    while True:\n"
+        "        if os.path.isdir(os.path.join(p, '.west')):\n"
+        "            return True\n"
+        "        parent = os.path.dirname(p)\n"
+        "        if parent == p:\n"
+        "            return False\n"
+        "        p = parent\n"
+        "source_dir = sys.argv[-1]\n"
+        "if has_dot_west(source_dir):\n"
+        "    ok()\n"
+        "zb = os.environ.get('ZEPHYR_BASE') or os.path.join(os.getcwd(), 'zephyr')\n"
+        "if has_dot_west(os.path.dirname(zb)):\n"
+        "    ok()\n"
+        "print('FATAL ERROR: Could not find a west workspace in this or any parent directory')\n"
+        "sys.exit(1)\n"
+    )
+
+
+def _two_slice_zephyr_plan(app_in_workspace: str, app_outside_workspace: str) -> str:
+    """`m55_he`-shaped (app bundled inside the workspace) and
+    `m55_hp`-shaped (the user's own project, outside it) slices, mirroring
+    the maintainer's real E1M-AEN801 repro exactly enough to reproduce the
+    asymmetry -- see this section's own header comment."""
+    return json.dumps(
+        {
+            "schemaVersion": 1,
+            "generatedBy": "g",
+            "boardYaml": "/w/board.yaml",
+            "sku": "S",
+            "buildRoot": "build",
+            "sharedArtefacts": [],
+            "warnings": [],
+            "executionPolicy": {
+                "missingTool": "skip",
+                "nullCommand": "skip",
+                "unknownBackend": "fail",
+            },
+            "slices": [
+                {
+                    "coreId": "m55_he",
+                    "backend": "zephyr",
+                    "buildDir": "build/m55_he",
+                    "appDir": "app",
+                    "configArtefacts": [],
+                    "toolchain": None,
+                    "artifacts": [],
+                    "debug": {},
+                    "command": {
+                        "tool": "west",
+                        "args": ["build", "-b", "board_he", app_in_workspace],
+                        "cwd": "build/m55_he",
+                    },
+                    "env": {},
+                    "envAppendPath": {},
+                },
+                {
+                    "coreId": "m55_hp",
+                    "backend": "zephyr",
+                    "buildDir": "build/m55_hp",
+                    "appDir": "app",
+                    "configArtefacts": [],
+                    "toolchain": None,
+                    "artifacts": [],
+                    "debug": {},
+                    "command": {
+                        "tool": "west",
+                        "args": ["build", "-b", "board_hp", app_outside_workspace],
+                        "cwd": "build/m55_hp",
+                    },
+                    "env": {},
+                    "envAppendPath": {},
+                },
+            ],
+        }
+    )
+
+
+def test_dangling_zephyr_base_does_not_break_a_later_zephyr_slice(tmp_path, monkeypatch):
+    """The regression test for tan-cli#336: a dangling `$ZEPHYR_BASE` must
+    produce the SAME outcomes as an unset one, for EVERY slice -- not just
+    the first. `m55_hp` (the user's-project-shaped slice) is the one that
+    actually exercises the bug; `m55_he` passing either way is not
+    informative on its own (see this section's header comment), which is
+    why this asserts BOTH runs' full outcome lists match, not just that the
+    dangling run "mostly" succeeds."""
+    real_ws = tmp_path / "ws"
+    sdk_root_dir = real_ws / "alp-sdk"
+    sdk_root_dir.mkdir(parents=True)
+    (real_ws / ".west").mkdir()
+    (real_ws / ".west" / "config").write_text("[manifest]\npath = alp-sdk\n", encoding="utf-8")
+
+    # A SIBLING of the workspace, never nested inside it -- the shape
+    # `tan init --destination .` always produces.
+    build_root = tmp_path / "proj"
+    build_root.mkdir(parents=True)
+
+    layout = venv_layout(os.name == "nt")
+    _plant_spawnable_west(build_root / ".venv" / layout.bin_dir / layout.west)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    (real_ws / "build").write_text(_fake_west_build_script(), encoding="utf-8")
+
+    plan = _two_slice_zephyr_plan(
+        app_in_workspace=str(sdk_root_dir / "firmware" / "shim"),
+        app_outside_workspace=str(build_root / "src"),
+    )
+
+    def run(zephyr_base: str | None) -> list:
+        if zephyr_base is None:
+            monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+        else:
+            monkeypatch.setenv("ZEPHYR_BASE", zephyr_base)
+        return execute_slices(
+            parse_build_plan(plan),
+            build_root=build_root,
+            env_lookup=lambda k: None,
+            gap_fillers=[],
+            on_output=lambda s: None,
+            sdk_root=str(sdk_root_dir),
+        )
+
+    unset = run(None)
+    dangling = run(str(tmp_path / "nonexistent-zephyr-base"))
+
+    unset_statuses = [(o.core_id, o.status) for o in unset]
+    dangling_statuses = [(o.core_id, o.status) for o in dangling]
+    assert unset_statuses == [("m55_he", "succeeded"), ("m55_hp", "succeeded")], [
+        o.message for o in unset
+    ]
+    assert dangling_statuses == unset_statuses, [o.message for o in dangling]
+
+
+def test_west_no_workspace_failure_names_the_resolved_workspace_and_zephyr_base(
+    tmp_path, monkeypatch
+):
+    """tan-cli#336's "also in scope" ask: when west fails with "could not
+    find a workspace" and tan IS holding a resolved workspace path, the
+    slice `reason` must name it -- not just repeat the exit code. Forces
+    the failure past the production env-clearing fix above by having the
+    PLAN itself pin a bad `ZEPHYR_BASE` on the slice's own `env` ("plan
+    wins" -- tan never overrides a value the plan pinned explicitly), on a
+    slice whose app has no ancestor `.west` to fall back on."""
+    monkeypatch.delenv("ZEPHYR_BASE", raising=False)
+
+    real_ws = tmp_path / "ws"
+    sdk_root_dir = real_ws / "alp-sdk"
+    sdk_root_dir.mkdir(parents=True)
+    (real_ws / ".west").mkdir()
+    (real_ws / ".west" / "config").write_text("[manifest]\npath = alp-sdk\n", encoding="utf-8")
+
+    build_root = tmp_path / "proj"
+    build_root.mkdir(parents=True)
+
+    layout = venv_layout(os.name == "nt")
+    _plant_spawnable_west(build_root / ".venv" / layout.bin_dir / layout.west)
+    empty_path = tmp_path / "empty-path"
+    empty_path.mkdir()
+    monkeypatch.setenv("PATH", str(empty_path))
+
+    (real_ws / "build").write_text(_fake_west_build_script(), encoding="utf-8")
+
+    bad_zephyr_base = str(tmp_path / "plan-pinned-bad-zephyr-base")
+    plan = json.dumps(
+        {
+            "schemaVersion": 1,
+            "generatedBy": "g",
+            "boardYaml": "/w/board.yaml",
+            "sku": "S",
+            "buildRoot": "build",
+            "sharedArtefacts": [],
+            "warnings": [],
+            "executionPolicy": {
+                "missingTool": "skip",
+                "nullCommand": "skip",
+                "unknownBackend": "fail",
+            },
+            "slices": [
+                {
+                    "coreId": "m55_hp",
+                    "backend": "zephyr",
+                    "buildDir": "build/m55_hp",
+                    "appDir": "app",
+                    "configArtefacts": [],
+                    "toolchain": None,
+                    "artifacts": [],
+                    "debug": {},
+                    "command": {
+                        "tool": "west",
+                        "args": ["build", "-b", "board_hp", str(build_root / "src")],
+                        "cwd": "build/m55_hp",
+                    },
+                    "env": {"ZEPHYR_BASE": bad_zephyr_base},
+                    "envAppendPath": {},
+                },
+            ],
+        }
+    )
+
+    out = execute_slices(
+        parse_build_plan(plan),
+        build_root=build_root,
+        env_lookup=lambda k: None,
+        gap_fillers=[],
+        on_output=lambda s: None,
+        sdk_root=str(sdk_root_dir),
+    )
+
+    assert out[0].status == "failed"
+    assert str(real_ws) in out[0].message, out[0].message
+    assert bad_zephyr_base in out[0].message, out[0].message

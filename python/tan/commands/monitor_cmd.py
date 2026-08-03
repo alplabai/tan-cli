@@ -10,10 +10,22 @@ There is no safe cross-platform guess for the port itself (COMx vs
 one does not exist -- this command lists every serial port pyserial can see
 and refuses instead of hanging on a wrong device.
 
-Board-context port resolution (a `console:` block in the project's
-`system-manifest.yaml`) is deliberately NOT implemented here either: the board
-schema and orchestrator do not emit one today. Teach this verb to read it once
-they do.
+Board-context port resolution -- filling in `--port` from the current project
+instead of asking for it -- is deliberately NOT implemented here, and it is
+not simply unstarted (tan-cli#255): the build-plan already carries a
+`slices[].debug.console` selector per slice (`build-plan-v1.schema.json`,
+issue #610 §4; computed here too, at `tan/planner/buildplan.py::_slice_debug`,
+and independently in alp-sdk's own `scripts/alp_orchestrate/buildplan.py`),
+resolving to `"uart"` / `"ram"` / `"linux"` / `null`. That is a console
+BACKEND CLASS, not a port: it says a slice's console is a UART (as opposed to
+a RAM console read over SWD, or a Linux tty), never which host-visible device
+that UART shows up as. Nothing in `board.yaml` or the build-plan carries a
+VID:PID, serial number, or platform-specific device path for a board's
+console UART, so `debug.console == "uart"` still leaves every USB-serial
+adapter on the bench indistinguishable to this host OS -- reading it would not
+let this command fill in `--port`. Teach this verb to read a real per-board
+physical-port fact once metadata carries one; `debug.console` alone is not
+that fact.
 
 **No alp-sdk checkout required, unlike `model`.** The oracle's `monitor.py`
 imports nothing from alp-sdk beyond `alp_cli._workspace.python_exe`, itself
@@ -203,8 +215,34 @@ def monitor(
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
+    project: str = typer.Option(None, "--project", hidden=True),
+    board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
+    sdk_root: str = typer.Option(None, "--sdk-root", hidden=True),
+    target: str = typer.Option(None, "--target", hidden=True),
+    all_targets: bool = typer.Option(False, "--all", hidden=True),
+    verbose: bool = typer.Option(False, "--verbose", hidden=True),
+    quiet: bool = typer.Option(False, "--quiet", hidden=True),
+    no_color: bool = typer.Option(False, "--no-color", hidden=True),
+    non_interactive: bool = typer.Option(False, "--non-interactive", hidden=True),
+    ci: bool = typer.Option(False, "--ci", hidden=True),
 ) -> None:
     """Open a serial console to the board."""
+    # The ten options above are clap's `GlobalArgs` members (`global = true`)
+    # that the oracle accepts on EVERY verb, `monitor` included, and never
+    # reads for this one -- confirmed live (`tan.exe monitor --non-interactive
+    # --ci --target zephyr-conf --all --project . --board-yaml x --sdk-root x
+    # --port COM7` reaches the identical "port not found" failure a bare
+    # `tan.exe monitor --port COM7` does). Declared here purely so the argv
+    # SURFACE matches: `tan monitor --sdk-root <path> --port COM7` exited 2 as
+    # a Click "No such option" usage error without this, breaking any caller
+    # (or saved script) forwarding the global set unconditionally -- unlike
+    # `model`/`new-som`/`faultdecode`, `monitor` never resolves an SDK root at
+    # all (see the module docstring), so `--project`/`--board-yaml`/
+    # `--sdk-root` are genuinely unread here too, not merely deferred. Hidden
+    # from `--help` because they do nothing. Same port-wide gap as
+    # `clean_cmd.clean`/`new_som_cmd.new_som`.
+    del project, board_yaml, sdk_root, target, all_targets
+    del verbose, quiet, no_color, non_interactive, ci
     if output_format not in ("text", "json"):
         raise typer.BadParameter(
             f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"

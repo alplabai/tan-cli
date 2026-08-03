@@ -166,7 +166,7 @@ def test_new_som_sdk_root_unresolved_never_recommends_a_refused_subcommand(tmp_p
             "--family", "fam",
         ],
     )
-    assert result.exit_code == 1
+    assert result.exit_code == 2
     assert "alp-sdk root is unresolved" in result.output
     assert_no_refused_subcommand_named(result.output)
 

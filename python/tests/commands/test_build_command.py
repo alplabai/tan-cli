@@ -925,6 +925,29 @@ def test_no_plan_and_no_sdk_is_a_coded_envelope_not_a_traceback(project):
     assert "Traceback" not in proc.stderr
 
 
+def test_an_unresolvable_explicit_sdk_root_is_treated_as_no_sdk_at_all(project):
+    # tan-cli#257/#258: a bogus `--sdk-root` used to be carried straight
+    # through as `sdk.sourceTier: "sdkRootFlag"` (`resolve_sdk_root_ladder`
+    # reports an explicit flag UNVALIDATED, by design, for callers that only
+    # report the tier), reach `_emit_plan` as a non-None `sdk_root`, and get
+    # refused for the NEXT missing thing instead -- `no board.yaml found`,
+    # in a directory with no board.yaml either -- with an extra `sdk` key the
+    # oracle never emits on this path. Measured against the oracle
+    # (`target/debug/tan.exe build --sdk-root ./nowhere --format json`): it
+    # refuses with `build.plan-unavailable` "no alp-sdk checkout found", exit
+    # 1, and no `sdk` key at all. A flag that silently changes meaning (SDK
+    # problem read as a project problem) is worse than one that fails
+    # outright.
+    proc = run_tan("build", "--sdk-root", "./nowhere", "--format", "json", cwd=project)
+    env = envelope_of(proc)
+    assert proc.returncode == 1, env
+    assert [i["code"] for i in env["issues"]] == ["build.plan-unavailable"], env["issues"]
+    assert "no board.yaml" not in env["issues"][0]["message"]
+    assert "sdk" not in env
+    assert env["data"] is None
+    assert "Traceback" not in proc.stderr
+
+
 def test_build_resolves_the_sdk_tan_init_pinned_with_no_sdk_root_flag_and_no_env_var(
     project, monkeypatch
 ):
