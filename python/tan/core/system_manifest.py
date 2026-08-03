@@ -31,6 +31,7 @@ address, pin name -- is spelled in this port. Those live in alp-sdk
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from collections.abc import Sequence
@@ -129,6 +130,49 @@ _CORE_RESOLVERS = (
 )
 
 
+#: The infinity/not-a-number spellings serde_yaml's `parse_f64` special-cases
+#: BEFORE it ever tries a numeric parse, matched against the scalar with any
+#: leading sign stripped. Only these become non-finite floats; see
+#: [`_construct_core_float`].
+_YAML_INF_SPELLINGS = (".inf", ".Inf", ".INF")
+_YAML_NAN_SPELLINGS = (".nan", ".NaN", ".NAN")
+
+
+def _construct_core_float(loader, node):
+    """A float-tagged plain scalar as serde_yaml's `parse_f64` resolves it --
+    which is NOT what `float()` does for an overflowing exponent (tan-cli#387).
+
+    serde_yaml accepts a parsed number only `if float.is_finite()`, and returns
+    `None` otherwise; a `serde_yaml::Value` then falls through to the next
+    candidate type and the scalar stays a STRING. So `soc_flash_mb: 1e400` is
+    the string `"1e400"` on the oracle, while PyYAML's own float constructor
+    resolves it to `inf`. That diverged twice over: the wrong TYPE in
+    `data.hw_info`, and then a value `json.dumps` wrote as the non-JSON literal
+    `Infinity` into both stdout and the persisted `bundle-manifest.json`.
+
+    The three EXPLICIT spellings are the deliberate exception -- `.inf`, `-.inf`
+    and `.nan` really do resolve to non-finite `f64` on the oracle. Turning them
+    into `null` is `serde_json`'s job at serialise time
+    (`tan.envelope.json_safe_floats`), not this loader's: doing it here would
+    emit `null` where the oracle emits the string `"1e400"`, and would lose the
+    distinction between the two cases entirely.
+    """
+    text = loader.construct_scalar(node)
+    unsigned = text[1:] if text[:1] in ("-", "+") else text
+    if unsigned in _YAML_INF_SPELLINGS:
+        return float("-inf") if text.startswith("-") else float("inf")
+    if unsigned in _YAML_NAN_SPELLINGS:
+        return float("nan")
+    try:
+        value = float(text)
+    except ValueError:
+        # Only reachable through an EXPLICIT `!!float` tag -- the implicit
+        # resolver's regex admits nothing `float()` refuses. The raw text is
+        # what serde_yaml is left holding too.
+        return text
+    return value if math.isfinite(value) else text
+
+
 def _core_schema_loader(yaml_module):
     """A `SafeLoader` resolving plain scalars by the YAML 1.2 CORE schema, so a
     value carried verbatim into the bundle manifest matches what serde_yaml's
@@ -142,6 +186,9 @@ def _core_schema_loader(yaml_module):
     CoreSchemaLoader.yaml_implicit_resolvers = {}
     for tag, pattern, first in _CORE_RESOLVERS:
         CoreSchemaLoader.add_implicit_resolver(tag, re.compile(pattern), first)
+    # `add_constructor` copies `yaml_constructors` onto the subclass first, so
+    # this is scoped the same way the resolvers above are.
+    CoreSchemaLoader.add_constructor("tag:yaml.org,2002:float", _construct_core_float)
     return CoreSchemaLoader
 
 
@@ -597,6 +644,18 @@ _SERDE_INT_MAX = 2**64 - 1
 
 
 def _representable_by_serde_yaml(node: Any) -> bool:
+    """Whether serde_yaml could hold this whole tree in a `Value` -- an integer
+    bound only.
+
+    A non-finite FLOAT is deliberately representable here and must stay that
+    way (tan-cli#387). `.inf` / `-.inf` / `.nan` are perfectly good
+    `serde_yaml::Value::Number`s; returning False for them would make
+    `raw_passthrough` yield its empty defaults and drop the WHOLE `hw_info` and
+    `boot_order` on the floor, where the oracle emits every key with the
+    non-finite ones as `null`. The JSON side of that problem is fixed where
+    JSON is written (`tan.envelope.json_safe_floats`), not by refusing the
+    document.
+    """
     if isinstance(node, bool):
         return True
     if isinstance(node, int):

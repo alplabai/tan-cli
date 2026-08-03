@@ -242,10 +242,64 @@ def _family_bucket(sku: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _split_cr(line: str) -> tuple[str, str]:
+    """Split a `content.split("\\n")` element into `(body, cr)`, where `cr` is
+    the `"\\r"` a CRLF source leaves on the end of every line and `""` for LF.
+
+    tan-cli#404: the `\\r` is a LINE TERMINATOR, never content, and every
+    character-level decision below (is the tail a comment? where does the value
+    token end? is there anything after `sku:` at all?) got it wrong when it was
+    left attached. Stripping it once, up front, is what makes those decisions
+    terminator-insensitive; the caller re-appends it verbatim, so a CRLF file
+    goes back out CRLF and byte-parity with `_read_verbatim` holds.
+    """
+    return (line[:-1], "\r") if line.endswith("\r") else (line, "")
+
+
+def _retargeted_sku_line(indent: str, trimmed: str, sku: str) -> tuple[str, bool]:
+    """Rewrite one `sku:` line body onto `sku`. Returns the new body (no line
+    terminator -- see [`_split_cr`]) and whether a trailing COMMENT was dropped,
+    which is what tells the caller a wrapped comment block has been opened and
+    its continuation lines must go too.
+    """
+    after_key = trimmed[len("sku:") :]
+    stripped = after_key.lstrip(" \t")
+    leading_ws = after_key[: len(after_key) - len(stripped)]
+    if not stripped or stripped.startswith("#"):
+        # `sku:` with nothing after it, or `sku:  # comment` with a comment but
+        # no value. Splicing at the first whitespace run would either glue the
+        # value onto `sku:` (read back as a scalar, not a mapping entry) or eat
+        # the `#` into it. A `sku:` with no value names no SoM, so its comment
+        # is not stale and stays.
+        return f"{indent}sku: {sku}{after_key}", False
+    # `[ \t]`, not `\s`: the value token ends at a space or a tab and at nothing
+    # else. `\s` also matched the `\r` of a CRLF line, so the terminator was
+    # captured into `tail` and thrown away with it -- one mixed-EOL line in the
+    # very file the customer is about to edit (tan-cli#404).
+    match = re.search(r"[ \t]", stripped)
+    value = stripped[: match.start()] if match else stripped
+    tail = stripped[match.start() :] if match else ""
+    if value == sku:
+        return f"{indent}sku:{leading_ws}{sku}{tail}", False
+    return f"{indent}sku:{leading_ws}{sku}", tail.lstrip(" \t").startswith("#")
+
+
+def _is_wrapped_comment_line(body: str, sku_indent: str) -> bool:
+    """True when `body` is a comment-only line indented PAST `sku_indent` --
+    i.e. a continuation of the comment the `sku:` line opened, not a comment
+    documenting whatever comes next (tan-cli#404). A blank line ends the block:
+    it is not a comment, and a comment resuming after one is a new thought."""
+    stripped = body.lstrip(" \t")
+    if not stripped.startswith("#"):
+        return False
+    return len(body) - len(stripped) > len(sku_indent)
+
+
 def retarget_board_yaml_som(content: str, sku: str) -> str:
     """Rewrite the FIRST `som:` -> `sku:` value to `sku`, leaving the rest of
     that line byte-for-byte alone -- UNLESS the value is actually changing and
-    a trailing comment is present, in which case the comment is dropped.
+    a trailing comment is present, in which case the comment is dropped, all of
+    it, however many physical lines it spans.
 
     `wizard::retarget_board_yaml_som`. Only the value token moves: the gap
     before a trailing comment is preserved, so a column-aligned inline comment
@@ -262,35 +316,43 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
     there is no SKU->vendor-name table here to rewrite it correctly for the new
     one -- retargeting onto `E1M-V2N101` left that Alif comment on a Renesas
     SKU. Dropping it is honest; inventing a new one is not this function's job.
+
+    tan-cli#404 -- that drop used to be strictly line-local, and 12 of the 100
+    `board.yaml` files in the SDK example catalogue carry a `sku:` comment that
+    WRAPS. `aen/edgeai-vision-aen` retargeted onto `E1M-V2N101` kept four of its
+    five comment lines: a Renesas RZ/V2N project whose `board.yaml` documented a
+    pair of Alif Ethos-U55s, an Ethos-U85 and a VeriSilicon ISP Pico
+    (`vsi,isp-pico`) attached to nothing -- in a file the project ships as
+    teaching material, with nothing in `tan init`'s output saying a comment had
+    been rewritten at all. So the drop now consumes the block: the inline
+    comment plus every following comment-only line indented past the `sku:` key.
+    Deliberately anchored to THAT comment, not to any comment near a changed
+    `sku:` -- a `sku:` line with no comment of its own opens no block, so a
+    comment documenting the next key is never swallowed.
     """
     out: list[str] = []
     in_som = False
-    done = False
+    rewritten = False
+    # The `sku:` line's own indent while a dropped comment's continuation lines
+    # are still being consumed; `None` at every other point.
+    consuming: str | None = None
     for line in content.split("\n"):
-        if not done:
-            trimmed = line.lstrip(" \t")
-            if line and not line[0] in " \t":
+        body, cr = _split_cr(line)
+        if consuming is not None:
+            if _is_wrapped_comment_line(body, consuming):
+                continue
+            consuming = None
+        if not rewritten:
+            trimmed = body.lstrip(" \t")
+            if body and body[0] not in " \t":
                 # A new top-level key: entering `som:`, or leaving it.
                 in_som = trimmed.startswith("som:")
             elif in_som and trimmed.startswith("sku:"):
-                indent = line[: len(line) - len(trimmed)]
-                after_key = trimmed[len("sku:") :]
-                stripped = after_key.lstrip(" \t")
-                leading_ws = after_key[: len(after_key) - len(stripped)]
-                if not stripped or stripped.startswith("#"):
-                    # `sku:` with nothing after it, or `sku:  # comment` with a
-                    # comment but no value. Splicing at the first whitespace run
-                    # would either glue the value onto `sku:` (read back as a
-                    # scalar, not a mapping entry) or eat the `#` into it.
-                    out.append(f"{indent}sku: {sku}{after_key}")
-                else:
-                    match = re.search(r"\s", stripped)
-                    value = stripped[: match.start()] if match else stripped
-                    tail = stripped[match.start() :] if match else ""
-                    if value != sku:
-                        tail = ""
-                    out.append(f"{indent}sku:{leading_ws}{sku}{tail}")
-                done = True
+                indent = body[: len(body) - len(trimmed)]
+                new_body, comment_dropped = _retargeted_sku_line(indent, trimmed, sku)
+                out.append(new_body + cr)
+                rewritten = True
+                consuming = indent if comment_dropped else None
                 continue
         out.append(line)
     return "\n".join(out)

@@ -510,6 +510,95 @@ def resolve_sdk_root_wide(
     return None, "none", tiered.broken_project_pin
 
 
+#: tan-cli#407's warning code. Namespaced `sdk.` and not `build.`/`generate.`
+#: on purpose: a caller on EITHER ladder emits this identical string, so a
+#: consumer holding one envelope from each side matches them on the code, and
+#: a per-command spelling would make the pair it has to correlate the one
+#: thing that differs.
+SDK_DISCOVERY_DIVERGENT = "sdk.discovery-divergent"
+
+#: Both command groups spelled out in the warning itself, because the reader
+#: is being told their toolchain is split across two checkouts and the useful
+#: next question -- "which of my commands went where?" -- must not require
+#: reading this source.
+_NARROW_COMMANDS = (
+    "build, doctor, clean, run, flash, size, image, kconfig, validate, "
+    "presets, inspect, trace and sdk current"
+)
+_WIDE_COMMANDS = "init, generate, examples and renode"
+
+
+def sdk_ladder_divergence_issue(
+    sdk_root_arg: str | None, workspace_root: Path, *, wide: bool
+) -> Issue | None:
+    """The tan-cli#407 warning for a workspace where the two ladders above
+    answer DIFFERENT checkouts -- `None` (the overwhelmingly common case)
+    when they agree, so every call site can do `issue =
+    sdk_ladder_divergence_issue(...); if issue: issues.append(issue)`
+    unconditionally, exactly like `sdk_cmd.project_pin_issue`.
+
+    The divergence itself is deliberate and oracle-measured (see
+    [`resolve_sdk_root_ladder`]'s own docstring, and
+    `tests/commands/test_build_manifest.py`), and this does not try to remove
+    it. What it removes is the SILENCE: both ladders label their answer with
+    the same `SdkSourceTier` string, `"discovery"`, so in a workspace holding
+    both a child `<ws>/alp-sdk` and a lateral `../alp-sdk`, `tan generate`
+    emits `build/generated/alp.conf`, the DTS overlays and
+    `alp_hw_info_build.h` from one checkout's `metadata/` while `tan build`,
+    `tan size` and `tan trace` plan against the other -- and both envelopes
+    say `discovery`, leaving no field a consumer could compare. `sdk: {root,
+    sourceTier}` exists (#110) precisely so the vscode extension can tell
+    which SDK produced a result instead of guessing; one tier name for two
+    answers is that key failing at its only job.
+
+    A sixth `SdkSourceTier` value would be the other way to say this and is
+    rejected upstream for the same reason [`resolve_sdk_root_ladder`] rejects
+    an `ALP_SDK_ROOT` tier: the closed enum is a wire contract no consumer
+    expects to grow, and `test_build_manifest.py` pins the exact
+    `(path, "discovery", None)` tuple both ladders return here because that is
+    the oracle's own answer. An `issues[]` entry adds a fact without moving a
+    reported one -- the same trade `broken_project_pin` already makes.
+
+    `wide` only picks which side of the pair is labelled "this command"; both
+    sides name both checkouts, in the same order, so two envelopes describing
+    one collision read as one collision rather than two unrelated warnings.
+
+    Both roots are compared as `_abs_posix` strings rather than as `Path`s
+    because that is the spelling the message quotes and the spelling
+    `sdk.root` carries on the wire -- comparing anything else risks reporting
+    a "divergence" between two names for one directory. Safe here precisely
+    because both ladders derive every candidate from the same
+    `workspace_root`: the tiers ABOVE discovery (`--sdk-root`, project pin,
+    global default) are shared verbatim, so they can never be the pair that
+    differs.
+    """
+    narrow_path, _narrow_tier, _narrow_pin = resolve_sdk_root_ladder(sdk_root_arg, workspace_root)
+    wide_path, _wide_tier, _wide_pin = resolve_sdk_root_wide(sdk_root_arg, workspace_root)
+    # One side unresolved is not a collision to disambiguate: the two
+    # envelopes already differ by `sourceTier` (`none` vs something), which is
+    # the very signal this warning exists to supply.
+    if narrow_path is None or wide_path is None:
+        return None
+
+    narrow = _abs_posix(str(narrow_path))
+    wider = _abs_posix(str(wide_path))
+    if narrow == wider:
+        return None
+
+    narrow_label = _NARROW_COMMANDS if wide else "this command"
+    wide_label = "this command" if wide else _WIDE_COMMANDS
+    return Issue(
+        SDK_DISCOVERY_DIVERGENT,
+        "warning",
+        f"two alp-sdk checkouts resolve from this directory and both report "
+        f'sourceTier "discovery": {narrow_label} uses "{narrow}", while '
+        f'{wide_label} uses "{wider}". Generated files and the build plan can '
+        f"therefore come from different SDK versions -- pin the one you mean "
+        f"with --sdk-root, or with `tan init --sdk-root <path>` to write it "
+        f"into .alp/sdk-path, which outranks both discovery tiers.",
+    )
+
+
 def _planner_python(start: str, sdk_root: str | None) -> str:
     """The interpreter a SPAWNED build step runs under.
 
@@ -1314,6 +1403,12 @@ def build(
     # walk, so `tan init`'s own pointer went unread the moment `tan build` ran
     # in the same directory.
     resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    # tan-cli#407: computed HERE, while `sdk_root` still holds the raw
+    # `--sdk-root` flag -- it is reassigned to the RESOLVED root a few lines
+    # below, and a bogus flag is blanked to `None` in between, which would
+    # make this warn about a discovery collision the user never reached
+    # because they named a root explicitly.
+    sdk_divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=False)
     # tan-cli#257/#258: `resolve_sdk_root_ladder` returns an explicit
     # `--sdk-root` UNVALIDATED (I-31 terminal-for-REPORTING, matching the
     # oracle's `resolve_sdk_tiered`) -- fine for a caller that only reports
@@ -1383,13 +1478,23 @@ def build(
         data = None
         issues = [Issue("build.internal-failure", "error", f"{type(err).__name__}: {err}")]
 
+    # Both facts are about how the SDK ROOT was RESOLVED, so both are prepended
+    # ahead of whatever the build itself reported, and both survive a run that
+    # never planned anything -- a refusal is exactly when knowing which
+    # checkout answered matters most.
+    #
     # tan-cli#263 review: `tan build` is the command a silently-missed
     # `.alp/sdk-path` pin hurts most -- it builds against whichever tier the
     # ladder fell through to and says nothing, where `sdk current` alone only
-    # helps someone already suspicious enough to run it.
-    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
-    if pin_issue is not None:
-        issues = [pin_issue, *issues]
+    # helps someone already suspicious enough to run it. tan-cli#407 is the
+    # same argument for the two-checkout collision one tier below it.
+    resolution_issues = [
+        issue
+        for issue in (project_pin_issue(sdk_broken_pin, sdk_tier), sdk_divergence)
+        if issue is not None
+    ]
+    if resolution_issues:
+        issues = [*resolution_issues, *issues]
 
     if json_mode:
         emit(Envelope("build", project, data, issues, exit_code, sdk=sdk))
