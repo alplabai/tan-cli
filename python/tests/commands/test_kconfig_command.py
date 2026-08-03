@@ -491,6 +491,48 @@ def test_resolve_core_reports_missing_board_yaml(tmp_path: Path) -> None:
     assert excinfo.value.code == "kconfig.board-yaml-missing"
 
 
+def test_resolve_core_reports_a_non_utf8_board_yaml_as_a_coded_refusal(
+    tmp_path: Path,
+) -> None:
+    """tan-cli#396: `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so
+    the read guard could not fire for a board.yaml saved in cp1252/latin-1 or
+    carrying one stray byte -- it escaped as a raw `UnicodeDecodeError`.
+
+    `kconfig.board-yaml-missing` is the oracle's own code for this: Rust's
+    `read_to_string` fails with an `io::Error` on non-UTF-8 bytes, and
+    `kconfig.rs:156-161` maps every read failure to that one code.
+    """
+    board_yaml = tmp_path / "board.yaml"
+    board_yaml.write_bytes(b"cores:\n  cm33:\n    os: zephyr\n# \xff\xfe\xfd\n")
+    with pytest.raises(_CoreResolutionError) as excinfo:
+        _resolve_core(None, str(board_yaml))
+    assert excinfo.value.code == "kconfig.board-yaml-missing"
+
+
+def test_a_non_utf8_board_yaml_is_an_envelope_not_zero_bytes(tmp_path: Path) -> None:
+    """The shape that made tan-cli#396 worth an issue: rc 1 with ZERO bytes on
+    stdout. A JSON consumer gets nothing to parse, so the extension's matches
+    fail open and the `prj.conf` symbol menu silently renders empty or stale.
+
+    Asserted on `result.stdout` alone -- the envelope has to be on the stdout
+    stream, not merely somewhere in the combined output.
+    """
+    sdk = _sdk_root(tmp_path)
+    proj = _project(tmp_path, None)
+    (proj / "board.yaml").write_bytes(b"cores:\n  cm33:\n    os: zephyr\n# \xff\xfe\xfd\n")
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["issues"][0]["code"] == "kconfig.board-yaml-missing"
+    # The offending byte is named, so the remedy ("re-save board.yaml as UTF-8")
+    # is derivable from the envelope alone -- the user cannot see the decode
+    # error any other way now that it no longer reaches the terminal.
+    assert "0xff" in envelope["issues"][0]["message"]
+
+
 def test_resolve_core_reports_invalid_yaml(tmp_path: Path) -> None:
     board_yaml = tmp_path / "board.yaml"
     board_yaml.write_text("cores: [this is not a mapping\n", encoding="utf-8")

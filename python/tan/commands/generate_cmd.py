@@ -79,6 +79,7 @@ carries the envelope and nothing else, in both formats.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -406,8 +407,23 @@ def _ensure_writable(output: Path, target: str) -> None:
             output.parent.mkdir(parents=True, exist_ok=True)
             # Append mode, not write: proving writability must not truncate a
             # file whose emit could still be refused further down.
+            existed = output.exists()
             with output.open("ab"):
                 pass
+            if not existed:
+                # tan-cli#397: the probe must not leave its own 0-byte file
+                # behind. `_missing_output` below asks whether the emitter
+                # actually produced the artefact, and a destination THIS
+                # function created would answer yes for every `--output` run --
+                # which is the shape `cmake/alp.cmake` drives, so the guard
+                # would be dead on the one path that matters most.
+                #
+                # Suppressed rather than raised: if the unlink fails (a Windows
+                # host with a scanner holding a handle, say) the destination is
+                # still writable, and refusing a good run over failed cleanup
+                # would be a worse bug than the weakened check.
+                with contextlib.suppress(OSError):
+                    output.unlink()
     except (OSError, ValueError) as err:
         raise GenerateError(
             "generate.output-unwritable",
@@ -507,6 +523,48 @@ def _relative_or_full(workspace_root: Path, output_path: Path) -> str:
         return str(output_path)
 
 
+def _missing_output(output: Path, emit: str) -> str | None:
+    """`None` when `emit` really did leave an artefact at `output`, else the
+    message for its `generate.emit-failed` issue.
+
+    tan-cli#397: a zero exit code from a child is evidence the child RAN, never
+    evidence of what it produced (tan-cli#365 is the same class -- there a stale
+    artefact satisfied a presence check). Without this, a spawned
+    `alp_project.py` that exits 0 and writes nothing -- a partially cloned
+    checkout, a differently configured emitter, a future SDK taking a path tan
+    did not expect -- lands its target in `data.written` under `ok: true`, and
+    the extension, for which `written[]` IS the answer, points the user at a
+    file that is not on disk. The next `tan build` then configures Zephyr
+    against an absent or stale `alp.conf` and the symptom surfaces much later as
+    wrong Kconfig in an image.
+
+    Emptiness is deliberately NOT failure for a stream target: a board whose
+    cores are all `os: off` renders an empty `alp.conf`
+    (`planner_emit._render_per_core` joins zero parts), so a non-empty rule
+    would refuse a legitimate emit. `TREE_MODES` are the other way round --
+    `_ensure_writable` and `write_tree` both create the DIRECTORY themselves, so
+    its existence proves nothing and "holds at least one entry" is the weakest
+    honest check. Neither test can tell this run's output from a previous run's
+    leftovers; only the emitter could, and it is exactly the thing whose word is
+    not being taken here.
+    """
+    try:
+        produced = (
+            output.is_dir() and any(output.iterdir())
+            if emit in planner_emit.TREE_MODES
+            else output.is_file()
+        )
+    except OSError:
+        # An unreadable destination is not a produced one.
+        produced = False
+    if produced:
+        return None
+    return (
+        f"Generation failed for target '{emit}': the emitter reported success but "
+        f"left nothing at `{output}`."
+    )
+
+
 def _emit_one(
     python: str,
     script: Path,
@@ -517,6 +575,10 @@ def _emit_one(
 ) -> str | None:
     """Run one emit. `None` on success, else the message for its
     `generate.emit-failed` issue.
+
+    `None` here means only that the CHILD EXITED 0 -- it cannot mean the file
+    exists, because nothing in this function writes it. The caller pairs it with
+    `_missing_output` for that (tan-cli#397).
 
     Every way a subprocess can fail is a message, not an exception: the binary
     is absent or not executable (`OSError`), it wedges (`TimeoutExpired`), or it
@@ -982,6 +1044,13 @@ def generate(
                 message = _emit_one(
                     python, script, board_path, mode, target_output, core
                 )
+            if message is None:
+                # tan-cli#397: an emit that claims success still has to have
+                # produced something. Checked HERE, at the one place `written`
+                # is decided, rather than inside `_emit_one` -- one site covers
+                # both engines (and any third), and no future caller can append
+                # to `written` on a child's exit code alone.
+                message = _missing_output(target_output, mode)
             if message is None:
                 written.append(_relative_or_full(workspace_root, target_output))
             else:

@@ -105,7 +105,23 @@ def _resolve_core(core_arg: str | None, board_yaml: str) -> str:
         return core_arg
     try:
         text = Path(board_yaml).read_text(encoding="utf-8")
-    except OSError as err:
+    except (OSError, UnicodeDecodeError) as err:
+        # tan-cli#396: `UnicodeDecodeError` is a `ValueError`, NOT an `OSError`,
+        # so an `except OSError` alone could not fire for a board.yaml saved in
+        # cp1252/latin-1 (or with one stray byte pasted into a comment) -- it
+        # escaped as an unhandled traceback, rc 1 with ZERO bytes on stdout.
+        # That is the worst shape a machine interface has: the extension's two
+        # string matches against the envelope both fail open, so the `prj.conf`
+        # symbol menu renders empty or stale and never says why.
+        #
+        # Deliberately the SAME code and message an unreadable file gets,
+        # because the oracle reaches this one arm for both: Rust's
+        # `std::fs::read_to_string` returns an `io::Error` (kind `InvalidData`,
+        # "stream did not contain valid UTF-8") for non-UTF-8 bytes, and
+        # `crates/tan-cli/src/commands/kconfig.rs:156-161` maps every
+        # `read_to_string` error to `kconfig.board-yaml-missing`. Not
+        # `errors="replace"`: that would silently mangle the user's bytes and
+        # then resolve a core out of the mangled result.
         raise _CoreResolutionError(
             "kconfig.board-yaml-missing",
             f"failed to read board.yaml at `{board_yaml}`: {err}",
