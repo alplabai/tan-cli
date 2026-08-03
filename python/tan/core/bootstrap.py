@@ -858,6 +858,42 @@ def hint_line(tool: str, install: dict[str, str]) -> str:
 #: first line is left byte-identical. See `posix_refusal` for why.
 _DOCTOR_FIX_HINT = "Or run `tan doctor --build --fix` to install them from the SDK's manifest."
 
+#: tan-cli#370. The line above is TRUE only where the manifest's own install
+#: commands need no elevation. alp-sdk's `prerequisites.install.linux` is six
+#: `sudo apt-get install -y ...` entries, and `doctor --build --fix` REFUSES to
+#: spawn anything whose first word is `sudo` (`doctor_cmd.fix_needs_sudo_check`,
+#: `doctor.fix-needs-sudo`) -- deliberately, because under `--format json` this
+#: process's stdio is captured end to end and a password prompt would hang
+#: forever rather than fail loudly. So on Linux `--fix` installs NOTHING; it
+#: prints the exact command per tool. Promising an install there trades one
+#: wrong expectation for another, which is the very thing #355 set out to stop,
+#: and it does so on the host most customers are on.
+#:
+#: Keyed on the COMMANDS, not on the platform: macOS is POSIX and its `brew
+#: install ...` needs no elevation, so it earns the plain wording, and Windows
+#: `winget` (user-scope) does too. Reading the commands is also what keeps this
+#: correct against a manifest nobody here has seen.
+_DOCTOR_FIX_HINT_NEEDS_ELEVATION = (
+    "Or run `tan doctor --build --fix`: it prints the exact command for each "
+    "tool from the SDK's manifest, and runs the ones needing no elevation "
+    "(tan never spawns `sudo` itself)."
+)
+
+
+def _doctor_fix_hint(missing: list[str], install: dict[str, str]) -> str:
+    """Which of the two hints above is true for THESE tools on THIS host.
+
+    Only the commands reachable for the MISSING tools are considered: a `sudo`
+    entry belonging to some tool that is already present says nothing about
+    what `--fix` will do in this run. A tool the manifest has no command for
+    cannot need elevation either -- it contributes generic advice, not a spawn.
+    """
+    return (
+        _DOCTOR_FIX_HINT_NEEDS_ELEVATION
+        if any(install.get(tool, "").split(maxsplit=1)[:1] == ["sudo"] for tool in missing)
+        else _DOCTOR_FIX_HINT
+    )
+
 
 def windows_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
     """`bootstrap.ps1`'s `$Prereqs` loop: header, one `hint_line` each, the
@@ -868,7 +904,10 @@ def windows_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailur
     # tan-cli#355: same gap as the POSIX refusal -- name the installer tan ships.
     # The Windows wording is tan's own (it already carries per-tool hints the
     # POSIX one may not), so this is an addition, not a divergence.
-    lines.append(_DOCTOR_FIX_HINT)
+    # tan-cli#370: which of the two hints is true depends on the commands, not
+    # on the platform -- Windows `winget` is user-scope today, but the manifest
+    # is alp-sdk's to change and this reads what it actually says.
+    lines.append(_doctor_fix_hint(missing, install))
     return PrereqFailure(
         "prerequisites-missing", tuple(lines), _structured_missing(missing, install)
     )
@@ -905,7 +944,7 @@ def posix_refusal(missing: list[str], install: dict[str, str]) -> PrereqFailure:
         "prerequisites-missing",
         (
             f"Missing required tools: {' '.join(missing)}.  Install them and re-run.",
-            _DOCTOR_FIX_HINT,
+            _doctor_fix_hint(missing, install),
         ),
         _structured_missing(missing, install),
     )
