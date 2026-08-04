@@ -303,3 +303,208 @@ def test_two_commands_on_different_ladders_leave_the_split_detectable(tmp_path):
         f"`tan build` resolved {build_root} and `tan generate` resolved "
         f"{generate_root}, and neither envelope said so"
     )
+
+
+# ───────────────── the four wide callers, wired (tan-cli#407) ─────────────────
+
+#: Every module that calls the WIDE ladder. Kept as data because two things
+#: read it: the structural gate below (which is what stops a sixth wide
+#: caller landing silently unwired) and the reader, who would otherwise have
+#: to trust a prose list in a docstring.
+#:
+#: `doctor_cmd` is the odd one and belongs here anyway: it RESOLVES narrowly
+#: like its twelve siblings and calls `resolve_sdk_root_wide` only to report
+#: what the other ladder would have answered (#407's "doctor surfaces the
+#: divergence as a check"). It therefore emits `SDK_DISCOVERY_DIVERGENT` as
+#: a `Check.code` rather than through `sdk_ladder_divergence_issue`, which
+#: is why the gate accepts either spelling.
+WIDE_LADDER_MODULES = (
+    "init_cmd",
+    "generate_cmd",
+    "examples_cmd",
+    "renode_cmd",
+    "doctor_cmd",
+)
+
+
+def test_every_wide_ladder_caller_is_wired_to_the_divergence_warning():
+    """The structural half of #407's stage 1, and the reason it is structural:
+    the defect was never that the helper was wrong, it was that fifteen
+    modules resolve an SDK and exactly ONE of them said so. A grep-shaped
+    assertion is what makes a sixteenth impossible to add silently.
+
+    `build_cmd` is excluded because it DEFINES both ladders and the helper;
+    everything that CALLS `resolve_sdk_root_wide` must emit
+    `sdk.discovery-divergent` by one of the two sanctioned spellings (see
+    `WIDE_LADDER_MODULES` for why there are two).
+
+    The caller probe matches CALL syntax (`name(`), not the bare name. The
+    looser form was tried first and immediately reported `sdk_cmd.py`, which
+    only mentions `resolve_sdk_root_wide` inside a docstring cross-reference
+    at `sdk_cmd.py:509` -- a gate whose first finding is a comment teaches
+    people to ignore it."""
+    commands_dir = PACKAGE_ROOT / "tan" / "commands"
+    callers = {
+        module.stem: module
+        for module in sorted(commands_dir.glob("*.py"))
+        if module.stem != "build_cmd"
+        and "resolve_sdk_root_wide(" in module.read_text(encoding="utf-8")
+    }
+
+    unwired = sorted(
+        stem
+        for stem, module in callers.items()
+        if not any(
+            spelling in module.read_text(encoding="utf-8")
+            for spelling in ("sdk_ladder_divergence_issue(", "SDK_DISCOVERY_DIVERGENT")
+        )
+    )
+    assert unwired == [], (
+        f"{unwired} resolve the SDK through the wide ladder but never emit "
+        f"{DIVERGENCE_CODE}, so a workspace holding two checkouts gets a "
+        f"silent answer from them"
+    )
+    # The converse: `WIDE_LADDER_MODULES` is not stale. If a wide caller is
+    # renamed or removed, this fails rather than silently shrinking the
+    # gate's scope to whatever happens to be left.
+    assert set(callers) == set(WIDE_LADDER_MODULES)
+
+
+def _wide_command_argv(name: str, workspace: Path) -> tuple[str, ...]:
+    """The shortest argv that reaches each wide command's issue-emission
+    point in a workspace whose only SDKs are the two marker-only checkouts
+    `_make_sdk` builds.
+
+    `generate` is the one that needs a fixture: with no board.yaml it refuses
+    at `generate.board-yaml-missing` BEFORE resolving an SDK at all (and that
+    refusal's envelope is frozen in `contract/envelopes/`, so it must not
+    grow an issue). Two lines of board.yaml carry it past that guard; every
+    emit target then fails against a checkout with no `metadata/`, which is
+    fine -- the warning is appended after the target loop, not inside it.
+
+    `renode` needs nothing: its own refusal path carries the warning, which
+    is the point (`renode.manifest-unavailable` tells the reader to run `tan
+    build` first, and `tan build` is the ladder that disagrees)."""
+    if name == "generate":
+        (workspace / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    return {
+        "examples": ("examples",),
+        "generate": ("generate",),
+        "init": ("init", "--name", "demo"),
+        "renode": ("renode",),
+    }[name]
+
+
+@pytest.mark.parametrize("command", ["examples", "generate", "init", "renode"])
+def test_each_wide_command_names_the_checkout_the_narrow_ladder_would_have_used(
+    tmp_path, command
+):
+    """#407's acceptance for the wide side: in the divergent layout each of
+    the four must emit `sdk.discovery-divergent`, and the message must name
+    BOTH checkouts -- the one it used and the one thirteen other commands
+    would have used. Naming only its own would leave the reader with a
+    warning they cannot act on."""
+    workspace, child, lateral = _divergent_layout(tmp_path)
+    argv = _wide_command_argv(command, workspace)
+
+    env = _envelope(_run_tan(*argv, "--format", "json", cwd=workspace))
+
+    divergence = next((i for i in env["issues"] if i["code"] == DIVERGENCE_CODE), None)
+    assert divergence is not None, (
+        f"`tan {' '.join(argv)}` resolved "
+        f"{(env.get('sdk') or {}).get('root')} and did not say that the "
+        f"narrow ladder would have resolved another checkout; codes were "
+        f"{[i['code'] for i in env['issues']]}"
+    )
+    assert divergence["severity"] == "warning"
+    # `.as_posix()`, not `str()`: the message is built from `_abs_posix`, so
+    # it carries `/` on every host (tan-cli#413's lesson, kept).
+    assert child.as_posix() in divergence["message"]
+    assert lateral.as_posix() in divergence["message"]
+
+
+def test_a_wide_command_refusal_still_carries_the_divergence_warning(tmp_path):
+    """`tan renode`'s dominant outcome in a fresh project is a REFUSAL --
+    there is no `system-manifest.yaml` until `tan build` has run. The warning
+    used to be appended sixty lines past six `fail_sdk` early returns, so the
+    refusal that matters most shipped without it: its own message says to run
+    `tan build`, and `tan build` is the ladder that resolves the OTHER
+    checkout. Measured before the fix as
+    `codes == ['renode.manifest-unavailable']`."""
+    workspace, _child, _lateral = _divergent_layout(tmp_path)
+
+    env = _envelope(_run_tan("renode", "--format", "json", cwd=workspace))
+
+    codes = [i["code"] for i in env["issues"]]
+    assert codes[0] == "renode.manifest-unavailable", (
+        "the refusal itself must stay `issues[0]` -- context is appended "
+        f"after it, not in front of it; got {codes}"
+    )
+    assert DIVERGENCE_CODE in codes
+
+
+def test_doctor_reports_the_divergence_as_a_check_not_as_a_single_root(tmp_path):
+    """#407's other named acceptance: `tan doctor` used to render the
+    collision as `alp-sdk at <lateral> (discovery)` -- a `pass`, with no hint
+    that `tan generate` in that same directory answers a different checkout
+    under the identical tier name.
+
+    Three things are asserted because three could regress independently: the
+    check's STATUS (a `pass` here is the original defect), its CODE (`doctor.
+    sdk` would not correlate with the five commands emitting
+    `sdk.discovery-divergent`), and the EXIT CODE, which must not move --
+    `exit_code_for` keys on `fail` alone, and a divergence is a warning, not
+    a broken host."""
+    workspace, child, lateral = _divergent_layout(tmp_path)
+
+    env = _envelope(_run_tan("doctor", "--format", "json", cwd=workspace))
+
+    sdk_checks = [c for c in env["data"]["checks"] if c["name"] == "sdk"]
+    assert len(sdk_checks) == 1
+    check = sdk_checks[0]
+    assert check["status"] == "warn", f"still reported as a clean pass: {check}"
+    assert lateral.as_posix() in check["detail"]
+    assert child.as_posix() in check["detail"]
+
+    codes = [i["code"] for i in env["issues"]]
+    assert DIVERGENCE_CODE in codes
+    assert "doctor.sdk" not in codes, (
+        "the check must carry the shared code, not the derived `doctor.<name>` "
+        "one -- a consumer correlating two envelopes matches on the code"
+    )
+
+
+def test_doctor_over_one_checkout_stays_a_clean_pass(tmp_path):
+    """The regression the doctor half must not become. A single-SDK
+    workspace -- every ordinary one -- keeps `sdk: pass` and gains no
+    warning."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(tmp_path / "alp-sdk")
+
+    env = _envelope(_run_tan("doctor", "--format", "json", cwd=workspace))
+
+    check = next(c for c in env["data"]["checks"] if c["name"] == "sdk")
+    assert check["status"] == "pass"
+    assert DIVERGENCE_CODE not in [i["code"] for i in env["issues"]]
+
+
+def test_both_sides_of_the_split_warn_now_that_the_wide_callers_are_wired(tmp_path):
+    """The tightened form of `test_two_commands_on_different_ladders_leave_
+    the_split_detectable` above, which deliberately asserts only "at least
+    one" so it keeps its meaning after #269 collapses the two ladders.
+
+    This one asserts BOTH, and pairs `tan build` with `tan examples` rather
+    than `tan generate` on purpose: `examples` reaches its emission point in
+    a bare workspace, so the test measures the wiring rather than how much
+    fixture it takes to get a generate run past its guards."""
+    workspace, child, lateral = _divergent_layout(tmp_path)
+
+    build_env = _envelope(_run_tan("build", "--format", "json", cwd=workspace))
+    examples_env = _envelope(_run_tan("examples", "--format", "json", cwd=workspace))
+
+    assert build_env["sdk"]["root"] == lateral.as_posix()
+    assert examples_env["sdk"]["root"] == child.as_posix()
+    for label, env in (("build", build_env), ("examples", examples_env)):
+        codes = [i["code"] for i in env["issues"]]
+        assert DIVERGENCE_CODE in codes, f"`tan {label}` stayed silent; codes were {codes}"

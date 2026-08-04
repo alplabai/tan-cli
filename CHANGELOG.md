@@ -134,23 +134,6 @@ release.yml extracts the notes by an exact `^## \[<tag minus v>\]` match, so a
   time, so a partial artefact from an emitter that died mid-write survives as
   evidence), with cleanup failure swallowed so it cannot replace the real
   refusal.
-- **Two SDK discovery ladders returned different checkouts from one directory,
-  both labelled `sourceTier: "discovery"`** (tan-cli#407). The disagreement is
-  deliberate and oracle-measured -- the narrow ladder (thirteen commands) takes
-  the lateral `../alp-sdk`, the wide one (`init`, `generate`, `examples`,
-  `renode`) the child `<ws>/alp-sdk` -- but both reported the same tier string,
-  so nothing on the wire said which had answered. In a workspace holding both,
-  `generate` emits `alp.conf`, the DTS overlays and `alp_hw_info_build.h` from
-  one checkout's `metadata/` while `build`, `size` and `trace` plan against the
-  other. `sdk: {root, sourceTier}` exists (tan-cli#110) precisely so the vscode
-  extension can tell which SDK produced a result. Every command's envelope now
-  carries a `sdk.discovery-divergent` warning naming BOTH roots, attached at
-  the one seam every envelope passes through rather than at the 20 `SdkInfo`
-  construction sites, and gated on `sourceTier == "discovery"` so it touches
-  the disk only in the ambiguous case. `doctor` gains an `sdkDiscoveryDivergent`
-  check (`warn`, emitted only on the divergence) so the human surface says it
-  too. No sixth `SdkSourceTier` value: the enum is a wire contract no consumer
-  expects to grow.
 - **`validate` reported `validation failure` when nothing had been validated**
   (tan-cli#350). Two different situations produced one message -- no
   `board.yaml` to check, and a `board.yaml` that genuinely failed its schema --
@@ -182,8 +165,76 @@ release.yml extracts the notes by an exact `^## \[<tag minus v>\]` match, so a
   tan-cli#427, which tracks the flags themselves, and the message no longer
   names a release at all: it said "deferred to v0.6.0" while the release it
   meant was renumbered to 0.5.0, and a refusal that promises a version is a
-  claim this port cannot keep true.
+  claim this port cannot keep true.- **Two SDK discovery ladders answered different checkouts from one directory
+  and both reported `sourceTier: "discovery"`, so nothing on the wire said
+  which one had answered** (tan-cli#407). In a workspace holding both a child
+  `<ws>/alp-sdk` — what `tan bootstrap` clones — and a lateral `../alp-sdk`,
+  `tan generate` emitted `build/generated/alp.conf`, the DTS overlays and
+  `alp_hw_info_build.h` out of one checkout's `metadata/` while `tan build`,
+  `tan size`, `tan trace` and `tan doctor` planned and reported against the
+  other. Measured ten commands for ten under the identical tier string, and
+  `tan sdk current` — the one command a user runs to ask "which SDK am I
+  on?" — answered with the narrow one only, reporting the readiness and
+  `VERSION` of the checkout `tan generate` did not use. The envelope's
+  `sdk: {root, sourceTier}` key exists (tan-cli#110) precisely so
+  `alp-sdk-vscode` can tell which SDK produced a result instead of guessing;
+  one tier name for two answers is that key failing at its only job.
 
+  The divergence itself is deliberate and oracle-measured (see
+  `resolve_sdk_root_ladder`'s own docstring) and is **unchanged**. The tier
+  string cannot move either: `SdkSourceTier` is a closed five-value wire
+  contract no consumer expects to grow, and `test_build_manifest.py` pins the
+  exact `(path, "discovery", None)` tuple both ladders return because that is
+  the oracle's own answer. What changed is the silence. Six commands now emit
+  the shared `sdk.discovery-divergent` warning naming BOTH checkouts, so a
+  consumer holding one envelope from each side matches them on the code:
+  `tan build` and `tan sdk current` on the narrow ladder, `tan init`,
+  `tan generate`, `tan examples` and `tan renode` on the wide one.
+
+  `tan doctor` renders it as a check rather than reporting one of the two
+  roots as if it were the only one: its `sdk` check moves `pass` → `warn`,
+  carries `code: "sdk.discovery-divergent"` and names the checkout the four
+  wide commands resolve. The exit code does not move — `exit_code_for` keys
+  on `fail` alone, and a split workspace is a warning, not a broken host.
+
+  `tan renode` needed a second fix to benefit at all: both its `fail_sdk`
+  helpers built a single-issue list, so its six early refusals dropped this
+  warning *and* the pre-existing `sdk.project-pin-unresolved` one. Measured
+  before the fix, a divergent workspace refused with
+  `renode.manifest-unavailable` alone — the refusal that matters most,
+  because its own message says to run `tan build` first and `tan build` is
+  the ladder that disagrees. Both issues are now computed at resolution time
+  and ride on every envelope the command can still produce, with the refusal
+  itself kept as `issues[0]`.
+
+  A structural gate (`tests/commands/test_sdk_discovery_ladders.py`) now
+  fails if a module calls `resolve_sdk_root_wide` without emitting the code,
+  so a sixth wide caller cannot land silently unwired.
+
+  The ten narrowly-resolving commands this originally left silent (`size`,
+  `trace`, `clean`, `run`, `flash`, `inspect`, `presets`, `image`, `kconfig`,
+  `validate`) are now covered too, and not by wiring each of them: the
+  warning is attached at `Envelope.__init__`, the one seam every command's
+  envelope passes through. They each reach the ladder by a different seam,
+  which is exactly why per-command wiring left them out -- and a fix present
+  on six commands and missing on ten leaves the reported silence in place,
+  since `alp-sdk-vscode` branches on `sourceTier` from both groups. Gated on
+  `sourceTier == "discovery"` before anything touches the disk, so an
+  ordinary single-checkout host pays nothing: every higher tier
+  (`--sdk-root`, the project pin, the global default) is shared verbatim by
+  both ladders and cannot be the pair that differs. The seam skips a command
+  that already emitted the code, so the six wired above do not double-report.
+
+  Two defects surfaced only by measuring the seam against the real layout,
+  either of which would have shipped a warning that looked wired and was
+  not: `project.root` is `null` for `examples` and `sdk current` -- two of
+  the commands measured as divergent -- so an early bail on a null root left
+  the wide side unreported; and it is the relative `"."` for several others,
+  where `Path(".").parent` is `"."`, collapsing the ladders' lateral
+  candidate onto the child so a real divergence reads as agreement.
+  Measured: `doctor` warned while `validate`, from the same directory, did
+  not. Verified over the issue's own layout on the frozen binary: eleven
+  commands each carry the code, and a single-checkout layout stays silent.
 - **BLOCKER: the Flow D SETOOLS auto-sign's own soft-failure guard could
   destroy a prior sign record instead of only detecting a fresh one**
   (tan-cli#373, regression in #365's own fix). `app-package-map.txt` is

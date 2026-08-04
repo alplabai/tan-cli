@@ -111,10 +111,11 @@ from pathlib import Path
 import typer
 
 from tan.commands.build_cmd import (
+    SDK_DISCOVERY_DIVERGENT,
     _abs_posix,
     discover_sdk_root,
     resolve_sdk_root_ladder,
-    sdk_ladder_divergence_issue,
+    resolve_sdk_root_wide,
 )
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
@@ -1470,6 +1471,7 @@ def sdk_check(
     tier: str | None = None,
     unselected_candidate: str | None = None,
     broken_global_default: str | None = None,
+    divergent_candidate: str | None = None,
 ) -> Check:
     """`sdk` -- is an alp-sdk checkout resolved at all? Mirrors
     `tan_core::preflight::build_preflight_checks`'s `sdk` check.
@@ -1530,6 +1532,34 @@ def sdk_check(
                     f"pass --sdk-root {unselected_candidate} to use it"
                 )
             detail += ")"
+        if divergent_candidate is not None:
+            # BOTH roots re-rendered POSIX here, unlike the `pass` branch's
+            # `alp-sdk at {sdk_root}` above, which keeps this host's native
+            # separators and is left byte-identical. The reason is the CODE:
+            # this branch's detail becomes an `issues[].message` under
+            # `sdk.discovery-divergent`, which five other commands also emit
+            # -- and all five build it from `_abs_posix`. A consumer
+            # correlating two envelopes would otherwise match a code across a
+            # message spelled `C:/...` on one side and `C:\...` on the other.
+            # The envelope is the contract; normalise the filesystem side to
+            # meet it, never the other way round (caught by
+            # windows-latest on tan-cli#428, green everywhere else).
+            posix_root = f"alp-sdk at {_abs_posix(sdk_root)}"
+            if tier is not None:
+                posix_root += f" ({tier})"
+            return Check(
+                "sdk",
+                "warn",
+                f"{posix_root}; `tan init`, `tan generate`, `tan examples` "
+                f"and `tan renode` resolve a DIFFERENT checkout from this "
+                f"directory ({_abs_posix(divergent_candidate)}) and report "
+                f'the same sourceTier "discovery", so generated files and '
+                f"the build plan can come from different SDK versions.",
+                f"--sdk-root <path> to pin the one you mean for a single run, "
+                f"or `tan init --sdk-root <path>` to write it into "
+                f".alp/sdk-path, which outranks both discovery tiers.",
+                code=SDK_DISCOVERY_DIVERGENT,
+            )
         return Check("sdk", "pass", detail)
     scope_note = f" for --project {project_scope}" if project_scope is not None else ""
     if broken_global_default is not None:
@@ -2608,9 +2638,30 @@ def _collect(
             _abs_posix(str(candidate))
         ) != os.path.normcase(_abs_posix(sdk_root)):
             unselected_candidate = str(candidate)
+    # tan-cli#407: the #301 block above deliberately says nothing when the
+    # winning tier already IS `discovery` -- and that is precisely the case
+    # where the second checkout is not merely "unselected" but ACTIVELY in
+    # use, by the four commands that take the wide ladder. Same report-only
+    # discipline as #301: the candidate can only ever be one
+    # `resolve_sdk_root_wide` itself would reach, never a scan of its own.
+    divergent_candidate: str | None = None
+    if sdk_root is not None and sdk_tier == "discovery":
+        wide, _wide_tier, _wide_pin = resolve_sdk_root_wide(None, Path(workspace_root))
+        # `normcase` both sides, for the reason spelled out in the #301 block
+        # above: `_abs_posix` does not resolve, so on Windows one directory
+        # under two spellings would be reported as two checkouts.
+        if wide is not None and os.path.normcase(_abs_posix(str(wide))) != os.path.normcase(
+            _abs_posix(sdk_root)
+        ):
+            divergent_candidate = str(wide)
     checks.append(
         sdk_check(
-            sdk_root, project_scope, sdk_tier, unselected_candidate, broken_global_default
+            sdk_root,
+            project_scope,
+            sdk_tier,
+            unselected_candidate,
+            broken_global_default,
+            divergent_candidate,
         )
     )
     project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
@@ -2814,58 +2865,12 @@ def _collect(
     resolved_device, device_source = jlink_flash_device(sdk_root)
     checks.append(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
 
-    # tan-cli#407: the `sdk` check above names ONE root. In a workspace where
-    # the two ladders answer different checkouts that is the narrow one, with
-    # nothing said about the checkout `init`/`generate`/`examples`/`renode`
-    # would use -- reporting one of two roots as if it were the only one. The
-    # envelope carries `sdk.discovery-divergent` on every command now, but
-    # that is the JSON surface, and `doctor` is where a human goes to ask what
-    # their toolchain is pointed at.
-    divergence = sdk_discovery_divergence_check(workspace_root)
-    if divergence is not None:
-        checks.append(divergence)
-
     # tan-cli#294 finding 5: LAST, mirroring `assemble_doctor_report`'s own
     # placement -- traces a report back to the SDK checkout that produced it.
     if sdk_root is not None:
         checks.append(sdk_provenance_check(sdk_root))
 
     return checks
-
-
-def sdk_discovery_divergence_check(workspace_root: str) -> Check | None:
-    """`sdkDiscoveryDivergent` -- `None` (no check emitted at all) unless the
-    narrow and wide SDK ladders resolve DIFFERENT checkouts from this
-    workspace (tan-cli#407).
-
-    Emitted only on the divergence rather than as an always-present
-    pass/fail: on a single-checkout host, which is nearly all of them, there
-    is nothing to report, and a permanent `[   pass] sdkDiscoveryDivergent`
-    line would add noise to every report in order to say nothing. The `sdk`
-    check already answers "which root am I on"; this answers "and is there a
-    second one some of your commands use instead".
-
-    `warn`, not `fail`: both roots are real checkouts and every command
-    resolves one of them successfully, so nothing is broken -- it is
-    ambiguous, and the user may have meant it. Failing would block a working
-    host over a layout tan cannot prove is wrong.
-
-    """
-    try:
-        start = Path(workspace_root).resolve()
-    except OSError:
-        return None
-    issue = sdk_ladder_divergence_issue(None, start, wide=False)
-    if issue is None:
-        return None
-    return Check(
-        "sdkDiscoveryDivergent",
-        "warn",
-        issue.message,
-        "Pin the checkout you mean with `--sdk-root <path>`, or write it into "
-        "`.alp/sdk-path` with `tan init --sdk-root <path>` -- a project pin "
-        "outranks both discovery tiers, so every command then agrees.",
-    )
 
 
 def _has_module(name: str) -> bool:
