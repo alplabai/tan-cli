@@ -60,28 +60,18 @@ in `parity.yml`'s `python-tests` job (`cargo build --locked --bin tan` is
 that job's own first step) and in any local `python -m pytest tests/parity`
 run against an already-built `target/{release,debug}/tan`.
 """
-import json
 from pathlib import Path
 
 import pytest
 
 from tan.core.scaffold import DEFAULT_SOM_SKU, TEMPLATE_IDS, plan_template_files
 
-from . import oracle, oracle_fixtures
 from .oracle import _run, python_command, rust_binary
+from .scaffold_fixtures import resolve_tree
 
+#: Only read on the LIVE/CAPTURE path now (tan-cli#409) -- a frozen replay
+#: never spawns the oracle, so `None` here is not a reason to skip anything.
 RUST = rust_binary()
-#: tan-cli#409. Gated on `missing_for_live`, NOT on `RUST is None`: frozen
-#: replay needs no binary at all, so these must keep running (and keep
-#: discriminating) once tan-cli#269 deletes `crates/`. Only an explicit
-#: `TAN_PARITY_LIVE=1` run asked to spawn a binary that is not there skips.
-#: With the old gate, 47 of this module's cases became passing SKIPS the
-#: moment the oracle stopped building -- a green run measuring nothing.
-_SKIP_NO_ORACLE = pytest.mark.skipif(
-    oracle.missing_for_live(RUST),
-    reason="TAN_PARITY_LIVE=1 was asked for but no Rust tan is built; run "
-    "`cargo build --bin tan` (or set TAN_RUST_BINARY)",
-)
 
 #: `(template_id, relative_path) -> reason`, the SAME shape and the SAME
 #: `xfail(strict=True)` discipline as `test_contract_envelopes.py`'s dict of
@@ -207,78 +197,6 @@ def _read_tree(root: Path) -> dict[str, bytes]:
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
-#: The frozen ORACLE trees, one entry per template id (tan-cli#409). Its own
-#: file rather than an entry in the node-keyed `oracle_fixtures` store,
-#: because the natural key here is the template, not the test case -- see
-#: `_scaffold_trees`.
-_TREE_FIXTURE = Path(__file__).parent / "oracle_fixtures" / "scaffold_trees.json"
-
-
-def _frozen_rust_tree(template_id: str, root: Path, argv: list[str]) -> dict[str, bytes]:
-    """The oracle's scaffolded tree for `template_id`, replayed from the
-    committed fixture -- or captured from a real oracle spawn under
-    `TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1`.
-
-    Stored as UTF-8 TEXT keyed by relative path, not base64: every file all
-    six templates scaffold is text (measured -- zero binary files across 40
-    files), and readable JSON means a fixture diff shows what actually
-    changed in the oracle's output instead of an opaque blob. A binary file
-    appearing later is REFUSED at capture time rather than silently mangled,
-    so the assumption cannot rot quietly.
-
-    Newlines are preserved exactly. `_read_tree` reads bytes on purpose --
-    "no text-mode newline translation to launder a real divergence" -- and
-    `json.dumps` round-trips `
-` verbatim, so a CRLF/LF divergence
-    between the two sides still fails the comparison after a freeze.
-    """
-    if oracle_fixtures.LIVE:
-        work = root / "rust" / "root"
-        home = root / "rust" / "home"
-        work.mkdir(parents=True)
-        home.mkdir(parents=True)
-        code, out = _run([RUST], argv, work, home)
-        assert code == 0, f"rust tan init --template {template_id} failed: {out}"
-        tree = _read_tree(work)
-        if oracle_fixtures.CAPTURE:
-            encoded = {}
-            for relpath, blob in sorted(tree.items()):
-                try:
-                    encoded[relpath] = blob.decode("utf-8")
-                except UnicodeDecodeError as err:
-                    raise AssertionError(
-                        f"--template {template_id} scaffolded a NON-UTF-8 file "
-                        f"({relpath}); this fixture stores text. Add a base64 "
-                        f"branch here and to the replay below rather than "
-                        f"letting it be mangled (tan-cli#409)."
-                    ) from err
-            data = {}
-            if _TREE_FIXTURE.is_file():
-                data = json.loads(_TREE_FIXTURE.read_text(encoding="utf-8"))
-            data[template_id] = encoded
-            _TREE_FIXTURE.write_text(
-                json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-                newline="\n",
-            )
-        return tree
-
-    if not _TREE_FIXTURE.is_file():
-        raise AssertionError(
-            f"no frozen oracle scaffold trees at {_TREE_FIXTURE}. Capture them "
-            f"against a built oracle: TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 "
-            f"TAN_RUST_BINARY=<path> pytest {Path(__file__).name} (tan-cli#409)."
-        )
-    data = json.loads(_TREE_FIXTURE.read_text(encoding="utf-8"))
-    if template_id not in data:
-        raise AssertionError(
-            f"no frozen oracle scaffold tree for --template {template_id!r} in "
-            f"{_TREE_FIXTURE}. A NEW template must be captured before it can be "
-            f"compared, or its parity is unmeasured (tan-cli#409)."
-        )
-    return {relpath: text.encode("utf-8") for relpath, text in data[template_id].items()}
-
-
 def _scaffold_trees(template_id: str, tmp_path_factory) -> tuple[dict[str, bytes], dict[str, bytes]]:
     """`tan init --template <template_id>` (`DEFAULT_SOM_SKU`) through both
     binaries, each into its own fresh scratch dir, as {relative_path: bytes}.
@@ -294,17 +212,8 @@ def _scaffold_trees(template_id: str, tmp_path_factory) -> tuple[dict[str, bytes
         return cached
     root = tmp_path_factory.mktemp(f"scaffold-oracle-{template_id.replace('-', '_')}")
     argv = ["init", "--template", template_id, "--format", "json"]
-    trees: list[dict[str, bytes]] = []
-    # The RUST side is frozen per TEMPLATE (tan-cli#409). The PYTHON side is
-    # always spawned live -- it is the thing under test, and a frozen copy of
-    # it would compare the port against itself.
-    #
-    # Keyed by template rather than by pytest node id, unlike
-    # `oracle_fixtures.resolve`: the several-dozen relative-path cases below
-    # all read ONE tree per template, and a node-keyed store would commit 47
-    # copies of the same six trees.
-    rust_tree = _frozen_rust_tree(template_id, root, argv)
-    for side, command in (("python", python_command()),):
+
+    def _spawn(side: str, command: list[str]) -> dict[str, bytes]:
         # Nested `<side>/root` -- not `root / side` bare -- so `discover_
         # workspace_sdk`'s parent-of-cwd probe (`oracle.py`'s `work_dir`
         # fixture carries the identical shape, same reason) can never see a
@@ -315,8 +224,22 @@ def _scaffold_trees(template_id: str, tmp_path_factory) -> tuple[dict[str, bytes
         home.mkdir(parents=True)
         code, out = _run(command, argv, work, home)
         assert code == 0, f"{side} tan init --template {template_id} failed: {out}"
-        trees.append(_read_tree(work))
-    result = (rust_tree, trees[0])
+        return _read_tree(work)
+
+    # tan-cli#409: the ORACLE side replays a committed tree by default and is
+    # spawned only under `TAN_PARITY_LIVE=1`. Before this, both tests were
+    # gated on binary PRESENCE (`skipif(RUST is None, ...)`), so the day
+    # tan-cli#269 deletes `crates/` all 47 of them became passing skips and
+    # the run still exited 0 -- and this was the LARGEST such hole left,
+    # bigger than the two the coverage ledger was opened to track.
+    #
+    # Keyed by TEMPLATE ID rather than through `oracle_fixtures.resolve`,
+    # because this helper is memoised across two tests: whichever ran first
+    # would own the node-derived key, making it depend on collection order.
+    # See `scaffold_fixtures`'s module docstring.
+    rust_files = resolve_tree(template_id, lambda: _spawn("rust", [RUST]))
+    python_files = _spawn("python", python_command())
+    result = (rust_files, python_files)
     _TREE_CACHE[template_id] = result
     return result
 
@@ -340,7 +263,6 @@ def _cases():
             yield pytest.param(template_id, relative_path, id=f"{template_id}::{relative_path}", marks=marks)
 
 
-@_SKIP_NO_ORACLE
 @pytest.mark.parametrize("template_id,relative_path", list(_cases()))
 def test_scaffold_file_content_matches_the_oracle(template_id, relative_path, tmp_path_factory):
     rust_files, python_files = _scaffold_trees(template_id, tmp_path_factory)
@@ -364,7 +286,6 @@ def _undeclared_file_set_divergence(
     return sorted((set(rust_files) ^ set(python_files)) - declared)
 
 
-@_SKIP_NO_ORACLE
 @pytest.mark.parametrize("template_id", TEMPLATE_IDS)
 def test_scaffold_file_list_matches_the_oracle(template_id, tmp_path_factory):
     """The SET of files, independent of content. `test_scaffold_file_content_
