@@ -224,12 +224,90 @@ def _reorder_global_flags(argv: list[str]) -> list[str]:
     return argv  # no subcommand token ever found
 
 
+def _tokens_consumed_after(command: object) -> dict[str, int]:
+    """`{option-string: how many argv tokens it swallows AFTER its own}` for
+    one Click command -- 0 for a boolean/count flag, `nargs` for anything that
+    takes a value.
+
+    DERIVED from the live Click tree rather than hand-listed, for the same
+    reason `_GLOBAL_FLAG_ARITY` is imported instead of retyped: a per-command
+    option table written out here would be a third copy of every command's
+    signature, silently stale the first time a command gains a flag.
+
+    Duck-typed on `param_type_name`/`is_flag`/`count`, never `isinstance` --
+    Typer builds its commands out of its own VENDORED click (`typer._click`,
+    confirmed against typer==0.27.0/click==8.4.1: `isinstance(get_command(app),
+    click.Group)` is FALSE), so an `isinstance(param, click.Option)` test here
+    matches nothing and would quietly classify every option as unknown. Note
+    `nargs` is 1 even on a flag, so `is_flag`/`count` -- not `nargs` -- is what
+    decides whether a value follows.
+    """
+    consumed: dict[str, int] = {}
+    for param in getattr(command, "params", ()):
+        if getattr(param, "param_type_name", "") != "option":
+            continue
+        takes_value = not getattr(param, "is_flag", False) and not getattr(param, "count", False)
+        for decl in (*param.opts, *param.secondary_opts):
+            consumed[decl] = getattr(param, "nargs", 1) if takes_value else 0
+    return consumed
+
+
 def _wants_help(argv: list[str]) -> bool:
-    """Whether `--help` appears anywhere in argv. Textual, like `_wants_json`
-    below: Click's own `--help` is an eager option that can short-circuit
-    parsing before anything else runs, so this only needs to know the token
-    is present, not where."""
-    return "--help" in argv
+    """Whether Click's eager `--help` would fire -- i.e. whether `--help` sits
+    in an OPTION position, not whether the token appears at all.
+
+    tan-cli#394: this was `return "--help" in argv`, justified on the grounds
+    that Click's `--help` is eager so only presence matters. A `--help` that
+    Click consumes as some option's VALUE never reaches that eager callback,
+    though, so presence and position disagree -- and `main()` routes the whole
+    run through `_emit_help_envelope` (a second, `CliRunner`-driven dispatch)
+    on this answer. Measured pre-fix: `tan scaffold --format json --name
+    --help --destination out` wrote `include/modules/help.h` plus two more
+    files and still reported `command: "cli"`, `data: {"message": "<the real
+    scaffold envelope, escaped>"}`, `ok: true`, rc 0; `tan init ... --name
+    --help ...` additionally created a directory literally named `--help`; and
+    `tan explain --format json --template --help` re-labelled a real
+    `explain.template-unknown` refusal as `cli.parse-error`. Because
+    `contract/README.md:31-38` records that both consumer-side string matches
+    FAIL OPEN, alp-sdk-vscode rendered "no files changed" for a `scaffold`
+    that had just written three -- no error, no log, no warning.
+
+    Walks argv the way `_reorder_global_flags` above already walks it, only
+    with the FULL per-command option table (`_tokens_consumed_after`) instead
+    of just the global one: `_GLOBAL_FLAG_ARITY` alone cannot answer this,
+    because the flags that actually swallow a `--help` in practice
+    (`--template`, `--name`, `--destination`) are each command's own.
+    `--` ends option parsing for Click, so it ends it here too.
+
+    Conservative where it cannot know: an unknown option (whose arity nothing
+    here can determine) or an unknown command name (whose option table does not
+    exist) falls back to the old presence test over the REMAINDER of argv, so
+    `tan --format json badcmd --help` still reaches `_emit_help_envelope` and
+    still exits 2 with one envelope, exactly as before. Erring towards "this is
+    help" is the safe direction: help is read-only, and the alternative would
+    hand an unresolvable argv to a dispatch that prints human text to stdout
+    under `--format json`.
+    """
+    command: object = get_command(app)
+    consumed = _tokens_consumed_after(command)
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--help":
+            return True
+        if token == "--":
+            return False
+        name = token.split("=", 1)[0]
+        if name in consumed:
+            i += 1 if "=" in token else 1 + consumed[name]
+            continue
+        subcommand = getattr(command, "commands", {}).get(token)
+        if subcommand is None:
+            return "--help" in argv[i:]
+        command = subcommand
+        consumed = _tokens_consumed_after(subcommand)
+        i += 1
+    return False
 
 
 def _emit_help_envelope(argv: list[str]) -> int:

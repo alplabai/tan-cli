@@ -894,6 +894,15 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "examples.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/examples_cmd.py",
+      "literal": "\"examples.sdk-root-unresolved\"",
+      "note": "Added by tan-cli#400. `tan examples` used to answer an unresolvable alp-sdk checkout with rc 0, `ok:true`, `data.examples: []` and `issues: []` -- byte-identical to a healthy SDK that ships no examples, so alp-sdk-vscode's example picker rendered an empty list with nothing to react to and `tan init --from-example <sourceDir>` was unreachable with no indication of why. Deliberately the same `<command>.sdk-root-unresolved` spelling `presets`, `pinmux`, `build`, `generate`, `init`, `model` and `trace` already use for this identical bad path. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change; promote to `frozen` (filling in consumer/consumerEffect for real) the moment the picker binds to it. NOT emitted when a checkout resolves and simply has no `examples/` tree: that is not a misconfiguration, and its absence is what distinguishes the two empty catalogues on the wire."
+    },
+    {
       "code": "examples.internal-failure",
       "status": "reserved",
       "severity": "error",
@@ -1135,6 +1144,15 @@
       "emittedBy": "python/tan/commands/sdk_cmd.py",
       "literal": "Issue(\"sdk.network-required\", \"warning\", ...)",
       "note": "tan-cli#351: fires when `sdk list` is run without `--online` -- now a `warning` on a SUCCESS envelope (exit 0, `ok: true`), not an `error` on a failure. This port gates the network call the oracle itself reaches unconditionally (the oracle has no `--online` flag at all), for hermeticity; that gate is a normal, everyday state -- not a verdict on anything the caller did wrong -- so it must not exit non-zero, matching `sdk current`'s exit-0 answer to the same shape of question (`sdk-current-no-sdk`). Was `severity: \"error\"`, exit 1, emitted through `_fail()`'s `f\"sdk.{code}\"` prefixing helper (`literal: code=\"network-required\"`) until #351; now a direct literal `Issue(...)` call, still covered by the same emit-site gate under the plain-literal scan instead of the prefixing one. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.discovery-divergent",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "literal": "\"sdk.discovery-divergent\"",
+      "note": "Emitted when `resolve_sdk_root_ladder` (narrow) and `resolve_sdk_root_wide` (wide) resolve DIFFERENT alp-sdk checkouts from one cwd while both label their answer `sourceTier: \"discovery\"` -- so `tan generate` can emit board files from one checkout's metadata while `tan build`/`doctor`/`kconfig` plan against another, undetectably. The message names both roots in a fixed order and says which one THIS command used, so two envelopes describing one collision correlate on the code plus the path pair. Registered by tan-cli#407. Currently emitted from `tan build` only; the remaining ladder call sites are one-line adds beside their existing `project_pin_issue(...)` calls and are tracked on that issue. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "sdk.not-ported",
