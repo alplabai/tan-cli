@@ -46,6 +46,7 @@ from typing import Any
 import typer
 
 from tan.commands.inspect_cmd import resolve_debug_project_context
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
@@ -244,8 +245,14 @@ def trace(
         fail(
             ExitCode.VALIDATION_FAILURE,
             "sdk-root-unresolved",
-            "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk switch "
-            "<version|path>`, or place the project near an alp-sdk checkout.",
+            # tan-cli#381: this port landed AFTER #305 centralised the advice
+            # and hardcoded `tan sdk switch` again -- a subcommand that refuses
+            # outright here (`sdk_cmd._run_not_ported`, `sdk.not-ported`). Same
+            # shape as `generate_cmd`/`model_cmd`: keep the two mechanisms that
+            # do work (`--sdk-root`, a checkout beside the project), take the
+            # third from NO_SDK_NEXT_STEPS so it cannot drift again.
+            "alp-sdk root is unresolved. Use --sdk-root, place the project near an "
+            f"alp-sdk checkout, or {NO_SDK_NEXT_STEPS}.",
             empty_data(target),
             ["trace: alp-sdk root is unresolved."],
         )

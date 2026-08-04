@@ -101,6 +101,52 @@ def test_to_json_never_raises_on_recursion_error():
     assert parsed["issues"][0]["code"] == "envelope.serialize-failed"
 
 
+def test_non_finite_floats_serialise_as_null_not_infinity_or_nan():
+    """tan-cli#387: `json.dumps` defaults to `allow_nan=True` and writes the
+    JavaScript literals `Infinity` / `-Infinity` / `NaN`, which RFC 8259 has
+    no production for -- `JSON.parse` throws `SyntaxError: Unexpected token
+    'I'` on the exact byte stream tan put on stdout, and the same bytes reach
+    the persisted `<build-root>/image-bundle/bundle-manifest.json`. They are
+    reachable from user data: `.inf` / `-.inf` / `.nan` / an overflowing
+    `1e400` in a hand-edited `build/system-manifest.yaml`'s `hw_info:` flows
+    verbatim into `image`'s envelope `data`.
+
+    `serde_json` writes `null` for a non-finite `f64`, so the oracle hands the
+    same consumer a parseable envelope; this asserts the port now does too,
+    AT THE SAME EXIT CODE (0 here). The exit code is half the fix: routing
+    through `allow_nan=False` alone would raise into the
+    `envelope.serialize-failed` / exit-5 fallback, trading invalid JSON for an
+    exit-code divergence.
+
+    `parse_constant` is what makes this a real check: Python's own
+    `json.loads` ACCEPTS the three literals by default, so a plain round-trip
+    passes on the broken output. Raising there is the failure condition, the
+    strict-parser stand-in for `JSON.parse`."""
+    payload = {"a": float("inf"), "b": float("-inf"), "c": float("nan"), "d": [float("nan")]}
+    env = Envelope("test", Project(None, None), payload, [], ExitCode.SUCCESS)
+    text = env.to_json()
+
+    assert "Infinity" not in text and "NaN" not in text, text
+
+    def _strict(literal):
+        raise AssertionError(f"non-JSON literal {literal!r} reached the wire: {text}")
+
+    parsed = json.loads(text, parse_constant=_strict)
+    assert parsed["data"] == {"a": None, "b": None, "c": None, "d": [None]}
+    assert parsed["exitCode"] == 0 and parsed["ok"] is True
+
+
+def test_a_non_finite_float_does_not_become_a_serialize_failure():
+    """The half of tan-cli#387 that a `null`-only assertion would miss: the
+    envelope must keep the command's OWN exit code, not the fallback's 5.
+    Pinned separately because the fallback is the obvious wrong fix and it
+    still produces valid JSON."""
+    env = Envelope("test", Project(None, None), {"x": float("nan")}, [], ExitCode.VALIDATION_FAILURE)
+    parsed = json.loads(env.to_json())
+    assert parsed["exitCode"] == 2
+    assert parsed["issues"] == []
+
+
 def test_sdk_root_is_always_posix_separated():
     """`sdk.root` must never diverge by separator style.
 

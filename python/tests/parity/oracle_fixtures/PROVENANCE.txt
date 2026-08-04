@@ -165,6 +165,23 @@ identical to before this pass (`git diff --stat` on each is empty).
 
 --------------------------------------------------------------------------
 
+2026-08-03, tan-cli#376: ONE KEY RENAMED, NOTHING RE-CAPTURED.
+
+  test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle#0
+    -> test_validate_no_sdk_guard_matches_the_oracle_at_exit_2#0
+
+#376 ported the SDK-validator spawn path, so the port now answers that case
+with the oracle's own `validate.sdk-root-unresolved` instead of the unported-
+path stub `validate.spawn-not-implemented` -- the divergence the old test name
+recorded is gone, and the test was renamed with it. Keys here are pytest node
+ids (`oracle_fixtures._current_key`), so the rename moves the key; the stored
+ORACLE answer under it is byte-identical and was NOT re-captured (nothing
+about the Rust binary changed). The re-capture recipe in the 2026-08-01 pass
+above still names the OLD spelling, deliberately -- it is a record of what was
+run that day; use the new name if re-running it.
+
+--------------------------------------------------------------------------
+
 THE CAPTURE HOST'S TOOL INVENTORY IS PART OF THE FROZEN ANSWER
 (tan-cli#313, tan-cli#324)
 

@@ -1753,7 +1753,7 @@
    }
   }
  ],
- "tests/parity/test_oracle_parity.py::test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle#0": [
+ "tests/parity/test_oracle_parity.py::test_validate_no_sdk_guard_matches_the_oracle_at_exit_2#0": [
   2,
   {
    "command": "validate",

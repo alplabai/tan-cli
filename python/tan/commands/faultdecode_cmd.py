@@ -12,6 +12,15 @@ stdio through untouched; this command reproduces exactly what a caller
 already received through that pipe, in text or `--json` form, so nothing
 downstream (a saved script, the extension) observes a change.
 
+That makes `faultdecode` the ONE registered verb whose `--format json` is not
+tan's envelope, and tan-cli#399 decided it stays that way -- wrapping it would
+change bytes a caller already receives -- on the condition that the exemption
+stop being invisible. It is now a named row in `contract/README.md`
+("Deliberately outside the envelope"), which also spells out what a consumer
+must do about it: alp-sdk-vscode's `isEnvelope` guard returns false here and
+FAILS OPEN, reporting `Command completed.` with the decode unreachable, so
+this verb has to be special-cased consumer-side rather than parsed generically.
+
 A firmware engineer pastes the fault registers a HardFault prints (CFSR, HFSR,
 optionally DFSR, BFAR, MMFAR) and gets back the human-readable cause plus, when
 an ELF is supplied, the faulting symbol and `file:line` -- instead of staring at
@@ -36,6 +45,7 @@ import json as _json
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import typer
@@ -112,19 +122,70 @@ def _parse_hexint(option: str, value: str | None) -> int | None:
         ) from err
 
 
-def _read_dump(file_: str | None) -> str:
-    """Read a pasted dump from --file, '-' (stdin), or piped stdin."""
+#: How long the IMPLICIT stdin auto-consume waits before giving up
+#: (tan-cli#388). Only reached when no register flag and no `--file` were
+#: given -- i.e. when a piped dump is the command's only possible input.
+#: ponytail: fixed budget, not a flag; `--file -` is the unbounded opt-in and
+#: is what a caller with a genuinely slow producer should use.
+_STDIN_AUTOCONSUME_BUDGET_S = 2.0
+
+
+def _read_piped_stdin(timeout: float = _STDIN_AUTOCONSUME_BUDGET_S) -> str:
+    """Best-effort read of a piped stdin, bounded by `timeout` (tan-cli#388).
+
+    `sys.stdin.read()` returns at EOF, and a pipe reaches EOF only when the
+    last writer CLOSES it -- not when it merely stops writing. A parent that
+    spawns `tan` with `stdin=PIPE` and keeps the write end open (the default
+    shape for a spawned child, and what `alp-sdk-vscode` does) therefore
+    blocked the child forever, with zero bytes on stdout and stderr and no
+    exit code: measured `rc=124` under a 12 s `timeout(1)` against a held-open
+    FIFO, where `tan presets` on the same FIFO returned in 0.33 s.
+
+    A daemon THREAD rather than `select.select([sys.stdin], ...)`: `select` on
+    Windows accepts sockets only, and this repo's primary development host is
+    Windows, so a select-based readiness gate would leave the platform it is
+    tested on still hanging. Daemon so a read still blocked at the budget
+    cannot keep the process alive after the report has been written.
+    """
+    try:
+        if sys.stdin.isatty():
+            return ""
+    except (AttributeError, ValueError):  # pragma: no cover - env-dependent
+        return ""
+    read: list[str] = []
+
+    def _pump() -> None:
+        try:
+            read.append(sys.stdin.read())
+        except (OSError, ValueError):  # pragma: no cover - env-dependent
+            pass
+
+    reader = threading.Thread(target=_pump, daemon=True)
+    reader.start()
+    reader.join(timeout)
+    return read[0] if read else ""
+
+
+def _read_dump(file_: str | None, auto_consume: bool) -> str:
+    """Read a pasted dump from --file, '-' (stdin), or piped stdin.
+
+    `--file` is the EXPLICIT request and is honoured unconditionally, `-`
+    included: "read stdin to EOF" is exactly what a caller spelling it asks
+    for, and it stays the escape hatch for a producer slower than
+    `_read_piped_stdin`'s budget.
+
+    `auto_consume` gates the IMPLICIT path only -- the caller passes False
+    once the register flags have been parsed and at least one was supplied,
+    because there is then nothing left for a dump to contribute that the
+    flags do not already carry, and reading anyway is what hung the primary
+    documented invocation (`tan faultdecode --cfsr 0x8200`, tan-cli#388).
+    """
     if file_ is not None:
         if file_ == "-":
             return sys.stdin.read()
         return Path(file_).read_text(encoding="utf-8", errors="ignore")
     # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works.
-    if not sys.stdin.isatty():
-        try:
-            return sys.stdin.read()
-        except (OSError, ValueError):  # pragma: no cover - env-dependent
-            return ""
-    return ""
+    return _read_piped_stdin() if auto_consume else ""
 
 
 def _check_elf_path(value: str | None) -> Path | None:
@@ -236,11 +297,14 @@ def faultdecode(
     file_value = _check_file_path(file_)
 
     # 1. Gather registers: start from a parsed dump, then let explicit flags win.
-    parsed: dict[str, int] = {}
-    dump_text = _read_dump(file_value)
-    if dump_text:
-        parsed = parse_dump(dump_text)
-
+    #
+    # The FLAGS are parsed first (tan-cli#388), because whether to read stdin
+    # at all depends on them. Every register the caller spelled out is one a
+    # dump cannot add anything to, and the implicit read blocks until the
+    # writer closes the pipe -- so `tan faultdecode --cfsr 0x8200` under a
+    # parent that holds stdin open hung forever, having written nothing, on
+    # the command's own primary documented invocation. Parsing first also
+    # means a bad hex value is refused before anything is consumed.
     cfsr_i = _parse_hexint("cfsr", cfsr)
     hfsr_i = _parse_hexint("hfsr", hfsr)
     dfsr_i = _parse_hexint("dfsr", dfsr)
@@ -251,6 +315,24 @@ def faultdecode(
     ufsr_i = _parse_hexint("ufsr", ufsr)
     pc_i = _parse_hexint("pc", pc)
     lr_i = _parse_hexint("lr", lr)
+
+    # Narrower than the issue's own wording ("skip it when any register is
+    # present"), and deliberately: an EXPLICIT `--file` must still be read
+    # alongside flags, because a dump carries `pc`/`lr` the register flags
+    # commonly do not (`--cfsr 0x1 --file dump.txt` is a real shape, pinned by
+    # `test_explicit_flag_wins_over_a_parsed_dump`). `--file` cannot hang on a
+    # held-open pipe anyway -- only the implicit auto-consume can, and that is
+    # exactly what this gates.
+    parsed: dict[str, int] = {}
+    dump_text = _read_dump(
+        file_value,
+        auto_consume=not any(
+            value is not None
+            for value in (cfsr_i, hfsr_i, dfsr_i, bfar_i, mmfar_i, mmfsr_i, bfsr_i, ufsr_i)
+        ),
+    )
+    if dump_text:
+        parsed = parse_dump(dump_text)
 
     def pick(name: str, flag_val: int | None) -> int | None:
         return flag_val if flag_val is not None else parsed.get(name)

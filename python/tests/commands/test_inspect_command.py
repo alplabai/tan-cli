@@ -20,6 +20,7 @@ import json
 import typer
 from typer.testing import CliRunner
 
+from tan.commands import sdk_cmd
 from tan.commands.inspect_cmd import (
     ResolvedDebugContext,
     collect_resolved_values,
@@ -94,7 +95,11 @@ def test_six_rows_in_oracle_order_with_unresolved_sdk():
     sdk_row = next(v for v in values if v["key"] == "sdkRoot")
     assert sdk_row["value"] is None
     assert sdk_row["source"] == "unresolved"
-    assert "--sdk-root" in sdk_row["detail"] and "tan sdk switch" in sdk_row["detail"]
+    # tan-cli#381: used to require `tan sdk switch` here -- a subcommand this
+    # build refuses. The row now carries the shared `NO_SDK_NEXT_STEPS`, so
+    # this pins the mechanism that works and nothing about the wording.
+    assert "--sdk-root" in sdk_row["detail"]
+    assert sdk_cmd.NO_SDK_NEXT_STEPS in sdk_row["detail"]
 
 
 def test_resolved_sdk_row_reports_workspace_source():

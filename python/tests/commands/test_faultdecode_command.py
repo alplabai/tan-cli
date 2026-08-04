@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -31,6 +33,10 @@ from typer.testing import CliRunner
 
 from tan.commands.faultdecode_cmd import faultdecode
 from tests.conftest import REAL_ENVIRON
+
+#: `python/` -- `python -m tan` resolves the package off `os.getcwd()`, so the
+#: real-subprocess case below needs this on the child's `PYTHONPATH`.
+PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 app = typer.Typer()
 app.command("faultdecode")(faultdecode)
@@ -259,8 +265,11 @@ def test_format_json_after_subcommand_is_equivalent_to_json_flag():
 
 def test_format_json_before_subcommand_reads_off_ctx_obj():
     """Mirrors `debug-config`'s pre-subcommand plumbing (`cli.py`'s `root`
-    callback stashes `--format` on `ctx.obj`; a command in
-    `_HONOURS_ROOT_FORMAT` reads it back). Confirmed live against the built
+    callback stashes `--format` on `ctx.obj`, and this command reads it back;
+    since tan-cli#378 the real `cli.py` relocates the token past the
+    subcommand name instead, and the `ctx.obj` seam this exercises is the
+    fallback that keeps the two positions interchangeable). Confirmed live
+    against the built
     `tan.exe`: `tan --format json faultdecode --cfsr 0x8200` and `tan
     faultdecode --format json --cfsr 0x8200` print byte-identical unwrapped
     JSON at rc=0, because the oracle's clap `--format` is `global = true`."""
@@ -296,6 +305,70 @@ def test_stdin_dump_is_auto_consumed_when_piped():
     result = runner.invoke(app, [], input="CFSR: 0x8200\n")
     assert result.exit_code == 0
     assert "PRECISERR" in result.output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--cfsr", "0x8200", "--json"],
+        ["--mmfsr", "0x02", "--bfsr", "0x82", "--json"],
+    ],
+    ids=["cfsr", "sub-registers"],
+)
+def test_registers_on_the_command_line_do_not_wait_on_a_held_open_stdin(argv):
+    """tan-cli#388. `sys.stdin.read()` returns at EOF, and a pipe reaches EOF
+    only when the last writer CLOSES it -- not when it merely stops writing.
+    `_read_dump` ran unconditionally for any non-tty stdin, and BEFORE the
+    register flags were parsed, so a parent that spawns `tan` with
+    `stdin=PIPE` and holds the write end open blocked the child forever, with
+    zero bytes on stdout and stderr and no exit code. Measured against a
+    held-open FIFO: `rc=124` under a 12 s `timeout(1)`, where `tan presets`
+    on the SAME FIFO returned in 0.33 s. The affected invocation is the
+    PRIMARY documented one -- registers pasted straight off a HardFault.
+
+    A real subprocess with `stdin=PIPE` LEFT OPEN is the only shape that can
+    catch this: `CliRunner(input=...)` hands the command an already-complete,
+    already-closed buffer, which is why this module was fully green with the
+    defect live. Re-verified in reverse before landing -- with `_read_dump`
+    restored to its pre-fix shape the same probe hangs for the full timeout
+    and produces 0 bytes.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tan", "faultdecode", *argv],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join(
+                [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+            ),
+        },
+    )
+    try:
+        # Deliberately NOT `communicate()`: that closes stdin, handing the
+        # child the EOF whose absence is the whole defect.
+        stdout = ""
+        try:
+            proc.wait(timeout=30)
+            stdout = proc.stdout.read()
+        except subprocess.TimeoutExpired:  # pragma: no cover - the defect
+            proc.kill()
+            raise AssertionError(
+                "tan faultdecode blocked on a held-open stdin pipe for 30s with "
+                "every register already supplied on the command line (tan-cli#388)"
+            ) from None
+    finally:
+        proc.stdin.close()
+        proc.stdout.close()
+        proc.stderr.close()
+
+    assert proc.returncode == 0, stdout
+    report = json.loads(stdout)
+    assert report["fault_detected"] is True
+    assert report["root_cause"]
 
 
 def test_explicit_flag_wins_over_a_parsed_dump():
