@@ -168,3 +168,73 @@ def pinned_oracle() -> None:
         "the stale profile, or set TAN_RUST_BINARY=<path to the correct "
         "build> explicitly."
     )
+
+
+# ---------------------------------------------------------------------------
+# The SUBJECT under test, pinned the same way the ORACLE is (tan-cli#423).
+#
+# `pinned_oracle` above stops the suite measuring the wrong oracle. Nothing
+# stopped it measuring the wrong SUBJECT: `import tan` and `python -m tan`
+# both resolve through `sys.path`, so whichever `tan` is INSTALLED wins
+# whenever the repo's own `python/` is not first. On a developer box with an
+# editable install pointing at a second checkout, that is a completely
+# different tree -- measured:
+#
+#     <repo root>/          python -m tan --version  ->  tan 0.5.0-rc3
+#     <repo root>/python/   python -m tan --version  ->  tan 0.5.0-rc5.dev0
+#
+# and `importlib.util.find_spec("tan").origin` resolved to
+# `<another tan-cli worktree>/python/tan/__init__.py`.
+#
+# That is not a theoretical hazard. It made `tests/parity/seam1_field_diff.py`
+# report
+#
+#     FAIL multicore_rpmsg-imx93: alp-sdk refuses but tan does not
+#
+# for a `status: tbd` hw_rev the tan under test refuses correctly in every
+# emit mode -- a FALSE parity divergence, filed as a real one before the cause
+# was found. A green run from `python/` and a red run from the repo root, for
+# code that never changed.
+#
+# Two halves, because there are two ways in:
+#   * IN-PROCESS `import tan` -- asserted below, and a mismatch FAILS the
+#     session rather than skipping, for the reason `pinned_oracle` gives.
+#   * SPAWNED `[sys.executable, "-m", "tan", ...]` -- 26 test files do this,
+#     and a child resolves through its OWN sys.path, so asserting in this
+#     process would not touch them. `PYTHONPATH` is prepended instead, which
+#     is inherited by every child regardless of cwd or how the argv is built.
+# ---------------------------------------------------------------------------
+@pytest.fixture(scope="session", autouse=True)
+def tan_under_test() -> None:
+    """Refuse to run the suite against a `tan` from another tree.
+
+    Session-scoped and autouse from the tree root, so it nets every consumer
+    -- in-process import and spawned child alike -- present and future.
+    """
+    repo_python = Path(__file__).resolve().parents[1]
+
+    # Children first: prepend rather than replace, so a caller who set
+    # PYTHONPATH for their own reasons keeps it, just not ahead of us.
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [p for p in existing.split(os.pathsep) if p]
+    if str(repo_python) not in parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join([str(repo_python), *parts])
+
+    import tan as _tan
+
+    origin = getattr(_tan, "__file__", None)
+    assert origin is not None, (
+        "`import tan` resolved to a module with no __file__ (a namespace "
+        "package shadowing the real one?) -- this suite cannot tell what it "
+        "would be measuring (tan-cli#423)"
+    )
+    resolved = Path(origin).resolve()
+    assert repo_python in resolved.parents, (
+        f"the suite imported `tan` from {resolved}, which is NOT under this "
+        f"repository's {repo_python}. That is almost always an editable "
+        "install pointing at another checkout, and it means every assertion "
+        "here would describe a different tree -- including the parity gates, "
+        "which have already reported a divergence that did not exist because "
+        "of exactly this (tan-cli#423). Run pytest from `python/`, or "
+        "`pip uninstall alp-tan`, or set PYTHONPATH to this repo's `python/`."
+    )

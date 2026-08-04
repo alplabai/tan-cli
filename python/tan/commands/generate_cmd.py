@@ -80,6 +80,7 @@ carries the envelope and nothing else, in both formats.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -390,8 +391,11 @@ def _resolve_output_override(
     return candidate if candidate.is_absolute() else workspace_root / candidate
 
 
-def _ensure_writable(output: Path, target: str) -> None:
+def _ensure_writable(output: Path, target: str) -> bool:
     """Create `output`'s parent and prove the destination is writable.
+
+    Returns True when the probe ITSELF created the destination file, so a
+    refused emit can take it back off disk (tan-cli#420, `_discard_probe_file`).
 
     Done HERE rather than discovered when the spawned emitter trips over it, for
     two reasons: a `PermissionError` traceback on the SDK's stderr is a terrible
@@ -408,18 +412,53 @@ def _ensure_writable(output: Path, target: str) -> None:
         if target == ZEPHYR_BOARD:
             # `--emit zephyr-board`'s `--output` IS the board directory.
             output.mkdir(parents=True, exist_ok=True)
-        else:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            # Append mode, not write: proving writability must not truncate a
-            # file whose emit could still be refused further down.
-            with output.open("ab"):
-                pass
+            return False
+        output.parent.mkdir(parents=True, exist_ok=True)
+        # Checked BEFORE the open, which is what creates it. Afterwards there
+        # is no way left to tell tan's probe from a file the user already had.
+        existed = output.exists()
+        # Append mode, not write: proving writability must not truncate a
+        # file whose emit could still be refused further down.
+        with output.open("ab"):
+            pass
+        return not existed
     except (OSError, ValueError) as err:
         raise GenerateError(
             "generate.output-unwritable",
             f"--output path `{output}` cannot be written: {err}",
             ExitCode.WRITE_FAILURE,
         ) from err
+
+
+def _discard_probe_file(output: Path) -> None:
+    """Remove a destination file that `_ensure_writable` created and no emit
+    ever filled (tan-cli#420).
+
+    The envelope was always honest about this -- exit 3, `data.written == []`,
+    `generate.emit-failed` -- so what is fixed here is the DISK, not the
+    report. The file that survives a refused run is a zero-byte
+    `build/generated/alp.conf`, and `cmake/alp.cmake` hands exactly that path
+    to Zephyr as `EXTRA_CONF_FILE`. Zephyr does not treat an empty conf file
+    as an error: it applies no configuration and says nothing. So the stray
+    turns a loud failure into a later build that silently carries none of the
+    project's alp config.
+
+    Within tan's own flow the refusal stops the build, which is why leaving it
+    was defensible. It is not the only flow: standalone `west build` against a
+    tree where a `tan generate` failed earlier reaches that configure with
+    nobody re-running generate in between, and hand-written firmware bypassing
+    the tan-driven path is first-class in this SDK.
+
+    Zero-byte is re-checked at unlink time rather than trusted from the probe:
+    between the probe and the refusal an emitter may have written a partial
+    file, and a partial artefact is evidence for the user to look at, not
+    litter to remove. Cleanup failure is swallowed -- the run has already
+    failed for a reason worth reporting, and "could not tidy up" must not
+    replace it.
+    """
+    with contextlib.suppress(OSError):
+        if output.is_file() and output.stat().st_size == 0:
+            output.unlink()
 
 
 def _confine_default_outputs(
@@ -994,8 +1033,9 @@ def generate(
         # the parent directory (and, for `zephyr-board`, the output directory
         # itself). Running it earlier would leave strays behind for a run the
         # `som.sku` or overlay guard above was about to refuse.
+        probe_created_output = False
         if output_override is not None:
-            _ensure_writable(output_override, targets[0])
+            probe_created_output = _ensure_writable(output_override, targets[0])
         else:
             # No `--output`: every target writes its DEFAULT path, which must
             # stay confined to the project after symlink resolution
@@ -1040,6 +1080,12 @@ def generate(
             else:
                 failed.append(mode)
                 issues.append(Issue("generate.emit-failed", "error", message))
+                # tan-cli#420: don't leave the writability probe's own empty
+                # file behind for a Zephyr configure to pick up as a valid
+                # (and silently empty) EXTRA_CONF_FILE. Only the file this
+                # run created, and only while it is still zero-byte.
+                if probe_created_output and target_output == output_override:
+                    _discard_probe_file(target_output)
 
         # APPENDED, after the per-target issues: what the user asked for comes
         # first and this is context about how it ran. Never omitted, though --

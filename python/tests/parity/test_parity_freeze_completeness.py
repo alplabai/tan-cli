@@ -131,23 +131,25 @@ _PLATFORM_BOUND: dict[str, frozenset[str]] = {
 #: What is left here is genuinely a different shape, not the same debt
 #: shrunk: the scaffold pair below compares a FILE TREE, which no fixture
 #: store in this package can hold yet.
-_UNFROZEN: dict[str, frozenset[str]] = {
-    # These two compare a scaffolded FILE TREE -- the set of paths, and each
-    # path's bytes -- not an envelope. `oracle.rust_run`/`compare` freeze a
-    # `(exit code, envelope dict)` pair, which is the wrong shape for a tree,
-    # so there is nothing to route them through today: freezing them needs a
-    # tree-shaped fixture store that does not exist yet. Declared rather than
-    # silently left live, per this module's own contract -- when `crates/` goes
-    # (tan-cli#269) these become passing skips and the scaffold-content
-    # comparison stops measuring anything, so the fixture store has to land
-    # first or this coverage is lost.
-    "test_scaffold_content_oracle_parity.py": frozenset(
-        {
-            "test_scaffold_file_content_matches_the_oracle",
-            "test_scaffold_file_list_matches_the_oracle",
-        }
-    ),
-}
+#: EMPTY as of the two freezes above landing together (tan-cli#409). Both
+#: entries that lived here are gone for the same reason -- the recorded
+#: blocker did not survive being measured:
+#:
+#: - `test_oracle_parity.py`'s seven were said to belong to tan-cli#408, so
+#:   converting them concurrently would clobber it. #408's scope is the six
+#:   `python/tan/` modules over the 800-line cap; it names the oversized test
+#:   files as an observation and delivers nothing in them.
+#: - the scaffold pair was said to need "a tree-shaped fixture store that does
+#:   not exist yet". Measured, the oracle side is six templates, 40 files,
+#:   every one valid UTF-8, 120 KiB of JSON -- frozen per template in
+#:   `oracle_fixtures/scaffold_trees.json`.
+#:
+#: Kept as an empty dict rather than deleted: this is the register a future
+#: live-only case declares itself in, and the gate below reads all three.
+#: A new entry here is a debt someone chose to take, which is reviewable; a
+#: case gated live with no entry is the silent hole this module exists to
+#: refuse.
+_UNFROZEN: dict[str, frozenset[str]] = {}
 
 _REGISTERS = (
     ("harness self-test", _HARNESS_SELF_TESTS),

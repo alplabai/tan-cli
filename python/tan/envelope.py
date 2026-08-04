@@ -4,6 +4,7 @@ import json
 import math
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from tan.exit_codes import ExitCode
@@ -116,14 +117,85 @@ class SdkInfo:
         return {"root": self.root.replace("\\", "/"), "sourceTier": self.source_tier}
 
 
+#: The four commands resolving the SDK through `resolve_sdk_root_wide` rather
+#: than `resolve_sdk_root_ladder` (tan-cli#407). Only used to label WHICH side
+#: of a divergence the reader is holding; getting it wrong would swap two
+#: labels in a warning, never change which root a command uses.
+WIDE_LADDER_COMMANDS = frozenset({"init", "generate", "examples", "renode"})
+
+
 class Envelope:
     def __init__(self, command, project, data, issues, exit_code, sdk=None):
         self.command = command
         self.project = project
         self.data = data
-        self.issues = issues
+        self.issues = self._with_sdk_divergence(command, project, issues, sdk)
         self.exit_code = int(exit_code)
         self.sdk = sdk
+
+    @staticmethod
+    def _with_sdk_divergence(command, project, issues, sdk):
+        """Append the tan-cli#407 warning when the two SDK ladders would answer
+        DIFFERENT checkouts from this project root.
+
+        Done at the ONE seam every command's envelope passes through, not at
+        each of the 20 `SdkInfo(...)` construction sites: #407's whole
+        complaint is that the two ladders report the same `sourceTier`
+        ("discovery") for two roots, and a fix present on `build` but missing
+        on the other sixteen commands would leave exactly the silence the
+        issue is about -- the vscode extension branches on `sourceTier` from
+        `generate`/`examples` (wide) AND `build`/`doctor`/`sdk current`
+        (narrow), so partial coverage still gives it two roots it cannot tell
+        apart.
+
+        Gated on `sourceTier == "discovery"` before anything touches the disk,
+        which makes this free in every normal layout: any HIGHER tier
+        (`--sdk-root`, the project pin, the global default) is shared verbatim
+        by both ladders and cannot be the pair that differs, so there is
+        nothing to compare. That gate is also why passing `sdk_root_arg=None`
+        below is exact rather than approximate -- a `--sdk-root` run reports
+        `sdkRootFlag`, never `discovery`, so it never reaches here.
+
+        Appends to a NEW list. Mutating the caller's would be a side effect on
+        an argument, and several commands keep rendering their own text from
+        the list they passed in.
+
+        Import is local: `build_cmd` imports this module at module level, so a
+        top-level import here would be circular.
+        """
+        if sdk is None or getattr(sdk, "source_tier", None) != "discovery":
+            return issues
+        # `project.root` is None for the commands that are not project-scoped
+        # -- `examples` and `sdk current` both report `{"root": null}` -- and
+        # those are exactly two of the commands #407 measured as divergent, so
+        # bailing on a null root would have left the reported collision
+        # unreported on the wide side. They resolved the SDK from the cwd, so
+        # that is the workspace root to ask about.
+        root = getattr(project, "root", None)
+        try:
+            # RESOLVED, never the raw `project.root`. Several commands report
+            # it as the relative `"."` (`validate` does), and `Path(".").parent`
+            # is `"."` -- so the ladders' lateral `../alp-sdk` candidate
+            # collapses onto the child `./alp-sdk` and a real divergence reads
+            # as agreement. Measured: from a cwd where `doctor` warned,
+            # `validate` did not, purely because of that one character.
+            start = Path(root).resolve() if root else Path.cwd()
+
+            from tan.commands.build_cmd import sdk_ladder_divergence_issue
+
+            divergence = sdk_ladder_divergence_issue(
+                None, start, wide=command in WIDE_LADDER_COMMANDS
+            )
+        except Exception:  # noqa: BLE001
+            # A warning about ambiguity must never be the reason a command
+            # cannot report its actual result. Whatever the run was doing is
+            # more important than this advisory.
+            return issues
+        if divergence is None:
+            return issues
+        if any(getattr(i, "code", None) == divergence.code for i in issues):
+            return issues
+        return [*issues, divergence]
 
     def _as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {

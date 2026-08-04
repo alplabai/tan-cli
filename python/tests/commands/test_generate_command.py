@@ -1335,7 +1335,12 @@ def test_an_output_override_the_emitter_never_filled_is_not_reported_written(
     """The `cmake/alp.cmake` shape, and the reason mere existence is not the
     test: `_ensure_writable` opens the destination for APPEND before the spawn
     to prove it is writable, which CREATES a zero-byte file. An existence-only
-    check would report tan's own probe as the emitter's artefact."""
+    check would report tan's own probe as the emitter's artefact.
+
+    Also asserts the probe file is taken back off disk (tan-cli#420) -- the
+    zero-byte-survives assertion this used to carry is flipped on purpose, see
+    the comment on that assertion.
+    """
     project, sdk = _project_with_silent_sdk(tmp_path)
     destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
     monkeypatch.chdir(project)
@@ -1354,8 +1359,21 @@ def test_an_output_override_the_emitter_never_filled_is_not_reported_written(
     assert env["data"]["written"] == []
     assert env["data"]["failed"] == ["zephyr-conf"]
     assert env["issues"][0]["code"] == "generate.emit-failed"
-    # The probe's own zero-byte file is all that is there.
-    assert destination.stat().st_size == 0
+    # tan-cli#420: the probe's own zero-byte file is REMOVED again.
+    #
+    # This read `destination.stat().st_size == 0` and that was a deliberate
+    # assertion, not an oversight -- the envelope is honest either way. It is
+    # flipped because the envelope was never the exposure. `cmake/alp.cmake`
+    # hands this exact path to Zephyr as `EXTRA_CONF_FILE`, and Zephyr accepts
+    # an empty conf file silently: no configuration applied, nothing said. A
+    # standalone `west build` after a failed `tan generate` reaches that
+    # configure with nothing re-running generate in between, and hand-written
+    # firmware bypassing the tan-driven flow is first-class in this SDK.
+    assert not destination.exists()
+    # The PARENT survives: `_ensure_writable` had to create it either way, an
+    # empty `generated/` misleads nobody, and removing directories a run did
+    # not necessarily create is a much worse trade than leaving one behind.
+    assert destination.parent.is_dir()
 
 
 def test_a_tree_target_that_left_no_board_directory_is_a_failed_target(
@@ -1436,3 +1454,71 @@ def test_a_tree_target_that_wrote_files_is_still_a_success(
     assert env["data"]["written"] == [
         os.path.join("build", "boards", "alp_e1m_aen801_m55_hp")
     ]
+
+
+def test_a_destination_that_already_existed_is_never_discarded(
+    tmp_path, monkeypatch, capsys
+):
+    """The tan-cli#420 cleanup must only take back the file the probe itself
+    created. A destination the user already had is theirs -- deleting it on a
+    failed emit would turn a refusal into data loss, which is far worse than
+    the stray it is cleaning up.
+
+    Empty on purpose: a zero-byte pre-existing file is the one case where the
+    unlink-time size check cannot tell the two apart, so the decision has to
+    rest on `existed`, captured before the probe opens it.
+    """
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+    destination.parent.mkdir(parents=True)
+    destination.touch()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target="zephyr-conf",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["failed"] == ["zephyr-conf"]
+    assert destination.exists(), "a pre-existing destination was deleted by the #420 cleanup"
+
+
+def test_a_partly_written_destination_survives_a_failed_emit(tmp_path, monkeypatch, capsys):
+    """The cleanup re-checks zero-byte at unlink time rather than trusting the
+    probe. An emitter that wrote something and then failed leaves evidence the
+    user needs to see -- that is a partial artefact, not litter."""
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    # Writes, then reports failure -- an emitter that died partway through.
+    # Deliberately NOT the real `_emit_one` after the write: the artefact
+    # guard's only refusal for `zephyr-conf` is missing-or-zero-byte, so a
+    # non-empty file would be reported as SUCCEEDED and this test would
+    # exercise nothing. Measured: the first version of it did exactly that
+    # (`ok:true`, `written:[...]`, exit 0).
+    def _emit_then_fail(python, script, board, mode, output, core):
+        Path(output).write_text("CONFIG_HALF_WRITTEN=y\n", encoding="utf-8")
+        return "the SDK emitter exited 1 partway through"
+
+    monkeypatch.setattr(generate_cmd, "_emit_one", _emit_then_fail)
+
+    code = _call_generate(
+        target="zephyr-conf",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    capsys.readouterr()
+    assert destination.exists(), "a partially written artefact was deleted"
+    assert "CONFIG_HALF_WRITTEN=y" in destination.read_text(encoding="utf-8")

@@ -1167,9 +1167,16 @@ def test_an_unported_oracle_flag_is_refused_as_deferred_not_as_a_typo(project, f
     """`tan build --pristine` used to exit 2 with Click's "No such option",
     which is indistinguishable from `tan build --pristien`. Every flag the
     v0.4.1 oracle has and this port does not is DECLARED, so the answer is the
-    same coded refusal `deferred_cmd` gives the seven deferred verbs: exit 1,
-    `cli.command-deferred`, and a message naming the flag, v0.6.0 and the
-    tan-cli#260 URL a caller can grep for.
+    same coded refusal `deferred_cmd` gives a deferred verb: exit 1,
+    `cli.command-deferred`, and a message naming the flag and an issue URL a
+    caller can grep for.
+
+    The URL is tan-cli#427, not #260: #260 tracked the seven verbs, which all
+    shipped in 0.5.0 and closed it, so a refusal pointing there sent the user
+    to a closed issue about commands that work. No version number is asserted
+    either -- the message used to name v0.6.0 while the release it meant was
+    renumbered to 0.5.0, and a refusal that names a release is a promise this
+    port cannot keep true.
 
     Exit 1 is the load-bearing half. Reusing 2 would put "known but deferred"
     back at the exact exit code the typo case already occupies, which is the
@@ -1184,8 +1191,9 @@ def test_an_unported_oracle_flag_is_refused_as_deferred_not_as_a_typo(project, f
     assert [i["code"] for i in env["issues"]] == ["cli.command-deferred"], env["issues"]
     message = env["issues"][0]["message"]
     assert argv[0] in message
-    assert "v0.6.0" in message
-    assert "tan-cli/issues/260" in message
+    assert "tan-cli/issues/427" in message
+    # The stale pointer must not come back.
+    assert "issues/260" not in message
     assert "Traceback" not in proc.stderr
 
 

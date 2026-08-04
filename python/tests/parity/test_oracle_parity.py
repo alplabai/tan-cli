@@ -694,9 +694,9 @@ def test_sdk_switch_unresolvable_version_is_a_known_divergence_from_the_oracle(w
     assert (p_code, [i["code"] for i in p_out["issues"]]) == (1, ["sdk.not-ported"])
 
 
-# --- v0.6.0's named command-surface parity ----------------------------------
+# --- the named command-surface parity ---------------------------------------
 #
-# v0.6.0's own milestone goal states, verbatim: "Full command-surface parity
+# The milestone goal states, verbatim: "Full command-surface parity
 # with the v0.4.1 oracle: model, new-som, monitor, faultdecode, the
 # introspection set, renode, and the seven entirely-unported verbs." Nothing
 # above this point in the file ever runs any of those verbs -- this section is

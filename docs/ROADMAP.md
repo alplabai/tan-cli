@@ -105,8 +105,10 @@ Gated on the RC having soaked, not on a date.
 
 ### tan — `v0.6.0` · known oracle divergences
 
-The full command surface landed inside the `v0.5.0` RC cycle instead of
-waiting for this milestone: the seven verbs that shipped as stubs at rc1
+The command-surface work once planned for this milestone SHIPPED AS `0.5.0`
+and its issues moved to that milestone, so `v0.6.0` names the next release
+and nothing already delivered. The full command surface landed inside the
+`v0.5.0` RC cycle instead of waiting for a later one: the seven verbs that shipped as stubs at rc1
 (`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`,
 `support-bundle` — tan-cli#260, #257), `model` (#253), `new-som` (#254),
 `monitor` (#255), `faultdecode` (#256), and `renode --sim-mode` (#77) are all
