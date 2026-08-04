@@ -7,11 +7,15 @@ bundle.gdbserverBackend`, ...) alongside 253 correctly kebab-cased ones --
 `doctor_cmd.checks_to_issues`/`support_bundle_cmd._doctor_issues` derived the
 issue code straight from `Check.name`, which is camelCase (it doubles as a
 JSON data key and a display string, and stays that way on purpose -- see
-`Check`'s own docstring). alp-sdk-vscode's contract gate encodes the kebab
-convention as a regex and FAILS OPEN on a shape it does not recognise --
-exactly the fail-open `test_frozen_issue_codes.py`'s own module docstring
-warns about for a renamed/dropped code, just one axis over (shape, not
-spelling). Nothing caught the drift landing in the first place: this is that
+`Check`'s own docstring). alp-sdk-vscode's `findFrozenCodes`
+(`test/tanContract.test.js`) hard-asserts every published `issueCodes[]`
+entry against this exact shape regex, so a camelCase code here REDS the
+consumer's contract gate outright -- the opposite of the fail-open
+`test_frozen_issue_codes.py`'s own module docstring warns about for a
+renamed/dropped code, which is a different mechanism (a `===` match on
+spelling, not this shape check). That is exactly how this landed: v0.5.0's
+27 camelCase codes reded `findFrozenCodes` and blocked the extension's pin
+to that release. Nothing caught the drift before it shipped: this is that
 catch.
 
 `kebab_check_name` (`tan/commands/doctor_cmd.py`) is now the single place a
@@ -54,10 +58,10 @@ def test_every_registered_issue_code_is_lowercase_kebab():
     offenders = [c for c in codes if not ISSUE_CODE_SHAPE.match(c)]
     assert offenders == [], (
         "contract/issue-codes.json carries code(s) that are not lowercase-kebab "
-        "(^[a-z][a-z0-9-]*\\.[a-z0-9-]+$) -- alp-sdk-vscode's contract gate "
-        "FAILS OPEN on a shape it does not recognise (an unrecognised code is "
-        "indistinguishable from \"no problem\"), so a camelCase code here is a "
-        "silent wire break, not a loud one:\n  " + "\n  ".join(offenders)
+        "(^[a-z][a-z0-9-]*\\.[a-z0-9-]+$) -- alp-sdk-vscode's findFrozenCodes "
+        "hard-asserts every issueCodes[] entry against this shape, so a camelCase "
+        "code here REDS the consumer's contract gate and blocks the version "
+        "pin:\n  " + "\n  ".join(offenders)
     )
 
 

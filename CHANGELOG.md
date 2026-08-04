@@ -15,10 +15,11 @@ All notable changes to `tan` are documented here. Format follows
   derived an issue code straight from `Check.name`, which is camelCase (it
   doubles as a JSON data key and a display string, and stays that way —
   `name` itself is unchanged by this fix). alp-sdk-vscode's contract gate
-  encodes `ISSUE_CODE_SHAPE = /^[a-z][a-z0-9-]*\.[a-z0-9-]+$/` and FAILS OPEN
-  on a code shaped otherwise (an unrecognised code is indistinguishable from
-  "no problem" on the consumer side), so all 27 were silently invisible to
-  it, blocking a pin to v0.5.0. All 27 are `"status": "reserved"`,
+  encodes `ISSUE_CODE_SHAPE = /^[a-z][a-z0-9-]*\.[a-z0-9-]+$/`, and its
+  `findFrozenCodes` hard-asserts every published `issueCodes[]` entry against
+  it, so a code shaped otherwise REDS the consumer's contract gate outright —
+  loud, not silent — which is exactly what blocked the pin to v0.5.0. All 27
+  are `"status": "reserved"`,
   `"consumer": "none"` — nothing consumed the old spelling, so the rename is
   free, exactly as the v0.5.0 entry above already said of the sibling
   `support-bundle.<checkName>` batch ("costing nothing to rename later").

@@ -183,7 +183,8 @@ def _assembled_suffixes() -> dict[str, frozenset[str]]:
 #: value defined ELSEWHERE can carry. Read straight off the sibling gate's
 #: `_FORWARDER_SUFFIXES`, the declared, source-verified home of exactly this
 #: fact, rather than re-derived here: `support_bundle_cmd.py`'s
-#: `Issue(f"support-bundle.{c.name}", ...)` takes its 20 `c.name`s from
+#: `Issue(f"support-bundle.{doctor_cmd.kebab_check_name(c.name)}", ...)` takes
+#: its 20 `c.name`s from
 #: `doctor_cmd.py`'s own `Check(...)` list, so those suffixes are genuinely not
 #: string constants in the file that emits them.
 _ASSEMBLED_SUFFIXES: dict[str, frozenset[str]] = _assembled_suffixes()
