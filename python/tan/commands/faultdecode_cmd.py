@@ -50,6 +50,7 @@ import select
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import typer
@@ -154,20 +155,66 @@ def _stdin_offers_input() -> bool:
     writer has closed, so a real `echo ... | tan faultdecode` still reads its
     dump and only the open-and-idle pipe falls through.
 
-    `True` when readiness cannot be determined -- `select.select` on Windows
-    accepts sockets only, and an in-memory `CliRunner` stdin has no `fileno`
+    `select.select` answers this directly wherever it can, which is every
+    POSIX host. It CANNOT on Windows -- there it accepts sockets only -- and an
+    in-memory `CliRunner` stdin has no `fileno` at all
     (`io.UnsupportedOperation` derives from both `OSError` and `ValueError`).
-    Falling back to the read is the conservative direction: it preserves the
-    documented `... | tan faultdecode` behaviour everywhere, and the primary
-    fix for tan-cli#388 -- not reading stdin at all when the registers came in
-    on the command line -- is platform-independent and covers the invocation
-    the extension actually makes.
+
+    Falling back to "just read it" was the first shape of this fix, and it left
+    the bug fully intact on Windows: measured on windows-latest,
+    `test_an_idle_open_stdin_pipe_falls_through_to_the_no_dump_refusal` still
+    hit its 20 s bound, because an idle open pipe with no registers supplied
+    took the fallback and blocked exactly as before. A platform-specific
+    readiness check meant a platform-specific hang, on a platform this repo
+    gates as a required check.
+
+    So the fallback is a BOUNDED read rather than a guess: the read still
+    happens, still terminates at EOF, and still yields a dump that arrives
+    inside the window -- but a writer that never writes and never closes costs
+    `_STDIN_READY_TIMEOUT_S`, not the process.
     """
     try:
         ready, _, _ = select.select([sys.stdin], [], [], _STDIN_READY_TIMEOUT_S)
     except (OSError, ValueError):
-        return True
+        return _stdin_offers_input_by_reading()
     return bool(ready)
+
+
+#: Filled by `_stdin_offers_input_by_reading` so `_read_dump` does not read a
+#: second time -- those bytes are already consumed, and a pipe cannot be
+#: rewound.
+_PREREAD_STDIN: list[str] = []
+
+
+def _stdin_offers_input_by_reading() -> bool:
+    """The Windows / no-`fileno` path: read stdin on a daemon thread, bounded.
+
+    Reading is the only way to learn whether a Windows pipe will ever deliver,
+    so this reads -- but off the main thread, so `_STDIN_READY_TIMEOUT_S` is a
+    real bound and not an aspiration. Whatever arrived is stashed in
+    :data:`_PREREAD_STDIN` for `_read_dump` to return, because a pipe read
+    cannot be undone and reading twice would drop the dump this exists to
+    preserve.
+
+    The thread is a daemon precisely because it may still be parked in
+    `read()` at interpreter exit; it holds nothing but stdin, and leaving it
+    is the correct outcome for a producer that never speaks.
+    """
+    got: list[str] = []
+
+    def _drain() -> None:
+        try:
+            got.append(sys.stdin.read())
+        except (OSError, ValueError):  # pragma: no cover - env-dependent
+            pass
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
+    reader.join(_STDIN_READY_TIMEOUT_S)
+    if not got:
+        return False
+    _PREREAD_STDIN.append(got[0])
+    return bool(got[0])
 
 
 def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
@@ -187,6 +234,12 @@ def _read_dump(file_: str | None, *, auto_consume_stdin: bool) -> str:
     # Auto-consume piped stdin (non-tty) so `... | tan faultdecode` just works.
     if not auto_consume_stdin or sys.stdin.isatty() or not _stdin_offers_input():
         return ""
+    if _PREREAD_STDIN:
+        # The readiness check had to consume stdin to answer (Windows, or a
+        # stdin with no `fileno`). Return what it read rather than reading
+        # again: a pipe cannot be rewound, so a second read returns "" and
+        # would silently drop the dump.
+        return _PREREAD_STDIN.pop()
     try:
         return sys.stdin.read()
     except (OSError, ValueError):  # pragma: no cover - env-dependent
