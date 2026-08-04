@@ -749,6 +749,83 @@ def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_pa
     assert "interactively" not in message
 
 
+# ---------------------------------------------------------------------------
+# tan-cli#389 / tan-cli#390: the two ways bootstrap destroyed something the
+# customer created. Both are gated end-to-end (a real `tan bootstrap`
+# subprocess) rather than by unit call, because both defects lived in the
+# COMPOSITION -- a guard that a flag short-circuited past, and a delete whose
+# only saving fact was resolved after it had already run.
+# ---------------------------------------------------------------------------
+
+
+def _live_workspace(tmp_path: Path, *, zephyr_version: str = "4.4.1") -> tuple[Path, Path]:
+    """A LIVE west workspace at `<tmp>/ws`, of the exact shape `west init -l
+    alp-sdk` + `west update` leaves behind: `.west/config` naming `alp-sdk` as
+    the manifest repo, and a `zephyr/` checkout carrying a VERSION file.
+
+    `zephyr_version` picks which `_select_workspace` branch a `$ZEPHYR_BASE`
+    pointed here takes: the SDK pin ("4.4.1") -> REUSE, anything else -> STALE.
+    Both set `WorkspacePlan.adopted`, and both therefore repoint `paths.venv_dir`
+    at THIS tree's `.venv` -- which is what makes them the same hazard.
+    """
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    ws = sdk.parent
+    (ws / ".west").mkdir()
+    (ws / ".west" / "config").write_text(
+        "[manifest]\npath = alp-sdk\nfile = west.yml\n", encoding="utf-8"
+    )
+    (ws / "zephyr").mkdir()
+    major, minor, patch = zephyr_version.split(".")
+    (ws / "zephyr" / "VERSION").write_text(
+        f"VERSION_MAJOR = {major}\nVERSION_MINOR = {minor}\nPATCHLEVEL = {patch}\n"
+        f"EXTRAVERSION =\n",
+        encoding="utf-8",
+    )
+    return sdk, ws
+
+
+
+
+def test_workspace_flag_still_relocates_when_no_workspace_depends_on_the_checkout(tmp_path):
+    """Non-vacuity for the refusal above: `--workspace` is not being disabled,
+    only stopped from orphaning a LIVE workspace. The same fixture minus the
+    `.west/config` (an ordinary clone that no workspace points at) still moves,
+    so a refusal that fired on everything would be caught here."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    newhome = tmp_path / "newhome"
+
+    proc = run_tan(
+        "bootstrap", "--no-west", "--no-pip", "--format", "json",
+        "--sdk-root", str(sdk), "--workspace", str(newhome), cwd=sdk.parent,
+    )
+    env = envelope(proc)
+    assert proc.returncode == 0
+    assert "bootstrap.workspace-relocated" in codes(env)
+    assert (newhome / sdk.name / "scripts" / "alp_project.py").is_file()
+    assert not sdk.exists()
+
+
+
+
+def _venv_without_pip(root: Path) -> Path:
+    """A REAL venv whose interpreter runs and whose `pip` is absent -- `uv
+    venv`'s default shape, which is what tan-cli#390 was reported against,
+    reproduced with the stdlib so the suite needs no uv. Hermetic: `--without-pip`
+    neither downloads nor unpacks a wheel."""
+    venv = root / ".venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(venv)],
+        check=True, capture_output=True,
+    )
+    return venv
+
+
+
+
+
+
+
+
 def test_find_enclosing_west_walks_ancestors_never_the_start_itself(tmp_path):
     """`west init -l` aborts the instant an ancestor `.west` turns up while
     walking UP from the topdir -- but the topdir's OWN `.west` is the ordinary
@@ -1620,12 +1697,29 @@ def test_macos_reads_its_own_tool_list_and_falls_back_to_posix_without_one():
     assert legacy.prerequisites(MACOS) == legacy.prerequisites(LINUX)
 
 
-def test_the_posix_refusal_stays_one_line_with_two_spaces_before_install():
-    """`bootstrap.sh`'s wording, byte-for-byte. It names the tools and nothing
-    else; the per-tool commands travel in the STRUCTURED half only."""
+def test_the_posix_refusal_keeps_the_oracle_line_and_adds_the_doctor_fix_remedy():
+    """Was `..._stays_one_line_with_two_spaces_before_install`, which asserted
+    the refusal is exactly ONE line. tan-cli#355 deliberately makes it two, so
+    that assertion now encodes the wrong intent and is inverted here rather than
+    left to fail.
+
+    What is NOT negotiable, and is still pinned byte-for-byte, is `bootstrap.sh`'s
+    own first line -- including the TWO spaces before "Install", which any reflow
+    would silently eat. The per-tool commands still travel in the STRUCTURED half
+    only; that half of the original constraint is unchanged.
+
+    What is added is a second line naming `tan doctor --build --fix`. The old
+    wording predates tan having an installer at all; tan-cli#91 gave it one, and
+    a pristine `ubuntu:24.04` showed a first-time customer being handed four
+    package names with no route to them while that command sat one subcommand
+    away. Withholding a remedy tan HAS, to match an oracle that never had one,
+    is parity serving nobody."""
     install = parse_bootstrap_manifest(REAL_MANIFEST).install_for_host(LINUX)
     refusal = posix_refusal(["cmake", "ninja"], install)
-    assert refusal.lines == ("Missing required tools: cmake ninja.  Install them and re-run.",)
+    assert len(refusal.lines) == 2, refusal.lines
+    assert refusal.lines[0] == "Missing required tools: cmake ninja.  Install them and re-run."
+    assert "  Install them" in refusal.lines[0], "the oracle's double space was reflowed away"
+    assert "tan doctor --build --fix" in refusal.lines[1]
     assert [m.command for m in refusal.missing] == [
         "sudo apt-get install -y cmake", "sudo apt-get install -y ninja-build"
     ]

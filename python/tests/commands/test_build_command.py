@@ -124,15 +124,30 @@ def two_slice_plan(probe_args):
     """Two slices: one that really runs (the artefact probe) and one carrying
     ``command: null`` plus its matching ``warnings[]`` entry -- I-11's shape.
     Slice order is `sorted(coreId)` as the SDK emits it (I-06); `aaa_probe`
-    sorts first, so the probe IS the first dispatch."""
+    sorts first, so the probe IS the first dispatch.
+
+    Backend is ``baremetal``, not ``zephyr``: this fixture is dispatch/policy/
+    envelope scaffolding across the whole file, and the probe tool never
+    loads real Zephyr CMake boilerplate -- a `zephyr` backend here would trip
+    the tan-cli#309 guard and report the probe slice `failed` on every case
+    that expects it `ok`. `backend` is the ONLY field that does that -- the
+    guard branches on `sl.backend` alone (`build/execute.py`), and the `cwd`
+    it inspects comes from `sl.command.cwd`, not from `buildDir`. `buildDir`
+    and `toolchain.id` were matched to it purely so the fixture does not read
+    as three different backends at once; both are inert here (nothing reads
+    `toolchain`, and `build_dir` reaches only token substitution and the
+    post-build manifest). The ``-zephyr`` suffix kept in the `configArtefacts` path
+    strings below is a separate, cosmetic naming convention -- several cases
+    elsewhere in this file assert those exact path literals, so they are
+    left as-is; it carries no Zephyr meaning of its own."""
     def slice_(core_id, command, artefacts):
         return {
             "coreId": core_id,
-            "backend": "zephyr",
-            "buildDir": f"build/{core_id}-zephyr",
+            "backend": "baremetal",
+            "buildDir": f"build/{core_id}",
             "appDir": None,
             "configArtefacts": artefacts,
-            "toolchain": {"id": "zephyr"},
+            "toolchain": {"id": "baremetal"},
             "artifacts": {"elf": None},
             "debug": {"console": "rtt"},
             "command": command,
@@ -344,11 +359,11 @@ def test_a_wholly_skipped_build_refuses_not_reports_success(project):
 
 
 def test_a_partial_build_where_only_some_slices_are_skipped_still_reports_ok(project):
-    """A user deliberately building only the Zephyr side on a host with no
-    Yocto toolchain must NOT need a flag: at least one slice built, so this
-    stays `ok: true` -- but the skipped slice(s) still land in `issues[]`,
-    naming their missing tool, so a consumer reading only `issues[]` can
-    still tell "2 of 3" from "3 of 3"."""
+    """A build where one slice's tool is present and runs while another
+    names a tool missing from the host must NOT need a flag: at least one
+    slice built, so this stays `ok: true` -- but the skipped slice(s) still
+    land in `issues[]`, naming their missing tool, so a consumer reading
+    only `issues[]` can still tell "2 of 3" from "3 of 3"."""
     plan_doc = two_slice_plan(ALL_ARTEFACTS)
     # Swap the null-command second slice for a real one naming a tool that
     # cannot exist on any host, so it takes the missing-tool branch (not the
@@ -910,6 +925,29 @@ def test_no_plan_and_no_sdk_is_a_coded_envelope_not_a_traceback(project):
     assert "Traceback" not in proc.stderr
 
 
+def test_an_unresolvable_explicit_sdk_root_is_treated_as_no_sdk_at_all(project):
+    # tan-cli#257/#258: a bogus `--sdk-root` used to be carried straight
+    # through as `sdk.sourceTier: "sdkRootFlag"` (`resolve_sdk_root_ladder`
+    # reports an explicit flag UNVALIDATED, by design, for callers that only
+    # report the tier), reach `_emit_plan` as a non-None `sdk_root`, and get
+    # refused for the NEXT missing thing instead -- `no board.yaml found`,
+    # in a directory with no board.yaml either -- with an extra `sdk` key the
+    # oracle never emits on this path. Measured against the oracle
+    # (`target/debug/tan.exe build --sdk-root ./nowhere --format json`): it
+    # refuses with `build.plan-unavailable` "no alp-sdk checkout found", exit
+    # 1, and no `sdk` key at all. A flag that silently changes meaning (SDK
+    # problem read as a project problem) is worse than one that fails
+    # outright.
+    proc = run_tan("build", "--sdk-root", "./nowhere", "--format", "json", cwd=project)
+    env = envelope_of(proc)
+    assert proc.returncode == 1, env
+    assert [i["code"] for i in env["issues"]] == ["build.plan-unavailable"], env["issues"]
+    assert "no board.yaml" not in env["issues"][0]["message"]
+    assert "sdk" not in env
+    assert env["data"] is None
+    assert "Traceback" not in proc.stderr
+
+
 def test_build_resolves_the_sdk_tan_init_pinned_with_no_sdk_root_flag_and_no_env_var(
     project, monkeypatch
 ):
@@ -1129,9 +1167,16 @@ def test_an_unported_oracle_flag_is_refused_as_deferred_not_as_a_typo(project, f
     """`tan build --pristine` used to exit 2 with Click's "No such option",
     which is indistinguishable from `tan build --pristien`. Every flag the
     v0.4.1 oracle has and this port does not is DECLARED, so the answer is the
-    same coded refusal `deferred_cmd` gives the seven deferred verbs: exit 1,
-    `cli.command-deferred`, and a message naming the flag, v0.6.0 and the
-    tan-cli#260 URL a caller can grep for.
+    same coded refusal `deferred_cmd` gives a deferred verb: exit 1,
+    `cli.command-deferred`, and a message naming the flag and an issue URL a
+    caller can grep for.
+
+    The URL is tan-cli#427, not #260: #260 tracked the seven verbs, which all
+    shipped in 0.5.0 and closed it, so a refusal pointing there sent the user
+    to a closed issue about commands that work. No version number is asserted
+    either -- the message used to name v0.6.0 while the release it meant was
+    renumbered to 0.5.0, and a refusal that names a release is a promise this
+    port cannot keep true.
 
     Exit 1 is the load-bearing half. Reusing 2 would put "known but deferred"
     back at the exact exit code the typo case already occupies, which is the
@@ -1146,8 +1191,9 @@ def test_an_unported_oracle_flag_is_refused_as_deferred_not_as_a_typo(project, f
     assert [i["code"] for i in env["issues"]] == ["cli.command-deferred"], env["issues"]
     message = env["issues"][0]["message"]
     assert argv[0] in message
-    assert "v0.6.0" in message
-    assert "tan-cli/issues/260" in message
+    assert "tan-cli/issues/427" in message
+    # The stale pointer must not come back.
+    assert "issues/260" not in message
     assert "Traceback" not in proc.stderr
 
 

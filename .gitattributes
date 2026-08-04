@@ -1,3 +1,24 @@
+# Repo default: LF in the blob AND in the working tree, for every tracked
+# file. tan-cli#364: `feat/v06-batch` was authored largely from a Windows box
+# whose `core.autocrlf` is `true`, and 111 files came back CRLF-converted --
+# `.github/workflows/release.yml`, `python/tan/cli.py`, `doctor_cmd.py`,
+# `flash_cmd.py`, the parity fixtures, whole test modules. Every one of them
+# then reads as a full-file replacement in review (a 38-line change to
+# `bootstrap.py` rendered as 3668 changed lines) and `git diff --check`
+# reported 11,788 findings, so the real diff could not be audited at all.
+#
+# The specific `text eol=lf` pins below predate this and stay: each one records
+# WHY that path must be LF regardless of the default (byte-exact vendoring,
+# a script that executes on a customer's machine, a gate anchored on `
+`).
+# This line is the blanket floor under them, not a replacement for them.
+#
+# Every tracked file in this repo is text -- .py .rs .yaml .txt .md .json .c
+# .conf .exit .yml .sh .toml .h .js .zsh .ps1 .lock .fish .env .bash -- so
+# `text=auto` has no binary to misdetect here. Adding a binary asset later
+# needs its own `-text` line.
+* text=auto eol=lf
+
 # Vendored `alp-sdk --emit scaffold` output is baked into the binary via
 # include_str! and byte-compared against a fresh LF emit by the cross-repo
 # parity gate. Force LF so a Windows CI checkout (autocrlf=true) cannot

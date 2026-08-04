@@ -102,6 +102,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -109,8 +110,22 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import _abs_posix, discover_sdk_root, resolve_sdk_root_ladder
-from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, parse_sdk_version_yaml, project_pin_issue
+from tan.commands.build_cmd import (
+    SDK_DISCOVERY_DIVERGENT,
+    _abs_posix,
+    discover_sdk_root,
+    resolve_sdk_root_ladder,
+    resolve_sdk_root_wide,
+)
+from tan.commands.sdk_cmd import (
+    NO_SDK_NEXT_STEPS,
+    _has_loader_script,
+    _home_alp_dir,
+    _pointer_target,
+    global_default_pointer_fix_hint,
+    parse_sdk_version_yaml,
+    project_pin_issue,
+)
 from tan.core.bootstrap import (
     MissingPrerequisite,
     PrereqFailure,
@@ -121,10 +136,13 @@ from tan.core.bootstrap import (
     posix_venv_unusable,
     reported_missing,
 )
+from tan.core.consent import can_prompt
+from tan.core.global_flags import accept_global_flags
 from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: Zephyr's own floor, from `<zephyr>/cmake/modules/python.cmake`'s
 #: `set(PYTHON_MINIMUM_REQUIRED 3.12)`. Only the FALLBACK -- `zephyr_python_floor`
@@ -909,6 +927,29 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
         if env_dir
         else "ZEPHYR_SDK_INSTALL_DIR unset"
     )
+    # tan-cli#424: on POSIX that command needs `file(1)`, which NOTHING else
+    # tells the customer about -- the SDK's own host-tools step dies with
+    # "ERROR: Host tools installation failed" / "FATAL ERROR: command
+    # `<sdk>/setup.sh -t arm-zephyr-eabi -h` failed", naming neither the tool
+    # nor a remedy. Isolated to that single variable in a pristine
+    # ubuntu:24.04: identical bootstrapped workspace, identical HOME, `file`
+    # the only difference -- WITH it `west sdk install` exits 0 ("All done"),
+    # WITHOUT it exits 1 with those two lines.
+    #
+    # Named HERE rather than added to the manifest's `prerequisites`, because
+    # `tan bootstrap` genuinely does not need it and succeeds without it --
+    # promoting it there would refuse hosts over a tool the bootstrap never
+    # uses. This is the message immediately preceding the failure, which is
+    # where it is actionable. Same shape as `seven_zip_check` above: a
+    # host-tool prerequisite of `west sdk install` itself, surfaced beside the
+    # command that needs it rather than folded into the bootstrap gate.
+    host_tool_note = (
+        ""
+        if os.name == "nt"
+        else " On Linux/macOS the SDK's host-tools step also needs `file` on PATH"
+        " (Debian/Ubuntu: `sudo apt-get install -y file`); without it the install"
+        ' fails with "Host tools installation failed" and names nothing.'
+    )
     return Check(
         "zephyrSdk",
         "fail",
@@ -916,7 +957,7 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
         f"an initialised west workspace, run `{zephyr_sdk_install_command()}`.",
         f"Install the Zephyr SDK toolchain (arm-zephyr-eabi, version "
         f"{ZEPHYR_SDK_INSTALL_VERSION}): from an initialised west workspace, run "
-        f"`{zephyr_sdk_install_command()}`. Details: "
+        f"`{zephyr_sdk_install_command()}`.{host_tool_note} Details: "
         "https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
     )
 
@@ -1399,11 +1440,38 @@ def home_path_check(home: str | None) -> Check:
 # ---------------------------------------------------------------------------
 
 
+def _broken_global_default() -> str | None:
+    """The raw `sdkPath` `~/.alp/sdk-default` names, ONLY when that pointer
+    file exists but its target is NOT a valid alp-sdk checkout (tan-cli#344).
+    `None` when the pointer is absent, unreadable/malformed, or DOES resolve
+    -- every one of those is indistinguishable from "nothing configured" and
+    stays that way; this exists to name the one case that is not.
+
+    Reads the exact file `sdk_cmd.resolve_sdk_tiered` already reads
+    (`_pointer_target(_home_alp_dir() / "sdk-default")` + `_has_loader_script`)
+    the SAME way, purely for this one extra fact -- it changes no resolution
+    outcome (`resolve_sdk_root_ladder`/`resolve_sdk_tiered` are untouched by
+    this function; it is called separately, only to feed `sdk_check`'s
+    report). `resolve_sdk_tiered` itself already tracks an analogous broken
+    POINTER for the project-pin tier (`ActiveSdk.broken_project_pin`) and
+    surfaces it via `project_pin_issue` regardless of which lower tier
+    answers -- this is the same idea one tier up, for the one tier that had
+    no such memory at all: a dangling global default fell through silently,
+    with nothing left to report it had ever existed.
+    """
+    target = _pointer_target(_home_alp_dir() / "sdk-default")
+    if target is None or _has_loader_script(Path(target)):
+        return None
+    return target
+
+
 def sdk_check(
     sdk_root: str | None,
     project_scope: str | None,
     tier: str | None = None,
     unselected_candidate: str | None = None,
+    broken_global_default: str | None = None,
+    divergent_candidate: str | None = None,
 ) -> Check:
     """`sdk` -- is an alp-sdk checkout resolved at all? Mirrors
     `tan_core::preflight::build_preflight_checks`'s `sdk` check.
@@ -1436,6 +1504,23 @@ def sdk_check(
     discovery, or nothing else resolves there) -- named explicitly, with how
     to select it, so a plausible checkout sitting right there does not read
     as unconsidered.
+
+    `broken_global_default` (tan-cli#344, `_broken_global_default` above) is
+    the raw `sdkPath` a machine-global `~/.alp/sdk-default` pointer held when
+    that file exists but its target is no longer a valid checkout -- only
+    meaningful in the `sdk_root is None` branch (a global default that DID
+    resolve never reaches this function with `sdk_root is None` at all).
+    Before this, "I have nothing configured" and "what I configured is
+    broken and tan silently fell through past it" printed the identical
+    sentence: `NO_SDK_NEXT_STEPS`, which tells the user to clone a checkout
+    and pass `--sdk-root`, with no hint the thing they already configured is
+    dangling. Falling through stays correct (unchanged here) and exit 4
+    stays correct (unchanged here) -- only which sentence explains it
+    changes. `bootstrap_cmd`'s own broken-pointer messages
+    (`global_default_pointer_fix_hint`) are the shape this matches: name the
+    pointer file directly, never `tan sdk switch`, which refuses outright in
+    this build (tan-cli#305) -- recommending it here would be the exact
+    dead end #305 already fixed for the project-pin case.
     """
     if sdk_root is not None:
         detail = f"alp-sdk at {sdk_root}"
@@ -1447,8 +1532,48 @@ def sdk_check(
                     f"pass --sdk-root {unselected_candidate} to use it"
                 )
             detail += ")"
+        if divergent_candidate is not None:
+            # BOTH roots re-rendered POSIX here, unlike the `pass` branch's
+            # `alp-sdk at {sdk_root}` above, which keeps this host's native
+            # separators and is left byte-identical. The reason is the CODE:
+            # this branch's detail becomes an `issues[].message` under
+            # `sdk.discovery-divergent`, which five other commands also emit
+            # -- and all five build it from `_abs_posix`. A consumer
+            # correlating two envelopes would otherwise match a code across a
+            # message spelled `C:/...` on one side and `C:\...` on the other.
+            # The envelope is the contract; normalise the filesystem side to
+            # meet it, never the other way round (caught by
+            # windows-latest on tan-cli#428, green everywhere else).
+            posix_root = f"alp-sdk at {_abs_posix(sdk_root)}"
+            if tier is not None:
+                posix_root += f" ({tier})"
+            return Check(
+                "sdk",
+                "warn",
+                f"{posix_root}; `tan init`, `tan generate`, `tan examples` "
+                f"and `tan renode` resolve a DIFFERENT checkout from this "
+                f"directory ({_abs_posix(divergent_candidate)}) and report "
+                f'the same sourceTier "discovery", so generated files and '
+                f"the build plan can come from different SDK versions.",
+                f"--sdk-root <path> to pin the one you mean for a single run, "
+                f"or `tan init --sdk-root <path>` to write it into "
+                f".alp/sdk-path, which outranks both discovery tiers.",
+                code=SDK_DISCOVERY_DIVERGENT,
+            )
         return Check("sdk", "pass", detail)
     scope_note = f" for --project {project_scope}" if project_scope is not None else ""
+    if broken_global_default is not None:
+        pointer = str(_home_alp_dir() / "sdk-default")
+        return Check(
+            "sdk",
+            "fail",
+            f"no SDK selected{scope_note} -- the machine-global default "
+            f'({pointer}) names "{broken_global_default}", which is not a '
+            f"valid alp-sdk checkout, so tan fell through past it and found "
+            f"nothing else either.",
+            f"{global_default_pointer_fix_hint(pointer)}, or pass "
+            f"--sdk-root <path> directly.",
+        )
     return Check(
         "sdk",
         "fail",
@@ -2109,6 +2234,324 @@ def resolve_manifest_python_floor(sdk_root: str | None) -> tuple[tuple[int, int]
     return _manifest_floor_from_facts(loaded.facts), loaded.source
 
 
+#: Generous on purpose: a real install can pull a package over the network,
+#: unlike every OTHER timeout in this file (`PROBE_TIMEOUT_S`), which only
+#: ever waits on a local `--version` banner. `ponytail`: one fixed ceiling,
+#: no live progress reporting -- raise it, or stream output, if a real
+#: install exceeds it before this is revisited.
+FIX_INSTALL_TIMEOUT_S = 300
+
+
+def fix_needs_sudo_check(tool: str, command: str) -> Check:
+    """`doctor.fix-needs-sudo` -- ADR 0021's Tier-B refusal (tan-cli#91,
+    MAINTAINER DECISION): tan never spawns `sudo` on the customer's behalf.
+
+    Under `--format json` this process's stdio is captured end to end, so a
+    `sudo` password prompt has nowhere to go -- it would hang forever rather
+    than fail loudly, which is a worse outcome than refusing up front. REFUSE
+    AND PRINT: name the exact command, verbatim, so it can be pasted into a
+    real terminal, and stop there. `run_fix` below is the only caller, and
+    only reaches this branch for a command whose first word IS literally
+    `sudo` -- the manifest's own POSIX `prerequisites.install` commands are
+    the one place that word appears in this codebase at all; Windows
+    (`winget`, user-scope) and macOS (`brew`) never need it.
+    """
+    return Check(
+        f"fix:{tool}",
+        "warn",
+        f'`--fix` will not run `{command}` for {tool}: it needs elevation '
+        f'("sudo"), and tan never spawns sudo itself. Run it yourself, then '
+        f"re-run `tan doctor`.",
+        command,
+        code="doctor.fix-needs-sudo",
+    )
+
+
+def fix_installed_check(tool: str, command: str) -> Check:
+    """`doctor.fix-installed` -- `--fix` ran a manifest install command that
+    needed no elevation (ADR 0021 Tier A), and the child process exited 0.
+
+    Deliberately NOT a claim that `{tool}` is now on PATH: this process
+    already read its own PATH at start-up (tan-cli#91), so an install that
+    lands after that moment is invisible to it -- there is no same-process
+    re-check to perform, honestly or otherwise. "Installed; reopen your
+    shell" is the whole truth this check can tell; `hostPrerequisites`
+    above still reports `{tool}` missing in THIS report, which is correct
+    for THIS report.
+    """
+    return Check(
+        f"fix:{tool}",
+        "warn",
+        f"`--fix` ran `{command}` for {tool}. tan cannot see a PATH change "
+        f"made after it started -- open a new shell, then re-run `tan "
+        f"doctor` there to confirm.",
+        code="doctor.fix-installed",
+    )
+
+
+def fix_spawn_failed_check(tool: str, command: str, err: Exception) -> Check:
+    """`doctor.fix-spawn-failed` -- `--fix` resolved `{tool}`'s install
+    command on PATH (`on_path` already succeeded) but starting it raised
+    (`OSError`/`ValueError`/`subprocess.SubprocessError` other than a
+    timeout). Distinct from silence: without this, a customer watching
+    `--fix` do nothing cannot tell "the OS refused to start it" from "tan
+    never tried"."""
+    return Check(
+        f"fix:{tool}",
+        "warn",
+        f"`--fix` could not start `{command}` for {tool}: {err}. Run it "
+        f"yourself, then re-run `tan doctor`.",
+        command,
+        code="doctor.fix-spawn-failed",
+    )
+
+
+def fix_failed_check(tool: str, command: str, returncode: int) -> Check:
+    """`doctor.fix-failed` -- `--fix` ran `{tool}`'s install command and the
+    child exited non-zero. `hostPrerequisites` above still reports `{tool}`
+    missing in THIS report (same no-same-process-recheck honesty as
+    `fix_installed_check`) -- this Check is the only place a customer learns
+    the install itself failed, rather than merely "still missing"."""
+    return Check(
+        f"fix:{tool}",
+        "warn",
+        f"`--fix` ran `{command}` for {tool}; it exited {returncode}. Run it "
+        f"yourself to see the full output, then re-run `tan doctor`.",
+        command,
+        code="doctor.fix-failed",
+    )
+
+
+def fix_timed_out_check(tool: str, command: str) -> Check:
+    """`doctor.fix-timed-out` -- `{tool}`'s install command did not finish
+    inside `FIX_INSTALL_TIMEOUT_S` (300s) and was killed. Without this, a
+    hang here reads as up to 20 minutes of silent terminal: text-mode output
+    only prints after the WHOLE report completes."""
+    return Check(
+        f"fix:{tool}",
+        "warn",
+        f"`--fix` killed `{command}` for {tool} after {FIX_INSTALL_TIMEOUT_S}s "
+        f"with no result. Run it yourself, then re-run `tan doctor`.",
+        command,
+        code="doctor.fix-timed-out",
+    )
+
+
+#: Per-installer remedy for `fix_installer_not_found_check`, keyed by the first
+#: word of the manifest's install command. Only two entries because only two
+#: are reachable: `metadata/bootstrap.json`'s `prerequisites.install` produces
+#: `brew` on macOS and `winget` on Windows, and Linux's `sudo apt-get ...` is
+#: refused by `fix_needs_sudo_check` long before anything tries to resolve it
+#: (see `_fallback_install_commands` in `tan.core.bootstrap`, which is
+#: byte-pinned to the manifest). Anything else gets the generic remedy below
+#: -- a manifest is free to name a package manager this table has never heard
+#: of, and "not found" with no advice is the exact silence tan-cli#360 is
+#: about.
+INSTALLER_REMEDIES = {
+    "brew": (
+        "Homebrew is not installed -- install it from https://brew.sh, then "
+        "re-run `tan doctor --fix`."
+    ),
+    "winget": (
+        'winget comes from the App Installer package -- install "App '
+        'Installer" from the Microsoft Store (Windows 10 1809 or newer), open '
+        "a new shell so PATH picks it up, then re-run `tan doctor --fix`."
+    ),
+}
+
+
+def fix_installer_not_found_check(installer: str, tools: list[str]) -> Check:
+    """`doctor.fix-installer-not-found` -- tan-cli#360: `--fix` could not
+    resolve the program the manifest's install command starts with, so it ran
+    NO repair for the tools that command covers.
+
+    This used to be a bare `continue` in `run_fix` -- the one outcome that
+    emitted no Check at all, in a function whose whole stated invariant is
+    that every entry is either run or refused and every outcome is reported.
+    It is also the single most likely outcome on the hosts `--fix` exists
+    for: the manifest installs with `brew` on macOS and `winget` on Windows,
+    so a fresh Mac without Homebrew, or a Windows image with no usable
+    winget, reported tools missing, ACCEPTED `--fix`, and then printed
+    exactly the same report back with no `fix:*` line anywhere. The
+    least-equipped host got the least diagnostic behaviour, and could not
+    tell "nothing needed fixing" from "tan never found the installer to try
+    with".
+
+    ONE Check per installer, not per tool: a fresh Mac is missing all six
+    manifest prerequisites at once and every one of them says `brew`, so
+    per-tool would print the same "install Homebrew" paragraph six times over
+    -- six restatements of one fact, in a report a customer is reading to
+    find out what is actually wrong. `tools` therefore carries every tool
+    this one absence blocked, and `run_fix` groups them.
+
+    Named `fix:{installer}` rather than `fix:{tool}` for the same reason --
+    the subject of this verdict is the installer, and one name per absent
+    installer is what keeps the grouping legible in the text report. No
+    `fix` field: the per-tool install commands are not runnable until the
+    installer exists, and `hostPrerequisites` already carries each one
+    verbatim (`data.missingPrerequisites[].command`), so repeating a
+    command that cannot run would be worse than pointing at it.
+    """
+    named = ", ".join(tools)
+    many = len(tools) > 1
+    remedy = INSTALLER_REMEDIES.get(installer) or (
+        f"Install `{installer}`, then re-run `tan doctor --fix`."
+    )
+    return Check(
+        f"fix:{installer}",
+        "warn",
+        f"`--fix` ran no repair for {named}: the manifest installs "
+        f"{'them' if many else 'it'} with `{installer}`, which is not on "
+        f"PATH. {remedy} Or install {'those tools' if many else named} with a "
+        f"package manager this host already has -- `hostPrerequisites` above "
+        f"names {'each' if many else 'its'} exact install command.",
+        code="doctor.fix-installer-not-found",
+    )
+
+
+def run_fix(missing: list[dict[str, str | None]]) -> list[Check]:
+    """`--fix`'s ADR 0021 executor (tan-cli#91): for each tool
+    `hostPrerequisites` already reported missing, either run its manifest
+    install command (no elevation needed -- Tier A) or refuse and name it
+    (needs `sudo` -- Tier B), never both, never neither. `missing` is that
+    check's OWN structured field (`Check.missing`, `{tool, command}` pairs)
+    -- never a second, independently recomputed tool/command list, so this
+    can only ever act on exactly what the report already told the customer
+    was wrong.
+
+    A tool with `command=None` (the manifest names no install command for
+    it) is skipped outright: nothing to run, nothing to refuse, and the
+    existing `hostPrerequisites` Fail already carries the honest "install it
+    yourself" advice for that case.
+
+    Every outcome becomes a `Check` -- `fix_needs_sudo_check`/
+    `fix_installed_check` on the two "acted, and it's fine" paths, (as of
+    the tan-cli#91 follow-up below) `fix_spawn_failed_check`/`fix_failed_check`/
+    `fix_timed_out_check` on the three "acted, and it's NOT fine" paths, and
+    (tan-cli#360) `fix_installer_not_found_check` on the "could not act at
+    all" one -- never a bare side effect. A customer who typed `--fix` and
+    got the SAME report back used to have no way to tell "nothing needed
+    fixing" from "tan tried and silently gave up": a spawn error, a non-zero
+    exit, a `FIX_INSTALL_TIMEOUT_S` (300s) timeout, or an install command
+    whose own program is not on PATH each used to `continue` with no trace at
+    all, and text-mode output only prints after the WHOLE report completes --
+    up to 20 minutes of silent terminal across four tools with nothing to
+    show for it. `hostPrerequisites`'s own Fail still names the tool and its
+    command either way; these Checks add the ONE fact it structurally cannot
+    carry -- what `--fix` itself did about it.
+
+    Only ever called from `doctor()`'s `--fix` branch, itself gated on
+    `can_prompt` (`tan.core.consent`) -- the one place in this module that
+    mutates the host rather than merely observing it, so it is confined
+    exactly there, never folded into `_collect` (pure probes, see the module
+    docstring).
+    """
+    results: list[Check] = []
+    # installer -> every tool whose install command starts with it and that
+    # therefore went unrepaired (tan-cli#360). Insertion-ordered, so the
+    # grouped Checks appended below come out in `missing` order rather than
+    # an arbitrary one.
+    unresolved: dict[str, list[str]] = {}
+    for entry in missing:
+        tool = entry.get("tool")
+        command = entry.get("command")
+        if not tool or not command:
+            continue
+        if command.strip().startswith("sudo "):
+            results.append(fix_needs_sudo_check(tool, command))
+            continue
+        argv = shlex.split(command)
+        if not argv:
+            # The one deliberately silent skip left (tan-cli#360 reviewed the
+            # rest): an all-whitespace install command names no program to
+            # report as absent, so there is nothing this could say beyond what
+            # `hostPrerequisites`'s own Fail already says about the tool. A
+            # manifest defect, not a host one.
+            continue
+        # `on_path`, never bare `subprocess.run([name, ...])`: the same
+        # PATH-only, no-cwd-insertion resolver every other spawn in this
+        # module uses (see `on_path`'s own docstring) -- a project-local
+        # binary happening to share the tool's name must not be what `--fix`
+        # runs with elevated-sounding trust.
+        resolved_exe = on_path(argv[0])
+        if resolved_exe is None:
+            # tan-cli#360: collected, not silently dropped. Grouped by
+            # installer because one absent `brew` blocks every macOS
+            # prerequisite at once -- see `fix_installer_not_found_check`.
+            unresolved.setdefault(argv[0], []).append(tool)
+            continue
+        argv[0] = resolved_exe
+        try:
+            result = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stdin=subprocess.DEVNULL,
+                timeout=FIX_INSTALL_TIMEOUT_S,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            results.append(fix_timed_out_check(tool, command))
+            continue
+        except (OSError, ValueError, subprocess.SubprocessError) as err:
+            results.append(fix_spawn_failed_check(tool, command, err))
+            continue
+        if result.returncode == 0:
+            results.append(fix_installed_check(tool, command))
+        else:
+            results.append(fix_failed_check(tool, command, result.returncode))
+    return [
+        *results,
+        *(fix_installer_not_found_check(i, t) for i, t in unresolved.items()),
+    ]
+
+
+def fix_suppressed_issue(*, non_interactive: bool, ci: bool, json_mode: bool) -> Issue:
+    """`doctor.fix-suppressed` -- tan-cli#91 P1, measured against the oracle:
+    `tan doctor --fix --format json` on an unhealthy host used to be a
+    byte-for-byte silent no-op vs. plain `tan doctor` -- no issue, no note,
+    exit code unchanged -- indistinguishable from a `--fix` that genuinely
+    found nothing to do. The oracle's own equivalent refuses outright
+    (`cli.parse-error`, exit 2); this port instead reports HONESTLY: `--fix`
+    was requested, the `can_prompt` consent gate (`tan.core.consent`) refused
+    it, and here is which of its conditions actually tripped -- not just that
+    nothing happened.
+
+    Only ever called from `doctor()`, and only when `fix` is set and
+    `can_prompt` returned `False` for these same three flags -- never the
+    other way around, so this can only ever explain a REAL suppression.
+
+    The `isatty()` pair is read ONLY when `not json_mode`, mirroring
+    `can_prompt`'s own short-circuit order (`... and not json_mode and
+    sys.stdin.isatty() and sys.stderr.isatty()`) rather than a coincidence:
+    under `--format json`, `tan.cli.main` tees `sys.stderr` through
+    `_TeeStderr`, which has no `isatty()` at all -- reading it unconditionally
+    here crashes this exact suppressed-fix report with
+    `AttributeError: '_TeeStderr' object has no attribute 'isatty'` (measured
+    against a real `tan doctor --fix --format json --ci` run). `json_mode`
+    is already a complete, accurate reason on its own; there is nothing the
+    tty state could add under it.
+    """
+    reasons = []
+    if json_mode:
+        reasons.append("`--format json` (no terminal to prompt on)")
+    if ci:
+        reasons.append("`--ci`")
+    if non_interactive:
+        reasons.append("`--non-interactive`")
+    if not json_mode and not (sys.stdin.isatty() and sys.stderr.isatty()):
+        reasons.append("no interactive terminal (stdin/stderr not a tty -- piped, redirected, or CI)")
+    return Issue(
+        "doctor.fix-suppressed",
+        "warning",
+        "`--fix` was requested but not run: " + "; ".join(reasons) + ". Re-run "
+        "`tan doctor --fix` from a real, interactive terminal, without "
+        "--ci/--non-interactive/--format json, to allow it.",
+    )
+
+
 def _collect(
     sdk_root: str | None,
     build: bool = False,
@@ -2116,6 +2559,7 @@ def _collect(
     project_scope: str | None = None,
     workspace_root: str = ".",
     sdk_tier: str | None = None,
+    broken_global_default: str | None = None,
 ) -> list[Check]:
     """Every probe, in report order. Nothing here may raise -- see the module
     docstring; `probe`/`on_path`/`_read_text` are the only three ways this
@@ -2155,6 +2599,12 @@ def _collect(
     it. Optional/defaulted for the same reason every other parameter here is:
     every existing direct caller keeps working, reporting `sdk` with no tier
     parenthetical rather than a guessed one.
+
+    `broken_global_default` (tan-cli#344) -- the raw `sdkPath` a dangling
+    `~/.alp/sdk-default` pointer names, computed once by the caller
+    (`_broken_global_default`) and threaded straight to `sdk_check`. Optional/
+    defaulted like `sdk_tier`; only changes the `sdk` check's remedy text, and
+    only in the branch `sdk_root is None` already reaches.
     """
     checks: list[Check] = []
 
@@ -2188,7 +2638,32 @@ def _collect(
             _abs_posix(str(candidate))
         ) != os.path.normcase(_abs_posix(sdk_root)):
             unselected_candidate = str(candidate)
-    checks.append(sdk_check(sdk_root, project_scope, sdk_tier, unselected_candidate))
+    # tan-cli#407: the #301 block above deliberately says nothing when the
+    # winning tier already IS `discovery` -- and that is precisely the case
+    # where the second checkout is not merely "unselected" but ACTIVELY in
+    # use, by the four commands that take the wide ladder. Same report-only
+    # discipline as #301: the candidate can only ever be one
+    # `resolve_sdk_root_wide` itself would reach, never a scan of its own.
+    divergent_candidate: str | None = None
+    if sdk_root is not None and sdk_tier == "discovery":
+        wide, _wide_tier, _wide_pin = resolve_sdk_root_wide(None, Path(workspace_root))
+        # `normcase` both sides, for the reason spelled out in the #301 block
+        # above: `_abs_posix` does not resolve, so on Windows one directory
+        # under two spellings would be reported as two checkouts.
+        if wide is not None and os.path.normcase(_abs_posix(str(wide))) != os.path.normcase(
+            _abs_posix(sdk_root)
+        ):
+            divergent_candidate = str(wide)
+    checks.append(
+        sdk_check(
+            sdk_root,
+            project_scope,
+            sdk_tier,
+            unselected_candidate,
+            broken_global_default,
+            divergent_candidate,
+        )
+    )
     project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
     checks.append(
         board_yaml_preflight_check(
@@ -2436,15 +2911,27 @@ def doctor(
         "this used to gate, now runs unconditionally, so this flag no longer "
         "changes the check list.",
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
+    fix: bool = typer.Option(
+        False,
+        "--fix",
+        help="Run the manifest's own install command (ADR 0021) for any "
+        "hostPrerequisites tool this host is missing, when it needs no "
+        "elevation. A command that needs `sudo` is printed, never run -- tan "
+        "never spawns sudo. Only in an interactive, non-CI, text-mode run "
+        "(--non-interactive/--ci/--format json all disable it): a repair a "
+        "human did not watch happen is not consent.",
+    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Never prompt, and never run --fix's repairs -- see --fix.",
+    ),
+    ci: bool = typer.Option(
+        False, "--ci", help="CI mode: implies --non-interactive and disables --fix."
     ),
 ) -> None:
     """Diagnose whether this host can build and flash."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     # Snapshot the RAW `--project` value before `project` is reassigned below
@@ -2478,6 +2965,11 @@ def doctor(
     resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
+    # tan-cli#344: a dangling `~/.alp/sdk-default` is a distinct fact from
+    # "nothing configured" -- computed unconditionally (one small file read)
+    # so `sdk_check` can name it in the one branch (`sdk_root is None`) where
+    # the two used to print the identical sentence.
+    broken_global_default = _broken_global_default()
     # Forward slashes -- the established envelope contract on this seam
     # (`build_cmd.build`, `flash_cmd._resolve_project`), not the native
     # separators `str(Path(...))` would emit on Windows.
@@ -2498,9 +2990,44 @@ def doctor(
             project_scope=project_scope,
             workspace_root=str(workspace_root),
             sdk_tier=sdk_tier,
+            broken_global_default=broken_global_default,
         )
+        # tan-cli#91 / ADR 0021: `--fix` only ever RUNS anything when a human
+        # is demonstrably present. `doctor` otherwise only REPORTS; this flag
+        # turns it into a machine-global, network-fetching installer, so the
+        # consent gate is the feature, not decoration around it.
+        #
+        # Delegated to [`tan.core.consent.can_prompt`] rather than spelled out
+        # inline, because spelling it out inline is exactly how this went
+        # wrong: the hand-written form tested only the three FLAGS
+        # (`!non_interactive && !ci && !is_json`) and omitted the two
+        # `isatty()` calls, so a CI runner that redirected its output but did
+        # not happen to pass `--ci` got unattended host mutation -- measured
+        # under fully captured pipes, four real `winget install` runs with
+        # nobody watching. The oracle's own `--non-interactive` help states
+        # the missing half ("the same rule applies unasked when stdin or
+        # stderr is not a terminal -- piped, redirected, or a CI runner").
+        # See that module for why BOTH handles matter, and why `stdout`
+        # deliberately does not.
+        fix_allowed = fix and can_prompt(non_interactive=non_interactive, ci=ci, json_mode=json_mode)
+        if fix_allowed:
+            missing_for_fix = next(
+                (c.missing for c in checks if c.name == "hostPrerequisites"), None
+            )
+            if missing_for_fix:
+                checks = [*checks, *run_fix(missing_for_fix)]
         exit_code = exit_code_for(checks)
         issues = checks_to_issues(checks)
+        # tan-cli#91 P1: `--fix` requested and consent refused used to be a
+        # SILENT no-op, byte-for-byte identical to plain `tan doctor` --
+        # measured against the oracle (`doctor --fix --format json`, which the
+        # oracle instead refuses to parse outright). SAY SO instead: name
+        # every condition of `can_prompt`'s that actually tripped.
+        if fix and not fix_allowed:
+            issues = [
+                *issues,
+                fix_suppressed_issue(non_interactive=non_interactive, ci=ci, json_mode=json_mode),
+            ]
         # tan-cli#294 finding 4 (#203/#210, alp-sdk-vscode#347, ADR 0021 P0a):
         # `hostPrerequisites` is the only check that ever carries a
         # `{tool, command}` pair, so it is the only place this reads from --
@@ -2542,15 +3069,46 @@ def doctor(
         emit(Envelope("doctor", project, data, issues, exit_code, sdk=sdk))
     else:
         for check in (data or {}).get("checks", []):
-            fix = f"\n    fix: {check['fix']}" if "fix" in check else ""
-            print(f"[{check['status']:>7}] {check['name']}: {check['detail']}{fix}", file=sys.stderr)
+            # `fix_line`, never `fix`: this loop runs after the `fix: bool`
+            # parameter is done being read, but shadowing it here is a trap
+            # for the next edit that needs it further down.
+            fix_line = f"\n    fix: {check['fix']}" if "fix" in check else ""
+            print(f"[{check['status']:>7}] {check['name']}: {check['detail']}{fix_line}", file=sys.stderr)
         if data is None:
             for issue in issues:
                 print(f"{issue.severity}: {issue.message}", file=sys.stderr)
         else:
+            # tan-cli#375: an Issue with no backing Check -- a suppressed
+            # `--fix` (`fix_suppressed_issue`) or a broken `.alp/sdk-path`
+            # pin (`project_pin_issue`, tan-cli#263) -- used to vanish here
+            # completely: this branch (the non-exception path) printed only
+            # the summary line, never `issues`. `--fix`'s consent gate
+            # (tan-cli#91) is right to suppress silently TOWARDS THE HOST --
+            # it must never mutate anything unwatched -- but silence towards
+            # the CUSTOMER is a different bug: the JSON envelope already
+            # carried `doctor.fix-suppressed`/`sdk.project-pin-unresolved`
+            # and text mode carried neither. `checks_to_issues(checks)`
+            # already turned every warn/fail Check into an Issue, and each of
+            # those already printed above as a `[  warn]`/`[  fail]` line --
+            # reprinting them here would duplicate the whole report, so this
+            # filters down to exactly the codes no Check line already named.
+            # Printed AFTER every check line and BEFORE the summary: findable
+            # without being buried mid-report, and the report still ends on
+            # the summary line.
+            checked_codes = {c.code or f"doctor.{c.name}" for c in checks}
+            for issue in issues:
+                if issue.code not in checked_codes:
+                    print(f"{issue.severity}: {issue.message}", file=sys.stderr)
             s = data["summary"]
             print(
                 f"\n{s['pass']} passed, {s['warn']} warning(s), {s['fail']} failed.",
                 file=sys.stderr,
             )
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the five oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--no-color`/`--quiet`/`--target`/`--verbose`) on top of
+# `--non-interactive`/`--ci`, already declared and wired into `can_prompt`
+# above; see `tan.core.global_flags`.
+doctor = accept_global_flags(doctor)

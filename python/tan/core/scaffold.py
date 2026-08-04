@@ -58,11 +58,20 @@ TEMPLATE_IDS = (
 )
 
 #: The template a non-interactive `tan init` with no `--template` gets.
-#: `zephyr-app`, NOT `minimal-app` (tan-cli #97): minimal-app's hand-generated
-#: `CMakeLists.txt` never calls `find_package(Zephyr ...)`, so a bare `tan init`
-#: followed by `tan build` used to point west at a plain host CMake project and
-#: link an x86-64 binary for a core declared `os: zephyr`. Do not "simplify"
-#: this back to the first registry entry.
+#: `zephyr-app`, NOT `minimal-app` (tan-cli #97). Until tan-cli#309, TWO bugs
+#: compounded: `board.yaml`'s `app: ./src` sent the planner's `_zephyr_app_dir`
+#: straight at `src/CMakeLists.txt` (it has a `CMakeLists.txt` of its own, so
+#: the parent-fallback that would have reached the real one never fired), and
+#: THAT file called plain `add_executable(alp_app ...)` with no `find_package(
+#: Zephyr ...)` at all -- so `west build -b <board> <project>/src` configured
+#: and linked a genuine x86-64 host binary, silently, for a core declared
+#: `os: zephyr`; the root `CMakeLists.txt` (dead code the whole time) was never
+#: even the file at fault. tan-cli#309 fixed both: the generator itself
+#: (`_minimal_app_root_cmake`/`_minimal_app_src_cmake` below) and `board.yaml`'s
+#: `app:` (`_minimal_app_board_yaml`). zephyr-app stays the default regardless
+#: -- that is a separate, still-live product choice (vendored from a real SDK
+#: catalog entry vs. tan's own hand-generated stub), not something this fix
+#: revisits. Do not "simplify" this back to the first registry entry.
 DEFAULT_TEMPLATE_ID = "zephyr-app"
 
 #: tan template id -> its vendored SDK scaffold-catalog directory.
@@ -103,9 +112,23 @@ def _read_verbatim(path: Path) -> str:
 
     `open(newline="")`, not `Path.read_text(newline=...)`: that keyword landed in
     3.13 and this package's floor is 3.12.
+
+    Raises `OSError` for a non-UTF-8 file too (tan-cli#415): `UnicodeDecodeError`
+    is a `ValueError`, not an `OSError`, so a bare `except OSError` around a
+    call to this function -- both call sites below use exactly that -- would
+    otherwise let a corrupt vendored tree escape as an unhandled traceback
+    instead of the `TemplateDataError` they already raise for every other way
+    the read can fail. Folded in here, once, rather than duplicated at each
+    call site: mirrors Rust's own `read_to_string`, which returns an
+    `io::Error` (kind `InvalidData`) for invalid UTF-8 rather than a distinct
+    error type (the same equivalence `kconfig_cmd.py`'s `_resolve_core`
+    documents for the identical reason).
     """
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        return handle.read()
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return handle.read()
+    except UnicodeDecodeError as err:
+        raise OSError(str(err)) from err
 
 
 def _write_verbatim(path: Path, content: str) -> None:
@@ -233,10 +256,64 @@ def _family_bucket(sku: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _split_cr(line: str) -> tuple[str, str]:
+    """Split a `content.split("\\n")` element into `(body, cr)`, where `cr` is
+    the `"\\r"` a CRLF source leaves on the end of every line and `""` for LF.
+
+    tan-cli#404: the `\\r` is a LINE TERMINATOR, never content, and every
+    character-level decision below (is the tail a comment? where does the value
+    token end? is there anything after `sku:` at all?) got it wrong when it was
+    left attached. Stripping it once, up front, is what makes those decisions
+    terminator-insensitive; the caller re-appends it verbatim, so a CRLF file
+    goes back out CRLF and byte-parity with `_read_verbatim` holds.
+    """
+    return (line[:-1], "\r") if line.endswith("\r") else (line, "")
+
+
+def _retargeted_sku_line(indent: str, trimmed: str, sku: str) -> tuple[str, bool]:
+    """Rewrite one `sku:` line body onto `sku`. Returns the new body (no line
+    terminator -- see [`_split_cr`]) and whether a trailing COMMENT was dropped,
+    which is what tells the caller a wrapped comment block has been opened and
+    its continuation lines must go too.
+    """
+    after_key = trimmed[len("sku:") :]
+    stripped = after_key.lstrip(" \t")
+    leading_ws = after_key[: len(after_key) - len(stripped)]
+    if not stripped or stripped.startswith("#"):
+        # `sku:` with nothing after it, or `sku:  # comment` with a comment but
+        # no value. Splicing at the first whitespace run would either glue the
+        # value onto `sku:` (read back as a scalar, not a mapping entry) or eat
+        # the `#` into it. A `sku:` with no value names no SoM, so its comment
+        # is not stale and stays.
+        return f"{indent}sku: {sku}{after_key}", False
+    # `[ \t]`, not `\s`: the value token ends at a space or a tab and at nothing
+    # else. `\s` also matched the `\r` of a CRLF line, so the terminator was
+    # captured into `tail` and thrown away with it -- one mixed-EOL line in the
+    # very file the customer is about to edit (tan-cli#404).
+    match = re.search(r"[ \t]", stripped)
+    value = stripped[: match.start()] if match else stripped
+    tail = stripped[match.start() :] if match else ""
+    if value == sku:
+        return f"{indent}sku:{leading_ws}{sku}{tail}", False
+    return f"{indent}sku:{leading_ws}{sku}", tail.lstrip(" \t").startswith("#")
+
+
+def _is_wrapped_comment_line(body: str, sku_indent: str) -> bool:
+    """True when `body` is a comment-only line indented PAST `sku_indent` --
+    i.e. a continuation of the comment the `sku:` line opened, not a comment
+    documenting whatever comes next (tan-cli#404). A blank line ends the block:
+    it is not a comment, and a comment resuming after one is a new thought."""
+    stripped = body.lstrip(" \t")
+    if not stripped.startswith("#"):
+        return False
+    return len(body) - len(stripped) > len(sku_indent)
+
+
 def retarget_board_yaml_som(content: str, sku: str) -> str:
     """Rewrite the FIRST `som:` -> `sku:` value to `sku`, leaving the rest of
     that line byte-for-byte alone -- UNLESS the value is actually changing and
-    a trailing comment is present, in which case the comment is dropped.
+    a trailing comment is present, in which case the comment is dropped, all of
+    it, however many physical lines it spans.
 
     `wizard::retarget_board_yaml_som`. Only the value token moves: the gap
     before a trailing comment is preserved, so a column-aligned inline comment
@@ -253,35 +330,43 @@ def retarget_board_yaml_som(content: str, sku: str) -> str:
     there is no SKU->vendor-name table here to rewrite it correctly for the new
     one -- retargeting onto `E1M-V2N101` left that Alif comment on a Renesas
     SKU. Dropping it is honest; inventing a new one is not this function's job.
+
+    tan-cli#404 -- that drop used to be strictly line-local, and 12 of the 100
+    `board.yaml` files in the SDK example catalogue carry a `sku:` comment that
+    WRAPS. `aen/edgeai-vision-aen` retargeted onto `E1M-V2N101` kept four of its
+    five comment lines: a Renesas RZ/V2N project whose `board.yaml` documented a
+    pair of Alif Ethos-U55s, an Ethos-U85 and a VeriSilicon ISP Pico
+    (`vsi,isp-pico`) attached to nothing -- in a file the project ships as
+    teaching material, with nothing in `tan init`'s output saying a comment had
+    been rewritten at all. So the drop now consumes the block: the inline
+    comment plus every following comment-only line indented past the `sku:` key.
+    Deliberately anchored to THAT comment, not to any comment near a changed
+    `sku:` -- a `sku:` line with no comment of its own opens no block, so a
+    comment documenting the next key is never swallowed.
     """
     out: list[str] = []
     in_som = False
-    done = False
+    rewritten = False
+    # The `sku:` line's own indent while a dropped comment's continuation lines
+    # are still being consumed; `None` at every other point.
+    consuming: str | None = None
     for line in content.split("\n"):
-        if not done:
-            trimmed = line.lstrip(" \t")
-            if line and not line[0] in " \t":
+        body, cr = _split_cr(line)
+        if consuming is not None:
+            if _is_wrapped_comment_line(body, consuming):
+                continue
+            consuming = None
+        if not rewritten:
+            trimmed = body.lstrip(" \t")
+            if body and body[0] not in " \t":
                 # A new top-level key: entering `som:`, or leaving it.
                 in_som = trimmed.startswith("som:")
             elif in_som and trimmed.startswith("sku:"):
-                indent = line[: len(line) - len(trimmed)]
-                after_key = trimmed[len("sku:") :]
-                stripped = after_key.lstrip(" \t")
-                leading_ws = after_key[: len(after_key) - len(stripped)]
-                if not stripped or stripped.startswith("#"):
-                    # `sku:` with nothing after it, or `sku:  # comment` with a
-                    # comment but no value. Splicing at the first whitespace run
-                    # would either glue the value onto `sku:` (read back as a
-                    # scalar, not a mapping entry) or eat the `#` into it.
-                    out.append(f"{indent}sku: {sku}{after_key}")
-                else:
-                    match = re.search(r"\s", stripped)
-                    value = stripped[: match.start()] if match else stripped
-                    tail = stripped[match.start() :] if match else ""
-                    if value != sku:
-                        tail = ""
-                    out.append(f"{indent}sku:{leading_ws}{sku}{tail}")
-                done = True
+                indent = body[: len(body) - len(trimmed)]
+                new_body, comment_dropped = _retargeted_sku_line(indent, trimmed, sku)
+                out.append(new_body + cr)
+                rewritten = True
+                consuming = indent if comment_dropped else None
                 continue
         out.append(line)
     return "\n".join(out)
@@ -514,11 +599,16 @@ def plan_template_files(template_id: str, sku: str) -> list[PlannedFile]:
 def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     """Read a vendored scaffold tree and retarget its `board.yaml` onto `sku`.
 
-    Files come back sorted by their relative POSIX path, which is byte-for-byte
-    the order the Rust `vendored_tree!` macro lists them in for every tree
-    (`CMakeLists.txt`, `README.md`, `board.yaml`, ... -- uppercase first) -- so
-    `data.fileChanges[]` matches the shipped binary's without a hand-kept list
-    here to drift out of step with it.
+    Files come back sorted by their relative POSIX path (`CMakeLists.txt`,
+    `README.md`, `board.yaml`, ... -- uppercase first), the order the Rust
+    `vendored_tree!` macro lists them in, so `data.fileChanges[]` matches the
+    shipped binary's without a hand-kept list here to drift out of step with
+    it. `iot` is the one tree where the two LISTS differ, not just their order:
+    it carries a `native_sim.conf` the frozen Rust tree never got (tan-cli#379,
+    declared in `tests/parity/test_scaffold_content_oracle_parity.py`'s
+    `FILE_SET_DIVERGENCE`), so `tan init --template iot-starter --format json`
+    returns one `fileChanges[]` entry more than the oracle does. Sorting is
+    what keeps every file the two trees DO share in the same relative order.
 
     Sorted on that STRING, never on the `Path`: `PurePath.__lt__` compares a
     case-FOLDED key on Windows, so sorting paths ordered `board.yaml` before
@@ -638,12 +728,54 @@ def _library_names(board_yaml: str) -> list[str]:
 # ---------------------------------------------------------------------------
 #
 # tan's OWN content, not a copy of anything the SDK ships -- the SDK catalog has
-# no `minimal-app` entry (its `minimal` entry is what `zephyr-app` vendors).
-# Deliberately a plain-CMake, non-west-buildable stub: it is the "I want full
-# control over bring-up order" baseline, which is also why it is not the
-# non-interactive default (see `DEFAULT_TEMPLATE_ID`). Ported from
-# `wizard/service/c_project.rs`; `contract/envelopes/init-preview-minimal-app`
-# pins its exact eight-file list.
+# no `minimal-app` entry (its `minimal` entry is what `zephyr-app` vendors). Its
+# `board.yaml` (below) declares `os: zephyr` and its README says so too -- it
+# was always meant to build as a real Zephyr app; "hand-generated" describes
+# where the content comes from (tan's own generator, not a vendored SDK
+# capture), not a licence to skip Zephyr's own boilerplate.
+#
+# tan-cli#309 -- two bugs, not one, and fixing only the first makes the second
+# worse (a CMake configure error instead of a silent host binary):
+#
+# 1. `board.yaml`'s `app:` decides which CMakeLists.txt `west build` actually
+#    configures, via the planner's `_zephyr_app_dir`
+#    (`tan/planner/orchestrator.py`): it resolves `app:` to a directory, and
+#    picks that directory ITSELF whenever it holds a `CMakeLists.txt` of its
+#    own, falling back to the PARENT only when it does not. This template's
+#    `src/` deliberately keeps its own `CMakeLists.txt` (the two-file split
+#    below), so `app: ./src` (through v0.5.0-rc3) sent `west build` straight at
+#    `src/CMakeLists.txt` -- the root `CMakeLists.txt` (`project()` +
+#    `add_subdirectory(src)`, never `add_executable`) was dead code the whole
+#    time, not the file at fault.
+# 2. `src/CMakeLists.txt` -- the file actually configured -- called plain
+#    `add_executable(alp_app ${ALP_APP_SOURCES})`, no `find_package(Zephyr
+#    ...)` anywhere in either file. CMake configures and links that shape fine
+#    (measured: a real `alp_app.exe`, PE32+ x86-64, built from `CMakeFiles/
+#    alp_app.dir/{main,features/app_bootstrap}.obj` -- app_bootstrap.c WAS
+#    compiled and linked, just into a host binary Zephyr's build never ran at
+#    all), so `tan build` reported success for a project that was never Zephyr.
+#
+# `_minimal_app_root_cmake`/`_minimal_app_src_cmake` below fix (2): the root
+# file now carries `find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})`
+# before `project()`, and `src/CMakeLists.txt` contributes to Zephyr's own
+# `app` target via `target_sources(app ...)` instead of a second
+# `add_executable` -- the same KIND of CMake every vendored template already
+# writes (e.g. `templates/vendored/minimal/*/CMakeLists.txt`), while keeping
+# its own hand-generated CONTENT. `_minimal_app_board_yaml` fixes (1): `app: .`
+# (the project root) so `_zephyr_app_dir` resolves to the root file directly,
+# without ever consulting `src/`. Measured after both fixes: a real CMake +
+# Ninja + Zephyr-SDK configure+build compiles `src/features/app_bootstrap.c`
+# into `app/libapp.a` alongside `src/main.c`, and Zephyr's own link step pulls
+# `libapp.a` in whole (`-Wl,--whole-archive app/libapp.a`) on the way to a real
+# `zephyr.elf`.
+#
+# Ported from `wizard/service/c_project.rs`/`gen_board_yaml`'s `app: ./src` up
+# through both defects (`crates/` is FROZEN -- see `docs/ROADMAP.md`'s standing
+# rule -- so tan-cli#309 is fixed here only, not there); `minimal-app` still
+# is not the non-interactive default (see `DEFAULT_TEMPLATE_ID`), a separate,
+# independent choice. `contract/envelopes/init-preview-minimal-app` pins its
+# exact eight-file list/order (path + change-kind only, never file content or
+# `board.yaml`'s `app:` value), which neither fix touches.
 
 #: minimal-app's one feature file: `(path, unit name, TODO line)`.
 _MINIMAL_APP_FEATURE_FILE = (
@@ -670,13 +802,7 @@ def _minimal_app_files(sku: str) -> list[PlannedFile]:
         PlannedFile("README.md", _minimal_app_readme(sku)),
         # No `prj_conf_extras`: minimal-app declares none.
         PlannedFile("prj.conf", "CONFIG_ASSERT=y\nCONFIG_NEWLIB_LIBC=y\n"),
-        PlannedFile(
-            "CMakeLists.txt",
-            "cmake_minimum_required(VERSION 3.20)\n"
-            "project(alp_starter C)\n"
-            "\n"
-            "add_subdirectory(src)\n",
-        ),
+        PlannedFile("CMakeLists.txt", _minimal_app_root_cmake()),
         PlannedFile("src/CMakeLists.txt", _minimal_app_src_cmake()),
         PlannedFile(
             "include/app/app.h",
@@ -699,7 +825,21 @@ def _minimal_app_board_yaml(sku: str) -> str:
     """A board.yaml conforming to the SDK board schema: `som` + `cores` are the
     only required top-level keys, and the OS is per-core. There is deliberately
     NO top-level `os:` key (I-02) and no way to ask for one -- a core's runtime
-    follows its Cortex class, and this scaffold's app source is Zephyr."""
+    follows its Cortex class, and this scaffold's app source is Zephyr.
+
+    `app: .` (the PROJECT ROOT), not `./src` (tan-cli#309 round 2):
+    `_zephyr_app_dir` (`tan/planner/orchestrator.py`) resolves `app:` to the
+    directory holding the CMakeLists.txt `west build` actually configures, and
+    picks the `app:` path ITSELF whenever that path has its own
+    `CMakeLists.txt` -- falling back to its parent only when it does not. This
+    template's `src/` deliberately keeps a `CMakeLists.txt` of its own (the
+    two-file split `_minimal_app_root_cmake`/`_minimal_app_src_cmake` write),
+    so `app: ./src` sent `west build` straight at `src/CMakeLists.txt` --
+    a bare `target_sources(app ...)` with no `find_package(Zephyr ...)`
+    of its own -- and skipped the root file (with the REAL `find_package`/
+    `project()`) entirely. `app: .` resolves to the project root directly:
+    `_zephyr_app_dir` finds `CMakeLists.txt` right there and returns it
+    without ever consulting `src/`."""
     return (
         "# Generated by `tan init`.\n"
         "# board.yaml describes hardware: the SoM SKU + per-core app map.\n"
@@ -710,7 +850,7 @@ def _minimal_app_board_yaml(sku: str) -> str:
         "cores:\n"
         f"  {app_core_for_sku(sku)}:\n"
         "    os: zephyr\n"
-        "    app: ./src\n"
+        "    app: .\n"
     )
 
 
@@ -738,17 +878,39 @@ def _minimal_app_readme(sku: str) -> str:
     )
 
 
+def _minimal_app_root_cmake() -> str:
+    """tan-cli#309: the file `board.yaml`'s `app: .` now points `west build`
+    at directly, so THIS is the file that has to carry Zephyr's boilerplate --
+    before the fix it was `add_subdirectory(src)` with nothing before it, and
+    `board.yaml`'s `app: ./src` skipped straight past it to `src/CMakeLists.txt`
+    (`_minimal_app_board_yaml`'s docstring has the full mechanism).
+    `find_package(Zephyr ...)` has to run before `project()` -- Zephyr's own
+    convention (every vendored template does the same, e.g.
+    `templates/vendored/minimal/*/CMakeLists.txt`) -- because `find_package`
+    is what resolves the toolchain/board machinery `project()` consumes when it
+    enables the C language; reversing the order leaves `project()` running
+    before Zephyr's own CMake modules are even on `CMAKE_MODULE_PATH`."""
+    return (
+        "cmake_minimum_required(VERSION 3.20.0)\n"
+        "find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})\n"
+        "project(alp_starter C)\n"
+        "\n"
+        "add_subdirectory(src)\n"
+    )
+
+
 def _minimal_app_src_cmake() -> str:
+    """Contributes to Zephyr's own `app` target via `target_sources`/
+    `target_include_directories` -- never a second `add_executable`, which
+    Zephyr's build never links in (tan-cli#309)."""
     feature_path = _MINIMAL_APP_FEATURE_FILE[0]
     rel = feature_path[len("src/") :] if feature_path.startswith("src/") else feature_path
     return (
-        "set(ALP_APP_SOURCES\n"
+        "target_sources(app PRIVATE\n"
         "  main.c\n"
         f"  {rel}\n"
         ")\n"
-        "\n"
-        "add_executable(alp_app ${ALP_APP_SOURCES})\n"
-        "target_include_directories(alp_app PRIVATE ../include)\n"
+        "target_include_directories(app PRIVATE ../include)\n"
     )
 
 

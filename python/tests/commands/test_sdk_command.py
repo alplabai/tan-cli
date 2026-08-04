@@ -400,14 +400,35 @@ def test_current_names_an_unresolvable_project_pin_instead_of_reporting_it_silen
     ]
 
 
-def test_list_refuses_without_online_and_touches_no_network(tmp_path, isolated_home):
+def test_list_without_online_answers_offline_and_touches_no_network(tmp_path, isolated_home):
+    """tan-cli#351: bare `sdk list` is a NORMAL state, matching `sdk current`'s
+    "nothing configured" -- exit 0, `ok: true` -- not a failure. The oracle has
+    no `--online` flag and always reaches the network for `sdk list`; gating it
+    is this port's own hermeticity addition (I-23), so the gate itself must not
+    read as an error. `sdk.network-required` survives as a `warning`-severity
+    issue (still present, still the code a consumer can key on), not an
+    `error` on a passing envelope."""
     proc = run_tan("sdk", "list", "--format", "json", cwd=tmp_path)
-    assert proc.returncode == 1
+    assert proc.returncode == 0
     env = envelope(proc)
+    assert env["ok"] is True
     assert env["issues"][0]["code"] == "sdk.network-required"
-    # The `list`-shaped payload survives the refusal: the extension reads
-    # `data.releases` with a `?? []` fallback.
+    assert env["issues"][0]["severity"] == "warning"
+    assert "upstream" in env["issues"][0]["message"].lower()
+    assert "--online" in env["issues"][0]["message"]
+    # The `list`-shaped payload survives: the extension reads `data.releases`
+    # with a `?? []` fallback.
     assert env["data"] == {"subcommand": "list", "releases": []}
+
+
+def test_list_without_online_text_mode_names_upstream_and_the_flag(tmp_path, isolated_home):
+    """Text mode gets the same "this is normal, here's the switch" framing as
+    JSON, not the old "this command needs network access" wording that read
+    like a broken host rather than a plain missing flag."""
+    proc = run_tan("sdk", "list", cwd=tmp_path)
+    assert proc.returncode == 0
+    assert "upstream" in proc.stderr.lower()
+    assert "--online" in proc.stderr
 
 
 @pytest.mark.parametrize("verb", ["install", "switch"])

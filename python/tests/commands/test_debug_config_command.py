@@ -362,14 +362,24 @@ def test_a_bad_format_is_a_usage_error_not_a_traceback(tmp_path):
     assert "Traceback" not in proc.stderr
 
 
-def test_a_command_that_ignores_the_root_format_refuses_it_rather_than_dropping_it(
-    tmp_path,
-):
-    """`--format` is accepted before the subcommand for `debug-config` (four
-    goldens invoke it that way, mirroring clap's `global = true`). A command that
-    does not yet read it must REFUSE the pre-subcommand position: accepting it
-    and running in text mode means exit 0 with nothing on stdout, which is an
-    envelope-less `--format json` run -- the break this whole port guards."""
+def test_a_pre_subcommand_format_reaches_the_command_not_a_root_refusal(tmp_path):
+    """INVERTED by tan-cli#378, deliberately. This asserted the opposite --
+    `tan --format json validate --offline` must answer `cli.parse-error` -- on
+    the premise that a command not reading the root `--format` would otherwise
+    run in silent text mode (exit 0, nothing on stdout, an envelope-less
+    `--format json` run). The premise was sound; #378 removed it, by relocating
+    the flag past the subcommand name onto the command's OWN always-read
+    `--format` instead of hand-listing which commands were allowed to precede
+    it. Refusing is now the defect, not the guard: the refusal named
+    `command: "cli"` for argv the oracle runs, for the 20 of 32 commands the
+    allowlist never reached.
+
+    Anchored on the oracle, not on the port's own new answer -- measured,
+    `target/debug/tan.exe --format json validate --offline` in an empty
+    directory is exit 2 with `command: "validate"` and
+    `validate.board-yaml-missing`. That is what this now pins, so a
+    re-introduced root-level refusal (a `cli.parse-error`, whatever its
+    message) fails here again."""
     proc = subprocess.run(
         [sys.executable, "-m", "tan", "--format", "json", "validate", "--offline"],
         capture_output=True,
@@ -386,7 +396,12 @@ def test_a_command_that_ignores_the_root_format_refuses_it_rather_than_dropping_
     )
 
     assert proc.returncode == 2
-    assert json.loads(proc.stdout)["issues"][0]["code"] == "cli.parse-error"
+    envelope_ = json.loads(proc.stdout)
+    assert envelope_["command"] == "validate", (
+        "the pre-subcommand `--format json` must reach `validate` and be reported "
+        f"as ITS envelope, not the CLI's: {envelope_}"
+    )
+    assert envelope_["issues"][0]["code"] == "validate.board-yaml-missing", envelope_
 
 
 def test_no_os_or_backend_flag_exists(tmp_path):
@@ -418,6 +433,7 @@ def test_an_unexpected_exception_is_still_a_coded_envelope(monkeypatch, capsys):
             server=None,
             core=None,
             pre_launch_task=None,
+            gdbserver_address=None,
             svd=None,
             preview=False,
             project=None,
@@ -815,3 +831,159 @@ def test_an_out_of_range_source_date_epoch_still_emits_one_envelope(epoch, tmp_p
     payload = json.loads(proc.stdout)          # exactly one parseable document
     assert payload["command"] == "debug-config"
     assert payload["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#138: the restored v0.3.1 preLaunchTask default, end to end.
+# ---------------------------------------------------------------------------
+
+
+def test_a_default_run_names_its_v031_pre_launch_task(tmp_path):
+    """Formerly the CLI-level pairing of `no_profile_names_a_pre_launch_task_
+    by_default`: a plain run with no `--pre-launch-task` used to emit NO
+    key. tan-cli#138 (maintainer decision) restores the v0.3.1 default -- the
+    pure-logic contract itself lives in `tests/core/test_debug_launch.py`;
+    this proves the CLI actually wires it through end to end."""
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                "--preview", "--format", "json")
+    )
+    assert env["data"]["configuration"]["preLaunchTask"] == "alp: build active target"
+
+
+def test_pre_launch_task_empty_string_opts_out_over_the_cli(tmp_path):
+    """`--pre-launch-task ''` reaches the same opt-out `create_launch_draft`
+    exercises directly -- proven here through actual argv parsing, since an
+    empty-string CLI value is its own trap (typer/click could plausibly treat
+    it as "not passed")."""
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                "--pre-launch-task", "", "--preview", "--format", "json")
+    )
+    assert "preLaunchTask" not in env["data"]["configuration"]
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#321: miDebuggerServerAddress needs a hand-filled value.
+# ---------------------------------------------------------------------------
+
+
+def test_yocto_preview_reports_the_gdbserver_address_info_issue_by_default(tmp_path):
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER,
+                "--preview", "--format", "json")
+    )
+    assert env["exitCode"] == 0
+    assert env["data"]["configuration"]["miDebuggerServerAddress"] == "<host>:<port>"
+    # tan-cli#138 vs #321: yocto-userspace carries NO restored preLaunchTask
+    # default (unlike the other three target classes -- DEFAULT_PRE_LAUNCH_
+    # TASK in tan/core/debug_launch.py deliberately omits it), so the issue
+    # message must say so rather than claiming a default that does not exist.
+    assert "preLaunchTask" not in env["data"]["configuration"]
+    issue = next(
+        (i for i in env["issues"] if i["code"] == "debug-config.gdbserver-address-unresolved"),
+        None,
+    )
+    assert issue is not None and issue["severity"] == "info"
+    assert "--gdbserver-address" in issue["message"]
+    assert "carries no `preLaunchTask` reminder" in issue["message"]
+    assert "--pre-launch-task" in issue["message"]
+
+
+def test_yocto_write_reports_the_gdbserver_address_info_issue_too(tmp_path):
+    """The write-path counterpart of the preview test above (tan-cli#321): the
+    issue is built from the FINAL `configuration` in both branches of the
+    `success()` closure in `debug_config_cmd.py`, not only the `--preview`
+    one -- a mutation collapsing the write branch's own check (`if target ==
+    YOCTO_USERSPACE` -> `if False`) killed no test before this, because
+    every assertion of this issue firing lived on the `--preview` case
+    only."""
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER, "--format", "json")
+    )
+    assert env["exitCode"] == 0
+    assert env["data"]["preview"] is False
+    assert env["data"]["configuration"]["miDebuggerServerAddress"] == "<host>:<port>"
+    codes = [i["code"] for i in env["issues"]]
+    assert "debug-config.gdbserver-address-unresolved" in codes
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert (
+        on_disk["configurations"][0]["miDebuggerServerAddress"] == "<host>:<port>"
+    )
+
+
+def test_gdbserver_address_flag_fills_the_field_and_drops_the_issue(tmp_path):
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER,
+                "--gdbserver-address", "192.168.10.42:3333", "--preview", "--format", "json")
+    )
+    assert env["exitCode"] == 0
+    assert env["data"]["configuration"]["miDebuggerServerAddress"] == "192.168.10.42:3333"
+    codes = [i["code"] for i in env["issues"]]
+    assert "debug-config.gdbserver-address-unresolved" not in codes
+
+
+def test_gdbserver_address_on_a_target_kind_without_the_field_says_so(tmp_path):
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", ZEPHYR_MCU, "--server", JLINK,
+                "--gdbserver-address", "192.168.10.42:3333", "--preview", "--format", "json")
+    )
+    assert "miDebuggerServerAddress" not in env["data"]["configuration"]
+    assert any("--gdbserver-address was given" in n for n in env["data"]["notes"]), (
+        "accepting --gdbserver-address here in silence is the no-op this note exists to prevent"
+    )
+    # Not a yocto-userspace draft, so the tan-cli#321 issue must not fire either.
+    codes = [i["code"] for i in env["issues"]]
+    assert "debug-config.gdbserver-address-unresolved" not in codes
+
+
+def test_an_empty_gdbserver_address_fails_instead_of_writing(tmp_path):
+    """The same floor `--svd` holds for its own path argument: falling back to
+    "no address" on an explicitly empty value would make a typo (or a copy-
+    paste mistake) indistinguishable from not passing the flag at all."""
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER,
+                "--gdbserver-address", "", "--preview", "--format", "json")
+    )
+    assert env["exitCode"] == 5
+    assert "empty value" in env["issues"][0]["message"]
+    assert not launch_json(tmp_path).exists()
+
+
+def test_a_hand_typed_gdbserver_address_survives_a_rerun_and_is_not_re_nagged(tmp_path):
+    """tan-cli#321's info issue is checked against what this run actually
+    WRITES, not the pre-merge draft: a customer who already filled in the
+    real address must not be nagged about it forever. Companion to the Rust
+    `a_hand_typed_gdbserver_address_survives_the_host_port_placeholder`
+    (`crates/tan-core/src/debug_launch.rs`), which covers the merge itself;
+    this proves the ISSUE follows the same outcome."""
+    launch_json(tmp_path).parent.mkdir()
+    launch_json(tmp_path).write_text(
+        json.dumps(
+            {
+                "version": "0.2.0",
+                "configurations": [
+                    {
+                        "name": "Alp: Yocto Remote Debug",
+                        "type": "cppdbg",
+                        "request": "launch",
+                        "miDebuggerServerAddress": "192.168.10.42:3333",
+                        "miDebuggerPath": "/opt/gdb/bin/aarch64-poky-linux-gdb",
+                    }
+                ],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    env = envelope(
+        run_cli(tmp_path, "--target-kind", YOCTO_USERSPACE, "--server", GDBSERVER, "--format", "json")
+    )
+
+    assert env["exitCode"] == 0
+    assert env["data"]["configuration"]["miDebuggerServerAddress"] == "192.168.10.42:3333"
+    codes = [i["code"] for i in env["issues"]]
+    assert "debug-config.gdbserver-address-unresolved" not in codes
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk["configurations"][0]["miDebuggerServerAddress"] == "192.168.10.42:3333"

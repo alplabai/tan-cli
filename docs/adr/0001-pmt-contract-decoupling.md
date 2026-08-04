@@ -1,11 +1,32 @@
 # 0001 — P/M/T contract-based SDK decoupling
 
-- Status: Accepted
+- Status: Amended (2026-08-03 — planner ownership moved into Python `tan`)
 - Date: 2026-07-23
 - Deciders: tan-cli maintainers
 - Relates: alp-sdk ADR-0020 (SDK owns build execution), alp-sdk#864 (`--emit
   scaffold`), alp-sdk#855 (ADR-0020 rollout), alp-sdk#866 (bridge retirement)
 - Parent rationale for: #1, #7, #12, #14, #15, #16
+
+## 2026-08-03 amendment — planner relocation
+
+The Python port changed the repository boundary assumed by the original
+decision below. The shipping CLI now owns the relocated planner under
+`python/tan/planner/`; `tan build` invokes it in-process through
+`python/tan/planner_root.py` and does not import or spawn alp-sdk's
+`scripts/alp_orchestrate/`. The planner still reads schemas, metadata, examples,
+and tooling from the selected alp-sdk checkout.
+
+The build-plan remains a deliberate planner/executor seam inside `tan`, and its
+schema-version refusal, `executionPolicy`, `env`, and `envAppendPath` guarantees
+remain in force. Parity tests compare the relocated producer with alp-sdk's
+original planner while that source still exists. The old acceptance sentence
+“`tan` is touched only on a `schemaVersion` bump” now applies to the executor
+side of the seam, not to the repository as a whole: planner logic changes are
+ported into `tan/planner` and re-pinned deliberately.
+
+The remainder is preserved as the rationale and architecture at the time of the
+original decision. Where it says alp-sdk owns the planner or rejects putting a
+planner in `tan`, this amendment supersedes it.
 
 ## Context
 

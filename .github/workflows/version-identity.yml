@@ -1,0 +1,61 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# tan-cli#377 — an untagged tree must not claim the version of a release that
+# already published.
+#
+# `dev` sat at `TAN_VERSION = "0.5.0-rc4"` for the whole post-rc4 wave. That is
+# the version of tag v0.5.0-rc4 (fbbea03d), so the published binary and every
+# build of `dev` both answered `tan 0.5.0-rc4` while carrying different
+# behaviour and a different contract — and no bug report could say which one it
+# was on. ci.yml's `versions agree` step could not catch it: it checks the three
+# version files against EACH OTHER, and all three were stale in agreement.
+#
+# WHY THIS IS ITS OWN WORKFLOW AND NOT A STEP IN ci.yml
+# =====================================================
+# It is the one version check that needs the repository's TAGS, and
+# `actions/checkout` fetches with `--no-tags` unless told otherwise — so in
+# ci.yml's default checkout `git tag --list` returns NOTHING, and a gate that
+# reads an empty tag list as "no release ever claimed this version" passes for
+# precisely the reason it must not. `version_check.py --not-released` treats an
+# empty tag list as a hard failure for that reason, which means the job running
+# it MUST fetch tags; `fetch-depth: 0` below is load-bearing, not hygiene.
+#
+# Folding this into ci.yml is fine the day ci.yml's checkout fetches tags — one
+# fewer required context. It is separate here only because that checkout is not
+# this change's to edit.
+name: version-identity
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: version-identity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  not-a-released-version:
+    name: TAN_VERSION is not an existing tag's
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 — the whole point. `fetch-tags: true` with a shallow
+      # fetch would also do, but 0 cannot be silently defeated by a future
+      # checkout-action change in how the two interact, and this repo is small.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # No `pip install` first: version_check.py imports only the stdlib, so
+      # this gate cannot fail for a reason unrelated to versions.
+      #
+      # `--selftest --self` duplicates ci.yml's own step deliberately — this job
+      # must fail with a complete picture (all four files, not just the tag
+      # verdict), and the run costs a second.
+      - name: TAN_VERSION == pyproject == npm-shim == CHANGELOG, and not a published tag
+        run: python python/scripts/version_check.py --selftest --self --not-released

@@ -64,8 +64,10 @@ from pathlib import Path
 import typer
 
 from tan.commands.sdk_cmd import SDK_MARKER, project_pin_issue, resolve_sdk_tiered
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -564,15 +566,9 @@ def presets(
     ),
     sdk_root: str = typer.Option(None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."),
     verbose: bool = typer.Option(False, "--verbose", help="List each discovered SKU."),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """List the SDK's SoM presets plus tan's built-in defaults."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     root, board_path = ".", "./board.yaml"
@@ -638,3 +634,10 @@ def presets(
         for line in render_presets_text(skus, board_libraries, verbose):
             print(line, file=sys.stderr)
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the six oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`) on top of `--board-yaml`/`--verbose`, already declared and read
+# above; see `tan.core.global_flags`.
+presets = accept_global_flags(presets)

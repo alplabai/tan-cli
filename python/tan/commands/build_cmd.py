@@ -97,14 +97,17 @@ from tan.commands.deferred_cmd import DEFERRED_ISSUE_CODE, DEFERRED_ISSUE_URL
 from tan.commands.sdk_cmd import project_pin_issue, resolve_sdk_tiered
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
+from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `scripts/alp_project.py` is THE marker for an alp-sdk checkout -- the same
 #: literal `tan_core::project` hardcodes (I-31). Renaming or relocating it
-#: breaks every `--sdk-root` resolution in the CLI, so it is spelled once.
-SDK_MARKER = ("scripts", "alp_project.py")
+#: breaks every `--sdk-root` resolution in the CLI, so it is spelled once --
+#: in `tan.core.shapes` since tan-cli#408. The import below re-exports it
+#: here because a dozen modules already reach it through this one.
 
 #: Envelope `data.slices[].status`, from `SliceOutcome.status`. The wire
 #: vocabulary is the Rust one (`ok` / `skipped` / `failed`), NOT the executor's
@@ -134,7 +137,7 @@ _MODE_NATIVE = "native"
 #: `cli.parse-error`, and a message indistinguishable from `tan build
 #: --pristien`. Registering them turns "known, deferred" into its own coded
 #: answer at exit 1, exactly as `deferred_cmd` does for the seven deferred
-#: VERBS, whose `cli.command-deferred` code and tan-cli#260 URL are reused
+#: VERBS, whose `cli.command-deferred` code and issue URL are reused
 #: rather than forked (a caller special-casing deferral needs one code to
 #: match, not two).
 #:
@@ -162,7 +165,11 @@ _DEFERRED_FLAGS = (
 
 #: `--help` text for every one of them -- one string, because they all report
 #: the same fact and a per-flag reason would be twelve things to keep true.
-_DEFERRED_HELP = "Deferred to v0.6.0, not implemented in this build (tan-cli#260)."
+# No version number: this said "Deferred to v0.6.0" while the release it
+# meant was renumbered to 0.5.0, and a help string that names the release a
+# flag will appear in is a promise tan cannot keep true. The issue link is
+# the durable pointer.
+_DEFERRED_HELP = "Deferred, not implemented in this build (tan-cli#427)."
 
 
 class BuildError(Exception):
@@ -339,8 +346,11 @@ def _abs_posix(path: str) -> str:
     return os.path.abspath(path).replace("\\", "/")
 
 
-def _is_sdk_root(path: Path) -> bool:
-    return path.joinpath(*SDK_MARKER).is_file()
+#: tan-cli#408: one implementation, in `tan.core.shapes`. Three modules
+#: carried a private copy of this and they had already drifted in TYPE --
+#: this one took a `Path`, `flash_cmd`'s and `renode_cmd`'s took a `str`.
+#: Imported under the same private name so no call site here moves.
+_is_sdk_root = is_sdk_root
 
 
 def discover_sdk_root(workspace_root: Path) -> Path | None:
@@ -508,6 +518,95 @@ def resolve_sdk_root_wide(
     if found is not None:
         return found, "discovery", tiered.broken_project_pin
     return None, "none", tiered.broken_project_pin
+
+
+#: tan-cli#407's warning code. Namespaced `sdk.` and not `build.`/`generate.`
+#: on purpose: a caller on EITHER ladder emits this identical string, so a
+#: consumer holding one envelope from each side matches them on the code, and
+#: a per-command spelling would make the pair it has to correlate the one
+#: thing that differs.
+SDK_DISCOVERY_DIVERGENT = "sdk.discovery-divergent"
+
+#: Both command groups spelled out in the warning itself, because the reader
+#: is being told their toolchain is split across two checkouts and the useful
+#: next question -- "which of my commands went where?" -- must not require
+#: reading this source.
+_NARROW_COMMANDS = (
+    "build, doctor, clean, run, flash, size, image, kconfig, validate, "
+    "presets, inspect, trace and sdk current"
+)
+_WIDE_COMMANDS = "init, generate, examples and renode"
+
+
+def sdk_ladder_divergence_issue(
+    sdk_root_arg: str | None, workspace_root: Path, *, wide: bool
+) -> Issue | None:
+    """The tan-cli#407 warning for a workspace where the two ladders above
+    answer DIFFERENT checkouts -- `None` (the overwhelmingly common case)
+    when they agree, so every call site can do `issue =
+    sdk_ladder_divergence_issue(...); if issue: issues.append(issue)`
+    unconditionally, exactly like `sdk_cmd.project_pin_issue`.
+
+    The divergence itself is deliberate and oracle-measured (see
+    [`resolve_sdk_root_ladder`]'s own docstring, and
+    `tests/commands/test_build_manifest.py`), and this does not try to remove
+    it. What it removes is the SILENCE: both ladders label their answer with
+    the same `SdkSourceTier` string, `"discovery"`, so in a workspace holding
+    both a child `<ws>/alp-sdk` and a lateral `../alp-sdk`, `tan generate`
+    emits `build/generated/alp.conf`, the DTS overlays and
+    `alp_hw_info_build.h` from one checkout's `metadata/` while `tan build`,
+    `tan size` and `tan trace` plan against the other -- and both envelopes
+    say `discovery`, leaving no field a consumer could compare. `sdk: {root,
+    sourceTier}` exists (#110) precisely so the vscode extension can tell
+    which SDK produced a result instead of guessing; one tier name for two
+    answers is that key failing at its only job.
+
+    A sixth `SdkSourceTier` value would be the other way to say this and is
+    rejected upstream for the same reason [`resolve_sdk_root_ladder`] rejects
+    an `ALP_SDK_ROOT` tier: the closed enum is a wire contract no consumer
+    expects to grow, and `test_build_manifest.py` pins the exact
+    `(path, "discovery", None)` tuple both ladders return here because that is
+    the oracle's own answer. An `issues[]` entry adds a fact without moving a
+    reported one -- the same trade `broken_project_pin` already makes.
+
+    `wide` only picks which side of the pair is labelled "this command"; both
+    sides name both checkouts, in the same order, so two envelopes describing
+    one collision read as one collision rather than two unrelated warnings.
+
+    Both roots are compared as `_abs_posix` strings rather than as `Path`s
+    because that is the spelling the message quotes and the spelling
+    `sdk.root` carries on the wire -- comparing anything else risks reporting
+    a "divergence" between two names for one directory. Safe here precisely
+    because both ladders derive every candidate from the same
+    `workspace_root`: the tiers ABOVE discovery (`--sdk-root`, project pin,
+    global default) are shared verbatim, so they can never be the pair that
+    differs.
+    """
+    narrow_path, _narrow_tier, _narrow_pin = resolve_sdk_root_ladder(sdk_root_arg, workspace_root)
+    wide_path, _wide_tier, _wide_pin = resolve_sdk_root_wide(sdk_root_arg, workspace_root)
+    # One side unresolved is not a collision to disambiguate: the two
+    # envelopes already differ by `sourceTier` (`none` vs something), which is
+    # the very signal this warning exists to supply.
+    if narrow_path is None or wide_path is None:
+        return None
+
+    narrow = _abs_posix(str(narrow_path))
+    wider = _abs_posix(str(wide_path))
+    if narrow == wider:
+        return None
+
+    narrow_label = _NARROW_COMMANDS if wide else "this command"
+    wide_label = "this command" if wide else _WIDE_COMMANDS
+    return Issue(
+        SDK_DISCOVERY_DIVERGENT,
+        "warning",
+        f"two alp-sdk checkouts resolve from this directory and both report "
+        f'sourceTier "discovery": {narrow_label} uses "{narrow}", while '
+        f'{wide_label} uses "{wider}". Generated files and the build plan can '
+        f"therefore come from different SDK versions -- pin the one you mean "
+        f"with --sdk-root, or with `tan init --sdk-root <path>` to write it "
+        f"into .alp/sdk-path, which outranks both discovery tiers.",
+    )
 
 
 def _planner_python(start: str, sdk_root: str | None) -> str:
@@ -805,12 +904,14 @@ def _dispatch(
                 replace(plan, slices=runnable),
                 build_root=build_root,
                 env_lookup=os.environ.get,
-                # NOT YET PORTED: Rust fills ZEPHYR_BASE and EXTRA_ZEPHYR_MODULES
-                # here from the resolved west workspace, so `west build -b
-                # <alp-board>` finds the SDK's boards without the user wiring
-                # -DEXTRA_ZEPHYR_MODULES. Plans emitted by the SDK carry both on
-                # the slice's own envAppendPath, so this is a gap only for a host
-                # relying on the CLI to fill them.
+                # tan-cli#308: no build_cmd.py-level gap fillers of our own --
+                # `execute_slices` fills ZEPHYR_BASE/EXTRA_ZEPHYR_MODULES
+                # itself, PER SLICE, from the west workspace it resolves
+                # internally (`tan.core.zephyr_env.zephyr_env_overrides`),
+                # exactly where the Rust oracle's own `execute_slices`
+                # computes them (`execute/mod.rs`, inside its own per-slice
+                # loop) -- not from an outer caller. This parameter stays for
+                # a caller-supplied override this port has none of yet.
                 gap_fillers=(),
                 on_output=heartbeat,
                 sdk_root=sdk_root,
@@ -1141,9 +1242,7 @@ def build(
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     # --- declared so they are refused as DEFERRED, never as a typo ----------
     # See `_DEFERRED_FLAGS`. Each is a real, working flag of the v0.4.1 oracle
     # that this port does not implement. LISTED in `--help` rather than hidden,
@@ -1166,10 +1265,6 @@ def build(
     ci: bool = typer.Option(False, "--ci", help=_DEFERRED_HELP),
 ) -> None:
     """Build every slice of the project's build plan."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     # Before anything is resolved or read: a run naming a flag this port does
@@ -1203,8 +1298,8 @@ def build(
         if was_given:
             _refuse(
                 DEFERRED_ISSUE_CODE,
-                f"`tan build {flag}` is deferred to v0.6.0 and not available in "
-                f"this build (see {DEFERRED_ISSUE_URL}).",
+                f"`tan build {flag}` is deferred and not available in this "
+                f"build (see {DEFERRED_ISSUE_URL}).",
                 ExitCode.RUNTIME_FAILURE,
                 json_mode,
             )
@@ -1312,6 +1407,30 @@ def build(
     # walk, so `tan init`'s own pointer went unread the moment `tan build` ran
     # in the same directory.
     resolved_sdk_root, sdk_tier, sdk_broken_pin = resolve_sdk_root_ladder(sdk_root, workspace_root)
+    # tan-cli#407: computed HERE, while `sdk_root` still holds the raw
+    # `--sdk-root` flag -- it is reassigned to the RESOLVED root a few lines
+    # below, and a bogus flag is blanked to `None` in between, which would
+    # make this warn about a discovery collision the user never reached
+    # because they named a root explicitly.
+    sdk_divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=False)
+    # tan-cli#257/#258: `resolve_sdk_root_ladder` returns an explicit
+    # `--sdk-root` UNVALIDATED (I-31 terminal-for-REPORTING, matching the
+    # oracle's `resolve_sdk_tiered`) -- fine for a caller that only reports
+    # the tier, but `build` also ACTS on `resolved_sdk_root`, so a bogus flag
+    # used to sail through as `sdk.sourceTier: "sdkRootFlag"`, reach
+    # `_emit_plan` as a non-None `sdk_root`, and get refused for the NEXT
+    # missing thing (`no board.yaml found`) instead -- telling the customer
+    # their project is broken when the `--sdk-root` they just typed is what's
+    # wrong, and reporting an `sdk` key the oracle never emits on this path.
+    # Validated here, at the flag's own entry point, rather than in the
+    # shared ladder (which every other caller also relies on staying
+    # unvalidated) -- same shape as `clean_cmd.sdk_root_resolves` and
+    # `flash_cmd._resolve_sdk`, the two callers that already guard their own
+    # explicit `--sdk-root`. An unresolvable explicit root is treated as no
+    # root at all: `_emit_plan` then gives its own "no alp-sdk checkout
+    # found" refusal, and no `sdk` key is reported, matching the oracle.
+    if sdk_tier == "sdkRootFlag" and not _is_sdk_root(resolved_sdk_root):
+        resolved_sdk_root = None
     sdk_root = str(resolved_sdk_root) if resolved_sdk_root is not None else None
     sdk = SdkInfo(sdk_root, sdk_tier) if sdk_root is not None else None
     # Absolute, `.`/`..`-collapsed, anchored on `workspace_root` -- what the
@@ -1363,13 +1482,23 @@ def build(
         data = None
         issues = [Issue("build.internal-failure", "error", f"{type(err).__name__}: {err}")]
 
+    # Both facts are about how the SDK ROOT was RESOLVED, so both are prepended
+    # ahead of whatever the build itself reported, and both survive a run that
+    # never planned anything -- a refusal is exactly when knowing which
+    # checkout answered matters most.
+    #
     # tan-cli#263 review: `tan build` is the command a silently-missed
     # `.alp/sdk-path` pin hurts most -- it builds against whichever tier the
     # ladder fell through to and says nothing, where `sdk current` alone only
-    # helps someone already suspicious enough to run it.
-    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
-    if pin_issue is not None:
-        issues = [pin_issue, *issues]
+    # helps someone already suspicious enough to run it. tan-cli#407 is the
+    # same argument for the two-checkout collision one tier below it.
+    resolution_issues = [
+        issue
+        for issue in (project_pin_issue(sdk_broken_pin, sdk_tier), sdk_divergence)
+        if issue is not None
+    ]
+    if resolution_issues:
+        issues = [*resolution_issues, *issues]
 
     if json_mode:
         emit(Envelope("build", project, data, issues, exit_code, sdk=sdk))

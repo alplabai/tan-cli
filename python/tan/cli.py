@@ -12,31 +12,30 @@ Commands register here with a STATIC import -- see ``tan.commands.__init__``
 for why an importlib/pkgutil registry is a trap: it works from source and
 fails inside a PyInstaller ``--onefile`` binary, which is how tan actually
 ships. That is why this module, not a package ``__init__``, is where ``app``
-lives: one obvious place to add each ``app.command()`` call, and one list
-(``_SUBCOMMAND_NAMES``) that must track it.
+lives: one obvious place to add each ``app.command()`` call, which is also the
+single table everything else here derives from (``_SUBCOMMAND_NAMES``, and the
+pre-/post-subcommand ``--format`` cases in
+``tests/commands/test_cli_global_flags.py``).
 """
 import io
 import sys
 
 import typer
 from click.testing import CliRunner
-from typer.main import get_command
+from typer.main import get_command, get_command_name
 
 from tan.commands.bootstrap_cmd import bootstrap
 from tan.commands.build_cmd import build
 from tan.commands.clean_cmd import clean
 from tan.commands.debug_config_cmd import debug_config
-from tan.commands.deferred_cmd import (
-    DEFERRED_CONTEXT_SETTINGS,
-    DEFERRED_VERBS,
-    completion,
-    diff,
-    inspect,
-    pinmux,
-    scaffold,
-    support_bundle,
-    trace,
-)
+from tan.commands.completion_cmd import completion
+from tan.commands.diff_cmd import diff
+from tan.commands.inspect_cmd import inspect
+from tan.commands.pinmux_cmd import pinmux
+from tan.commands.scaffold_cmd import scaffold
+from tan.commands.support_bundle_cmd import support_bundle
+from tan.commands.trace_cmd import trace
+from tan.commands.deferred_cmd import DEFERRED_CONTEXT_SETTINGS
 from tan.commands.doctor_cmd import doctor
 from tan.commands.examples_cmd import examples
 from tan.commands.explain_cmd import explain
@@ -56,6 +55,7 @@ from tan.commands.sdk_cmd import sdk
 from tan.commands.size_cmd import size
 from tan.commands.validate_cmd import validate
 from tan.commands.west_forward_cmd import FORWARD_CONTEXT_SETTINGS, lock, migrate, quality
+from tan.core.global_flags import RELOCATABLE_FLAG_ARITY
 from tan.envelope import (
     Envelope,
     Issue,
@@ -65,6 +65,7 @@ from tan.envelope import (
     envelope_emitted_exit_code,
 )
 from tan.exit_codes import ExitCode
+from tan.output_format import declared_formats, invalid_format_message
 from tan.version import TAN_VERSION
 
 app = typer.Typer(add_completion=False)
@@ -78,9 +79,9 @@ app = typer.Typer(add_completion=False)
 app.command("bootstrap")(bootstrap)
 app.command("build")(build)
 app.command("clean")(clean)
-app.command("completion", context_settings=DEFERRED_CONTEXT_SETTINGS)(completion)
+app.command("completion")(completion)
 app.command("debug-config")(debug_config)
-app.command("diff", context_settings=DEFERRED_CONTEXT_SETTINGS)(diff)
+app.command("diff")(diff)
 app.command("doctor")(doctor)
 app.command("examples")(examples)
 app.command("explain")(explain)
@@ -89,67 +90,80 @@ app.command("flash")(flash)
 app.command("generate")(generate)
 app.command("image")(image)
 app.command("init")(init)
-app.command("inspect", context_settings=DEFERRED_CONTEXT_SETTINGS)(inspect)
+app.command("inspect")(inspect)
 app.command("kconfig")(kconfig)
 app.command("lock", context_settings=FORWARD_CONTEXT_SETTINGS)(lock)
 app.command("migrate", context_settings=FORWARD_CONTEXT_SETTINGS)(migrate)
 app.command("model")(model)
 app.command("monitor")(monitor)
 app.command("new-som")(new_som)
-app.command("pinmux", context_settings=DEFERRED_CONTEXT_SETTINGS)(pinmux)
+app.command("pinmux")(pinmux)
 app.command("presets")(presets)
 app.command("quality", context_settings=FORWARD_CONTEXT_SETTINGS)(quality)
 app.command("renode")(renode)
 app.command("run")(run)
-app.command("scaffold", context_settings=DEFERRED_CONTEXT_SETTINGS)(scaffold)
+app.command("scaffold")(scaffold)
 app.command("sdk")(sdk)
 app.command("size")(size)
-app.command("support-bundle", context_settings=DEFERRED_CONTEXT_SETTINGS)(support_bundle)
-app.command("trace", context_settings=DEFERRED_CONTEXT_SETTINGS)(trace)
+app.command("support-bundle")(support_bundle)
+app.command("trace")(trace)
 app.command("validate")(validate)
 
-#: Every registered subcommand name -- must track the `app.command(...)` calls
-#: above. Used only to find the argv BOUNDARY `_reorder_global_flags` moves a
-#: leading global flag across; it is never itself treated as a flag.
+#: Every registered subcommand name, DERIVED from the `app.command(...)` table
+#: above rather than retyped beside it (tan-cli#378). Used only to find the
+#: argv BOUNDARY `_reorder_global_flags` moves a leading global flag across;
+#: it is never itself treated as a flag.
+#:
+#: Hand-kept, this was a second place to forget a command -- and forgetting one
+#: here is silent: a name missing from the set is not recognised as the
+#: boundary, so the whole rewrite aborts and every leading global flag on that
+#: command goes back to being a Click "No such option". Deriving it means a
+#: command registered next year is covered by the single `app.command(...)`
+#: line that registers it.
+#:
+#: `CommandInfo.name` is the explicit name every registration above passes;
+#: `get_command_name` is Typer's own `snake_case` -> `kebab-case` fallback, for
+#: a future registration that omits it (`app.command()(debug_config)` would
+#: otherwise contribute `None`).
 _SUBCOMMAND_NAMES = frozenset(
-    {
-        "bootstrap", "build", "clean", "completion", "debug-config", "diff",
-        "doctor", "examples", "explain", "faultdecode", "flash", "generate",
-        "image", "init", "inspect", "kconfig", "lock", "migrate", "model",
-        "monitor", "new-som", "pinmux", "presets", "quality", "renode", "run",
-        "scaffold", "sdk", "size", "support-bundle", "trace", "validate",
-    }
+    info.name or get_command_name(info.callback.__name__)
+    for info in app.registered_commands
 )
 
-#: clap's `GlobalArgs` (`crates/tan-cli/src/cli.rs` lines 24-73) minus
-#: `--format`: every field there is `#[arg(long, global = true, ...)]`, so
-#: clap accepts it on EITHER side of the subcommand name. `--format` is
-#: deliberately excluded -- it already has its own root-level, per-command
-#: allowlisted mechanism below (`_HONOURS_ROOT_FORMAT`), rolled out command by
-#: command on purpose (see `root`'s refusal branch and
-#: `test_debug_config_command.py`'s `--format json validate` case, which
-#: pins `validate` to STILL be refused pre-subcommand until it is taught to
-#: read `ctx.obj` itself); folding `--format` into the blanket reorder below
-#: would silently skip that refusal for every not-yet-migrated command.
-#: `--version` is not here either -- it lives on `Cli` directly in clap, not
+#: clap's `GlobalArgs` (`crates/tan-cli/src/cli.rs` lines 24-73) PLUS
+#: `--format`: every field there is `#[arg(long, global = true, ...)]`, so clap
+#: accepts each on EITHER side of the subcommand name, and `--format` is one of
+#: them. `--version` is not -- it lives on `Cli` directly in clap, not
 #: `GlobalArgs`, and is root-only on both sides already.
 #: Value: the flag's arity (1 = takes a value, 0 = boolean).
-_GLOBAL_FLAG_ARITY: dict[str, int] = {
-    "--project": 1,
-    "--board-yaml": 1,
-    "--sdk-root": 1,
-    "--target": 1,
-    "--all": 0,
-    "--verbose": 0,
-    "--quiet": 0,
-    "--no-color": 0,
-    "--non-interactive": 0,
-    "--ci": 0,
-}
+#:
+#: Imported from `tan.core.global_flags` rather than hand-copied a second
+#: time (tan-cli#261): that module is also what
+#: `tan.core.global_flags.accept_global_flags` reads to decide which flags a
+#: command is missing, so this reorder table and the per-command injection
+#: list cannot drift apart the way two independent hand-written copies of
+#: clap's `GlobalArgs` field list eventually would. `--format` is in the
+#: relocation table but NOT the injection list -- see `RELOCATABLE_FLAG_ARITY`
+#: there for why the two must stay separate.
+_RELOCATABLE_FLAG_ARITY: dict[str, int] = RELOCATABLE_FLAG_ARITY
+
+#: The oracle's global `--format` only ever had two values (measured:
+#: `target/debug/tan.exe --format sarif validate` and `... --format bogus
+#: new-som --sku FOO` both answer `error: invalid value '<x>' for '--format
+#: <FORMAT>' [possible values: text, json]` at exit 2, in BOTH argv
+#: positions) -- but this port's global `--format` is wider than that
+#: (tan-cli#403): `_format_callback` accepts `_every_declared_format()`, the
+#: union over every registered command's own `--format`, not a hard-coded
+#: pair. `_reorder_global_flags` has to relocate that SAME domain, via the
+#: SAME function, or a value outside the oracle's two but inside a real
+#: command's own domain (`diagnostic-v1`/`sarif`, `validate`'s) collapses the
+#: rewrite and drops the subcommand entirely instead of relocating past it
+#: (tan-cli#433) -- a second, hand-kept copy of this set is exactly the drift
+#: that produced #433 in the first place.
 
 
 def _reorder_global_flags(argv: list[str]) -> list[str]:
-    """Move a leading GLOBAL flag (`_GLOBAL_FLAG_ARITY`) from before the
+    """Move a leading GLOBAL flag (`_RELOCATABLE_FLAG_ARITY`) from before the
     subcommand name to immediately after it, where a command that implements
     it already has its own local option declared (see e.g. `clean_cmd.clean`'s
     trailing `--quiet`/`--ci`/`--target`/... parameters) -- Click only reads
@@ -170,24 +184,36 @@ def _reorder_global_flags(argv: list[str]) -> list[str]:
     fail on `--bogus`; this never invents support a command never had, and
     never swallows an unrecognised flag silently.
 
-    `--format` is left in place rather than moved: it is skipped over (kept
-    ahead of the subcommand, exactly where it was typed) so scanning can
-    continue past it, because `root` (below) already declares its own
-    `--format` and reads pre-subcommand values off `ctx.obj` -- a LEADING
-    `--format json --sdk-root X doctor` must not abort the whole rewrite and
-    strand `--sdk-root` in the unrecognised pre-subcommand position. This is
-    NOT full parity with the oracle: the oracle's clap `--format` is `global =
-    true` and actually runs doctor at rc=4 (`tan --format json --sdk-root X
-    doctor`); this port only lets the argv survive the reorder and reach
-    `root`, which then refuses any command outside `_HONOURS_ROOT_FORMAT`
-    (below) with rc=2 and a `cli.parse-error` envelope -- `doctor` is not yet
-    in that set, so `python -m tan --format json --sdk-root X doctor` is
-    still rc=2 today. The worked, pinned example is `debug-config`, which
-    IS in `_HONOURS_ROOT_FORMAT`: `tan --format json debug-config ...`
-    reaches the command and emits the JSON envelope, per
-    `test_debug_config_command.py`'s `--format json validate` case. Each
-    command joins `_HONOURS_ROOT_FORMAT` -- and only then gains this rc=4-style
-    parity -- when it learns to read `ctx.obj["format"]`.
+    `--format` is relocated by exactly this mechanism too (tan-cli#378), and
+    that is the WHOLE of how it is global now. It used to be excepted here --
+    left sitting ahead of the subcommand for `root`'s own `--format` to catch
+    and stash on `ctx.obj`, with a hand-written set of commands allowed to
+    read it back. That set reached 12 of the 32 registered commands and
+    stopped; the other 20 (`tan --format json doctor`, `... model list`,
+    `... sdk current`, `... validate`, ...) were refused at rc=2 with a
+    `cli.parse-error` envelope naming `command: "cli"` -- the wrong command
+    for a machine caller to key off, on argv the oracle accepts. Relocation
+    needs no such set because it does not depend on a command opting in:
+    every registered command declares AND reads its own `--format` (the
+    position every golden already uses, and where each command's own
+    "'x' (choose from 'text', 'json')" validation lives), so moving the token
+    there hands it to a parameter that acts on it. A command added later is
+    covered by the `app.command(...)` line that registers it, with nothing
+    else to remember -- pinned by
+    `tests/commands/test_cli_global_flags.py`, which derives its cases from
+    that same registration table.
+
+    `--format`'s relocatable domain is `_every_declared_format()` -- the union
+    over every registered command's own `--format`, not just the oracle's
+    `text`/`json` pair (tan-cli#403) -- because `root`'s own eager
+    `_format_callback` accepts that identical union; the two have to read the
+    SAME set or a value `_format_callback` would happily accept gets treated
+    here as not-the-flag-at-all and collapses the rewrite instead of
+    relocating past the subcommand name (tan-cli#433). A value outside even
+    that union -- `bogus` -- still is not this flag, and the rewrite still
+    collapses to just that `--format <value>` pair so `root` refuses it at
+    parse time, before any command resolves -- see the `--format` branch below
+    for why leaving the rest of argv in place does not reach the refusal.
 
     Deliberately conservative otherwise: any OTHER token before the first
     subcommand name that is not a recognised global flag (or that flag's
@@ -198,27 +224,75 @@ def _reorder_global_flags(argv: list[str]) -> list[str]:
     move anything after) sees the exact argv it always has.
     """
     moved: list[str] = []
-    kept: list[str] = []  # `--format` tokens, left before the subcommand
     i = 0
     n = len(argv)
     while i < n:
         token = argv[i]
         if token in _SUBCOMMAND_NAMES:
-            return [*kept, token, *moved, *argv[i + 1 :]]
+            return [token, *moved, *argv[i + 1 :]]
         name = token.split("=", 1)[0]
-        if name == "--format":
-            if "=" in token:
-                kept.append(token)
-                i += 1
-                continue
-            if i + 1 >= n:
-                return argv  # "--format" with no value: let Click report it natively
-            kept.extend((token, argv[i + 1]))
-            i += 2
-            continue
-        arity = _GLOBAL_FLAG_ARITY.get(name)
+        arity = _RELOCATABLE_FLAG_ARITY.get(name)
         if arity is None:
             return argv  # not a recognised global flag and not the subcommand
+        if name == "--format":
+            # The relocatable domain is `_every_declared_format()`, not a
+            # hard-coded `text`/`json` pair (tan-cli#433, a regression of
+            # tan-cli#403): `_format_callback` already accepts the union over
+            # every registered command's `--format`, including `validate`'s
+            # `diagnostic-v1`/`sarif`, so this rewrite has to relocate that
+            # SAME set or it refuses a value `root` itself would have
+            # accepted, collapsing the argv and dropping the subcommand along
+            # with it -- exactly #433's `tan --format diagnostic-v1 validate
+            # --offline`, which lost `validate` entirely and answered "a
+            # command is required" instead of the diagnostic-v1 document `tan
+            # validate --offline --format diagnostic-v1` produces.
+            #
+            # A value outside even that union is not this flag at all, and the
+            # oracle refuses such a VALUE at PARSE time, before the command
+            # body runs -- measured: `tan --format bogus new-som --sku FOO`
+            # rejects the value and does no work, while a rewrite that let the
+            # value through made it something only `new-som`'s own body
+            # validates, and `new-som` WRITES metadata files. The rewrite
+            # therefore collapses to exactly the two tokens that reproduce
+            # that refusal through `root`'s own `_format_callback`, dropping
+            # the rest of argv -- see the `return` below for why leaving argv
+            # alone does not work.
+            if "=" in token:
+                value = token.split("=", 1)[1]
+            else:
+                value = argv[i + 1] if i + 1 < n else None
+            if value not in _every_declared_format():
+                # Just returning `argv` here (the first cut of tan-cli#378)
+                # does NOT reach that refusal, for two measured reasons.
+                #
+                # (1) `root`'s `--format` is a plain, non-`multiple` Click
+                # option, so Click's parser overwrites `state.opts` on each
+                # occurrence and only ever type-casts the LAST one
+                # (`click.parser._match_long_opt`) -- `_format_callback` is
+                # never handed the bad value at all when a second `--format`
+                # follows. Measured: `tan --format bogus --format json new-som
+                # --sku FOO` reached `new-som`'s BODY (its SDK-root preflight
+                # message printed), where the oracle answers `invalid value
+                # 'bogus'` having run nothing, and where a resolvable
+                # `--sdk-root` means real metadata writes.
+                #
+                # (2) Returning the untouched argv also strands every global
+                # flag already scanned ahead of this one back in the
+                # pre-subcommand position `root` does not declare: `tan
+                # --verbose --format bogus validate` answered `No such option:
+                # --verbose` -- naming a flag this port supports, for an argv
+                # whose actual fault is the `--format` value.
+                #
+                # Collapsing to `--format <bad-value>` alone fixes both: it is
+                # the only argv that makes `root` refuse THIS value, at parse,
+                # before any command resolves. Everything dropped is either a
+                # global flag (accepted, never read on a refused invocation) or
+                # the subcommand the oracle likewise never runs. The `=`
+                # spelling collapses to its single token; a trailing `--format`
+                # with no value at all collapses to just the flag, which Click
+                # reports as "Option '--format' requires an argument." (exit 2,
+                # matching clap's own "a value is required" refusal).
+                return argv[i : i + (1 if "=" in token else 2)]
         if "=" in token or arity == 0:
             moved.append(token)
             i += 1
@@ -230,12 +304,74 @@ def _reorder_global_flags(argv: list[str]) -> list[str]:
     return argv  # no subcommand token ever found
 
 
+def _value_taking_options(command: str | None) -> frozenset[str]:
+    """Every option STRING that swallows the next argv token as its value --
+    `root`'s own, plus `command`'s when argv names one.
+
+    Read off Click's real parameter objects rather than a table in this
+    module: the options that matter here are per-command (`scaffold --name`,
+    `explain --template`, `init --destination`), so no table here could know
+    them, and a table that tried would be stale the first time a command grew
+    an option. `--help`/`--version` and every other boolean are excluded by
+    `is_flag`; `click.Argument`s are excluded by the leading-dash test (their
+    `opts` carry the parameter NAME, not a flag).
+    """
+    group = get_command(app)
+    params = list(group.params)
+    subcommand = group.commands.get(command) if command is not None else None
+    if subcommand is not None:
+        params += list(subcommand.params)
+    return frozenset(
+        opt
+        for param in params
+        for opt in (*param.opts, *param.secondary_opts)
+        if opt.startswith("-") and not getattr(param, "is_flag", False) and param.nargs == 1
+    )
+
+
 def _wants_help(argv: list[str]) -> bool:
-    """Whether `--help` appears anywhere in argv. Textual, like `_wants_json`
-    below: Click's own `--help` is an eager option that can short-circuit
-    parsing before anything else runs, so this only needs to know the token
-    is present, not where."""
-    return "--help" in argv
+    """Whether `--help` appears in an OPTION position -- not as some other
+    option's VALUE (tan-cli#394).
+
+    A plain `"--help" in argv` was wrong in a way `--help`'s eagerness hides:
+    Click's parser takes the next token as a value-carrying option's argument
+    WITHOUT checking whether it looks like an option
+    (`click.parser._get_value_from_state` pops `rargs[0]` unconditionally), so
+    a `--help` consumed that way NEVER reaches the eager help callback. The
+    pre-scan believed it had; `main()` then routed the whole argv through
+    `_emit_help_envelope`, which runs the command under `CliRunner` and
+    reports its captured output as one `command: "cli"` envelope. Measured:
+    `tan scaffold --format json --name --help --destination out` wrote three
+    real files and answered `{"command":"cli","ok":true,...,"data":{"message":
+    "<the escaped scaffold envelope>"}}` -- so a consumer reading
+    `data.written` saw `[]` for a run that wrote, and `tan explain --format
+    json --template --help` re-labelled a real `explain.template-unknown`
+    refusal as `cli.parse-error`. Text mode reported the truth in both cases;
+    only the JSON channel lied.
+
+    Walking argv with the real arity table instead means the two channels
+    agree: a `--help` in value position is left to the command, which then
+    emits its OWN envelope (the same one text mode describes), and a `--help`
+    in option position still short-circuits here.
+    """
+    takes_value = _value_taking_options(
+        next((token for token in argv if token in _SUBCOMMAND_NAMES), None)
+    )
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        # `--` ends option parsing for Click exactly as it does for clap, so a
+        # `--help` after it is a positional argument and the eager help callback
+        # never fires. Measured against the oracle: `tan explain -- --help`
+        # exits 2 with a refusal, not help.
+        if token == "--":
+            return False
+        if token == "--help":
+            return True
+        # `--opt=value` carries its value inline, so it consumes one token; a
+        # bare value-taking `--opt` eats the token after it, whatever it says.
+        i += 2 if token in takes_value else 1
+    return False
 
 
 def _emit_help_envelope(argv: list[str]) -> int:
@@ -276,38 +412,6 @@ def _emit_help_envelope(argv: list[str]) -> int:
     return code
 
 
-#: Commands that read the root `--format` off `ctx.obj`, so the flag may precede
-#: the subcommand name for them (clap's `global = true`). Grow this as each
-#: command is taught to; see `root` for why an unlisted command must REFUSE the
-#: pre-subcommand position rather than silently ignore it.
-#:
-#: The non-deferred four (`debug-config`/`flash`/`image`/`size`) and
-#: `faultdecode` are hand-listed here -- each command's own module is where its
-#: `ctx.obj["format"]` read lives, so there is no shared list to derive them
-#: from the way the deferred seven have `deferred_cmd.DEFERRED_VERBS`.
-#: `faultdecode` was verified against the oracle the same way (measured:
-#: `target/debug/tan.exe --format json faultdecode --cfsr 0x8200` reaches the
-#: command rather than erroring on `--format`'s position) and its own module
-#: (`faultdecode_cmd.py:resolved_format`) already reads `ctx.obj`; this entry
-#: was the missing wire-up.
-#:
-#: The seven `deferred_cmd.py` stubs are DERIVED from `DEFERRED_VERBS` rather
-#: than retyped here -- a third hardcoded copy of the same seven names is
-#: exactly the drift this set exists to prevent (an eighth stub added to
-#: `deferred_cmd.py` without a matching edit here would otherwise pass every
-#: test while silently regressing to exit 2 for the new verb). Verified
-#: against the oracle (`target/debug/tan.exe`): `tan --format json scaffold`
-#: (and the other six) all reach the real command rather than erroring on
-#: `--format`'s position -- clap's `--format` is genuinely global, so a stub
-#: that refuses it pre-command would hand the JSON caller most likely to check
-#: for the deferral's issue code the exact typo-shaped exit-2 `cli.parse-error`
-#: that module exists to eliminate. Each stub reads `ctx.obj["format"]` (see
-#: `deferred_cmd.py`).
-_HONOURS_ROOT_FORMAT = frozenset(
-    {"debug-config", "flash", "image", "size", "faultdecode", *DEFERRED_VERBS}
-)
-
-
 def _format_callback(ctx: typer.Context, value: str | None) -> str | None:
     """Validates `--format`'s value the moment Click parses it. Marked
     `is_eager=True` on the option below, alongside `--version`
@@ -331,15 +435,63 @@ def _format_callback(ctx: typer.Context, value: str | None) -> str | None:
     bogus`, `tan --format bogus --version`, and `tan --format "" build` (an
     empty value counts as invalid: clap says "a value is required for
     '--format <FORMAT>' but none was supplied") all exit 2 on the value
-    itself. Without this, a root-position `--format ""` silently defaulted to
-    text mode for every command in `_HONOURS_ROOT_FORMAT` (rc 1, diverging
-    from the oracle's rc 2) instead of being refused here. `ctx.fail()` gives
-    the same Click UsageError shape (exit 2) every other CLI mistake here
-    already gets.
+    itself. `ctx.fail()` gives the same Click UsageError shape (exit 2) every
+    other CLI mistake here already gets.
+
+    Reaches the argv shapes where `--format` is still parsed by `root` since
+    tan-cli#378 relocated the pre-subcommand position: no subcommand at all
+    (bare `tan --format bogus`, `tan --format bogus --version`), a rewrite
+    `_reorder_global_flags` aborted on some earlier unrecognised token (which
+    is itself a usage error) -- and, deliberately, EVERY pre-subcommand
+    `--format` whose value is outside `_ROOT_FORMAT_VALUES`, which that
+    function leaves in place precisely so this refusal is what a caller gets.
+    That is the oracle's own ordering: it rejects the value before the
+    subcommand runs, so `tan --format bogus new-som --sku FOO` writes nothing.
+    With `text`/`json` and a subcommand named, the value lands on that
+    command's own `--format` instead, whose identically-shaped "'x' (choose
+    from 'text', 'json')" `BadParameter` -- the first statement in every
+    command body, before any work -- refuses the post-subcommand position at
+    the same exit 2.
     """
-    if value is not None and value not in ("text", "json"):
-        ctx.fail(f"'{value}' is not one of 'text', 'json'")
+    if value is None:
+        return value
+    # The domain here is the UNION over every registered command, not the
+    # two-value list this used to hard-code (tan-cli#403). It has to be: the
+    # callback is EAGER and fires before `ctx.invoked_subcommand` is known, so
+    # a `text`/`json` domain refused `tan --format diagnostic-v1 validate
+    # --offline` at exit 2 while the post-subcommand spelling of the same run
+    # emitted the document. `validate` really does declare four formats
+    # (`ValidateOutputFormat`), and the two spellings are meant to be one flag.
+    #
+    # Eagerness itself stays, and is not negotiable: the docstring above pins
+    # measured oracle behaviour where `tan --format bogus --version` must exit
+    # 2 BEFORE `--version` runs. Moving the whole check into `root`'s body
+    # would hand that race to `--version`.
+    #
+    # This is only the OUTER bound. `root` narrows to the invoked subcommand's
+    # own list once it knows which one that is.
+    allowed = _every_declared_format()
+    if value not in allowed:
+        ctx.fail(invalid_format_message(value, allowed))
     return value
+
+
+def _every_declared_format() -> tuple[str, ...]:
+    """Every `--format` value ANY registered command accepts, first-seen order.
+
+    Derived from the live command tree rather than listed. A hand-kept union
+    would be a second copy of the same fact, and a command that gained a
+    fourth format would then be refused here by a stale copy -- which is the
+    exact shape of the bug this replaced.
+    """
+    seen: dict[str, None] = {}
+    group = get_command(app)
+    for name in sorted(getattr(group, "commands", {})):
+        for value in declared_formats(group.commands[name]):
+            seen.setdefault(value, None)
+    # `or` guards the degenerate case only: a tree with no `--format` anywhere
+    # would otherwise refuse every value, including the two that always worked.
+    return tuple(seen) or ("text", "json")
 
 
 def _version_callback(ctx: typer.Context, value: bool) -> bool:
@@ -434,13 +586,15 @@ def root(
     ),
 ) -> None:
     """tan CLI -- board configuration, generation, and project tooling."""
-    # Rust's `--format` is `global = true`, so clap accepts it on EITHER side of
-    # the subcommand name; four committed goldens invoke `tan --format json
-    # debug-config ...`. Click gives the group only what precedes the subcommand,
-    # so the value is recorded here and read off `ctx.obj` by any command that
-    # honours the pre-subcommand position. A command's OWN `--format` (declared
-    # after the command name) still wins -- that is the position every other
-    # golden uses.
+    # The `ctx.obj["format"]` seam thirteen command modules read as a fallback
+    # (`output_format or (ctx.obj or {}).get("format") or "text"`). Since
+    # tan-cli#378 relocated the pre-subcommand `--format` past the subcommand
+    # name, those reads land on the command's OWN parameter and this is `None`
+    # on every argv that names a command -- kept because the seam is what
+    # makes the two positions interchangeable if a future argv shape reaches a
+    # command without going through `_reorder_global_flags`, and because
+    # dropping it would leave `ctx.obj` unset for readers that would then have
+    # to be edited in lockstep for no behavioural gain.
     ctx.obj = {"format": output_format}
     if ctx.invoked_subcommand is None:
         # Bare invocation. Rust's clap requires a subcommand and exits 2 with
@@ -454,26 +608,16 @@ def root(
         # already gets, so bare invocation does not need its own bespoke
         # rendering.
         ctx.fail("a command is required")
-    if output_format is not None and ctx.invoked_subcommand not in _HONOURS_ROOT_FORMAT:
-        # A command that does not read `ctx.obj` would ACCEPT `--format json`
-        # here and then run in text mode: exit 0, human text on stderr, and
-        # NOTHING on stdout -- an envelope-less `--format json` run, which is the
-        # exact break this port exists to prevent (the extension renders an empty
-        # panel with no error). Refusing is the status quo for those commands
-        # (Click's own usage error, exit 2, plus `main`'s `cli.parse-error`
-        # envelope). Each command joins `_HONOURS_ROOT_FORMAT` when it learns to
-        # read `ctx.obj`; until then the flag only works in its documented
-        # position, after the subcommand name.
-        #
-        # LAST in this callback deliberately: `--version` and the bare-invocation
-        # refusal both have their own answers, and checking first hijacked them
-        # with a worse message (`tan --format json --version` exits 0 with the
-        # version line in Rust, and bare `tan --format json` must say "a command
-        # is required", not name a `None` subcommand).
-        ctx.fail(
-            f"--format must be given after the '{ctx.invoked_subcommand}' "
-            "subcommand, not before it"
-        )
+    # No third branch here any more (tan-cli#378). This callback used to refuse
+    # a pre-subcommand `--format` for any command outside a hand-written
+    # allowlist of commands that honoured it -- the refusal was correct given the
+    # premise (a command that merely ACCEPTED the flag and ran in text mode
+    # would exit 0 with nothing on stdout), but the premise stopped holding
+    # once `_reorder_global_flags` relocates `--format` to where the command's
+    # own, always-read parameter picks it up. The allowlist reached 12 of 32
+    # commands and stalled, so 20 valid oracle invocations exited 2 with
+    # `command: "cli"`; deleting the branch is what makes the flag global for
+    # all 32 with nothing left to keep in sync.
 
 
 def _wants_json(argv: list[str]) -> bool:
@@ -554,6 +698,28 @@ class _TeeStderr:
         return self._buffer.getvalue()
 
 
+def _reconfigure_stdio() -> None:
+    """Force UTF-8, LF-only stdout/stderr, once, at the process boundary.
+
+    Every command downstream just `print()`s -- correctness here is what
+    makes that safe. A normal Windows `TextIOWrapper` translates a written
+    `\\n` to `\\r\\n` and encodes with the process's ANSI code page, neither of
+    which the oracle's `serde_json`/`println!` output does. Both are visible
+    on stdout, not just in theory: measured, `tan completion --shell bash`
+    was 3975 bytes with 108 `\\r` where the oracle's was 3867 bytes with zero
+    -- and the emitted script is a hard syntax error when sourced in a strict
+    bash (`syntax error near unexpected token $'{\\r''`); `clean --format
+    json` and a bare `--format json` both ended `\\r\\n` too, so this is a
+    process-wide stdout-newline defect, not a completion-specific one. A
+    frozen/piped stream may not implement `.reconfigure()` (e.g. a test
+    harness's in-memory buffer) -- `hasattr` skips those rather than raising,
+    since the fix only matters for the real console/pipe case it targets.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", newline="\n")
+
+
 def main() -> None:
     """Process entrypoint.
 
@@ -575,9 +741,27 @@ def main() -> None:
     missing stdout envelope when the exit signals failure under `--format
     json`.
     """
-    argv = _reorder_global_flags(sys.argv[1:])
+    _reconfigure_stdio()
+    original_argv = sys.argv[1:]
+    argv = _reorder_global_flags(original_argv)
     sys.argv = [sys.argv[0], *argv]
-    json_mode = _wants_json(argv)
+    # Scanned off the ORIGINAL argv, not the rewritten one: `_reorder_global_flags`
+    # COLLAPSES to just the offending `--format <bad-value>` pair the moment a
+    # pre-subcommand `--format` carries a value the oracle's global `--format`
+    # does not have (see its own docstring), which drops every later token --
+    # including a SECOND, accepted `--format json` the oracle still notices when
+    # it decides which channel to answer on. Measured against the oracle: `tan
+    # --format sarif --format json validate --offline` answers a 423-byte JSON
+    # envelope on stdout (`wants_json` in Rust's own `main.rs` is a textual scan
+    # of the whole process argv too, not a re-parse of whatever clap's actual
+    # value resolution landed on). Reading the rewritten `argv` here instead
+    # left that same invocation with `--format json` already dropped by the
+    # collapse, so `json_mode` came back `False` and the usage-error fallback
+    # below never ran: `main()` fell into the text-mode branch, which prints
+    # Click's error to stderr only -- zero bytes on stdout, a hard violation of
+    # "stdout is the envelope channel" for an argv the caller marked `--format
+    # json`.
+    json_mode = _wants_json(original_argv)
 
     if json_mode and _wants_help(argv):
         # `--help` short-circuits Click before `root`/any command ever runs

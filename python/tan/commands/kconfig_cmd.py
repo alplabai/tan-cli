@@ -55,8 +55,10 @@ import yaml
 
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `tan.planner.kconfig_symbols.SCHEMA_VERSION`, verbatim -- not imported
 #: directly: every `tan.planner.*` submodule import runs the package's own
@@ -104,10 +106,48 @@ def _resolve_core(core_arg: str | None, board_yaml: str) -> str:
         return core_arg
     try:
         text = Path(board_yaml).read_text(encoding="utf-8")
-    except OSError as err:
+    except (OSError, UnicodeDecodeError) as err:
+        # tan-cli#396: `UnicodeDecodeError` is a `ValueError`, NOT an `OSError`,
+        # so an `except OSError` alone could not fire for a board.yaml saved in
+        # cp1252/latin-1 (or with one stray byte pasted into a comment) -- it
+        # escaped as an unhandled traceback, rc 1 with ZERO bytes on stdout.
+        # That is the worst shape a machine interface has: the extension's two
+        # string matches against the envelope both fail open, so the `prj.conf`
+        # symbol menu renders empty or stale and never says why.
+        #
+        # Deliberately the SAME code and message an unreadable file gets,
+        # because the oracle reaches this one arm for both: Rust's
+        # `std::fs::read_to_string` returns an `io::Error` (kind `InvalidData`,
+        # "stream did not contain valid UTF-8") for non-UTF-8 bytes, and
+        # `crates/tan-cli/src/commands/kconfig.rs:156-161` maps every
+        # `read_to_string` error to `kconfig.board-yaml-missing`. Not
+        # `errors="replace"`: that would silently mangle the user's bytes and
+        # then resolve a core out of the mangled result.
         raise _CoreResolutionError(
             "kconfig.board-yaml-missing",
             f"failed to read board.yaml at `{board_yaml}`: {err}",
+        ) from err
+    except UnicodeDecodeError as err:
+        # tan-cli#396: `UnicodeDecodeError` is a `ValueError`, NOT an
+        # `OSError`, so the clause above could never fire on it -- one
+        # undecodable byte in the customer's own board.yaml (a cp1252/latin-1
+        # editor on Windows, a stray byte pasted into a comment) escaped this
+        # whole command as a traceback: rc 1, ZERO bytes on stdout, no
+        # envelope. That is the worst possible shape for this particular
+        # command, which exists to feed the alp-sdk-vscode `prj.conf` LSP
+        # symbol menu: per `contract/README.md:33-37` the extension's two
+        # string matches both fail OPEN on empty stdout, so it renders an
+        # empty or stale menu and never tells the user why. `scaffold.py`
+        # already learned this exact lesson (`except (OSError,
+        # UnicodeDecodeError)`); this file had not.
+        #
+        # `board-yaml-invalid`, not `board-yaml-missing`: the file is there
+        # and readable, so "missing" would send the customer looking for the
+        # wrong problem. Same class -- and same remedy -- as the list-shaped
+        # board.yaml below.
+        raise _CoreResolutionError(
+            "kconfig.board-yaml-invalid",
+            f"failed to read board.yaml at `{board_yaml}`: not valid UTF-8: {err}",
         ) from err
     try:
         doc = yaml.safe_load(text)
@@ -329,39 +369,23 @@ def _text_lines(data: dict, verbose: bool) -> list[str]:
     return lines
 
 
-def kconfig(
-    core: str = typer.Option(
-        None,
-        "--core",
-        metavar="CORE_ID",
-        help="Core id to scope the Kconfig symbol menu to (default: the board's "
-        "one declared Zephyr core, when unambiguous).",
-    ),
-    project: str = typer.Option(
-        None, "--project", metavar="PATH", help="Project root (defaults to current directory)."
-    ),
-    board_yaml: str = typer.Option(
-        None,
-        "--board-yaml",
-        metavar="PATH",
-        help="Explicit board.yaml path (overrides project resolution).",
-    ),
-    sdk_root: str = typer.Option(None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."),
-    verbose: bool = typer.Option(False, "--verbose", help="Emit additional diagnostic detail."),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+def _run_kconfig(
+    *,
+    root: str,
+    board_path: str,
+    core: str | None,
+    sdk_root: str | None,
+    verbose: bool,
+    json_mode: bool,
 ) -> None:
-    """Show the board-scoped Kconfig symbol menu for one core (the vscode
-    `prj.conf` LSP's live feed). Needs a bootstrapped Zephyr workspace."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
-    json_mode = output_format == "json"
+    """The whole setup-class ladder plus the emit, split out of `kconfig`
+    below so that command can wrap it in ONE catch-all (tan-cli#396) without
+    indenting 130 lines under a `try:`.
 
-    root, board_path = resolve_project_paths(project, board_yaml)
-
+    Every failure exits through `_fail`, which raises `typer.Exit` after
+    writing the envelope -- so this function's only control-flow exception is
+    `typer.Exit`, which is exactly what the caller re-raises untouched.
+    """
     # Setup-class check #1: no SDK checkout resolved -- checked before core
     # resolution so every setup-class failure here is uniformly one shape,
     # never a spawn attempt with half-resolved inputs (mirrors kconfig.rs).
@@ -529,3 +553,76 @@ def kconfig(
         for line in _text_lines(data, verbose):
             print(line, file=sys.stderr)
     raise typer.Exit(int(ExitCode.SUCCESS))
+
+
+def kconfig(
+    core: str = typer.Option(
+        None,
+        "--core",
+        metavar="CORE_ID",
+        help="Core id to scope the Kconfig symbol menu to (default: the board's "
+        "one declared Zephyr core, when unambiguous).",
+    ),
+    project: str = typer.Option(
+        None, "--project", metavar="PATH", help="Project root (defaults to current directory)."
+    ),
+    board_yaml: str = typer.Option(
+        None,
+        "--board-yaml",
+        metavar="PATH",
+        help="Explicit board.yaml path (overrides project resolution).",
+    ),
+    sdk_root: str = typer.Option(None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."),
+    verbose: bool = typer.Option(False, "--verbose", help="Emit additional diagnostic detail."),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
+) -> None:
+    """Show the board-scoped Kconfig symbol menu for one core (the vscode
+    `prj.conf` LSP's live feed). Needs a bootstrapped Zephyr workspace."""
+    json_mode = output_format == "json"
+
+    # The same backstop `presets_cmd.py` has had all along and this command
+    # did not (tan-cli#396). Nothing enumerated reaches it -- every IO/parse
+    # failure below is already coded -- and that is precisely the point: the
+    # ONE nobody thought of must arrive as an envelope rather than as a
+    # traceback on stderr with zero bytes on stdout, which the vscode
+    # extension renders as an empty or stale `prj.conf` symbol menu with no
+    # error of any kind (`contract/README.md:33-37`).
+    #
+    # `typer.Exit` is re-raised untouched: it is a `RuntimeError` subclass, so
+    # a bare `except Exception` swallows it -- and every SUCCESSFUL run, plus
+    # every already-coded refusal, leaves through exactly that exception.
+    # Catching it here would have turned `ok: true` into an internal failure.
+    #
+    # The pre-resolution defaults mirror `presets_cmd`'s: `resolve_project_
+    # paths` is itself inside the guard, so the failing envelope needs a
+    # `project` block even when resolution is what blew up.
+    root, board_path = ".", "./board.yaml"
+    try:
+        root, board_path = resolve_project_paths(project, board_yaml)
+        _run_kconfig(
+            root=root,
+            board_path=board_path,
+            core=core,
+            sdk_root=sdk_root,
+            verbose=verbose,
+            json_mode=json_mode,
+        )
+    except typer.Exit:
+        raise
+    except Exception as err:  # noqa: BLE001 -- the envelope IS the error contract
+        _fail(
+            root=root,
+            board_path=board_path,
+            exit_code=ExitCode.INTERNAL_FAILURE,
+            code="kconfig.internal-failure",
+            message=f"kconfig failed unexpectedly: {type(err).__name__}: {err}",
+            core=core,
+            json_mode=json_mode,
+        )
+
+
+# tan-cli#261: adds the six oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`) on top of `--verbose`, already declared and read above; see
+# `tan.core.global_flags`.
+kconfig = accept_global_flags(kconfig)

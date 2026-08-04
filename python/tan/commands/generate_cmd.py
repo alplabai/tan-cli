@@ -46,7 +46,8 @@ VENDORED `--emit scaffold` tree so they work with no checkout at all.
 **Every failure path is an envelope, never a traceback.** A missing or
 unreadable `board.yaml`, an unresolved SDK, a bad `--target`/`--core` pairing, a
 `native_sim` overlay that would be truncated, an interpreter too old to run the
-SDK scripts, a spawn that dies or returns garbage -- each has a
+SDK scripts, a spawn that dies, returns garbage, or exits 0 without producing
+its artefact (tan-cli#397) -- each has a
 `generate.<code>` issue and an exit code below, and the command carries a
 catch-all backstop for anything unforeseen. The extension parses stdout whole:
 a traceback there renders as nothing at all, with no error.
@@ -79,6 +80,7 @@ carries the envelope and nothing else, in both formats.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import subprocess
 import sys
@@ -91,12 +93,18 @@ import typer
 # which interpreter name the SDK's own scripts run under -- a PATH name, never
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
 from tan import planner_emit
-from tan.commands.build_cmd import _planner_python, resolve_sdk_root_wide
+from tan.commands.build_cmd import (
+    _planner_python,
+    resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
+)
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, project_pin_issue
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -383,8 +391,11 @@ def _resolve_output_override(
     return candidate if candidate.is_absolute() else workspace_root / candidate
 
 
-def _ensure_writable(output: Path, target: str) -> None:
+def _ensure_writable(output: Path, target: str) -> bool:
     """Create `output`'s parent and prove the destination is writable.
+
+    Returns True when the probe ITSELF created the destination file, so a
+    refused emit can take it back off disk (tan-cli#420, `_discard_probe_file`).
 
     Done HERE rather than discovered when the spawned emitter trips over it, for
     two reasons: a `PermissionError` traceback on the SDK's stderr is a terrible
@@ -401,18 +412,53 @@ def _ensure_writable(output: Path, target: str) -> None:
         if target == ZEPHYR_BOARD:
             # `--emit zephyr-board`'s `--output` IS the board directory.
             output.mkdir(parents=True, exist_ok=True)
-        else:
-            output.parent.mkdir(parents=True, exist_ok=True)
-            # Append mode, not write: proving writability must not truncate a
-            # file whose emit could still be refused further down.
-            with output.open("ab"):
-                pass
+            return False
+        output.parent.mkdir(parents=True, exist_ok=True)
+        # Checked BEFORE the open, which is what creates it. Afterwards there
+        # is no way left to tell tan's probe from a file the user already had.
+        existed = output.exists()
+        # Append mode, not write: proving writability must not truncate a
+        # file whose emit could still be refused further down.
+        with output.open("ab"):
+            pass
+        return not existed
     except (OSError, ValueError) as err:
         raise GenerateError(
             "generate.output-unwritable",
             f"--output path `{output}` cannot be written: {err}",
             ExitCode.WRITE_FAILURE,
         ) from err
+
+
+def _discard_probe_file(output: Path) -> None:
+    """Remove a destination file that `_ensure_writable` created and no emit
+    ever filled (tan-cli#420).
+
+    The envelope was always honest about this -- exit 3, `data.written == []`,
+    `generate.emit-failed` -- so what is fixed here is the DISK, not the
+    report. The file that survives a refused run is a zero-byte
+    `build/generated/alp.conf`, and `cmake/alp.cmake` hands exactly that path
+    to Zephyr as `EXTRA_CONF_FILE`. Zephyr does not treat an empty conf file
+    as an error: it applies no configuration and says nothing. So the stray
+    turns a loud failure into a later build that silently carries none of the
+    project's alp config.
+
+    Within tan's own flow the refusal stops the build, which is why leaving it
+    was defensible. It is not the only flow: standalone `west build` against a
+    tree where a `tan generate` failed earlier reaches that configure with
+    nobody re-running generate in between, and hand-written firmware bypassing
+    the tan-driven path is first-class in this SDK.
+
+    Zero-byte is re-checked at unlink time rather than trusted from the probe:
+    between the probe and the refusal an emitter may have written a partial
+    file, and a partial artefact is evidence for the user to look at, not
+    litter to remove. Cleanup failure is swallowed -- the run has already
+    failed for a reason worth reporting, and "could not tidy up" must not
+    replace it.
+    """
+    with contextlib.suppress(OSError):
+        if output.is_file() and output.stat().st_size == 0:
+            output.unlink()
 
 
 def _confine_default_outputs(
@@ -506,6 +552,56 @@ def _relative_or_full(workspace_root: Path, output_path: Path) -> str:
         return str(output_path)
 
 
+def _missing_emit_output(emit: str, output: Path) -> str | None:
+    """Why a ZERO exit did not actually produce `output`, or `None` when it did.
+
+    tan-cli#397: `_emit_one` used to read `returncode == 0` as proof that a file
+    landed, and `written[]` was built from nothing else. A checkout whose
+    `scripts/alp_project.py` exits 0 down a path tan did not expect -- a
+    partially installed or partially cloned alp-sdk, a differently configured
+    emitter, a future SDK version -- then produced `ok: true`, exit 0,
+    `failed: []` and a `written[]` naming a file that is not on disk. The next
+    `tan build` configures Zephyr against a stale `alp.conf` or none at all, and
+    the symptom surfaces much later as wrong Kconfig in a built image with
+    nothing in the generate envelope pointing back at the missing artefact.
+    alp-sdk-vscode believes `written[]` outright -- it is the only signal the
+    extension has for what a generate produced, so it performs no existence
+    check of its own.
+
+    NON-EMPTY, not merely present, because the destination already exists by the
+    time the emitter runs whenever `--output` was given: `_ensure_writable`
+    proves writability first, with an `open("ab")` that CREATES a zero-byte file
+    (and a `mkdir` for `zephyr-board`'s directory). An existence-only check
+    would therefore accept tan's own probe as the emitter's artefact -- and
+    `--output` is exactly the shape `cmake/alp.cmake` drives for all 96 Zephyr
+    examples. No real emit is empty: every renderer alp-sdk's `alp_project.py`
+    reaches opens with its `# Auto-generated by scripts/alp_orchestrate.py`
+    header (or is JSON), and a board tree is several files.
+
+    Only the SPAWNED engine needs this. `_emit_one_in_process` performs the
+    write itself, so its `None` is already earned.
+    """
+    prefix = f"Generation failed for target '{emit}': the SDK emitter exited 0 but "
+    try:
+        if emit == ZEPHYR_BOARD:
+            if not output.is_dir():
+                return prefix + f"did not create the board directory `{output}`."
+            if not any(output.iterdir()):
+                return prefix + f"wrote no files into `{output}`."
+            return None
+        if not output.is_file() or output.stat().st_size == 0:
+            return prefix + f"did not write `{output}`."
+    except (OSError, ValueError) as err:
+        # Never swallowed into a success: a destination that cannot even be
+        # stat'ed is exactly the state this guard exists to refuse to call
+        # "written". `ValueError` sits beside `OSError` for the same reason
+        # `_ensure_writable` catches both -- a path carrying a surrogate or an
+        # embedded NUL raises that, and letting one reach the command's
+        # catch-all backstop would report it as InternalFailure (5).
+        return prefix + f"`{output}` could not be checked: {err}"
+    return None
+
+
 def _emit_one(
     python: str,
     script: Path,
@@ -521,6 +617,9 @@ def _emit_one(
     is absent or not executable (`OSError`), it wedges (`TimeoutExpired`), or it
     exits non-zero (the SDK's own stderr is the most useful message there, so it
     is forwarded verbatim when present).
+
+    A zero exit is necessary but NOT sufficient -- `_missing_emit_output` has
+    the whole of why (tan-cli#397).
     """
     argv = [
         python,
@@ -553,7 +652,7 @@ def _emit_one(
     except (OSError, ValueError, subprocess.SubprocessError) as err:
         return f"Generation failed for target '{emit}': {err}"
     if out.returncode == 0:
-        return None
+        return _missing_emit_output(emit, output)
     stderr = (out.stderr or "").strip()
     return stderr or f"Generation failed for target '{emit}'."
 
@@ -800,9 +899,7 @@ def generate(
     non_interactive: bool = typer.Option(
         False, "--non-interactive", hidden=True
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     verbose: bool = typer.Option(
         False, "--verbose", help="List each target in text output."
     ),
@@ -813,10 +910,6 @@ def generate(
     # (as it does to every `tan` invocation), and an unknown flag there is a
     # Click usage error that fails the whole CMake configure.
     del non_interactive
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     # The as-GIVEN strings, never the resolved absolute paths: the envelope
@@ -940,8 +1033,9 @@ def generate(
         # the parent directory (and, for `zephyr-board`, the output directory
         # itself). Running it earlier would leave strays behind for a run the
         # `som.sku` or overlay guard above was about to refuse.
+        probe_created_output = False
         if output_override is not None:
-            _ensure_writable(output_override, targets[0])
+            probe_created_output = _ensure_writable(output_override, targets[0])
         else:
             # No `--output`: every target writes its DEFAULT path, which must
             # stay confined to the project after symlink resolution
@@ -986,6 +1080,12 @@ def generate(
             else:
                 failed.append(mode)
                 issues.append(Issue("generate.emit-failed", "error", message))
+                # tan-cli#420: don't leave the writability probe's own empty
+                # file behind for a Zephyr configure to pick up as a valid
+                # (and silently empty) EXTRA_CONF_FILE. Only the file this
+                # run created, and only while it is still zero-byte.
+                if probe_created_output and target_output == output_override:
+                    _discard_probe_file(target_output)
 
         # APPENDED, after the per-target issues: what the user asked for comes
         # first and this is context about how it ran. Never omitted, though --
@@ -1003,6 +1103,17 @@ def generate(
         pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
         if pin_issue is not None:
             issues.append(pin_issue)
+        # tan-cli#407: this command just wrote `build/generated/alp.conf`, the
+        # DTS overlays and `alp_hw_info_build.h` out of one checkout's
+        # `metadata/`, and `tan build` may plan the very same tree against
+        # another -- both reporting `sourceTier: "discovery"`. Of the four wide
+        # commands this is the one where the split becomes FILES on disk, so
+        # the warning ships beside them. `sdk_root` is the RAW flag (never
+        # reassigned in this function): an explicit root puts both ladders on
+        # the terminal `sdkRootFlag` tier and the helper returns `None`.
+        divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=True)
+        if divergence is not None:
+            issues.append(divergence)
     except GenerateError as err:
         refuse(err)
         return
@@ -1026,3 +1137,11 @@ def generate(
         engine=engine,
         exit_code=ExitCode.SUCCESS if not failed else ExitCode.WRITE_FAILURE,
     )
+
+
+# tan-cli#261: adds the two oracle `GlobalArgs` flags this command was still
+# missing (`--ci`/`--no-color`) on top of the five already declared above
+# (`--target`/`--all`/`--quiet`/`--verbose` read for real; `--non-interactive`
+# accepted and dropped the same way these two now are); see
+# `tan.core.global_flags`.
+generate = accept_global_flags(generate)

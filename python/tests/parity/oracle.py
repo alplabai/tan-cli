@@ -22,9 +22,10 @@ declares the surface both binaries genuinely produce:
 
 ``VERSION``
     Exit code plus the *shape* of the version line. The literals differ BY
-    DESIGN and permanently: the port declares 0.5.0-dev, the checked-out Rust
-    declares 0.4.1-dev (``python/tan/version.py`` records why the port must not
-    reuse the shipped number). What the extension actually contracts on is the
+    DESIGN and permanently: the port declares ``0.5.0-rc3``
+    (``python/tan/version.py``, which records why the port must not reuse the
+    shipped number), the checked-out Rust declares ``0.4.1``
+    (``Cargo.toml``). What the extension actually contracts on is the
     regex ``/^tan \\d+\\.\\d+\\.\\d+/``
     (alp-sdk-vscode/src/alpCli/service.ts:107-121), so that is what is compared
     -- and a side that fails the regex outright is reported even when both
@@ -36,7 +37,8 @@ declares the surface both binaries genuinely produce:
     compare that would enforce it. Prefix-anchoring here silently accepted
     ``"tan 0.5.0-dev\\nLEAKED EXTRA STDOUT LINE"`` and
     ``"tan 9.9.9 THIS IS NOT TAN AT ALL"`` as parity -- on the one case that
-    actually runs today. Rust prints exactly ``tan 0.4.1-dev``.
+    actually runs today. Rust prints exactly ``tan 0.4.1`` (see
+    :data:`PINNED_ORACLE_VERSION`, the one place that spelling is owned).
 
 ``PLAN``
     Exit code, the envelope shell, and -- inside ``data`` -- a NARROWED view of
@@ -78,13 +80,14 @@ declares the surface both binaries genuinely produce:
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import oracle_fixtures
+from . import oracle_fixtures, oracle_provenance
 
 #: ``python/`` -- pinned onto the subprocess ``PYTHONPATH`` so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``, mirroring the
@@ -202,16 +205,135 @@ class ParityResult:
     diffs: list[str]
 
 
+#: The exact ``--version`` line the whole parity suite is measured against.
+#: Not ``0.4.1-dev``: that spelling is this repo's OLDER PROSE for the RUST
+#: oracle, from before ``Cargo.toml`` settled on ``version = "0.4.1"``, which
+#: is why the binary prints no suffix today. It has never been the PORT's
+#: string -- ``python/tan/version.py`` declares ``TAN_VERSION = "0.5.0-rc3"``.
+#: The checked-out Rust binary's actual stdout, byte for byte, is
+#: ``tan 0.4.1`` with no suffix (verified directly: ``tan --version | cat -A``
+#: -> ``tan 0.4.1$``). Shared here, not owned by any one test module, because
+#: ``conftest.py``'s session-scoped ``pinned_oracle`` fixture checks against
+#: it for every file under ``tests/parity/``, not just the module that used to
+#: define it alone.
+PINNED_ORACLE_VERSION = "tan 0.4.1"
+
+#: The `crates/` commit the oracle must have been built from -- the HALF of the
+#: pin `--version` cannot express (tan-cli#406).
+#:
+#: `tan --version` is a pure function of `Cargo.toml`'s `[workspace.package]`
+#: version, which moves only at release time, so it is BLIND to every change
+#: within a release: measured, 15 commits changed the binary's build inputs
+#: between `c5dedc1` ("release: v0.4.1") and `ac79d4c` without touching that
+#: line, two of them envelope-visible (`bb13283` `project.boardYaml`,
+#: `a30adaf` the flash TBD placeholder), and binaries built from both ends
+#: printed the IDENTICAL `tan 0.4.1` while comparing DIFFERENT. Measured
+#: consequence: the stale end fails three cases with a `project.boardYaml`
+#: assertion diff that reads as a port regression -- the apparent fix being to
+#: re-introduce the exact bug `bb13283` removed -- and the converse, an
+#: envelope regression certified against a baseline that already contains it,
+#: is the one that ships.
+#:
+#: Spelled as the newest commit touching a BUILD INPUT (see
+#: :data:`oracle_provenance.BUILD_INPUT_PATHSPEC`), not `git log -1 --
+#: crates/`: the last commit over the whole directory is `8a71310`, which
+#: edited two crate-level `README.md` files and cannot change a byte of the
+#: binary. Recompute with ``git log -1 --format=%H -- 'crates/*/src/*'
+#: 'crates/*/Cargo.toml' Cargo.toml Cargo.lock``.
+PINNED_ORACLE_CRATES_COMMIT = "ac79d4c7ffe00e43f26f3b7c6265436afbff5b0e"
+
+#: The CONTENT of the build inputs the frozen fixtures were captured against,
+#: as `sha256(git ls-files -s -- <BUILD_INPUT_PATHSPEC>)`. This is the pin the
+#: freshness gate asserts on; :data:`PINNED_ORACLE_CRATES_COMMIT` above stays
+#: as the human-readable "which commit was that" and backs the sidecar /
+#: `$TAN_ORACLE_COMMIT` declaration path. Content, not a SHA, because a SHA
+#: cannot survive a PR merge ref, a rebase, a cherry-pick or a squash --
+#: none of which change a byte the compiler reads (tan-cli#414).
+PINNED_ORACLE_BUILD_INPUT_DIGEST = (
+    "d3dc3b8bbb24d2cd05ab5944e0438ac7490828f57de11288366260d45c99f6a0"
+)
+
+
+def build_output_root() -> Path:
+    """``<repo>/target`` -- cargo's output tree, and the only place a binary
+    can be assumed to have come from THIS checkout. Read through
+    :data:`REPO_ROOT` at call time so a test that repoints the root moves this
+    with it."""
+    return REPO_ROOT / "target"
+
+
+def oracle_provenance_drift(binary: str) -> str | None:
+    """Why *binary* cannot be certified as the pinned oracle, or ``None``.
+
+    The checker itself lives in :mod:`oracle_provenance` and takes every root
+    and pin as an argument; this is where THIS checkout's values are bound to
+    it, which is the one thing that has to stay here -- ``oracle.py`` owns the
+    pins, and a test that repoints :data:`REPO_ROOT` must move the check with
+    it.
+    """
+    return oracle_provenance.drift(
+        binary,
+        repo_root=REPO_ROOT,
+        build_output=build_output_root(),
+        pinned_commit=PINNED_ORACLE_CRATES_COMMIT,
+        pinned_version=PINNED_ORACLE_VERSION,
+    )
+
+
+def _certified(binary: str) -> str:
+    """*binary*, or a raise naming the drift. The raise is what turns a
+    stale-oracle run from three `project.boardYaml` assertion diffs into one
+    message that says "rebuild the oracle"."""
+    drift = oracle_provenance_drift(binary)
+    if drift is not None:
+        raise RuntimeError(drift)
+    return binary
+
+
 def rust_binary() -> str | None:
-    """``TAN_RUST_BINARY`` if set, else a build in the usual places. Returns
-    ``None`` only when NOBODY named an oracle and none was built, so the caller
-    can skip rather than invent a comparison.
+    """``TAN_RUST_BINARY`` if set, else the MOST RECENTLY BUILT of
+    ``target/{release,debug}/tan``. Returns ``None`` only when NOBODY named an
+    oracle and none was built, so the caller can skip rather than invent a
+    comparison.
 
     A set-but-missing ``TAN_RUST_BINARY`` RAISES instead. It must not fall back
     to some other binary -- an operator who named one should not silently get a
     different one -- but it must not skip either: a typo'd path in CI would then
     produce an all-skip, all-green run that certifies nothing, which is the
     exact failure mode this harness exists to prevent.
+
+    When both profiles exist, the choice is by ``st_mtime``, not a fixed
+    release-over-debug preference (what this function used to do,
+    unconditionally). That preference used to silently pick a STALE binary: a
+    ``target/release/tan`` left over from a much earlier build (measured --
+    ``tan 0.1.1``, weeks old) sitting next to a freshly rebuilt
+    ``target/debug/tan`` (``tan 0.4.1``) always won, because ``release`` was
+    tried first regardless of either file's age, and every unpinned caller of
+    this function silently measured against the wrong oracle with no signal
+    that anything was off. mtime is what an ordinary edit-build-test loop
+    actually implies: whichever profile was rebuilt LAST is the one a
+    developer (or CI job that just ran ``cargo build``) intends to test
+    against right now. A caller that legitimately wants one profile over the
+    other regardless of freshness should set ``TAN_RUST_BINARY`` explicitly
+    rather than rely on this default.
+
+    Whatever is resolved is then run past :func:`oracle_provenance_drift`,
+    which RAISES on a binary that cannot be tied to
+    :data:`PINNED_ORACLE_CRATES_COMMIT` (tan-cli#406). mtime ranks BUILD time
+    and says nothing about the SOURCE TREE a build came from, so the rule
+    above -- correct as far as it goes -- happily elects a freshly rebuilt
+    binary from a months-old checkout, and ``--version`` then certifies it,
+    because that string cannot change within a release.
+
+    A TIE (identical ``st_mtime`` on both profiles) is refused outright rather
+    than resolved silently -- silently is what this function used to do, and
+    it always broke to ``target/release``, which is exactly the stale-pick bug
+    the mtime rule above replaced. A CI cache restore, ``cp -p``, rsync, or an
+    artifact download can equalise (or invert) mtimes on ``target/`` with no
+    rebuild involved, so a tie is a real, reachable way to reinstate that bug
+    for every caller that does not separately assert the resolved version (see
+    ``conftest.py``'s ``pinned_oracle``, which is that safety net -- this raise
+    is the thing it nets).
     """
     override = os.environ.get("TAN_RUST_BINARY")
     if override:
@@ -221,12 +343,59 @@ def rust_binary() -> str | None:
                 "a named-but-missing oracle would make this suite pass vacuously. "
                 "Fix the path, or unset it to fall back to target/{release,debug}."
             )
-        return override
-    for profile in ("release", "debug"):
-        candidate = REPO_ROOT / "target" / profile / f"tan{_EXE}"
-        if candidate.exists():
-            return str(candidate)
-    return None
+        return _certified(override)
+    candidates = [
+        build_output_root() / profile / f"tan{_EXE}" for profile in ("release", "debug")
+    ]
+    existing = [c for c in candidates if c.exists()]
+    if not existing:
+        return None
+    newest_mtime = max(c.stat().st_mtime for c in existing)
+    tied = [c for c in existing if c.stat().st_mtime == newest_mtime]
+    if len(tied) > 1:
+        raise RuntimeError(
+            "target/release/tan and target/debug/tan report the IDENTICAL "
+            f"mtime ({newest_mtime!r}): {', '.join(str(c) for c in tied)}. "
+            "Refusing to pick one silently -- a tie used to break to "
+            "target/release unconditionally, which is the exact stale-binary "
+            "bug the mtime rule this function now uses was written to "
+            "replace. Rebuild one of the two profiles to break the tie, or "
+            "set TAN_RUST_BINARY=<path> to the one you mean."
+        )
+    return _certified(str(tied[0]))
+
+
+def resolve_oracle_for_skipif() -> str | None:
+    """:func:`rust_binary`, but safe to call at MODULE IMPORT time.
+
+    Test modules outside ``tests/parity/`` bind their oracle at import
+    (``_ORACLE = ...`` feeding a ``pytest.mark.skipif``), and ``rust_binary``
+    deliberately RAISES on three conditions -- an mtime TIE between
+    ``target/{release,debug}``, a set-but-missing ``TAN_RUST_BINARY``, and an
+    oracle that cannot be tied to :data:`PINNED_ORACLE_CRATES_COMMIT`
+    (:func:`oracle_provenance_drift`, tan-cli#406). A
+    raise while a test module is being imported is a COLLECTION error, which
+    aborts the entire pytest session rather than the file that asked; that is
+    exactly why ``pinned_oracle`` resolves inside its fixture body and not at
+    its conftest's import (see that fixture's docstring, and the measured
+    ``collected 0 items ... rc=4`` it records).
+
+    Swallowing the raise here would normally trade a loud abort for a SILENT
+    SKIP, which is worse and is the shape of the bug this whole area keeps
+    reproducing. It does not, because the session-scoped autouse
+    ``pinned_oracle`` in ``python/tests/conftest.py`` calls ``rust_binary()``
+    itself: whichever condition raised here raises there too, one fixture
+    later, and fails the run with the real message. So the deferral costs a
+    slightly later error and buys a session that still collects.
+
+    Returning ``None`` therefore means one of: nothing was built and nobody
+    named one (the ordinary skip), or a condition ``pinned_oracle`` is about to
+    fail the session over anyway.
+    """
+    try:
+        return rust_binary()
+    except RuntimeError:
+        return None
 
 
 def missing_for_live(rust: str | None) -> bool:
@@ -241,6 +410,86 @@ def missing_for_live(rust: str | None) -> bool:
     skips.
     """
     return oracle_fixtures.LIVE and rust is None
+
+
+def empty_tool_inventory(scratch: Path) -> str:
+    """A ``PATH`` value that resolves NOTHING except ``which`` itself -- the
+    general form of ``test_flash_oracle_parity.py``'s ``_pin_tool_inventory``
+    for a case whose frozen fixture answer is "no such tool anywhere on PATH",
+    not "found this specific stand-in". Any ``shutil.which``/
+    ``doctor_cmd.on_path`` probe run against this directory reports every
+    PROBED name absent -- ``west`` for ``test_west_forward_matches_rust``
+    today, ``git``/``cmake``/``ninja``/``python3``/``xz``/``wget`` for
+    ``support-bundle.hostPrerequisites``, and any other which()-gated case's
+    absent-tool branch tomorrow -- matching whatever tool inventory a
+    fixture's capture host happened to lack (tan-cli#313, tan-cli#324),
+    without inventing a second bespoke per-file helper for each one that
+    comes up.
+
+    Seeds the directory with exactly one file: a symlink to the REAL
+    ``which`` this host resolves on its own PATH, POSIX only (a no-op on
+    Windows, whose probe -- ``crate::util::windows_path_lookup`` -- walks
+    ``%PATH%`` by hand and never spawns an external ``which`` at all). A
+    directory that is genuinely, literally empty is NOT a clean "nothing on
+    PATH" answer on POSIX: the oracle's own probe
+    (``crates/tan-cli/src/util.rs:35-50``, ``command_on_path``) resolves a
+    tool by SPAWNING ``which <tool>`` as a subprocess, and that spawn itself
+    has to find ``which`` via this SAME (oracle-controlled) PATH. An empty
+    directory can't resolve ``which`` either, so the probe fails before it
+    ever answers the question asked -- measured directly: a PATH holding
+    every one of ``support-bundle``'s six required tools but NOT ``which``
+    still reports all six missing, and copying a working ``which`` in
+    (touching nothing else) makes that same warning vanish entirely. A
+    literally-empty directory's "everything missing" answer was an artefact
+    of the unresolvable ``which`` spawn, not a real absence measurement --
+    see ``_DEFERRED_VERBS``'s own comment for what the pinned
+    ``support-bundle`` answer means now that this seeds a working ``which``:
+    a GENUINE probe that ran and found nothing, not a degenerate one that
+    could not run at all.
+
+    REPLACES ``PATH`` outright rather than prepending, for the identical
+    reason ``_pin_tool_inventory`` does: prepending would still let a REAL
+    tool further down the replay host's own PATH be found, which is exactly
+    the host-dependence this exists to remove.
+
+    Hand the result to :func:`compare`'s ``python_env_overrides`` -- e.g.
+    ``{"PATH": empty_tool_inventory(tmp_path)}`` -- for a FROZEN-REPLAY
+    caller, and never fabricate the equivalent for the rust side THERE: the
+    frozen answer is a recorded fixture, and pinning only the python side's
+    PATH is exactly right in that mode (see that parameter's own docstring
+    for why forwarding the same pin to the rust side under
+    ``TAN_PARITY_LIVE=1`` is not a safe substitute -- the whole tan-cli#313/
+    #324 bug was one side pinned and the other left to whatever happened to
+    be installed). That ban is scoped to ``compare()``'s frozen-replay path --
+    it does not reach a case that spawns BOTH binaries live on every run
+    instead (e.g. ``test_deferred_verb_is_a_known_divergence_from_the_
+    oracle``): there, applying this SAME value to both sides' subprocess
+    environments is sound, because it is one identical override applied
+    twice, symmetrically, not a pin smuggled onto one side only.
+    """
+    stub_dir = scratch / "empty-path"
+    stub_dir.mkdir(exist_ok=True)
+    if sys.platform != "win32":
+        # The seed is NOT optional. A literally-empty PATH makes the oracle's
+        # POSIX probe unable to resolve `which` ITSELF, so its tool report goes
+        # degenerate: it names every tool missing because it could not look,
+        # not because they are absent. A caller pinning that answer measures a
+        # broken probe. Refuse rather than silently return to it (tan-cli#313,
+        # tan-cli#324 -- the same silent-degradation class both closed).
+        real_which = shutil.which("which")
+        if real_which is None:
+            raise RuntimeError(
+                "empty_tool_inventory() cannot seed `which` into the stub PATH: "
+                "shutil.which('which') returned None on this POSIX host. Without "
+                "it the oracle's tool probe cannot run at all and reports every "
+                "tool missing for the wrong reason -- refusing rather than "
+                "pinning that artefact."
+            )
+        link = stub_dir / "which"
+        if not link.exists():
+            os.symlink(real_which, link)
+        assert link.exists(), f"failed to seed `which` into {stub_dir}"
+    return str(stub_dir)
 
 
 def python_command() -> list[str]:
@@ -270,7 +519,22 @@ def _env(home: Path) -> dict[str, str]:
     }
 
 
-def _run(command: list[str], argv: list[str], cwd: Path, home: Path):
+def _run(
+    command: list[str],
+    argv: list[str],
+    cwd: Path,
+    home: Path,
+    *,
+    env_overrides: dict[str, str] | None = None,
+):
+    """``env_overrides`` layers on top of :func:`_env`'s shared environment --
+    e.g. pinning ``PATH`` so a tool-presence probe INSIDE the spawned process
+    (``shutil.which``/``doctor_cmd.on_path``) cannot pick up whatever happens
+    to be installed on whichever host is replaying this suite (tan-cli#313).
+    Empty by default, so every existing caller is unaffected."""
+    env = _env(home)
+    if env_overrides:
+        env = {**env, **env_overrides}
     proc = subprocess.run(
         [*command, *argv],
         capture_output=True,
@@ -281,7 +545,7 @@ def _run(command: list[str], argv: list[str], cwd: Path, home: Path):
         encoding="utf-8",
         errors="replace",
         cwd=cwd,
-        env=_env(home),
+        env=env,
     )
     try:
         payload = json.loads(proc.stdout)
@@ -355,6 +619,7 @@ def compare(
     home: Path | None = None,
     python: list[str] | None = None,
     extra_scrub_roots: tuple[Path | str, ...] = (),
+    python_env_overrides: dict[str, str] | None = None,
 ) -> ParityResult:
     """Diff the two binaries on ``argv``, scoped to ``surface``.
 
@@ -374,12 +639,57 @@ def compare(
     cover -- e.g. a checked-in fixture file (a ``--plan-from`` plan) that
     itself embeds the path of whatever alp-sdk checkout it was captured
     against. Empty by default, so every existing caller is unaffected.
+
+    ``python_env_overrides`` (tan-cli#313) layers extra environment onto the
+    PYTHON side's subprocess ONLY, never the rust side's -- and is REFUSED
+    outright whenever ``oracle_fixtures.LIVE`` is set, rather than silently
+    applied to one side only. In frozen replay (the default, no
+    ``TAN_PARITY_LIVE``) the rust side never spawns anything at all, so
+    pinning only the python side is exactly right: the frozen fixture IS the
+    rust answer, already captured against a specific tool inventory, and the
+    python side's live PATH probe needs pinning to match it, or the
+    comparison depends on what happens to be installed on whoever runs the
+    suite. See ``test_flash_oracle_parity.py``'s ``_pin_tool_inventory``.
+
+    Under ``TAN_PARITY_LIVE=1`` both sides DO spawn, and ``_env``'s own
+    invariant applies in full ("one environment, shared by both sides --
+    the whole point is that the only difference between the two runs is the
+    implementation"): applying the pin to python alone would silently break
+    that invariant for exactly the pinned cases, and forwarding it to
+    ``rust_run`` too is NOT a safe substitute -- measured against the real
+    oracle (``target/debug/tan``), POSIX ``command_on_path``
+    (``crates/tan-cli/src/util.rs:45-50``) resolves a tool by SPAWNING
+    ``which`` as its own subprocess, which itself has to be found via the
+    (now-pinned, ``which``-free) ``PATH`` -- so a PATH replaced with only a
+    ``dd`` stand-in makes ``which`` itself unresolvable, every rust-side
+    probe report "not found" including ``dd``, and the SAME pin that makes
+    python answer "dd" makes rust answer "bmaptool" -- the opposite tool, on
+    the identical override. So under ``TAN_PARITY_LIVE=1`` this parameter
+    raises rather than comparing two binaries under two different (or two
+    subtly-broken-in-opposite-directions) environments; the caller should
+    drop the pin for a live run (both binaries then share this host's REAL
+    tool inventory, which is the whole point of a live re-validation) and
+    keep it only for frozen replay. ``None`` by default, so every existing
+    caller is unaffected.
     """
     home = home or cwd
     roots = (cwd, home, *extra_scrub_roots)
 
+    if oracle_fixtures.LIVE and python_env_overrides:
+        raise RuntimeError(
+            "compare() got python_env_overrides under TAN_PARITY_LIVE=1: both "
+            "binaries spawn for real in this mode, and pinning only the "
+            "python side's PATH breaks _env's 'one environment, shared by "
+            "both sides' invariant -- see this parameter's own docstring for "
+            "why forwarding the same pin to the rust side is not a safe fix "
+            "either (tan-cli#313). Drop python_env_overrides for a live run, "
+            "or drop TAN_PARITY_LIVE to replay the frozen fixture with it."
+        )
+
     r_code, r_out = rust_run(argv, cwd, home, scrub_roots=roots)
-    p_code, p_out = _run(python or python_command(), argv, cwd, home)
+    p_code, p_out = _run(
+        python or python_command(), argv, cwd, home, env_overrides=python_env_overrides
+    )
     p_out = oracle_fixtures.scrub(p_out, *roots)
     # Scoped to PATH_KEYS, on BOTH sides, before the diff -- see that
     # constant's own docstring. A no-op whenever the two sides already agree

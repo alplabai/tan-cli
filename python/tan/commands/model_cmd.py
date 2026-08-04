@@ -57,8 +57,10 @@ from tan.commands.build_cmd import _planner_python
 from tan.commands.build_output import resolve_metadata_sdk_root, resolve_project_context
 from tan.commands.doctor_cmd import resolve_manifest_python_floor
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -144,6 +146,31 @@ def _load_board(path: Path) -> dict[str, Any]:
         raise ModelError(
             "model.board-yaml-missing",
             f"board.yaml not found at {path}: {err}",
+            ExitCode.VALIDATION_FAILURE,
+        ) from err
+    except UnicodeDecodeError as err:
+        # tan-cli#396: `UnicodeDecodeError` is a `ValueError`, NOT an
+        # `OSError`, so `except OSError` alone could never catch it -- one
+        # undecodable byte in the customer's own board.yaml escaped this
+        # whole command as a traceback: measured `exitCode: 5` /
+        # `model.internal-failure` / "model build failed unexpectedly:
+        # UnicodeDecodeError: ...", which tells a script "tan broke" rather
+        # than "your board.yaml has a bad byte". The file opened and read
+        # fine, so `board-yaml-missing` would send the customer looking for
+        # the wrong problem -- this is the same unusable-input class the
+        # YAML-syntax and not-a-mapping arms below already land on.
+        #
+        # `model` has no Rust oracle to defer to here (unlike `kconfig`,
+        # which folds this same byte-for-byte case into `board-yaml-missing`
+        # to mirror `read_to_string`'s single `io::Error` arm) -- a merge
+        # briefly folded this arm into the OSError one above on that other
+        # command's precedent (tan-cli#415), which made this whole `except`
+        # unreachable dead code and silently reverted the tan-cli#396 fix.
+        # Restored as its own arm: this file's own established
+        # classification, not an oracle's.
+        raise ModelError(
+            "model.board-yaml-invalid",
+            f"{path}: not valid UTF-8: {err}",
             ExitCode.VALIDATION_FAILURE,
         ) from err
     try:
@@ -404,7 +431,16 @@ def _run_build(
 def model(
     subcommand: str = typer.Argument(None, metavar="SUBCOMMAND", help="build."),
     board: str = typer.Option(
-        "board.yaml", "--board", metavar="PATH", help="Path to board.yaml."
+        # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
+        # option, not a second option -- it is what `build`, `run`, `kconfig`,
+        # `validate`, `generate` and `inspect` all call the board file, and
+        # what `docs/CLI.md`'s "Common flags" tells a caller every command
+        # supports. Declared here so `accept_global_flags` sees it as already
+        # covered and stops injecting an inert twin behind this one: a caller
+        # who used the surface-wide spelling was served `./board.yaml`'s
+        # `som.sku` instead of the file they named, and `som.sku` is what
+        # picks the silicon `build_model` compiles for.
+        "board.yaml", "--board", "--board-yaml", metavar="PATH", help="Path to board.yaml."
     ),
     out: str = typer.Option(
         "build/models", "--out", metavar="PATH", help="Output directory."
@@ -421,15 +457,9 @@ def model(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Compile + package board.yaml `models:` into `.alpmodel` packages."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     def finish(
@@ -504,3 +534,21 @@ def model(
         return
 
     finish(project_, sdk, data, issues, exit_code)
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command is
+# missing entirely (`--all`/`--ci`/`--no-color`/`--non-interactive`/
+# `--quiet`/`--target`/`--verbose`); see `tan.core.global_flags`.
+#
+# `--board-yaml` is NOT among them any more (tan-cli#398). It used to be, and
+# the note here claimed that was harmless because "`model`'s own `--board`
+# already plays `--board-yaml`'s role for real" -- but the two spellings were
+# never wired together, so the injected one was accepted, dropped, and the
+# default `./board.yaml` packaged instead of the file the caller named, at
+# `exitCode: 0` with `issues: []`. It is now a second decl on `--board`
+# itself (above), so both spellings are one option and read one file.
+#
+# The six arity-0 flags above stay accepted-and-dropped; the injected
+# `--target` is now REFUSED when supplied rather than ignored, per the same
+# issue -- `model` has no emit target to honour it with.
+model = accept_global_flags(model)

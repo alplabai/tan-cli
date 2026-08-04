@@ -35,21 +35,15 @@ deliberate — it is how a release candidate stays opt-in.
 
 ## Which versions go together
 
-The line to install today:
+The stable line and the current opt-in Python line:
 
-| Component | Version | Notes |
+| Component | Stable | Opt-in / pre-release |
 |---|---|---|
-| alp-sdk | **v0.14.0** | |
-| tan | **v0.4.1** | Rust build |
-| Alp IDE | **v0.4.x** | stable channel; pins tan `0.4.1` |
+| alp-sdk | **v0.14.0** | **v0.15.0-rc1**; tan parity may pin a newer exact commit |
+| tan | **v0.4.1** — frozen Rust line | **v0.5.0-rc4** — shipping Python port |
+| Alp IDE | **v0.4.0** | **v0.5.x** pre-release channel |
 
-Planned, once the Python `tan` ships:
-
-| Component | Beta line | Stable line |
-|---|---|---|
-| alp-sdk | its own cadence, unaffected | its own cadence, unaffected |
-| tan | `v0.5.0-rc1` — Python | `v0.5.0` — Python |
-| Alp IDE | `v0.5.x` — **pre-release** | `v0.6.x` — stable |
+The planned stable Python line remains tan `v0.5.0` with Alp IDE `v0.6.x`.
 
 ### How to tell a beta from a stable Alp IDE build
 
@@ -83,12 +77,14 @@ Established by RUNNING the v0.4.1 oracle, never by reading `crates/`.
 ## The migration
 
 One arc: **the Rust `tan` becomes a Python `tan`, and `tan` becomes the only
-planner and executor.** Today `alp-sdk` plans and `tan` executes; at the end
-`tan` does both and `alp-sdk` carries no Python.
+planner and executor.** The release path and planner have already moved:
+`python/tan/planner/` plans in-process and the Python executor runs the plan.
+The remaining end state is to remove the frozen Rust oracle and alp-sdk's
+original planner copy once their parity roles are fully captured.
 
 ### tan — `v0.5.0-rc1` · opt-in release candidate
 
-The first tag at which a Python `tan` exists. Ships the essential command
+The first tag at which a Python `tan` existed. It shipped the essential command
 surface — `build`, `generate`/`emit`, `doctor`, `sdk`, `kconfig`, `init`,
 `flash`, `bootstrap`, `validate` — plus the
 `{command, ok, exitCode, project, data, issues}` envelope the extension parses,
@@ -96,7 +92,9 @@ and the v0.4.1 compatibility floor.
 
 Assets are PyInstaller freezes of `python/`, on four targets. Windows arm64 and
 Linux arm64 get no asset in this release: PyInstaller cannot cross-compile and
-there is no runner to freeze on. Those hosts stay on the stable line.
+adding the available hosted arm64 runners was out of scope, not impossible.
+Those hosts stay on the stable line or install the Python package from a
+checkout.
 
 Gated on Target 1 green on silicon.
 
@@ -105,11 +103,17 @@ Gated on Target 1 green on silicon.
 `SUPPORTED_CLI_VERSION` moves; the Python `tan` becomes what customers get.
 Gated on the RC having soaked, not on a date.
 
-### tan — `v0.6.0` · full command-surface parity
+### tan — `v0.6.0` · known oracle divergences
 
-The verbs deliberately left out of the RC: `model`, `new-som`, `monitor`,
-`faultdecode`, the introspection set, `renode`, and the seven entirely-unported
-commands. Also the known oracle divergences filed during the port.
+The command-surface work once planned for this milestone SHIPPED AS `0.5.0`
+and its issues moved to that milestone, so `v0.6.0` names the next release
+and nothing already delivered. The full command surface landed inside the
+`v0.5.0` RC cycle instead of waiting for a later one: the seven verbs that shipped as stubs at rc1
+(`scaffold`, `completion`, `diff`, `pinmux`, `inspect`, `trace`,
+`support-bundle` — tan-cli#260, #257), `model` (#253), `new-som` (#254),
+`monitor` (#255), `faultdecode` (#256), and `renode --sim-mode` (#77) are all
+real by `v0.5.0-rc4`. What is still deferred to `v0.6.0` is narrower — the
+known oracle divergences filed during the port (see the `deferred` label).
 
 Deferred is not a bug backlog — the `deferred` label means *chosen*, and each
 issue records what the oracle does so the choice can be re-read later.
@@ -120,10 +124,10 @@ issue records what the oracle does so the choice can be re-read later.
 executor. The end state ADR-0020 names.
 
 The blocking question is not code deletion. `crates/` is currently the **oracle**
-— every parity test measures the port by running `target/debug/tan.exe`. Delete
-it and the port loses the only thing that can tell it it has drifted. And
-`contract/` is frozen today by `crates/tan-cli/tests/contract.rs`; if the Rust
-test goes without a Python enforcer, the freeze quietly becomes advisory.
+for live behaviour parity, so deleting it before every required observation is
+captured would make uncaptured behaviour unrecoverable. The envelope registry no
+longer blocks deletion: Python conformance and source↔registry gates now enforce
+the shipping contract, while `contract.rs` owns only Rust-oracle entries.
 
 **Pulled forward deliberately.** The direction is to get off Rust as fast as is
 safe, so Rust's *load-bearing* roles are removed in order rather than waiting for
@@ -137,8 +141,8 @@ the version number:
    gets harder the longer it waits: once `crates/` is gone, anything never
    captured is unrecoverable. A frozen fixture also beats a live oracle, which
    can itself drift.
-3. **Out of the repo.** Safe once 1 and 2 are done, and gated on answering who
-   enforces `contract/` afterwards.
+3. **Out of the repo.** Safe once 1 and 2 are done; before deletion, repoint or
+   retire the remaining registry entries owned by Rust paths.
 
 Issues whose fix lives in `crates/` were moved off the RC for the same reason:
 `crates/` is frozen, so they are blocked by policy, not effort. Each carries a
@@ -146,10 +150,10 @@ comment saying what survives the port and what dies with the oracle.
 
 ### Alp IDE — `v0.5.x` beta, `v0.6.x` stable
 
-The extension cannot move until `tan` ships, and it is the delivery mechanism.
-Its cutover work is the three couplings plus the pin: a prerelease-capable pin,
-the Linux target triple, and an honest message on the two platforms a Python
-`tan` release does not publish.
+The extension's pre-release line already consumes Python `tan` candidates; its
+stable cutover remains the delivery mechanism. The remaining work is the stable
+pin, the Linux target triple/archive handling, and an honest message on the two
+platforms a Python `tan` release does not publish.
 
 ### alp-sdk — unchanged cadence
 
@@ -170,7 +174,9 @@ Internal. Each is here because it has already cost a round.
 - **Parity is measured against `PINNED_SDK_TAG`, on a clean LF-native clone.**
   A dirty or differently-reffed `alp-sdk` produces confident nonsense in both
   directions.
-- **Never edit `crates/` or `contract/`** — frozen.
+- **Do not add product work to `crates/`** — it is the frozen oracle. `contract/`
+  is live shared API data: edit it when the Python emit-site gates and consumer
+  compatibility rules require the change.
 - **A frozen tree is measured at its own freeze vendor point; a shipped
   Python surface is measured at `PINNED_SDK_TAG`.** Every parity gate has to
   pick one of the two — never compare a frozen tree against a moving pin.

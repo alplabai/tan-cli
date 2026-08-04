@@ -419,6 +419,163 @@ fn code_lines(source: &str) -> String {
         .join("\n")
 }
 
+/// The Python-side gate that owns the registry→source direction for every
+/// registry entry whose emission site is a `python/` path (tan-cli#363), and
+/// the test inside it that performs that check.
+///
+/// Pinned by name so deleting or renaming the delegate cannot quietly leave
+/// those entries owned by NEITHER gate. This is a text search like the one
+/// #363 is about, but not the same defect: a Python `def` line cannot be
+/// line-wrapped, so no reformat can break it — unlike a needle spanning a
+/// call's arguments, which is what broke.
+///
+/// The `def` existing is not the same claim as it RUNNING (tan-cli#372): a
+/// `@pytest.mark.skip`/`skipif` decorator directly above it, or a
+/// module-level `pytestmark` skip, leaves this exact substring untouched
+/// while pytest reports the delegate as SKIPPED — which is a green exit code,
+/// same as the `ci.yml` comment says of the suite at large ("skips and xfails
+/// are green"). [`python_delegate_skip_reason`] closes that gap.
+const PYTHON_EMISSION_GATE: &str = "python/tests/gates/test_frozen_issue_codes.py";
+const PYTHON_EMISSION_TEST: &str = "def test_every_python_side_registry_entry_is_still_emitted(";
+
+/// Shared by [`frozen_issue_codes`]'s `frozen` and `reserved` arms: check the
+/// entry's declared emission site HERE when it is Rust source, or report it as
+/// delegated when it is Python. Returns `true` when delegated.
+///
+/// WHY the split. For a `crates/` entry, `literal` is a verbatim slice of Rust
+/// source and `crates/` is frozen (it ships to nobody — the release assets are
+/// PyInstaller freezes of `python/tan`, tan-cli#271), so the needle cannot rot
+/// under a reformat. For a `python/` entry it is not a needle at all: it is a
+/// prose DESCRIPTION of the emission shape (`Issue("sdk.network-required",
+/// "warning", ...)`, `f"support-bundle.{c.name}" where c.name == "boardYaml"`).
+/// Matching that against source keys the gate on ONE single-line formatting of
+/// a call rather than on Python syntax, so a line wrap turns a live registered
+/// code into a stale-code verdict — which is exactly what happened to
+/// `sdk.network-required` on Linux, Windows AND macOS at once (tan-cli#363).
+///
+/// It was never one stale row. MEASURED while fixing #363: 42 of the 198
+/// python-side entries failed this same substring check; only the first was
+/// ever reported, because `assert!` panics. Fixing the one row the issue named
+/// would have surfaced the next 41 immediately.
+///
+/// This test cannot import Python's `ast`, and a Python parser hand-rolled in
+/// Rust would be a weaker copy of one that already exists
+/// (`python/tests/gates/`), so python-side entries are delegated to
+/// [`PYTHON_EMISSION_GATE`], which parses them. What stays enforced here: the
+/// delegation is TOTAL (`frozen_issue_codes` rejects any `emittedBy` under
+/// neither root, and the Python gate asserts the same mirror), the delegated
+/// file still exists, and both halves are non-empty.
+///
+/// `literal` is `Option` since tan-cli#372: it is REQUIRED for a `crates/`
+/// entry (the needle this function checks against source) but a `python/`
+/// entry is never read for it — `test_frozen_issue_codes.py`'s own
+/// `FROZEN_LOCATIONS` dropped the field entirely in the #363 rewrite, in
+/// favor of an `ast` parse. Requiring it anyway on the JSON side made it
+/// mandatory-to-supply and checked-by-nobody, and 42 of the 198 python-side
+/// values were already stale under that regime with nothing to notice — the
+/// exact "reads as a verified fact and is not one" problem #372 was filed
+/// about. So a python-side entry must NOT carry the field at all now (see the
+/// assertion below): there is no value it could hold that this function, or
+/// any other, would ever check.
+fn check_or_delegate(
+    code: &str,
+    rel: &str,
+    literal: Option<&str>,
+    status: &str,
+    remedy: &str,
+) -> bool {
+    let path = repo_root().join(rel);
+    if rel.starts_with("python/") {
+        assert!(
+            path.is_file(),
+            "{code}: `emittedBy` names {rel}, which does not exist. The emission site \
+             moved or was deleted — update contract/issue-codes.json to name the real \
+             one, so {PYTHON_EMISSION_GATE} can check it."
+        );
+        assert!(
+            literal.is_none(),
+            "{code}: `emittedBy` names a python/ path but the entry still carries a \
+             `literal` field ({literal:?}). Nothing reads it — {PYTHON_EMISSION_GATE} checks \
+             python-side emission with its own `ast` parse, never this string (tan-cli#372) — \
+             so a stale value here would read as a verified fact while being checked by \
+             nobody. Delete the field from contract/issue-codes.json for this entry."
+        );
+        return true;
+    }
+    assert!(
+        rel.starts_with("crates/"),
+        "{code}: `emittedBy` is {rel:?}, under neither `crates/` (checked here) nor \
+         `python/` (checked by {PYTHON_EMISSION_GATE}) — it would be gated by nothing. \
+         Point it at the real emission site."
+    );
+    let literal = literal
+        .unwrap_or_else(|| panic!("{code}: a crates/ frozen or reserved code needs `literal`"));
+    let source =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{code}: cannot read {rel}: {e}"));
+    let status_upper = status.to_uppercase();
+    assert!(
+        code_lines(&source).contains(literal),
+        "{status_upper} ISSUE CODE `{code}` is gone: {rel} no longer contains \
+         {literal:?} outside comments.\n{remedy}"
+    );
+    false
+}
+
+/// tan-cli#372: whether the pinned delegate test itself would be SKIPPED
+/// rather than run. `gate_source.contains(PYTHON_EMISSION_TEST)` (the only
+/// check before this one existed) proves the `def` line still exists; it
+/// cannot tell a running delegate from a skipped one, because a
+/// `@pytest.mark.skip`/`skipif` decorator does not change that substring —
+/// and pytest reports a skip as a pass, so `ci.yml`'s own "skips and xfails
+/// are green" design turns that into an invisible green covering 198+
+/// registry entries.
+///
+/// Two shapes, both real in this codebase (see `python/tests/**` for
+/// examples of each): a decorator immediately above the `def`, and a
+/// module-level `pytestmark` that silences every test in the file with no
+/// decorator on this one at all.
+///
+/// The decorator check walks upward through the unbroken block of non-blank
+/// lines directly above the `def` — pytest decorators, and any multi-line
+/// argument list a `skipif(...)` condition spans, never have a blank line
+/// between themselves, each other, or the function they decorate, so that
+/// block is exactly "every decorator on this test" without needing a real
+/// Python parser. `contains("pytest.mark.skip")` catches `skipif` too, since
+/// that spelling contains the same substring.
+fn python_delegate_skip_reason(gate_source: &str) -> Option<String> {
+    let lines: Vec<&str> = gate_source.lines().collect();
+    let def_line_idx = lines
+        .iter()
+        .position(|l| l.contains(PYTHON_EMISSION_TEST))?;
+
+    let mut start = def_line_idx;
+    while start > 0 && !lines[start - 1].trim().is_empty() {
+        start -= 1;
+    }
+    let decorator_block = lines[start..def_line_idx].join("\n");
+    if decorator_block.contains("pytest.mark.skip") {
+        return Some(format!(
+            "{PYTHON_EMISSION_GATE}: `{PYTHON_EMISSION_TEST}...` is decorated with a \
+             pytest.mark.skip/skipif (tan-cli#372) — pytest reports a skip as a PASS, so the \
+             delegate would stop running while every registry entry delegated to it \
+             (`check_or_delegate`) is still reported as checked. Remove the skip."
+        ));
+    }
+
+    if lines
+        .iter()
+        .any(|l| l.trim_start().starts_with("pytestmark") && l.contains("skip"))
+    {
+        return Some(format!(
+            "{PYTHON_EMISSION_GATE} sets a module-level `pytestmark` mentioning `skip` \
+             (tan-cli#372) — that silences every test in the file, including \
+             `{PYTHON_EMISSION_TEST}...`, with no decorator on the function itself to catch. \
+             Remove it."
+        ));
+    }
+    None
+}
+
 /// The frozen `issues[].code` strings alp-sdk-vscode matches with `===`
 /// (tan-cli#106), gated against `contract/issue-codes.json`.
 ///
@@ -437,6 +594,10 @@ fn code_lines(source: &str) -> String {
 /// the whole refusal branch and leaves the string behind passes here.
 /// `crates/tan-cli/src/commands/bootstrap/mod.rs`'s own unit tests cover the
 /// emission; this covers the spelling.
+///
+/// SCOPE, since tan-cli#363: `crates/` entries only. See
+/// [`check_or_delegate`] for why a `python/` entry cannot be checked by a
+/// substring needle and who checks it instead.
 #[test]
 fn frozen_issue_codes() {
     let registry_path = contract_root().join("issue-codes.json");
@@ -465,6 +626,13 @@ fn frozen_issue_codes() {
         sources.len()
     );
 
+    // Both halves of the tan-cli#363 split, counted so neither can silently
+    // empty out: `checked_here` is the `crates/` entries this test still
+    // substring-checks, `delegated` the `python/` ones it hands to
+    // `PYTHON_EMISSION_GATE`. See `check_or_delegate`.
+    let mut checked_here = 0usize;
+    let mut delegated = 0usize;
+
     for entry in codes {
         let code = entry["code"].as_str().expect("issueCodes[].code");
         let status = entry["status"].as_str().expect("issueCodes[].status");
@@ -473,23 +641,28 @@ fn frozen_issue_codes() {
                 let rel = entry["emittedBy"]
                     .as_str()
                     .unwrap_or_else(|| panic!("{code}: a frozen code needs `emittedBy`"));
-                let literal = entry["literal"]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("{code}: a frozen code needs `literal`"));
-                let path = repo_root().join(rel);
-                let source = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{code}: cannot read {rel}: {e}"));
-                assert!(
-                    code_lines(&source).contains(literal),
-                    "FROZEN ISSUE CODE `{code}` is gone: {rel} no longer contains \
-                     {literal:?} outside comments.\n\
-                     alp-sdk-vscode matches this code with `===` and that match FAILS \
+                // `.as_str()` on a MISSING key, not `.unwrap`: `literal` is only
+                // required for a `crates/` entry, and `check_or_delegate` is what
+                // enforces that split (tan-cli#372) — panicking on absence here,
+                // before `rel` is even inspected, would re-demand the field for
+                // python-side entries too.
+                let literal = entry["literal"].as_str();
+                if check_or_delegate(
+                    code,
+                    rel,
+                    literal,
+                    status,
+                    "alp-sdk-vscode matches this code with `===` and that match FAILS \
                      OPEN — the extension will not error, log or warn, it will silently \
                      skip the check. If this rename is deliberate: bump the CLI \
                      MAJOR/MINOR, update contract/issue-codes.json + CHANGELOG.md, and \
                      open the matching alp-sdk-vscode issue. Do NOT loosen the consumer \
-                     to a prefix match."
-                );
+                     to a prefix match.",
+                ) {
+                    delegated += 1;
+                } else {
+                    checked_here += 1;
+                }
             }
             "reserved" => {
                 // Pre-consumer: the spelling exists at the emission site (kept
@@ -507,20 +680,22 @@ fn frozen_issue_codes() {
                 let rel = entry["emittedBy"]
                     .as_str()
                     .unwrap_or_else(|| panic!("{code}: a reserved code needs `emittedBy`"));
-                let literal = entry["literal"]
-                    .as_str()
-                    .unwrap_or_else(|| panic!("{code}: a reserved code needs `literal`"));
-                let path = repo_root().join(rel);
-                let source = std::fs::read_to_string(&path)
-                    .unwrap_or_else(|e| panic!("{code}: cannot read {rel}: {e}"));
-                assert!(
-                    code_lines(&source).contains(literal),
-                    "RESERVED ISSUE CODE `{code}` is gone: {rel} no longer contains \
-                     {literal:?} outside comments. No consumer matches it yet, so \
-                     dropping or renaming it is not a breaking wire change -- but the \
-                     registry entry is now stale. Update contract/issue-codes.json to \
-                     match, or restore the emission."
-                );
+                // See the `frozen` arm above: `literal` is only required for a
+                // `crates/` entry, enforced inside `check_or_delegate` (tan-cli#372).
+                let literal = entry["literal"].as_str();
+                if check_or_delegate(
+                    code,
+                    rel,
+                    literal,
+                    status,
+                    "No consumer matches it yet, so dropping or renaming it is not a \
+                     breaking wire change -- but the registry entry is now stale. Update \
+                     contract/issue-codes.json to match, or restore the emission.",
+                ) {
+                    delegated += 1;
+                } else {
+                    checked_here += 1;
+                }
             }
             "retired" => {
                 // A retired code is not emitted any more, but the consumer branch
@@ -544,6 +719,89 @@ fn frozen_issue_codes() {
             }
             other => panic!("{code}: unknown status {other:?} (expected frozen|reserved|retired)"),
         }
+    }
+
+    // Non-vacuity, both halves (tan-cli#275's standing lesson: an assertion
+    // nobody has watched fail is not proven to fire — and after #363 there are
+    // two ways for this one to stop checking anything). If either half empties
+    // out, a registry-wide `emittedBy` convention change has quietly silenced
+    // this gate or the Python one, and the count is the only thing that says so.
+    assert!(
+        checked_here > 0 && delegated > 0,
+        "expected BOTH halves of the issue-code registry to be non-empty, got \
+         {checked_here} checked here (crates/) and {delegated} delegated to \
+         {PYTHON_EMISSION_GATE} (python/) — one side is no longer being checked \
+         by anything"
+    );
+
+    // The delegate itself: pinned by name, so removing the Python check cannot
+    // leave the delegated entries owned by neither gate. `frozen_issue_codes`
+    // and that test assert the same partition from opposite sides, so an
+    // `emittedBy` repointed at a third kind of path reddens both.
+    let gate_path = repo_root().join(PYTHON_EMISSION_GATE);
+    let gate_source = std::fs::read_to_string(&gate_path).unwrap_or_else(|e| {
+        panic!(
+            "{PYTHON_EMISSION_GATE} is unreadable ({e}), but {delegated} registry \
+             entries are delegated to it — restore it, or bring their check back here"
+        )
+    });
+    assert!(
+        gate_source.contains(PYTHON_EMISSION_TEST),
+        "{PYTHON_EMISSION_GATE} no longer defines `{PYTHON_EMISSION_TEST}...`, and \
+         {delegated} registry entries are delegated to it (tan-cli#363) — they would \
+         now be gated by nothing. Restore that test, or repoint this pin at whatever \
+         replaced it."
+    );
+    // tan-cli#372: the assert above proves the `def` line exists, not that it
+    // RUNS — see `python_delegate_skip_reason`.
+    if let Some(reason) = python_delegate_skip_reason(&gate_source) {
+        panic!("{reason}");
+    }
+}
+
+/// tan-cli#372's `#[ignore]` mirror, named in the issue's own words: "the same
+/// hazard exists for `#[ignore]` on the Rust side". `cargo test` reports an
+/// ignored test as neither pass nor fail (`test result: ok. N passed; M
+/// ignored`), so `#[ignore]` on any of the three registry tests below would
+/// silence its whole share of the issue-code registry exactly like a Python
+/// skip would, with the same green exit code covering it.
+///
+/// Nothing inside `frozen_issue_codes` (or its two siblings) can catch
+/// `#[ignore]` on itself — an ignored test's body never executes, so an
+/// assertion inside it never runs either. This has to be its own,
+/// unconditionally-collected test that reads the source from outside.
+#[test]
+fn issue_code_registry_tests_are_not_ignored() {
+    let path = "crates/tan-cli/tests/contract.rs";
+    let source = std::fs::read_to_string(repo_root().join(path))
+        .unwrap_or_else(|e| panic!("cannot read {path}: {e}"));
+
+    for name in [
+        "frozen_issue_codes",
+        "every_emitted_issue_code_is_registered",
+        "every_prefixed_issue_code_is_registered",
+    ] {
+        let needle = format!("fn {name}(");
+        let at = source
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{path}: `fn {name}(` not found — this pin is stale"));
+        let lines: Vec<&str> = source[..at].lines().collect();
+        // Same "unbroken non-blank block above it" walk as
+        // `python_delegate_skip_reason`, mirrored for Rust attributes.
+        let mut block: Vec<&str> = Vec::new();
+        for line in lines.iter().rev() {
+            if line.trim().is_empty() {
+                break;
+            }
+            block.push(line);
+        }
+        assert!(
+            !block.iter().any(|l| l.trim_start().starts_with("#[ignore")),
+            "{path}: `fn {name}` is `#[ignore]`d — cargo test reports an ignored test as \
+             neither pass nor fail, so this would silently stop checking every issue-code \
+             registry entry the function covers while CI stays green (tan-cli#372, the same \
+             hazard as a Python skip). Remove the attribute."
+        );
     }
 }
 

@@ -1,0 +1,302 @@
+WHAT tests/parity/ ACTUALLY COMPARES, AND WHAT IT DOES NOT (tan-cli#409)
+=========================================================================
+
+This ledger exists because the freeze (tan-cli#272) is what has to keep this
+package discriminating once tan-cli#269 deletes crates/, and two holes in it
+resolve to SILENT ZERO COVERAGE at that moment rather than to a failure.
+Measured on one tree, same commit, same host, the only variable being whether
+target/{release,debug}/tan exists:
+
+  oracle binary present:  247 passed,  95 skipped, 4 xfailed
+  no target/ at all:      230 passed, 112 skipped, 4 xfailed   (exit 0)
+
+Seventeen tests moved from passed to skipped and the run still exited 0.
+
+A skip is the right answer for exactly two of those seventeen and the wrong
+answer for the other fifteen. This file names all of them, plus the eight
+registered subcommands no test compares AT ALL, so the gap is reviewable in
+one place instead of being re-derived by whoever next reads a green run and
+believes it.
+
+WHERE IT STANDS NOW (2026-08-04, re-measured the same way). Thirteen of the
+fifteen are frozen, AND the scaffold hole that opened after this ledger was
+written is closed too. Same two commands, same tree:
+
+  with the binary present:  335 passed,  97 skipped, 13 xfailed
+  no target/ at all:        331 passed, 101 skipped, 13 xfailed
+
+The gap is FOUR tests. Not one of them is undeclared:
+
+   2  the harness self-tests -- the binary is their SUBJECT; permanent, and
+      never parity coverage
+   2  test_support_bundle_oracle_parity.py -- freezable only on win32
+
+`_UNFROZEN` in `test_parity_freeze_completeness.py` is EMPTY. That register
+is the one tan-cli#409 requires to reach empty BEFORE tan-cli#269 deletes
+crates/, because after that no fixture can be captured at all. It has.
+
+`_PLATFORM_BOUND` is the whole remainder, and it needs a MACHINE, not a
+decision: the compared surface (doctor's whole check list and statuses, the
+whole inspect.context) is decided by the HOST. A darwin capture writes
+`macos-aarch64` into a check detail and adds codeLLDBExtension/lldb rows; a
+Windows bundle carries `longPaths`, which exists nowhere else. No scrub
+reaches any of it, and the capture-time leak guard does NOT fire on it.
+
+The paragraphs below are kept as WRITTEN, not rewritten in place: the
+measurement they record is what the freeze was graded against, and a ledger
+that edits its own history to match the present is exactly what let
+PROVENANCE.txt's frozen-SHA claim rot. Read them as of their date, and this
+block as the delta.
+
+Keep it current. It is the only record of what the parity suite is NOT
+measuring, and a green suite is not evidence against anything listed here.
+
+Since 2026-08-04 it is no longer the ONLY record, and no longer the only
+thing keeping itself current: `tests/parity/test_parity_freeze_completeness.
+py` is the machine-checked half. It FAILS on any case gated on `RUST is None`
+that has no committed fixture and is not named in one of its three registers,
+and it fails again on a register entry that has gone stale -- so this file and
+that module have to move together. Prose alone is what let the last claim in
+this directory rot (see PROVENANCE.txt's own drift section).
+
+FIRST PASS DONE, same day, measured the same way on the same tree (the counts
+moved because the suite grew, not because the gate did):
+
+  oracle binary present:  296 passed,  95 skipped, 4 xfailed
+  no target/ at all:      282 passed, 109 skipped, 4 xfailed   (exit 0)
+
+Fourteen still move, down from seventeen. Three of section A's freezable
+cases are now frozen (marked FROZEN below), and twelve first-ever comparisons
+landed for section C's verbs -- those twelve pass in BOTH columns, which is
+the property the whole freeze is for.
+
+
+A. LIVE-ONLY CASES -- gated on BINARY PRESENCE, with no frozen fixture
+---------------------------------------------------------------------
+
+Each is decorated `@_ORACLE_REQUIRED` (or an inline `skipif(RUST is None)`)
+and spawns the oracle directly through `oracle._run([RUST], ...)`, never
+through `compare()`/`rust_run()` -- so none of them consults
+`oracle_fixtures.resolve`, and none of them has a key in this directory.
+Contrast `oracle.missing_for_live`, which the fixture-backed cases use and
+which deliberately does NOT skip in frozen mode.
+
+FREEZABLE -- the compared surface is an exit code plus an envelope, which
+`oracle_fixtures.resolve` + `oracle_fixtures.scrub` already replay for 200-odd
+other cases. Nothing but a capture run stands between these and a fixture; the
+capture recipe is in PROVENANCE.txt. The reason they were left live is
+recorded at test_oracle_parity.py's own section comment: "adding a fixture
+entry for a brand-new case is a separate, deliberate act with its own capture
+recipe -- out of scope for this change".
+
+  tests/parity/test_build_sdk_root_oracle_parity.py
+    test_build_sdk_root_invalid_matches_the_oracle          FROZEN 2026-08-04
+  tests/parity/test_oracle_parity.py
+    test_explain_matches_the_oracle[overview]
+    test_explain_matches_the_oracle[unknown-template]
+    test_explain_matches_the_oracle[unknown-target]
+    test_renode_no_sdk_matches_the_oracle
+    test_size_missing_manifest_is_a_known_divergence_from_the_oracle
+    test_run_no_sdk_is_a_known_divergence_from_the_oracle
+    test_model_bare_invocation_is_a_known_divergence_from_the_oracle
+    test_new_som_is_a_known_divergence_from_the_oracle
+    test_monitor_is_a_known_divergence_from_the_oracle
+    test_faultdecode_is_a_known_divergence_from_the_oracle
+  tests/parity/test_run_oracle_parity.py
+    test_run_no_sdk_is_a_known_divergence_from_the_oracle   FROZEN 2026-08-04
+    test_run_sdk_root_invalid_now_matches_the_oracle        FROZEN 2026-08-04
+
+The three FROZEN rows above are done: each now takes its rust side through
+`oracle.rust_run` and replays a committed key, and each passes with no
+target/ present. Their modules' own docstrings record why the original
+"live so a regression cannot hide behind a stale fixture" reasoning inverted
+-- a skip does not go stale, it stops measuring, and staleness is caught by
+PINNED_ORACLE_BUILD_INPUT_DIGEST instead (tan-cli#414).
+
+The eight remaining rows are in test_oracle_parity.py, which tan-cli#408 is
+restructuring in parallel; editing it from the same change would clobber that
+work. They are declared in `test_parity_freeze_completeness.py`'s `_UNFROZEN`
+register, which is DEBT, not design: that register has to reach empty before
+tan-cli#269 lands, because after the deletion these can never be captured.
+
+LIVE-ONLY BY CONSTRUCTION -- a frozen answer would be WRONG on any host but
+the capture host, so freezing these two as they stand trades a skip for a
+false red:
+
+  tests/parity/test_support_bundle_oracle_parity.py
+    test_support_bundle_matches_the_oracle_on_a_failing_host
+    test_support_bundle_matches_the_oracle_with_a_resolved_sdk
+
+  Why: what these compare is the bundle's `doctor.checks` list (names,
+  positions, statuses) and the whole `inspect.context`, and both are decided
+  by the HOST, not only by the binary -- the check list itself is
+  platform-shaped (`longPaths` exists on Windows and nowhere else), and the
+  statuses read this machine's tool inventory and, on Windows, its registry.
+  The module's own docstring states the design: "this case's whole value is
+  that both binaries run on THIS host". A fixture captured on one OS replayed
+  against a live port on another diffs two platforms' genuinely different --
+  and both correct -- behaviour, which is the failure `oracle_fixtures.
+  CAPTURE_PLATFORM` already exists to warn about. `empty_tool_inventory`
+  pins the PATH for the first case but cannot pin the platform, and the
+  second case deliberately runs on the real PATH.
+
+  What a real freeze needs, if someone takes it on: capture on
+  CAPTURE_PLATFORM (win32) with the tool inventory PROVENANCE.txt's own
+  inventory table records, and gate the replay on that same platform -- i.e.
+  the case becomes a declared PLATFORM skip elsewhere rather than a
+  binary-absence skip, which is a different and reviewable category. The
+  alternative -- narrowing the comparison to the platform-independent subset
+  -- would drop exactly the check-NAME/POSITION pinning the case exists for
+  (tan-cli#357, tan-cli#374).
+
+
+B. THE TWO EXEMPTIONS -- harness self-tests that legitimately need a binary
+---------------------------------------------------------------------------
+
+Exempt BY NAME, so the exemption is reviewable rather than implicit. Neither
+can be frozen, because in both the BINARY ITSELF is the subject under test
+rather than a source of answers -- and neither may be counted as parity
+coverage:
+
+  tests/parity/test_oracle_parity.py
+    test_a_named_but_missing_rust_binary_is_an_error_not_a_skip
+    test_rust_oracle_is_present_or_the_suite_says_so
+
+
+C. REGISTERED SUBCOMMANDS WITH NO ORACLE COMPARISON AT ALL
+-----------------------------------------------------------
+
+Eight of the 32 verbs had none. Seven now have one --
+`tests/parity/test_command_surface_oracle_parity.py`, frozen, 12 keys -- and
+each entry below records what that comparison reaches and what it still does
+not. `doctor` is the one with nothing, and the reason is measured, not
+assumed.
+
+  bootstrap   COVERED (refusal only): the `bootstrap.sdk-root-unresolved`
+              envelope, whole. exit 2, `ok`, the entire `data` skeleton and
+              the issue's code/severity all AGREE; only the remedy wording
+              differs, pinned literally on both sides.
+              STILL UNCOVERED: everything that mutates the machine -- venv
+              creation, the west clone/update, pip. No hermetic surface
+              without a network and a scratch workspace on both sides.
+  completion  COVERED: the verb list, per shell (bash/zsh/fish), extracted
+              from each script and compared exactly -- 32 verbs, in order.
+              DECLARED DIVERGENCE, not a gap: the port completes two extra
+              `--format` values after `validate` (`diagnostic-v1`, `sarif`,
+              tan-cli#403) which the oracle does not offer for any command.
+              Pinned in both directions, so either side changing is seen.
+              This is why the scripts are not compared byte-for-byte.
+  doctor      STILL UNCOVERED, and not merely unwritten. Its envelope is
+              decided by the HOST: measured on darwin, the oracle's own
+              check list carries `zephyrSdkAvailableForHost ... macos-
+              aarch64` plus `codeLLDBExtension`/`lldb` rows that a Windows
+              run does not have, and Windows carries `longPaths`, which
+              exists nowhere else. A fixture captured on one OS is a false
+              red on another, and no scrub reaches a host architecture
+              written into a check's `detail`. Freezing it means capturing
+              on CAPTURE_PLATFORM and gating the replay there -- the same
+              deal section A's support-bundle pair needs.
+              ALSO MEASURED, and worth a decision of its own: the two sides
+              disagree STRUCTURALLY on this verb today. The oracle emits
+              `data.targetKind` and `data.server`; the port emits neither.
+              They spell `data.generatedAt` differently --
+              `1970-01-01T00:00:00.000Z` against `1970-01-01T00:00:00Z` --
+              under an identical SOURCE_DATE_EPOCH=0. Recorded here rather
+              than pinned as expected, because pinning would make it look
+              decided; the extension reads this section out of the support
+              bundle.
+  examples    COVERED (empty-catalogue path): exit 0, `ok: true` and
+              `data: {schemaVersion: "1", examples: []}` on both sides.
+              DECLARED DIVERGENCE: the port also emits
+              `examples.sdk-root-unresolved` (warning) where the oracle
+              emits no issue at all -- machine-visible, unlike a wording
+              difference, so it is pinned rather than narrowed away.
+              STILL UNCOVERED: a POPULATED catalogue, which is a function of
+              alp-sdk CONTENT and so must pin the SDK ref the way
+              PROVENANCE.txt's one SDK-bound fixture does.
+  inspect     COVERED: the whole `resolvedValues` table -- keys, order,
+              values, `source` and `detail` -- on an empty project. This is
+              the surface the extension's diagnostics view reads, and it was
+              previously reachable only as a nested section of the
+              support-bundle payload, i.e. only on the two cases that vanish
+              with crates/.
+              STILL UNCOVERED: a resolved-SDK context (`--sdk-root` bound,
+              `--focus-path`, `--show-origin`).
+  kconfig     COVERED (refusal only): the `kconfig.no-sdk-root` envelope,
+              whole, including `data.schemaVersion` being the integer 1 on
+              both sides where other verbs use the string "1".
+              STILL UNCOVERED: the symbol menu itself -- the live feed for
+              alp-sdk-vscode's prj.conf LSP -- which needs a bootstrapped
+              Zephyr workspace to answer at all ("Needs a bootstrapped
+              Zephyr workspace", per its own --help).
+  scaffold    COVERED (refusal only): the `scaffold.name-required` envelope
+              under --non-interactive, including the empty `data` skeleton
+              (`fileChanges`, `written`, `unchanged`) a real scaffold fills.
+              STILL UNCOVERED: an actual write. Comparable by diffing two
+              scratch trees (the shape test_clean_parity.py already uses),
+              which nobody has written.
+  trace       COVERED (refusal only): the `trace.sdk-root-unresolved`
+              envelope, whole -- `workflow: cli.trace`, empty `decisions`,
+              and the same message on both sides. Previously the support
+              bundle's third section and compared NOWHERE, not even
+              indirectly.
+              STILL UNCOVERED: a real decision list, which needs a bound SDK.
+
+Not coverage, but not a gap either -- declared xfail(strict=True) with
+recorded reasons, listed here so they are not mistaken for either:
+
+  tests/parity/test_oracle_parity.py  validate       (xfail, strict)
+  tests/parity/test_oracle_parity.py  build --plan   (xfail, strict)
+
+The extension's stake in this list, which is why it is not academic:
+`kconfig` is the live feed for alp-sdk-vscode's prj.conf symbol LSP,
+`examples` backs its example picker, and `inspect`/`doctor`/`trace` are the
+three sections its diagnostics surface reads out of the support bundle.
+
+
+D. WHAT MUST HAPPEN BEFORE tan-cli#269 DELETES crates/
+-------------------------------------------------------
+
+After the deletion none of the fixtures in this directory can be captured at
+all, and nothing in section A or C can be measured again:
+
+  1. Capture the thirteen FREEZABLE cases in section A.
+     PARTLY DONE 2026-08-04: three of the thirteen are frozen (marked FROZEN
+     in section A). The other eight are in test_oracle_parity.py and are the
+     one item on this list that is still pure debt -- they are declared in
+     `test_parity_freeze_completeness.py`'s `_UNFROZEN` register so they
+     cannot be forgotten, but a register is bookkeeping, not coverage.
+  2. Decide the support-bundle pair: capture on win32 with a declared
+     platform gate, or record the loss.
+     STILL OPEN. Recorded, and now measured: PROVENANCE.txt's 2026-08-04
+     section names the exact host-shaped rows a darwin capture would freeze,
+     and notes that the capture-time leak guard does NOT refuse it -- so this
+     has to be a decision by whoever holds a Windows host, not something the
+     tooling will stop by itself.
+  2b. Capture the seven remaining `test_oracle_parity.py` cases.
+     DONE 2026-08-04. Their recorded blocker was file ownership -- the module
+     was said to belong to tan-cli#408 -- and that did not survive reading
+     #408, whose scope is the six `python/tan/` modules over the 800-line
+     cap; it names the oversized test files as an observation and delivers
+     nothing in them. Four now go through `_both_sides` (`rust_run` plus a
+     matching scrub of the port side), three through
+     `rust_run(..., scrub_roots=())`. The gate's own staleness check is what
+     caught the register the moment its entry stopped being true.
+  3. Add comparisons for as many of section C's eight as have a stable
+     oracle surface -- `completion` first, it is nearly free.
+     DONE 2026-08-04 for seven of the eight; see section C for what each
+     reaches and what it does not. `doctor` is the eighth and needs item 2's
+     win32 capture for the same reason the support-bundle pair does.
+  4. A gate that FAILS when a parity case is gated on `RUST is None` and has
+     no fixture key, exempting section B by name. tan-cli#409 places it under
+     python/tests/gates/; it is the check that would have caught both holes,
+     and it fails today on all fifteen.
+     DONE 2026-08-04, as `tests/parity/test_parity_freeze_completeness.py`
+     -- in this package rather than under python/tests/gates/, which is the
+     one place this ledger's own instructions were not followed. Nothing in
+     its logic depends on where the file sits (it finds the parity package
+     through the imported module, not through its own path), so relocating it
+     is the move plus one import line: `from . import oracle_fixtures` has to
+     become `from tests.parity import oracle_fixtures`, since python/tests/
+     has no __init__.py and a relative import does not resolve from there.
+     Verified before its registers were filled in: it named all fifteen.

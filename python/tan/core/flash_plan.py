@@ -22,9 +22,21 @@ reintroduce a tolerant bool/int reader here.
 
 **No hardware facts (I-26 / ADR-0017).** Nothing in this module names a SKU, an
 address, a pin, an I2C address, a probe serial or a vendor branch. Every such
-value arrives in ``flash_args``, passed through from alp-sdk ``metadata/``. The
-ONE exception is inherited verbatim from the Rust oracle and flagged at its
-definition (``_DEFAULT_JLINK_DEVICE``); do not add a second.
+value arrives in ``flash_args``, passed through from alp-sdk ``metadata/``.
+
+**TWO** exceptions remain, both inherited verbatim from the Rust oracle and
+both flagged at their definitions: ``_DEFAULT_JLINK_DEVICE`` (a part number)
+and ``_DEFAULT_BASE`` (a flash base address). Do not add a third. The count
+used to read "the ONE exception", naming ``_DEFAULT_JLINK_DEVICE`` and
+silently passing over the address -- tan-cli#402, which also found the two
+literals that miscount was keeping company with: both ``swd_probe``
+success messages hardcoded a ``GD32G553`` SKU and reported it as what the run
+had just programmed, whatever ``flash_args`` actually resolved to. The
+messages now name the resolved device/target, so the only SKU and address
+left in this module are the two named above, each reachable only when the
+manifest supplied nothing. An honest count is the whole mechanism: a
+docstring that undercounts its own debt is how the third one gets added
+without argument.
 """
 from __future__ import annotations
 
@@ -39,6 +51,16 @@ from tan.core.pending import PENDING_PLACEHOLDER as PENDING_SENTINEL, is_pending
 #: `system_manifest.rs::SYSTEM_MANIFEST_SCHEMA_VERSION`.
 SYSTEM_MANIFEST_SCHEMA_VERSION = 1
 
+#: INHERITED HARDWARE FACT, not a new one -- the second of the two this module
+#: carries, flagged here by #402 after the module docstring had counted only
+#: `_DEFAULT_JLINK_DEVICE` for as long as both had existed.
+#: `builders.rs:16`'s `DEFAULT_BASE`, byte-identical. An ADDRESS, which
+#: ADR-0017 / I-26 forbids, and it is already shipped in the Rust binary --
+#: dropping it here would make the port place a raw `.bin` somewhere else than
+#: the oracle on every `swd_probe` entry whose `flash_args` omits `base`. Only
+#: ever reached when the manifest supplied nothing; the correct fix is for the
+#: SoM preset to always supply `flash_args.base`, after which this default
+#: becomes unreachable and can be deleted on BOTH sides.
 _DEFAULT_BASE = "0x08000000"
 #: INHERITED HARDWARE FACT, not a new one. `builders.rs:15`'s
 #: `DEFAULT_JLINK_DEVICE`. This is a part number in tan, which ADR-0017 / I-26
@@ -823,11 +845,32 @@ def _str_list_debug(items) -> str:
 # ── swd_probe ───────────────────────────────────────────────────────────────
 
 
+def commander_path(path: str) -> str:
+    """A path as it should be interpolated into a J-Link Commander script
+    line -- quoted when it CONTAINS whitespace, unchanged otherwise
+    (tan-cli#369). SEGGER's Commander splits an unquoted line on whitespace,
+    so an unquoted `loadbin C:\\Program Files\\alif\\setools\\build\\
+    AppTocPackage.bin, <address>` silently truncates to `C:\\Program` --
+    `-ExitOnError 1` turns that into a loud SEGGER parse error rather than a
+    mis-write, which is the only reason it was not a blocker. tan generates
+    every Commander script now, so tan owns making its own filenames parse
+    back correctly. Quoting is CONDITIONAL, not unconditional, so the
+    overwhelmingly common no-space path -- every already-measured
+    oracle/bench script -- renders byte-identical to before this fix.
+    """
+    return f'"{path}"' if any(c.isspace() for c in path) else path
+
+
 def jlink_commander_script(artefact: str, base: str, do_reset: bool) -> str:
     """The J-Link Commander script: reset/halt, load (`loadbin`+base for `.bin`,
     else `loadfile`), optional reset-and-go, quit-close."""
     lines = ["r", "halt"]
-    if is_raw_bin(artefact):
+    # `is_raw_bin` reads the extension via `os.path.splitext` -- checked on
+    # the UNQUOTED artefact, before `commander_path` may wrap it in `"..."`,
+    # which would otherwise shift the extension off the string entirely.
+    is_bin = is_raw_bin(artefact)
+    artefact = commander_path(artefact)
+    if is_bin:
         lines.append(f"loadbin {artefact}, {base}")
     else:
         lines.append(f"loadfile {artefact}")
@@ -835,6 +878,57 @@ def jlink_commander_script(artefact: str, base: str, do_reset: bool) -> str:
         lines += ["r", "g"]
     lines.append("qc")
     return "\n".join(lines) + "\n"
+
+
+def _resolve_jlink_device(fa: Any) -> str:
+    """The J-Link device profile for `swd_probe`'s primary branch:
+    `flash_args.jlink_device` when the manifest named one, else the inherited
+    `_DEFAULT_JLINK_DEVICE` -- EXCEPT when `flash_args.target` is present,
+    which REFUSES.
+
+    **tan-cli#402.** `target` is the OpenOCD/pyOCD target name, read ~15 lines
+    below at the point the FALLBACK branch builds its argv -- i.e. after the
+    J-Link branch has already returned. A SoM preset declaring `interface:
+    cmsis-dap, target: stm32h7x` and no `jlink_device` therefore reached a real
+    J-Link write with the compiled-in GD32 profile, at the compiled-in
+    `_DEFAULT_BASE`, on any host that merely happens to have SEGGER installed,
+    with no diagnostic at all -- and `flash_plan.py`'s own `_DEFAULT_JLINK_
+    DEVICE` note records that a shipped preset omits `jlink_device` today. tan
+    cannot derive one spelling from the other (`stm32h7x` is not
+    `STM32H747XI_M7`: an OpenOCD target names a family, a J-Link profile names
+    a part), and guessing is exactly the silicon knowledge I-26 forbids -- so a
+    manifest naming a DIFFERENT part gets a refusal, never a substitution.
+
+    Scoped to `target`, and by KEY PRESENCE rather than by what it resolves to.
+    `interface` names no part, so it does not trip this on its own; and a
+    `target: ""` must not buy the silent GD32 default back on a quoting detail,
+    the same reason `flow_d_available` reads presence. `flash_args` naming
+    NEITHER key keeps the oracle's fallback untouched: that is what every
+    recorded `swd_probe` parity fixture captures (`would run JLinkExe -device
+    GD32G553MEY7TR ...`), so widening this to fire on an empty `flash_args`
+    would diverge from the oracle on 13 fixtures at once.
+
+    **DIVERGES from the shipped Rust oracle** (`builders.rs:243`), which has no
+    such refusal and silently substitutes. Deliberate, and out of reach of
+    `tests/parity/test_flash_oracle_parity.py`: no `swd_probe` case there
+    declares `target` without ALSO forcing the openocd/pyocd path via
+    `use_openocd`/`use_pyocd`, which skips this branch entirely.
+    """
+    device = fa_str_checked(fa, "jlink_device", False)
+    if device is not None:
+        return device
+    if _fa_has_key(fa, "target"):
+        raise FlashPlanError(
+            "swd_probe: flash_args.target is set but flash_args.jlink_device is "
+            f"not -- refusing to fall back to the built-in {_DEFAULT_JLINK_DEVICE} "
+            "profile for a SoM that named a different part. An OpenOCD/pyOCD "
+            "target is not a J-Link device profile and tan does not guess one "
+            "from the other. Add flash_args.jlink_device with the part-number "
+            "J-Link profile, or set flash_args.use_openocd: true (or "
+            "flash_args.use_pyocd: true) to take the path flash_args.target "
+            "belongs to."
+        )
+    return _DEFAULT_JLINK_DEVICE
 
 
 def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
@@ -862,7 +956,7 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
         else:
             jlink = next((n for n in _JLINK_BINARIES if which(n)), None)
     if jlink is not None:
-        device = _default(fa_str_checked(fa, "jlink_device", False), _DEFAULT_JLINK_DEVICE)
+        device = _resolve_jlink_device(fa)
         speed = _default(fa_int_checked(fa, "jlink_speed"), _DEFAULT_JLINK_SPEED)
         return FlashPlan(
             argv=(
@@ -870,9 +964,14 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
                 "-AutoConnect", "1", "-ExitOnError", "1", "-NoGui", "1",
                 "-CommanderScript",
             ),
-            ok_message=(
-                f"swd_probe[{core}]: GD32G553 flashed via J-Link ({device}) @ {base}"
-            ),
+            # The RESOLVED device, never a compiled-in SKU (#402). This string
+            # is `data.entries[].message` -- the only per-entry human text in
+            # the flash envelope, so it is what alp-sdk-vscode renders as the
+            # outcome of a flash. It used to read `GD32G553 flashed via J-Link
+            # ({device})`, i.e. it resolved the device from metadata and then
+            # threw it away in the prose half, reporting every successful
+            # `swd_probe` write as a GD32G553 whatever it had programmed.
+            ok_message=f"swd_probe[{core}]: {device} flashed via J-Link @ {base}",
             jlink_script=jlink_commander_script(inp.artefact, base, do_reset),
         )
 
@@ -896,11 +995,13 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
         # carry their own addresses and OpenOCD's `program` proc adds a trailing
         # address to them, so passing it unconditionally shifts every section.
         program += f" exit {base}" if is_bin else " exit"
+        tool = "openocd"
         argv = (
             "openocd", "-f", f"interface/{interface}.cfg",
             "-f", f"target/{target}.cfg", "-c", program,
         )
     elif pyocd:
+        tool = "pyocd"
         parts = ["pyocd", "flash", "--target", target]
         # pyOCD's --base-address is documented binary-only; passing it for an
         # ELF/HEX is meaningless at best and a wrong-address write at worst.
@@ -913,7 +1014,14 @@ def plan_swd_probe(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
             "swd_probe: no flash tool found -- install SEGGER J-Link (preferred), "
             "or `openocd`, or `pyocd`."
         )
-    return FlashPlan(argv=argv, ok_message=f"swd_probe[{core}]: GD32G553 flashed @ {base}")
+    # The same #402 fix as the J-Link line above, on the worse of the two: this
+    # arm named `GD32G553` and echoed no device AT ALL, so nothing in the
+    # message could contradict it. `target` is the only device identity this
+    # path has -- it is literally what OpenOCD/pyOCD were pointed at -- so it
+    # is what the line records, together with which of the two ran.
+    return FlashPlan(
+        argv=argv, ok_message=f"swd_probe[{core}]: {target} flashed via {tool} @ {base}"
+    )
 
 
 def _default(value, fallback):
@@ -1181,6 +1289,12 @@ def parse_atoc_start_address(text: str) -> str | None:
     empty, foreign or not-yet-signed file, not a malformed one; the caller
     decides what that means.
 
+    **tan-cli#373.** `tan.core.setools.sign_slot0` -- the one place this repo
+    WRITES that report -- never deletes it for exactly this reason: an
+    earlier version did, which destroyed every prior entry (this SETOOLS
+    install's whole accumulated sign history) the moment a soft-failing
+    re-sign recreated the file holding only its own block.
+
     **This is a BUILD-TIME output, never plan-time metadata.** `app-gen-toc`
     writes the address fresh at signing time and the runbook says outright it
     SHIFTS per build/config -- no field under `metadata/**` can express it, so
@@ -1196,6 +1310,180 @@ def parse_atoc_start_address(text: str) -> str | None:
         if fields:
             address = fields[-1]
     return address
+
+
+def is_elf_artefact(artefact: str) -> bool:
+    """Extension-based, mirroring `is_raw_bin`'s own convention: no extension,
+    `.elf`, or `.out` (case-insensitive) -- the three "plausibly ELF" shapes
+    #367(a) named and #353 agreed are safe to resolve automatically to a
+    same-stem sibling `.bin`. Covers the Zephyr build's own known-good
+    `zephyr.elf`/`zephyr.bin` pair AND a toolchain output named bare (`app`)
+    or `.out` with no `.elf` suffix. Every other shape (a `.hex` carries its
+    own load addresses) is NOT, even when a same-stem `.bin` happens to sit
+    beside it: that could be an unrelated image, and resolving it silently
+    would flash something the manifest never named.
+
+    **tan-cli#373.** A prior version of this function accepted `.elf` only --
+    a narrowing of #367(a)'s own three-shape decision that nothing flagged,
+    since no test exercised the other two.
+    """
+    return os.path.splitext(artefact)[1].lower() in ("", ".elf", ".out")
+
+
+def resolve_slot0_binary(artefact: str, is_file: Callable[[str], bool]) -> str | None:
+    """The ONE definition of "what raw `.bin` does this slot0 write/sign
+    actually mean" -- shared by [`plan_alif_mram_jlink`] (the `loadbin`/
+    `verifybin` pair) and `tan.commands.flash_cmd
+    ._resolve_flow_d_atoc_via_setools` (the SETOOLS `app-gen-toc` sign
+    input), via [`validate_flow_d_shape`], so the two can never resolve
+    DIFFERENT files for the same entry. **#367's root cause**: they used to
+    each carry their own copy of this logic, and neither actually applied the
+    ELF-only restriction its own comment/tests claimed -- a `.hex` resolved
+    to a same-stem sibling `.bin` exactly like an ELF did, silently flashing
+    a different artefact than the manifest named.
+
+    Already a raw `.bin` -> returned unchanged. A plausibly-ELF artefact
+    ([`is_elf_artefact`]: no extension, `.elf`, `.out`) with a real
+    same-directory, same-stem `.bin` -> that sibling. Every other shape -- a
+    `.hex`, a plausibly-ELF artefact with no sibling, anything else -- ->
+    `None`; the caller decides how to phrase the refusal.
+    """
+    if is_raw_bin(artefact):
+        return artefact
+    if not is_elf_artefact(artefact):
+        return None
+    sibling = os.path.splitext(artefact)[0] + ".bin"
+    return sibling if is_file(sibling) else None
+
+
+@dataclass(frozen=True)
+class FlowDShape:
+    """Everything about a Flow D entry that is knowable WITHOUT `atoc`/
+    `atoc_address` -- i.e. before SETOOLS may need to sign one. `artefact` is
+    already resolved via [`resolve_slot0_binary`] when `app_address` is set;
+    callers must use THIS value, not the raw input artefact, for both the
+    SETOOLS sign input and the final loadbin/verifybin.
+    """
+
+    device: str
+    app_address: str | None
+    artefact: str
+
+
+def validate_flow_d_shape(fa: Any, artefact: str, is_file: Callable[[str], bool]) -> FlowDShape:
+    """Validate + resolve every Flow D input that does NOT depend on `atoc`/
+    `atoc_address` -- the part-number device profile and, when
+    `slot0_load_address` selects the mramxip shape, the artefact itself.
+
+    **The single source `tan.commands.flash_cmd._flash_entry` now calls
+    BEFORE ever considering a SETOOLS auto-sign or a `--dry-run` preview
+    (#366).** `atoc`/`atoc_address` are legitimately still absent at that
+    point -- SETOOLS is what is about to produce them -- so this cannot
+    validate the WHOLE entry; splitting out exactly the half that CAN be
+    checked early means a manifest that would fail here can no longer report
+    `ok:true` on a SETOOLS `--dry-run` preview just because the failure used
+    to live only in the (until-then unreached) second half of
+    `plan_alif_mram_jlink`.
+
+    Also called BY `plan_alif_mram_jlink` itself -- there remains exactly ONE
+    implementation of these checks; calling it twice on the real-write path
+    is pure/side-effect-free, so the repeat costs nothing.
+    """
+    device = fa_str_checked(fa, "jlink_flash_device", False)
+    if device is None:
+        if _fa_has_key(fa, "jlink_flash_device"):
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: flash_args.jlink_flash_device is present but "
+                "null/empty -- refusing to write MRAM with no part-number J-Link "
+                "device profile; the generic profile has none. It is a per-variant "
+                "metadata fact (socs/**/*.json `variants[].debug.jlink_flash_device`); "
+                "tan does not guess a part number."
+            )
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.jlink_flash_device is required -- only the "
+            "part-number J-Link device profile unlocks the MRAM loader, and the "
+            "generic profile has none. It is a per-variant metadata fact "
+            "(socs/**/*.json `variants[].debug.jlink_flash_device`); tan does not "
+            "guess a part number."
+        )
+    validate_identifier(device, "jlink_flash_device")
+    # OPTIONAL -- selects the mramxip two-blob shape when present; the default
+    # single-ATOC-blob shape (flash-jlink.sh) needs no app-address write at
+    # all, since the ATOC embeds the app. `None` only for genuinely absent; a
+    # present-but-malformed value still raises below, never silently reverts
+    # to the default shape.
+    #
+    # `fa_str_checked` alone cannot tell "key absent" from "key present with a
+    # null/empty-string value" -- both collapse to `None` (`raw or None` at
+    # line ~571). A key that IS present must still refuse when it resolves to
+    # `None`: a `slot0_load_address: ""` or a bare `slot0_load_address:` (YAML
+    # null) must never silently pick the default shape, exactly like any other
+    # malformed value.
+    app_address = fa_str_checked(fa, "slot0_load_address", True)
+    if app_address is None and _fa_has_key(fa, "slot0_load_address"):
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.slot0_load_address is present but "
+            "null/empty -- refusing to silently select the default "
+            "single-ATOC-blob shape. Remove the key entirely to use the default "
+            "shape, or supply the app's real MRAM address to select the mramxip "
+            "two-blob shape."
+        )
+    resolved_artefact = artefact
+    if app_address is not None:
+        validate_address(app_address, "slot0_load_address")
+        # The mramxip shape `loadbin`s the app blob at an explicit MRAM
+        # address -- correct ONLY for a raw `.bin`. `loadbin`ing anything else
+        # (e.g. `zephyr.elf`) at that address writes the artefact's own
+        # headers into MRAM instead of the app image (tan-cli#311). Unlike
+        # `plan_swd_probe`'s ELF/HEX fallback to `loadfile`, there is no
+        # fallback here: `loadfile` ignores `slot0_load_address` entirely,
+        # which would silently place the app wherever the ELF's own load
+        # addresses say rather than where this flow demands -- a refusal is
+        # the safer failure. tan-cli#353 resolves a real ELF/sibling-`.bin`
+        # pair rather than refusing over something resolvable;
+        # [`resolve_slot0_binary`] is the ONE place that decides which shapes
+        # qualify (#367).
+        resolved = resolve_slot0_binary(artefact, is_file)
+        if resolved is None:
+            if is_elf_artefact(artefact):
+                detail = (
+                    "No sibling "
+                    f"{os.path.basename(os.path.splitext(artefact)[0] + '.bin')} "
+                    "was found beside it either."
+                )
+            else:
+                detail = (
+                    "Only a plausibly-ELF artefact's (no extension, .elf, .out) "
+                    "same-stem sibling .bin is resolved automatically -- a .hex "
+                    "(or any other shape) is not, even with a same-stem .bin "
+                    "beside it, since that could be an unrelated image."
+                )
+            raise FlashPlanError(
+                f"{FLOW_D_METHOD}: flash_args.slot0_load_address is set but the "
+                f"artefact {artefact} is not a raw .bin -- refusing to loadbin "
+                "it at slot0_load_address, which would write the artefact's own "
+                f"headers into MRAM instead of the app image. {detail} Point the "
+                "build's output_artefact at the slot0-linked zephyr.bin for the "
+                "mramxip shape."
+            )
+        resolved_artefact = resolved
+    # tan-cli#373: `jlink_speed`/`confirm` do not depend on `atoc`/`atoc_address`
+    # either, so they belong in the "everything checkable early" half this
+    # function IS -- but #366 only moved `jlink_flash_device`/
+    # `slot0_load_address` here, leaving these two still validated only deep
+    # inside `plan_alif_mram_jlink`. That left #366's own fix narrowed, not
+    # closed: `_resolve_flow_d_atoc_via_setools`'s `--dry-run` preview short-
+    # circuits BEFORE `plan_alif_mram_jlink` ever runs (measured: a manifest
+    # with `jlink_speed: "fast"` and SETOOLS resolving reported `ok:true`
+    # under `--dry-run`), and on a REAL (confirmed) run the SETOOLS auto-sign
+    # itself -- spawning `app-gen-toc`, writing into the customer's install --
+    # happens before `plan_alif_mram_jlink` ever gets a chance to refuse.
+    # Validating (and discarding the result -- `plan_alif_mram_jlink` still
+    # applies its own default) here closes that gap regardless of which path
+    # the entry takes afterward.
+    fa_int_checked(fa, "jlink_speed")
+    fa_bool_checked(fa, "confirm")
+    return FlowDShape(device=device, app_address=app_address, artefact=resolved_artefact)
 
 
 def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> FlashPlan:
@@ -1263,47 +1551,8 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     two persistent-device backends -- see the `planning_only` note below.
     """
     fa = inp.flash_args
-    device = fa_str_checked(fa, "jlink_flash_device", False)
-    if device is None:
-        if _fa_has_key(fa, "jlink_flash_device"):
-            raise FlashPlanError(
-                f"{FLOW_D_METHOD}: flash_args.jlink_flash_device is present but "
-                "null/empty -- refusing to write MRAM with no part-number J-Link "
-                "device profile; the generic profile has none. It is a per-variant "
-                "metadata fact (socs/**/*.json `variants[].debug.jlink_flash_device`); "
-                "tan does not guess a part number."
-            )
-        raise FlashPlanError(
-            f"{FLOW_D_METHOD}: flash_args.jlink_flash_device is required -- only the "
-            "part-number J-Link device profile unlocks the MRAM loader, and the "
-            "generic profile has none. It is a per-variant metadata fact "
-            "(socs/**/*.json `variants[].debug.jlink_flash_device`); tan does not "
-            "guess a part number."
-        )
-    validate_identifier(device, "jlink_flash_device")
-    # OPTIONAL -- selects the mramxip two-blob shape when present; the default
-    # single-ATOC-blob shape (flash-jlink.sh) needs no app-address write at
-    # all, since the ATOC embeds the app. `None` only for genuinely absent; a
-    # present-but-malformed value still raises below, never silently reverts
-    # to the default shape.
-    #
-    # `fa_str_checked` alone cannot tell "key absent" from "key present with a
-    # null/empty-string value" -- both collapse to `None` (`raw or None` at
-    # line ~571). A key that IS present must still refuse when it resolves to
-    # `None`: a `slot0_load_address: ""` or a bare `slot0_load_address:` (YAML
-    # null) must never silently pick the default shape, exactly like any other
-    # malformed value.
-    app_address = fa_str_checked(fa, "slot0_load_address", True)
-    if app_address is None and _fa_has_key(fa, "slot0_load_address"):
-        raise FlashPlanError(
-            f"{FLOW_D_METHOD}: flash_args.slot0_load_address is present but "
-            "null/empty -- refusing to silently select the default "
-            "single-ATOC-blob shape. Remove the key entirely to use the default "
-            "shape, or supply the app's real MRAM address to select the mramxip "
-            "two-blob shape."
-        )
-    if app_address is not None:
-        validate_address(app_address, "slot0_load_address")
+    shape = validate_flow_d_shape(fa, inp.artefact, os.path.isfile)
+    device, app_address, artefact = shape.device, shape.app_address, shape.artefact
 
     atoc = fa_str(fa, "atoc")
     atoc_address = fa_str_checked(fa, "atoc_address", True)
@@ -1348,14 +1597,32 @@ def plan_alif_mram_jlink(inp: FlashInputs, which: Callable[[str], bool]) -> Flas
     lines: list[str] = []
     if serial is not None:
         lines.append(f"SelectEmuBySN {serial}")
+    else:
+        # tan-cli#353: no serial pinned, so this script selects no probe. Fine
+        # on a single-probe host; on a bench with several J-Links JLinkExe
+        # cannot choose and answers "Connecting to J-Link ...FAILED: Cannot
+        # connect to the probe/programmer." -- measured on the AEN bench, which
+        # carries three. Recorded here so the failure diagnosis can SAY that
+        # instead of leaving the user with SEGGER's bare sentence; the plan
+        # itself is unchanged, because refusing would break every correct
+        # single-probe host.
+        pass
+    # Quoted (tan-cli#369) ONLY for these Commander-script lines, when either
+    # actually contains whitespace -- `artefact`/`atoc` themselves are left
+    # unquoted for `ok_message` and every other use above.
+    commander_artefact = commander_path(artefact)
+    commander_atoc = commander_path(atoc)
     lines += ["si SWD", f"speed {speed}", f"device {device}", "connect"]
     if app_address is not None:
-        lines.append(f"loadbin {inp.artefact} {app_address}")
-    lines.append(f"loadbin {atoc} {atoc_address}")
+        # `artefact`, not `inp.artefact`: the tan-cli#353 sibling resolution
+        # above may have swapped an ELF for its real raw `.bin`, and the
+        # write must use what was RESOLVED or the guard would be decorative.
+        lines.append(f"loadbin {commander_artefact} {app_address}")
+    lines.append(f"loadbin {commander_atoc} {atoc_address}")
     if app_address is not None:
-        lines.append(f"verifybin {inp.artefact} {app_address}")
+        lines.append(f"verifybin {commander_artefact} {app_address}")
     lines += [
-        f"verifybin {atoc} {atoc_address}",
+        f"verifybin {commander_atoc} {atoc_address}",
         # PIN reset (RSetType 2), then run: the Secure Enclave boot ROM re-reads
         # and boots the ATOC, exactly as it does after an SE-UART burn. A core
         # reset would leave the SE out of the loop.

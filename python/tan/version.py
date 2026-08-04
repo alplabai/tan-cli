@@ -9,4 +9,27 @@
 # is strictly worse for a user's project than a rejected one.
 #
 # Pre-1.0 SemVer puts a break in the MINOR, and a language rewrite is a break.
-TAN_VERSION = "0.5.0-rc4"
+#
+# THIS IS A DEVELOPMENT VERSION, and that is the point (tan-cli#377). It sat at
+# a flat "0.5.0-rc4" for the whole post-rc4 wave, which is the version of an
+# ALREADY-PUBLISHED tag (v0.5.0-rc4 -> fbbea03d): the released binary and every
+# build of this tree answered `tan 0.5.0-rc4` while behaving differently, so no
+# bug report could name which one it was on. `version_check.py --not-released`
+# now refuses that state, so this cannot silently recur next cycle.
+#
+# Why `-rc5.dev0` and not the obvious `0.5.0-dev`: `dev` sorts BELOW `rc` in
+# SemVer AND in PEP 440, so `0.5.0-dev` would sort below the v0.5.0-rc4 this
+# tree is built on top of -- a newer build claiming to predate the release it
+# came after. `0.5.0-rc5.dev0` sorts rc4 < rc5.dev0 < rc5 < 0.5.0 in both
+# ecosystems. It does NOT promise an rc5 will be cut: PEP 440 reads `X.devN` as
+# "before X", and the next release being 0.5.0 (above rc5) keeps that true
+# either way. Build metadata (`0.5.0-rc4+dev`) was rejected for the opposite
+# reason -- SemVer 2.0.0 sec. 10 requires precedence to IGNORE it, so it would
+# have sorted EQUAL to the published tag.
+#
+# At release: drop the pre-release entirely (`0.5.0`), date CHANGELOG.md's
+# `## [0.5.0]` heading, and bring python/pyproject.toml (PEP 440 spelling) and
+# npm-shim/package.json (this exact string) with it --
+# `python/scripts/version_check.py --selftest --self --not-released` checks all
+# four together.
+TAN_VERSION = "0.5.0"

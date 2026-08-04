@@ -5,26 +5,24 @@ The vscode extension drives `tan <cmd> --format json` and hard-depends on
 five things that nothing else in this repo pins:
 
 - the top-level envelope shape, `{ command, ok, exitCode, project, data,
-  issues }` (`crates/tan-cli/src/envelope.rs`);
+  issues }` (`python/tan/envelope.py`);
 - the exit-code contract — 0 success, 1 runtime, 2 validation, 3 write, 4
-  doctor, 5 internal (`crates/tan-cli/src/exit.rs`);
+  doctor, 5 internal (`python/tan/exit_codes.py`);
 - `tan --version`'s first stdout line, `tan MAJOR.MINOR.PATCH`;
 - the **frozen issue codes** it matches with `===` (`issue-codes.json`, below);
 - the **`data` field names** it reads with `?? []` fallbacks (below).
 
-`crates/tan-cli/tests/contract.rs` (run by `cargo test`, part of the normal
-CI `test` job — no separate CI wiring needed) spawns the real, compiled `tan`
-binary against the golden fixtures in `envelopes/` below and diffs the
-result. A breaking wire-format change fails `cargo test` here instead of
-being discovered later, silently, in the extension.
+`python/tests/conformance/test_contract_envelopes.py` runs every committed
+fixture against `python -m tan`, the implementation that release assets ship,
+and diffs the complete envelope and process exit code. It runs in the normal
+Python CI job. A breaking shipping-wire change therefore fails before it can be
+discovered silently in the extension.
 
-This is a **Rust integration test, not a shell script** (unlike the retired
-`cli-rs/contract/run.sh`): `cargo test` already runs it cross-platform (this
-repo's CI test job matrixes ubuntu/windows/macos-latest — a bash harness
-would need a second execution path on Windows CI runners for no benefit),
-needs no new CI job, and gets `cargo`'s own binary discovery
-(`CARGO_BIN_EXE_tan`) for free instead of a hand-rolled `target/debug/tan(.exe)`
-path.
+`crates/tan-cli/tests/contract.rs` still runs the same fixtures against the
+frozen Rust v0.4.1 oracle. It is a secondary compatibility check and also owns
+the registry entries whose `emittedBy` path still points into `crates/`; it is
+not the shipping gate. Both harnesses are native cross-platform tests rather
+than shell scripts.
 
 ## The frozen wire vocabulary (issue #106)
 
@@ -40,7 +38,7 @@ indistinguishable from "no problem" until a customer hits it.
 `bootstrap.` would swallow codes the extension has no verdict for. The
 contract belongs to whoever owns the envelope: this repo.
 
-### Exit codes (`crates/tan-cli/src/exit.rs`)
+### Exit codes (`python/tan/exit_codes.py`)
 
 | Code | Meaning |
 |---|---|
@@ -53,8 +51,13 @@ contract belongs to whoever owns the envelope: this repo.
 
 ### Frozen issue codes (`issue-codes.json`)
 
-`issue-codes.json` is the single source; `contract.rs`'s `frozen_issue_codes`
-gates it, and the release workflow publishes it. Renaming or removing a
+`issue-codes.json` is the single source. Python's
+`test_every_issue_code_is_registered.py` scans shipping emit sites in the
+source→registry direction, and `test_frozen_issue_codes.py` checks every
+Python-owned registry entry in the registry→source direction. The Rust
+`contract.rs` gate retains responsibility only for entries owned by the frozen
+oracle. The release workflow publishes the combined registry. Renaming or
+removing a
 `status: "frozen"` code is a **breaking wire change** — bump the CLI
 MAJOR/MINOR, record it in `CHANGELOG.md`, and open the matching
 alp-sdk-vscode issue. A `status: "reserved"` code has no consumer yet
@@ -84,19 +87,12 @@ with a full `consumerEffect` per entry — this table does not duplicate them.
 `.has()` — equivalent to `===` for this purpose) to stop it spawning a real
 bootstrap that has already been refused. The latter two carry no missing
 TOOL at all, so `missingPrerequisites[]` is always empty for them; the fix
-travels only in `issues[].message` (see
-`crates/tan-core/src/bootstrap/prerequisites.rs`).
+travels only in `issues[].message` (see `python/tan/core/bootstrap.py`).
 
-Every other registered code is `reserved` — no consumer binds any of them
-yet, so renaming or dropping one costs nothing on the wire, and none is
-tabled above per the criterion stated: `bootstrap.workspace-guard`,
-`workspace-relocated`, `workspace-invalid`, `print-env-workspace-conflict`,
-`manifest`, `sdk-root-unresolved`, `zephyr-base-manifest-mismatch`,
-`zephyr-base-stale`, `zephyr-base-incompatible`, `west-config-reconciled`,
-`west-config-reconcile-failed`, `pip-upgrade`, `zephyr-requirements`,
-`sdk-extras`, `editable-install`, `failed`; and
-`debug-config.comments-dropped`, `legacy-entry-migrated`,
-`legacy-entry-untouched`, `internal-failure`, `write-failure`.
+Every other registered code is `reserved` — no consumer binds any of them yet,
+so renaming or dropping one costs nothing on the wire. The registry contains
+the complete, current list; duplicating hundreds of reserved entries here would
+create a second list that immediately drifts.
 
 ### Frozen `data` field names, and exactly what covers each
 
@@ -135,9 +131,9 @@ Every tagged release carries **`envelope-contract.json`** beside the binaries:
 ```
 
 Built by the `Bundle the envelope contract` step in
-`.github/workflows/release.yml` — pure re-packaging of committed files that
-`cargo test` already gates, so nothing in the asset can disagree with the
-repo. It exists so the extension's own contract test diffs against a
+`.github/workflows/release.yml` — pure re-packaging of committed files gated by
+the Python conformance/issue-code tests and the frozen Rust oracle tests. It
+exists so the extension's own contract test diffs against a
 published artefact instead of a hand-copied fixture that drifts. Fetch it at
 `https://github.com/alplabai/tan-cli/releases/download/<tag>/envelope-contract.json`.
 
@@ -152,20 +148,18 @@ One directory per case, mirroring the retired `cli-rs/contract` harness:
 | `expected.exit` | The golden process exit code, as a bare integer. |
 | *(optional)* `board.yaml` / other fixture inputs | Copied into the isolated working directory the case runs in before `tan` is spawned. **Directories are copied recursively**, which is what lets a case ship a synthetic `sdk/` checkout (`scripts/alp_project.py` + `metadata/…` + `examples/…`) and pass `--sdk-root ./sdk`. That relative argv keeps the "no absolute paths in argv" rule intact — `data.sdkRoot` comes back as the literal `./sdk` on every platform. |
 
-`contract/fixtures/` (sibling directory) is unrelated — it holds a synthetic
-SDK checkout tree consumed by `crates/tan-cli/src/commands/presets.rs`'s own
-unit tests, not an envelope golden.
+`contract/fixtures/` (sibling directory) is not an envelope-golden directory.
+It holds shared synthetic SDK, bootstrap-manifest, and toolchain inputs used by
+Python and Rust unit/parity tests.
 
 ## What a golden does NOT cover: key ORDER
 
-The diff is `assert_eq!` on two `serde_json::Value`s, and under this
-workspace's `preserve_order` feature `Map`'s equality is **order-insensitive**
-(it is `IndexMap`'s). So a golden pins the key **set** and the values, never
-the order they are emitted in — swapping `serde_json::Map::shift_remove` for
-the order-scrambling `remove` in `debug_launch.rs` leaves all twelve cases
-green while failing named `tan-core` unit tests. Key order is a real contract
-for the commands that mirror the TS CLI's output; pin it with a serialized-
-string assertion in the owning module's own tests, not here.
+The Python harness compares parsed dictionaries, whose equality is
+**order-insensitive**; the Rust oracle harness compares
+`serde_json::Value`s with the same property. A golden therefore pins the key
+set and values, never emission order. Key order is a real contract for commands
+that mirror TS output; pin it with a serialized-string assertion in the owning
+Python module's tests, not here.
 
 ## Determinism
 
@@ -180,14 +174,16 @@ just the one that captured it:
 - **Isolated working-directory PARENT** — that fresh directory is itself
   nested under its own fresh, uniquely named parent
   (`.../tan-contract-<case>-<pid>/root`), never spawned directly under the
-  shared system temp root. `discover_workspace_sdk` (tan-core `project.rs`)
+  shared system temp root. `discover_workspace_sdk`
+  (`python/tan/commands/sdk_cmd.py`)
   probes the working directory's *parent* for a sibling `alp-sdk/`; if that
   parent were the shared temp root, a stray `alp-sdk` checkout left there by
   something else could flip a golden's `sourceTier` to `discovery`.
 - **Isolated `HOME`/`USERPROFILE`** — also a fresh temp directory per case,
   so a developer's real `~/.alp/sdk-default` (or lack of one) can never
   change what `sdk current` reports.
-- **`SOURCE_DATE_EPOCH=0`** — honored by `crate::util::generated_at_iso`; set
+- **`SOURCE_DATE_EPOCH=0`** — honored by
+  `python/tan/core/timestamp.py::generated_at_iso`; set
   unconditionally even though none of the current cases emit a timestamp, so
   a future timestamped case is covered without touching the harness.
 - **No absolute paths in argv** — every case invokes `tan` without
@@ -197,12 +193,13 @@ just the one that captured it:
   `__SDKROOT__`-style substitution token (the convention `tests/parity/`
   uses) as a result.
 - **Scoped path-separator normalization** — the one thing case selection
-  can't avoid by construction: `PathBuf::to_string_lossy()` renders
+  can't avoid by construction: Windows path rendering produces
   `./board.yaml` as `.\board.yaml` on Windows. The harness normalizes
   `\` → `/` on the freshly captured side before diffing, but only on the
   known path-shaped fields (`root`, `boardYaml`, `boardYamlPath`,
   `destination`, `relativePath`, `sdkPath`, `sdkPinned`, `written`,
-  `unchanged`, `launchJsonPath` — see `PATH_KEYS` in `contract.rs`), not every
+  `unchanged`, `launchJsonPath` — see `PATH_KEYS` in the Python conformance
+  harness), not every
   string leaf. A blanket rewrite would also launder a real drift inside
   `issues[].message` or any other value that happens to contain a backslash —
   exactly the kind of change this gate exists to catch. Committed goldens are
@@ -227,10 +224,10 @@ just the one that captured it:
 | `init-invalid-template` | `init --template bogus-template --format json` | 2 | Validation-failure envelope shape for `init`. |
 | `validate-offline-clean` | `validate --offline --format json` (fixture `board.yaml`) | 0 | The offline structural validator's clean-outcome envelope — no Python/SDK spawn, so it's genuinely deterministic and network-free. |
 | `validate-offline-schema-violation` | `validate --offline --format json` (malformed fixture `board.yaml`) | 2 | Same command, non-clean outcome — pins the `issues[]` shape too. |
-| `validate-offline-empty-document` | `validate --offline --format json` (empty fixture `board.yaml`) | 2 | An empty/comment-only document used to report exit 0 "clean" — the silent-failure shape Python's `validate_board_text` refuses as a `BoardShapeError`. Pins that the Rust port refuses it too, message and exit code alike. |
+| `validate-offline-empty-document` | `validate --offline --format json` (empty fixture `board.yaml`) | 2 | An empty/comment-only document used to report exit 0 "clean" — pins that both the shipping Python CLI and frozen Rust oracle refuse it, message and exit code alike. |
 | `sdk-current-no-sdk` | `sdk current --format json` | 0 | Reports `sourceTier: "none"` in a workspace with no SDK configured — offline, host-independent given the isolated `HOME`. |
 | `sdk-unknown-subcommand` | `sdk bogus --format json` | 1 | Runtime-failure envelope shape; the only offline path that exercises exit code 1 in this set. |
-| `generate-board-yaml-missing` | `generate --format json` (no `board.yaml` present) | 2 | `generate`'s `data` schema (`{schemaVersion,targets,written,failed}`) is distinct from `init`'s and was otherwise completely unguarded — this is `generate`'s first guard clause (`commands/generate.rs`'s `run()`), needing no board/SDK/Python/network to reach. |
+| `generate-board-yaml-missing` | `generate --format json` (no `board.yaml` present) | 2 | `generate`'s `data` schema (`{schemaVersion,targets,written,failed}`) is distinct from `init`'s and was otherwise completely unguarded — this is the first guard clause in `python/tan/commands/generate_cmd.py`, needing no board/SDK/network to reach. |
 | `debug-config-preview-zephyr-mcu` | `debug-config --target-kind zephyr-mcu --server jlink --preview` | 0 | |
 | `debug-config-preview-baremetal-mcu` | `debug-config --target-kind baremetal-mcu --server openocd --preview` | 0 | |
 | `debug-config-preview-yocto-userspace` | `debug-config --target-kind yocto-userspace --server gdbserver --preview` | 0 | |
@@ -239,9 +236,31 @@ just the one that captured it:
 | `presets-heterogeneous-som` | `presets --sdk-root ./sdk --format json` (fixture SDK) | 0 | Issue #106's worked example made executable. The fixture SoM has an `a55` (`machine:` → yocto) and an `m33` (`board:` → zephyr), so `data.soms[].cores[].{id,os}` carries two different values — rename `soms` or `cores` and this fails instead of quietly scaffolding a multi-core part single-core with no IPC. Also pins `boardLibraries` discovery. |
 | `explain-overview` | `explain --format json` | 0 | `data.available.projectTemplates`, the New Project wizard's starter list. Fully hermetic — the catalogues are static, no SDK involved. |
 | `examples-catalog` | `examples --sdk-root ./sdk --format json` (fixture SDK) | 0 | `data.examples[].sourceDir`, which is what `tan init --from-example <sourceDir>` is handed back; a rename breaks scaffolding from an SDK example. Also pins README-derived `title`/`description`. |
-| `version_first_line_matches_contract` (in `contract.rs`, no fixture dir) | `--version` | 0 | Not a golden diff — `tan MAJOR.MINOR.PATCH` would need editing on every release if pinned literally, so the test asserts the *format* instead. |
-| `frozen_issue_codes` (in `contract.rs`, no fixture dir) | — | — | Source-literal assertion over `issue-codes.json`. Not a golden because the two `bootstrap.*` codes are not reachable hermetically: `yocto-host` fires only on a non-Linux host (a golden would be inert on the ubuntu CI leg) and `prerequisites-missing` only when a tool is absent from PATH. It proves the SPELLING survives at the emission site, **not** that the code still reaches the wire — that residue is stated in the test's own doc comment too. |
+| version-format tests (no fixture dir) | `--version` | 0 | `python/tests/test_cli_skeleton.py` and the Rust mirror assert the format rather than a literal version that changes every release. |
+| issue-code gates (no fixture dir) | — | — | Python AST gates check the shipping emit sites; `contract.rs` checks Rust-owned registry entries. They prove spelling/registration, while command tests prove reachability. |
 | `doctor_build_data_keys_the_extension_reads` (in `contract.rs`, no fixture dir) | `doctor --build --format json` | — | KEY-SET assertion, not a value diff: doctor's values are host facts (what is on PATH, whether a Zephyr workspace exists), its key names are not. Covers `data.summary.{pass,warn,fail}`, `data.nextSteps`, `data.checks[].{name,status}` and the literal check name `workspace`. |
+
+Deliberately **outside the envelope**: nothing, as of tan-cli#399's close-out.
+`faultdecode` was the one verb here — its `--format json` used to print the
+SDK's unwrapped fault report
+(`fault_detected`/`inputs`/`flags`/`addresses`/`root_cause`/`symbols`)
+verbatim, the output contract it inherited from the retired
+stdio-inheriting forward to `python -m alp_cli faultdecode` (the oracle maps
+the global `--format json` onto the child's own `--json`,
+`crates/tan-cli/src/commands/sdk_cli.rs`) — but `faultdecode_cmd.py` now
+treats `--format json` as a second, distinct spelling that wraps the report in
+the standard envelope; its OWN `--json` flag is the one that stays the
+unwrapped compatibility surface, unchanged, so a saved script or a pipe using
+`--json` still receives exactly the bytes it always did. `new-som`, in the
+same unenveloped state until the same issue, closed the same way.
+
+This is also pinned in code, not just prose: `python/tests/
+test_cli_skeleton.py`'s `_ENVELOPE_SHAPE_EXEMPT` enumerates the registered
+command table and asserts every command's `--format json` carries the
+`{command,ok,exitCode,project,data,issues}` shape — EMPTY today, since
+`faultdecode` was its only entry. Should a future command need an exemption,
+name it there AND in this paragraph together — one without the other is
+exactly the drift tan-cli#399 was filed about.
 
 Deliberately not covered: `sdk list` (hits the GitHub releases API — network),
 `build --materialise`'s `data.written` (needs a resolvable SDK + a Python
@@ -249,16 +268,15 @@ spawn), `kconfig` (the SDK's
 `--emit kconfig` needs a bootstrapped `ZEPHYR_BASE` — alp-sdk's one
 workspace-dependent emit, see alp-sdk `docs/cli.md`; `tan kconfig`'s pure
 JSON→`KconfigData`→envelope shaping is unit-tested hermetically in
-`crates/tan-cli/src/commands/kconfig.rs` and `crates/tan-core/src/kconfig.rs`
-instead). Not exhaustive by design — this pins the envelope *shape* +
+`python/tan/commands/kconfig_cmd.py` and its tests instead). Not exhaustive by
+design — this pins the envelope *shape* +
 exit-code contract for the commands the extension actually parses, not full
 command coverage. What is uncovered is listed rather than omitted: silence
 reading as coverage is how an inert gate survives.
 
 ## Regenerating a golden after a *deliberate* envelope change
 
-There is no `--bless` flag (the retired shell harness had one; the Rust
-suite doesn't need the extra code at this fixture count). To update a golden on
+There is no `--bless` flag. To update a golden on
 purpose:
 
 1. Build `tan` and run the case's `args.txt` by hand from an empty directory,
@@ -267,7 +285,10 @@ purpose:
 2. Copy the printed envelope into `expected.json`, converting any `\` path
    separator to `/` (Windows only — Unix output is already normalized).
 3. Update `expected.exit` if the exit code changed.
-4. Re-run `cargo test -p tan --test contract` and confirm it passes.
+4. Re-run `cd python && python -m pytest
+   tests/conformance/test_contract_envelopes.py -q`. If the deliberate change
+   also updates the frozen oracle contract, run `cargo test --locked -p
+   alp-tan-cli --test contract` too.
 5. Explain the *intentional* shape change in the commit message — a golden
    update with no explanation of why the wire format changed is exactly the
    drift this gate exists to catch.

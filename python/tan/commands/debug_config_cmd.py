@@ -71,12 +71,14 @@ from tan.core.debug_launch import (
     parse_target_kind,
     sdk_identity_overwrites,
 )
+from tan.core.global_flags import accept_global_flags
 from tan.core.jsonc_splice import pretty_json
 from tan.core.run import native_sim_exe_beside
 from tan.core.size import resolve_variant
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -544,6 +546,57 @@ def _resolve_user_svd(workspace_root: str, arg: str) -> str:
     return _workspace_relative(workspace_root, candidate)
 
 
+def _resolve_gdbserver_address(arg: str) -> str:
+    """Validate `--gdbserver-address` (tan-cli#321). Emitted verbatim into
+    `miDebuggerServerAddress` -- cppdbg accepts a bare hostname, an IPv4 or
+    bracketed-IPv6 literal, so there is no single `host:port` shape narrow
+    enough to validate without rejecting a real one; the only input that can
+    never be a real address is an empty string, the same floor `--svd` holds
+    for its own path argument.
+    """
+    if arg.strip() == "":
+        raise DebugConfigError("Alp: --gdbserver-address was given an empty value.")
+    return arg
+
+
+def _gdbserver_address_unresolved_issue() -> Issue:
+    """tan-cli#321 direction 1: the yocto-userspace draft's
+    `miDebuggerServerAddress` is still the unresolved `<host>:<port>`
+    placeholder in what this run actually produced. Severity `info` -- this is
+    not a failure, it is the one field on this target class that NO build and
+    NO SDK-published metadata can ever resolve (it names where the board ends
+    up after deploy, a fact that exists only at runtime), so surfacing it
+    explicitly is the whole point of this issue rather than leaving F5 to fail
+    silently at connect.
+
+    tan-cli#138 vs #321: unlike the other three target classes, this profile's
+    `preLaunchTask` carries NO restored default -- see
+    `tan.core.debug_launch.DEFAULT_PRE_LAUNCH_TASK`'s own doc comment for why:
+    alp-sdk-vscode registers no working task for yocto-userspace (the only one
+    that exists exits 1 by design), so naming one here would put the
+    "preLaunchTask terminated with exit code 1" dialog in front of every F5.
+    Said here, alongside the address gap, rather than as a second issue: both
+    point at the same manual deploy-and-start-gdbserver step, and a customer
+    who wants a reminder can still opt one in explicitly.
+    """
+    return Issue(
+        "debug-config.gdbserver-address-unresolved",
+        "info",
+        "This yocto-userspace configuration's `miDebuggerServerAddress` is "
+        "still the placeholder `<host>:<port>` -- the host and gdbserver port "
+        "are a runtime property of the deployed board that no build can "
+        "resolve. Fill it in by hand in launch.json once you know it, or pass "
+        "`--gdbserver-address host:port` next time you regenerate this "
+        "profile. tan has no deploy mechanism of its own, so deploying the "
+        "binary and starting gdbserver on the target before F5 is still a "
+        "manual step; this profile carries no `preLaunchTask` reminder of "
+        "that by default (tan-cli#138 vs #321 -- the extension's only "
+        "registered task for this target exits 1 by design, so naming it "
+        "would fail before every F5). Pass `--pre-launch-task '<name>'` to "
+        "add a reminder of your own.",
+    )
+
+
 def _has_placeholder(value: Any) -> bool:
     """Whether any `<...>` placeholder survived resolution, anywhere in the draft
     -- including inside `configFiles`, which is an array.
@@ -836,6 +889,7 @@ def _run(
     server_arg: str | None,
     core: str | None,
     pre_launch_task: str | None,
+    gdbserver_address: str | None,
     svd: str | None,
     preview: bool,
     project_arg: str,
@@ -915,6 +969,15 @@ def _run(
         except DebugConfigError as err:
             return _internal_failure(generated_at, str(err), launch_json_path)
 
+    # `--gdbserver-address` is the ONLY producer of `resolution.gdbserver_address`
+    # (tan-cli#321): a runtime property of the deployed board, so nothing else
+    # -- not a build, not SDK-published metadata -- can ever fill it.
+    if gdbserver_address is not None:
+        try:
+            resolution.gdbserver_address = _resolve_gdbserver_address(gdbserver_address)
+        except DebugConfigError as err:
+            return _internal_failure(generated_at, str(err), launch_json_path)
+
     apply_launch_resolution(draft, resolution)
 
     # alp-sdk#1026 review finding #4: which server-identity field the SDK
@@ -939,10 +1002,30 @@ def _run(
             "no svdFile field, so it had no effect: the Cortex Peripherals view "
             "is a cortex-debug (MCU) feature."
         )
+    # Same "no silent no-op" floor as `--svd` above: only a yocto-userspace
+    # draft carries `miDebuggerServerAddress` at all.
+    if gdbserver_address is not None and "miDebuggerServerAddress" not in draft:
+        notes.append(
+            f"--gdbserver-address was given, but target kind "
+            f"'{target_kind or ZEPHYR_MCU}' emits no miDebuggerServerAddress "
+            "field, so it had no effect: that field is a yocto-userspace "
+            "(cppdbg) feature."
+        )
 
     def success(
         *, replaced: bool, configuration: Any, issues: list[Issue], is_preview: bool
     ) -> _Outcome:
+        # tan-cli#321: checked against `configuration` -- the value ACTUALLY
+        # going out (the fresh `draft` on `--preview`, the merged
+        # `written_configuration` on a write) -- not the pre-merge `draft`
+        # this closure captures from its enclosing scope. A write that merged
+        # over a customer's own already-hand-filled address must not re-nag
+        # them every run; checking the final value is what tells the two
+        # apart, the same distinction `_has_placeholder` exists for.
+        final_issues = list(issues)
+        if target == YOCTO_USERSPACE and isinstance(configuration, dict):
+            if _has_placeholder(configuration.get("miDebuggerServerAddress")):
+                final_issues.append(_gdbserver_address_unresolved_issue())
         return _Outcome(
             exit_code=ExitCode.SUCCESS,
             data=_data(
@@ -956,7 +1039,7 @@ def _run(
                 configuration=configuration,
             ),
             project=project,
-            issues=issues,
+            issues=final_issues,
             text=_success_text(
                 target=target,
                 server=server,
@@ -966,7 +1049,7 @@ def _run(
                 notes=notes,
                 configuration=configuration,
                 quiet=quiet,
-                issues=issues,
+                issues=final_issues,
             ),
         )
 
@@ -1092,8 +1175,25 @@ def debug_config(
         "--pre-launch-task",
         metavar="TASK",
         help=(
-            "Emit preLaunchTask: <TASK> on the generated configuration. Off by "
-            "default: VS Code aborts pre-launch on a task it cannot resolve."
+            "Emit preLaunchTask: <TASK> on the generated configuration. "
+            "Defaults to the v0.3.1 task name for this target (tan-cli#138): "
+            "'alp: build active target' (zephyr-mcu), 'alp: build baremetal "
+            "target' (baremetal-mcu), 'alp: build native_sim target' "
+            "(native-host). yocto-userspace carries no default (tan-cli#321: "
+            "the extension's only registered task for it exits 1 by design) "
+            "-- pass this flag explicitly to add a reminder. Pass an empty "
+            "string to omit the key entirely."
+        ),
+    ),
+    gdbserver_address: str = typer.Option(
+        None,
+        "--gdbserver-address",
+        metavar="HOST:PORT",
+        help=(
+            "Fill miDebuggerServerAddress on a yocto-userspace configuration "
+            "(tan-cli#321). This is a runtime property of the deployed board "
+            "that no build can resolve; without it the field stays the "
+            "<host>:<port> placeholder and F5 fails at connect."
         ),
     ),
     svd: str = typer.Option(
@@ -1118,9 +1218,7 @@ def debug_config(
     sdk_root: str = typer.Option(  # read for the alp-sdk#1026 metadata fallback; see below
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     quiet: bool = typer.Option(False, "--quiet", help="Suppress non-essential output."),
 ) -> None:
     """Generate (or preview) a VS Code launch.json debug configuration.
@@ -1139,11 +1237,7 @@ def debug_config(
     # debug-config ...`, which is what the committed goldens invoke and what
     # clap's `global = true` gives the Rust); the root callback records it and
     # this option overrides it when repeated after the command name.
-    resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     try:
@@ -1152,6 +1246,7 @@ def debug_config(
             server_arg=server,
             core=core,
             pre_launch_task=pre_launch_task,
+            gdbserver_address=gdbserver_address,
             svd=svd,
             preview=preview,
             project_arg=project or ".",
@@ -1190,3 +1285,12 @@ def debug_config(
         for line in outcome.text:
             stream.write(f"{line}\n")
     raise typer.Exit(int(outcome.exit_code))
+
+
+# tan-cli#261: adds the six oracle `GlobalArgs` flags this command was still
+# missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--target`/
+# `--verbose`) on top of `--quiet`, already declared and read above; see
+# `tan.core.global_flags`. `ctx: typer.Context` (this command's own
+# `_HONOURS_ROOT_FORMAT` seam) is untouched -- appended parameters are all
+# keyword-only Options, never repositioned relative to it.
+debug_config = accept_global_flags(debug_config)

@@ -1,14 +1,32 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# Build the single-file `tan` executable.
+# Build the `tan` executable as a PyInstaller --onedir freeze and archive it.
 #
-# --onefile is REQUIRED, not a preference: the VS Code extension downloads a raw
-# binary straight to ONE cached path and has no unpack step anywhere in it
-# (alp-sdk-vscode/src/alpCli/service.ts:295 "tan-cli ships a RAW binary per
-# target (not an archive)"; download.ts:159-162 writes the response body to the
-# destination file; download.ts:124-129 chmods it 0o755). A --onedir artifact
-# cannot be consumed by the extension at all.
+# --onedir, not --onefile, as of tan-cli#349. --onefile re-extracts its whole
+# ~14 MB runtime into a FRESH temp dir on EVERY invocation, and on macOS each
+# extracted .dylib is unsigned (the parent's ad-hoc signature does not cover
+# extracted copies), so the OS re-verifies every one of them on every launch.
+# Measured on the published v0.5.0-rc4 --onefile assets (5 runs of --version):
+# macOS arm64 13.25/19.35/19.35/18.58/19.74 s, against git --version's 0.01 s
+# on the same host. alp-sdk-vscode's own version probe times out at 3 s
+# (vscodeAdapter.ts:1406) and its commandOnPath check at 5 s -- that asset's
+# --version TIMED OUT under the extension's own probe, not merely "slow".
+# Confirmed locally too (Windows, this host, Python 3.12.10/PyInstaller
+# 6.21.0, mean of 5 --version runs): --onefile 0.880 s vs --onedir 0.369 s --
+# a >2x win even on the platform that was never the emergency, since --onedir
+# extracts ONCE, at install time, rather than per invocation.
+#
+# The old rationale here (an --onedir artifact "cannot be consumed by the
+# extension at all", because the extension downloaded a raw binary straight to
+# one cached path with no unpack step anywhere) is exactly the shape of the
+# tan-cli#259 failure this comment used to warn about -- a stale comment
+# asserting the opposite of the code. It stopped being true the moment this
+# script started emitting an archive instead of a raw binary: the archive
+# below IS meant to be unpacked, which install.sh (../install.sh, this repo)
+# already does. Unpacking it on the alp-sdk-vscode side is a SEPARATE unit of
+# #349, landing independently in that repo -- this script and the archive it
+# produces are correct on their own regardless of when that lands.
 #
 # PyInstaller is a BUILD-TIME tool only -- deliberately absent from the runtime
 # dependencies in pyproject.toml. Build from a CLEAN environment holding nothing
@@ -59,10 +77,12 @@
 # falls back to the SDK's own `-m alp_orchestrate` subprocess and, failing that,
 # reports a coded `build.plan-unavailable` -- but no release should ship so.
 #
-# The artifact is named `tan` / `tan.exe` here. Release assets carry the Rust
-# target triple the extension already hardcodes (service.ts:34-46) -- rename on
-# upload, e.g. tan.exe -> tan-x86_64-pc-windows-msvc.exe. PyInstaller cannot
-# cross-compile: each of the six targets must be built on its own host/runner.
+# The onedir folder is named `tan/` (dist/tan/tan[.exe] + dist/tan/_internal/)
+# and the ARCHIVE built from it below is named `tan.zip` / `tan.tar.gz` here.
+# Release assets carry the Rust target triple the extension already hardcodes
+# (service.ts:34-46) -- rename on upload, e.g. tan.zip ->
+# tan-x86_64-pc-windows-msvc.zip. PyInstaller cannot cross-compile: each target
+# must be built on its own host/runner.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -103,11 +123,30 @@ case "${OS:-}" in Windows_NT) ADD_DATA_SEP=';' ;; esac
 # that let `click` go undeclared until `tests/gates/test_declared_dependencies.py`
 # existed (see that gate's own docstring). `truststore` needs no equivalent
 # flag: it carries no data files, only Python + the OS's own verifier APIs.
-"${PYTHON:-python}" -m PyInstaller --onefile --name tan --clean --noconfirm \
+"${PYTHON:-python}" -m PyInstaller --onedir --name tan --clean --noconfirm \
   --console --distpath dist --workpath .build --specpath .build \
   --add-data "../tan/templates/vendored${ADD_DATA_SEP}tan/templates/vendored" \
   --collect-data certifi \
   --paths . tan/__main__.py
+
+# Archive the onedir folder into the actual release artefact -- one file, so
+# `checksums.txt`/the attestation/install.sh all still deal with a single
+# thing per target, matching the old raw-binary contract's shape even though
+# the payload is now a directory (tan-cli#349). zip on Windows (installers on
+# that platform reach for it natively); tar.gz elsewhere, matching every
+# existing `.tar.gz`-based download path (curl | tar in getting-started.yml,
+# install.sh). shutil.make_archive over `zip`/`tar` as external commands: it
+# is stdlib, so it needs nothing this build venv doesn't already have, and it
+# behaves identically across the three build OSes.
+archive_ext=tar.gz
+archive_format=gztar
+case "${OS:-}" in Windows_NT) archive_ext=zip; archive_format=zip ;; esac
+"${PYTHON:-python}" - "$archive_format" <<'PY'
+import shutil
+import sys
+
+shutil.make_archive("dist/tan", sys.argv[1], root_dir="dist", base_dir="tan")
+PY
 
 # Fail the BUILD, not merely the test suite, on a dirty interpreter. $PYTHON
 # stays optional on purpose: an already-activated clean venv should not need
@@ -136,8 +175,10 @@ if ldd --version 2>&1 | head -1 | grep -qi musl || ls /lib/ld-musl-* >/dev/null 
   libc=musl
 fi
 
-artifact=dist/tan
-[ -f dist/tan.exe ] && artifact=dist/tan.exe
+# The ceiling now measures the ARCHIVE, not the onedir folder: that is the one
+# file a consumer actually downloads, and a "size of a directory" number would
+# depend on the filesystem's block size rather than on what shipped.
+artifact="dist/tan.${archive_ext}"
 size=$(wc -c <"$artifact")
 if [ "$size" -ge "$max_bytes" ]; then
   # QUARANTINE, do not merely complain. `exit 1` alone is defeatable by a pipe:

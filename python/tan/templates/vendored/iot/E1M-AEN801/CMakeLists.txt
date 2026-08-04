@@ -30,7 +30,17 @@ if(NOT _alp_rv EQUAL 0)
         "stderr: ${_alp_stderr}")
 endif()
 
-list(APPEND EXTRA_CONF_FILE ${_alp_generated})
+# PREPEND, not APPEND (tan-cli#379). Zephyr merges the EXTRA_CONF_FILE list in
+# order and the last assignment of a symbol wins, so appending the GENERATED
+# alp.conf parked it after a caller's own `-DEXTRA_CONF_FILE=native_sim.conf`
+# and silently overrode it -- measured, cache `-D` value plus `list(APPEND ...)`
+# yields `native_sim.conf;<build-dir>/generated/alp.conf`. That is backwards for
+# a generated baseline: this template's native_sim leg exists only to turn the
+# alp.conf-emitted `CONFIG_MBEDTLS=y` back off (see native_sim.conf), and could
+# not. Prepending keeps alp.conf winning over prj.conf (the whole list is merged
+# after it) while letting an explicit caller overlay win, which is what README.md's
+# build command and testcase.yaml's `extra_args` both already claimed happens.
+list(PREPEND EXTRA_CONF_FILE ${_alp_generated})
 
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(mqtt_telemetry LANGUAGES C)

@@ -219,8 +219,8 @@ jobs:
       # A CLEAN venv, not the runner's shared interpreter -- PyInstaller
       # bundles whatever its hooks can see (measured 34349423 B dirty vs
       # ~13.7 MB clean in release.yml's own header). `.[monitor]` matches
-      # release.yml/getting-started.yml: an extra a --onefile binary
-      # advertises in --help must actually be bundled.
+      # release.yml/getting-started.yml: an extra a frozen binary advertises
+      # in --help must actually be bundled.
       - name: freeze tan (clean venv)
         if: ${{ !matrix.container }}
         shell: bash
@@ -255,33 +255,55 @@ jobs:
       # The actual gate: --version / doctor / sdk list --online / bootstrap
       # --dry-run, on a genuinely clean HOME + empty cwd, both with and
       # without $ZEPHYR_BASE. See clean_host_smoke.py's module docstring for
-      # the full contract; it is the CONSUMER of build_binary.sh's dist/tan
-      # (or dist/tan.exe), never a rebuild of it.
+      # the full contract; it is the CONSUMER of build_binary.sh's onedir
+      # output at dist/tan/tan (or dist/tan/tan.exe), never a rebuild of it.
+      # tan-cli#349 moved the executable one level deeper (dist/tan/tan[.exe],
+      # not dist/tan[.exe]) -- this job runs it straight out of that folder
+      # rather than unpacking the sibling dist/tan.zip/.tar.gz archive, since
+      # both are byte-identical to what the archive contains and skipping the
+      # unpack step is one less thing that could go wrong here (the archive
+      # itself IS covered, separately, by release-asset-smoke below, which has
+      # no unpacked folder to fall back to since it starts from the download).
       #
-      # `matrix.ext` picks the exact name, NOT `[ -f python/dist/tan ] ||
-      # BIN=python/dist/tan.exe` (what this used to be): this step's `shell:`
-      # is Git Bash/MSYS on the Windows runner, and MSYS's `[ -f ]` reports
-      # TRUE for an extension-less name whenever a same-stem `.exe` exists --
-      # it resolves the PE lookup transparently, the same way `CreateProcess`
-      # would. So `[ -f "python/dist/tan" ]` was true with ONLY `tan.exe` on
-      # disk, the `||` fallback never ran, and the extension-less path was
-      # handed to `clean_host_smoke.py`, whose `Path.is_file()` has no such
-      # magic and correctly reported it missing (tan-cli#303 CI finding). The
-      # matrix already knows the platform at schedule time -- deriving the
-      # name from it is exact and shell-independent; release.yml uses the
-      # same `matrix.ext` field for the same reason.
+      # `matrix.ext` picks the exact name, NOT `[ -f python/dist/tan/tan ] ||
+      # BIN=python/dist/tan/tan.exe` (what this used to be one level up):
+      # this step's `shell:` is Git Bash/MSYS on the Windows runner, and
+      # MSYS's `[ -f ]` reports TRUE for an extension-less name whenever a
+      # same-stem `.exe` exists -- it resolves the PE lookup transparently,
+      # the same way `CreateProcess` would. So `[ -f "python/dist/tan/tan" ]`
+      # was true with ONLY `tan.exe` on disk, the `||` fallback never ran, and
+      # the extension-less path was handed to `clean_host_smoke.py`, whose
+      # `Path.is_file()` has no such magic and correctly reported it missing
+      # (tan-cli#303 CI finding). The matrix already knows the platform at
+      # schedule time -- deriving the name from it is exact and
+      # shell-independent; release.yml uses the same `matrix.ext` field for
+      # the same reason.
       - name: clean-host smoke (--version / doctor / sdk list --online / bootstrap --dry-run)
         shell: bash
         env:
-          TAN_BIN: python/dist/tan${{ matrix.ext }}
+          TAN_BIN: python/dist/tan/tan${{ matrix.ext }}
         run: |
           set -euo pipefail
           if [ ! -f "$TAN_BIN" ]; then
             echo "::error::expected the freeze at ${TAN_BIN} (matrix ext '${{ matrix.ext }}') but it is missing. Checked only that exact name -- not a [ -f tan ] || [ -f tan.exe ] probe, which MSYS/Git-Bash cannot answer correctly (see the comment above this step)."
-            ls -la python/dist || echo "python/dist does not exist at all -- the freeze step above did not run or did not produce it."
+            ls -la python/dist/tan 2>/dev/null || ls -la python/dist || echo "python/dist does not exist at all -- the freeze step above did not run or did not produce it."
             exit 1
           fi
           python python/scripts/clean_host_smoke.py --tan "$TAN_BIN"
+
+      # tan-cli#349: the onefile freeze re-extracted ~14 MB per invocation, so
+      # EVERY command paid 13-19 s on macOS arm64 (~1.1 s Windows, ~0.4 s
+      # Linux) before doing any work. --onedir moved that to install time.
+      # This step is how that stays fixed on the platform it was filed
+      # against: macOS arm64 is in this matrix and is NOT a host the
+      # maintainer can measure by hand -- which is precisely why the fix
+      # shipped unverified there. Runs against the same freeze the smoke test
+      # above just used, so it costs one process per run and nothing else.
+      - name: startup timing (tan-cli#349 onefile regression gate)
+        shell: bash
+        env:
+          TAN_BIN: python/dist/tan/tan${{ matrix.ext }}
+        run: python python/scripts/measure_startup.py --tan "$TAN_BIN"
 
   # POST-PUBLISH confirmation: downloads the asset `install.sh`/`install.ps1`
   # actually fetch and runs the identical smoke test against those exact
@@ -295,14 +317,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Asset names mirror release.yml's contract exactly (tan-cli#349):
+          # one archive per target, not a raw binary.
           - os: windows-latest
-            asset: tan-x86_64-pc-windows-msvc.exe
+            asset: tan-x86_64-pc-windows-msvc.zip
+            ext: .exe
           - os: macos-15-intel
-            asset: tan-x86_64-apple-darwin
+            asset: tan-x86_64-apple-darwin.tar.gz
+            ext: ""
           - os: macos-15
-            asset: tan-aarch64-apple-darwin
+            asset: tan-aarch64-apple-darwin.tar.gz
+            ext: ""
           - os: ubuntu-latest
-            asset: tan-x86_64-unknown-linux-gnu
+            asset: tan-x86_64-unknown-linux-gnu.tar.gz
+            ext: ""
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     permissions:
@@ -337,8 +365,22 @@ jobs:
           mkdir -p dl
           gh release download "$tag" --repo alplabai/tan-cli \
               --pattern "${{ matrix.asset }}" --dir dl --clobber
-          chmod +x "dl/${{ matrix.asset }}"
+
+      # tan-cli#349: the published asset is now an archive of a --onedir
+      # freeze, not a raw executable -- unpack it before the smoke test can
+      # run anything. `shutil.unpack_archive` (stdlib, already have Python
+      # 3.12 from the setup-python step above) picks zip vs tar.gz from the
+      # extension itself, so this one call covers every leg in the matrix
+      # without a platform-specific unzip/tar branch. The archive's own
+      # top-level entry is `tan/` (see build_binary.sh), so the unpacked
+      # binary lands at dl/unpacked/tan/tan[.exe].
+      - name: unpack the downloaded archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -c "import shutil; shutil.unpack_archive('dl/${{ matrix.asset }}', 'dl/unpacked')"
+          chmod +x "dl/unpacked/tan/tan${{ matrix.ext }}"
 
       - name: clean-host smoke against the downloaded asset
         shell: bash
-        run: python python/scripts/clean_host_smoke.py --tan "dl/${{ matrix.asset }}"
+        run: python python/scripts/clean_host_smoke.py --tan "dl/unpacked/tan/tan${{ matrix.ext }}"

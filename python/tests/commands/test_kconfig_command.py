@@ -491,6 +491,48 @@ def test_resolve_core_reports_missing_board_yaml(tmp_path: Path) -> None:
     assert excinfo.value.code == "kconfig.board-yaml-missing"
 
 
+def test_resolve_core_reports_a_non_utf8_board_yaml_as_a_coded_refusal(
+    tmp_path: Path,
+) -> None:
+    """tan-cli#396: `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so
+    the read guard could not fire for a board.yaml saved in cp1252/latin-1 or
+    carrying one stray byte -- it escaped as a raw `UnicodeDecodeError`.
+
+    `kconfig.board-yaml-missing` is the oracle's own code for this: Rust's
+    `read_to_string` fails with an `io::Error` on non-UTF-8 bytes, and
+    `kconfig.rs:156-161` maps every read failure to that one code.
+    """
+    board_yaml = tmp_path / "board.yaml"
+    board_yaml.write_bytes(b"cores:\n  cm33:\n    os: zephyr\n# \xff\xfe\xfd\n")
+    with pytest.raises(_CoreResolutionError) as excinfo:
+        _resolve_core(None, str(board_yaml))
+    assert excinfo.value.code == "kconfig.board-yaml-missing"
+
+
+def test_a_non_utf8_board_yaml_is_an_envelope_not_zero_bytes(tmp_path: Path) -> None:
+    """The shape that made tan-cli#396 worth an issue: rc 1 with ZERO bytes on
+    stdout. A JSON consumer gets nothing to parse, so the extension's matches
+    fail open and the `prj.conf` symbol menu silently renders empty or stale.
+
+    Asserted on `result.stdout` alone -- the envelope has to be on the stdout
+    stream, not merely somewhere in the combined output.
+    """
+    sdk = _sdk_root(tmp_path)
+    proj = _project(tmp_path, None)
+    (proj / "board.yaml").write_bytes(b"cores:\n  cm33:\n    os: zephyr\n# \xff\xfe\xfd\n")
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["issues"][0]["code"] == "kconfig.board-yaml-missing"
+    # The offending byte is named, so the remedy ("re-save board.yaml as UTF-8")
+    # is derivable from the envelope alone -- the user cannot see the decode
+    # error any other way now that it no longer reaches the terminal.
+    assert "0xff" in envelope["issues"][0]["message"]
+
+
 def test_resolve_core_reports_invalid_yaml(tmp_path: Path) -> None:
     board_yaml = tmp_path / "board.yaml"
     board_yaml.write_text("cores: [this is not a mapping\n", encoding="utf-8")
@@ -536,3 +578,89 @@ def test_resolve_core_reports_a_list_shaped_cores_block_as_invalid(
         _resolve_core(None, str(board_yaml))
     assert excinfo.value.code == "kconfig.board-yaml-invalid"
     assert "not valid YAML" in excinfo.value.message
+
+
+def test_resolve_core_reports_a_non_utf8_board_yaml_as_missing_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    """tan-cli#396: `UnicodeDecodeError` is a `ValueError`, NOT an `OSError`,
+    so an `except OSError` alone could never fire on it -- a board.yaml saved
+    by a cp1252/latin-1 editor, or with one stray byte pasted into a comment,
+    escaped the whole command as a raw traceback (rc 1, ZERO bytes on stdout,
+    no envelope for the vscode `prj.conf` LSP to match on). Measured before
+    the fix: `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in
+    position 32: invalid start byte`.
+
+    `kconfig.board-yaml-missing`, not `-invalid`: structural, not incidental
+    -- `kconfig.rs:156-161` maps EVERY `read_to_string` error to
+    `board-yaml-missing`, because Rust folds invalid UTF-8 into `io::Error`
+    (`stream did not contain valid UTF-8`), the SAME arm a genuinely absent
+    file takes; `board-yaml-invalid` is reserved for a PARSE error, which a
+    read failure never reaches. Confirmed live against the oracle: a
+    `board.yaml` carrying one `0xFF` byte answers `kconfig.board-yaml-missing`
+    / "failed to read board.yaml at `...`: stream did not contain valid
+    UTF-8", not `-invalid`."""
+    board_yaml = tmp_path / "board.yaml"
+    board_yaml.write_bytes(b"cores:\n  cm33:\n    os: zephyr\n# \xff\xfe\xfd\n")
+    with pytest.raises(_CoreResolutionError) as excinfo:
+        _resolve_core(None, str(board_yaml))
+    assert excinfo.value.code == "kconfig.board-yaml-missing"
+    assert str(board_yaml) in excinfo.value.message
+
+
+def test_non_utf8_board_yaml_is_an_envelope_on_stdout_not_zero_bytes(
+    tmp_path: Path,
+) -> None:
+    """tan-cli#396's CLI-level twin of the unit test above: the shape that
+    actually reached the customer was `rc=1`, stdout `0 bytes`, traceback on
+    stderr. Per `contract/README.md:33-37` the extension's two string matches
+    both fail OPEN on that -- it "does not error, does not log and does not
+    warn", it renders an empty or stale symbol menu -- so the zero-bytes shape
+    is what this pins, not just the issue code.
+
+    `kconfig.board-yaml-missing`, matching the oracle -- see
+    `test_resolve_core_reports_a_non_utf8_board_yaml_as_missing_not_a_
+    traceback`'s own docstring for why this is `-missing`, not `-invalid`
+    (`kconfig.rs:156-161` folds every `read_to_string` failure, non-UTF-8
+    included, into one arm).
+
+    `--core` is deliberately OMITTED: with it, `_resolve_core` returns before
+    the read and the defect is unreachable."""
+    sdk = _sdk_root(tmp_path)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "board.yaml").write_bytes(b"cores:\n  cm33:\n    os: zephyr\n# \xff\xfe\xfd\n")
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2
+    assert result.stdout != ""
+    envelope = json.loads(result.stdout)
+    assert envelope["ok"] is False
+    assert envelope["exitCode"] == 2
+    assert envelope["issues"][0]["code"] == "kconfig.board-yaml-missing"
+
+
+def test_an_unexpected_failure_is_a_coded_envelope_not_a_traceback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tan-cli#396: the catch-all `presets_cmd.py` has had all along and this
+    command did not. Nothing enumerated reaches it -- every IO/parse failure
+    above is already coded -- so it is provoked here by making an inner
+    resolution raise, which is exactly the class of "the one nobody thought
+    of" it exists to convert from a traceback-with-empty-stdout into an
+    envelope."""
+    sdk = _sdk_root(tmp_path)
+    proj = _project(tmp_path, "cores:\n  m55_he:\n    os: zephyr\n")
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("resolver exploded")
+
+    monkeypatch.setattr("tan.commands.kconfig_cmd.resolve_sdk", boom)
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 5
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "kconfig.internal-failure"
+    assert "RuntimeError: resolver exploded" in envelope["issues"][0]["message"]
