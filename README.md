@@ -227,19 +227,28 @@ Installing it today gets you the stale Rust CLI, not the current `tan`.
 > The shim downloads the matching platform binary on install (see
 > [`npm-shim/`](npm-shim/)); no Rust toolchain needed.
 
-`tan` needs an **alp-sdk checkout** to plan against. It is found, in order, from
-`--sdk-root <path>`, the `.alp/sdk-path` pointer `tan sdk switch` writes, or an
-`alp-sdk/` directory beside the project. `tan sdk install <version>` only
-downloads into `~/.alp/sdk-cache` — follow it with `tan sdk switch <version>` to
-select it (which also reconciles a stale `.west/config` manifest pointer left
-over from a prior SDK version under the same workspace topdir). No VS Code
-required.
+`tan` needs an **alp-sdk checkout** to plan against. Clone one yourself — `git
+clone https://github.com/alplabai/alp-sdk` — and point tan at it. It is found,
+in order, from `--sdk-root <path>`, the `.alp/sdk-path` pointer (written by `tan
+init` for the project it scaffolds), or an `alp-sdk/` directory beside the
+project. No VS Code required.
+
+> [!WARNING]
+> **`tan sdk install` and `tan sdk switch` do not work in this build.** Both
+> exit 1 with `sdk.not-ported`; `tan sdk list` and `tan sdk current` work. They
+> are unported rather than broken, and deliberately so for `switch`: it must
+> write the active-SDK pointer *and* reconcile `<topdir>/.west/config`'s
+> `manifest.path` ([#62](https://github.com/alplabai/tan-cli/issues/62)), and a
+> version doing only the first reports success while `west` keeps resolving the
+> manifest from the stale pointer. Until they land, `--sdk-root <path>` is the
+> mechanism — every command below accepts it
+> ([#381](https://github.com/alplabai/tan-cli/issues/381)).
 
 ## Quickstart
 
 ```sh
-# Start in a directory holding an alp-sdk checkout — clone one, or
-# `tan sdk install <version> && tan sdk switch <version>`.
+# Start in a directory holding an alp-sdk checkout:
+#   git clone https://github.com/alplabai/alp-sdk
 tan bootstrap --sdk-root ./alp-sdk    # west + Zephyr workspace + Python deps
                                       # (Linux, macOS and native Windows alike)
 tan init --name my-app                # defaults to --template zephyr-app
@@ -330,7 +339,9 @@ any `tan` command.
 ‡ `monitor` runs entirely in `tan` — it never resolves an alp-sdk checkout,
 unlike `model`/`new-som`/`faultdecode` — but needs pyserial, which is an
 *optional* dependency (`[project.optional-dependencies] monitor`, not
-`dependencies`): `pip install "alp-tan[monitor]"` for a source install. A
+`dependencies`): `pip install "./python[monitor]"` from a checkout — the extra
+is on the local path, since the `alp-tan` distribution that would carry it is
+not published anywhere. A
 release binary bundles pyserial at build time already. Without it, `tan
 monitor` exits with the coded issue `monitor.pyserial-missing` naming the
 fix — a binary built without that extra cannot pip-install its way out.
@@ -432,9 +443,32 @@ carries the newer ADR-0020 fields the SDK now emits — per-slice
 
 ## Development
 
-Four gates, all of them, before every push. CI runs `fmt` + `clippy` once on
-Linux, matrixes `build` + `test` across Linux, Windows, and macOS, and adds an
-`msrv` job that re-checks the declared `rust-version` (1.86):
+**Features land in `python/`.** That is where the release assets are frozen
+from, so that is what a change has to be green in before every push:
+
+```sh
+pip install -e ./python              # the DECLARED dependency set, never a
+                                     # hand-listed one — a wrong declaration
+                                     # must fail here, not on a customer's
+                                     # first run
+pip install pytest
+cd python && python -m pytest tests -q
+python scripts/version_check.py --selftest --self   # the three version files agree
+```
+
+Zero failures is the gate, not a count — skips and xfails are green, and the
+suite grows as ports land. `python/tests/gates/` is where the checks that read
+the repo itself live — declared dependencies, issue-code registration, the
+planner-relocation audit, and the gate that holds this section and the release
+docs to what `release.yml` actually does; `python/tests/parity/` diffs against
+the frozen Rust oracle and needs `ALP_SDK_ROOT` (and `TAN_RUST_BINARY`) or it
+skips.
+
+The four cargo gates still run in CI (`fmt` + `clippy` once on Linux, `build` +
+`test` matrixed across Linux/Windows/macOS, plus an `msrv` job re-checking the
+declared `rust-version`, 1.86) and still have to pass — but they verify the
+**frozen oracle**, not the shipped program: `crates/` is a v0.4.1-era reference
+the parity suite diffs against, and nothing built from it is released.
 
 ```sh
 cargo fmt --all --check
@@ -443,18 +477,29 @@ cargo build --all-targets
 cargo test
 ```
 
-House rules: keep files small, put pure logic in `tan-core` (with unit tests)
-rather than the executor, and never rename an SDK-contract string
+House rules: keep files small, put pure logic in `tan/core/` (with unit tests)
+rather than in a command module, and never rename an SDK-contract string
 (`alp-sdk`, `alp_orchestrate`, `board.yaml`, `alp.conf`, `.alp/…`) — only the
 user-facing binary is `tan`.
 
 ## Releases
 
-Version-tag pushes (`v<major>.<minor>.<patch>`) build per-platform `tan`
-binaries and publish them as GitHub release assets for the alp-sdk-vscode
-downloader. The tag must equal the workspace `Cargo.toml` version — CI fails the
-release otherwise. The exact tag scheme, per-target asset names, and the vscode
-`releaseAssetForTarget` mapping are the release-asset contract — see
+Version-tag pushes (`v<major>.<minor>.<patch>`) freeze one `tan` archive per
+platform and publish them as GitHub release assets for the alp-sdk-vscode
+downloader. The tag must equal `TAN_VERSION` in `python/tan/version.py` — the
+string the shipped binary prints — and `python/pyproject.toml` (its PEP 440
+rendering) and `npm-shim/package.json` must agree with it. `release.yml`'s
+`verify-version` job runs `python/scripts/version_check.py`, which reconciles
+those three and fails the release before a single asset is built. The workspace
+`Cargo.toml` is deliberately not part of that check: it versions the frozen Rust
+crates on their own cadence, and bumping it does nothing for a release.
+
+Registry publication is not automatic. The crates.io job is deleted, and the npm
+shim is published only when the repository variable `TAN_NPM_PUBLISH` is set to
+`true` on a final tag — the `release_gate` job then asserts the outcome matched
+that declaration, so an armed channel cannot ship nothing quietly. The exact tag
+scheme, per-target asset names, and the vscode `releaseAssetForTarget` mapping
+are the release-asset contract — see
 [`docs/release-contract.md`](docs/release-contract.md).
 
 ## References
