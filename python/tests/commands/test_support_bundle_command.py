@@ -385,7 +385,7 @@ def test_a_failing_check_is_a_doctor_failure_not_a_silent_success(tmp_path, monk
     doc = json.loads(result.stdout)
     assert doc["exitCode"] == 4
     assert doc["ok"] is False
-    issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.hostPrerequisites")
+    issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.host-prerequisites")
     assert issue["severity"] == "error"
     assert issue["message"] == "missing from PATH: ninja."
     # The bundle file is still written on a doctor failure -- it is precisely
@@ -403,7 +403,7 @@ def test_a_warning_check_becomes_a_warning_issue_and_stays_exit_zero(tmp_path, m
     assert result.exit_code == 0
     doc = json.loads(result.stdout)
     assert doc["ok"] is True
-    issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.hostPrerequisites")
+    issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.host-prerequisites")
     assert issue["severity"] == "warning"
 
 
@@ -411,7 +411,7 @@ def test_an_unresolved_sdk_root_fails_the_bundle(tmp_path, monkeypatch):
     """The oracle's `sdkRoot` check is `status_pass_fail(has_sdk)` -- a hard
     fail, so a bundle taken with no alp-sdk checkout exits 4. Measured against
     the oracle from a project with no resolvable SDK: rc=4, issues include
-    `support-bundle.sdkRoot` at error severity."""
+    `support-bundle.sdk-root` at error severity."""
     monkeypatch.chdir(tmp_path)
     write(tmp_path / "board.yaml", "x")
     monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: _clean_checks())
@@ -420,7 +420,7 @@ def test_an_unresolved_sdk_root_fails_the_bundle(tmp_path, monkeypatch):
     assert result.exit_code == 4
     doc = json.loads(result.stdout)
     assert doc["ok"] is False
-    issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.sdkRoot")
+    issue = next(i for i in doc["issues"] if i["code"] == "support-bundle.sdk-root")
     assert issue["severity"] == "error"
     assert issue["message"] == "No alp-sdk checkout resolved."
 

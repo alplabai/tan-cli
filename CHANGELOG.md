@@ -5,6 +5,62 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
+## [0.5.1] — 2026-08-04
+
+### Fixed
+
+- **27 `contract/issue-codes.json` issue codes shipped camelCase in v0.5.0,
+  breaking every consumer's kebab-case convention.** `doctor_cmd.py`'s
+  `checks_to_issues()` and `support_bundle_cmd.py`'s `_doctor_issues()` both
+  derived an issue code straight from `Check.name`, which is camelCase (it
+  doubles as a JSON data key and a display string, and stays that way —
+  `name` itself is unchanged by this fix). alp-sdk-vscode's contract gate
+  encodes `ISSUE_CODE_SHAPE = /^[a-z][a-z0-9-]*\.[a-z0-9-]+$/` and FAILS OPEN
+  on a code shaped otherwise (an unrecognised code is indistinguishable from
+  "no problem" on the consumer side), so all 27 were silently invisible to
+  it, blocking a pin to v0.5.0. All 27 are `"status": "reserved"`,
+  `"consumer": "none"` — nothing consumed the old spelling, so the rename is
+  free, exactly as the v0.5.0 entry above already said of the sibling
+  `support-bundle.<checkName>` batch ("costing nothing to rename later").
+  - `doctor.boardYaml` → `doctor.board-yaml`, `doctor.bootstrapManifest` →
+    `doctor.bootstrap-manifest`, `doctor.homePath` → `doctor.home-path`,
+    `doctor.hostPrerequisites` → `doctor.host-prerequisites`,
+    `doctor.hostPython` → `doctor.host-python`, `doctor.longPaths` →
+    `doctor.long-paths`, `doctor.pythonFloor` → `doctor.python-floor`,
+    `doctor.sdkProvenance` → `doctor.sdk-provenance`, `doctor.sevenZip` →
+    `doctor.seven-zip`, `doctor.venvProvenance` → `doctor.venv-provenance`,
+    `doctor.westResolved` → `doctor.west-resolved`, `doctor.zephyrSdk` →
+    `doctor.zephyr-sdk`, `doctor.zephyrSdkAvailableForHost` →
+    `doctor.zephyr-sdk-available-for-host`, `doctor.zephyrVersion` →
+    `doctor.zephyr-version`, `doctor.zephyrWorkspace` →
+    `doctor.zephyr-workspace`; `support-bundle.boardYaml` →
+    `support-bundle.board-yaml`, `support-bundle.bootstrapManifest` →
+    `support-bundle.bootstrap-manifest`, `support-bundle.gdbserverBackend` →
+    `support-bundle.gdbserver-backend`, `support-bundle.homePath` →
+    `support-bundle.home-path`, `support-bundle.hostPrerequisites` →
+    `support-bundle.host-prerequisites`, `support-bundle.jlinkBackend` →
+    `support-bundle.jlink-backend`, `support-bundle.longPaths` →
+    `support-bundle.long-paths`, `support-bundle.noneBackend` →
+    `support-bundle.none-backend`, `support-bundle.openocdBackend` →
+    `support-bundle.openocd-backend`, `support-bundle.pyocdBackend` →
+    `support-bundle.pyocd-backend`, `support-bundle.sdkRoot` →
+    `support-bundle.sdk-root`, `support-bundle.zephyrSdkAvailableForHost` →
+    `support-bundle.zephyr-sdk-available-for-host`.
+- **Fixed at the derivation, not by hand-editing the 27 outputs**: both
+  commands now route their fallback issue-code suffix through a new
+  `doctor_cmd.kebab_check_name()` helper (`check.code or
+  f"doctor.{kebab_check_name(check.name)}"` /
+  `f"support-bundle.{doctor_cmd.kebab_check_name(c.name)}"`), so a future
+  `Check` with a camelCase `name` and no explicit `code=` override cannot
+  reintroduce this. An explicit `code=` override still wins, unchanged.
+- **New gate**: `tests/gates/test_issue_code_registry_shape.py` fails if any
+  `contract/issue-codes.json` code does not match
+  `^[a-z][a-z0-9-]*\.[a-z0-9-]+$` (the exact alp-sdk-vscode consumer regex,
+  duplicated verbatim since that repo isn't a Python import here), and
+  separately asserts the regex itself still rejects the 27 pre-fix
+  camelCase spellings — non-vacuity, so this cannot regress to a gate that
+  would have waved the original defect through.
+
 ## [0.5.0] — 2026-08-04
 
 *This section was headed `## [0.6.0]` until tan-cli#377. **0.5.0 has never been

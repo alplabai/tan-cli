@@ -32,4 +32,9 @@
 # npm-shim/package.json (this exact string) with it --
 # `python/scripts/version_check.py --selftest --self --not-released` checks all
 # four together.
-TAN_VERSION = "0.5.0"
+#
+# 0.5.1: patch fix for the 27 camelCase issue codes v0.5.0 shipped in
+# `contract/issue-codes.json` (`doctor.boardYaml`, `support-
+# bundle.gdbserverBackend`, ...) -- all `"reserved"`/`"consumer": "none"`, so
+# the rename is free. See CHANGELOG.md's `## [0.5.1]` entry.
+TAN_VERSION = "0.5.1"

@@ -58,6 +58,8 @@ import ast
 import json
 import pathlib
 
+from tan.commands.doctor_cmd import kebab_check_name
+
 # `python/tests/gates/` is on `sys.path` under pytest's default prepend import
 # mode (no `__init__.py` here), so the sibling gate imports as a plain module.
 # Imported for its DECLARED table only -- no scan runs at import time, so this
@@ -187,10 +189,21 @@ def _assembled_suffixes() -> dict[str, frozenset[str]]:
 _ASSEMBLED_SUFFIXES: dict[str, frozenset[str]] = _assembled_suffixes()
 
 
+def _kebab_matches(candidates: set[str] | frozenset[str], suffix: str) -> bool:
+    """`True` when some IDENTIFIER-shaped member of `candidates` kebab-cases
+    (`kebab_check_name`) to `suffix` -- e.g. `"boardYaml"` -> `"board-yaml"`.
+
+    Restricted to `str.isidentifier()` members so an unrelated string constant
+    (a path, a URL, a message) cannot coincidentally kebab-case into a real
+    suffix; `Check(...)`'s `name` argument -- the actual value space this
+    exists for -- is always a plain identifier."""
+    return any(c.isidentifier() and kebab_check_name(c) == suffix for c in candidates)
+
+
 def _unemitted_reason(path: pathlib.Path, code: str) -> str | None:
     """`None` when `code` is still emitted by `path`, else a one-line reason.
 
-    Four shapes are accepted, and between them they cover all 198 python-side
+    Five shapes are accepted, and between them they cover all 198 python-side
     registry entries (measured, tan-cli#363) -- the registry's own policy is
     that a dynamically assembled code is registered whole even though no whole
     literal exists anywhere, so the assembled shapes have to be recognised, not
@@ -210,6 +223,12 @@ def _unemitted_reason(path: pathlib.Path, code: str) -> str | None:
          constant here but the suffix is defined in another module; the suffix
          must appear in that file's declared `_ASSEMBLED_SUFFIXES` set, so a
          fabricated `support-bundle.bogus` row still fails.
+      5. KEBAB-SLUG of shape 2 or 4 -- `doctor_cmd.py::kebab_check_name` runs
+         over `Check(...)`'s raw camelCase `name` before it reaches the wire
+         (`doctor.board-yaml` from the constant `"boardYaml"`; `support-
+         bundle.gdbserver-backend` from the assembled `"gdbserverBackend"`),
+         so a bare-suffix or cross-file match is also accepted when its
+         KEBAB form, not just its literal form, equals `suffix`.
     """
     if not path.is_file():
         return f"{code}: {path.name} does not exist"
@@ -226,16 +245,19 @@ def _unemitted_reason(path: pathlib.Path, code: str) -> str | None:
         return None
     if family in constants and f".{suffix}" in constants:
         return None
+    if _kebab_matches(constants, suffix):
+        return None
     # `_rel` (the sibling gate's, reused) is the one spelling `_ASSEMBLED_SUFFIXES`
     # is keyed by, and it falls back to the path unchanged outside `tan/` -- so a
     # synthetic self-test file under pytest's `tmp_path` is reported, not crashed on.
     rel = _rel(path)
-    if f"{family}." in constants and suffix in _ASSEMBLED_SUFFIXES.get(rel, frozenset()):
+    assembled = _ASSEMBLED_SUFFIXES.get(rel, frozenset())
+    if f"{family}." in constants and (suffix in assembled or _kebab_matches(assembled, suffix)):
         return None
     return (
-        f"{code}: neither {code!r} nor the bare suffix {suffix!r} is a string constant in "
-        f"{rel} (nor an assembled-code shape this scan recognises) -- the emission is gone, "
-        f"or it moved to another file and the registry's `emittedBy` is now stale"
+        f"{code}: neither {code!r} nor the bare suffix {suffix!r} (nor its kebab form) is a "
+        f"string constant in {rel} (nor an assembled-code shape this scan recognises) -- the "
+        f"emission is gone, or it moved to another file and the registry's `emittedBy` is now stale"
     )
 
 

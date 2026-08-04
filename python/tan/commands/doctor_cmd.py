@@ -1821,14 +1821,27 @@ def next_steps(checks: list[Check]) -> list[str]:
     return steps
 
 
+_CAMEL_BOUNDARY = re.compile(r"(?<!^)(?=[A-Z])")
+
+
+def kebab_check_name(name: str) -> str:
+    """`Check.name` (camelCase, also a JSON data key/display string -- left
+    alone) -> the kebab-case slug an issue *code* uses, e.g. `'sevenZip'` ->
+    `'seven-zip'`. `contract/issue-codes.json`'s registry gate
+    (`^[a-z][a-z0-9-]*\\.[a-z0-9-]+$`) rejects camelCase; 27 issue codes
+    derived straight from `check.name` shipped camelCase in v0.5.0 before this
+    existed."""
+    return _CAMEL_BOUNDARY.sub("-", name).lower()
+
+
 def checks_to_issues(checks: list[Check]) -> list[Issue]:
     """Warn/fail checks become issues; `unknown` raises none (it is not a
     problem, the question was simply not askable). The code is the check's own
     when it has one -- the frozen `bootstrap.*` spellings -- else Rust's
-    `doctor.<checkName>` convention."""
+    `doctor.<checkName>` convention, kebab-cased (`kebab_check_name`)."""
     return [
         Issue(
-            check.code or f"doctor.{check.name}",
+            check.code or f"doctor.{kebab_check_name(check.name)}",
             "error" if check.status == "fail" else "warning",
             check.detail,
         )
@@ -3095,7 +3108,7 @@ def doctor(
             # Printed AFTER every check line and BEFORE the summary: findable
             # without being buried mid-report, and the report still ends on
             # the summary line.
-            checked_codes = {c.code or f"doctor.{c.name}" for c in checks}
+            checked_codes = {c.code or f"doctor.{kebab_check_name(c.name)}" for c in checks}
             for issue in issues:
                 if issue.code not in checked_codes:
                     print(f"{issue.severity}: {issue.message}", file=sys.stderr)

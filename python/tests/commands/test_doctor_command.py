@@ -421,7 +421,7 @@ def test_collect_exit_code_over_two_REAL_trees_venv_with_west_and_without(tmp_pa
     # `{ok, exitCode, issues}` shape `alp-sdk-vscode` actually consumes.
     issues = doctor_cmd.checks_to_issues(checks)
     assert any(
-        i.code == "doctor.westResolved" and i.severity == "error" for i in issues
+        i.code == "doctor.west-resolved" and i.severity == "error" for i in issues
     ), issues
 
 

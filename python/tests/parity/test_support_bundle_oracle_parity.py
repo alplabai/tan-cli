@@ -84,6 +84,8 @@ from pathlib import Path
 
 import pytest
 
+from tan.commands.doctor_cmd import kebab_check_name
+
 from . import oracle_fixtures, platform_fixtures
 from .oracle import _run, empty_tool_inventory, python_command, rust_binary
 
@@ -177,13 +179,22 @@ def _issue_pairs(payload: dict) -> list[tuple[str, str]]:
     return [(i["code"], i["severity"]) for i in payload["issues"]]
 
 
-def _expected_issues(checks: list[tuple[str, str]]) -> list[tuple[str, str]]:
+def _expected_issues(checks: list[tuple[str, str]], *, kebab: bool = False) -> list[tuple[str, str]]:
     """A check list's own warn/fail rows, translated into the wire issue
     shape `_doctor_issues` produces -- shared by both tests below so the two
     issue lists agree wherever the checks do, without either test having to
-    restate them."""
+    restate them.
+
+    `kebab=True` for the PORT side only: `_doctor_issues` now runs
+    `kebab_check_name` over the raw `Check.name` before combining it with the
+    `support-bundle.` prefix (the 27-camelCase-code fix), while the frozen
+    Rust oracle's own `doctor.<checkName>` convention is untouched -- so the
+    two sides of this comparison are no longer the SAME transform, on
+    purpose. `checks` (`c["name"]`, from `_statuses`) is unaffected either
+    way: that is `Check.name`, which stays camelCase (also a JSON data key)."""
+    slug = kebab_check_name if kebab else (lambda name: name)
     return [
-        (f"support-bundle.{name}", "error" if status == "fail" else "warning")
+        (f"support-bundle.{slug(name)}", "error" if status == "fail" else "warning")
         for name, status in checks
         if status in ("warn", "fail")
     ]
@@ -211,7 +222,10 @@ def _assert_doctor_sections_match(r_bundle: dict, p_bundle: dict, r_out: dict, p
     # -- `_doctor_issues` never heard of `PORT_ONLY_CHECKS`, so a
     # `bootstrapManifest` warn genuinely rides on the wire and belongs in
     # this expectation, unlike in the oracle-shaped comparison above.
-    assert _issue_pairs(p_out) == _expected_issues(p_checks_raw)
+    # `kebab=True`: the port's own issue CODE is kebab-cased even though the
+    # CHECK NAME `bootstrapManifest`/etc. driving it stays camelCase -- see
+    # `_expected_issues`' own docstring.
+    assert _issue_pairs(p_out) == _expected_issues(p_checks_raw, kebab=True)
 
 
 def test_support_bundle_matches_the_oracle_on_a_failing_host(work_dir, tmp_path):
@@ -272,8 +286,8 @@ def test_support_bundle_matches_the_oracle_on_a_failing_host(work_dir, tmp_path)
     # The two facts the issue report named by hand, pinned literally so a
     # future refactor cannot satisfy the structural assertions above with an
     # empty check list.
-    assert ("support-bundle.sdkRoot", "error") in _issue_pairs(p_out)
-    assert ("support-bundle.hostPrerequisites", "error") in _issue_pairs(p_out)
+    assert ("support-bundle.sdk-root", "error") in _issue_pairs(p_out)
+    assert ("support-bundle.host-prerequisites", "error") in _issue_pairs(p_out)
 
 
 def test_support_bundle_matches_the_oracle_with_a_resolved_sdk(work_dir, tmp_path):
@@ -341,4 +355,4 @@ def test_support_bundle_matches_the_oracle_with_a_resolved_sdk(work_dir, tmp_pat
     _assert_doctor_sections_match(r_bundle, p_bundle, r_out, p_out)
     # Pinned literally, so a future refactor cannot satisfy the structural
     # assertion above by dropping the check `PORT_ONLY_CHECKS` declares.
-    assert ("support-bundle.bootstrapManifest", "warning") in _issue_pairs(p_out)
+    assert ("support-bundle.bootstrap-manifest", "warning") in _issue_pairs(p_out)

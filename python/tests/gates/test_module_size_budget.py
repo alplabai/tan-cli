@@ -71,7 +71,11 @@ _FUNCTION_CAP = 50
 #: module" number so a split that shrinks one file cannot be spent widening
 #: another.
 _MODULE_BUDGET: dict[str, int] = {
-    "tan/commands/doctor_cmd.py": 3114,
+    # 3127, not 3114: the 27-camelCase-issue-code fix added `kebab_check_name`
+    # (+ its `_CAMEL_BOUNDARY` regex), the one shared place a `Check.name`
+    # becomes a kebab issue-code suffix, used by both `checks_to_issues()` here
+    # and `support_bundle_cmd._doctor_issues()`.
+    "tan/commands/doctor_cmd.py": 3127,
     "tan/commands/bootstrap_cmd.py": 2781,
     "tan/core/bootstrap.py": 1890,
     "tan/core/flash_plan.py": 1808,
