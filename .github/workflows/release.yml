@@ -8,9 +8,17 @@
 # ===========================================================================
 #
 #   Tag scheme : v<major>.<minor>.<patch>   (SemVer, e.g. v0.1.0)
-#                The tag MUST equal the `tan` crate version in the workspace
-#                Cargo.toml ([workspace.package] version) — the verify-version
-#                job below fails the release if it does not.
+#                The tag MUST equal `TAN_VERSION` in python/tan/version.py —
+#                the string the shipped binary prints — with pyproject.toml
+#                (PEP 440 rendering) and npm-shim/package.json reconciled
+#                against it. The verify-version job below fails the release if
+#                they disagree. The workspace Cargo.toml is deliberately NOT
+#                read: it versions the frozen Rust crates, which no longer
+#                produce any asset here. An earlier revision of this header
+#                said the tag had to equal that Cargo.toml version — it was
+#                true until the port and is exactly the kind of stale
+#                opposite-of-the-code comment tan-cli#259 warns about; the
+#                consequence was an operator bumping a version no gate reads.
 #
 #   Assets     : one ARCHIVE per target triple (tan-cli#349 — was one raw
 #                uncompressed binary; see below), named
@@ -135,7 +143,14 @@ permissions:
   contents: write # create the release + upload assets (default GITHUB_TOKEN only)
 
 jobs:
-  # Fail fast: the tag must match the crate version before we build 8 targets.
+  # Fail fast, before the matrix freezes anything: the tag must equal
+  # `TAN_VERSION` in python/tan/version.py, with pyproject.toml and
+  # npm-shim/package.json reconciled against it. This line named the workspace
+  # Cargo.toml version and a target count off the retired cargo pipeline until
+  # tan-cli#383 -- neither survived the port, and it outlived the fix that
+  # corrected every markdown file, because a comment is the one piece of
+  # documentation nobody re-reads while editing the code beneath it. By the
+  # time the step below contradicts it the tag is already pushed and immutable.
   verify-version:
     runs-on: ubuntu-latest
     steps:
