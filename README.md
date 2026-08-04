@@ -356,18 +356,35 @@ fix — a binary built without that extra cannot pip-install its way out.
 global set (tan-cli#261, one shared `tan/core/global_flags.py`) — none of
 `--project`, `--board-yaml`, `--sdk-root`, `--target`, `--all`, `--format`,
 `--verbose`, `--quiet`, `--no-color`, `--non-interactive`, `--ci` raises "no
-such option" anywhere any more; a command with no real use for one still
-accepts and drops it rather than refusing it.
+such option" anywhere any more.
+
+**`tan build` is the exception, and it refuses rather than drops** (tan-cli#438
+corrected this paragraph, which claimed otherwise). Measured on `tan build`,
+each of these exits 1 with the coded issue `cli.command-deferred` naming the
+flag and pointing at tan-cli#427:
+
+    --plan  --target <EMIT>  --all  --manifest  --manifest-from <FILE>
+    --no-auto-bootstrap  --pristine  --verbose  --quiet  --no-color
+    --non-interactive  --ci
+
+That is deliberate: they are real, working flags of the v0.4.1 oracle that this
+port does not implement yet, and a DECLARED refusal is the only way to tell
+"known but deferred" apart from a typo — an unknown flag is a Click
+`UsageError` at exit 2, indistinguishable from `tan bulid`. See
+`tan/commands/deferred_cmd.py`'s module docstring.
+
+On every OTHER command a flag with no real use is accepted and dropped, as
+below.
 
 | Flag | Effect |
 | --- | --- |
 | `--project <PATH>` | Project root (default: current directory). |
 | `--board-yaml <PATH>` | Explicit `board.yaml`, overriding project resolution. |
 | `--sdk-root <PATH>` | alp-sdk checkout to plan against. |
-| `--target <EMIT>` / `--all` | Parse on every command now instead of erroring, but the underlying behaviour is still deferred, not silently dropped: `tan build --target …`/`--all` refuses with the coded issue `cli.command-deferred` (tan-cli#260) naming it; every other command accepts and drops both with no effect. |
+| `--target <EMIT>` / `--all` | Parse on every command now instead of erroring, but the underlying behaviour is still deferred, not silently dropped: `tan build --target …`/`--all` refuses with the coded issue `cli.command-deferred` (tan-cli#427) naming it; every other command accepts and drops both with no effect. |
 | `--format json` | Machine-readable envelope instead of text. |
-| `--non-interactive` / `--ci` | Refuse to prompt or mutate the host without a human watching (`tan/core/consent.py`): a command with a documented default takes it, one without a default fails naming the missing flag. Applied *unasked* too — the same refusal fires when stdin or stderr is not a terminal (piped, redirected, a CI runner), not only when the flag is passed. `doctor --fix` (tan-cli#91) and `scaffold`'s prompt gate on this for real today; every other command accepts both flags without yet changing behaviour for them. |
-| `--quiet` / `--verbose` / `--no-color` | Output volume and styling. |
+| `--non-interactive` / `--ci` | Refuse to prompt or mutate the host without a human watching (`tan/core/consent.py`): a command with a documented default takes it, one without a default fails naming the missing flag. Applied *unasked* too — the same refusal fires when stdin or stderr is not a terminal (piped, redirected, a CI runner), not only when the flag is passed. `doctor --fix` (tan-cli#91) and `scaffold`'s prompt gate on this for real today; every other command accepts both flags without yet changing behaviour for them — except `tan build`, which refuses both with `cli.command-deferred` (see above). |
+| `--quiet` / `--verbose` / `--no-color` | Output volume and styling — on every command except `tan build`, which refuses all three with `cli.command-deferred` (see above). |
 
 `--format json` emits the stable envelope
 `{command, ok, exitCode, project, sdk, data, issues}` — the contract the
