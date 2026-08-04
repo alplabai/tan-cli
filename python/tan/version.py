@@ -32,4 +32,4 @@
 # npm-shim/package.json (this exact string) with it --
 # `python/scripts/version_check.py --selftest --self --not-released` checks all
 # four together.
-TAN_VERSION = "0.5.0-rc5.dev0"
+TAN_VERSION = "0.5.0"

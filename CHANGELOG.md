@@ -5,7 +5,7 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.5.0] — Unreleased
+## [0.5.0] — 2026-08-04
 
 *This section was headed `## [0.6.0]` until tan-cli#377. **0.5.0 has never been
 released** — only `v0.5.0-rc1`…`v0.5.0-rc4` — so everything here and everything
