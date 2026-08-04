@@ -338,6 +338,196 @@
    }
   }
  ],
+ "tests/parity/test_oracle_parity.py::test_explain_matches_the_oracle[overview]#0": [
+  0,
+  {
+   "command": "explain",
+   "data": {
+    "available": {
+     "generationTargets": [
+      "zephyr-conf",
+      "dts-overlay",
+      "cmake-args",
+      "yocto-conf",
+      "native-sim-overlay",
+      "carrier-netlist",
+      "west-libraries",
+      "hw-info-h",
+      "os-topology",
+      "zephyr-board"
+     ],
+     "moduleTemplates": [
+      "sensor-driver",
+      "connectivity-service",
+      "inference-stage",
+      "diagnostics-check"
+     ],
+     "projectTemplates": [
+      "minimal-app",
+      "zephyr-app",
+      "sensor-starter",
+      "iot-starter",
+      "edge-ai-starter",
+      "board-diagnostics"
+     ]
+    },
+    "details": [
+     "Use --template to explain a project template (init) or module template (scaffold).",
+     "Use --target to explain a generation output target.",
+     "Project templates: minimal-app, zephyr-app, sensor-starter, iot-starter, edge-ai-starter, board-diagnostics",
+     "Module templates: sensor-driver, connectivity-service, inference-stage, diagnostics-check",
+     "Generation targets: zephyr-conf, dts-overlay, cmake-args, yocto-conf, native-sim-overlay, carrier-netlist, west-libraries, hw-info-h, os-topology, zephyr-board"
+    ],
+    "schemaVersion": "1",
+    "selector": {
+     "kind": "overview",
+     "value": "all"
+    },
+    "summary": "tan explain topics"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
+ "tests/parity/test_oracle_parity.py::test_explain_matches_the_oracle[unknown-target]#0": [
+  1,
+  {
+   "command": "explain",
+   "data": {
+    "available": {
+     "generationTargets": [
+      "zephyr-conf",
+      "dts-overlay",
+      "cmake-args",
+      "yocto-conf",
+      "native-sim-overlay",
+      "carrier-netlist",
+      "west-libraries",
+      "hw-info-h",
+      "os-topology",
+      "zephyr-board"
+     ],
+     "moduleTemplates": [
+      "sensor-driver",
+      "connectivity-service",
+      "inference-stage",
+      "diagnostics-check"
+     ],
+     "projectTemplates": [
+      "minimal-app",
+      "zephyr-app",
+      "sensor-starter",
+      "iot-starter",
+      "edge-ai-starter",
+      "board-diagnostics"
+     ]
+    },
+    "details": [],
+    "schemaVersion": "1",
+    "selector": {
+     "kind": "overview",
+     "value": "bogus-target"
+    },
+    "summary": ""
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "explain.target-unknown",
+     "message": "Unknown generation target 'bogus-target'.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
+ "tests/parity/test_oracle_parity.py::test_explain_matches_the_oracle[unknown-template]#0": [
+  1,
+  {
+   "command": "explain",
+   "data": {
+    "available": {
+     "generationTargets": [
+      "zephyr-conf",
+      "dts-overlay",
+      "cmake-args",
+      "yocto-conf",
+      "native-sim-overlay",
+      "carrier-netlist",
+      "west-libraries",
+      "hw-info-h",
+      "os-topology",
+      "zephyr-board"
+     ],
+     "moduleTemplates": [
+      "sensor-driver",
+      "connectivity-service",
+      "inference-stage",
+      "diagnostics-check"
+     ],
+     "projectTemplates": [
+      "minimal-app",
+      "zephyr-app",
+      "sensor-starter",
+      "iot-starter",
+      "edge-ai-starter",
+      "board-diagnostics"
+     ]
+    },
+    "details": [],
+    "schemaVersion": "1",
+    "selector": {
+     "kind": "overview",
+     "value": "bogus-template"
+    },
+    "summary": ""
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "explain.template-unknown",
+     "message": "Unknown template 'bogus-template'.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
+ "tests/parity/test_oracle_parity.py::test_faultdecode_is_a_known_divergence_from_the_oracle#0": [
+  2,
+  {
+   "command": "faultdecode",
+   "data": {
+    "subcommand": "faultdecode"
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "faultdecode.failed",
+     "message": "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk switch <version|path>`, or place the project near an alp-sdk checkout.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
  "tests/parity/test_oracle_parity.py::test_generate_matches_rust_with_a_resolvable_sdk#0": [
   0,
   {
@@ -486,6 +676,50 @@
    }
   },
   "{\n  \"sdkPath\": \"../rust-sdk\",\n  \"updatedAt\": \"1970-01-01T00:00:00.000Z\"\n}\n"
+ ],
+ "tests/parity/test_oracle_parity.py::test_model_bare_invocation_is_a_known_divergence_from_the_oracle#0": [
+  2,
+  {
+   "command": "model",
+   "data": {
+    "subcommand": "model"
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "model.failed",
+     "message": "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk switch <version|path>`, or place the project near an alp-sdk checkout.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
+ "tests/parity/test_oracle_parity.py::test_monitor_is_a_known_divergence_from_the_oracle#0": [
+  2,
+  {
+   "command": "monitor",
+   "data": {
+    "subcommand": "monitor"
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "monitor.failed",
+     "message": "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk switch <version|path>`, or place the project near an alp-sdk checkout.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
  ],
  "tests/parity/test_oracle_parity.py::test_new_som_matches_the_oracle_on_command_and_issue_code#0": [
   2,
@@ -1752,6 +1986,60 @@
    }
   }
  ],
+ "tests/parity/test_oracle_parity.py::test_renode_no_sdk_matches_the_oracle#0": [
+  1,
+  {
+   "command": "renode",
+   "data": {
+    "controlPort": 0,
+    "descriptor": "",
+    "elf": "",
+    "expect": null,
+    "expectFound": false,
+    "logPath": "<ORACLE-ROOT-0>/build/renode.log",
+    "platformStem": "",
+    "renodeArgv": [],
+    "repl": "",
+    "resc": "",
+    "sku": "",
+    "timeout": 120,
+    "uartPort": 0
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "renode.sdk-root-not-found",
+     "message": "Cannot locate alp-sdk root.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  }
+ ],
+ "tests/parity/test_oracle_parity.py::test_run_no_sdk_is_a_known_divergence_from_the_oracle#0": [
+  1,
+  {
+   "command": "run",
+   "data": null,
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "build.plan-unavailable",
+     "message": "no alp-sdk checkout found \u2014 pass `--sdk-root <PATH>`, pin one with `tan sdk switch <version|path>`, set it in settings, or run `tan bootstrap`. The build-plan comes from the SDK's `alp_orchestrate --emit build-plan`.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  }
+ ],
  "tests/parity/test_oracle_parity.py::test_sdk_switch_unresolvable_version_is_a_known_divergence_from_the_oracle#0": [
   1,
   {
@@ -1774,6 +2062,33 @@
    "project": {
     "boardYaml": null,
     "root": null
+   }
+  }
+ ],
+ "tests/parity/test_oracle_parity.py::test_size_missing_manifest_is_a_known_divergence_from_the_oracle#0": [
+  1,
+  {
+   "command": "size",
+   "data": {
+    "schema": "alp-size/1",
+    "slices": [],
+    "summary": {
+     "over_budget": [],
+     "unknown_budget": []
+    }
+   },
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "size.manifest-unavailable",
+     "message": "no system-manifest.yaml at <ORACLE-ROOT-0>/build/system-manifest.yaml; run `tan build` first (No such file or directory (os error 2)).",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
    }
   }
  ],

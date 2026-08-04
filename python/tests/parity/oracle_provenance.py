@@ -131,14 +131,34 @@ def build_input_digest(repo_root: Path) -> str | None:
 
 
 def crates_commits_since(repo_root: Path, sha: str) -> str | None:
-    """``git log --oneline <sha>..HEAD -- crates``: empty string when nothing
-    has moved, ``None`` when git could not answer.
+    """Commits that changed ``crates/`` CONTENT since ``sha``: empty string
+    when nothing has moved, ``None`` when git could not answer.
 
     Scoped to the WHOLE of ``crates/``, unlike :data:`BUILD_INPUT_PATHSPEC`:
     this one backs the frozen fixtures' ``PROVENANCE.txt`` claim
     (tan-cli#409), and a capture is a claim about the tree that produced it,
     not only about the compiler's inputs.
+
+    The TREE HASHES are compared first, and equality short-circuits to "no
+    movement" before the log is consulted at all. `git log -- crates` answers
+    about COMMIT REACHABILITY, not content: a squash merge, a rebase or a
+    revert that leaves `crates/` byte-identical still produces a new commit
+    object whose path-filtered log entry looks exactly like real drift.
+    Measured on the tan-cli#418 squash -- `git log` named it, while
+    `git rev-parse <sha>:crates` and `git rev-parse HEAD:crates` were the
+    SAME hash (205e15ac5291db72e590c40bcd317cb911ab6cdd) and
+    `git diff --numstat` reported zero files.
+
+    That false fire is the expensive kind: it demands a re-validation nobody
+    needs, on every merge, until someone learns to advance the pin without
+    measuring -- at which point the check is worse than absent, because it
+    still reads as evidence. Comparing content makes the answer mean what the
+    caller assumes it means.
     """
+    before = git(repo_root, "rev-parse", f"{sha}:crates")
+    after = git(repo_root, "rev-parse", "HEAD:crates")
+    if before is not None and after is not None and before == after:
+        return ""
     return git(repo_root, "log", "--oneline", f"{sha}..HEAD", "--", "crates")
 
 

@@ -96,7 +96,76 @@ release.yml extracts the notes by an exact `^## \[<tag minus v>\]` match, so a
 
 ### Fixed
 
-- **Two SDK discovery ladders answered different checkouts from one directory
+- **The test suite did not necessarily test THIS repo's `tan`** (tan-cli#423).
+  26 test files spawn `[sys.executable, "-m", "tan", ...]`, which resolves to
+  whatever `tan` the interpreter finds first -- on one host an editable install
+  pointing at a different worktree entirely, so the suite's verdict depended on
+  the directory `pytest` was started from. It had already produced one FALSE
+  parity failure (`multicore_rpmsg-imx93: alp-sdk refuses but tan does not`),
+  filed as a real divergence before the cause was found; tan refuses that
+  `status: tbd` hw_rev correctly in every emit mode. `tests/conftest.py` gains
+  `tan_under_test`, a session-scoped autouse fixture modelled on the existing
+  `pinned_oracle`: it asserts the imported `tan` resolves inside this repo's
+  `python/` and prepends that directory to `PYTHONPATH` for the spawned
+  children. Measured: `test_faultdecode_command.py` went from 2 failed to 24
+  passed when run from the repo root.
+- **`build` reported a bare `terminated with exit code: 1` when the Zephyr SDK
+  cross toolchain was missing** (tan-cli#419), although `doctor`'s `zephyrSdk`
+  check already diagnosed exactly that with the exact remedy. CMake's refusal
+  (`Could not find a package configuration file provided by "Zephyr-sdk"`) sat
+  in the pass-through child output the envelope never named. The slice message
+  now names the cause and the `west sdk install --version 1.0.1 -t
+  arm-zephyr-eabi` remedy, importing the command string from `doctor_cmd`
+  rather than re-spelling it so the two cannot drift. A slice that fails for
+  any other reason keeps the bare message -- a conditional re-wording must not
+  mislabel unrelated failures.
+- **`generate` left its writability probe's empty file behind when the emit was
+  refused** (tan-cli#420). `_ensure_writable` proves the destination writable
+  with `open("ab")`, which CREATES it; nothing removed it again. The envelope
+  was always honest (exit 3, `data.written == []`, `generate.emit-failed`), but
+  the DISK was not: `cmake/alp.cmake` hands
+  `${CMAKE_BINARY_DIR}/generated/alp.conf` to Zephyr as `EXTRA_CONF_FILE`, and
+  Zephyr accepts an empty conf file silently -- no configuration applied,
+  nothing said. Inside tan's own flow the refusal stops the build, but a
+  standalone `west build` after a failed `tan generate` reaches that configure
+  with nothing re-running generate in between. The probe's file is now removed,
+  and only ever that file: only when the probe itself created it (`existed`
+  captured BEFORE the open), only while still zero-byte (re-checked at unlink
+  time, so a partial artefact from an emitter that died mid-write survives as
+  evidence), with cleanup failure swallowed so it cannot replace the real
+  refusal.
+- **`validate` reported `validation failure` when nothing had been validated**
+  (tan-cli#350). Two different situations produced one message -- no
+  `board.yaml` to check, and a `board.yaml` that genuinely failed its schema --
+  and the first is the state every new user is in before `tan init`. Now three
+  distinguishable verdicts: `validate.board-yaml-missing` naming the searched
+  path and both fixes; a clean pass; and a real failure that carries the
+  `validate.schema-violation` errors that produced it. The escalated case (the
+  message firing on a project tan itself scaffolded) is gone with the
+  not-ported path it came from, removed in tan-cli#376.
+- **The frozen binary took 13-19 s to run ANY command on macOS arm64**
+  (tan-cli#349) because the PyInstaller `--onefile` bundle re-extracted ~14 MB
+  of interpreter and shared libraries on every invocation, and on macOS each
+  extracted `.dylib` falls outside the parent's ad-hoc signature and is
+  inspected individually on load. `--onedir` moved that to install time. The
+  fix shipped verified on Linux and Windows only -- macOS was the one platform
+  it could not be measured on by hand -- so the `clean-host` matrix, which
+  already freezes and runs the binary on `macos-15` and `macos-15-intel`, now
+  times `--version` there: 5 runs, median against a 5 s ceiling. Measured on
+  macOS arm64: **0.342 s**, against 13.25 / 19.35 / 19.35 / 18.58 / 19.74 s
+  before.
+- **The oracle-provenance gate fired on commits that never touched the oracle.**
+  It compared reachability alone, so any commit after the recorded SHA counted
+  as drift. It now compares the `crates/` tree hash first and reports only when
+  the tree genuinely differs.
+- **`tan build`'s deferred flags pointed every refusal at a CLOSED issue.**
+  `DEFERRED_ISSUE_URL` named tan-cli#260, which tracked the seven verbs -- all
+  of which shipped in this release, closing it. A user following that link
+  landed on a closed issue about commands that work. The flags now point at
+  tan-cli#427, which tracks the flags themselves, and the message no longer
+  names a release at all: it said "deferred to v0.6.0" while the release it
+  meant was renumbered to 0.5.0, and a refusal that promises a version is a
+  claim this port cannot keep true.- **Two SDK discovery ladders answered different checkouts from one directory
   and both reported `sourceTier: "discovery"`, so nothing on the wire said
   which one had answered** (tan-cli#407). In a workspace holding both a child
   `<ws>/alp-sdk` — what `tan bootstrap` clones — and a lateral `../alp-sdk`,
@@ -140,11 +209,32 @@ release.yml extracts the notes by an exact `^## \[<tag minus v>\]` match, so a
 
   A structural gate (`tests/commands/test_sdk_discovery_ladders.py`) now
   fails if a module calls `resolve_sdk_root_wide` without emitting the code,
-  so a sixth wide caller cannot land silently unwired. Ten narrowly-resolving
-  commands (`size`, `trace`, `clean`, `run`, `flash`, `inspect`, `presets`,
-  `image`, `kconfig`, `validate`) still resolve without disclosing it; they
-  each reach the ladder through a different seam and are tracked separately.
+  so a sixth wide caller cannot land silently unwired.
 
+  The ten narrowly-resolving commands this originally left silent (`size`,
+  `trace`, `clean`, `run`, `flash`, `inspect`, `presets`, `image`, `kconfig`,
+  `validate`) are now covered too, and not by wiring each of them: the
+  warning is attached at `Envelope.__init__`, the one seam every command's
+  envelope passes through. They each reach the ladder by a different seam,
+  which is exactly why per-command wiring left them out -- and a fix present
+  on six commands and missing on ten leaves the reported silence in place,
+  since `alp-sdk-vscode` branches on `sourceTier` from both groups. Gated on
+  `sourceTier == "discovery"` before anything touches the disk, so an
+  ordinary single-checkout host pays nothing: every higher tier
+  (`--sdk-root`, the project pin, the global default) is shared verbatim by
+  both ladders and cannot be the pair that differs. The seam skips a command
+  that already emitted the code, so the six wired above do not double-report.
+
+  Two defects surfaced only by measuring the seam against the real layout,
+  either of which would have shipped a warning that looked wired and was
+  not: `project.root` is `null` for `examples` and `sdk current` -- two of
+  the commands measured as divergent -- so an early bail on a null root left
+  the wide side unreported; and it is the relative `"."` for several others,
+  where `Path(".").parent` is `"."`, collapsing the ladders' lateral
+  candidate onto the child so a real divergence reads as agreement.
+  Measured: `doctor` warned while `validate`, from the same directory, did
+  not. Verified over the issue's own layout on the frozen binary: eleven
+  commands each carry the code, and a single-checkout layout stays silent.
 - **BLOCKER: the Flow D SETOOLS auto-sign's own soft-failure guard could
   destroy a prior sign record instead of only detecting a fresh one**
   (tan-cli#373, regression in #365's own fix). `app-package-map.txt` is
@@ -755,10 +845,10 @@ else installs by hand.
 
   An earlier revision of this entry claimed the opposite, and was wrong in both
   halves: that the oracle returns 1 for these cases, and that moving to 2 would
-  be a considered BREAK for v0.6.0 (#262). Neither was ever measured. For the
-  guard cases 2 is what the oracle already does, so matching it is a
+  be a considered BREAK for the next minor (#262). Neither was ever measured.
+  For the guard cases 2 is what the oracle already does, so matching it is a
   compatibility fix. #262 is re-scoped to the one case that is a genuine
-  v0.6.0 decision: `validate.failed` after a real spawn.
+  release decision: `validate.failed` after a real spawn.
 
   **Corrected 2026-08 (v0.5.0): the paragraph this replaced claimed
   `validate.spawn-not-implemented` was still exit 1 at this port's rc1 tag.

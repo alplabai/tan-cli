@@ -1214,3 +1214,70 @@ def test_west_no_workspace_failure_names_the_resolved_workspace_and_zephyr_base(
     assert out[0].status == "failed"
     assert str(real_ws) in out[0].message, out[0].message
     assert bad_zephyr_base in out[0].message, out[0].message
+
+
+def test_a_missing_zephyr_sdk_is_named_not_left_as_a_bare_exit_code(tmp_path):
+    """tan-cli#419. Zephyr's CMake refuses with
+
+        CMake Error at <zephyr>/cmake/modules/FindZephyr-sdk.cmake:160
+          (find_package): Could not find a package configuration file provided
+          by "Zephyr-sdk" (requested version 1.0)
+
+    and the slice exits 1. Before this, the envelope said only ``slice `c1`
+    terminated with exit code: 1`` -- the cause sat in ~4 KB of pass-through
+    CMake text the envelope never named, even though `doctor`'s `zephyrSdk`
+    check reports it with the exact remedy. Measured on one host at one
+    moment: doctor named it; build's whole serialised envelope contained
+    neither "zephyr sdk" nor "sdk install".
+
+    Asserts the CODE and the REMEDY, not merely that the slice failed -- a
+    failure with the old bare message would satisfy any weaker check.
+    """
+    from tan.commands.doctor_cmd import zephyr_sdk_install_command
+
+    # `backend="baremetal"`: this drives the failure-message path, not Zephyr's
+    # own artefact guard (tan-cli#309), which would otherwise decide the status
+    # for a `zephyr` slice before the message is built.
+    #
+    # The CMake text is passed as an ARGUMENT and echoed, not embedded in the
+    # `-c` source. Embedding needs three levels of escaping (this file -> JSON
+    # -> the child's own literal); the first attempt put a real newline inside
+    # a single-quoted child string, so the child died with a SyntaxError,
+    # printed nothing, and the test still failed -- for the wrong reason.
+    cmake_error = (
+        "CMake Error at /w/zephyr/cmake/modules/FindZephyr-sdk.cmake:160 (find_package):\n"
+        '  Could not find a package configuration file provided by "Zephyr-sdk" '
+        "(requested version 1.0)\n"
+    )
+    emit = "import sys; sys.stdout.write(sys.argv[1]); raise SystemExit(1)"
+    cmd = (
+        f'{{"tool": {PYTHON}, "args": ["-c", {json.dumps(emit)}, '
+        f'{json.dumps(cmake_error)}], "cwd": null}}'
+    )
+    seen: list[str] = []
+    out = execute_slices(parse_build_plan(_plan(cmd, backend="baremetal")), build_root=tmp_path,
+                         env_lookup=lambda k: None, gap_fillers=[], on_output=seen.append)
+
+    # The child really did emit the text. Without this the test would pass or
+    # fail on something other than what it claims to check.
+    assert any("Zephyr-sdk" in line for line in seen), seen
+    assert out[0].status == "failed"
+    assert out[0].exit_code == 1
+    message = out[0].message or ""
+    assert "Zephyr SDK" in message, message
+    assert zephyr_sdk_install_command() in message, message
+    assert "doctor --build" in message, message
+
+
+def test_a_plain_failure_keeps_the_bare_message(tmp_path):
+    """The tan-cli#419 re-wording is CONDITIONAL on the watched literal. A
+    slice that fails for any other reason must not be told the Zephyr SDK is
+    missing -- that would trade one unhelpful message for a wrong one."""
+    cmd = f'{{"tool": {PYTHON}, "args": ["-c", "raise SystemExit(4)"], "cwd": null}}'
+    out = execute_slices(parse_build_plan(_plan(cmd, backend="baremetal")), build_root=tmp_path,
+                         env_lookup=lambda k: None, gap_fillers=[], on_output=lambda s: None)
+
+    assert out[0].status == "failed"
+    message = out[0].message or ""
+    assert "Zephyr SDK" not in message, message
+    assert "terminated with exit code: 4" in message, message

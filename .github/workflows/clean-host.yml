@@ -291,6 +291,20 @@ jobs:
           fi
           python python/scripts/clean_host_smoke.py --tan "$TAN_BIN"
 
+      # tan-cli#349: the onefile freeze re-extracted ~14 MB per invocation, so
+      # EVERY command paid 13-19 s on macOS arm64 (~1.1 s Windows, ~0.4 s
+      # Linux) before doing any work. --onedir moved that to install time.
+      # This step is how that stays fixed on the platform it was filed
+      # against: macOS arm64 is in this matrix and is NOT a host the
+      # maintainer can measure by hand -- which is precisely why the fix
+      # shipped unverified there. Runs against the same freeze the smoke test
+      # above just used, so it costs one process per run and nothing else.
+      - name: startup timing (tan-cli#349 onefile regression gate)
+        shell: bash
+        env:
+          TAN_BIN: python/dist/tan/tan${{ matrix.ext }}
+        run: python python/scripts/measure_startup.py --tan "$TAN_BIN"
+
   # POST-PUBLISH confirmation: downloads the asset `install.sh`/`install.ps1`
   # actually fetch and runs the identical smoke test against those exact
   # bytes. Cannot block the tag (release.yml has already published by the

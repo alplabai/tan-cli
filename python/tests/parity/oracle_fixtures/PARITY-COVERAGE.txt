@@ -18,6 +18,35 @@ registered subcommands no test compares AT ALL, so the gap is reviewable in
 one place instead of being re-derived by whoever next reads a green run and
 believes it.
 
+WHERE IT STANDS NOW (2026-08-04, re-measured the same way, on f3208e1).
+Thirteen of the fifteen are frozen. Same two commands, same tree:
+
+  with the binary present:  335 passed,  97 skipped, 13 xfailed
+  no target/ at all:        293 passed, 148 skipped,  4 xfailed
+
+`test_oracle_parity.py` contributes ZERO oracle-presence skips now -- the
+`@_ORACLE_REQUIRED` decorator is gone from it entirely, and its last seven
+live-only cases replay from committed fixtures. What still moves between
+those two runs, all of it DECLARED by name in
+`test_parity_freeze_completeness.py`:
+
+   2  the harness self-tests -- permanent, and never parity coverage
+   2  test_support_bundle_oracle_parity.py -- freezable only on win32
+  47  test_scaffold_content_oracle_parity.py -- compares a FILE TREE
+
+The last row is the one that grew: it did not exist when this ledger was
+written, and it is now the LARGEST hole in the freeze, bigger than the two it
+was created to track. It needs a tree-shaped fixture store, which is a piece
+of harness nobody has built. The support-bundle pair needs a machine. Both
+must land before tan-cli#269, and neither is a decision anyone is still
+waiting on -- they are work.
+
+The paragraphs below are kept as WRITTEN, not rewritten in place: the
+measurement they record is what the freeze was graded against, and a ledger
+that edits its own history to match the present is exactly what let
+PROVENANCE.txt's frozen-SHA claim rot. Read them as of their date, and this
+block as the delta.
+
 Keep it current. It is the only record of what the parity suite is NOT
 measuring, and a green suite is not evidence against anything listed here.
 
@@ -243,6 +272,15 @@ all, and nothing in section A or C can be measured again:
      and notes that the capture-time leak guard does NOT refuse it -- so this
      has to be a decision by whoever holds a Windows host, not something the
      tooling will stop by itself.
+  2b. Capture the seven remaining `test_oracle_parity.py` cases.
+     DONE 2026-08-04. Their recorded blocker was file ownership -- the module
+     was said to belong to tan-cli#408 -- and that did not survive reading
+     #408, whose scope is the six `python/tan/` modules over the 800-line
+     cap; it names the oversized test files as an observation and delivers
+     nothing in them. Four now go through `_both_sides` (`rust_run` plus a
+     matching scrub of the port side), three through
+     `rust_run(..., scrub_roots=())`. The gate's own staleness check is what
+     caught the register the moment its entry stopped being true.
   3. Add comparisons for as many of section C's eight as have a stable
      oracle surface -- `completion` first, it is nearly free.
      DONE 2026-08-04 for seven of the eight; see section C for what each

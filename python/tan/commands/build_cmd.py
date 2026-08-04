@@ -137,7 +137,7 @@ _MODE_NATIVE = "native"
 #: `cli.parse-error`, and a message indistinguishable from `tan build
 #: --pristien`. Registering them turns "known, deferred" into its own coded
 #: answer at exit 1, exactly as `deferred_cmd` does for the seven deferred
-#: VERBS, whose `cli.command-deferred` code and tan-cli#260 URL are reused
+#: VERBS, whose `cli.command-deferred` code and issue URL are reused
 #: rather than forked (a caller special-casing deferral needs one code to
 #: match, not two).
 #:
@@ -165,7 +165,11 @@ _DEFERRED_FLAGS = (
 
 #: `--help` text for every one of them -- one string, because they all report
 #: the same fact and a per-flag reason would be twelve things to keep true.
-_DEFERRED_HELP = "Deferred to v0.6.0, not implemented in this build (tan-cli#260)."
+# No version number: this said "Deferred to v0.6.0" while the release it
+# meant was renumbered to 0.5.0, and a help string that names the release a
+# flag will appear in is a promise tan cannot keep true. The issue link is
+# the durable pointer.
+_DEFERRED_HELP = "Deferred, not implemented in this build (tan-cli#427)."
 
 
 class BuildError(Exception):
@@ -1294,8 +1298,8 @@ def build(
         if was_given:
             _refuse(
                 DEFERRED_ISSUE_CODE,
-                f"`tan build {flag}` is deferred to v0.6.0 and not available in "
-                f"this build (see {DEFERRED_ISSUE_URL}).",
+                f"`tan build {flag}` is deferred and not available in this "
+                f"build (see {DEFERRED_ISSUE_URL}).",
                 ExitCode.RUNTIME_FAILURE,
                 json_mode,
             )
