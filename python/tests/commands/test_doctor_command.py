@@ -2743,3 +2743,41 @@ def test_doctor_fix_suppressed_notice_reaches_text_mode_not_just_json(monkeypatc
     summary_at = result.stderr.rindex("passed,")
     assert notice_at < summary_at, result.stderr
     assert result.stderr.strip().endswith("failed.")
+
+
+def test_doctor_names_the_second_checkout_instead_of_reporting_one_as_the_only_one(tmp_path):
+    """tan-cli#407: the `sdk` check names ONE root. In a workspace where the
+    two ladders answer different checkouts that is the narrow one, and nothing
+    said the wide commands use another -- doctor reporting one of two roots as
+    if it were the only one. The envelope carries the warning for every
+    command, but doctor is where a human asks what their toolchain points at.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    for root in (workspace / "alp-sdk", tmp_path / "alp-sdk"):
+        (root / "scripts").mkdir(parents=True)
+        (root / "scripts" / "alp_project.py").touch()
+
+    check = doctor_cmd.sdk_discovery_divergence_check(str(workspace))
+
+    assert check is not None
+    assert check.name == "sdkDiscoveryDivergent"
+    # `warn`, not `fail`: both roots are real and every command resolves one of
+    # them. Failing would block a working host over a layout tan cannot prove
+    # is wrong.
+    assert check.status == "warn"
+    assert str(workspace / "alp-sdk").replace("\\", "/") in check.detail
+    assert str(tmp_path / "alp-sdk").replace("\\", "/") in check.detail
+
+
+def test_doctor_emits_no_divergence_check_on_a_single_checkout_host(tmp_path):
+    """Absent entirely, not a passing line: a permanent `[   pass]
+    sdkDiscoveryDivergent` on every ordinary report would be noise saying
+    nothing, and the `sdk` check already answers 'which root am I on'."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    root = workspace / "alp-sdk"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "alp_project.py").touch()
+
+    assert doctor_cmd.sdk_discovery_divergence_check(str(workspace)) is None

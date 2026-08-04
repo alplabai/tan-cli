@@ -26,9 +26,11 @@ from tan.commands.build.manifest import (
 )
 from tan.commands import build_cmd
 from tan.commands.build_cmd import (
+    _abs_posix,
     discover_sdk_root,
     resolve_sdk_root_ladder,
     resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
 )
 from tan.core.system_manifest import SliceRunResult, parse_system_manifest
 
@@ -487,3 +489,70 @@ def test_native_sim_target_survives_a_write_failure(tmp_path, monkeypatch):
     )
     assert outcome.write_failed_reason is not None
     assert outcome.native_sim_target is True
+
+
+# ------------------------------------------------ tan-cli#407: the two ladders
+#
+# The DISAGREEMENT above is deliberate and oracle-measured. What #407 reports is
+# that both ladders label their answer with the same `SdkSourceTier` string,
+# `"discovery"`, so nothing on the wire says which one answered. The acceptance
+# criterion offered two ways out and explicitly allowed either: a distinct tier
+# value for the wide walk, or "an issue emitted by both ladders naming the
+# checkout the other one would have chosen".
+#
+# The issue is the one taken. A sixth tier value is a wire-contract change the
+# vscode extension does not expect, and the tests above pin the exact
+# `(path, "discovery", None)` tuples because those are the oracle's own answers
+# -- changing them would trade a reporting gap for a parity break.
+
+
+def test_both_ladders_answer_discovery_for_two_different_checkouts(tmp_path):
+    """The defect itself, pinned. Not a regression guard on the ladders (the
+    tests above already own that) -- this is the PREMISE the warning below
+    exists for, so if it ever stops holding, the warning becomes dead code
+    rather than silently passing."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+
+    narrow_path, narrow_tier, _ = resolve_sdk_root_ladder(None, workspace)
+    wide_path, wide_tier, _ = resolve_sdk_root_wide(None, workspace)
+
+    assert narrow_path != wide_path
+    assert narrow_tier == wide_tier == "discovery"
+
+
+def test_a_two_checkout_layout_is_named_by_both_sides(tmp_path):
+    """#407's acceptance criterion: over one layout holding both checkouts, the
+    two resolutions must be distinguishable from the envelope alone. Both sides
+    name BOTH roots, in the same order, so two envelopes describing one
+    collision read as one collision and not two unrelated warnings."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+
+    narrow = sdk_ladder_divergence_issue(None, workspace, wide=False)
+    wide = sdk_ladder_divergence_issue(None, workspace, wide=True)
+
+    assert narrow is not None and wide is not None
+    assert narrow.code == wide.code == "sdk.discovery-divergent"
+    for issue in (narrow, wide):
+        assert _abs_posix(str(workspace / "alp-sdk")) in issue.message
+        assert _abs_posix(str(tmp_path / "alp-sdk")) in issue.message
+    # Which side is "this command" is the only difference between them.
+    assert "this command" in narrow.message and "this command" in wide.message
+    assert narrow.message != wide.message
+
+
+def test_one_checkout_produces_no_divergence_warning(tmp_path):
+    """The negative control. A warning that fires on the ordinary
+    single-checkout layout is worse than no warning: it trains the reader to
+    ignore the one case that matters."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+
+    assert sdk_ladder_divergence_issue(None, workspace, wide=False) is None
+    assert sdk_ladder_divergence_issue(None, workspace, wide=True) is None

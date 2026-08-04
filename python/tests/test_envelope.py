@@ -170,3 +170,124 @@ def test_sdk_root_is_always_posix_separated():
     parsed = json.loads(env.to_json())
     assert parsed["sdk"]["root"] == "C:/Users/dev/alp-sdk"
     assert "\\" not in parsed["sdk"]["root"]
+
+
+# ------------------------------------------ tan-cli#407: SDK ladder divergence
+
+
+def _make_sdk(root):
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    (root / "scripts" / "alp_project.py").touch()
+
+
+def _envelope_for(command, root, sdk_root):
+    return Envelope(
+        command,
+        Project.resolved(str(root), None),
+        {},
+        [],
+        0,
+        sdk=SdkInfo(str(sdk_root), "discovery"),
+    )
+
+
+def _codes(envelope):
+    return [i.code for i in envelope.issues]
+
+
+def test_both_a_narrow_and_a_wide_command_carry_the_divergence_warning(tmp_path):
+    """tan-cli#407's end-to-end criterion, at the seam every command's envelope
+    passes through: from ONE directory holding two checkouts, a narrow command
+    and a wide command report the same `sourceTier` for different `sdk.root`
+    values, and both say so.
+
+    Asserted at `Envelope` rather than per command because that is where the
+    fix lives -- #407's actual complaint is that `build` alone knowing about
+    this leaves the other sixteen commands silent, and a per-command test
+    would have passed on exactly that broken shape.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+
+    narrow = _envelope_for("doctor", workspace, tmp_path / "alp-sdk")
+    wide = _envelope_for("generate", workspace, workspace / "alp-sdk")
+
+    assert "sdk.discovery-divergent" in _codes(narrow)
+    assert "sdk.discovery-divergent" in _codes(wide)
+    # The premise: same tier, different roots. Without this the warning could
+    # be firing on a layout that never had the problem.
+    assert narrow.sdk.source_tier == wide.sdk.source_tier == "discovery"
+    assert narrow.sdk.root != wide.sdk.root
+
+
+def test_a_single_checkout_layout_adds_no_warning(tmp_path):
+    """Negative control -- the ordinary host."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+
+    envelope = _envelope_for("doctor", workspace, workspace / "alp-sdk")
+    assert "sdk.discovery-divergent" not in _codes(envelope)
+
+
+def test_a_higher_tier_than_discovery_is_never_probed(tmp_path):
+    """`--sdk-root`, the project pin and the global default are shared verbatim
+    by both ladders, so they cannot be the pair that differs. The gate on
+    `sourceTier == "discovery"` is what keeps this free on every normal run --
+    if it ever stopped holding, every envelope would pay two filesystem walks.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+
+    pinned = Envelope(
+        "doctor",
+        Project.resolved(str(workspace), None),
+        {},
+        [],
+        0,
+        sdk=SdkInfo(str(tmp_path / "alp-sdk"), "sdkRootFlag"),
+    )
+    assert "sdk.discovery-divergent" not in _codes(pinned)
+
+
+def test_a_relative_project_root_still_sees_the_divergence(tmp_path, monkeypatch):
+    """`project.root` is reported as the relative `"."` by several commands.
+    `Path(".").parent` is `"."`, so the ladders' lateral `../alp-sdk` candidate
+    collapses onto the child and a real divergence reads as agreement --
+    measured: `doctor` warned while `validate`, from the same cwd, did not.
+    """
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+    monkeypatch.chdir(workspace)
+
+    envelope = _envelope_for("validate", ".", tmp_path / "alp-sdk")
+    assert "sdk.discovery-divergent" in _codes(envelope)
+
+
+def test_the_warning_is_not_added_twice(tmp_path):
+    """`build` computes this itself, while its `--sdk-root` flag is still raw.
+    The seam must not append a second copy on top of it."""
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    _make_sdk(workspace / "alp-sdk")
+    _make_sdk(tmp_path / "alp-sdk")
+
+    from tan.commands.build_cmd import sdk_ladder_divergence_issue
+
+    already = sdk_ladder_divergence_issue(None, workspace, wide=False)
+    assert already is not None
+    envelope = Envelope(
+        "build",
+        Project.resolved(str(workspace), None),
+        {},
+        [already],
+        0,
+        sdk=SdkInfo(str(tmp_path / "alp-sdk"), "discovery"),
+    )
+    assert _codes(envelope).count("sdk.discovery-divergent") == 1

@@ -1909,6 +1909,14 @@
       "note": "The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "doctor.sdkDiscoveryDivergent",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/doctor_cmd.py",
+      "note": "tan-cli#407. Emitted ONLY when the narrow and wide SDK ladders resolve different checkouts from one workspace -- there is no passing counterpart, so a report WITHOUT this code means one checkout, not an unrun check. The `doctor.` prefix is applied by `checks_to_issues()`'s `check.code or f\"doctor.{check.name}\"`, mirroring the Rust oracle's own `doctor.<checkName>` convention verbatim (that function's own docstring says so) -- camelCase, not this registry's usual kebab-case, because the suffix is the `Check(...)` construction's `name` argument, not a hand-written code fragment. Resolved out of an `_ACKNOWLEDGED_CEILINGS` entry into `_RESOLVABLE_HELPERS` while remediating tan-cli#224's own review: the ceiling's stated cost (\"a materially bigger audit\") did not survive measurement -- 48 `Check(...)` call sites, every one literal. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "doctor.sdkProvenance",
       "status": "reserved",
       "severity": "warning",

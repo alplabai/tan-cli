@@ -110,7 +110,12 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import _abs_posix, discover_sdk_root, resolve_sdk_root_ladder
+from tan.commands.build_cmd import (
+    _abs_posix,
+    discover_sdk_root,
+    resolve_sdk_root_ladder,
+    sdk_ladder_divergence_issue,
+)
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     _has_loader_script,
@@ -2809,12 +2814,58 @@ def _collect(
     resolved_device, device_source = jlink_flash_device(sdk_root)
     checks.append(jlink_check(jlink_exe, jlink_version, resolved_device, device_source))
 
+    # tan-cli#407: the `sdk` check above names ONE root. In a workspace where
+    # the two ladders answer different checkouts that is the narrow one, with
+    # nothing said about the checkout `init`/`generate`/`examples`/`renode`
+    # would use -- reporting one of two roots as if it were the only one. The
+    # envelope carries `sdk.discovery-divergent` on every command now, but
+    # that is the JSON surface, and `doctor` is where a human goes to ask what
+    # their toolchain is pointed at.
+    divergence = sdk_discovery_divergence_check(workspace_root)
+    if divergence is not None:
+        checks.append(divergence)
+
     # tan-cli#294 finding 5: LAST, mirroring `assemble_doctor_report`'s own
     # placement -- traces a report back to the SDK checkout that produced it.
     if sdk_root is not None:
         checks.append(sdk_provenance_check(sdk_root))
 
     return checks
+
+
+def sdk_discovery_divergence_check(workspace_root: str) -> Check | None:
+    """`sdkDiscoveryDivergent` -- `None` (no check emitted at all) unless the
+    narrow and wide SDK ladders resolve DIFFERENT checkouts from this
+    workspace (tan-cli#407).
+
+    Emitted only on the divergence rather than as an always-present
+    pass/fail: on a single-checkout host, which is nearly all of them, there
+    is nothing to report, and a permanent `[   pass] sdkDiscoveryDivergent`
+    line would add noise to every report in order to say nothing. The `sdk`
+    check already answers "which root am I on"; this answers "and is there a
+    second one some of your commands use instead".
+
+    `warn`, not `fail`: both roots are real checkouts and every command
+    resolves one of them successfully, so nothing is broken -- it is
+    ambiguous, and the user may have meant it. Failing would block a working
+    host over a layout tan cannot prove is wrong.
+
+    """
+    try:
+        start = Path(workspace_root).resolve()
+    except OSError:
+        return None
+    issue = sdk_ladder_divergence_issue(None, start, wide=False)
+    if issue is None:
+        return None
+    return Check(
+        "sdkDiscoveryDivergent",
+        "warn",
+        issue.message,
+        "Pin the checkout you mean with `--sdk-root <path>`, or write it into "
+        "`.alp/sdk-path` with `tan init --sdk-root <path>` -- a project pin "
+        "outranks both discovery tiers, so every command then agrees.",
+    )
 
 
 def _has_module(name: str) -> bool:

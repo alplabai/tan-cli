@@ -815,12 +815,16 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # is the sixth `doctor.fix-*` Check, named `f"fix:{installer}"` (one
         # per ABSENT INSTALLER, not per tool) and carrying an explicit
         # `code="doctor.fix-installer-not-found"`.
+        # 56 as of tan-cli#407: `sdk_discovery_divergence_check` adds
+        # `sdkDiscoveryDivergent`, a plain literal camelCase name (so it is
+        # scanned, not skipped), reported only when the narrow and wide SDK
+        # ladders resolve different checkouts.
         prefix="doctor.",
         expr="check.name",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
-        expected_calls=55,
+        expected_calls=56,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(
