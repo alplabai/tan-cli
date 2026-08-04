@@ -105,6 +105,7 @@ from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
+from tan.core.shapes import yaml_kind
 
 #: `data.schemaVersion` for this command's payload -- the envelope payload's
 #: own version, unrelated to `board.yaml`'s `schemaVersion:`.
@@ -210,22 +211,10 @@ def _load_document(text: str) -> Any:
         raise ParseFailure("schema-violation", f"board.yaml is not valid YAML: {err}") from err
 
 
-def _yaml_kind(value: Any) -> str:
-    """A short YAML-ish type name for an error message -- not a claim of
-    matching serde's exact wording (see the module docstring's scope note)."""
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "a boolean"
-    if isinstance(value, (int, float)):
-        return "a number"
-    if isinstance(value, str):
-        return "a string"
-    if isinstance(value, list):
-        return "a sequence"
-    if isinstance(value, dict):
-        return "a mapping"
-    return type(value).__name__
+#: tan-cli#408: one implementation, in `tan.core.shapes` -- `pinmux_cmd.py`
+#: carried a byte-identical copy. The module docstring's scope note (this is
+#: not a claim of matching serde's exact wording) moved with it.
+_yaml_kind = yaml_kind
 
 
 def _typed_field(doc: dict, key: str, expected: type, label: str) -> Any:
