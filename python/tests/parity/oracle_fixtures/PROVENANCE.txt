@@ -550,3 +550,72 @@ The gap is FOUR tests, and all four are declared by name in
 the binary as their SUBJECT and can never be frozen, and the two
 `test_support_bundle_oracle_parity.py` cases, which need a win32 host for the
 reason the earlier section gives in full. `_UNFROZEN` is now EMPTY.
+
+--------------------------------------------------------------------------
+
+2026-08-04, the PLATFORM-BOUND store: captured on three CI runners
+(tan-cli#409)
+
+A third store, `platform_bound.json`, read by
+`tests/parity/platform_fixtures.py`. Keyed `<case>::<sys.platform>`, because
+what `test_support_bundle_oracle_parity.py`'s two cases compare -- doctor's
+whole check list and statuses plus the whole `inspect.context` -- is decided
+by the HOST as much as by the binary. One frozen answer cannot serve three
+platforms, and the store NEVER falls back to another platform's key.
+
+  platform_bound.json   6 keys
+
+    failing-host::darwin   failing-host::linux   failing-host::win32
+    resolved-sdk::darwin   resolved-sdk::linux   resolved-sdk::win32
+
+Captured by `.github/workflows/capture-platform-fixtures.yml`, run
+30913698426, all three jobs `success`:
+
+    capture (ubuntu-latest)   -> linux
+    capture (windows-latest)  -> win32
+    capture (macos-latest)    -> darwin
+
+platform:       NOT one host. Each key was captured on the runner whose
+                `sys.platform` it names. This is the first store in this
+                directory for which the `platform:` line above is a
+                per-key fact rather than a file-wide one.
+
+The recorded blocker for these two was "needs a win32 host, and nobody has
+one". That was half right: a single-keyed store genuinely cannot hold them,
+but the win32 machine was never missing -- this repository runs
+`windows-latest` on every PR. What was missing was a job that captured on it.
+
+TWO THINGS MEASURED WHILE COLLECTING, both worth keeping:
+
+1. `resolved-sdk::darwin` from `macos-latest` DIFFERS from the same key
+   captured on this developer's own darwin box, in exactly one field:
+
+       .doctor.checks[4].detail   "lldb" (runner)  vs  "lldb-dap" (local)
+
+   Check NAMES and STATUSES are identical, and `_statuses` -- what
+   `_assert_doctor_sections_match` compares -- reads only `(name, status)`.
+   So the difference is inert for every assertion, and the CI-captured key
+   replays green on a local box whose `lldb` resolves differently. Verified
+   by replacing the local capture with the runner's and re-running with
+   `target/` moved aside. Recorded because a future reader diffing this
+   store against their own capture WILL see it and should not read it as
+   drift.
+
+2. Merging the three artifacts was ORDER-DEPENDENT, and silently wrong. A
+   runner starts from the committed store, so `platform-bound-ubuntu-latest`
+   also carried the `darwin` keys that were already committed -- and
+   `sorted()` put it after `platform-bound-macos-latest`, so a stale
+   `darwin` key overwrote the fresh one `macos-latest` had just captured.
+   Caught by diffing the two darwin captures before merging, NOT by a test.
+   Fixed on both sides: the workflow now filters to its own `sys.platform`
+   before uploading, and `platform_fixtures.merge_from` REFUSES a
+   multi-platform artifact outright rather than silently picking one.
+
+Measured with target/ moved aside, i.e. exactly the state tan-cli#269
+produces:
+
+  tests/parity, no target/ at all:  336 passed, ZERO oracle-presence skips
+
+`_UNFROZEN` and `_PLATFORM_BOUND` are both EMPTY. Every case in this package
+now replays without a Rust binary except the two harness self-tests, which
+take the binary as their SUBJECT and never could.

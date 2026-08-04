@@ -90,28 +90,29 @@ _HARNESS_SELF_TESTS: dict[str, frozenset[str]] = {
     ),
 }
 
-#: Freezable only ON `oracle_fixtures.CAPTURE_PLATFORM`. Both compare
-#: `doctor.checks` (names, positions, statuses) and the whole
-#: `inspect.context`, and both are decided by the HOST as much as by the
-#: binary: the check list is platform-shaped (`longPaths` exists on Windows
-#: and nowhere else) and the statuses read this machine's tool inventory and,
-#: on Windows, its registry. `empty_tool_inventory` pins the PATH for the
-#: first and cannot pin the platform; the second deliberately runs on the real
-#: PATH. Measured while writing this, on darwin, with the oracle's own bundle
-#: under `empty_tool_inventory`: the frozen check list would carry
-#: `zephyrSdkAvailableForHost pass -- The Zephyr SDK publishes a host build
-#: for macos-aarch64`, plus `codeLLDBExtension`/`lldb` rows a Windows bundle
-#: does not have at all. Nothing scrubs a host architecture out of a check's
-#: `detail`. See `oracle_fixtures/PROVENANCE.txt` for why the capture-time
-#: leak guard does NOT catch this and must not be relied on to.
-_PLATFORM_BOUND: dict[str, frozenset[str]] = {
-    "test_support_bundle_oracle_parity.py": frozenset(
-        {
-            "test_support_bundle_matches_the_oracle_on_a_failing_host",
-            "test_support_bundle_matches_the_oracle_with_a_resolved_sdk",
-        }
-    ),
-}
+#: Cases whose answer is host-decided, so ONE frozen answer would be wrong
+#: everywhere but the capture host. **EMPTY since 2026-08-04** -- not because
+#: the hazard went away, but because it was solved instead of declared.
+#:
+#: It held `test_support_bundle_oracle_parity.py`'s two cases, recorded as
+#: "needs a win32 host, and nobody has one". That was half right: a
+#: SINGLE-keyed store cannot hold them, because `longPaths` exists on Windows
+#: and nowhere else and a darwin capture freezes `macos-aarch64` into a check
+#: detail. A store keyed by `(case, sys.platform)` can --
+#: `tests/parity/platform_fixtures.py` -- and the win32 machine was never
+#: actually missing: this repository runs `windows-latest` on every PR.
+#: `.github/workflows/capture-platform-fixtures.yml` captures on all three
+#: runners and uploads each one's store.
+#:
+#: Their coverage is now checked by
+#: `test_every_platform_bound_case_is_captured_on_every_target_platform`
+#: below, which reads the STORE rather than a hand-kept list -- so "which
+#: platforms are frozen" cannot drift away from what is actually committed.
+#:
+#: Kept as an empty dict, like `_UNFROZEN`: the gate reads `_REGISTERS`
+#: structurally, and a future genuinely platform-bound case needs somewhere
+#: honest to be declared.
+_PLATFORM_BOUND: dict[str, frozenset[str]] = {}
 
 #: DEBT, not design -- and as of 2026-08-04 it is **EMPTY**, which is exactly
 #: what tan-cli#409 asks for: this is the register that had to reach empty
@@ -352,3 +353,57 @@ def test_every_scaffold_template_has_a_committed_tree():
         f"{stale} are frozen but are no longer in TEMPLATE_IDS -- drop them, "
         f"so the store keeps describing the tree it guards."
     )
+
+
+#: The platform-bound case ids, as `platform_fixtures` keys them. Spelled here
+#: rather than imported from the test module, so this gate does not import a
+#: module that spawns binaries at collection time.
+_PLATFORM_BOUND_CASES = ("failing-host", "resolved-sdk")
+
+
+def test_every_platform_bound_case_is_captured_on_every_target_platform():
+    """`_PLATFORM_BOUND`'s cases are frozen PER PLATFORM (tan-cli#409), and a
+    partially-captured store is the failure mode this gate exists for.
+
+    A missing key makes the case SKIP -- naming the platform -- rather than
+    fail, because the three captures arrive from three different CI runners
+    and cannot land in one commit. That skip is usable while they are being
+    collected and poisonous if it becomes permanent, which is exactly how the
+    hole this store closes was allowed to persist in the first place. So the
+    skip is the caller's behaviour and THIS is the pressure: red for as long
+    as any target platform has no answer.
+
+    Produce the missing ones with
+    `.github/workflows/capture-platform-fixtures.yml`, which runs the capture
+    on `ubuntu-latest`, `windows-latest` and `macos-latest` and uploads each
+    runner's store; merge the artifacts with `platform_fixtures.merge_from`.
+    """
+    from . import platform_fixtures
+
+    missing = platform_fixtures.missing_platforms(_PLATFORM_BOUND_CASES)
+    assert missing == [], (
+        f"{missing} have no frozen oracle answer. These cases replay per "
+        f"platform and NEVER fall back to another OS's key -- that fallback "
+        f"would diff two platforms' genuinely different behaviour. "
+        f"{platform_fixtures.CAPTURE_RECIPE}"
+    )
+
+
+def test_the_platform_store_never_falls_back_to_another_platforms_key():
+    """The invariant the whole store rests on, asserted rather than trusted.
+
+    A `resolve_for_platform` that quietly answered with some OTHER platform's
+    capture would turn every one of these cases green while comparing a
+    Windows check list against a POSIX one -- a worse outcome than the skip it
+    replaced, because it would look like coverage.
+    """
+    from . import platform_fixtures
+
+    captured = platform_fixtures.captured_platforms(_PLATFORM_BOUND_CASES[0])
+    absent = [p for p in platform_fixtures.TARGET_PLATFORMS if p not in captured]
+    if not absent:
+        pytest.skip("every target platform is captured; nothing to prove absent")
+    # `_key` is what `resolve_for_platform` looks up, so asking it directly is
+    # asking the real question rather than a restatement of it.
+    for platform in absent:
+        assert platform_fixtures._key(_PLATFORM_BOUND_CASES[0], platform) not in captured

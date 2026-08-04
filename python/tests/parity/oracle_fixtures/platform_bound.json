@@ -1,0 +1,1112 @@
+{
+  "failing-host::darwin": [
+    4,
+    {
+      "command": "support-bundle",
+      "data": {
+        "decisionCount": 1,
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "outputPath": "<ORACLE-ROOT-2>/rust-bundle/debug-support-bundle-1970-01-01T00-00-00-000Z.json",
+        "schemaVersion": "1",
+        "server": "none",
+        "targetKind": "native-host"
+      },
+      "exitCode": 4,
+      "issues": [
+        {
+          "code": "support-bundle.sdkRoot",
+          "message": "No alp-sdk checkout resolved.",
+          "severity": "error"
+        },
+        {
+          "code": "support-bundle.hostPrerequisites",
+          "message": "Missing required tools: git cmake python3 ninja.  Install them and re-run. (facts from tan's built-in fallback list)",
+          "severity": "error"
+        }
+      ],
+      "ok": false,
+      "project": {
+        "boardYaml": "<ORACLE-ROOT-0>/board.yaml",
+        "root": "<ORACLE-ROOT-0>"
+      }
+    },
+    {
+      "doctor": {
+        "checks": [
+          {
+            "detail": "<ORACLE-ROOT-0>",
+            "name": "workspaceRoot",
+            "status": "pass"
+          },
+          {
+            "detail": "No alp-sdk checkout resolved.",
+            "fix": "Run `tan sdk switch <path>` or pass `--sdk-root <path>`.",
+            "name": "sdkRoot",
+            "status": "fail"
+          },
+          {
+            "detail": "<ORACLE-ROOT-0>/board.yaml",
+            "name": "boardYaml",
+            "status": "pass"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb: unknown — the standalone tan binary cannot see VS Code's installed extensions.",
+            "name": "codeLLDBExtension",
+            "status": "unknown"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb ships its own LLDB, so none is needed on PATH.",
+            "name": "lldb",
+            "status": "pass"
+          },
+          {
+            "detail": "Missing required tools: git cmake python3 ninja.  Install them and re-run. (facts from tan's built-in fallback list)",
+            "fix": "Install the missing prerequisites, then run `tan bootstrap`.",
+            "name": "hostPrerequisites",
+            "status": "fail"
+          },
+          {
+            "detail": "The Zephyr SDK publishes a host build for macos-aarch64.",
+            "name": "zephyrSdkAvailableForHost",
+            "status": "pass"
+          },
+          {
+            "detail": "Home directory has no spaces: <ORACLE-ROOT-1>",
+            "name": "homePath",
+            "status": "pass"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "missingPrerequisites": [
+          {
+            "command": "brew install git",
+            "tool": "git"
+          },
+          {
+            "command": "brew install cmake",
+            "tool": "cmake"
+          },
+          {
+            "command": "brew install python3",
+            "tool": "python3"
+          },
+          {
+            "command": "brew install ninja",
+            "tool": "ninja"
+          }
+        ],
+        "nextSteps": [
+          "Run `tan sdk switch <path>` or pass `--sdk-root <path>`.",
+          "Install the missing prerequisites, then run `tan bootstrap`."
+        ],
+        "server": "none",
+        "summary": {
+          "fail": 2,
+          "pass": 5,
+          "warn": 0
+        },
+        "targetKind": "native-host"
+      },
+      "generatedAt": "1970-01-01T00:00:00.000Z",
+      "inspect": {
+        "context": {
+          "boardYamlExists": true,
+          "boardYamlPath": "<ORACLE-ROOT-0>/board.yaml",
+          "debuggerExtensions": {
+            "codeLLDB": true,
+            "cortexDebug": true,
+            "cppTools": true,
+            "observable": false
+          },
+          "generatedAt": "1970-01-01T00:00:00.000Z",
+          "projectSelected": false,
+          "pythonBinary": "python3",
+          "sdkRoot": null,
+          "westCwd": "<ORACLE-ROOT-0>",
+          "workspaceRoot": "<ORACLE-ROOT-0>"
+        },
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "resolvedValues": [
+          {
+            "detail": "Resolved project directory (cwd, or --project <dir>).",
+            "key": "workspaceRoot",
+            "source": "workspace",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Set with --sdk-root <path> or `tan sdk switch <path>` when automatic discovery is ambiguous.",
+            "key": "sdkRoot",
+            "source": "unresolved",
+            "value": null
+          },
+          {
+            "detail": "Resolved board.yaml path (default location, or --board-yaml <path>).",
+            "key": "boardYamlPath",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>/board.yaml"
+          },
+          {
+            "detail": "board.yaml exists at the resolved path.",
+            "key": "boardYamlExists",
+            "source": "runtime",
+            "value": true
+          },
+          {
+            "detail": "Working directory used for west commands.",
+            "key": "westCwd",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Interpreter used for loader and validation scripts.",
+            "key": "pythonBinary",
+            "source": "default",
+            "value": "python3"
+          }
+        ],
+        "schemaVersion": "1"
+      },
+      "notes": [
+        "targetKind=native-host",
+        "server=none",
+        "workspaceRoot=<ORACLE-ROOT-0>"
+      ],
+      "schemaVersion": "1",
+      "trace": {
+        "decisions": [
+          {
+            "detail": "Generation targets were not traced because project context is unresolved.",
+            "key": "generation.targets",
+            "outcome": "failed"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "schemaVersion": "1",
+        "workflow": "cli.support-bundle"
+      }
+    }
+  ],
+  "failing-host::linux": [
+    4,
+    {
+      "command": "support-bundle",
+      "data": {
+        "decisionCount": 1,
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "outputPath": "<ORACLE-ROOT-2>/rust-bundle/debug-support-bundle-1970-01-01T00-00-00-000Z.json",
+        "schemaVersion": "1",
+        "server": "none",
+        "targetKind": "native-host"
+      },
+      "exitCode": 4,
+      "issues": [
+        {
+          "code": "support-bundle.sdkRoot",
+          "message": "No alp-sdk checkout resolved.",
+          "severity": "error"
+        },
+        {
+          "code": "support-bundle.hostPrerequisites",
+          "message": "Missing required tools: git cmake python3 ninja xz wget.  Install them and re-run. (facts from tan's built-in fallback list)",
+          "severity": "error"
+        }
+      ],
+      "ok": false,
+      "project": {
+        "boardYaml": "<ORACLE-ROOT-0>/board.yaml",
+        "root": "<ORACLE-ROOT-0>"
+      }
+    },
+    {
+      "doctor": {
+        "checks": [
+          {
+            "detail": "<ORACLE-ROOT-0>",
+            "name": "workspaceRoot",
+            "status": "pass"
+          },
+          {
+            "detail": "No alp-sdk checkout resolved.",
+            "fix": "Run `tan sdk switch <path>` or pass `--sdk-root <path>`.",
+            "name": "sdkRoot",
+            "status": "fail"
+          },
+          {
+            "detail": "<ORACLE-ROOT-0>/board.yaml",
+            "name": "boardYaml",
+            "status": "pass"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb: unknown — the standalone tan binary cannot see VS Code's installed extensions.",
+            "name": "codeLLDBExtension",
+            "status": "unknown"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb ships its own LLDB, so none is needed on PATH.",
+            "name": "lldb",
+            "status": "pass"
+          },
+          {
+            "detail": "Missing required tools: git cmake python3 ninja xz wget.  Install them and re-run. (facts from tan's built-in fallback list)",
+            "fix": "Install the missing prerequisites, then run `tan bootstrap`.",
+            "name": "hostPrerequisites",
+            "status": "fail"
+          },
+          {
+            "detail": "The Zephyr SDK publishes a host build for linux-x86_64.",
+            "name": "zephyrSdkAvailableForHost",
+            "status": "pass"
+          },
+          {
+            "detail": "Home directory has no spaces: <ORACLE-ROOT-1>",
+            "name": "homePath",
+            "status": "pass"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "missingPrerequisites": [
+          {
+            "command": "sudo apt-get install -y git",
+            "tool": "git"
+          },
+          {
+            "command": "sudo apt-get install -y cmake",
+            "tool": "cmake"
+          },
+          {
+            "command": "sudo apt-get install -y python3",
+            "tool": "python3"
+          },
+          {
+            "command": "sudo apt-get install -y ninja-build",
+            "tool": "ninja"
+          },
+          {
+            "command": "sudo apt-get install -y xz-utils",
+            "tool": "xz"
+          },
+          {
+            "command": "sudo apt-get install -y wget",
+            "tool": "wget"
+          }
+        ],
+        "nextSteps": [
+          "Run `tan sdk switch <path>` or pass `--sdk-root <path>`.",
+          "Install the missing prerequisites, then run `tan bootstrap`."
+        ],
+        "server": "none",
+        "summary": {
+          "fail": 2,
+          "pass": 5,
+          "warn": 0
+        },
+        "targetKind": "native-host"
+      },
+      "generatedAt": "1970-01-01T00:00:00.000Z",
+      "inspect": {
+        "context": {
+          "boardYamlExists": true,
+          "boardYamlPath": "<ORACLE-ROOT-0>/board.yaml",
+          "debuggerExtensions": {
+            "codeLLDB": true,
+            "cortexDebug": true,
+            "cppTools": true,
+            "observable": false
+          },
+          "generatedAt": "1970-01-01T00:00:00.000Z",
+          "projectSelected": false,
+          "pythonBinary": "python3",
+          "sdkRoot": null,
+          "westCwd": "<ORACLE-ROOT-0>",
+          "workspaceRoot": "<ORACLE-ROOT-0>"
+        },
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "resolvedValues": [
+          {
+            "detail": "Resolved project directory (cwd, or --project <dir>).",
+            "key": "workspaceRoot",
+            "source": "workspace",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Set with --sdk-root <path> or `tan sdk switch <path>` when automatic discovery is ambiguous.",
+            "key": "sdkRoot",
+            "source": "unresolved",
+            "value": null
+          },
+          {
+            "detail": "Resolved board.yaml path (default location, or --board-yaml <path>).",
+            "key": "boardYamlPath",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>/board.yaml"
+          },
+          {
+            "detail": "board.yaml exists at the resolved path.",
+            "key": "boardYamlExists",
+            "source": "runtime",
+            "value": true
+          },
+          {
+            "detail": "Working directory used for west commands.",
+            "key": "westCwd",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Interpreter used for loader and validation scripts.",
+            "key": "pythonBinary",
+            "source": "default",
+            "value": "python3"
+          }
+        ],
+        "schemaVersion": "1"
+      },
+      "notes": [
+        "targetKind=native-host",
+        "server=none",
+        "workspaceRoot=<ORACLE-ROOT-0>"
+      ],
+      "schemaVersion": "1",
+      "trace": {
+        "decisions": [
+          {
+            "detail": "Generation targets were not traced because project context is unresolved.",
+            "key": "generation.targets",
+            "outcome": "failed"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "schemaVersion": "1",
+        "workflow": "cli.support-bundle"
+      }
+    }
+  ],
+  "failing-host::win32": [
+    4,
+    {
+      "command": "support-bundle",
+      "data": {
+        "decisionCount": 1,
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "outputPath": "<ORACLE-ROOT-2>\\rust-bundle\\debug-support-bundle-1970-01-01T00-00-00-000Z.json",
+        "schemaVersion": "1",
+        "server": "none",
+        "targetKind": "native-host"
+      },
+      "exitCode": 4,
+      "issues": [
+        {
+          "code": "support-bundle.sdkRoot",
+          "message": "No alp-sdk checkout resolved.",
+          "severity": "error"
+        },
+        {
+          "code": "support-bundle.hostPrerequisites",
+          "message": "Missing required tools:   git  ->  winget install -e --id Git.Git   cmake  ->  winget install -e --id Kitware.CMake   python  ->  winget install -e --id Python.Python.3.12   ninja  ->  winget install -e --id Ninja-build.Ninja Install the tools above (then reopen PowerShell) and re-run. (facts from tan's built-in fallback list)",
+          "severity": "error"
+        }
+      ],
+      "ok": false,
+      "project": {
+        "boardYaml": "<ORACLE-ROOT-0>/board.yaml",
+        "root": "<ORACLE-ROOT-0>"
+      }
+    },
+    {
+      "doctor": {
+        "checks": [
+          {
+            "detail": "<ORACLE-ROOT-0>",
+            "name": "workspaceRoot",
+            "status": "pass"
+          },
+          {
+            "detail": "No alp-sdk checkout resolved.",
+            "fix": "Run `tan sdk switch <path>` or pass `--sdk-root <path>`.",
+            "name": "sdkRoot",
+            "status": "fail"
+          },
+          {
+            "detail": "<ORACLE-ROOT-0>/board.yaml",
+            "name": "boardYaml",
+            "status": "pass"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb: unknown — the standalone tan binary cannot see VS Code's installed extensions.",
+            "name": "codeLLDBExtension",
+            "status": "unknown"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb ships its own LLDB, so none is needed on PATH.",
+            "name": "lldb",
+            "status": "pass"
+          },
+          {
+            "detail": "Missing required tools:   git  ->  winget install -e --id Git.Git   cmake  ->  winget install -e --id Kitware.CMake   python  ->  winget install -e --id Python.Python.3.12   ninja  ->  winget install -e --id Ninja-build.Ninja Install the tools above (then reopen PowerShell) and re-run. (facts from tan's built-in fallback list)",
+            "fix": "Install the missing prerequisites, then run `tan bootstrap`.",
+            "name": "hostPrerequisites",
+            "status": "fail"
+          },
+          {
+            "detail": "The Zephyr SDK publishes a host build for windows-x86_64.",
+            "name": "zephyrSdkAvailableForHost",
+            "status": "pass"
+          },
+          {
+            "detail": "Windows long paths are enabled (HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\\LongPathsEnabled = 1).",
+            "name": "longPaths",
+            "status": "pass"
+          },
+          {
+            "detail": "Home directory has no spaces: <ORACLE-ROOT-1>",
+            "name": "homePath",
+            "status": "pass"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "missingPrerequisites": [
+          {
+            "command": "winget install -e --id Git.Git",
+            "tool": "git"
+          },
+          {
+            "command": "winget install -e --id Kitware.CMake",
+            "tool": "cmake"
+          },
+          {
+            "command": "winget install -e --id Python.Python.3.12",
+            "tool": "python"
+          },
+          {
+            "command": "winget install -e --id Ninja-build.Ninja",
+            "tool": "ninja"
+          }
+        ],
+        "nextSteps": [
+          "Run `tan sdk switch <path>` or pass `--sdk-root <path>`.",
+          "Install the missing prerequisites, then run `tan bootstrap`."
+        ],
+        "server": "none",
+        "summary": {
+          "fail": 2,
+          "pass": 6,
+          "warn": 0
+        },
+        "targetKind": "native-host"
+      },
+      "generatedAt": "1970-01-01T00:00:00.000Z",
+      "inspect": {
+        "context": {
+          "boardYamlExists": true,
+          "boardYamlPath": "<ORACLE-ROOT-0>/board.yaml",
+          "debuggerExtensions": {
+            "codeLLDB": true,
+            "cortexDebug": true,
+            "cppTools": true,
+            "observable": false
+          },
+          "generatedAt": "1970-01-01T00:00:00.000Z",
+          "projectSelected": false,
+          "pythonBinary": "python",
+          "sdkRoot": null,
+          "westCwd": "<ORACLE-ROOT-0>",
+          "workspaceRoot": "<ORACLE-ROOT-0>"
+        },
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "resolvedValues": [
+          {
+            "detail": "Resolved project directory (cwd, or --project <dir>).",
+            "key": "workspaceRoot",
+            "source": "workspace",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Set with --sdk-root <path> or `tan sdk switch <path>` when automatic discovery is ambiguous.",
+            "key": "sdkRoot",
+            "source": "unresolved",
+            "value": null
+          },
+          {
+            "detail": "Resolved board.yaml path (default location, or --board-yaml <path>).",
+            "key": "boardYamlPath",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>/board.yaml"
+          },
+          {
+            "detail": "board.yaml exists at the resolved path.",
+            "key": "boardYamlExists",
+            "source": "runtime",
+            "value": true
+          },
+          {
+            "detail": "Working directory used for west commands.",
+            "key": "westCwd",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Interpreter used for loader and validation scripts.",
+            "key": "pythonBinary",
+            "source": "default",
+            "value": "python"
+          }
+        ],
+        "schemaVersion": "1"
+      },
+      "notes": [
+        "targetKind=native-host",
+        "server=none",
+        "workspaceRoot=<ORACLE-ROOT-0>"
+      ],
+      "schemaVersion": "1",
+      "trace": {
+        "decisions": [
+          {
+            "detail": "Generation targets were not traced because project context is unresolved.",
+            "key": "generation.targets",
+            "outcome": "failed"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "schemaVersion": "1",
+        "workflow": "cli.support-bundle"
+      }
+    }
+  ],
+  "resolved-sdk::darwin": [
+    0,
+    {
+      "command": "support-bundle",
+      "data": {
+        "decisionCount": 4,
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "outputPath": "<ORACLE-ROOT-2>/rust-bundle/debug-support-bundle-1970-01-01T00-00-00-000Z.json",
+        "schemaVersion": "1",
+        "server": "none",
+        "targetKind": "native-host"
+      },
+      "exitCode": 0,
+      "issues": [],
+      "ok": true,
+      "project": {
+        "boardYaml": "<ORACLE-ROOT-0>/board.yaml",
+        "root": "<ORACLE-ROOT-0>"
+      },
+      "sdk": {
+        "root": "<ORACLE-ROOT-2>/sdk",
+        "sourceTier": "sdkRootFlag"
+      }
+    },
+    {
+      "doctor": {
+        "checks": [
+          {
+            "detail": "<ORACLE-ROOT-0>",
+            "name": "workspaceRoot",
+            "status": "pass"
+          },
+          {
+            "detail": "<ORACLE-ROOT-2>/sdk",
+            "name": "sdkRoot",
+            "status": "pass"
+          },
+          {
+            "detail": "<ORACLE-ROOT-0>/board.yaml",
+            "name": "boardYaml",
+            "status": "pass"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb: unknown — the standalone tan binary cannot see VS Code's installed extensions.",
+            "name": "codeLLDBExtension",
+            "status": "unknown"
+          },
+          {
+            "detail": "lldb",
+            "name": "lldb",
+            "status": "pass"
+          },
+          {
+            "detail": "git, cmake, python3, ninja present (facts from tan's built-in fallback list)",
+            "name": "hostPrerequisites",
+            "status": "pass"
+          },
+          {
+            "detail": "The Zephyr SDK publishes a host build for macos-aarch64.",
+            "name": "zephyrSdkAvailableForHost",
+            "status": "pass"
+          },
+          {
+            "detail": "Home directory has no spaces: <ORACLE-ROOT-1>",
+            "name": "homePath",
+            "status": "pass"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "missingPrerequisites": null,
+        "nextSteps": [],
+        "server": "none",
+        "summary": {
+          "fail": 0,
+          "pass": 7,
+          "warn": 0
+        },
+        "targetKind": "native-host"
+      },
+      "generatedAt": "1970-01-01T00:00:00.000Z",
+      "inspect": {
+        "context": {
+          "boardYamlExists": true,
+          "boardYamlPath": "<ORACLE-ROOT-0>/board.yaml",
+          "debuggerExtensions": {
+            "codeLLDB": true,
+            "cortexDebug": true,
+            "cppTools": true,
+            "observable": false
+          },
+          "generatedAt": "1970-01-01T00:00:00.000Z",
+          "projectSelected": false,
+          "pythonBinary": "python3",
+          "sdkRoot": "<ORACLE-ROOT-2>/sdk",
+          "westCwd": "<ORACLE-ROOT-0>",
+          "workspaceRoot": "<ORACLE-ROOT-0>"
+        },
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "resolvedValues": [
+          {
+            "detail": "Resolved project directory (cwd, or --project <dir>).",
+            "key": "workspaceRoot",
+            "source": "workspace",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Resolved alp-sdk root used for scripts and schemas.",
+            "key": "sdkRoot",
+            "source": "workspace",
+            "value": "<ORACLE-ROOT-2>/sdk"
+          },
+          {
+            "detail": "Resolved board.yaml path (default location, or --board-yaml <path>).",
+            "key": "boardYamlPath",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>/board.yaml"
+          },
+          {
+            "detail": "board.yaml exists at the resolved path.",
+            "key": "boardYamlExists",
+            "source": "runtime",
+            "value": true
+          },
+          {
+            "detail": "Working directory used for west commands.",
+            "key": "westCwd",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Interpreter used for loader and validation scripts.",
+            "key": "pythonBinary",
+            "source": "default",
+            "value": "python3"
+          }
+        ],
+        "schemaVersion": "1"
+      },
+      "notes": [
+        "targetKind=native-host",
+        "server=none",
+        "workspaceRoot=<ORACLE-ROOT-0>"
+      ],
+      "schemaVersion": "1",
+      "trace": {
+        "decisions": [
+          {
+            "detail": "Would run: python3 <ORACLE-ROOT-2>/sdk/scripts/alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit zephyr-conf --output <ORACLE-ROOT-0>/build/generated/alp.conf",
+            "key": "generation.target.zephyr-conf",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>/build/generated/alp.conf"
+          },
+          {
+            "detail": "Would run: python3 <ORACLE-ROOT-2>/sdk/scripts/alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit dts-overlay --output <ORACLE-ROOT-0>/build/generated/alp.overlay",
+            "key": "generation.target.dts-overlay",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>/build/generated/alp.overlay"
+          },
+          {
+            "detail": "Would run: python3 <ORACLE-ROOT-2>/sdk/scripts/alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit cmake-args --output <ORACLE-ROOT-0>/build/generated/alp-cmake-args.txt",
+            "key": "generation.target.cmake-args",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>/build/generated/alp-cmake-args.txt"
+          },
+          {
+            "detail": "Would run: python3 <ORACLE-ROOT-2>/sdk/scripts/alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit yocto-conf --output <ORACLE-ROOT-0>/build/generated/alp-yocto.conf",
+            "key": "generation.target.yocto-conf",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>/build/generated/alp-yocto.conf"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "schemaVersion": "1",
+        "workflow": "cli.support-bundle"
+      }
+    }
+  ],
+  "resolved-sdk::linux": [
+    0,
+    {
+      "command": "support-bundle",
+      "data": {
+        "decisionCount": 4,
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "outputPath": "<ORACLE-ROOT-2>/rust-bundle/debug-support-bundle-1970-01-01T00-00-00-000Z.json",
+        "schemaVersion": "1",
+        "server": "none",
+        "targetKind": "native-host"
+      },
+      "exitCode": 0,
+      "issues": [],
+      "ok": true,
+      "project": {
+        "boardYaml": "<ORACLE-ROOT-0>/board.yaml",
+        "root": "<ORACLE-ROOT-0>"
+      },
+      "sdk": {
+        "root": "<ORACLE-ROOT-2>/sdk",
+        "sourceTier": "sdkRootFlag"
+      }
+    },
+    {
+      "doctor": {
+        "checks": [
+          {
+            "detail": "<ORACLE-ROOT-0>",
+            "name": "workspaceRoot",
+            "status": "pass"
+          },
+          {
+            "detail": "<ORACLE-ROOT-2>/sdk",
+            "name": "sdkRoot",
+            "status": "pass"
+          },
+          {
+            "detail": "<ORACLE-ROOT-0>/board.yaml",
+            "name": "boardYaml",
+            "status": "pass"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb: unknown — the standalone tan binary cannot see VS Code's installed extensions.",
+            "name": "codeLLDBExtension",
+            "status": "unknown"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb ships its own LLDB, so none is needed on PATH.",
+            "name": "lldb",
+            "status": "pass"
+          },
+          {
+            "detail": "git, cmake, python3, ninja, xz, wget present (facts from tan's built-in fallback list)",
+            "name": "hostPrerequisites",
+            "status": "pass"
+          },
+          {
+            "detail": "The Zephyr SDK publishes a host build for linux-x86_64.",
+            "name": "zephyrSdkAvailableForHost",
+            "status": "pass"
+          },
+          {
+            "detail": "Home directory has no spaces: <ORACLE-ROOT-1>",
+            "name": "homePath",
+            "status": "pass"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "missingPrerequisites": null,
+        "nextSteps": [],
+        "server": "none",
+        "summary": {
+          "fail": 0,
+          "pass": 7,
+          "warn": 0
+        },
+        "targetKind": "native-host"
+      },
+      "generatedAt": "1970-01-01T00:00:00.000Z",
+      "inspect": {
+        "context": {
+          "boardYamlExists": true,
+          "boardYamlPath": "<ORACLE-ROOT-0>/board.yaml",
+          "debuggerExtensions": {
+            "codeLLDB": true,
+            "cortexDebug": true,
+            "cppTools": true,
+            "observable": false
+          },
+          "generatedAt": "1970-01-01T00:00:00.000Z",
+          "projectSelected": false,
+          "pythonBinary": "python3",
+          "sdkRoot": "<ORACLE-ROOT-2>/sdk",
+          "westCwd": "<ORACLE-ROOT-0>",
+          "workspaceRoot": "<ORACLE-ROOT-0>"
+        },
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "resolvedValues": [
+          {
+            "detail": "Resolved project directory (cwd, or --project <dir>).",
+            "key": "workspaceRoot",
+            "source": "workspace",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Resolved alp-sdk root used for scripts and schemas.",
+            "key": "sdkRoot",
+            "source": "workspace",
+            "value": "<ORACLE-ROOT-2>/sdk"
+          },
+          {
+            "detail": "Resolved board.yaml path (default location, or --board-yaml <path>).",
+            "key": "boardYamlPath",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>/board.yaml"
+          },
+          {
+            "detail": "board.yaml exists at the resolved path.",
+            "key": "boardYamlExists",
+            "source": "runtime",
+            "value": true
+          },
+          {
+            "detail": "Working directory used for west commands.",
+            "key": "westCwd",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Interpreter used for loader and validation scripts.",
+            "key": "pythonBinary",
+            "source": "default",
+            "value": "python3"
+          }
+        ],
+        "schemaVersion": "1"
+      },
+      "notes": [
+        "targetKind=native-host",
+        "server=none",
+        "workspaceRoot=<ORACLE-ROOT-0>"
+      ],
+      "schemaVersion": "1",
+      "trace": {
+        "decisions": [
+          {
+            "detail": "Would run: python3 <ORACLE-ROOT-2>/sdk/scripts/alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit zephyr-conf --output <ORACLE-ROOT-0>/build/generated/alp.conf",
+            "key": "generation.target.zephyr-conf",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>/build/generated/alp.conf"
+          },
+          {
+            "detail": "Would run: python3 <ORACLE-ROOT-2>/sdk/scripts/alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit dts-overlay --output <ORACLE-ROOT-0>/build/generated/alp.overlay",
+            "key": "generation.target.dts-overlay",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>/build/generated/alp.overlay"
+          },
+          {
+            "detail": "Would run: python3 <ORACLE-ROOT-2>/sdk/scripts/alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit cmake-args --output <ORACLE-ROOT-0>/build/generated/alp-cmake-args.txt",
+            "key": "generation.target.cmake-args",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>/build/generated/alp-cmake-args.txt"
+          },
+          {
+            "detail": "Would run: python3 <ORACLE-ROOT-2>/sdk/scripts/alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit yocto-conf --output <ORACLE-ROOT-0>/build/generated/alp-yocto.conf",
+            "key": "generation.target.yocto-conf",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>/build/generated/alp-yocto.conf"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "schemaVersion": "1",
+        "workflow": "cli.support-bundle"
+      }
+    }
+  ],
+  "resolved-sdk::win32": [
+    0,
+    {
+      "command": "support-bundle",
+      "data": {
+        "decisionCount": 4,
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "outputPath": "<ORACLE-ROOT-2>\\rust-bundle\\debug-support-bundle-1970-01-01T00-00-00-000Z.json",
+        "schemaVersion": "1",
+        "server": "none",
+        "targetKind": "native-host"
+      },
+      "exitCode": 0,
+      "issues": [],
+      "ok": true,
+      "project": {
+        "boardYaml": "<ORACLE-ROOT-0>/board.yaml",
+        "root": "<ORACLE-ROOT-0>"
+      },
+      "sdk": {
+        "root": "<ORACLE-ROOT-2>/sdk",
+        "sourceTier": "sdkRootFlag"
+      }
+    },
+    {
+      "doctor": {
+        "checks": [
+          {
+            "detail": "<ORACLE-ROOT-0>",
+            "name": "workspaceRoot",
+            "status": "pass"
+          },
+          {
+            "detail": "<ORACLE-ROOT-2>/sdk",
+            "name": "sdkRoot",
+            "status": "pass"
+          },
+          {
+            "detail": "<ORACLE-ROOT-0>/board.yaml",
+            "name": "boardYaml",
+            "status": "pass"
+          },
+          {
+            "detail": "vadimcn.vscode-lldb: unknown — the standalone tan binary cannot see VS Code's installed extensions.",
+            "name": "codeLLDBExtension",
+            "status": "unknown"
+          },
+          {
+            "detail": "lldb-dap",
+            "name": "lldb",
+            "status": "pass"
+          },
+          {
+            "detail": "git, cmake, python, ninja present (facts from tan's built-in fallback list)",
+            "name": "hostPrerequisites",
+            "status": "pass"
+          },
+          {
+            "detail": "The Zephyr SDK publishes a host build for windows-x86_64.",
+            "name": "zephyrSdkAvailableForHost",
+            "status": "pass"
+          },
+          {
+            "detail": "Windows long paths are enabled (HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\\LongPathsEnabled = 1).",
+            "name": "longPaths",
+            "status": "pass"
+          },
+          {
+            "detail": "Home directory has no spaces: <ORACLE-ROOT-1>",
+            "name": "homePath",
+            "status": "pass"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "missingPrerequisites": null,
+        "nextSteps": [],
+        "server": "none",
+        "summary": {
+          "fail": 0,
+          "pass": 8,
+          "warn": 0
+        },
+        "targetKind": "native-host"
+      },
+      "generatedAt": "1970-01-01T00:00:00.000Z",
+      "inspect": {
+        "context": {
+          "boardYamlExists": true,
+          "boardYamlPath": "<ORACLE-ROOT-0>/board.yaml",
+          "debuggerExtensions": {
+            "codeLLDB": true,
+            "cortexDebug": true,
+            "cppTools": true,
+            "observable": false
+          },
+          "generatedAt": "1970-01-01T00:00:00.000Z",
+          "projectSelected": false,
+          "pythonBinary": "python",
+          "sdkRoot": "<ORACLE-ROOT-2>/sdk",
+          "westCwd": "<ORACLE-ROOT-0>",
+          "workspaceRoot": "<ORACLE-ROOT-0>"
+        },
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "resolvedValues": [
+          {
+            "detail": "Resolved project directory (cwd, or --project <dir>).",
+            "key": "workspaceRoot",
+            "source": "workspace",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Resolved alp-sdk root used for scripts and schemas.",
+            "key": "sdkRoot",
+            "source": "workspace",
+            "value": "<ORACLE-ROOT-2>/sdk"
+          },
+          {
+            "detail": "Resolved board.yaml path (default location, or --board-yaml <path>).",
+            "key": "boardYamlPath",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>/board.yaml"
+          },
+          {
+            "detail": "board.yaml exists at the resolved path.",
+            "key": "boardYamlExists",
+            "source": "runtime",
+            "value": true
+          },
+          {
+            "detail": "Working directory used for west commands.",
+            "key": "westCwd",
+            "source": "setting",
+            "value": "<ORACLE-ROOT-0>"
+          },
+          {
+            "detail": "Interpreter used for loader and validation scripts.",
+            "key": "pythonBinary",
+            "source": "default",
+            "value": "python"
+          }
+        ],
+        "schemaVersion": "1"
+      },
+      "notes": [
+        "targetKind=native-host",
+        "server=none",
+        "workspaceRoot=<ORACLE-ROOT-0>"
+      ],
+      "schemaVersion": "1",
+      "trace": {
+        "decisions": [
+          {
+            "detail": "Would run: python <ORACLE-ROOT-2>/sdk\\scripts\\alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit zephyr-conf --output <ORACLE-ROOT-0>\\build/generated/alp.conf",
+            "key": "generation.target.zephyr-conf",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>\\build/generated/alp.conf"
+          },
+          {
+            "detail": "Would run: python <ORACLE-ROOT-2>/sdk\\scripts\\alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit dts-overlay --output <ORACLE-ROOT-0>\\build/generated/alp.overlay",
+            "key": "generation.target.dts-overlay",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>\\build/generated/alp.overlay"
+          },
+          {
+            "detail": "Would run: python <ORACLE-ROOT-2>/sdk\\scripts\\alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit cmake-args --output <ORACLE-ROOT-0>\\build/generated/alp-cmake-args.txt",
+            "key": "generation.target.cmake-args",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>\\build/generated/alp-cmake-args.txt"
+          },
+          {
+            "detail": "Would run: python <ORACLE-ROOT-2>/sdk\\scripts\\alp_project.py --input <ORACLE-ROOT-0>/board.yaml --emit yocto-conf --output <ORACLE-ROOT-0>\\build/generated/alp-yocto.conf",
+            "key": "generation.target.yocto-conf",
+            "outcome": "planned",
+            "outputPath": "<ORACLE-ROOT-0>\\build/generated/alp-yocto.conf"
+          }
+        ],
+        "generatedAt": "1970-01-01T00:00:00.000Z",
+        "schemaVersion": "1",
+        "workflow": "cli.support-bundle"
+      }
+    }
+  ]
+}
