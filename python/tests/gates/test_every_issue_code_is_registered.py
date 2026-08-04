@@ -413,6 +413,13 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
     {
         ("tan/commands/build_cmd.py", "err.code"),  # BuildError <- PlanParseError/TokenSubstitutionError
         ("tan/commands/build_cmd.py", "DEFERRED_ISSUE_CODE"),  # imported from deferred_cmd.py
+        ("tan/commands/doctor_cmd.py", "SDK_DISCOVERY_DIVERGENT"),  # imported from build_cmd.py
+        # (tan-cli#407). Same shape as the line above and covered the same way:
+        # `_module_string_constants` only reads the file it is given, so a
+        # constant DEFINED in `build_cmd.py` (where its literal
+        # `"sdk.discovery-divergent"` IS resolved and checked against
+        # `contract/issue-codes.json`) cannot resolve from `doctor_cmd.py`'s
+        # own tree. Declared, not silently dropped.
         ("tan/commands/build_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse`'s OWN body,
         # forwarding ITS OWN `code` parameter -- `_refuse` is itself in
         # `_FULL_CODE_CALLABLES`, so its call sites carry the literal.
@@ -815,12 +822,20 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # is the sixth `doctor.fix-*` Check, named `f"fix:{installer}"` (one
         # per ABSENT INSTALLER, not per tool) and carrying an explicit
         # `code="doctor.fix-installer-not-found"`.
+        #
+        # 56 as of tan-cli#407: `sdk_check` grew a second return, the `warn`
+        # arm for a workspace where the narrow and wide ladders resolve
+        # different checkouts. It carries `code=SDK_DISCOVERY_DIVERGENT`, so
+        # it is SKIPPED by `skip_if_keyword` and its code is covered by the
+        # `_KNOWN_CODE_FORWARDS` entry above rather than by this count -- the
+        # count moves anyway, because what it pins is how many `Check(...)`
+        # sites exist, not how many of them this spec classifies.
         prefix="doctor.",
         expr="check.name",
         name="Check",
         arg_index=0,
         skip_if_keyword="code",
-        expected_calls=55,
+        expected_calls=56,
         sites=1,
     ),
     ("tan/commands/west_forward_cmd.py", "_run_forward"): dict(

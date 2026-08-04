@@ -93,7 +93,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_wide
+from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import (
@@ -884,6 +884,18 @@ def init(
 
         workspace_root = Path(os.path.abspath(project)) if project else Path.cwd()
         resolved_sdk = _resolve_sdk_root(sdk_root, workspace_root)
+        # tan-cli#407, and this is the command where it matters most: `init`
+        # does not merely resolve an SDK, it WRITES the answer to
+        # `.alp/sdk-path` (`_record_sdk_pin`, below), and that pointer then
+        # outranks BOTH discovery tiers for every later command in the new
+        # project. So the collision is settled here, permanently, in the user's
+        # favour or against it -- and the wide ladder settles it on the CHILD
+        # `<ws>/alp-sdk` while thirteen commands would have taken the lateral
+        # `../alp-sdk`. Disclosing which one got bound is the whole point:
+        # after this run the divergence is genuinely GONE (both ladders read
+        # the pin), so this is the last moment the fact is observable at all.
+        # Computed BEFORE `_finish` for exactly that reason.
+        divergence_issue = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=True)
 
         if from_example is not None:
             template_id, files = _plan_from_example(from_example, som, resolved_sdk)
@@ -932,6 +944,8 @@ def init(
         )
         if missing_board_yaml_issue is not None:
             outcome.issues.append(missing_board_yaml_issue)
+        if divergence_issue is not None:
+            outcome.issues.append(divergence_issue)
     except InitError as err:
         _emit_error(json_mode, err)
         return

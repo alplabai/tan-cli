@@ -124,7 +124,7 @@ from typing import Any
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_wide
+from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
 from tan.commands.sdk_cmd import project_pin_issue
 from tan.commands.build_output import ManifestInvalid, ManifestUnavailable, load_manifest
 from tan.commands.doctor_cmd import on_path
@@ -848,8 +848,37 @@ def _run(
         return fail("renode.sdk-root-not-found", "Cannot locate alp-sdk root.")
     sdk = SdkInfo(sdk_root, sdk_tier or "none")
 
+    # WHICH checkout answered -- carried by every envelope this function can
+    # still produce, refusals included. Both of these used to be appended ~60
+    # lines below, past six `fail_sdk` returns that dropped them: measured on a
+    # workspace holding a child and a lateral checkout, `tan renode` refused
+    # with `renode.manifest-unavailable` and no `sdk.discovery-divergent` at
+    # all. That refusal is the one that matters most, because its own message
+    # says to run `tan build` first -- and `tan build` is on the OTHER ladder,
+    # so a silent refusal sends the reader to the command whose checkout
+    # disagrees with the one this envelope's `sdk.root` just named.
+    sdk_context_issues: list[Issue] = []
+    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier or "none")
+    if pin_issue is not None:
+        sdk_context_issues.append(pin_issue)
+    # tan-cli#407. `sdk_root_arg` is the RAW flag -- `sdk_root` above is the
+    # resolved text, and an explicit root puts both ladders on the terminal
+    # `sdkRootFlag` tier, where the helper correctly returns `None`.
+    divergence = sdk_ladder_divergence_issue(sdk_root_arg, Path(workspace_root), wide=True)
+    if divergence is not None:
+        sdk_context_issues.append(divergence)
+
     def fail_sdk(code: str, message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE):
-        return exit_code, data(), [_issue(code, "error", message)], [f"renode: {message}"], sdk, project
+        # The refusal FIRST, context after: `issues[0]` stays the thing that
+        # failed for any consumer that reads it positionally.
+        return (
+            exit_code,
+            data(),
+            [_issue(code, "error", message), *sdk_context_issues],
+            [f"renode: {message}"],
+            sdk,
+            project,
+        )
 
     manifest_path = os.path.join(build_root, "system-manifest.yaml")
     try:
@@ -910,11 +939,13 @@ def _run(
             "tan renode does not silently pass when Renode is missing.",
         )
 
-    issues: list[Issue] = []
+    # Same two SDK-context issues the refusals above carry, in the same order.
+    # tan-cli#407's half says the `.repl`/`.resc` platform descriptors this
+    # smoke boots came from the WIDE ladder's checkout while the ELF it boots
+    # was built by `tan build` off the NARROW one -- a descriptor/ELF pair from
+    # two SDK versions is a simulation failure with no visible cause.
+    issues: list[Issue] = list(sdk_context_issues)
     text: list[str] = []
-    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier or "none")
-    if pin_issue is not None:
-        issues.append(pin_issue)
     if image_bundle_arg is not None:
         msg = (
             f"renode: --image-bundle {image_bundle_arg} accepted but unused by the "
@@ -1047,8 +1078,26 @@ def _run_sim(
         return fail("renode.sdk-root-not-found", "Cannot locate alp-sdk root.")
     sdk = SdkInfo(sdk_root, sdk_tier or "none")
 
+    # The `--sim-mode` half of the plain smoke's `sdk_context_issues` -- same
+    # two issues, same order, same reason for computing them HERE rather than
+    # past the refusals. See `_run`'s own comment.
+    sdk_context_issues: list[Issue] = []
+    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier or "none")
+    if pin_issue is not None:
+        sdk_context_issues.append(pin_issue)
+    divergence = sdk_ladder_divergence_issue(sdk_root_arg, Path(workspace_root), wide=True)
+    if divergence is not None:
+        sdk_context_issues.append(divergence)
+
     def fail_sdk(code: str, message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE):
-        return exit_code, data(), [_issue(code, "error", message)], [f"renode: {message}"], sdk, project
+        return (
+            exit_code,
+            data(),
+            [_issue(code, "error", message), *sdk_context_issues],
+            [f"renode: {message}"],
+            sdk,
+            project,
+        )
 
     # The bundle's own manifest, when it has one: it supplies both the SKU
     # and the slice -> ELF resolution. Absent is fine (a bare bundle of
@@ -1153,11 +1202,8 @@ def _run_sim(
     argv = build_sim_renode_argv(renode_bin, resc_path)
     known["renodeArgv"] = argv
 
-    issues: list[Issue] = []
+    issues: list[Issue] = list(sdk_context_issues)
     text: list[str] = []
-    pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier or "none")
-    if pin_issue is not None:
-        issues.append(pin_issue)
     # The descriptor's `framebuffers`/`peripherals` are empty and the UART
     # is silent while the per-SKU profile half of `tan-cli#77` is deferred.
     # Saying so is not optional -- see `sim_profile_deferred_message`'s own

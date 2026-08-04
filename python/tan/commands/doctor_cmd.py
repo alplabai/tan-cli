@@ -110,7 +110,13 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import _abs_posix, discover_sdk_root, resolve_sdk_root_ladder
+from tan.commands.build_cmd import (
+    SDK_DISCOVERY_DIVERGENT,
+    _abs_posix,
+    discover_sdk_root,
+    resolve_sdk_root_ladder,
+    resolve_sdk_root_wide,
+)
 from tan.commands.sdk_cmd import (
     NO_SDK_NEXT_STEPS,
     _has_loader_script,
@@ -1465,6 +1471,7 @@ def sdk_check(
     tier: str | None = None,
     unselected_candidate: str | None = None,
     broken_global_default: str | None = None,
+    divergent_candidate: str | None = None,
 ) -> Check:
     """`sdk` -- is an alp-sdk checkout resolved at all? Mirrors
     `tan_core::preflight::build_preflight_checks`'s `sdk` check.
@@ -1525,6 +1532,34 @@ def sdk_check(
                     f"pass --sdk-root {unselected_candidate} to use it"
                 )
             detail += ")"
+        if divergent_candidate is not None:
+            # BOTH roots re-rendered POSIX here, unlike the `pass` branch's
+            # `alp-sdk at {sdk_root}` above, which keeps this host's native
+            # separators and is left byte-identical. The reason is the CODE:
+            # this branch's detail becomes an `issues[].message` under
+            # `sdk.discovery-divergent`, which five other commands also emit
+            # -- and all five build it from `_abs_posix`. A consumer
+            # correlating two envelopes would otherwise match a code across a
+            # message spelled `C:/...` on one side and `C:\...` on the other.
+            # The envelope is the contract; normalise the filesystem side to
+            # meet it, never the other way round (caught by
+            # windows-latest on tan-cli#428, green everywhere else).
+            posix_root = f"alp-sdk at {_abs_posix(sdk_root)}"
+            if tier is not None:
+                posix_root += f" ({tier})"
+            return Check(
+                "sdk",
+                "warn",
+                f"{posix_root}; `tan init`, `tan generate`, `tan examples` "
+                f"and `tan renode` resolve a DIFFERENT checkout from this "
+                f"directory ({_abs_posix(divergent_candidate)}) and report "
+                f'the same sourceTier "discovery", so generated files and '
+                f"the build plan can come from different SDK versions.",
+                f"--sdk-root <path> to pin the one you mean for a single run, "
+                f"or `tan init --sdk-root <path>` to write it into "
+                f".alp/sdk-path, which outranks both discovery tiers.",
+                code=SDK_DISCOVERY_DIVERGENT,
+            )
         return Check("sdk", "pass", detail)
     scope_note = f" for --project {project_scope}" if project_scope is not None else ""
     if broken_global_default is not None:
@@ -2603,9 +2638,30 @@ def _collect(
             _abs_posix(str(candidate))
         ) != os.path.normcase(_abs_posix(sdk_root)):
             unselected_candidate = str(candidate)
+    # tan-cli#407: the #301 block above deliberately says nothing when the
+    # winning tier already IS `discovery` -- and that is precisely the case
+    # where the second checkout is not merely "unselected" but ACTIVELY in
+    # use, by the four commands that take the wide ladder. Same report-only
+    # discipline as #301: the candidate can only ever be one
+    # `resolve_sdk_root_wide` itself would reach, never a scan of its own.
+    divergent_candidate: str | None = None
+    if sdk_root is not None and sdk_tier == "discovery":
+        wide, _wide_tier, _wide_pin = resolve_sdk_root_wide(None, Path(workspace_root))
+        # `normcase` both sides, for the reason spelled out in the #301 block
+        # above: `_abs_posix` does not resolve, so on Windows one directory
+        # under two spellings would be reported as two checkouts.
+        if wide is not None and os.path.normcase(_abs_posix(str(wide))) != os.path.normcase(
+            _abs_posix(sdk_root)
+        ):
+            divergent_candidate = str(wide)
     checks.append(
         sdk_check(
-            sdk_root, project_scope, sdk_tier, unselected_candidate, broken_global_default
+            sdk_root,
+            project_scope,
+            sdk_tier,
+            unselected_candidate,
+            broken_global_default,
+            divergent_candidate,
         )
     )
     project_selected = bool(project_scope and project_scope.strip()) or board_yaml is not None
