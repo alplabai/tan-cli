@@ -84,14 +84,32 @@ from pathlib import Path
 
 import pytest
 
+from . import oracle_fixtures, platform_fixtures
 from .oracle import _run, empty_tool_inventory, python_command, rust_binary
 
+#: Read only on the LIVE/CAPTURE path now (tan-cli#409): the oracle side of
+#: both cases below REPLAYS from `platform_fixtures`, keyed by this host's
+#: own `sys.platform`, so a missing binary is not a reason to skip anything.
 RUST = rust_binary()
 
-_ORACLE_REQUIRED = pytest.mark.skipif(
-    RUST is None,
-    reason="needs a built Rust tan; run `cargo build --bin tan` (or set TAN_RUST_BINARY)",
-)
+
+def _oracle_side(case_id, live_fn, *scrub_roots):
+    """The oracle's `[exit_code, envelope, bundle]` for `case_id` on THIS
+    platform, or a skip NAMING the platform when it has not been captured
+    yet.
+
+    A skip rather than a failure while the store is being filled -- the three
+    captures arrive from three different CI runners and cannot land in one
+    commit -- but `test_parity_freeze_completeness.py` FAILS the whole time
+    any target platform is missing, so "partially captured" cannot quietly
+    become the permanent state. That is precisely how this hole persisted.
+    """
+    try:
+        return platform_fixtures.resolve_for_platform(
+            case_id, live_fn, scrub_roots=scrub_roots
+        )
+    except platform_fixtures.Absent as absent:
+        pytest.skip(str(absent))
 
 #: The one check whose STATUS may legitimately differ, and the issue that owns
 #: the difference. tan-cli#306 widened `doctor_cmd.long_paths_check` to read
@@ -196,7 +214,6 @@ def _assert_doctor_sections_match(r_bundle: dict, p_bundle: dict, r_out: dict, p
     assert _issue_pairs(p_out) == _expected_issues(p_checks_raw)
 
 
-@_ORACLE_REQUIRED
 def test_support_bundle_matches_the_oracle_on_a_failing_host(work_dir, tmp_path):
     """The exact case tan-cli#357 reported: same project, no resolvable SDK,
     an empty PATH so the prerequisite probe genuinely finds nothing, separate
@@ -205,12 +222,22 @@ def test_support_bundle_matches_the_oracle_on_a_failing_host(work_dir, tmp_path)
     path = empty_tool_inventory(tmp_path)
     rust_dest, python_dest = tmp_path / "rust-bundle", tmp_path / "python-bundle"
 
-    r_code, r_out = _run(
-        [RUST],
-        ["support-bundle", "--format", "json", "--destination", str(rust_dest)],
-        work_dir,
-        home,
-        env_overrides={"PATH": path},
+    def _live_rust():
+        code, out = _run(
+            [RUST],
+            ["support-bundle", "--format", "json", "--destination", str(rust_dest)],
+            work_dir,
+            home,
+            env_overrides={"PATH": path},
+        )
+        # The bundle FILE is part of the frozen answer, not just the
+        # envelope: in replay mode nothing writes `rust_dest`, so a disk read
+        # after the fact would find nothing and report the divergence
+        # backwards.
+        return [code, out, _bundle(out)]
+
+    r_code, r_out, r_bundle_frozen = _oracle_side(
+        "failing-host", _live_rust, work_dir, home, tmp_path
     )
     p_code, p_out = _run(
         python_command(),
@@ -225,7 +252,12 @@ def test_support_bundle_matches_the_oracle_on_a_failing_host(work_dir, tmp_path)
     assert (r_code, r_out["ok"], r_out["exitCode"]) == (4, False, 4)
     assert (p_code, p_out["ok"], p_out["exitCode"]) == (r_code, r_out["ok"], r_out["exitCode"])
 
-    r_bundle, p_bundle = _bundle(r_out), _bundle(p_out)
+    # Both sides take the identical scrub: `_oracle_side` already applied it
+    # to the frozen half, so the live half needs it too or `inspect.context`
+    # diffs a live scratch path against the recorded placeholder.
+    r_bundle = r_bundle_frozen
+    p_bundle = oracle_fixtures.scrub(_bundle(p_out), work_dir, home, tmp_path)
+    p_out = oracle_fixtures.scrub(p_out, work_dir, home, tmp_path)
 
     # The resolved debug context, whole -- `projectSelected` and
     # `debuggerExtensions` included, which the port omitted before #357.
@@ -244,7 +276,6 @@ def test_support_bundle_matches_the_oracle_on_a_failing_host(work_dir, tmp_path)
     assert ("support-bundle.hostPrerequisites", "error") in _issue_pairs(p_out)
 
 
-@_ORACLE_REQUIRED
 def test_support_bundle_matches_the_oracle_with_a_resolved_sdk(work_dir, tmp_path):
     """tan-cli#374 finding 2: the failing-host case above pins its exit-code
     assertion on the one scenario where `sdkRoot` already fails on BOTH
@@ -282,8 +313,19 @@ def test_support_bundle_matches_the_oracle_with_a_resolved_sdk(work_dir, tmp_pat
             str(dest),
         ]
 
-    r_code, r_out = _run([RUST], argv(rust_dest), work_dir, home)
+    def _live_rust():
+        code, out = _run([RUST], argv(rust_dest), work_dir, home)
+        return [code, out, _bundle(out)]
+
+    r_code, r_out, r_bundle_frozen = _oracle_side(
+        "resolved-sdk", _live_rust, work_dir, home, tmp_path
+    )
     p_code, p_out = _run(python_command(), argv(python_dest), work_dir, home)
+    # NOT scrubbed yet: `_bundle` reads `data.outputPath` off this dict, and a
+    # redacted path resolves to nothing on disk. Scrubbed further down, after
+    # the bundle has been read.
+    p_bundle_raw = _bundle(p_out)
+    p_out = oracle_fixtures.scrub(p_out, work_dir, home, tmp_path)
 
     # The verdict, and the CLI-wide invariant that goes with it -- see the
     # failing-host case above for why these three are one fact, not three.
@@ -294,7 +336,8 @@ def test_support_bundle_matches_the_oracle_with_a_resolved_sdk(work_dir, tmp_pat
     # The oracle has no fail axis reachable in this scenario at all.
     assert r_out["issues"] == []
 
-    r_bundle, p_bundle = _bundle(r_out), _bundle(p_out)
+    r_bundle = r_bundle_frozen
+    p_bundle = oracle_fixtures.scrub(p_bundle_raw, work_dir, home, tmp_path)
     _assert_doctor_sections_match(r_bundle, p_bundle, r_out, p_out)
     # Pinned literally, so a future refactor cannot satisfy the structural
     # assertion above by dropping the check `PORT_ONLY_CHECKS` declares.
