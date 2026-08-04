@@ -113,42 +113,33 @@ _PLATFORM_BOUND: dict[str, frozenset[str]] = {
     ),
 }
 
-#: DEBT, not design -- and the `test_oracle_parity.py` half of it is PAID as
-#: of 2026-08-04.
+#: DEBT, not design -- and as of 2026-08-04 it is **EMPTY**, which is exactly
+#: what tan-cli#409 asks for: this is the register that had to reach empty
+#: BEFORE tan-cli#269 deletes `crates/`, because after that no fixture can be
+#: captured at all.
 #:
-#: That half held seven cases whose recorded blocker was file ownership, not
-#: the cases themselves: the module was said to belong to tan-cli#408, so
-#: converting them from a concurrent change would clobber it. The reason did
-#: not survive reading #408, whose scope is the six `python/tan/` modules
-#: over the 800-line cap -- it names the oversized test files as an
-#: observation and delivers nothing in them. Nothing owned the file, so all
-#: seven now replay from `oracle_fixtures/test_oracle_parity.json`: the four
-#: whose assertions read a PATH through `test_oracle_parity._both_sides`, the
-#: three that read only a `command`/exit/issue code through
-#: `rust_run(..., scrub_roots=())`. `PROVENANCE.txt` records the capture run
-#: and why darwin was safe for it.
+#: It held two groups. Neither recorded reason survived contact:
 #:
-#: What is left here is genuinely a different shape, not the same debt
-#: shrunk: the scaffold pair below compares a FILE TREE, which no fixture
-#: store in this package can hold yet.
-#: EMPTY as of the two freezes above landing together (tan-cli#409). Both
-#: entries that lived here are gone for the same reason -- the recorded
-#: blocker did not survive being measured:
+#: * Seven `test_oracle_parity.py` cases, blocked on FILE OWNERSHIP -- the
+#:   module was said to belong to tan-cli#408. Reading #408 showed its scope
+#:   is the six `python/tan/` modules over the 800-line cap; it names the
+#:   oversized test files as an observation and delivers nothing in them.
+#:   Nothing owned the file. They replay through
+#:   `test_oracle_parity._both_sides` and `rust_run(..., scrub_roots=())`.
+#: * Two `test_scaffold_content_oracle_parity.py` cases -- 47 node ids, and
+#:   the LARGEST hole in the freeze -- blocked on a tree-shaped fixture store
+#:   that "does not exist yet". So it was written:
+#:   `tests/parity/scaffold_fixtures.py`, keyed by TEMPLATE ID rather than by
+#:   pytest node id, because that helper is memoised across two tests and a
+#:   node-derived key would have depended on collection order.
 #:
-#: - `test_oracle_parity.py`'s seven were said to belong to tan-cli#408, so
-#:   converting them concurrently would clobber it. #408's scope is the six
-#:   `python/tan/` modules over the 800-line cap; it names the oversized test
-#:   files as an observation and delivers nothing in them.
-#: - the scaffold pair was said to need "a tree-shaped fixture store that does
-#:   not exist yet". Measured, the oracle side is six templates, 40 files,
-#:   every one valid UTF-8, 120 KiB of JSON -- frozen per template in
-#:   `oracle_fixtures/scaffold_trees.json`.
+#: Kept as an empty dict rather than deleted: the gate reads `_REGISTERS`
+#: structurally, so a future live-only case needs somewhere honest to be
+#: declared. An empty register is the difference between "no debt" and "no
+#: place to record debt".
 #:
-#: Kept as an empty dict rather than deleted: this is the register a future
-#: live-only case declares itself in, and the gate below reads all three.
-#: A new entry here is a debt someone chose to take, which is reviewable; a
-#: case gated live with no entry is the silent hole this module exists to
-#: refuse.
+#: `_PLATFORM_BOUND` above is now the ONLY thing between this package and a
+#: complete freeze, and it needs a win32 MACHINE, not a decision.
 _UNFROZEN: dict[str, frozenset[str]] = {}
 
 _REGISTERS = (
@@ -328,3 +319,36 @@ def test_the_detector_sees_a_gate_reached_through_a_decorator_function(tmp_path)
         newline="\n",
     )
     assert _live_only_tests(module) == {"test_reached_through_the_alias"}
+
+
+def test_every_scaffold_template_has_a_committed_tree():
+    """The scaffold store's own completeness (tan-cli#409).
+
+    `test_scaffold_content_oracle_parity.py` parametrizes off
+    `TEMPLATE_IDS`, and its oracle side now REPLAYS. A template added without
+    a capture would therefore not skip and not fail structurally -- it would
+    raise `KeyError` deep inside a parametrized case, which reads as a broken
+    harness rather than as "nobody captured this". Answered from the STORE,
+    not from a hand-kept list, so the two cannot drift apart.
+
+    This is also what makes `scaffold_fixtures.frozen_template_ids` true: it
+    was written claiming the gate read it, and for one commit nothing did.
+    """
+    from tan.core.scaffold import TEMPLATE_IDS
+
+    from . import scaffold_fixtures
+
+    frozen = scaffold_fixtures.frozen_template_ids()
+    missing = sorted(set(TEMPLATE_IDS) - frozen)
+    assert missing == [], (
+        f"{missing} have no committed scaffold tree in "
+        f"{scaffold_fixtures.FIXTURE_PATH.name}. Capture against a built "
+        f"oracle before `crates/` is deleted (tan-cli#269), after which no "
+        f"capture is possible at all."
+    )
+
+    stale = sorted(frozen - set(TEMPLATE_IDS))
+    assert stale == [], (
+        f"{stale} are frozen but are no longer in TEMPLATE_IDS -- drop them, "
+        f"so the store keeps describing the tree it guards."
+    )
