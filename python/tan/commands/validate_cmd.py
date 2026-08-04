@@ -18,10 +18,11 @@ Two paths, mirroring `crates/tan-cli/src/commands/validate.rs`:
   validation-failure class -- indistinguishable from a bad board to any
   caller that does not read the issue code.
 
-  **tan-cli#262 (v0.6.0, TAKEN): a missing verdict is the VALIDATOR's
-  problem, not a tan crash -- exit 2, not exit 1.** An earlier revision of
-  this docstring left that an open question ("the genuine v0.6.0 decision,
-  tracked in tan-cli#262"); the maintainer has now decided it. Measured
+  **tan-cli#262 (decided for 0.5.0, TAKEN): a missing verdict is the
+  VALIDATOR's problem, not a tan crash -- exit 2, not exit 1.** An earlier
+  revision of this docstring left that an open question ("the genuine
+  release decision, tracked in tan-cli#262"); the maintainer has now
+  decided it. Measured
   directly, running ``target/debug/tan.exe`` (tan 0.4.1-dev) with
   ``--format json``:
 
