@@ -10,12 +10,7 @@ same situation.
 
 Every wire-shape assertion below (exit code, issue code, `data.unchanged`,
 the exact message text for `board-yaml-missing`/the `som:`-shape check) was
-measured directly against `target/debug/tan.exe` -- the ONE pinned oracle
-`oracle_resolver` resolves and now version-asserts on every call (`tan 0.4.1`;
-the `0.4.1-dev` this docstring used to claim is older prose for the same build
-and is not what the binary prints). Before tan-cli#393 this file resolved
-`target/release` ahead of `target/debug` with no version check, so a stale
-release build could stand in for the oracle and pass silently -- see the
+measured directly against `target/debug/tan.exe` (tan 0.4.1-dev) -- see the
 module docstring in `tan/commands/diff_cmd.py` for the one place this port
 knowingly diverges (a non-string `e1m_routes` mapping key: PyYAML raises a
 `ConstructorError` at parse time, which this port reports as
@@ -30,9 +25,12 @@ only pins THIS port's own (documented, self-consistent) behaviour.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 import typer
 from typer.testing import CliRunner
 
@@ -46,13 +44,32 @@ from tan.commands.diff_cmd import (
 )
 from tan.commands.diff_cmd import diff as diff_command
 
-from .oracle_resolver import ORACLE_REQUIRED as _ORACLE_REQUIRED
-from .oracle_resolver import run_oracle as _run_oracle
+from tests.parity.oracle import resolve_oracle_for_skipif
 
 app = typer.Typer()
 app.command("diff")(diff_command)
 
 runner = CliRunner()
+
+#: The oracle binary, resolved by the ONE resolver in the suite -- see the
+#: fuller comment on the same line in `test_pinmux_command.py`. This module
+#: carried the second, byte-identical copy of the release-first walk. Its own
+#: oracle case passed against BOTH binaries, so the stale pick was invisible
+#: here: a real `diff` envelope divergence introduced between `tan 0.3.1` and
+#: the pinned `tan 0.4.1` would have been measured against the wrong baseline
+#: and reported green (tan-cli#393).
+_ORACLE = resolve_oracle_for_skipif()
+_ORACLE_REQUIRED = pytest.mark.skipif(
+    _ORACLE is None,
+    reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
+)
+
+
+def _run_oracle(argv: list[str], cwd: Path) -> tuple[int, dict]:
+    proc = subprocess.run(
+        [_ORACLE, *argv], capture_output=True, text=True, encoding="utf-8", cwd=cwd
+    )
+    return proc.returncode, json.loads(proc.stdout)
 
 
 def _project(tmp_path: Path, board_yaml_text: str) -> Path:

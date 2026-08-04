@@ -7,9 +7,11 @@
     "problem', so a rename here is silent on both sides with CI green. See",
     "alplabai/tan-cli#106.",
     "",
-    "This file is the single source: `crates/tan-cli/tests/contract.rs`",
-    "(`frozen_issue_codes`) gates it against the emitting sources, and the",
-    "release workflow folds it into the published `envelope-contract.json`",
+    "This file is the single source. Python's shipping emit sites are checked",
+    "in both directions by `python/tests/gates/test_every_issue_code_is_registered.py`",
+    "and `test_frozen_issue_codes.py`; `crates/tan-cli/tests/contract.rs` owns",
+    "only entries whose `emittedBy` path points into the frozen Rust oracle.",
+    "The release workflow folds the combined registry into `envelope-contract.json`",
     "asset so the extension's own contract test can diff against an artefact",
     "instead of a hand-copied fixture.",
     "",
@@ -763,20 +765,44 @@
       "note": "Built by `posix_venv_unusable()` (Linux only: `python3` runs but its `venv` module cannot create a usable environment because `ensurepip`/`python3-venv` is missing, tan-cli#161/#294); forwarded to the wire through TWO sites -- `bootstrap_cmd.py`'s `Issue(f\"bootstrap.{refusal.code}\", ...)` and `doctor_cmd.py`'s `code=f\"bootstrap.{venv_refusal.code}\"` -- both prefixing the same bare `PrereqFailure.code`. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "bootstrap.adopted-venv-unusable",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "The `bootstrap.` prefix is applied by `Log.warn`; fires when the workspace was ADOPTED from the user's own `$ZEPHYR_BASE` tree and its `.venv` is not usable. bootstrap refuses rather than reclaiming a directory it did not create. Severity is `warning` because it travels through `Log.warn`; the run's FAILING verdict is carried alongside it by `bootstrap.failed` at severity `error`, and the two share one message -- distinct from `venv-unusable`, which is the HOST `python3-venv`/`ensurepip` refusal from `python/tan/core/bootstrap.py`. Registered by tan-cli#390, which stopped `ensure_venv` from deleting a venv it did not create. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.venv-probe-inconclusive",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "The `bootstrap.` prefix is applied by `Log.warn`; fires when `_probe_venv_pip` could not run to completion (unspawnable interpreter, permission error, or a PROBE_TIMEOUT_S timeout), so nothing is known about the venv's pip. The venv is REUSED as-is: no answer is not a verdict and must not authorise an rmtree. Registered by tan-cli#390, which stopped `ensure_venv` from deleting a venv it did not create. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.venv-recreated",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "The `bootstrap.` prefix is applied by `Log.warn`; announces that a venv in a workspace bootstrap OWNS was removed and recreated because its pip ran and reported itself broken. Was a `log.line` before tan-cli#390, so the deletion never reached `issues[]` and was invisible to a `--format json` consumer. Registered by tan-cli#390, which stopped `ensure_venv` from deleting a venv it did not create. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "bootstrap.workspace-orphan-refused",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
+      "note": "The `bootstrap.` prefix is applied by `_refusal()`; fires when `--workspace` would relocate a checkout that is the MANIFEST REPOSITORY of a live west workspace, leaving that workspace's `.west/config` pointing at nothing. Distinct from `enclosing-west-workspace`, which probes ancestors of the DESTINATION rather than the workspace the checkout is taken out of. Registered by tan-cli#389, which stopped `--workspace` from renaming the manifest repository out of a live west workspace. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "bootstrap.workspace-relocation-rolled-back",
       "status": "reserved",
       "severity": "warning",
       "consumer": "none",
       "emittedBy": "python/tan/commands/bootstrap_cmd.py",
       "note": "tan-cli#284: fires from `rollback_relocation_after()` when a LATER phase (venv/west) fails after the checkout was already relocated, and the rollback itself is reported -- whether the move-back and the pointer restore both succeeded, only the pointer restore failed, or the move-back itself could not complete. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
-    },
-    {
-      "code": "bootstrap.orphans-west-workspace",
-      "status": "reserved",
-      "severity": "error",
-      "consumer": "none",
-      "emittedBy": "python/tan/commands/bootstrap_cmd.py",
-      "note": "tan-cli#389: the `bootstrap.` prefix is applied by `_refusal()`; fires BEFORE the relocation write when the checkout about to be moved is the MANIFEST REPO of a live west workspace (`relocation_orphans_workspace_refusal`). Distinct from `enclosing-west-workspace`, which probes ancestors of the DESTINATION -- this one names the workspace the checkout would be taken OUT of, which `--workspace` used to bypass entirely by short-circuiting the adoption probe. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "bootstrap.adopted-venv-unusable",
@@ -873,6 +899,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/clean_cmd.py",
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "examples.sdk-root-unresolved",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/examples_cmd.py",
+      "note": "Added by tan-cli#400. `tan examples` used to answer an unresolvable alp-sdk checkout with rc 0, `ok:true`, `data.examples: []` and `issues: []` -- byte-identical to a healthy SDK that ships no examples, so alp-sdk-vscode's example picker rendered an empty list with nothing to react to and `tan init --from-example <sourceDir>` was unreachable with no indication of why. Deliberately the same `<command>.sdk-root-unresolved` spelling `presets`, `pinmux`, `build`, `generate`, `init`, `model` and `trace` already use for this identical bad path. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change; promote to `frozen` (filling in consumer/consumerEffect for real) the moment the picker binds to it. NOT emitted when a checkout resolves and simply has no `examples/` tree: that is not a misconfiguration, and its absence is what distinguishes the two empty catalogues on the wire."
     },
     {
       "code": "examples.internal-failure",
@@ -1081,6 +1115,14 @@
       "consumer": "none",
       "emittedBy": "python/tan/commands/sdk_cmd.py",
       "note": "tan-cli#351: fires when `sdk list` is run without `--online` -- now a `warning` on a SUCCESS envelope (exit 0, `ok: true`), not an `error` on a failure. This port gates the network call the oracle itself reaches unconditionally (the oracle has no `--online` flag at all), for hermeticity; that gate is a normal, everyday state -- not a verdict on anything the caller did wrong -- so it must not exit non-zero, matching `sdk current`'s exit-0 answer to the same shape of question (`sdk-current-no-sdk`). Was `severity: \"error\"`, exit 1, emitted through `_fail()`'s `f\"sdk.{code}\"` prefixing helper (`literal: code=\"network-required\"`) until #351; now a direct literal `Issue(...)` call, still covered by the same emit-site gate under the plain-literal scan instead of the prefixing one. Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "sdk.discovery-divergent",
+      "status": "reserved",
+      "severity": "warning",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/build_cmd.py",
+      "note": "Emitted when `resolve_sdk_root_ladder` (narrow) and `resolve_sdk_root_wide` (wide) resolve DIFFERENT alp-sdk checkouts from one cwd while both label their answer `sourceTier: \"discovery\"` -- so `tan generate` can emit board files from one checkout's metadata while `tan build`/`doctor`/`kconfig` plan against another, undetectably. The message names both roots in a fixed order and says which one THIS command used, so two envelopes describing one collision correlate on the code plus the path pair. Registered by tan-cli#407. Currently emitted from `tan build` only; the remaining ladder call sites are one-line adds beside their existing `project_pin_issue(...)` calls and are tracked on that issue. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
     },
     {
       "code": "sdk.not-ported",

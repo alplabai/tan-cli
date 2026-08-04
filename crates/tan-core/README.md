@@ -4,12 +4,18 @@
 
 [![license](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/alplabai/tan-cli/blob/main/LICENSE)
 
-Pure, **I/O-free** domain logic for [`tan`](https://github.com/alplabai/tan-cli) —
+> **Frozen behaviour oracle.** `tan-core` is retained with the v0.4.1-era Rust
+> CLI for parity and contract checks. The shipping implementation and current
+> domain logic live in `python/tan/`; release assets are not built from this
+> crate.
+
+At its freeze point, this was the pure, **I/O-free** domain logic for
+[`tan`](https://github.com/alplabai/tan-cli) —
 the standalone Alp Lab build CLI that consumes the alp-sdk *build-plan* and
 executes it. This crate is the shared engine behind the `tan` binary
 (`crates/tan-cli`).
 
-`tan-core` is the Rust home of the build-plan / system-manifest **consumer**
+`tan-core` is the frozen Rust home of the build-plan / system-manifest **consumer**
 contracts plus the pure decision logic for the native commands. It contains
 **no** terminal, filesystem-walking, or process code — only deterministic,
 serde-based transforms — so the same logic stays testable in isolation and could

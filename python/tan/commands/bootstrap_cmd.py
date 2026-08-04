@@ -662,80 +662,52 @@ class Workspace:
         return False
 
 
-#: `_venv_pip_state` outcomes. THREE, not a bool (tan-cli#390): the only
-#: outcome that may authorise deleting a directory is the one where the venv's
-#: own interpreter RAN and its `pip` was the thing that failed.
-VENV_PIP_OK = "ok"
-VENV_PIP_MISSING = "missing"
-VENV_PIP_UNKNOWN = "unknown"
+#: `_probe_venv_pip` verdicts. Three, not two, because only ONE of them is
+#: evidence that a directory is wreckage worth deleting (tan-cli#390).
+PIP_USABLE = "usable"
+#: pip RAN and reported itself missing or broken -- the corpse of a bootstrap
+#: that died partway, which is what `ensure_venv`'s recreate exists for.
+PIP_ABSENT = "absent"
+#: The probe never got an answer at all: unspawnable interpreter, permission
+#: error, or a `PROBE_TIMEOUT_S` timeout. NOT a verdict, and never grounds for
+#: an `rmtree`.
+PIP_INCONCLUSIVE = "inconclusive"
 
 
-def _venv_pip_state(venv: VenvBin, runner: Runner) -> str:
-    """Whether an existing venv's own interpreter can run `pip` -- and, when it
-    cannot, whether that is a VERDICT or merely a missing answer.
+def _probe_venv_pip(venv: VenvBin, runner: Runner) -> str:
+    """Three-state answer to "can this venv's own interpreter run `pip`?".
 
-    `VENV_PIP_MISSING` tells a healthy venv from the corpse of a bootstrap that
-    died partway: Debian's `ensurepip` failure leaves a REAL `bin/python`
-    behind, so `venv_present` alone accepts it, while `pip` itself is absent.
-    That is the state `ensure_venv` recreates over.
+    `probe()` collapses "pip exited non-zero" and "the probe could not be run
+    at all" into a single `None`, and its own docstring is explicit that `None`
+    means "no answer", never "the answer is bad". `ensure_venv` nonetheless
+    read that `None` as a verdict and `shutil.rmtree`'d the directory on it, so
+    a venv that merely could not be spawned -- or one on a loaded machine that
+    blew the 120 s timeout -- was deleted as if it had failed (tan-cli#390).
 
-    `VENV_PIP_UNKNOWN` is the tan-cli#390 fix. `probe` collapses "pip exited
-    non-zero", "the binary could not be spawned at all" and "the probe timed
-    out after PROBE_TIMEOUT_S" into the same `None`, and its own docstring says
-    that `None` means "no answer, never the answer is bad". Reading it as a
-    verdict is what let a busy machine (probe timeout) or an unspawnable
-    interpreter authorise an `rmtree` of a directory tan may not even have
-    created. A SECOND probe -- `python -c ""`, the cheapest thing an
-    interpreter can be asked to do -- separates the two: if the interpreter
-    itself answers, `pip` really is the broken part; if it does not, tan knows
-    nothing about this venv and says so instead of deleting it.
-
-    Still `VENV_PIP_OK` under `--dry-run`, where the probe would describe a
-    venv this run was never going to touch anyway (nothing below deletes or
-    creates on a dry run).
+    Splitting the two keeps the recreate for the case it was written for while
+    making "I don't know" incapable of authorising a delete. Deliberately does
+    NOT go through `probe()`: the whole point is the returncode/exception
+    distinction `probe()` erases.
     """
     if runner.dry_run:
-        return VENV_PIP_OK
-    if probe([str(venv.python), "-m", "pip", "--version"], timeout=PROBE_TIMEOUT_S) is not None:
-        return VENV_PIP_OK
-    if probe([str(venv.python), "-c", ""], timeout=PROBE_TIMEOUT_S) is None:
-        return VENV_PIP_UNKNOWN
-    return VENV_PIP_MISSING
-
-
-def adopted_venv_unusable_refusal(ws: Workspace, state: str) -> str:
-    """`bootstrap.adopted-venv-unusable` (tan-cli#390): the venv inside a
-    workspace tan ADOPTED is not tan's to delete.
-
-    `_select_workspace`'s REUSE branch says "Never modify the user's tree" and
-    then repoints `paths.venv_dir` at `<their topdir>/.venv`, which is whatever
-    they put there -- `uv venv` installs no pip at all, and `python -m venv
-    --without-pip` is the documented way to build one deliberately. Both land
-    in `VENV_PIP_MISSING`, and the recreate below used to remove them along
-    with everything installed into them, announced only as a `log.line` that no
-    `--format json` consumer ever saw. STALE adopts the same tree, so it is the
-    same hazard on that branch.
-
-    A refusal rather than "reuse it anyway": the venv genuinely cannot run the
-    pip installs the next two phases need, so proceeding would fail a step
-    later with a message about `pip install west` instead of about the venv.
-    Every remedy named here is one the OPERATOR performs on their own tree.
-    """
-    var = "$env:ZEPHYR_BASE" if ws.is_windows else "$ZEPHYR_BASE"
-    reason = (
-        f"its interpreter ({_native(ws.venv_bin().python)}) could not be run at all"
-        if state == VENV_PIP_UNKNOWN
-        else "it has no usable pip"
-    )
-    return (
-        f"the west workspace at {_native(ws.workspace_dir)} was adopted from {var}, so "
-        f"{_native(ws.venv_dir)} is a venv tan did not create -- and {reason}, so the "
-        f"west/pip phases cannot run against it. tan does not delete a venv it does not "
-        f"own: nothing was removed. Install pip into it "
-        f"(`{_native(ws.venv_bin().python)} -m ensurepip --upgrade`), or remove "
-        f"{_native(ws.venv_dir)} yourself, or point {var} at a different workspace, then "
-        f"re-run `tan bootstrap`."
-    )
+        return PIP_USABLE
+    try:
+        out = subprocess.run(
+            [str(venv.python), "-m", "pip", "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        # SubprocessError covers TimeoutExpired (the child is already killed by
+        # `run`); ValueError catches an empty/garbage argv. None of these is a
+        # statement about pip.
+        return PIP_INCONCLUSIVE
+    return PIP_USABLE if out.returncode == 0 else PIP_ABSENT
 
 
 def _venv_python_version(
@@ -770,10 +742,9 @@ def _venv_python_version(
 
 
 def ensure_venv(
-    ws: Workspace, log: Log, runner: Runner, host: HostPython, adopted: bool
-) -> tuple[VenvBin | None, str | None, bool]:
+    ws: Workspace, log: Log, runner: Runner, host: HostPython, *, adopted: bool = False
+) -> tuple[VenvBin | None, str | None]:
     """Create (or reuse) the workspace venv and refresh `pip.bootstrapUpgrade`.
-    `(venv, failure, is_refusal)`.
 
     Everything -- west, the Zephyr requirements, the SDK extras -- installs into
     this workspace-local venv, never the system interpreter / `--user` /
@@ -786,77 +757,80 @@ def ensure_venv(
     only way out is `rm -rf` by hand: a retry must either reuse a KNOWN-GOOD
     venv or start clean, never silently inherit the wreckage.
 
-    `adopted` is `WorkspacePlan.adopted`, and it is the tan-cli#390 fix: this is
-    the ONLY function that deletes anything, and it must know whether the venv
-    it is about to delete sits inside a workspace tan built or one the operator
-    handed it via `$ZEPHYR_BASE`. It is PASSED IN rather than re-derived, and
-    the caller's plan is already resolved before the call: the module's only
-    other read of `plan.adopted` happens after this function returns, i.e. after
-    the delete had already run.
-
-    `is_refusal` splits the two failure kinds the caller must report
-    differently: a failing STEP (`False` -> `bootstrap.failed`, and roll back
-    any relocation this run performed) from a REFUSAL that wrote nothing
-    (`True` -> its own code at `error` severity). Deliberately a flag rather
-    than the code string itself -- the registry gate resolves LITERAL codes at
-    their emit site, so the spelling lives in exactly one place, at the `Issue`.
+    `adopted` is that reasoning's one exception and the reason this argument
+    exists (tan-cli#390). When `_select_workspace` ADOPTS a `$ZEPHYR_BASE`
+    topdir it repoints `ws.venv_dir` at the USER's own `<topdir>/.venv` --
+    under a comment promising never to modify their tree -- and the recreate
+    below then deleted it, because `uv venv` and `python -m venv --without-pip`
+    both produce a real interpreter with no pip. That directory is not
+    bootstrap's to reclaim: on an adopted tree an unusable venv is a REFUSAL
+    naming the path, never a delete. The caller must pass `plan.adopted`; the
+    default is `False` so a workspace bootstrap built itself keeps the
+    self-healing behaviour.
     """
     if not runner.dry_run:
         try:
             ws.workspace_dir.mkdir(parents=True, exist_ok=True)
         except OSError as err:
-            return (
-                None,
-                f"could not create the workspace directory {_native(ws.workspace_dir)}: {err}",
-                False,
-            )
+            return None, f"could not create the workspace directory {_native(ws.workspace_dir)}: {err}"
 
     if ws.venv_present():
-        state = _venv_pip_state(ws.venv_bin(), runner)
-        if state == VENV_PIP_OK:
+        verdict = _probe_venv_pip(ws.venv_bin(), runner)
+        if verdict == PIP_USABLE:
             log.line(f"Workspace venv already present at {_native(ws.venv_dir)}")
         elif adopted:
-            # tan-cli#390: NOT tan's venv. Refuse, delete nothing.
-            return None, adopted_venv_unusable_refusal(ws, state), True
-        elif state == VENV_PIP_UNKNOWN:
-            # tan-cli#390: the probe returned no answer -- a timeout, or an
-            # interpreter that could not be spawned. That is not evidence of
-            # wreckage, and "no answer" must never be the thing that authorises
-            # an `rmtree`. Reuse it as-is: if it really is broken, the pip
-            # upgrade below and the phases after it fail with their OWN coded
-            # warnings against the real command, which is strictly more
-            # recoverable than a directory that is already gone.
-            log.line(
-                f"Workspace venv at {_native(ws.venv_dir)} did not answer a `pip "
-                f"--version` probe and its interpreter could not be run either -- "
-                f"reusing it untouched rather than deleting a venv tan cannot inspect"
+            # tan-cli#390: this venv belongs to the user, not to bootstrap.
+            # Refuse and say which directory, rather than reclaiming it.
+            detail = (
+                "its interpreter could not be run"
+                if verdict == PIP_INCONCLUSIVE
+                else "it has no usable pip"
+            )
+            message = (
+                f"the venv at {_native(ws.venv_dir)} is not usable ({detail}), and this "
+                f"workspace was ADOPTED from your existing tree -- bootstrap will not "
+                f"delete a directory it did not create. Remove or repair "
+                f"{_native(ws.venv_dir)} yourself, or point --workspace at a different "
+                f"directory, then re-run."
+            )
+            log.warn("adopted-venv-unusable", message)
+            return None, message
+        elif verdict == PIP_INCONCLUSIVE:
+            # No answer is not a verdict (tan-cli#390): reuse it and let the
+            # real pip install a moment later report its own failure, rather
+            # than deleting a directory on the strength of a probe that never
+            # ran. Coded, so a `--format json` consumer sees why a later step
+            # failed against a venv nothing vouched for.
+            log.warn(
+                "venv-probe-inconclusive",
+                f"could not determine whether the venv at {_native(ws.venv_dir)} has a "
+                f"usable pip (the probe did not run to completion) -- reusing it as-is; "
+                f"if the installs below fail, remove that directory and re-run",
             )
         else:
-            # A `warn`, not a `line` (tan-cli#390): this is the one path that
-            # still deletes, so it must reach `issues[]` -- the extension drives
-            # `tan bootstrap --format json` and a `log.line` is invisible there.
+            # PIP_ABSENT on a workspace bootstrap owns: the wreckage case the
+            # recreate was written for. `log.warn`, not `log.line` -- a delete
+            # that never reaches `issues[]` is invisible on the only surface
+            # alp-sdk-vscode reads (tan-cli#390).
             log.warn(
                 "venv-recreated",
-                f"the workspace venv at {_native(ws.venv_dir)} has a working interpreter "
-                f"but no usable pip (a previous bootstrap likely failed partway) -- "
-                f"removed and recreated it; anything installed into it is gone",
+                f"Workspace venv at {_native(ws.venv_dir)} has no usable pip (a previous "
+                f"bootstrap likely failed partway) -- removing and recreating it",
             )
             if not runner.dry_run:
                 try:
                     shutil.rmtree(ws.venv_dir)
                 except OSError as err:
-                    return (
-                        None,
-                        f"failed to remove the broken venv at {_native(ws.venv_dir)}: {err}",
-                        False,
+                    return None, (
+                        f"failed to remove the broken venv at {_native(ws.venv_dir)}: {err}"
                     )
             failure = _create_venv(ws, log, runner, host)
             if failure is not None:
-                return None, failure, False
+                return None, failure
     else:
         failure = _create_venv(ws, log, runner, host)
         if failure is not None:
-            return None, failure, False
+            return None, failure
 
     venv = ws.venv_bin()
     upgrade = [
@@ -870,7 +844,7 @@ def ensure_venv(
     ]
     if runner.run(upgrade) is not None:
         log.warn("pip-upgrade", "pip/wheel upgrade reported a problem")
-    return venv, None, False
+    return venv, None
 
 
 def _create_venv(ws: Workspace, log: Log, runner: Runner, host: HostPython) -> str | None:
@@ -1297,69 +1271,6 @@ def enclosing_west_workspace_refusal(intended_topdir: Path, ancestor: Path) -> s
         f'"already initialized in {_native(ancestor)}, aborting." That other workspace may '
         f"still be in use; do not remove it on west's say-so. Point `tan bootstrap "
         f"--workspace <path>` somewhere outside {_native(ancestor)} instead."
-    )
-
-
-def _live_workspace_owning(repo_root: Path, zephyr_base_adopts: bool) -> Path | None:
-    """The west workspace whose MANIFEST REPO is `repo_root`, or `None`.
-
-    Two sources, because a live workspace can depend on this checkout by either
-    route. The ordinary one is an ancestor: `west init -l <checkout>` forces the
-    topdir to be the checkout's own parent, so the nearest ancestor holding a
-    `.west` whose `manifest.path` resolves back here IS that workspace. The
-    other is `$ZEPHYR_BASE` about to be ADOPTED -- `decide_workspace_reuse`
-    already proved `manifest_is_sdk` for that tree, and it need not be an
-    ancestor of the checkout at all.
-
-    Cheap and read-only, so it costs nothing on the overwhelmingly common run
-    where the answer is `None`.
-    """
-    top = find_enclosing_west(repo_root)
-    if top is not None and _manifest_points_at(top, repo_root):
-        return top
-    if zephyr_base_adopts:
-        zephyr_base = _env("ZEPHYR_BASE")
-        if zephyr_base:
-            # `_zephyr_base_will_adopt` being true is what makes this readable
-            # at all: it already required `<$ZEPHYR_BASE>/..` to be a west
-            # topdir whose manifest resolves to `repo_root`.
-            return Path(zephyr_base).parent
-    return None
-
-
-def relocation_orphans_workspace_refusal(repo_root: Path, workspace: Path, target: Path) -> str:
-    """`bootstrap.orphans-west-workspace`: refused BEFORE the checkout is moved
-    or the global default SDK is repointed (tan-cli#389).
-
-    `--workspace <path>` used to skip every check that could see this. It
-    short-circuits `_zephyr_base_will_adopt` (Python evaluates `a or b` left to
-    right, and `workspace_override is not None` is `a`), and it assigns `target`
-    directly instead of going through `default_relocation_target` -- whose
-    `dot_west_is_workspace` probe and `parent_needs_workspace_guard` call are
-    the two places that would have noticed the parent is a live workspace. So
-    the `os.rename` fired unconditionally on a checkout that a working
-    workspace was pointing at, at exit 0, and the same envelope then blamed
-    that workspace for a manifest mismatch the move itself had just created.
-
-    Not covered by `enclosing_west_workspace_refusal`: that walks ancestors of
-    the DESTINATION -- what `west init -l` would trip over there -- never the
-    workspace the checkout is being taken OUT of.
-
-    Refused rather than "move it and fix up the config": `<ws>/.west/config` is
-    only the visible half. That workspace's `zephyr/`, its modules and its venv
-    were all materialised against this checkout's `west.yml`, and no rewrite tan
-    could perform makes a second workspace out of one that lost its manifest
-    repo. A SECOND workspace is a clone, not a move.
-    """
-    return (
-        f"{_native(repo_root)} is the manifest repo of the west workspace at "
-        f"{_native(workspace)} (its .west/config names this checkout), so moving it to "
-        f"{_native(target)} would leave that workspace with no manifest -- every later "
-        f"`west build` / `west update` / `west alp-migrate` there would fail, and nothing "
-        f"tan does afterwards puts it back. Nothing was moved and your default SDK is "
-        f"unchanged. To build a SECOND workspace at {_native(target)}, clone alp-sdk into "
-        f"it and run `tan bootstrap` against that checkout; to move this one, move "
-        f"{_native(workspace)} itself."
     )
 
 
@@ -2179,14 +2090,16 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # still no question asked. `--format json` says so explicitly; a piped or
     # redirected stdin says so just as loudly, and the oracle hung forever on
     # exactly that before the terminal term was added.
-    #
-    # tan-cli#389: `will_adopt` is evaluated UNCONDITIONALLY, never
-    # short-circuited past. It used to be the right operand of `workspace_override
-    # is not None or ...`, so an explicit `--workspace` meant the adoption probe
-    # never ran at all -- and its answer is exactly what the orphan check below
-    # needs. `guard_applies` is the same value it always was.
-    will_adopt = _zephyr_base_will_adopt(pin, paths.repo_root)
-    guard_applies = workspace_override is not None or not will_adopt
+    # Evaluated UNCONDITIONALLY, not short-circuited past (tan-cli#389). Python
+    # skips the right operand of `or` once the left is true, so with
+    # `--workspace` set the adoption probe never ran at all -- and the two
+    # checks it feeds (`default_relocation_target`'s `.west/config` test and
+    # `parent_needs_workspace_guard`) are the only places that would notice the
+    # checkout is the manifest repo of a LIVE west workspace. The value is
+    # still only consulted for the no-override case; naming it first is what
+    # keeps the probe's side of the decision observable.
+    zephyr_base_adopts = _zephyr_base_will_adopt(pin, paths.repo_root)
+    guard_applies = workspace_override is not None or not zephyr_base_adopts
     target: Path | None = None
     if guard_applies:
         target = workspace_override
@@ -2213,43 +2126,6 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     reported_project,
                     sdk,
                 )
-        # tan-cli#389: refuse BEFORE the relocation write below when the
-        # checkout is the manifest repo of a LIVE west workspace it would be
-        # taken out of. Placed with the other pre-write refusals so nothing is
-        # on disk when it fires -- discovering it after `relocate_checkout` /
-        # `_write_global_sdk_pointer` would leave the checkout moved, the
-        # global default repointed, and the abandoned workspace unusable, and
-        # `rollback_relocation_after` never runs for a step that SUCCEEDED.
-        #
-        # Gated on the relocation actually MOVING something: `relocate_checkout`
-        # no-ops when the checkout is already a direct child of `target`
-        # (`--workspace <its own parent>`, and the retry-after-success path),
-        # and refusing a move that was never going to happen would break both.
-        if target is not None and not _same_directory(paths.repo_root.parent, target):
-            orphaned = _live_workspace_owning(paths.repo_root, will_adopt)
-            if orphaned is not None:
-                # This also settles the second half of tan-cli#389 -- the
-                # `zephyr-base-manifest-mismatch` warning tan used to emit
-                # about a mismatch tan itself had just created. Every move
-                # that could produce one is refused here, BEFORE
-                # `_select_workspace` re-probes the (by then relocated)
-                # checkout, so any mismatch reported past this point predates
-                # the run.
-                return (
-                    _refusal(
-                        ExitCode.VALIDATION_FAILURE,
-                        "orphans-west-workspace",
-                        [
-                            relocation_orphans_workspace_refusal(
-                                paths.repo_root, orphaned, target
-                            )
-                        ],
-                        payload(),
-                    ),
-                    reported_project,
-                    sdk,
-                )
-
         # tan-cli#284: whichever directory is about to become the west topdir
         # -- `target` whenever a relocation is happening (an explicit
         # `--workspace`, or the tan-cli#302 auto-relocation just above), else
@@ -2283,6 +2159,44 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                     reported_project,
                     sdk,
                 )
+
+        # tan-cli#389. The guard above probes ancestors of the DESTINATION; this
+        # one asks about the workspace the checkout would be taken OUT of. When
+        # `paths.repo_root` is the manifest repo of a live west workspace, the
+        # `os.rename` below renames it out from under a `<parent>/.west/config`
+        # that still records `path = <name>`: every later `west build` /
+        # `west update` / `west alp-*` in that topdir then fails, tan reports
+        # the workspace as having a foreign manifest -- true only because tan
+        # moved it -- and `~/.alp/sdk-default` is repointed at the new location
+        # for good measure. `rollback_relocation_after` is no help: it fires
+        # only when a LATER step fails, and here nothing fails.
+        #
+        # Checked before the host and prerequisite gates below for the same
+        # reason they sit before the relocation: a refusal knowable from
+        # filesystem facts alone must not depend on having got that far.
+        source_topdir = paths.repo_root.parent
+        if _is_file(source_topdir / ".west" / "config") and _manifest_points_at(
+            source_topdir, paths.repo_root
+        ):
+            return (
+                _refusal(
+                    ExitCode.VALIDATION_FAILURE,
+                    "workspace-orphan-refused",
+                    [
+                        f"{_native(paths.repo_root)} is the manifest repository of the "
+                        f"west workspace at {_native(source_topdir)}, so moving it to "
+                        f"{_native(target)} would leave that workspace pointing at "
+                        f"nothing -- its .west/config would still name this checkout.",
+                        "Nothing was moved and the default SDK was not changed.",
+                        "Bootstrap that workspace in place (drop --workspace), or clone a "
+                        "SECOND alp-sdk checkout under the directory you want and pass "
+                        "--sdk-root pointing at that one.",
+                    ],
+                    payload(),
+                ),
+                reported_project,
+                sdk,
+            )
 
     # Host gate + prerequisite gate, AFTER the write-avoiding checks above
     # (whose relative order the existing test suite already pins) but BEFORE
@@ -2510,29 +2424,13 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # The venv backs BOTH later phases, so it is created when either will run.
     venv: VenvBin | None = None
     if not (no_west and no_pip):
-        venv, error, is_refusal = ensure_venv(ws, log, runner, host_python, plan.adopted)
+        # `plan.adopted` passed IN, not read afterwards: the only other read of
+        # it sits below at the west-reconcile step, which is AFTER the venv
+        # phase -- so before tan-cli#390 the delete inside `ensure_venv` had
+        # already happened by the time anything consulted adoption at all.
+        venv, error = ensure_venv(ws, log, runner, host_python, adopted=plan.adopted)
         if error is not None:
             rollback_relocation_after("the workspace venv setup")
-            if is_refusal:
-                # tan-cli#390: a refusal that wrote NOTHING, so it is neither a
-                # `bootstrap.failed` step nor silent. Built here rather than
-                # through `_refusal`, which emits exactly one issue: the
-                # adoption itself was already recorded (`zephyr-base-stale` on
-                # the STALE branch), and dropping it would leave a consumer
-                # unable to tell WHICH workspace this refusal is about.
-                return (
-                    Outcome(
-                        ExitCode.VALIDATION_FAILURE,
-                        planned_payload(),
-                        [
-                            *log.take_issues(),
-                            Issue("bootstrap.adopted-venv-unusable", "error", error),
-                        ],
-                        [error],
-                    ),
-                    reported_project,
-                    sdk,
-                )
             return (
                 _fatal(error, planned_payload(), log.take_issues()),
                 reported_project,

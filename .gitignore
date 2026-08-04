@@ -35,3 +35,21 @@ python/*.egg-info/
 # the real tree. No `.vscode/` is tracked in this repo, so ignoring it at any
 # depth costs nothing; use `git add -f` if one is ever meant to ship.
 .vscode/
+
+# Agent/session state, never repository content. `.claude/alp-tasks.json` is
+# per-session bookkeeping: it carries a session UUID and a list of in-progress
+# task subjects, so committing it puts a machine-local scratch file into a PUBLIC
+# repo whose history is permanent, and guarantees a conflict on every future
+# session that writes it. `CLAUDE.md` is likewise tool configuration injected
+# into a checkout, not a document this project maintains -- tracking it would
+# mean reviewing a generated block on every plugin update. Both were added by
+# tan-cli#386 and removed before merge. Unanchored so they are ignored at any
+# depth; `git add -f` if one is ever deliberately meant to ship.
+.claude/
+CLAUDE.md
+
+# A local pip HTTP cache lands here whenever PIP_CACHE_DIR is pointed at the
+# checkout (a container run with the repo bind-mounted does exactly that).
+# Binary response bodies, machine-local and worthless to anyone else -- they
+# were staged once by a `git add -A` and caught before the commit.
+/pip/

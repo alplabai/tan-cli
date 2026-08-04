@@ -117,6 +117,13 @@ _FLASH_TIMEOUT_S = 900.0
 #: write timeout.
 _PREFLIGHT_TIMEOUT_S = 60.0
 
+#: Seconds to wait for the pipeline's stderr reader after both children are gone
+#: (`_Drain`). Bounded, not indefinite: the reader is what carries the
+#: decompressor's diagnosis into the outcome (tan-cli#401), but a `tan` that
+#: hangs on a thread rather than reporting a flash result would be the worse
+#: trade -- both children have already exited by every path that joins it.
+_DRAIN_JOIN_S = 2.0
+
 
 @dataclass
 class _Entry:
@@ -411,6 +418,123 @@ def _stderr_sink():
     return sys.stderr
 
 
+@dataclass(frozen=True)
+class _Half:
+    """One process of a two-process pipeline, once it is over: the program a
+    reader knows it by, the code it exited with (`None` when it was killed before
+    it reported one), and everything it said on stderr."""
+
+    program: str
+    returncode: int | None
+    stderr: str
+
+
+def _program_label(argv) -> str:
+    """The half's program as the reader knows it -- `gunzip`, not the absolute
+    path `_programs_resolved_in_venv` may have rewritten `argv[0]` into
+    (tan-cli#401/#289). A bare basename because this label goes into a failure
+    message that already has four lines to spend."""
+    argv = list(argv)
+    return os.path.basename(argv[0]) if argv else "?"
+
+
+def _half_lines(half: _Half) -> list[str]:
+    """One attributed section: an `<program> exited rc=<n>:` header over the
+    half's own non-empty stderr lines.
+
+    A half that both SUCCEEDED and said nothing contributes no section at all --
+    a header alone for a clean `dd` is noise in a four-line window. A half that
+    FAILED always gets its header even when it printed nothing, because "it
+    exited 9 and said nothing" is then the entire diagnosis available, and
+    dropping it would leave the message reading as if only the other half spoke
+    (tan-cli#401)."""
+    body = [line for line in half.stderr.splitlines() if line.strip()]
+    if not body and half.returncode == 0:
+        return []
+    rc = "unknown" if half.returncode is None else half.returncode
+    return [f"{half.program} exited rc={rc}:", *body]
+
+
+def _pipeline_stderr(left: _Half, right: _Half) -> str:
+    """Both halves' stderr, attributed, with the failing halves LAST.
+
+    Ordering is the whole point (tan-cli#401). `_capture_tail` keeps only the
+    last four non-empty lines of this text, and `dd status=progress` fills three
+    of them on every single run whether it wrote a good image or a truncated one
+    -- so folding the decompressor's stderr in anywhere but the end would still
+    leave `data.entries[].message` reading `0+61 records in | 0+1 records out |
+    3997696 bytes transferred`, which is what #401 measured. Among two failing
+    halves the LEFT one goes last: it is upstream, so it is the cause and the
+    right half's failure is its consequence. A healthy pipeline keeps the
+    natural left-to-right reading order."""
+    ok = [half for half in (left, right) if half.returncode == 0]
+    failed = [half for half in (right, left) if half.returncode != 0]
+    lines = [line for half in (*ok, *failed) for line in _half_lines(half)]
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def _pipeline_returncode(left_rc: int | None, right_rc: int | None) -> int:
+    """The code the entry reports for the pipeline: the FIRST non-zero of the two
+    halves, left first.
+
+    Reporting only the right half's code -- what this did until tan-cli#401 --
+    means a `.wic.gz` that died in `gunzip` is reported as `returncode=0`,
+    because `dd` happily exits 0 after writing whatever short stream it was fed.
+    `None` (a half killed before it reported a code) is not a zero and never
+    becomes one: with no honest code to report the pipeline reports `-1`, the
+    same sentinel `_Outcome` defaults to. Pure."""
+    for rc in (left_rc, right_rc):
+        if rc:
+            return rc
+    return 0 if left_rc is not None and right_rc is not None else -1
+
+
+class _Drain:
+    """The left half's stderr, read to EOF on a background thread for the
+    pipeline's lifetime.
+
+    Creating that pipe without reading it is a silent hang mid-write to a real
+    block device: once the decompressor writes more than the OS pipe buffer its
+    `write()` blocks forever, it never reaches EOF on stdout, dd's `read()`
+    blocks too, and the `wait()` never returns. So the read has to be concurrent
+    with the write, which is why it is a thread and not a `.read()` at the end.
+
+    `stream` is `None` in text mode, where the child's stderr is inherited and
+    streams straight to the terminal -- there is nothing here to drain, and
+    [`text`] answers `""`."""
+
+    def __init__(self, stream) -> None:
+        self._chunks: list[bytes] = []
+        self._stream = stream
+        started = threading.Thread(target=self._read, daemon=True) if stream is not None else None
+        self._thread = started
+        if started is not None:
+            started.start()
+
+    def _read(self) -> None:
+        try:
+            self._chunks.append(self._stream.read() or b"")
+        except (OSError, ValueError):
+            # A stream closed underneath the reader. Whatever it had already
+            # collected still gets reported; raising here would only kill a
+            # daemon thread nobody is watching.
+            pass
+
+    def join(self) -> None:
+        """Wait for the reader, briefly. Bounded because this also runs on the
+        pipeline's cleanup path, where the child may be unkillable (a `dd` in
+        uninterruptible IO) and `tan` must still return an outcome."""
+        if self._thread is not None:
+            self._thread.join(timeout=_DRAIN_JOIN_S)
+
+    def text(self) -> str:
+        """Everything the half said, decoded. Joins first: reading `_chunks`
+        while the thread may still be appending is exactly the read that made
+        the drained bytes look empty and invited dropping them (tan-cli#401)."""
+        self.join()
+        return _text(b"".join(self._chunks))
+
+
 def _spawn_pipeline(
     left,
     right,
@@ -420,25 +544,20 @@ def _spawn_pipeline(
     workspace: str | None = None,
 ) -> _Outcome:
     """A decompress -> dd pipeline: wire the decompressor's stdout into dd's
-    stdin. Fails when EITHER process fails, matching the Python rc folding.
+    stdin. Fails when EITHER process fails, and reports the first non-zero of
+    their two codes ([`_pipeline_returncode`]).
 
-    The decompressor's stderr is drained on a background thread for the
-    pipeline's lifetime. Creating the pipe without reading it is a silent hang
-    mid-write to a real block device: once the decompressor writes more than the
-    OS pipe buffer its `write()` blocks forever, it never reaches EOF on stdout,
-    dd's `read()` blocks too, and the `wait()` never returns.
-
-    **tan-cli#401.** The drain thread used to be joined only in the outer
-    `finally`, AFTER the `_Outcome` was already built -- so `drained` was read
-    before it could ever be filled, and a decompressor failure (`gunzip:
-    unexpected end of file`, rc 1) was silently reported as `dd`'s rc 0 and
-    throughput stats. Both are fixed here: the drain thread is joined BEFORE
-    the outcome is built, and the returned `stderr` folds both halves in,
-    each on its own `decompressor: `/`dd: ` labelled lines -- `dd`'s own
-    stats are real and worth keeping, but a reader must not have to guess
-    which process spoke. `returncode` reports the first non-zero of the two
-    (the decompressor's, when it is the one that failed), matching the
-    existing `success=(second.returncode == 0) and left_ok` fold.
+    BOTH halves' stderr reaches the outcome, each attributed to the program that
+    said it ([`_pipeline_stderr`]). Until tan-cli#401 the decompressor's stderr
+    was drained (it has to be, see [`_Drain`]) and then thrown away, and the
+    outcome carried `dd`'s stderr and `dd`'s rc alone: a `.wic.gz` truncated in
+    transit was reported to the extension as `0+61 records in | 0+1 records out |
+    3997696 bytes transferred in 0.003888 secs` with `returncode=0`, while
+    `gunzip: <image>.wic.gz: unexpected end of file` -- the one line that ends
+    the investigation -- had been read by `tan` and dropped. The entry status was
+    right and the cause was wrong, which is worse than useless here: the reader
+    blames the card or the target and re-runs the flash, writing a partial image
+    onto a real block device a second time.
 
     `venv_bin`/`workspace`: see [`_spawn`] -- the same PATH-prepend/cwd
     threading, applied to BOTH halves of the pipeline (tan-cli#289/#59/#61).
@@ -456,20 +575,8 @@ def _spawn_pipeline(
     except OSError as err:
         return _Outcome(success=False, stderr=f"could not spawn: {err}", captured=capture)
 
-    drained: list[bytes] = []
-    drain: threading.Thread | None = None
-    if first.stderr is not None:
-        stream = first.stderr
-
-        def _drain() -> None:
-            try:
-                drained.append(stream.read() or b"")
-            except (OSError, ValueError):
-                pass
-
-        drain = threading.Thread(target=_drain, daemon=True)
-        drain.start()
-
+    drain = _Drain(first.stderr)
+    left_label, right_label = _program_label(left), _program_label(right)
     try:
         try:
             second = subprocess.Popen(  # noqa: S603 -- as above
@@ -492,43 +599,44 @@ def _spawn_pipeline(
         except subprocess.TimeoutExpired:
             _terminate(second)
             _terminate(first)
+            killed = _Half(left_label, first.returncode, drain.text())
             return _Outcome(
                 success=False,
-                stderr=f"timed out after {timeout:.0f}s and was killed",
+                stderr=_timed_out_stderr(killed, timeout),
                 captured=capture,
             )
         try:
-            left_ok = first.wait(timeout=max(1.0, deadline - time.monotonic())) == 0
+            left_rc: int | None = first.wait(timeout=max(1.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             _terminate(first)
-            left_ok = False
-        # Join BEFORE reading `drained` (tan-cli#401) -- the old `finally`-only
-        # join ran after the `_Outcome` below was already built, so the
-        # decompressor's stderr was always empty at the point it mattered.
-        if drain is not None:
-            drain.join(timeout=2.0)
-        left_rc = first.returncode if first.returncode is not None else -1
-        right_rc = second.returncode if second.returncode is not None else -1
-        combined_lines = _label_lines("dd", _text(err_text))
-        # The decompressor's lines go LAST: `_capture_tail` keeps only the
-        # last 4 non-empty lines, and when the decompressor is the one that
-        # failed its (usually short) diagnosis is the actual cause -- dd's
-        # multi-line throughput stats must not be the thing that survives the
-        # truncation instead.
-        combined_lines += _label_lines("decompressor", _text(b"".join(drained)))
+            left_rc = None
+        # The drain is joined HERE, before the outcome is built -- not only in
+        # the `finally` below, which runs too late to contribute anything to it.
+        left_half = _Half(left_label, left_rc, drain.text())
+        right_half = _Half(right_label, second.returncode, _text(err_text))
+        rc = _pipeline_returncode(left_rc, second.returncode)
         return _Outcome(
-            success=(second.returncode == 0) and left_ok,
+            success=rc == 0,
             stdout=_text(out),
-            stderr="\n".join(combined_lines),
-            # The first non-zero of the two -- today's bug reported `dd`'s 0
-            # even when the decompressor was the one that failed.
-            returncode=left_rc if left_rc != 0 else right_rc,
+            stderr=_pipeline_stderr(left_half, right_half),
+            returncode=rc,
             captured=capture,
         )
     finally:
         _terminate(first)
-        if drain is not None:
-            drain.join(timeout=2.0)
+        drain.join()
+
+
+def _timed_out_stderr(left: _Half, timeout: float) -> str:
+    """The timeout report, with whatever the decompressor managed to say BEFORE
+    it and the sentence itself LAST.
+
+    Last because `_capture_tail` keeps the final four non-empty lines and the
+    sentence is the one that names this failure mode; first-half output because
+    a `gunzip` that printed a diagnosis and then wedged is a different bench
+    problem from one that went quiet, and #401's lesson is that captured stderr
+    is never thrown away."""
+    return "\n".join([*_half_lines(left), f"timed out after {timeout:.0f}s and was killed"]) + "\n"
 
 
 def _terminate(proc) -> None:
@@ -548,14 +656,6 @@ def _text(raw: Any) -> str:
     if isinstance(raw, bytes):
         return raw.decode("utf-8", errors="replace")
     return str(raw)
-
-
-def _label_lines(label: str, text: str) -> list[str]:
-    """Every non-empty line of `text`, prefixed `"{label}: "` (tan-cli#401) --
-    line-by-line, not once on the whole blob, so a multi-line decompressor
-    error (`gunzip: ...unexpected end of file` + `gunzip: uncompress failed`)
-    doesn't leave its second line unattributed."""
-    return [f"{label}: {line}" for line in text.splitlines() if line.strip()]
 
 
 def _spawn_jlink(

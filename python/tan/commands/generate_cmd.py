@@ -46,7 +46,8 @@ VENDORED `--emit scaffold` tree so they work with no checkout at all.
 **Every failure path is an envelope, never a traceback.** A missing or
 unreadable `board.yaml`, an unresolved SDK, a bad `--target`/`--core` pairing, a
 `native_sim` overlay that would be truncated, an interpreter too old to run the
-SDK scripts, a spawn that dies or returns garbage -- each has a
+SDK scripts, a spawn that dies, returns garbage, or exits 0 without producing
+its artefact (tan-cli#397) -- each has a
 `generate.<code>` issue and an exit code below, and the command carries a
 catch-all backstop for anything unforeseen. The extension parses stdout whole:
 a traceback there renders as nothing at all, with no error.
@@ -79,7 +80,6 @@ carries the envelope and nothing else, in both formats.
 
 from __future__ import annotations
 
-import contextlib
 import os
 import subprocess
 import sys
@@ -407,23 +407,8 @@ def _ensure_writable(output: Path, target: str) -> None:
             output.parent.mkdir(parents=True, exist_ok=True)
             # Append mode, not write: proving writability must not truncate a
             # file whose emit could still be refused further down.
-            existed = output.exists()
             with output.open("ab"):
                 pass
-            if not existed:
-                # tan-cli#397: the probe must not leave its own 0-byte file
-                # behind. `_missing_output` below asks whether the emitter
-                # actually produced the artefact, and a destination THIS
-                # function created would answer yes for every `--output` run --
-                # which is the shape `cmake/alp.cmake` drives, so the guard
-                # would be dead on the one path that matters most.
-                #
-                # Suppressed rather than raised: if the unlink fails (a Windows
-                # host with a scanner holding a handle, say) the destination is
-                # still writable, and refusing a good run over failed cleanup
-                # would be a worse bug than the weakened check.
-                with contextlib.suppress(OSError):
-                    output.unlink()
     except (OSError, ValueError) as err:
         raise GenerateError(
             "generate.output-unwritable",
@@ -523,46 +508,54 @@ def _relative_or_full(workspace_root: Path, output_path: Path) -> str:
         return str(output_path)
 
 
-def _missing_output(output: Path, emit: str) -> str | None:
-    """`None` when `emit` really did leave an artefact at `output`, else the
-    message for its `generate.emit-failed` issue.
+def _missing_emit_output(emit: str, output: Path) -> str | None:
+    """Why a ZERO exit did not actually produce `output`, or `None` when it did.
 
-    tan-cli#397: a zero exit code from a child is evidence the child RAN, never
-    evidence of what it produced (tan-cli#365 is the same class -- there a stale
-    artefact satisfied a presence check). Without this, a spawned
-    `alp_project.py` that exits 0 and writes nothing -- a partially cloned
-    checkout, a differently configured emitter, a future SDK taking a path tan
-    did not expect -- lands its target in `data.written` under `ok: true`, and
-    the extension, for which `written[]` IS the answer, points the user at a
-    file that is not on disk. The next `tan build` then configures Zephyr
-    against an absent or stale `alp.conf` and the symptom surfaces much later as
-    wrong Kconfig in an image.
+    tan-cli#397: `_emit_one` used to read `returncode == 0` as proof that a file
+    landed, and `written[]` was built from nothing else. A checkout whose
+    `scripts/alp_project.py` exits 0 down a path tan did not expect -- a
+    partially installed or partially cloned alp-sdk, a differently configured
+    emitter, a future SDK version -- then produced `ok: true`, exit 0,
+    `failed: []` and a `written[]` naming a file that is not on disk. The next
+    `tan build` configures Zephyr against a stale `alp.conf` or none at all, and
+    the symptom surfaces much later as wrong Kconfig in a built image with
+    nothing in the generate envelope pointing back at the missing artefact.
+    alp-sdk-vscode believes `written[]` outright -- it is the only signal the
+    extension has for what a generate produced, so it performs no existence
+    check of its own.
 
-    Emptiness is deliberately NOT failure for a stream target: a board whose
-    cores are all `os: off` renders an empty `alp.conf`
-    (`planner_emit._render_per_core` joins zero parts), so a non-empty rule
-    would refuse a legitimate emit. `TREE_MODES` are the other way round --
-    `_ensure_writable` and `write_tree` both create the DIRECTORY themselves, so
-    its existence proves nothing and "holds at least one entry" is the weakest
-    honest check. Neither test can tell this run's output from a previous run's
-    leftovers; only the emitter could, and it is exactly the thing whose word is
-    not being taken here.
+    NON-EMPTY, not merely present, because the destination already exists by the
+    time the emitter runs whenever `--output` was given: `_ensure_writable`
+    proves writability first, with an `open("ab")` that CREATES a zero-byte file
+    (and a `mkdir` for `zephyr-board`'s directory). An existence-only check
+    would therefore accept tan's own probe as the emitter's artefact -- and
+    `--output` is exactly the shape `cmake/alp.cmake` drives for all 96 Zephyr
+    examples. No real emit is empty: every renderer alp-sdk's `alp_project.py`
+    reaches opens with its `# Auto-generated by scripts/alp_orchestrate.py`
+    header (or is JSON), and a board tree is several files.
+
+    Only the SPAWNED engine needs this. `_emit_one_in_process` performs the
+    write itself, so its `None` is already earned.
     """
+    prefix = f"Generation failed for target '{emit}': the SDK emitter exited 0 but "
     try:
-        produced = (
-            output.is_dir() and any(output.iterdir())
-            if emit in planner_emit.TREE_MODES
-            else output.is_file()
-        )
-    except OSError:
-        # An unreadable destination is not a produced one.
-        produced = False
-    if produced:
-        return None
-    return (
-        f"Generation failed for target '{emit}': the emitter reported success but "
-        f"left nothing at `{output}`."
-    )
+        if emit == ZEPHYR_BOARD:
+            if not output.is_dir():
+                return prefix + f"did not create the board directory `{output}`."
+            if not any(output.iterdir()):
+                return prefix + f"wrote no files into `{output}`."
+            return None
+        if not output.is_file() or output.stat().st_size == 0:
+            return prefix + f"did not write `{output}`."
+    except (OSError, ValueError) as err:
+        # Never swallowed into a success: a destination that cannot even be
+        # stat'ed is exactly the state this guard exists to refuse to call
+        # "written". `ValueError` sits beside `OSError` for the same reason
+        # `_ensure_writable` catches both -- a path carrying a surrogate or an
+        # embedded NUL raises that, and letting one reach the command's
+        # catch-all backstop would report it as InternalFailure (5).
+        return prefix + f"`{output}` could not be checked: {err}"
+    return None
 
 
 def _emit_one(
@@ -576,14 +569,13 @@ def _emit_one(
     """Run one emit. `None` on success, else the message for its
     `generate.emit-failed` issue.
 
-    `None` here means only that the CHILD EXITED 0 -- it cannot mean the file
-    exists, because nothing in this function writes it. The caller pairs it with
-    `_missing_output` for that (tan-cli#397).
-
     Every way a subprocess can fail is a message, not an exception: the binary
     is absent or not executable (`OSError`), it wedges (`TimeoutExpired`), or it
     exits non-zero (the SDK's own stderr is the most useful message there, so it
     is forwarded verbatim when present).
+
+    A zero exit is necessary but NOT sufficient -- `_missing_emit_output` has
+    the whole of why (tan-cli#397).
     """
     argv = [
         python,
@@ -616,7 +608,7 @@ def _emit_one(
     except (OSError, ValueError, subprocess.SubprocessError) as err:
         return f"Generation failed for target '{emit}': {err}"
     if out.returncode == 0:
-        return None
+        return _missing_emit_output(emit, output)
     stderr = (out.stderr or "").strip()
     return stderr or f"Generation failed for target '{emit}'."
 
@@ -1044,13 +1036,6 @@ def generate(
                 message = _emit_one(
                     python, script, board_path, mode, target_output, core
                 )
-            if message is None:
-                # tan-cli#397: an emit that claims success still has to have
-                # produced something. Checked HERE, at the one place `written`
-                # is decided, rather than inside `_emit_one` -- one site covers
-                # both engines (and any third), and no future caller can append
-                # to `written` on a child's exit code alone.
-                message = _missing_output(target_output, mode)
             if message is None:
                 written.append(_relative_or_full(workspace_root, target_output))
             else:

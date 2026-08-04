@@ -32,26 +32,27 @@ from an un-revendored SDK change.
     `crates/` is frozen (`docs/ROADMAP.md`'s Standing Rules — the Rust `tan` is
     the retired oracle, not touched again) and stays pinned at `v0.14.0`
     (`ef79eab0`); this tree is the one a Python `tan` binary actually reads, so
-    it tracks `PINNED_SDK_TAG` and the Rust tree does not. That makes
-    `python/tests/core/test_scaffold.py::test_the_vendored_tree_is_byte_identical_to_the_rust_one`
-    fail on the same seven files this bump touched — an expected, permanent
-    consequence of the freeze, not a re-vendor bug. That test predates the
-    freeze decision and asserted a lockstep the two trees can no longer keep;
-    it is not this bump's call to loosen it.
-  - **The vendor ref and `parity.yml`'s `PINNED_SDK_TAG` are no longer the
-    same ref, and that is fine.** The pin moved on to `f4d87a1f` (tan-cli#320,
-    a commit past `v0.15.0-rc1` — see that variable's own comment for why),
-    while this tree stays captured at the `v0.15.0-rc1` TAG, because the links
-    below have to name a ref a customer can open in a browser. Re-measured at
-    `f4d87a1f`: `--emit scaffold` is byte-identical to this tree across all 9
-    (template, sku) pairs except the two deliberate edits below — no
-    `board.yaml`, `prj.conf`, `src/` or `CMakeLists.txt` content moved in that
-    range. That is what makes the split safe; it is not a licence to let the
-    two drift unchecked, and `scaffold_byte_parity.py` is what re-checks it.
-  - Bumping the pin still re-vendors this tree, the toolchain lock and the
-    kconfig golden together, or those gates go red. They are one atomic unit,
-    not independent bumps. (The toolchain lock and kconfig fixture needed no
-    byte change this round — see each gate's own re-run notes.)
+    it tracks `PINNED_SDK_TAG` and the Rust tree does not. The obsolete
+    Python-vs-Rust byte-identity test was retired; the shipping tree is guarded
+    by its LF-only unit test and by `tests/parity/scaffold_byte_parity.py`
+    against the live pinned SDK instead.
+  - **The vendor ref and `parity.yml`'s `PINNED_SDK_TAG` are NOT the same ref,
+    and that is deliberate.** The pin is `f4d87a1f` (tan-cli#320, a commit past
+    `v0.15.0-rc1` — see that variable's own comment for why), while this tree
+    stays captured at the `v0.15.0-rc1` TAG, because the links below have to
+    name a ref a customer can open in a browser and `v0.15.0` does not exist
+    (tan-cli#384). Re-measured at `f4d87a1f`: `--emit scaffold` is
+    byte-identical to this tree across all 9 (template, sku) pairs except the
+    two deliberate edits below — no `board.yaml`, `prj.conf`, `src/` or
+    `CMakeLists.txt` content moved in that range. That is what makes the split
+    safe; it is not a licence to let the two drift unchecked, and
+    `scaffold_byte_parity.py` is what re-checks it.
+  - Bumping that pin drives all FOUR parity gates — it re-vendors this tree,
+    the bootstrap manifest fixture, the toolchain lock and the kconfig golden
+    together, or the gates go red. They are one atomic unit, not four
+    independent bumps. (The toolchain lock and kconfig fixture needed no byte
+    change this round — see each gate's own re-run notes; only this tree and
+    the bootstrap manifest fixture had real drift.)
   - Re-vendored by re-running the emit, not by editing these files. A
     hand-edit that happens to match today is a copy that drifts tomorrow;
     the point of this tree is that it is generated.
@@ -167,9 +168,10 @@ cold-chain-metrics core the app links against), and `iot` adds
 `testcase.yaml` already required; see the non-envelope-extras section at the
 end).
 
-`crates/tan-core/src/wizard/service/vendored.rs` reads these via
-`include_str!` (baked into the binary at compile time — no filesystem read at
-`tan init` runtime) and:
+`python/tan/core/scaffold.py::_vendored_files` reads these through the packaged
+`tan.templates.VENDORED_ROOT`. Setuptools includes the tree in a wheel/source
+install and the PyInstaller build includes it in the frozen distribution. The
+reader:
 
 - picks the SKU-family bucket (`E1M-V2N*`/`E1M-V2M*` -> the `E1M-V2N101`
   tree, everything else -> the `E1M-AEN801` tree, mirroring
@@ -184,8 +186,8 @@ end).
   one; `retarget_board_yaml_som` replaces only the value token, not the rest
   of the line);
 - splices `--cores` companions (+ a default RPMsg channel to the first active
-  one) into the vendored `cores:` block, mirroring the retired
-  `gen_board_yaml`'s companion-core loop.
+  one) into the vendored `cores:` block via `splice_companion_cores`, mirroring
+  the retired Rust `gen_board_yaml` companion-core loop.
 
 ## Template-id mapping: resolved vs. deferred (maintainer decision)
 
@@ -222,8 +224,9 @@ Renesas `m33_sm`/`a55_cluster`. alp-sdk#877 (the same fix that resolved
 vendored at v0.13.0: `E1M-V2N101`'s tree correctly keys the app core on
 `m33_sm` (companion `a55_cluster`, `os: "off"`). It is also the FIRST
 HETEROGENEOUS (multi-core) vendored template — its `board.yaml` lists the
-companion core BEFORE the app core, which is why `vendored_app_core_key`
-(`vendored.rs`) reads the core that OWNS an `app:` key rather than trusting
+companion core BEFORE the app core, which is why
+`python/tan/core/scaffold.py::vendored_app_core_key` reads the core that OWNS
+an `app:` key rather than trusting
 positional "first child under `cores:`" (correct for `minimal`/`sensor` only
 because they are single-core).
 
@@ -244,10 +247,10 @@ scaffold's own "Customer workflow" comment).
 transport is the CC3501E Wi-Fi6+BLE bridge, silicon-validated only on that
 SKU; `E1M-V2N101`'s Murata Wi-Fi (`murata_lbee5hy2fy`) is `hil_silicon:
 untested` with an unmerged Linux data path. Unlike every other mapped
-template, there is no `_V2N` tree, no `FamilyTrees` tuple, and no
-`family_bucket` call for `iot` (`vendored.rs`'s `IOT_STARTER_SUPPORTED_SKU`).
-`tan init`'s upfront guard (`commands/init/mod.rs`) rejects any `--som` other
-than `E1M-AEN801` for this template with `init.invalid-som`, naming the
+template, there is no `_V2N` tree and no `_family_bucket` call for `iot`
+(`python/tan/core/scaffold.py` uses `IOT_STARTER_SUPPORTED_SKU` directly).
+`tan init`'s upfront guard (`python/tan/commands/init_cmd.py`) rejects any
+`--som` other than `E1M-AEN801` for this template with `init.invalid-som`, naming the
 supported SKU, before a single file is planned — never a silent fall-back
 onto a hand-written generator, which would keep alive on this one path the
 exact drift issue #14 retires everywhere else.
@@ -373,31 +376,16 @@ e.g. `alp_e1m_v2n101_m33_sm/r9a09g056n48gbg/cm33`). Confirmed for `minimal`:
 and `README.md`; `prj.conf`, `src/main.c`, and `testcase.yaml` (not part of
 the scaffold envelope, see below) stay byte-identical between the two.
 
-The vendored `minimal`/`sensor`/`edge-ai`/`diagnostics` scaffolds' `cores:`
-key is `m33_sm` for `E1M-V2N101`/`E1M-V2M101` and `m55_hp` for `E1M-AEN801` —
-agreeing with `app_core_for_sku`. `iot` has no per-SKU variance at all (only
-one vendored SKU); its app core is always `m55_hp`. `vendored.rs` still
-derives the `--cores` companion-splice target from EACH template's OWN
-vendored `board.yaml` `cores:` key (`vendored_app_core_key`/
-`vendored_app_core_for_sku`/`vendored_sensor_app_core_for_sku`/
-`vendored_edge_ai_app_core_for_sku`/`vendored_diagnostics_app_core_for_sku`/
-`vendored_iot_app_core_for_sku`) rather than calling `app_core_for_sku`
-directly, so a *future* re-vendor that (again) derives a different core for a
-vendored SKU fails `cargo test`
-(`vendored_app_core_matches_each_familys_board_yaml`/
-`vendored_sensor_app_core_matches_each_familys_board_yaml`/
-`vendored_edge_ai_app_core_matches_each_familys_board_yaml`/
-`vendored_diagnostics_app_core_matches_each_familys_board_yaml`/
-`vendored_iot_app_core_is_m55_hp`) instead of silently drifting. `tan init`'s
-upfront `--cores` validation (`commands/init/resolve.rs`'s
-`app_core_for_template`) now calls `vendored_app_core_for_sku`/
-`vendored_sensor_app_core_for_sku`/`vendored_edge_ai_app_core_for_sku`/
-`vendored_diagnostics_app_core_for_sku`/`vendored_iot_app_core_for_sku` for
-the `zephyr-app`/`sensor-starter`/`edge-ai-starter`/`board-diagnostics`/
-`iot-starter` templates specifically (`minimal-app`, the only template left
-hand-generated, still uses `app_core_for_sku`, matching its own
-`gen_board_yaml`), so the CLI-level check can never again independently
-disagree with what `create_wizard_plan_with_cores` actually plans.
+The vendored `minimal`/`sensor`/`edge-ai`/`diagnostics` scaffolds' `cores:` key
+is `m33_sm` for `E1M-V2N101`/`E1M-V2M101` and `m55_hp` for `E1M-AEN801`. `iot`
+has no per-SKU variance; its app core is always `m55_hp`. The shipping Python
+reader derives the `--cores` companion-splice target from each planned
+`board.yaml` through `vendored_app_core_key`, rather than re-deriving it from
+`app_core_for_sku`. `plan_template_files` reads and retargets the tree first;
+`splice_companion_cores` then operates on those actual bytes. Unit tests in
+`python/tests/core/test_scaffold.py` cover the family mapping, companion splice,
+and heterogeneous app-owner selection, so a future re-vendor cannot silently
+move the app core while the CLI keeps using an independent table.
 
 ### Heterogeneous `cores:` — `vendored_app_core_key` reads the `app:` owner
 
@@ -409,12 +397,10 @@ with its app core being the only entry. `vendored_app_core_key` therefore
 scans every child under `cores:`, tracking the current `  <core>:` key, and
 returns whichever one owns a `    app:` line, instead of positionally
 trusting the first indented child (which used to be correct only because
-`minimal`/`sensor` are single-core). Two `vendored.rs` unit tests are the
-regression guards for this: `vendored_app_core_key_finds_the_app_core_not_the_first_listed_core`
-and `edge_ai_cores_splice_targets_the_real_app_core_not_the_companion` both
-assert the edge-ai V2N tree resolves to `m33_sm`, not `a55_cluster` — for the
-raw key lookup and for where a `--cores` splice lands its IPC endpoint,
-respectively.
+`minimal`/`sensor` are single-core). Python's
+`test_vendored_app_core_key_skips_a_pre_declared_companion_listed_first` and
+`test_splice_adds_a_companion_and_a_default_rpmsg_channel` are the regression
+guards for the lookup and for where a `--cores` splice lands its IPC endpoint.
 
 `testcase.yaml` and `iot`'s `native_sim.conf` are vendored alongside the
 scaffold envelope but are **not** part of `--emit scaffold`'s output — the

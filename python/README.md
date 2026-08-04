@@ -46,6 +46,8 @@ the root [`README.md`](../README.md#install). That is the supported path for
 someone who just wants the command.
 
 `tan init` needs no alp-sdk checkout: the scaffold templates ship inside `tan`.
+Most planning/build commands do need a checkout for metadata, schemas, examples,
+and tooling; pass it with `--sdk-root` or place it beside the project.
 
 The distribution is named `alp-tan` rather than `tan` because `tan` is already
 taken on PyPI (an unrelated code formatter); the command you run is still `tan`.
@@ -54,10 +56,11 @@ either.
 
 ## What it does
 
-`tan` is the executor: it consumes a build plan produced from your `board.yaml`
-and drives the right tool for each core — `west` for Zephyr on Cortex-M,
-`bitbake` for Yocto on Cortex-A, `cmake` for bare metal. You never pick an OS or
-a toolchain; both are derived from each core's architecture.
+`tan` contains both the relocated planner and the executor. It produces a build
+plan from your `board.yaml` plus alp-sdk metadata, then drives the right tool for
+each core — `west` for Zephyr on Cortex-M, `bitbake` for Yocto on Cortex-A,
+`cmake` for bare metal. You never pick an OS or a toolchain; both are derived
+from each core's architecture.
 
 ## Requirements
 

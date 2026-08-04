@@ -348,6 +348,12 @@ def _wants_help(argv: list[str]) -> bool:
     i = 0
     while i < len(argv):
         token = argv[i]
+        # `--` ends option parsing for Click exactly as it does for clap, so a
+        # `--help` after it is a positional argument and the eager help callback
+        # never fires. Measured against the oracle: `tan explain -- --help`
+        # exits 2 with a refusal, not help.
+        if token == "--":
+            return False
         if token == "--help":
             return True
         # `--opt=value` carries its value inline, so it consumes one token; a

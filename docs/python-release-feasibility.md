@@ -145,7 +145,11 @@ CONTENT, so the call is yours — and note it only hides §0.2 rather than fixin
 it: a source install still takes the guarded path, and a frozen build with the
 extra never reaches the unguarded one.
 
-### What I still need from you
+### Historical requests (all resolved)
+
+The four requests below were the handoff at this point in the audit. They are
+retained as evidence of what was blocking that snapshot; none remains an open
+instruction.
 
 1. **`python/pyproject.toml`: move `[project.optional-dependencies]` below the
    `classifiers` array** (or move `classifiers` above line 72). One table

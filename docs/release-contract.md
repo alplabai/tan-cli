@@ -349,8 +349,8 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
 - **Every asset is executed before it is published.** `cargo build` proved a
   binary linked; a freeze proves nothing until it runs, so each build leg runs
   `python/tests/conformance/test_packaged_binary.py` against the artefact it
-  just produced (single file, `--version` inside the extension's 3 s probe
-  budget, `tan init --preview` to prove the `--add-data` scaffold templates
+  just produced (archive layout, `--version` inside the extension's 3 s probe
+  budget, `tan init --preview` to prove the packaged scaffold templates
   survived).
 - **Race-free publish.** Matrix jobs upload artifacts; a single `release` job
   collates and creates the release, so parallel jobs never race on release

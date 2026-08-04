@@ -730,12 +730,14 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         # (`bootstrap.zephyr-base-incompatible`) -- checked before bumping,
         # which is the whole point of the count: it forced the look.
         #
-        # 18, not 17, since tan-cli#390: `ensure_venv`'s surviving delete path
-        # (tan's OWN workspace venv, pip proven absent) was promoted from a
-        # `log.line` to `log.warn("venv-recreated", ...)` so a `--format json`
-        # consumer sees that a directory's contents were removed. New code,
-        # registered before this bump.
-        expected_calls=18,
+        # 20, not 17, since tan-cli#390 split `ensure_venv`'s existing-venv
+        # branch three ways. Each is a NEW code and all three are registered:
+        # `bootstrap.adopted-venv-unusable` (an adopted tree's venv is refused,
+        # never deleted), `bootstrap.venv-probe-inconclusive` (the pip probe
+        # never answered, so the venv is reused rather than removed), and
+        # `bootstrap.venv-recreated` (the one surviving delete, promoted from a
+        # `log.line` so it reaches `issues[]`). Checked before bumping.
+        expected_calls=20,
         sites=1,
     ),
     ("tan/commands/bootstrap_cmd.py", "_refusal"): dict(
@@ -743,10 +745,10 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         name="_refusal",
         arg_index=1,
-        # 9, not 8, since tan-cli#389: the pre-relocation refusal that stops a
-        # `--workspace` move from orphaning the live west workspace whose
-        # manifest repo the checkout IS (`bootstrap.orphans-west-workspace`,
-        # registered before this bump).
+        # 9, not 8, since tan-cli#389 added the `workspace-orphan-refused`
+        # refusal beside `enclosing-west-workspace`: `--workspace` must not
+        # rename the manifest repository out of a live west workspace. Code
+        # registered before bumping.
         expected_calls=9,
         sites=1,
     ),

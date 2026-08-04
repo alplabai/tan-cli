@@ -9,57 +9,45 @@ from typing import Any
 from tan.exit_codes import ExitCode
 
 
-def null_non_finite(node: Any) -> Any:
-    """`node` with every non-finite float replaced by `None` -- what
-    `serde_json` writes for a non-finite `f64`, and the only JSON there is
-    (tan-cli#387).
+def json_safe_floats(value: Any) -> Any:
+    """`value` with every NON-FINITE float replaced by `None`, recursively --
+    `serde_json`'s own answer for an `f64` RFC 8259 cannot express (tan-cli#387).
 
-    Python's `json.dumps` defaults to `allow_nan=True` and emits the
-    JavaScript literals `Infinity` / `-Infinity` / `NaN`, which RFC 8259 has
-    no production for: measured, `JSON.parse` throws `SyntaxError: Unexpected
-    token 'I'` on the byte stream tan put on stdout, and Python's own
-    `json.loads` only accepts it because it opts INTO the same extension by
-    default. The values are reachable from user data -- `.inf` / `.nan` /
-    an overflowing `1e400` in a hand-edited `build/system-manifest.yaml`'s
-    `hw_info:` flows verbatim into `image`'s envelope `data`.
+    Python's `json.dumps` defaults to `allow_nan=True` and writes the
+    non-standard literals `Infinity`, `-Infinity` and `NaN`. Those are not JSON.
+    `JSON.parse` throws on them, and the alp-sdk-vscode extension's only channel
+    is this envelope -- so a `build/system-manifest.yaml` carrying `.inf` in
+    `hw_info` (verbatim into `data` via `raw_passthrough`) used to hand the
+    consumer a parse throw at exit code 0 with `issues:[]`: no coded signal to
+    fall back on, and nothing to distinguish it from tan crashing. The oracle on
+    the identical input emits `null` and the consumer gets a field it can
+    inspect.
 
-    Applied ONLY on the retry path in `_serialise` below, never on the common
-    one: a whole-payload walk on every emit would cost every command a copy of
-    its own `data` to fix a case almost none of them can produce.
+    NOT solved with `allow_nan=False` at the `json.dumps` below. That raises,
+    which lands in `_serialise`'s `envelope.serialize-failed` / exit-5 fallback
+    where the oracle exits 0 -- one divergence traded for another. This projects
+    instead, so the exit code and `issues` stay exactly what the command decided.
 
-    Public (no leading underscore) so a command that writes the SAME data to a
-    SECOND sink outside the envelope -- `image_cmd`'s `bundle-manifest.json`,
-    tan-cli#387's "lesser half" -- can null it there too, rather than that sink
-    growing its own copy of this walk or, worse, its own `json.dumps` with
-    `allow_nan` left at its default and no fallback at all.
+    Applied at SERIALISE time, mirroring where `serde_json` makes the same
+    substitution, so it holds for every command's `data` rather than for the one
+    payload the defect was found in.
+
+    Map KEYS are deliberately left alone: `json.dumps` renders a non-finite
+    float key as the *string* `"Infinity"`, which is already valid JSON, and
+    rewriting it would change a key a consumer may be matching on.
+
+    A new object always -- the caller's payload is never mutated, so a command
+    that inspects its own `data` after `emit()` still sees its own floats.
     """
-    if isinstance(node, float) and not math.isfinite(node):
+    if isinstance(value, float) and not math.isfinite(value):
         return None
-    if isinstance(node, dict):
-        return {key: null_non_finite(value) for key, value in node.items()}
-    if isinstance(node, (list, tuple)):
-        return [null_non_finite(value) for value in node]
-    return node
-
-
-def _dumps(payload: Any) -> str:
-    """The ONE `json.dumps` call shape every envelope byte goes through.
-
-    `ensure_ascii=False`: the default (True) escapes every non-ASCII codepoint
-    as `\\uXXXX`, which is valid JSON but not what the oracle emits --
-    `serde_json::to_string` writes raw UTF-8 bytes verbatim (measured:
-    `scaffold --name "Sensör Ölçüm"` on the Rust CLI puts the literal
-    `Sensör Ölçüm` on the wire, not `Sens\\u00f6r...`). A consumer that
-    byte-compares tan's envelope against the oracle's, or that greps stdout
-    for a raw non-ASCII string, saw a divergence stdout never had a reason to
-    carry.
-
-    `allow_nan=False` (tan-cli#387): stdout must be RFC 8259, so a non-finite
-    float RAISES here rather than silently emitting `Infinity`/`NaN`. The
-    raise is caught in `_serialise` and answered with the oracle's `null`;
-    this parameter is what makes that case detectable at all.
-    """
-    return json.dumps(payload, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    if isinstance(value, dict):
+        return {k: json_safe_floats(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        # A tuple becomes a list: `json.dumps` writes both as a JSON array, so
+        # the wire bytes are unchanged.
+        return [json_safe_floats(v) for v in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -167,20 +155,26 @@ class Envelope:
         depends on that shape.
         """
         try:
-            try:
-                return (_dumps(self._as_dict()), self.exit_code)
-            except ValueError:
-                # tan-cli#387: `allow_nan=False` above raises exactly here, on
-                # a non-finite float somewhere in the payload. The retry emits
-                # `null` for it, byte-matching the oracle, and keeps
-                # `self.exit_code` -- deliberately NOT falling through to the
-                # `envelope.serialize-failed` block below, which would answer
-                # exit 5 where the oracle answers 0 and trade an invalid-JSON
-                # divergence for an exit-code one. A ValueError this retry
-                # cannot fix (a circular reference, which `null_non_finite`
-                # recurses into and dies on) lands in that block via the outer
-                # `except` -- one fallback envelope, never zero bytes.
-                return (_dumps(null_non_finite(self._as_dict())), self.exit_code)
+            # `ensure_ascii=False`: the default (True) escapes every non-ASCII
+            # codepoint as `\uXXXX`, which is valid JSON but not what the
+            # oracle emits -- `serde_json::to_string` writes raw UTF-8 bytes
+            # verbatim (measured: `scaffold --name "Sensör Ölçüm"` on the
+            # Rust CLI puts the literal `Sensör Ölçüm` on the wire, not
+            # `Sensör...`). A consumer that byte-compares tan's envelope
+            # against the oracle's, or that greps stdout for a raw non-ASCII
+            # string, saw a divergence stdout never had a reason to carry.
+            #
+            # `json_safe_floats`: `Infinity`/`-Infinity`/`NaN` are Python's
+            # non-standard extension literals, not JSON (tan-cli#387). See that
+            # function for why this is a projection and not `allow_nan=False`.
+            return (
+                json.dumps(
+                    json_safe_floats(self._as_dict()),
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ),
+                self.exit_code,
+            )
         except Exception as err:  # noqa: BLE001 -- no payload may ever crash stdout
             fallback_code = int(ExitCode.INTERNAL_FAILURE)
             fallback = {
@@ -199,7 +193,10 @@ class Envelope:
                     f"failed to serialize command output: {err}",
                 ).as_dict()
             ]
-            return (_dumps(fallback), fallback_code)
+            return (
+                json.dumps(fallback, separators=(",", ":"), ensure_ascii=False),
+                fallback_code,
+            )
 
 
 #: Whether this process has already written its one envelope to stdout.
