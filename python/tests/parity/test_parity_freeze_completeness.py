@@ -113,30 +113,43 @@ _PLATFORM_BOUND: dict[str, frozenset[str]] = {
     ),
 }
 
-#: DEBT, not design. Every one of these compares an exit code plus an
-#: envelope, which `oracle_fixtures.resolve` + `oracle_fixtures.scrub` already
-#: replay for 200-odd other cases; nothing but a capture run stands between
-#: them and a fixture, and the recipe is in `oracle_fixtures/PROVENANCE.txt`.
-#: They are still live for a reason that is about file ownership, not about
-#: them: all eight sit in `test_oracle_parity.py`, a 1248-line module whose
-#: restructuring belongs to tan-cli#408, and converting them from a
-#: concurrent change would clobber it. Capture them the moment that file is
-#: free -- after tan-cli#269 deletes `crates/` no capture is possible at all,
-#: and each of these becomes a permanent blind spot in the envelope
-#: alp-sdk-vscode consumes.
-_UNFROZEN: dict[str, frozenset[str]] = {
-    "test_oracle_parity.py": frozenset(
-        {
-            "test_explain_matches_the_oracle",
-            "test_renode_no_sdk_matches_the_oracle",
-            "test_size_missing_manifest_is_a_known_divergence_from_the_oracle",
-            "test_run_no_sdk_is_a_known_divergence_from_the_oracle",
-            "test_model_bare_invocation_is_a_known_divergence_from_the_oracle",
-            "test_monitor_is_a_known_divergence_from_the_oracle",
-            "test_faultdecode_is_a_known_divergence_from_the_oracle",
-        }
-    ),
-}
+#: DEBT, not design -- and the `test_oracle_parity.py` half of it is PAID as
+#: of 2026-08-04.
+#:
+#: That half held seven cases whose recorded blocker was file ownership, not
+#: the cases themselves: the module was said to belong to tan-cli#408, so
+#: converting them from a concurrent change would clobber it. The reason did
+#: not survive reading #408, whose scope is the six `python/tan/` modules
+#: over the 800-line cap -- it names the oversized test files as an
+#: observation and delivers nothing in them. Nothing owned the file, so all
+#: seven now replay from `oracle_fixtures/test_oracle_parity.json`: the four
+#: whose assertions read a PATH through `test_oracle_parity._both_sides`, the
+#: three that read only a `command`/exit/issue code through
+#: `rust_run(..., scrub_roots=())`. `PROVENANCE.txt` records the capture run
+#: and why darwin was safe for it.
+#:
+#: What is left here is genuinely a different shape, not the same debt
+#: shrunk: the scaffold pair below compares a FILE TREE, which no fixture
+#: store in this package can hold yet.
+#: EMPTY as of the two freezes above landing together (tan-cli#409). Both
+#: entries that lived here are gone for the same reason -- the recorded
+#: blocker did not survive being measured:
+#:
+#: - `test_oracle_parity.py`'s seven were said to belong to tan-cli#408, so
+#:   converting them concurrently would clobber it. #408's scope is the six
+#:   `python/tan/` modules over the 800-line cap; it names the oversized test
+#:   files as an observation and delivers nothing in them.
+#: - the scaffold pair was said to need "a tree-shaped fixture store that does
+#:   not exist yet". Measured, the oracle side is six templates, 40 files,
+#:   every one valid UTF-8, 120 KiB of JSON -- frozen per template in
+#:   `oracle_fixtures/scaffold_trees.json`.
+#:
+#: Kept as an empty dict rather than deleted: this is the register a future
+#: live-only case declares itself in, and the gate below reads all three.
+#: A new entry here is a debt someone chose to take, which is reviewable; a
+#: case gated live with no entry is the silent hole this module exists to
+#: refuse.
+_UNFROZEN: dict[str, frozenset[str]] = {}
 
 _REGISTERS = (
     ("harness self-test", _HARNESS_SELF_TESTS),
