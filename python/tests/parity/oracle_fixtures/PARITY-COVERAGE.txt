@@ -18,28 +18,29 @@ registered subcommands no test compares AT ALL, so the gap is reviewable in
 one place instead of being re-derived by whoever next reads a green run and
 believes it.
 
-WHERE IT STANDS NOW (2026-08-04, re-measured the same way, on f3208e1).
-Thirteen of the fifteen are frozen. Same two commands, same tree:
+WHERE IT STANDS NOW (2026-08-04, re-measured the same way). Thirteen of the
+fifteen are frozen, AND the scaffold hole that opened after this ledger was
+written is closed too. Same two commands, same tree:
 
   with the binary present:  335 passed,  97 skipped, 13 xfailed
-  no target/ at all:        293 passed, 148 skipped,  4 xfailed
+  no target/ at all:        331 passed, 101 skipped, 13 xfailed
 
-`test_oracle_parity.py` contributes ZERO oracle-presence skips now -- the
-`@_ORACLE_REQUIRED` decorator is gone from it entirely, and its last seven
-live-only cases replay from committed fixtures. What still moves between
-those two runs, all of it DECLARED by name in
-`test_parity_freeze_completeness.py`:
+The gap is FOUR tests. Not one of them is undeclared:
 
-   2  the harness self-tests -- permanent, and never parity coverage
+   2  the harness self-tests -- the binary is their SUBJECT; permanent, and
+      never parity coverage
    2  test_support_bundle_oracle_parity.py -- freezable only on win32
-  47  test_scaffold_content_oracle_parity.py -- compares a FILE TREE
 
-The last row is the one that grew: it did not exist when this ledger was
-written, and it is now the LARGEST hole in the freeze, bigger than the two it
-was created to track. It needs a tree-shaped fixture store, which is a piece
-of harness nobody has built. The support-bundle pair needs a machine. Both
-must land before tan-cli#269, and neither is a decision anyone is still
-waiting on -- they are work.
+`_UNFROZEN` in `test_parity_freeze_completeness.py` is EMPTY. That register
+is the one tan-cli#409 requires to reach empty BEFORE tan-cli#269 deletes
+crates/, because after that no fixture can be captured at all. It has.
+
+`_PLATFORM_BOUND` is the whole remainder, and it needs a MACHINE, not a
+decision: the compared surface (doctor's whole check list and statuses, the
+whole inspect.context) is decided by the HOST. A darwin capture writes
+`macos-aarch64` into a check detail and adds codeLLDBExtension/lldb rows; a
+Windows bundle carries `longPaths`, which exists nowhere else. No scrub
+reaches any of it, and the capture-time leak guard does NOT fire on it.
 
 The paragraphs below are kept as WRITTEN, not rewritten in place: the
 measurement they record is what the freeze was graded against, and a ledger

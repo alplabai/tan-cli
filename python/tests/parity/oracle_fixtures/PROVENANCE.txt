@@ -493,3 +493,60 @@ now. What remains, counted from the same run, is declared in
   47  test_scaffold_content_oracle_parity.py -- compares a FILE TREE, which
                                                no fixture store in this
                                                package can hold yet
+
+--------------------------------------------------------------------------
+
+2026-08-04, third darwin capture: the scaffold TREES (tan-cli#409)
+
+A second store, `scaffold_trees.json`, and a second reader,
+`tests/parity/scaffold_fixtures.py`. Not keys in the file above, because what
+is frozen here is not an envelope: `test_scaffold_content_oracle_parity.py`
+diffs a whole scaffolded FILE TREE, and it does so from two tests sharing one
+memoised spawn per template -- so a key derived from `PYTEST_CURRENT_TEST`
+would have depended on which of the two ran first. Keyed by TEMPLATE ID
+instead.
+
+  scaffold_trees.json   6 templates, 40 files, 120522 bytes
+
+    board-diagnostics  6 files      minimal-app      8 files
+    edge-ai-starter    8 files      sensor-starter   6 files
+    iot-starter        6 files      zephyr-app       6 files
+
+  cargo build --bin tan
+  TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 \
+    TAN_RUST_BINARY=target/debug/tan python -m pytest \
+    tests/parity/test_scaffold_content_oracle_parity.py
+
+oracle binary:  tan 0.4.1, target/debug/tan built from THIS checkout.
+oracle source:  crates/ at 8a71310, unchanged from
+                verified-against-crates-commit above.
+platform:       darwin (macOS 26.5.2)
+
+Stored as TEXT, not base64, and that is a measurement rather than a
+convenience. All six templates at DEFAULT_SOM_SKU (E1M-AEN801) were checked
+before the store was designed: 40 files, EVERY ONE valid UTF-8, and NOT ONE
+containing the scratch directory it was scaffolded into. So there is nothing
+to scrub -- unlike every key in the envelope store -- and nothing to encode,
+and a committed fixture whose values are the actual CMake/YAML/Markdown text
+is reviewable in a diff. `scaffold_fixtures._as_text` FAILS the capture on a
+non-UTF-8 byte sequence rather than laundering it through
+`errors="replace"`, so if a template ever vendors a binary asset the capture
+stops and the decision gets revisited.
+
+Newlines survive: json round-trips LF and CRLF distinctly and the reader does
+no translation, so a CRLF-vs-LF divergence between the two binaries still
+fails the comparison -- `_read_tree`'s own docstring reads raw bytes
+precisely so nothing launders a real divergence, and this store does not undo
+that.
+
+Measured with target/ moved aside, i.e. exactly the state tan-cli#269
+produces:
+
+  with the binary present:  335 passed,  97 skipped, 13 xfailed
+  no target/ at all:        331 passed, 101 skipped, 13 xfailed
+
+The gap is FOUR tests, and all four are declared by name in
+`test_parity_freeze_completeness.py`: the two harness self-tests, which take
+the binary as their SUBJECT and can never be frozen, and the two
+`test_support_bundle_oracle_parity.py` cases, which need a win32 host for the
+reason the earlier section gives in full. `_UNFROZEN` is now EMPTY.

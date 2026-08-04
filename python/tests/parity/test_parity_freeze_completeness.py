@@ -113,41 +113,34 @@ _PLATFORM_BOUND: dict[str, frozenset[str]] = {
     ),
 }
 
-#: DEBT, not design -- and the `test_oracle_parity.py` half of it is PAID as
-#: of 2026-08-04.
+#: DEBT, not design -- and as of 2026-08-04 it is **EMPTY**, which is exactly
+#: what tan-cli#409 asks for: this is the register that had to reach empty
+#: BEFORE tan-cli#269 deletes `crates/`, because after that no fixture can be
+#: captured at all.
 #:
-#: That half held seven cases whose recorded blocker was file ownership, not
-#: the cases themselves: the module was said to belong to tan-cli#408, so
-#: converting them from a concurrent change would clobber it. The reason did
-#: not survive reading #408, whose scope is the six `python/tan/` modules
-#: over the 800-line cap -- it names the oversized test files as an
-#: observation and delivers nothing in them. Nothing owned the file, so all
-#: seven now replay from `oracle_fixtures/test_oracle_parity.json`: the four
-#: whose assertions read a PATH through `test_oracle_parity._both_sides`, the
-#: three that read only a `command`/exit/issue code through
-#: `rust_run(..., scrub_roots=())`. `PROVENANCE.txt` records the capture run
-#: and why darwin was safe for it.
+#: It held two groups. Neither recorded reason survived contact:
 #:
-#: What is left here is genuinely a different shape, not the same debt
-#: shrunk: the scaffold pair below compares a FILE TREE, which no fixture
-#: store in this package can hold yet.
-_UNFROZEN: dict[str, frozenset[str]] = {
-    # These two compare a scaffolded FILE TREE -- the set of paths, and each
-    # path's bytes -- not an envelope. `oracle.rust_run`/`compare` freeze a
-    # `(exit code, envelope dict)` pair, which is the wrong shape for a tree,
-    # so there is nothing to route them through today: freezing them needs a
-    # tree-shaped fixture store that does not exist yet. Declared rather than
-    # silently left live, per this module's own contract -- when `crates/` goes
-    # (tan-cli#269) these become passing skips and the scaffold-content
-    # comparison stops measuring anything, so the fixture store has to land
-    # first or this coverage is lost.
-    "test_scaffold_content_oracle_parity.py": frozenset(
-        {
-            "test_scaffold_file_content_matches_the_oracle",
-            "test_scaffold_file_list_matches_the_oracle",
-        }
-    ),
-}
+#: * Seven `test_oracle_parity.py` cases, blocked on FILE OWNERSHIP -- the
+#:   module was said to belong to tan-cli#408. Reading #408 showed its scope
+#:   is the six `python/tan/` modules over the 800-line cap; it names the
+#:   oversized test files as an observation and delivers nothing in them.
+#:   Nothing owned the file. They replay through
+#:   `test_oracle_parity._both_sides` and `rust_run(..., scrub_roots=())`.
+#: * Two `test_scaffold_content_oracle_parity.py` cases -- 47 node ids, and
+#:   the LARGEST hole in the freeze -- blocked on a tree-shaped fixture store
+#:   that "does not exist yet". So it was written:
+#:   `tests/parity/scaffold_fixtures.py`, keyed by TEMPLATE ID rather than by
+#:   pytest node id, because that helper is memoised across two tests and a
+#:   node-derived key would have depended on collection order.
+#:
+#: Kept as an empty dict rather than deleted: the gate reads `_REGISTERS`
+#: structurally, so a future live-only case needs somewhere honest to be
+#: declared. An empty register is the difference between "no debt" and "no
+#: place to record debt".
+#:
+#: `_PLATFORM_BOUND` above is now the ONLY thing between this package and a
+#: complete freeze, and it needs a win32 MACHINE, not a decision.
+_UNFROZEN: dict[str, frozenset[str]] = {}
 
 _REGISTERS = (
     ("harness self-test", _HARNESS_SELF_TESTS),

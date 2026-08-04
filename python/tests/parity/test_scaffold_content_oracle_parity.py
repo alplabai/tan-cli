@@ -67,12 +67,11 @@ import pytest
 from tan.core.scaffold import DEFAULT_SOM_SKU, TEMPLATE_IDS, plan_template_files
 
 from .oracle import _run, python_command, rust_binary
+from .scaffold_fixtures import resolve_tree
 
+#: Only read on the LIVE/CAPTURE path now (tan-cli#409) -- a frozen replay
+#: never spawns the oracle, so `None` here is not a reason to skip anything.
 RUST = rust_binary()
-_SKIP_NO_ORACLE = pytest.mark.skipif(
-    RUST is None,
-    reason="needs a built Rust tan; run `cargo build --bin tan` (or set TAN_RUST_BINARY)",
-)
 
 #: `(template_id, relative_path) -> reason`, the SAME shape and the SAME
 #: `xfail(strict=True)` discipline as `test_contract_envelopes.py`'s dict of
@@ -213,8 +212,8 @@ def _scaffold_trees(template_id: str, tmp_path_factory) -> tuple[dict[str, bytes
         return cached
     root = tmp_path_factory.mktemp(f"scaffold-oracle-{template_id.replace('-', '_')}")
     argv = ["init", "--template", template_id, "--format", "json"]
-    trees: list[dict[str, bytes]] = []
-    for side, command in (("rust", [RUST]), ("python", python_command())):
+
+    def _spawn(side: str, command: list[str]) -> dict[str, bytes]:
         # Nested `<side>/root` -- not `root / side` bare -- so `discover_
         # workspace_sdk`'s parent-of-cwd probe (`oracle.py`'s `work_dir`
         # fixture carries the identical shape, same reason) can never see a
@@ -225,8 +224,22 @@ def _scaffold_trees(template_id: str, tmp_path_factory) -> tuple[dict[str, bytes
         home.mkdir(parents=True)
         code, out = _run(command, argv, work, home)
         assert code == 0, f"{side} tan init --template {template_id} failed: {out}"
-        trees.append(_read_tree(work))
-    result = (trees[0], trees[1])
+        return _read_tree(work)
+
+    # tan-cli#409: the ORACLE side replays a committed tree by default and is
+    # spawned only under `TAN_PARITY_LIVE=1`. Before this, both tests were
+    # gated on binary PRESENCE (`skipif(RUST is None, ...)`), so the day
+    # tan-cli#269 deletes `crates/` all 47 of them became passing skips and
+    # the run still exited 0 -- and this was the LARGEST such hole left,
+    # bigger than the two the coverage ledger was opened to track.
+    #
+    # Keyed by TEMPLATE ID rather than through `oracle_fixtures.resolve`,
+    # because this helper is memoised across two tests: whichever ran first
+    # would own the node-derived key, making it depend on collection order.
+    # See `scaffold_fixtures`'s module docstring.
+    rust_files = resolve_tree(template_id, lambda: _spawn("rust", [RUST]))
+    python_files = _spawn("python", python_command())
+    result = (rust_files, python_files)
     _TREE_CACHE[template_id] = result
     return result
 
@@ -250,7 +263,6 @@ def _cases():
             yield pytest.param(template_id, relative_path, id=f"{template_id}::{relative_path}", marks=marks)
 
 
-@_SKIP_NO_ORACLE
 @pytest.mark.parametrize("template_id,relative_path", list(_cases()))
 def test_scaffold_file_content_matches_the_oracle(template_id, relative_path, tmp_path_factory):
     rust_files, python_files = _scaffold_trees(template_id, tmp_path_factory)
@@ -274,7 +286,6 @@ def _undeclared_file_set_divergence(
     return sorted((set(rust_files) ^ set(python_files)) - declared)
 
 
-@_SKIP_NO_ORACLE
 @pytest.mark.parametrize("template_id", TEMPLATE_IDS)
 def test_scaffold_file_list_matches_the_oracle(template_id, tmp_path_factory):
     """The SET of files, independent of content. `test_scaffold_file_content_
