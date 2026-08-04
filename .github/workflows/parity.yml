@@ -184,23 +184,22 @@ env:
   #   `tests/parity/bootstrap_manifest_parity.py` itself survives as a
   #   manual diagnostic tool (see its module doc), not run in CI.
   #
-  # f4d87a1f -> 2bc6b400 (tan-cli#425): the pin had gone 7 contract-surface
-  # commits stale, so both seams were green against a tree that no longer
-  # reflected the planner. Bumped only after MEASURING all four contract gates
-  # against `2bc6b400` -- scaffold byte-parity 9/9 PASS, kconfig golden and
-  # toolchain lock byte-identical, seam1 rc 0. The one seam1 FAIL seen before
-  # the bump (`multicore_rpmsg-imx93`) was NOT a divergence: the comparator
-  # imported a `tan` from an unrelated checkout (tan-cli#423) and measured the
-  # wrong tree; with the tan under test it is `PASS (alp-sdk and tan both
-  # refuse this board)`.
+  # HELD at f4d87a1f (tan-cli#425). The pin IS 7 contract-surface commits
+  # behind alp-sdk dev and the freshness warning is correct -- but bumping it
+  # to `2bc6b400` was tried and REVERTED: it reds 77 SDK-bound tests on all
+  # three OS legs, e.g.
   #
-  # DELIBERATELY DECOUPLED from `test_planner_relocation_freshness.py`'s
-  # PINNED_SDK_COMMIT and `ci.yml`'s SDK `ref:`, which stay at `f4d87a1f`.
-  # Those two are a PAIR (ci.yml's own comment records that mismatching them
-  # broke the freshness gate) and moving them means re-hashing every
-  # `alp_orchestrate/*.py` AND re-auditing the relocation drift -- a porting
-  # audit, not a pin bump. This variable only selects the SDK the parity seams
-  # emit against, which is why it can move on measurement alone.
+  #   test_planner_emit_parity.py::test_the_breadth_layer_still_covers_every_board
+  #     AssertionError: only 2194 artefacts were compared byte for byte
+  #     assert 2194 >= 2900
+  #
+  # The four contract-gate SCRIPTS (scaffold byte-parity, kconfig golden,
+  # toolchain lock, seam1) all pass against `2bc6b400` -- which is what made
+  # the bump look safe -- but they are not the whole gate. `python -- pytest
+  # across python/` binds ALP_SDK_ROOT to this tag and runs the emit-parity
+  # breadth layer against it, and THAT is what the bump breaks. Bumping needs
+  # that breadth layer re-measured and its fixtures re-captured first; it is
+  # not a one-line refresh. See tan-cli#425.
   #
   # v0.15.0-rc1 -> f4d87a1f (tan-cli#320): `python/tests/gates/
   # test_planner_relocation_freshness.py`'s own PINNED_SDK_COMMIT moved to
@@ -230,7 +229,7 @@ env:
   # Windows host this time -- none of the vendored templates' SDK inputs
   # changed in this range, so the Windows-only limitation this comment
   # elsewhere notes did not block the check for THIS bump specifically).
-  PINNED_SDK_TAG: 2bc6b400c07daf686f7c96bcb0091eb1f9acf8ac
+  PINNED_SDK_TAG: f4d87a1f472dffe9fe7dffc247cc55bce71034ba
 
 jobs:
   seam1-plan-shape:
