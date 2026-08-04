@@ -9,6 +9,17 @@ the oracle's own module docstring describes (there it is `include_str!` over a
 committed `.bash`/`.zsh`/`.fish` file; here it is a literal, since this unit's
 file allowlist is `completion_cmd.py` alone).
 
+**One deliberate exception to that, tan-cli#403: the `--format` value lists.**
+The captures hardcoded `text json` in all three scripts, so `tan validate
+--format <TAB>` offered two of the four values `validate` really accepts and
+actively taught an IDE integrator that `diagnostic-v1` and `sarif` do not
+exist. Those three lists (and only those) are now placeholders spliced from
+`tan.output_format`'s enums by `_fill_formats` -- the same declarations the
+parser and `--help` derive from, so the three surfaces cannot disagree again.
+Everything else in the scripts is still the oracle's own bytes; the emitted
+`data.script` therefore diverges from v0.4.1's exactly where v0.4.1 was wrong
+about this port's own format surface.
+
 **Why hand-captured and not Typer/Click's own shell-completion machinery.**
 Typer ships one (`click.shell_completion`, gated off here via `app =
 typer.Typer(add_completion=False)` in `cli.py`), but it is not a substitute:
@@ -39,6 +50,14 @@ import typer
 
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import (
+    FORMAT_HELP,
+    WIDE_FORMAT_COMMANDS,
+    OutputFormat,
+    ValidateOutputFormat,
+    format_values,
+    resolve_format,
+)
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -51,8 +70,40 @@ SHELL_UNSUPPORTED_MESSAGE = "Unsupported shell. Allowed values: bash, zsh, fish.
 #: Verbatim from `completion.rs`'s `text` line -- the text-mode (stderr) wording.
 SHELL_UNSUPPORTED_TEXT_LINE = "completion: unsupported shell. Use --shell bash|zsh|fish."
 
+#: Where the captured scripts had a hardcoded `--format` value list, they now
+#: carry a placeholder `_fill_formats` (below) substitutes from the CLI's own
+#: enums -- tan-cli#403. The scripts are otherwise still byte-for-byte oracle
+#: captures; these four markers are the ONLY derived text in them.
+_FORMATS_MARK = "@FORMATS@"
+_WIDE_FORMATS_MARK = "@WIDE_FORMATS@"
+#: The commands with the wider domain, as a bash/zsh `case` alternation
+#: (`a|b`) and as fish's space-separated argument list respectively.
+_WIDE_COMMANDS_ALT_MARK = "@WIDE_COMMANDS_ALT@"
+_WIDE_COMMANDS_LIST_MARK = "@WIDE_COMMANDS_LIST@"
+
+
+def _fill_formats(template: str) -> str:
+    """Splice the declared `--format` value lists into one captured script.
+
+    The oracle generated its completions from the same clap `ValueEnum` that
+    fed its parser and its `--help`, so all three surfaces agreed by
+    construction. This port emits TEXT rather than walking a live command
+    graph (`completion_cmd` cannot import `tan.cli` -- that is an import
+    cycle), so the equivalent guarantee is: never type a value list into the
+    script text, splice it from the enum, and let
+    `tests/commands/test_output_format.py` diff the emitted script against
+    what the parser really accepts, per command.
+    """
+    return (
+        template.replace(_FORMATS_MARK, " ".join(format_values(OutputFormat)))
+        .replace(_WIDE_FORMATS_MARK, " ".join(format_values(ValidateOutputFormat)))
+        .replace(_WIDE_COMMANDS_ALT_MARK, "|".join(WIDE_FORMAT_COMMANDS))
+        .replace(_WIDE_COMMANDS_LIST_MARK, " ".join(WIDE_FORMAT_COMMANDS))
+    )
+
+
 #: Verbatim bash completion script, captured from the reference oracle.
-BASH_SCRIPT = """# tan CLI bash completion
+_BASH_TEMPLATE = """# tan CLI bash completion
 _tan_complete() {
   local cur prev words cword
 
@@ -64,8 +115,15 @@ _tan_complete() {
   local commands="validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode"
   local global_flags="--project --board-yaml --sdk-root --target --all --format --verbose --quiet --no-color --non-interactive --ci --help --version"
 
+  # Not one list for every command (tan-cli#403): `validate` also emits the
+  # two IDE-oriented documents. `${COMP_WORDS[1]}` is the subcommand word,
+  # already typed by the time `--format` can be completed.
   if [[ "$prev" == "--format" ]]; then
-    COMPREPLY=( $(compgen -W "text json" -- "$cur") )
+    local formats="@FORMATS@"
+    case "${COMP_WORDS[1]}" in
+      @WIDE_COMMANDS_ALT@) formats="@WIDE_FORMATS@" ;;
+    esac
+    COMPREPLY=( $(compgen -W "$formats" -- "$cur") )
     return
   fi
 
@@ -162,7 +220,7 @@ complete -F _tan_complete tan
 """
 
 #: Verbatim zsh completion script, captured from the reference oracle.
-ZSH_SCRIPT = """#compdef tan
+_ZSH_TEMPLATE = """#compdef tan
 
 _tan() {
   local -a commands
@@ -217,7 +275,6 @@ _tan() {
     '--sdk-root[SDK root]:path:_files -/'
     '--target[Generation target]'
     '--all[Generate all targets]'
-    '--format[Output format]:format:(text json)'
     '--verbose[Verbose output]'
     '--quiet[Quiet output]'
     '--no-color[Disable color output]'
@@ -226,6 +283,16 @@ _tan() {
     '--help[Show help]'
     '--version[Show version]'
   )
+
+  # `--format` is appended rather than listed above because its value list is
+  # not the same for every command (tan-cli#403): `validate` also completes
+  # the two IDE-oriented documents. Chosen here, once, so every `_arguments`
+  # call below still splices exactly one `${global_args[@]}` and no arm can
+  # drift.
+  case $words[2] in
+    @WIDE_COMMANDS_ALT@) global_args+=('--format[Output format]:format:(@WIDE_FORMATS@)') ;;
+    *) global_args+=('--format[Output format]:format:(@FORMATS@)') ;;
+  esac
 
   _arguments -C     '1:command:->command'     '*::arg:->args'     "${global_args[@]}"
 
@@ -316,14 +383,15 @@ compdef _tan tan
 """
 
 #: Verbatim fish completion script, captured from the reference oracle.
-FISH_SCRIPT = """complete -c tan -f
+_FISH_TEMPLATE = """complete -c tan -f
 complete -c tan -n '__fish_use_subcommand' -a 'validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode'
 complete -c tan -l project -d 'Project root'
 complete -c tan -l board-yaml -d 'board.yaml path'
 complete -c tan -l sdk-root -d 'SDK root path'
 complete -c tan -l target -d 'Generation target' -a 'zephyr-conf dts-overlay native-sim-overlay cmake-args yocto-conf carrier-netlist west-libraries zephyr-board hw-info-h'
 complete -c tan -l all -d 'Generate all targets'
-complete -c tan -l format -d 'Output format' -a 'text json'
+complete -c tan -n 'not __fish_seen_subcommand_from @WIDE_COMMANDS_LIST@' -l format -d 'Output format' -a '@FORMATS@'
+complete -c tan -n '__fish_seen_subcommand_from @WIDE_COMMANDS_LIST@' -l format -d 'Output format' -a '@WIDE_FORMATS@'
 complete -c tan -l verbose -d 'Verbose output'
 complete -c tan -l quiet -d 'Quiet output'
 complete -c tan -l no-color -d 'Disable color output'
@@ -397,6 +465,12 @@ complete -c tan -n '__fish_seen_subcommand_from renode' -l sim-mode -d 'Studio h
 complete -c tan -n '__fish_seen_subcommand_from size' -l fail-over-budget -d 'Exit non-zero over budget'
 """
 
+#: The three scripts as EMITTED: the captures above with their `--format`
+#: value lists spliced in from the CLI's own enums (tan-cli#403).
+BASH_SCRIPT = _fill_formats(_BASH_TEMPLATE)
+ZSH_SCRIPT = _fill_formats(_ZSH_TEMPLATE)
+FISH_SCRIPT = _fill_formats(_FISH_TEMPLATE)
+
 
 def resolve_shell(raw: str | None) -> str | None:
     """Mirror Rust's `resolve_shell`: default `bash`; trim + lowercase; else
@@ -441,9 +515,7 @@ def completion(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     quiet: bool = typer.Option(False, "--quiet", hidden=True),
     verbose: bool = typer.Option(False, "--verbose", hidden=True),
     no_color: bool = typer.Option(False, "--no-color", hidden=True),
@@ -467,19 +539,13 @@ def completion(
     # true`; verified against the oracle: `tan --format json completion
     # --shell zsh` reaches this command and emits the envelope). The root
     # callback (`cli.py`) records a leading value on `ctx.obj`; this option
-    # overrides it when repeated after the subcommand name. `is not None`,
-    # not a bare `or`: an explicit `--format ""` must still reach the
-    # validation below and exit 2, matching the oracle (measured: `tan
-    # completion --format ""` -> rc 2) -- `output_format or ...` would treat
-    # `""` as absent and silently fall back to text instead. Mirrors
-    # `deferred_cmd._make_stub`'s identical fix.
-    resolved_format = (
-        output_format if output_format is not None else (ctx.obj or {}).get("format") or "text"
-    )
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    # overrides it when repeated after the subcommand name -- that precedence
+    # is `resolve_format`'s, written once for the eleven commands that honour
+    # the leading position. An explicit `--format ""` still exits 2 (measured
+    # against the oracle: `tan completion --format ""` -> rc 2); since
+    # tan-cli#403 the declared enum refuses it at PARSE time, so no truthiness
+    # test in this body can mistake it for an absent flag.
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     resolved_shell = resolve_shell(shell)

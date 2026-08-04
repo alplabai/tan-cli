@@ -6,8 +6,10 @@ instead of spawning `python -m alp_cli.main validate --format json`.
 `text` and `json` (the envelope) are unchanged by this addition and are
 already pinned by the `validate-offline-clean` / `validate-offline-schema-
 violation` conformance fixtures under `contract/envelopes/` -- this file only
-covers the two new formats, which have no fixture (no Rust precedent: see
-`validate_cmd.py`'s `_FORMATS` docstring).
+covers the two new formats, which have no fixture (no Rust precedent: see the
+`--format` comment block at the top of `validate_cmd.py`, and
+`tan.output_format.ValidateOutputFormat`, where the four values are declared
+since tan-cli#403).
 
 Full schema conformance (against alp-sdk's actual
 `metadata/schemas/diagnostic-v1.schema.json` via `jsonschema`) is proven

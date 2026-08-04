@@ -63,6 +63,7 @@ from tan.envelope import (
     envelope_emitted_exit_code,
 )
 from tan.exit_codes import ExitCode
+from tan.output_format import declared_formats, invalid_format_message
 from tan.version import TAN_VERSION
 
 app = typer.Typer(add_completion=False)
@@ -427,9 +428,45 @@ def _format_callback(ctx: typer.Context, value: str | None) -> str | None:
     the same Click UsageError shape (exit 2) every other CLI mistake here
     already gets.
     """
-    if value is not None and value not in ("text", "json"):
-        ctx.fail(f"'{value}' is not one of 'text', 'json'")
+    if value is None:
+        return value
+    # The domain here is the UNION over every registered command, not the
+    # two-value list this used to hard-code (tan-cli#403). It has to be: the
+    # callback is EAGER and fires before `ctx.invoked_subcommand` is known, so
+    # a `text`/`json` domain refused `tan --format diagnostic-v1 validate
+    # --offline` at exit 2 while the post-subcommand spelling of the same run
+    # emitted the document. `validate` really does declare four formats
+    # (`ValidateOutputFormat`), and the two spellings are meant to be one flag.
+    #
+    # Eagerness itself stays, and is not negotiable: the docstring above pins
+    # measured oracle behaviour where `tan --format bogus --version` must exit
+    # 2 BEFORE `--version` runs. Moving the whole check into `root`'s body
+    # would hand that race to `--version`.
+    #
+    # This is only the OUTER bound. `root` narrows to the invoked subcommand's
+    # own list once it knows which one that is.
+    allowed = _every_declared_format()
+    if value not in allowed:
+        ctx.fail(invalid_format_message(value, allowed))
     return value
+
+
+def _every_declared_format() -> tuple[str, ...]:
+    """Every `--format` value ANY registered command accepts, first-seen order.
+
+    Derived from the live command tree rather than listed. A hand-kept union
+    would be a second copy of the same fact, and a command that gained a
+    fourth format would then be refused here by a stale copy -- which is the
+    exact shape of the bug this replaced.
+    """
+    seen: dict[str, None] = {}
+    group = get_command(app)
+    for name in sorted(getattr(group, "commands", {})):
+        for value in declared_formats(group.commands[name]):
+            seen.setdefault(value, None)
+    # `or` guards the degenerate case only: a tree with no `--format` anywhere
+    # would otherwise refuse every value, including the two that always worked.
+    return tuple(seen) or ("text", "json")
 
 
 def _version_callback(ctx: typer.Context, value: bool) -> bool:

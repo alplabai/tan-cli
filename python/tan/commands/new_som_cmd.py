@@ -113,6 +113,7 @@ from tan.commands.sdk_cmd import (
 )
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 _SKU_RE = re.compile(r"^E1M-[A-Z0-9-]+$")
 _SOC_REF_RE = re.compile(r"^[a-z0-9-]+:[a-z0-9-]+:[a-z0-9-]+$")
@@ -668,9 +669,7 @@ def new_som(
     board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
     target: str = typer.Option(None, "--target", hidden=True),
     all_targets: bool = typer.Option(False, "--all", hidden=True),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     verbose: bool = typer.Option(False, "--verbose", hidden=True),
     quiet: bool = typer.Option(False, "--quiet", hidden=True),
     no_color: bool = typer.Option(False, "--no-color", hidden=True),
@@ -689,11 +688,7 @@ def new_som(
     # this flag -- see the docstring bullet above.
     del board_yaml, target, all_targets
     del verbose, quiet, no_color, non_interactive, ci
-    resolved_format = output_format or "text"
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = output_format or OutputFormat.TEXT
     json_mode = resolved_format == "json"
 
     report_lines: list[str] = []

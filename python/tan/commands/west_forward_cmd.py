@@ -89,6 +89,7 @@ from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.envelope import Envelope, Issue, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: Passed to `app.command(...)` for each forwarder below: lets an unrecognised
 #: flag (the underlying `west alp-*` command's own surface) fall through to the
@@ -300,7 +301,7 @@ def _run_forward(
     project: str | None,
     board_yaml: str | None,
     sdk_root: str | None,
-    output_format: str,
+    output_format: OutputFormat,
     extra_args: Sequence[str] = (),
 ) -> None:
     """`extra_args` is what tan CONSUMED and hands back to the child --
@@ -309,11 +310,6 @@ def _run_forward(
     sites have to be reachable from one function for
     `tests/gates/test_every_issue_code_is_registered.py`'s prefix-template scan
     to resolve them."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
-
     context = resolve_project_context(project, board_yaml, sdk_root)
     plan = _plan(subcommand, passthrough, extra_args, context)
     if output_format != "json":
@@ -366,9 +362,7 @@ def migrate(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     all_boards: bool = typer.Option(
         False,
         "--all",
@@ -403,9 +397,7 @@ def lock(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Pin/lock library dependencies (`west alp-lock`)."""
     _run_forward("lock", list(west_args or []), project, board_yaml, sdk_root, output_format)
@@ -422,9 +414,7 @@ def quality(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Run the board.yaml quality checks (`west alp-quality`)."""
     _run_forward("quality", list(west_args or []), project, board_yaml, sdk_root, output_format)

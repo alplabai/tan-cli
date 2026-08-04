@@ -293,10 +293,20 @@ _ROOT_TOKEN = r"<(?:ORACLE-ROOT-\d+|ROOT)>"
 _SCRUBBED_PATH_TAIL_RE = re.compile(_ROOT_TOKEN + r"[^'\"\n]*")
 
 
-def normalise_scrubbed_path_separators(payload: Any) -> Any:
+def normalise_scrubbed_path_separators(payload: Any, *, force: bool = False) -> Any:
     """``\\`` -> ``/``, but ONLY inside a path anchored at a :func:`scrub`
     placeholder, and ONLY when this replay is not on the capture platform
-    (:data:`REPLAY_IS_CAPTURE_PLATFORM`).
+    (:data:`REPLAY_IS_CAPTURE_PLATFORM`) -- or when *force* overrides that.
+
+    ``force=True`` is for a key captured on a host that is NOT
+    :data:`CAPTURE_PLATFORM` (tan-cli#409 added the first ones: the
+    command-surface cases, captured on darwin). The automatic rule reads the
+    store as single-platform and disables itself on win32, which is right for
+    the win32-captured majority and exactly backwards for a POSIX-captured
+    key -- that one records ``/`` and a Windows replay's live port answers
+    ``\\``, with nothing left to reconcile them. Scoped per call site rather
+    than flipped globally, so it reaches only the keys whose provenance says
+    it should; ``PROVENANCE.txt`` records which those are.
 
     A path rooted at ``<ORACLE-ROOT-N>`` is, by construction, a scratch
     directory the harness itself created and then redacted. What separator
@@ -328,12 +338,12 @@ def normalise_scrubbed_path_separators(payload: Any) -> Any:
 
     tan-cli#272
     """
-    if REPLAY_IS_CAPTURE_PLATFORM:
+    if REPLAY_IS_CAPTURE_PLATFORM and not force:
         return payload
     if isinstance(payload, str):
         return _SCRUBBED_PATH_TAIL_RE.sub(lambda m: m.group(0).replace("\\", "/"), payload)
     if isinstance(payload, list):
-        return [normalise_scrubbed_path_separators(item) for item in payload]
+        return [normalise_scrubbed_path_separators(item, force=force) for item in payload]
     if isinstance(payload, dict):
-        return {k: normalise_scrubbed_path_separators(v) for k, v in payload.items()}
+        return {k: normalise_scrubbed_path_separators(v, force=force) for k, v in payload.items()}
     return payload

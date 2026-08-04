@@ -27,22 +27,24 @@ from typer.main import get_command
 from tan.commands.run_cmd import run as run_fn
 
 from . import oracle_fixtures
-from .oracle import _run, missing_for_live, python_command, rust_binary
+from .oracle import _run, missing_for_live, python_command, rust_binary, rust_run
 
 RUST = rust_binary()
 LIVE_GATE = pytest.mark.skipif(
     missing_for_live(RUST),
     reason="TAN_PARITY_LIVE=1 needs a Rust tan; set TAN_RUST_BINARY or run `cargo build`",
 )
-#: The two known-divergence cases below spawn the oracle unconditionally
-#: whenever a binary is present (mirrors `test_oracle_parity.py`'s
-#: `_ORACLE_REQUIRED`) rather than replaying a frozen fixture under
-#: `LIVE_GATE`'s default -- a stale frozen answer is exactly what let the
-#: old `xfail` reason above go unnoticed for as long as it did.
-_ORACLE_REQUIRED = pytest.mark.skipif(
-    RUST is None,
-    reason="needs a built Rust tan; run `cargo build --bin tan` (or set TAN_RUST_BINARY)",
-)
+#: **Every case here is frozen replay** (tan-cli#409). The two known-divergence
+#: cases below used to spawn the oracle unconditionally whenever a binary was
+#: present, behind their own `skipif(RUST is None, ...)`, on the reasoning that
+#: "a stale frozen answer is exactly what let the old `xfail` reason above go
+#: unnoticed for as long as it did". Measured, that gate buys the opposite of
+#: what it was for: it turns both cases into passing SKIPS the moment
+#: tan-cli#269 deletes `crates/`, and a skip does not go stale -- it stops
+#: measuring entirely, with no signal. Staleness is caught where it can be:
+#: `oracle.PINNED_ORACLE_BUILD_INPUT_DIGEST` fails the suite when `crates/`
+#: moves past the capture (tan-cli#414), and `TAN_PARITY_LIVE=1` re-runs both
+#: binaries for real while one still builds.
 
 
 def _rust_help(*argv: str) -> str:
@@ -100,7 +102,7 @@ def test_run_help_is_not_the_same_flag_set_as_build_or_flash():
     )
 
 
-@_ORACLE_REQUIRED
+@LIVE_GATE
 def test_run_no_sdk_is_a_known_divergence_from_the_oracle(tmp_path):
     """Exit code, issue code and `data` all agree (`build.plan-unavailable`,
     exit 1, `data: null`); only the remedy wording differs. The same case as
@@ -112,8 +114,12 @@ def test_run_no_sdk_is_a_known_divergence_from_the_oracle(tmp_path):
     work = tmp_path / "root"
     work.mkdir()
     argv = ["run", "--format", "json"]
-    r_code, r_out = _run([RUST], argv, work, home)
+    r_code, r_out = rust_run(argv, work, home)
+    # `rust_run` returns its side already scrubbed of cwd/home; the python side
+    # needs the identical substitution or `project.root` diffs a live scratch
+    # path against the placeholder the fixture recorded.
     p_code, p_out = _run(python_command(), argv, work, home)
+    p_out = oracle_fixtures.scrub(p_out, work, home)
     assert r_code == p_code == 1
     assert "sdk" not in r_out and "sdk" not in p_out
     assert [i["code"] for i in r_out["issues"]] == ["build.plan-unavailable"]
@@ -133,7 +139,7 @@ def test_run_no_sdk_is_a_known_divergence_from_the_oracle(tmp_path):
     assert {**r_out, "issues": []} == {**p_out, "issues": []}
 
 
-@_ORACLE_REQUIRED
+@LIVE_GATE
 def test_run_sdk_root_invalid_now_matches_the_oracle(tmp_path):
     """Was `test_run_sdk_root_invalid_is_a_known_divergence_from_the_oracle`,
     pinning a real defect; the defect is FIXED (tan-cli#257/#258) and this now
@@ -165,8 +171,9 @@ def test_run_sdk_root_invalid_now_matches_the_oracle(tmp_path):
     work = tmp_path / "root"
     work.mkdir()
     argv = ["run", "--format", "json", "--sdk-root", "./nowhere"]
-    r_code, r_out = _run([RUST], argv, work, home)
+    r_code, r_out = rust_run(argv, work, home)
     p_code, p_out = _run(python_command(), argv, work, home)
+    p_out = oracle_fixtures.scrub(p_out, work, home)
     assert r_code == p_code == 1
     assert [i["code"] for i in r_out["issues"]] == ["build.plan-unavailable"]
     assert [i["code"] for i in p_out["issues"]] == ["build.plan-unavailable"]

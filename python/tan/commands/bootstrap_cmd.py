@@ -128,6 +128,7 @@ from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import sdk_pointer_json
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion`. `"2"`, a STRING: v1's `scriptPath` named
 #: `<sdkRoot>/scripts/bootstrap.sh`, which this command does not run.
@@ -2700,9 +2701,7 @@ def bootstrap(
             "installing, cloning or writing anything."
         ),
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     verbose: bool = typer.Option(False, "--verbose", hidden=True),
     quiet: bool = typer.Option(False, "--quiet", hidden=True),
     no_color: bool = typer.Option(False, "--no-color", hidden=True),
@@ -2719,10 +2718,6 @@ def bootstrap(
     # Same port-wide gap as `clean_cmd.clean`'s identical block; not fixed here
     # for `doctor`/`init`, which still have it.
     del verbose, quiet, no_color, non_interactive, ci
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     reported = Project(root=None, board_yaml=None)

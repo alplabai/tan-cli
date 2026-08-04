@@ -99,6 +99,7 @@ from tan.core.setools import (
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 #: `data.schemaVersion` -- the STRING "1", not the integer. Rust serializes it
 #: as `&'static str` and the extension compares it as one.
@@ -1722,9 +1723,7 @@ def flash(
         "then flash_args.setools_dir in the manifest (lowest -- and rebuilt "
         "over by the next `tan build`, see docs/setools.md).",
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
 ) -> None:
     """Program every slice + helper MCU in the project's system manifest."""
     # `--format` is accepted BEFORE the subcommand too (clap makes it
@@ -1734,11 +1733,7 @@ def flash(
     # `cli._HONOURS_ROOT_FORMAT` -- because refusing it here means a customer's
     # FLASH does not run, on the one command where the fallback (a text-mode run
     # with an empty stdout) would be indistinguishable from a broken device.
-    resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     # Resolved OUTSIDE the guard: `project_obj` is reported on every path

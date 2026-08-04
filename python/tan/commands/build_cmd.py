@@ -100,6 +100,7 @@ from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
 from tan.core.venv import venv_python
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `scripts/alp_project.py` is THE marker for an alp-sdk checkout -- the same
 #: literal `tan_core::project` hardcodes (I-31). Renaming or relocating it
@@ -1232,9 +1233,7 @@ def build(
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     # --- declared so they are refused as DEFERRED, never as a typo ----------
     # See `_DEFERRED_FLAGS`. Each is a real, working flag of the v0.4.1 oracle
     # that this port does not implement. LISTED in `--help` rather than hidden,
@@ -1257,10 +1256,6 @@ def build(
     ci: bool = typer.Option(False, "--ci", help=_DEFERRED_HELP),
 ) -> None:
     """Build every slice of the project's build plan."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     # Before anything is resolved or read: a run naming a flag this port does

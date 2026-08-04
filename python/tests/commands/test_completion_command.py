@@ -20,6 +20,14 @@ scripts are frozen, byte-for-byte captures of the oracle's own already-gated
 output, not derived from a live command graph here, so there is no
 independent flag table this port could drift out of sync with.
 
+**One part of them IS derived, and does have such a gate: the `--format`
+value lists (tan-cli#403).** The captures said `text json` on every command,
+including `validate`, which really accepts four values -- exactly the drift
+"frozen capture" cannot notice. Those lists are now spliced from
+`tan.output_format`'s enums, and `tests/commands/test_output_format.py`
+diffs the emitted script against what each command's parser accepts, which is
+this port's local answer to `completion_scripts_match_clap_flags_exactly`.
+
 Every value in this file was confirmed against the built oracle
 (`target/debug/tan.exe`, reports `tan 0.4.1` -- see
 `tests/parity/oracle.py:219`'s `PINNED_ORACLE_VERSION`, the one place that
