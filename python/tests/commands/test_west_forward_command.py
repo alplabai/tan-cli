@@ -457,31 +457,47 @@ def test_data_args_reports_the_argv_handed_to_west(west_argv, workspace_project)
 
 #: `--project` / `--board-yaml` / `--sdk-root` were always declared here for
 #: real, and `--format` is not a global at all (see `global_flags.py`'s own
-#: note). These six are the arity-0 flags that leaked into the child and are
-#: now consumed and dropped.
-_DROPPED_GLOBALS = ("--all", "--verbose", "--quiet", "--no-color", "--non-interactive", "--ci")
+#: note). These seven -- six arity-0 flags plus the value-carrying `--target`
+#: -- are what leaked into the child and are now consumed and dropped.
+#:
+#: `--target` sat in a one-off `_REFUSED_GLOBAL` here until tan-cli#403's
+#: postmortem: `accept_global_flags` used to REFUSE an injected value-carrying
+#: flag outright (`typer.BadParameter`, exit 2, tan-cli#398's fix), but that
+#: was measured wrong against the oracle -- `target/debug/tan.exe` accepts and
+#: IGNORES `--target` on a command that never declares it (byte-identical
+#: `tan doctor --target zephyr --format json` output with and without the
+#: flag), so the refusal was a NEW divergence, not a fix. `global_flags.py`
+#: now drops a value-carrying global exactly like a boolean one; folded in
+#: here so the two generic tests below cover it for free instead of needing a
+#: dedicated refusal test.
+_DROPPED_GLOBALS = (
+    "--target",
+    "--all",
+    "--verbose",
+    "--quiet",
+    "--no-color",
+    "--non-interactive",
+    "--ci",
+)
 
-#: The seventh leaking flag, split out because it does not merely get dropped:
-#: `accept_global_flags` REFUSES an injected value-carrying flag with a usage
-#: error rather than silently substituting the command's own default
-#: (tan-cli#398). Either way it never reaches `west`, which is what tan-cli#405
-#: is about -- and refusal is strictly louder than the drop that issue asked
-#: for, so `--target cm33` can no longer alter the child argv by any route.
-_REFUSED_GLOBAL = "--target"
+#: The one flag in `_DROPPED_GLOBALS` that carries a value -- `_global_tokens`
+#: appends a throwaway one so the generic tests below exercise BOTH the flag
+#: and its value being dropped (tan-cli#405 measured the VALUE, not just the
+#: flag, leaking into the child argv as a caller-supplied positional).
+_VALUE_CARRYING_GLOBAL = "--target"
 
 
 def _global_tokens(flag: str) -> list[str]:
-    return [flag, "cm33"] if flag == _REFUSED_GLOBAL else [flag]
+    return [flag, "cm33"] if flag == _VALUE_CARRYING_GLOBAL else [flag]
 
 
 def test_the_covered_globals_match_the_shared_spec():
-    """An eleventh-flag-added-later guard: if `_GLOBAL_FLAG_SPECS` grows, this
+    """An eighth-flag-added-later guard: if `_GLOBAL_FLAG_SPECS` grows, this
     module must grow with it rather than silently stop covering the new flag."""
     assert set(GLOBAL_FLAGS) == {
         "--project",
         "--board-yaml",
         "--sdk-root",
-        _REFUSED_GLOBAL,
         *_DROPPED_GLOBALS,
     }
 
@@ -501,7 +517,8 @@ def test_a_trailing_global_flag_is_consumed_not_forwarded(
         [verb, "--project", str(workspace_project), *_global_tokens(flag), *_CHILD_ARGS[verb]],
     )
     assert result.exit_code == 0, result.output
-    assert flag not in west_argv["west"]
+    for token in _global_tokens(flag):
+        assert token not in west_argv["west"]
     _child_accepts(verb, west_argv["child"])
 
 
@@ -520,30 +537,9 @@ def test_a_leading_global_flag_is_consumed_not_forwarded(
     argv = [*_global_tokens(flag), verb, "--project", str(workspace_project), *_CHILD_ARGS[verb]]
     result = runner.invoke(app, _reorder_global_flags(argv))
     assert result.exit_code == 0, result.output
-    assert flag not in west_argv["west"]
+    for token in _global_tokens(flag):
+        assert token not in west_argv["west"]
     _child_accepts(verb, west_argv["child"])
-
-
-@pytest.mark.parametrize("verb", ["migrate", "lock", "quality"])
-@pytest.mark.parametrize("leading", [False, True])
-def test_target_is_refused_and_never_reaches_the_child(
-    verb, leading, west_argv, workspace_project
-):
-    """tan-cli#405 measured `--target cm33` leaking its VALUE into the child
-    argv, where a bare `cm33` read as a caller-supplied positional and silently
-    changed which project the child operated on. It is now parsed by tan and
-    refused (tan-cli#398), so `west` is never spawned at all and neither the
-    flag nor its value can perturb the argv -- in either argv position."""
-    tail = ["--project", str(workspace_project), *_CHILD_ARGS[verb]]
-    argv = (
-        _reorder_global_flags([_REFUSED_GLOBAL, "cm33", verb, *tail])
-        if leading
-        else [verb, _REFUSED_GLOBAL, "cm33", *tail]
-    )
-    result = runner.invoke(app, argv)
-    assert result.exit_code == 2, result.output
-    assert "west" not in west_argv
-    assert "--target" in result.output
 
 
 def test_migrate_forwards_its_own_all_after_consuming_it(west_argv, workspace_project):

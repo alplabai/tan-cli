@@ -125,6 +125,21 @@ _PLATFORM_BOUND: dict[str, frozenset[str]] = {
 #: and each of these becomes a permanent blind spot in the envelope
 #: alp-sdk-vscode consumes.
 _UNFROZEN: dict[str, frozenset[str]] = {
+    # These two compare a scaffolded FILE TREE -- the set of paths, and each
+    # path's bytes -- not an envelope. `oracle.rust_run`/`compare` freeze a
+    # `(exit code, envelope dict)` pair, which is the wrong shape for a tree,
+    # so there is nothing to route them through today: freezing them needs a
+    # tree-shaped fixture store that does not exist yet. Declared rather than
+    # silently left live, per this module's own contract -- when `crates/` goes
+    # (tan-cli#269) these become passing skips and the scaffold-content
+    # comparison stops measuring anything, so the fixture store has to land
+    # first or this coverage is lost.
+    "test_scaffold_content_oracle_parity.py": frozenset(
+        {
+            "test_scaffold_file_content_matches_the_oracle",
+            "test_scaffold_file_list_matches_the_oracle",
+        }
+    ),
     "test_oracle_parity.py": frozenset(
         {
             "test_explain_matches_the_oracle",
@@ -132,7 +147,6 @@ _UNFROZEN: dict[str, frozenset[str]] = {
             "test_size_missing_manifest_is_a_known_divergence_from_the_oracle",
             "test_run_no_sdk_is_a_known_divergence_from_the_oracle",
             "test_model_bare_invocation_is_a_known_divergence_from_the_oracle",
-            "test_new_som_is_a_known_divergence_from_the_oracle",
             "test_monitor_is_a_known_divergence_from_the_oracle",
             "test_faultdecode_is_a_known_divergence_from_the_oracle",
         }

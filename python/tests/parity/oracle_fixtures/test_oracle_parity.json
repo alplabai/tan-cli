@@ -487,6 +487,56 @@
   },
   "{\n  \"sdkPath\": \"../rust-sdk\",\n  \"updatedAt\": \"1970-01-01T00:00:00.000Z\"\n}\n"
  ],
+ "tests/parity/test_oracle_parity.py::test_new_som_matches_the_oracle_on_command_and_issue_code#0": [
+  2,
+  {
+   "__raw__": ""
+  }
+ ],
+ "tests/parity/test_oracle_parity.py::test_new_som_matches_the_oracle_on_command_and_issue_code#1": [
+  2,
+  {
+   "command": "new-som",
+   "data": {
+    "subcommand": "new-som"
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "new-som.failed",
+     "message": "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk switch <version|path>`, or place the project near an alp-sdk checkout.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
+ "tests/parity/test_oracle_parity.py::test_new_som_matches_the_oracle_on_command_and_issue_code#2": [
+  2,
+  {
+   "command": "new-som",
+   "data": {
+    "subcommand": "new-som"
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "new-som.failed",
+     "message": "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk switch <version|path>`, or place the project near an alp-sdk checkout.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
  "tests/parity/test_oracle_parity.py::test_plan_from_shows_the_plan_and_writes_nothing[audio_i2s-tone.build-plan]#0": [
   0,
   {
@@ -1753,7 +1803,7 @@
    }
   }
  ],
- "tests/parity/test_oracle_parity.py::test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle#0": [
+ "tests/parity/test_oracle_parity.py::test_validate_no_sdk_guard_matches_the_oracle_at_exit_2#0": [
   2,
   {
    "command": "validate",

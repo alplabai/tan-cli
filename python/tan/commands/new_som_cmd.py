@@ -199,9 +199,19 @@ def _fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE, *,
     would then be a frozen wire string (tan-cli#399). Before this, a
     `--format json` refusal reached `cli.main`'s generic fallback and went out
     as `command: "cli"` / `cli.parse-error`, so the two paths of one command
-    disagreed about whose envelope a consumer was reading."""
+    disagreed about whose envelope a consumer was reading.
+
+    `data` is `{"subcommand": "new-som"}`, not `null`, matching the oracle
+    byte-for-byte -- measured live: `target/debug/tan.exe new-som --format
+    json --sdk-root <bad>` answers `data:{"subcommand":"new-som"}`, exit 2.
+    That is the SAME generic forwarder-preflight shape `sdk_cli.rs::run`
+    hands every `alp-*` forward it refuses before spawning a child (the
+    class faultdecode/model/monitor share), not something specific to any
+    one refusal reason here."""
     if json_mode:
-        _envelope(None, [Issue("new-som.failed", "error", message)], exit_code)
+        _envelope(
+            {"subcommand": "new-som"}, [Issue("new-som.failed", "error", message)], exit_code
+        )
     else:
         typer.echo(f"new-som: {message}", err=True)
     raise typer.Exit(int(exit_code))
@@ -264,7 +274,11 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
     for path in sorted(boards_dir.glob("*.yaml")):
         try:
             doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError:
+        except (yaml.YAMLError, UnicodeDecodeError):
+            # tan-cli#415: `UnicodeDecodeError` is a `ValueError`, not a
+            # `yaml.YAMLError`, so a non-UTF-8 board file escaped this
+            # best-effort scan as an unhandled traceback instead of being
+            # skipped the same way an unparseable one already is.
             continue
         if isinstance(doc, dict) and isinstance(doc.get("name"), str):
             names.add(doc["name"])
@@ -315,7 +329,11 @@ def _family_hw_revisions(
         if path.is_file():
             try:
                 doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            except yaml.YAMLError:
+            except (yaml.YAMLError, UnicodeDecodeError):
+                # tan-cli#415: same widening as `_known_board_names` above --
+                # `UnicodeDecodeError` is a `ValueError`, not a `yaml.YAMLError`,
+                # and previously escaped uncaught rather than resolving to
+                # "not resolvable".
                 return None
             revs = doc.get("hw_revisions")
             if isinstance(revs, dict):
@@ -887,10 +905,23 @@ def new_som(
 
     som_schema_path = _som_schema_path(resolved_sdk)
     soc_schema_path = _soc_schema_path(resolved_sdk)
-    sku_needs_pattern = re.match(_current_sku_pattern(som_schema_path), sku) is None
+    try:
+        sku_needs_pattern = re.match(_current_sku_pattern(som_schema_path), sku) is None
+    except (OSError, UnicodeDecodeError) as exc:
+        # tan-cli#415: `som-preset-v1.schema.json` is SDK-supplied rather than
+        # user-supplied, but an unreadable or non-UTF-8 copy must still reach a
+        # coded envelope -- never a bare traceback with zero bytes on stdout.
+        # `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so it has to
+        # be named explicitly beside it.
+        fail(f"could not read {som_schema_path} ({exc})")
+        return
     preset_doc = yaml.safe_load(preset_text)
     if preset_doc is not None:
-        errors = _schema_errors(preset_doc, som_schema_path)
+        try:
+            errors = _schema_errors(preset_doc, som_schema_path)
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"could not read {som_schema_path} ({exc})")
+            return
         if sku_needs_pattern:
             errors = [e for e in errors if not e.startswith("sku:")]
         if errors:
@@ -900,7 +931,11 @@ def new_som(
             + (" (except the sku pattern -- see step below)" if sku_needs_pattern else "")
         )
     if soc_doc is not None:
-        errors = _schema_errors(soc_doc, soc_schema_path)
+        try:
+            errors = _schema_errors(soc_doc, soc_schema_path)
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"could not read {soc_schema_path} ({exc})")
+            return
         if errors:
             _internal_error("SoC spec", "soc-spec-v1", errors, json_mode)
         say("SoC spec skeleton validates against soc-spec-v1")

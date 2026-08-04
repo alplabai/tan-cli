@@ -927,6 +927,29 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
         if env_dir
         else "ZEPHYR_SDK_INSTALL_DIR unset"
     )
+    # tan-cli#424: on POSIX that command needs `file(1)`, which NOTHING else
+    # tells the customer about -- the SDK's own host-tools step dies with
+    # "ERROR: Host tools installation failed" / "FATAL ERROR: command
+    # `<sdk>/setup.sh -t arm-zephyr-eabi -h` failed", naming neither the tool
+    # nor a remedy. Isolated to that single variable in a pristine
+    # ubuntu:24.04: identical bootstrapped workspace, identical HOME, `file`
+    # the only difference -- WITH it `west sdk install` exits 0 ("All done"),
+    # WITHOUT it exits 1 with those two lines.
+    #
+    # Named HERE rather than added to the manifest's `prerequisites`, because
+    # `tan bootstrap` genuinely does not need it and succeeds without it --
+    # promoting it there would refuse hosts over a tool the bootstrap never
+    # uses. This is the message immediately preceding the failure, which is
+    # where it is actionable. Same shape as `seven_zip_check` above: a
+    # host-tool prerequisite of `west sdk install` itself, surfaced beside the
+    # command that needs it rather than folded into the bootstrap gate.
+    host_tool_note = (
+        ""
+        if os.name == "nt"
+        else " On Linux/macOS the SDK's host-tools step also needs `file` on PATH"
+        " (Debian/Ubuntu: `sudo apt-get install -y file`); without it the install"
+        ' fails with "Host tools installation failed" and names nothing.'
+    )
     return Check(
         "zephyrSdk",
         "fail",
@@ -934,7 +957,7 @@ def zephyr_sdk_check(detected: bool, env_dir: str | None = None) -> Check:
         f"an initialised west workspace, run `{zephyr_sdk_install_command()}`.",
         f"Install the Zephyr SDK toolchain (arm-zephyr-eabi, version "
         f"{ZEPHYR_SDK_INSTALL_VERSION}): from an initialised west workspace, run "
-        f"`{zephyr_sdk_install_command()}`. Details: "
+        f"`{zephyr_sdk_install_command()}`.{host_tool_note} Details: "
         "https://docs.zephyrproject.org/latest/develop/toolchains/zephyr_sdk.html",
     )
 
@@ -3041,6 +3064,27 @@ def doctor(
             for issue in issues:
                 print(f"{issue.severity}: {issue.message}", file=sys.stderr)
         else:
+            # tan-cli#375: an Issue with no backing Check -- a suppressed
+            # `--fix` (`fix_suppressed_issue`) or a broken `.alp/sdk-path`
+            # pin (`project_pin_issue`, tan-cli#263) -- used to vanish here
+            # completely: this branch (the non-exception path) printed only
+            # the summary line, never `issues`. `--fix`'s consent gate
+            # (tan-cli#91) is right to suppress silently TOWARDS THE HOST --
+            # it must never mutate anything unwatched -- but silence towards
+            # the CUSTOMER is a different bug: the JSON envelope already
+            # carried `doctor.fix-suppressed`/`sdk.project-pin-unresolved`
+            # and text mode carried neither. `checks_to_issues(checks)`
+            # already turned every warn/fail Check into an Issue, and each of
+            # those already printed above as a `[  warn]`/`[  fail]` line --
+            # reprinting them here would duplicate the whole report, so this
+            # filters down to exactly the codes no Check line already named.
+            # Printed AFTER every check line and BEFORE the summary: findable
+            # without being buried mid-report, and the report still ends on
+            # the summary line.
+            checked_codes = {c.code or f"doctor.{c.name}" for c in checks}
+            for issue in issues:
+                if issue.code not in checked_codes:
+                    print(f"{issue.severity}: {issue.message}", file=sys.stderr)
             s = data["summary"]
             print(
                 f"\n{s['pass']} passed, {s['warn']} warning(s), {s['fail']} failed.",

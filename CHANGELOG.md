@@ -5,7 +5,16 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.6.0] — Unreleased
+## [0.5.0] — 2026-08-04
+
+*This section was headed `## [0.6.0]` until tan-cli#377. **0.5.0 has never been
+released** — only `v0.5.0-rc1`…`v0.5.0-rc4` — so everything here and everything
+in the rc sections below ships together as the first real 0.5.0. The BREAKING
+`tan validate` exit-code change is measured against **v0.4.1**, the last actual
+release, and a MINOR bump already covers it under this project's own pre-1.0
+rule. A `## [0.6.0]` heading also made the release-body slice unresolvable:
+release.yml extracts the notes by an exact `^## \[<tag minus v>\]` match, so a
+`v0.5.0` tag would have found no section and refused to publish.*
 
 ### Added
 
@@ -53,6 +62,18 @@ All notable changes to `tan` are documented here. Format follows
 
 ### Changed
 
+- **Development builds no longer claim a published release's version**
+  (tan-cli#377). Between releases `tan --version` now answers a development
+  identity (`0.5.0-rc5.dev0` today) instead of repeating the last tag's number:
+  `dev` reported `0.5.0-rc4` for this entire wave, so the published rc4 binary
+  and every build of the development line were indistinguishable in a bug
+  report despite substantial behaviour and contract differences between them.
+  `python/scripts/version_check.py` gained `--not-released`, which REFUSES a
+  tree whose `TAN_VERSION` is the version of an existing release tag that does
+  not point at HEAD — the bump alone would have repeated the defect next cycle.
+  It also now checks that `CHANGELOG.md` carries the section the tag will be
+  released under, moving #212's missing-section failure off the release job
+  (four freezes and an immutable tag too late) and onto the PR.
 - **BREAKING: `tan validate`'s not-yet-ported spawn path now exits 2
   (`VALIDATION_FAILURE`), not 1 (`RUNTIME_FAILURE`)** (tan-cli#262, TAKEN).
   Before this release, a `board.yaml` present with an unresolvable SDK (or,
@@ -164,14 +185,23 @@ All notable changes to `tan` are documented here. Format follows
   flagging it. `output_artefact: app` (no extension) or `app.out` now
   resolves to its same-stem sibling `.bin` again, same as `zephyr.elf` does.
 
-## [0.5.0-rc4] — 2026-08-02
+### Shipped earlier in the 0.5.0 pre-releases
+
+0.5.0 has never been released — only `v0.5.0-rc1` through `v0.5.0-rc4`. The
+four sections below are those pre-releases, folded in unchanged so that this
+entry is the complete 0.5.0 delta against **v0.4.1**, the last real release.
+They are kept as separate dated subsections rather than merged topic-by-topic
+because several later entries supersede earlier ones within the same line, and
+that sequence is what a future reader archaeologising a regression needs.
+
+### [0.5.0-rc4] — 2026-08-02
 
 *Everything below was found by running the published `v0.5.0-rc3` binary as a
 customer would — on real Windows, macOS and Linux hosts, in isolated
 environments — not by testing the source. Two of them destroy or misplace a
 user's files; one silently drops a core from a multi-core build.*
 
-### Fixed
+#### Fixed
 
 - **`tan bootstrap --dry-run` moved the user's alp-sdk checkout and rewrote
   `~/.alp/sdk-default`.** One command on a clean directory left `alp-sdk/`
@@ -244,7 +274,7 @@ user's files; one silently drops a core from a multi-core build.*
   seam1's harness now **compares** a legitimate refusal on both sides instead of
   treating alp-sdk's non-zero emit as a harness abort (#320).
 
-### Internal
+#### Internal
 
 - Two test fixtures wrote an executable and immediately `exec`'d it with no
   guard, so a sibling test's still-open write handle could make the kernel
@@ -253,20 +283,20 @@ user's files; one silently drops a core from a multi-core build.*
   0 after the fix). The guard is hoisted so every fixture picks it up; the crate
   now has zero unguarded write-then-exec sites (#318, #333).
 
-### Known issues
+#### Known issues
 
 - `@alplabai/tan` has never published to npm: `NPM_TOKEN` is a classic token and
   `npm publish` demands an OTP. Needs an automation token (#233).
 - `SUPPORTED_CLI_VERSION` still lives in alp-sdk-vscode rather than being
   derived from the Python tan (#268).
 
-## [0.5.0-rc3] — 2026-08-01
+### [0.5.0-rc3] — 2026-08-01
 
 *Found by running the published `v0.5.0-rc2` binary end to end on a real
 Windows host -- fresh and dirty -- rather than testing the source or trusting a
 green CI run on a clean runner. Every defect below was invisible to both.*
 
-### Fixed
+#### Fixed
 
 - **`tan doctor` exited 4 on every fresh install.** `tan bootstrap` succeeds and
   deliberately leaves `west` off PATH (its own next-steps block says to activate
@@ -332,7 +362,7 @@ green CI run on a clean runner. Every defect below was invisible to both.*
   workspace or the user owns), so a fresh install gets past the failure
   outright rather than only being warned about it (#306, release-blocker).
 
-### Added
+#### Added
 
 - **`clean-host.yml` — the shipped-artefact gate on a genuinely clean host**
   (#278, escalated to a release-blocker). All six defects above were found by
@@ -364,13 +394,13 @@ green CI run on a clean runner. Every defect below was invisible to both.*
   CPython's `ssl` on win32 already falls back to the Windows certificate store
   where macOS and Linux have no equivalent.
 
-### Known
+#### Known
 
 - `tan bootstrap` still refuses the documented quickstart layout (`tan.exe` and
   `alp-sdk/` in one directory) with "holds more than this checkout", and the
   remedy it offers moves the user's checkout (#302).
 
-## [0.5.0-rc2] — 2026-08-01
+### [0.5.0-rc2] — 2026-08-01
 
 *Everything the maintainer's first real `v0.5.0-rc1` run turned up, plus what
 reviewing those fixes turned up in turn. Six release-blockers, and one theme:
@@ -383,7 +413,7 @@ this; the delivery mechanism is unchanged from rc1 (`alp-sdk-vscode` odd-minor
 pre-release channel, `prerelease: true` / `make_latest: false`, both installers
 resolving `latest` which excludes prereleases).
 
-### Fixed
+#### Fixed
 
 - **`tan build` and `tan flash` could not find `west` on a host that had
   bootstrapped successfully (#289, release-blocker).** `4d70bdc`/`eac6cbf`
@@ -529,7 +559,7 @@ resolving `latest` which excludes prereleases).
   `getting-started.yml` smoke-testing the **Rust** `tan` while the release ships
   a PyInstaller freeze (#278).
 
-### Changed
+#### Changed
 
 - **`doctor`'s `--build` is accepted and inert.** The check set is now
   unconditional, so there is no build-gated half left. `README.md` no longer
@@ -541,7 +571,7 @@ resolving `latest` which excludes prereleases).
   workspace; accepting the flag as a no-op would have given users a Fix button
   that reports success having repaired nothing.
 
-## [0.5.0-rc1] — 2026-07-31
+### [0.5.0-rc1] — 2026-07-31
 
 *The first release in which `tan` is a Python program: the planner relocated
 into it, so `tan` now plans AND executes, and the four assets are PyInstaller
@@ -558,7 +588,7 @@ both installers resolve `latest` through GitHub, which excludes prereleases, so
 `install.sh` and `install.ps1` still install the last stable release. Everyone
 else installs by hand.
 
-### Changed
+#### Changed
 - **The planner relocated into `tan`, so `tan` now plans AND executes.**
   alp-sdk's `scripts/alp_orchestrate/` (20 modules, ~6.2k lines) is now
   `python/tan/planner/`, and `tan build` renders the build plan **in-process**
@@ -641,7 +671,7 @@ else installs by hand.
   `metadata/schemas/board.schema.json` before it plans anything. The frozen
   one-file binary measures 12377580 B against the 15000000 B ceiling.
 
-### Added
+#### Added
 - **`tan build --execute` -- run a plan that came from `--plan-from`.** ADDED
   BY THIS PORT: v0.4.1 has no such flag, and there `--plan-from` implies
   `--plan` and outranks `--native`, so a file-supplied plan could not be
@@ -685,7 +715,7 @@ else installs by hand.
   generic "still needs resolution" note, which used to name `device` even for
   a server whose draft carries no such key.
 
-### Fixed
+#### Fixed
 - **A pending `TBD` placeholder can no longer reach a flasher** (#222). alp-sdk
   writes `TBD` into a manifest field it has not filled in yet, and every guard
   on the flash path used to test for EMPTY -- which is the one thing a `TBD`
@@ -730,10 +760,10 @@ else installs by hand.
   compatibility fix. #262 is re-scoped to the one case that is a genuine
   v0.6.0 decision: `validate.failed` after a real spawn.
 
-  **Corrected 2026-08 (v0.6.0): the paragraph this replaced claimed
+  **Corrected 2026-08 (v0.5.0): the paragraph this replaced claimed
   `validate.spawn-not-implemented` was still exit 1 at this port's rc1 tag.
   That was true when written and is not true of the current tree — #262 was
-  decided and TAKEN in v0.6.0 (see that section below for the full BREAKING
+  decided and TAKEN in v0.5.0 (see that section above for the full BREAKING
   change): `validate.spawn-not-implemented` now also emits exit 2
   (`VALIDATION_FAILURE`), the same code the guard cases above already used,
   closing the divergence this paragraph used to describe as open.** The two

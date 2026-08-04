@@ -642,19 +642,18 @@ def test_validate_board_yaml_missing_guard_matches_the_oracle_at_exit_2(work_dir
 
 
 @LIVE_GATE
-def test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
+def test_validate_no_sdk_guard_matches_the_oracle_at_exit_2(work_dir, tmp_path):
     """`board.yaml` present, no SDK resolvable: the oracle's pre-spawn guard
-    answers exit 2 `validate.sdk-root-unresolved`; the port answers exit 2
-    `validate.spawn-not-implemented` (the full spawn path is simply not
-    ported yet) -- the genuine, tracked divergence `validate_cmd.py`'s own
-    docstring calls tan-cli#262. Both exit 2 since #262 landed: the port moved
-    off exit 1 deliberately ("no verdict available" is the VALIDATOR's verdict,
-    not a tan crash), so only the issue code is the real divergence now. Both
-    stay pinned rather than narrowed to "issue code only", which would hide
-    that coincidence going away. Pinned as a KNOWN divergence, following the
-    same exclude-and-pin convention `test_init_sdk_root_flag_pin_is_a_known_
-    divergence_from_the_oracle` above uses, rather than asserted as parity
-    that does not exist.
+    answers exit 2 `validate.sdk-root-unresolved`. This used to be pinned as a
+    KNOWN divergence -- the port answered exit 2 `validate.spawn-not-
+    implemented` while the full spawn path was unported (tan-cli#262) -- but
+    tan-cli#376 landed the real spawn path, which reaches this SAME guard
+    (`resolve_sdk_root_ladder`) instead of the placeholder refusal that used
+    to sit in front of it: see `validate_cmd.py`'s own module docstring,
+    "`validate.spawn-not-implemented` is GONE as of #376". Both sides now
+    agree on issue code too, so this asserts the converged behaviour instead
+    of the stale gap (the frozen fixture backing this case was renamed with
+    it, 2026-08-03 -- see `oracle_fixtures/PROVENANCE.txt`).
 
     `scrub_roots=(work_dir, home)`: see the sibling `test_validate_board_
     yaml_missing_guard_matches_the_oracle_at_exit_2` above for why an empty
@@ -667,7 +666,7 @@ def test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle(work_dir, t
     r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=(work_dir, home))
     p_code, p_out = _run(python_command(), argv, work_dir, home)
     assert (r_code, [i["code"] for i in r_out["issues"]]) == (2, ["validate.sdk-root-unresolved"])
-    assert (p_code, [i["code"] for i in p_out["issues"]]) == (2, ["validate.spawn-not-implemented"])
+    assert (p_code, [i["code"] for i in p_out["issues"]]) == (2, ["validate.sdk-root-unresolved"])
 
 
 @LIVE_GATE
@@ -980,48 +979,42 @@ def test_model_bare_invocation_is_a_known_divergence_from_the_oracle(work_dir, t
     assert (p_code, [i["code"] for i in p_out["issues"]]) == (1, ["model.unknown-subcommand"])
 
 
-@_ORACLE_REQUIRED
-def test_new_som_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
-    """tan-cli#254. The port's ``new-som`` DOES accept ``--format`` (a hidden,
-    unread option mirroring clap's ``global = true`` GlobalArgs), but it is
-    not in ``cli.py``'s ``_HONOURS_ROOT_FORMAT``, so ``--format json`` still
-    never reaches a ``new-som``-shaped envelope -- ``root`` wraps the run in
-    its generic ``command: "cli"`` / ``cli.parse-error`` envelope instead,
-    where the oracle's own ``--format json`` reaches a real
-    ``command: "new-som"`` refusal (``new-som.failed``, exit 2). The bare,
-    ``--format``-free invocation now AGREES at exit 2 on both sides: the
-    port's SDK-root-unresolved preflight moved off the flat exit 1 onto the
-    forwarder's own ``ValidationFailure``. What still differs there is the
-    wording alone -- the port adds a ``git clone`` suggestion the oracle
-    never had."""
+def test_new_som_matches_the_oracle_on_command_and_issue_code(work_dir, tmp_path):
+    """tan-cli#254, closed. Three invocation shapes, all now agreeing with the
+    oracle on ``command``/issue code/exit code; wording is the one thing left
+    unpinned (the port adds a ``git clone`` remedy suggestion the oracle never
+    had).
+
+    * Bare ``new-som`` (no ``--format``): both exit 2 on the SDK-root-
+      unresolved preflight.
+    * Post-subcommand ``new-som --format json``: tan-cli#399 gave
+      ``new_som_cmd`` a real ``new-som.failed`` envelope -- it used to have no
+      ``emit(`` call at all (``del ... output_format`` was the whole handling
+      of the flag), so this answered the generic ``command: "cli"`` /
+      ``cli.parse-error`` fallback instead.
+    * Pre-subcommand ``--format json new-som``: this was the one shape left
+      diverging even after #399, because ``cli.py`` used to gate the
+      pre-subcommand position behind a hand-listed ``_HONOURS_ROOT_FORMAT``
+      frozenset that ``new-som`` was never added to. tan-cli#378 replaced that
+      whole mechanism with uniform ``--format`` RELOCATION
+      (``_reorder_global_flags`` moving the token past the subcommand name to
+      the parameter that already declares and reads it) -- every registered
+      command is covered with nothing to add per-command, so this position now
+      reaches the same ``new-som.failed`` envelope as the post-subcommand one,
+      matching the oracle's clap ``global = true`` semantics.
+    """
     home = tmp_path / "home"
-    r_code, _ = _run([RUST], ["new-som"], work_dir, home)
+    r_code, _ = rust_run(["new-som"], work_dir, home, scrub_roots=())
     p_code, _ = _run(python_command(), ["new-som"], work_dir, home)
-    assert r_code == 2
-    assert p_code == 2
-    _, r_json_out = _run([RUST], ["new-som", "--format", "json"], work_dir, home)
-    _, p_json_out = _run(python_command(), ["new-som", "--format", "json"], work_dir, home)
-    assert r_json_out["command"] == "new-som"
-    assert [i["code"] for i in r_json_out["issues"]] == ["new-som.failed"]
-    # tan-cli#399 CLOSED this half: the port used to answer `command: "cli"` /
-    # `cli.parse-error` here, because `new_som_cmd` contained no `emit(` call
-    # at all -- `del ... output_format` was the whole handling of `--format`.
-    # Post-subcommand `--format json` now reaches a real `new-som` envelope and
-    # AGREES with the oracle on command, issue code and exit 2.
-    assert p_json_out["command"] == "new-som"
-    assert [i["code"] for i in p_json_out["issues"]] == ["new-som.failed"]
-    # What has NOT closed, and is what keeps this named a divergence: the
-    # PRE-subcommand spelling. `new-som` is still absent from `cli.py`'s
-    # `_HONOURS_ROOT_FORMAT`, so `tan --format json new-som` is still wrapped in
-    # the generic `cli` refusal while the oracle -- where `--format` is a clap
-    # `global = true` arg -- reaches the same `new-som.failed` from either
-    # position. Closing it needs the frozenset entry AND a `ctx: typer.Context`
-    # on `new_som` reading `ctx.obj["format"]`; neither half is useful alone.
-    _, r_root_out = _run([RUST], ["--format", "json", "new-som"], work_dir, home)
-    _, p_root_out = _run(python_command(), ["--format", "json", "new-som"], work_dir, home)
-    assert r_root_out["command"] == "new-som"
-    assert p_root_out["command"] == "cli"
-    assert [i["code"] for i in p_root_out["issues"]] == ["cli.parse-error"]
+    assert r_code == p_code == 2
+
+    for argv in (["new-som", "--format", "json"], ["--format", "json", "new-som"]):
+        _, r_out = rust_run(argv, work_dir, home, scrub_roots=())
+        _, p_out = _run(python_command(), argv, work_dir, home)
+        assert r_out["command"] == p_out["command"] == "new-som", (argv, r_out, p_out)
+        assert r_out["exitCode"] == p_out["exitCode"] == 2, (argv, r_out, p_out)
+        assert [i["code"] for i in r_out["issues"]] == ["new-som.failed"], (argv, r_out)
+        assert [i["code"] for i in p_out["issues"]] == ["new-som.failed"], (argv, p_out)
 
 
 @_ORACLE_REQUIRED

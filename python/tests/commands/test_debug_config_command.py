@@ -362,14 +362,24 @@ def test_a_bad_format_is_a_usage_error_not_a_traceback(tmp_path):
     assert "Traceback" not in proc.stderr
 
 
-def test_a_command_that_ignores_the_root_format_refuses_it_rather_than_dropping_it(
-    tmp_path,
-):
-    """`--format` is accepted before the subcommand for `debug-config` (four
-    goldens invoke it that way, mirroring clap's `global = true`). A command that
-    does not yet read it must REFUSE the pre-subcommand position: accepting it
-    and running in text mode means exit 0 with nothing on stdout, which is an
-    envelope-less `--format json` run -- the break this whole port guards."""
+def test_a_pre_subcommand_format_reaches_the_command_not_a_root_refusal(tmp_path):
+    """INVERTED by tan-cli#378, deliberately. This asserted the opposite --
+    `tan --format json validate --offline` must answer `cli.parse-error` -- on
+    the premise that a command not reading the root `--format` would otherwise
+    run in silent text mode (exit 0, nothing on stdout, an envelope-less
+    `--format json` run). The premise was sound; #378 removed it, by relocating
+    the flag past the subcommand name onto the command's OWN always-read
+    `--format` instead of hand-listing which commands were allowed to precede
+    it. Refusing is now the defect, not the guard: the refusal named
+    `command: "cli"` for argv the oracle runs, for the 20 of 32 commands the
+    allowlist never reached.
+
+    Anchored on the oracle, not on the port's own new answer -- measured,
+    `target/debug/tan.exe --format json validate --offline` in an empty
+    directory is exit 2 with `command: "validate"` and
+    `validate.board-yaml-missing`. That is what this now pins, so a
+    re-introduced root-level refusal (a `cli.parse-error`, whatever its
+    message) fails here again."""
     proc = subprocess.run(
         [sys.executable, "-m", "tan", "--format", "json", "validate", "--offline"],
         capture_output=True,
@@ -386,7 +396,12 @@ def test_a_command_that_ignores_the_root_format_refuses_it_rather_than_dropping_
     )
 
     assert proc.returncode == 2
-    assert json.loads(proc.stdout)["issues"][0]["code"] == "cli.parse-error"
+    envelope_ = json.loads(proc.stdout)
+    assert envelope_["command"] == "validate", (
+        "the pre-subcommand `--format json` must reach `validate` and be reported "
+        f"as ITS envelope, not the CLI's: {envelope_}"
+    )
+    assert envelope_["issues"][0]["code"] == "validate.board-yaml-missing", envelope_
 
 
 def test_no_os_or_backend_flag_exists(tmp_path):

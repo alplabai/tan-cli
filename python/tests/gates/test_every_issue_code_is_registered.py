@@ -787,7 +787,17 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         name="fail",
         arg_index=0,
-        expected_calls=5,
+        # 6, not 5, since tan-cli#376 ported the spawn path: it DROPPED the
+        # `spawn-not-implemented` refusal and added the two guards that refusal
+        # stood in front of -- `sdk-root-unresolved` (the oracle's own guard 2)
+        # and `spawn-failed` (the subprocess could not be started at all). Each
+        # checked against the registry before the bump, which is the point of
+        # the count.
+        # 7 as of the #376 follow-up, which ported the oracle's THIRD pre-spawn
+        # guard (`crates/tan-cli/src/commands/validate.rs:124-129`):
+        # `python-too-old`, the one #376 left out while its own module docstring
+        # claimed three guards were implemented.
+        expected_calls=7,
         sites=1,
     ),
     ("tan/commands/doctor_cmd.py", "checks_to_issues"): dict(
@@ -995,12 +1005,29 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
         ),
         sites=1,
     ),
-    # `Issue(f"validate.{result.outcome}", ...)` at validate_cmd.py:546 only
-    # ever fires inside `for message in result.messages`, and
-    # `outcome = OUTCOME_CLEAN if not messages else OUTCOME_SCHEMA_VIOLATION`
-    # (validate_cmd.py:272) means a non-empty `messages` implies
-    # `outcome == OUTCOME_SCHEMA_VIOLATION == "schema-violation"` always.
-    ("tan/commands/validate_cmd.py", "result.outcome"): dict(suffixes=frozenset({"schema-violation"}), sites=1),
+    # `Issue(f"validate.{result.outcome}", ...)` -- ONE template, fed by BOTH
+    # of `validate()`'s paths (that single funnel is deliberate: a second
+    # template for the spawn path would be a second, separately-declared site
+    # for the same wire fact). `result.outcome`'s value space is
+    # `validate_cmd._STATUS_OUTCOME`'s four outcomes plus `failed`, ALL FIVE
+    # of them. Was `{"schema-violation"}` alone until tan-cli#376 ported the
+    # spawn path -- offline can still only reach `schema-violation` (`outcome
+    # = OUTCOME_CLEAN if not messages else OUTCOME_SCHEMA_VIOLATION`), the
+    # other four arrive only from a spawned validator.
+    # `clean` IS reachable, counter-intuitively: `validate_board_yaml.py`
+    # renders every diagnostic to stderr and only RETURNS 1 when
+    # `collector.has_errors()`, so a board carrying warnings only exits 0 with
+    # findings to report -- exit 0, `data.outcome: "clean"`, and one
+    # `validate.clean` issue at severity `warning`. That is the oracle's own
+    # `to_cli_issues` shape (it maps every parsed issue to
+    # `validate.<outcome>` before its clean-and-empty early return), not an
+    # invention of this port.
+    ("tan/commands/validate_cmd.py", "result.outcome"): dict(
+        suffixes=frozenset(
+            {"clean", "schema-violation", "missing-preset", "hardware-revision", "failed"}
+        ),
+        sites=1,
+    ),
     # `log.warn(*skew)` / `log.warn(*ceiling)` in bootstrap_cmd.py (no line
     # numbers -- see the note on the entry above)
     # unpack the `(suffix, message)` pairs `python_floor_skew_warning()` and

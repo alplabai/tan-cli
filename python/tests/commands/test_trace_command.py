@@ -162,9 +162,14 @@ def test_sdk_root_unresolved_is_a_validation_failure(tmp_path, monkeypatch):
         {
             "code": "trace.sdk-root-unresolved",
             "severity": "error",
+            # tan-cli#381: was "pin one with `tan sdk switch <version|path>`",
+            # a subcommand this build refuses. Now the shared
+            # `sdk_cmd.NO_SDK_NEXT_STEPS` tail, same as generate/model/kconfig.
             "message": (
-                "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk "
-                "switch <version|path>`, or place the project near an alp-sdk checkout."
+                "alp-sdk root is unresolved. Use --sdk-root, place the project near "
+                "an alp-sdk checkout, or get an alp-sdk checkout (`git clone "
+                "https://github.com/alplabai/alp-sdk`), then point tan at it with "
+                "`--sdk-root <path>`."
             ),
         }
     ]

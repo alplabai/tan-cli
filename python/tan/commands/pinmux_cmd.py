@@ -353,7 +353,14 @@ def _resolve(
             return sdk, resolved_family, None, [], issues, ExitCode.VALIDATION_FAILURE
         try:
             text = table_path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
+            # tan-cli#415: `UnicodeDecodeError` is a `ValueError`, not an
+            # `OSError`, so `except OSError` alone let a non-UTF-8 pinmux
+            # table escape `_resolve` uncaught -- caught upstream only by
+            # `pinmux()`'s generic backstop, which reported it as an `error`-
+            # severity `pinmux.internal-failure` at a non-zero exit instead of
+            # this SAME `warning`-severity "I don't know" every other
+            # unreadable table already gets at exit 0.
             issues.append(
                 Issue(
                     "pinmux.table-not-found",

@@ -47,3 +47,9 @@ python/*.egg-info/
 # depth; `git add -f` if one is ever deliberately meant to ship.
 .claude/
 CLAUDE.md
+
+# A local pip HTTP cache lands here whenever PIP_CACHE_DIR is pointed at the
+# checkout (a container run with the repo bind-mounted does exactly that).
+# Binary response bodies, machine-local and worthless to anyone else -- they
+# were staged once by a `git add -A` and caught before the commit.
+pip/

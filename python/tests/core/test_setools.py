@@ -20,10 +20,13 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
+import tan
 from tan.core.flash_plan import FlashPlanError
 from tan.core import setools as setools_module
 from tan.core.setools import (
@@ -304,7 +307,13 @@ def test_sign_slot0_copies_writes_and_derives_the_address(tmp_path):
     )
 
     assert address == _REAL_ATOC_ADDRESS
-    assert Path(atoc_path).samefile(setools_dir / "build" / "AppTocPackage.bin")
+    # tan-cli#380: the returned path is an IMMUTABLE per-run COPY, never the
+    # shared `build/AppTocPackage.bin` the next sign in this install
+    # overwrites -- same bytes, different file.
+    shared = setools_dir / "build" / "AppTocPackage.bin"
+    assert not Path(atoc_path).samefile(shared)
+    assert Path(atoc_path).read_bytes() == shared.read_bytes()
+    assert Path(atoc_path).parent == setools_dir / "build" / "tan-atoc"
 
     copied = setools_dir / "build" / "images" / "m55_he.bin"
     assert copied.read_bytes() == artefact.read_bytes()
@@ -465,3 +474,213 @@ def test_find_app_gen_toc_then_sign_slot0_end_to_end(tmp_path, monkeypatch):
     )
     assert address == _REAL_ATOC_ADDRESS
     assert os.path.isfile(atoc_path)
+
+
+# ── tan-cli#380: two real processes, one SETOOLS install ────────────────────
+#
+# The fake `app-gen-toc` above is a shell/batch script; these two tests need
+# one that can also RENDEZVOUS with a concurrent copy of itself, so it is
+# written in Python and reached through a one-line wrapper the host can
+# actually spawn. One implementation, both hosts.
+
+#: A fake `app-gen-toc` that stamps its own MARKER into the shared blob and
+#: its own ADDRESS into the shared map -- the distinct markers tan-cli#380's
+#: acceptance criteria ask for, so a cross-paired result is visible rather
+#: than inferred. Reads no `-f` config: the wrapper hard-codes which run it is.
+_FAKE_GEN_TOC_PY = '''\
+"""Fake `app-gen-toc` for tan-cli#380's overlap test. argv: MARKER ADDRESS
+RENDEZVOUS_S (the real tool's own `-f <config>` is passed too and ignored --
+this fake's identity comes from its wrapper, not from the config)."""
+import os
+import sys
+import time
+
+MARKER, ADDRESS, RENDEZVOUS_S = sys.argv[1], sys.argv[2], float(sys.argv[3])
+
+os.makedirs("build", exist_ok=True)
+with open(os.path.join("build", "ready-" + MARKER), "wb"):
+    pass
+
+# BOUNDED rendezvous: wait for another copy of this fake to announce itself.
+# This is what makes the UNSERIALIZED failure deterministic instead of a
+# timing coincidence -- when two runs are not locked apart, both are provably
+# inside their signing window at the same instant. When they ARE locked apart
+# no partner can ever appear, so this costs the first holder RENDEZVOUS_S
+# once and nothing after that.
+deadline = time.monotonic() + RENDEZVOUS_S
+while time.monotonic() < deadline:
+    if any(n.startswith("ready-") and n != "ready-" + MARKER for n in os.listdir("build")):
+        break
+    time.sleep(0.01)
+
+# Blob first, map second, with a gap between them: that gap is exactly where
+# an unserialized sibling overwrites the shared blob, leaving the address
+# appended below paired with bytes that are no longer the ones this run made.
+with open(os.path.join("build", "AppTocPackage.bin"), "wb") as fh:
+    fh.write(MARKER.encode("ascii"))
+time.sleep(0.3)
+with open(os.path.join("build", "app-package-map.txt"), "a", encoding="utf-8") as fh:
+    fh.write("APP Package Start Address: " + ADDRESS + "\\n")
+'''
+
+#: What each child process runs: one real `sign_slot0` in its own OS process
+#: (two real processes is the acceptance criterion -- threads would share the
+#: lock's own file descriptor and prove nothing about the cross-process case),
+#: reporting the (path, address) pair it was handed.
+_CHILD_SIGN = '''\
+import json, sys
+from tan.core.setools import sign_slot0
+path, address = sign_slot0(sys.argv[1], sys.argv[2], sys.argv[3], "m55_he", "0x80010000")
+sys.stdout.write(json.dumps({"path": path, "address": address}))
+'''
+
+#: A child that must REFUSE rather than wait out the full `_LOCK_WAIT_S`
+#: (180s) -- it shortens its own copy of the constant first.
+_CHILD_SIGN_IMPATIENT = '''\
+import sys
+from tan.core import setools
+from tan.core.flash_plan import FlashPlanError
+setools._LOCK_WAIT_S = 0.3
+try:
+    setools.sign_slot0(sys.argv[1], sys.argv[2], sys.argv[3], "m55_he", "0x80010000")
+except FlashPlanError as err:
+    sys.stdout.write(str(err))
+    sys.exit(3)
+'''
+
+#: Long enough to absorb a cold interpreter start on the slower of the two
+#: children (measured worst case here is well under a second) -- the margin is
+#: what the rendezvous above spends to be deterministic, and the whole test
+#: pays it exactly once because the lock is what keeps the partner away.
+_RENDEZVOUS_S = 2.0
+
+
+def _child_env() -> dict[str, str]:
+    """`PYTHONPATH` pinned to the package root of the `tan` this test itself
+    imported -- an editable install elsewhere on the machine would otherwise
+    decide which `setools.py` the children get, and they must be testing THIS
+    one."""
+    root = str(Path(tan.__file__).resolve().parent.parent)
+    return {**os.environ, "PYTHONPATH": root}
+
+
+def _write_marker_app_gen_toc(setools_dir: Path, marker: str, address: str) -> str:
+    """A spawnable `app-gen-toc-<marker>` wrapper around `_FAKE_GEN_TOC_PY`,
+    bound to one marker/address pair. `sign_slot0` takes the tool path
+    explicitly, so two wrappers in one install is how each concurrent run gets
+    a distinguishable identity without the fake having to parse a config."""
+    fake = setools_dir / "fake_gen_toc.py"
+    if not fake.exists():
+        fake.write_text(_FAKE_GEN_TOC_PY, encoding="utf-8", newline="\n")
+    args = f'"{fake}" {marker} {address} {_RENDEZVOUS_S}'
+    if os.name == "nt":
+        wrapper = setools_dir / f"app-gen-toc-{marker}.bat"
+        wrapper.write_text(
+            f'@echo off\r\n"{sys.executable}" {args}\r\nexit /b %errorlevel%\r\n',
+            encoding="utf-8",
+        )
+    else:
+        wrapper = setools_dir / f"app-gen-toc-{marker}"
+        wrapper.write_text(
+            f'#!/bin/sh\nexec "{sys.executable}" {args}\n', encoding="utf-8", newline="\n"
+        )
+        os.chmod(wrapper, 0o755)
+    return str(wrapper)
+
+
+def test_two_processes_signing_one_setools_dir_never_cross_pair(tmp_path):
+    """tan-cli#380 (BLOCKER, HARDWARE SAFETY). `build/AppTocPackage.bin` and
+    `build/app-package-map.txt` are FIXED, install-wide paths. Two `tan flash`
+    processes sharing one `$SETOOLS_DIR` used to interleave on them freely:
+    one could unlink or overwrite the blob while the other signed, or after
+    the other had already paired an address with that path -- and the path was
+    handed back MUTABLE, so even a perfectly-signed run could be corrupted
+    between `sign_slot0` returning and J-Link reading it. What lands in on-die
+    MRAM is then another run's ATOC at this run's address; recovery is
+    re-provisioning over SE-UART.
+
+    Two REAL processes, both signing into one install with the SAME `entry_id`
+    (`m55_he` -- the realistic case: two boards, same core, one SETOOLS
+    install), each with its own marker blob and its own address. Every run
+    must get back its OWN bytes at its OWN address, from a path that still
+    exists and still holds them after both runs are finished.
+
+    The overlap is FORCED, not hoped for: each fake `app-gen-toc` announces
+    itself and waits (bounded, `_RENDEZVOUS_S`) for its sibling before writing
+    anything, so if the two are not serialized they are provably mid-sign at
+    the same instant. Serialized, the handshake simply times out for the first
+    holder and the second finds a flag already there. The pass is
+    deterministic (mutual exclusion is); the pre-fix failure is deterministic
+    down to the sub-millisecond interleaving of two writes that are, without
+    the lock, aimed at the same file.
+    """
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    runs = [("ALPHA", "0x8001a000"), ("BETA", "0x8001b000")]
+
+    procs = []
+    for marker, address in runs:
+        artefact = tmp_path / f"zephyr-{marker}.bin"
+        artefact.write_bytes(f"app-image-{marker}".encode("ascii"))
+        procs.append(
+            subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    _CHILD_SIGN,
+                    str(setools_dir),
+                    _write_marker_app_gen_toc(setools_dir, marker, address),
+                    str(artefact),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=_child_env(),
+            )
+        )
+
+    results = []
+    for (marker, address), proc in zip(runs, procs):
+        out, err = proc.communicate(timeout=120)
+        assert proc.returncode == 0, f"{marker} run failed ({proc.returncode}): {err or out}"
+        results.append((marker, address, json.loads(out)))
+
+    for marker, address, got in results:
+        assert got["address"] == address, f"{marker} was handed another run's address: {got}"
+        blob = Path(got["path"])
+        assert blob.is_file(), f"{marker}'s ATOC was deleted by the other run: {got['path']}"
+        assert blob.read_bytes() == marker.encode("ascii"), (
+            f"{marker}'s returned ATOC holds another run's bytes: {blob.read_bytes()!r}"
+        )
+    assert results[0][2]["path"] != results[1][2]["path"], "both runs got the same mutable path"
+
+    # The append-mode map keeps BOTH runs' records -- #373's guarantee has to
+    # survive #380's fix, so the serialization must not have eaten either.
+    map_text = (setools_dir / "build" / "app-package-map.txt").read_text(encoding="utf-8")
+    assert map_text.count("APP Package Start Address:") == 2, map_text
+
+
+def test_a_second_process_cannot_enter_the_sign_step_while_the_lock_is_held(tmp_path):
+    """The deterministic half of the proof above: with the lock held here, a
+    real second process must not touch the install AT ALL -- not prepare it,
+    not spawn `app-gen-toc`, not read an address. It refuses with the sign
+    lock named (its own `_LOCK_WAIT_S` shortened so the test does not sit out
+    the real 180s), and `build/` -- everything `sign_slot0` creates -- is
+    still absent afterwards."""
+    setools_dir = tmp_path / "setools"
+    setools_dir.mkdir()
+    script = _write_fake_app_gen_toc(setools_dir / _script_name())
+    artefact = _artefact_bin(tmp_path)
+
+    with setools_module._setools_lock(str(setools_dir)):
+        proc = subprocess.run(
+            [sys.executable, "-c", _CHILD_SIGN_IMPATIENT, str(setools_dir), script, str(artefact)],
+            capture_output=True,
+            text=True,
+            env=_child_env(),
+            timeout=120,
+        )
+
+    assert proc.returncode == 3, f"the second process was not held off: {proc.stdout}{proc.stderr}"
+    assert "sign lock" in proc.stdout, proc.stdout
+    assert not (setools_dir / "build").exists(), "the blocked run still touched the install"

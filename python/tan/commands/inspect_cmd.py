@@ -60,6 +60,7 @@ from typing import Any
 import typer
 
 from tan.commands.build_cmd import _abs_posix, resolve_sdk_root_ladder
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -165,8 +166,12 @@ def collect_resolved_values(context: ResolvedDebugContext) -> list[dict[str, Any
             "detail": (
                 "Resolved alp-sdk root used for scripts and schemas."
                 if context.sdk_root is not None
-                else "Set with --sdk-root <path> or `tan sdk switch <path>` when "
-                "automatic discovery is ambiguous."
+                # tan-cli#381: named `tan sdk switch <path>`, which refuses in
+                # this build (`sdk_cmd._run_not_ported`) -- the #305 dead end,
+                # re-introduced by a port written after that fix landed. The
+                # unresolved arm is the only one a reader acts on, so it takes
+                # the shared NO_SDK_NEXT_STEPS instead of its own wording.
+                else f"Unresolved -- {NO_SDK_NEXT_STEPS}."
             ),
         },
         {

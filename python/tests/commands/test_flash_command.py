@@ -618,6 +618,80 @@ def test_a_tool_that_does_not_exist_is_a_failed_spawn_not_a_traceback():
     assert "could not spawn" in outcome.stderr
 
 
+# ── _spawn_pipeline (tan-cli#401): the decompressor|dd pipeline verdict ─────
+#
+# `plan_yocto_wic` builds exactly `<decompressor> | dd of=<target> ...` for a
+# compressed `.wic.gz`/`.wic.xz` Yocto artefact -- these stand in for the real
+# `gunzip`/`dd` pair with a Python one-liner on each side, so the cases run on
+# every platform this suite runs on.
+
+
+def _stub(code: str) -> list[str]:
+    return [sys.executable, "-c", code]
+
+
+def test_spawn_pipeline_decompressor_failure_is_the_verdict_not_dds_stats():
+    """The test that would have caught tan-cli#401. `dd` reads whatever the
+    left process wrote before it died and reports its OWN rc 0 plus
+    throughput stats -- exactly the truncated-`.wic.gz` shape Hakan measured.
+    The pipeline's overall verdict must be the decompressor's failure, its
+    stderr, and its non-zero rc -- not dd's."""
+    left = _stub(
+        "import sys; sys.stdout.write('partial'); sys.stdout.flush(); "
+        "sys.stderr.write('gunzip: image.wic.gz: unexpected end of file\\n'); "
+        "sys.stderr.write('gunzip: uncompress failed\\n'); sys.exit(1)"
+    )
+    right = _stub(
+        "import sys; data = sys.stdin.buffer.read(); "
+        "sys.stderr.write(f'{len(data)} bytes transferred\\n'); sys.exit(0)"
+    )
+    outcome = flash_cmd._spawn_pipeline(left, right, capture=True, timeout=10.0)
+    assert outcome.success is False
+    assert outcome.returncode == 1
+    assert "gunzip: image.wic.gz: unexpected end of file" in outcome.stderr
+
+    message = flash_cmd._execute_message(outcome, "yocto_wic", "a55")
+    assert "unexpected end of file" in message
+
+
+def test_spawn_pipeline_dds_own_failure_is_still_reported():
+    """The right process (`dd`) failing with the decompressor clean must still
+    surface, with ITS rc -- the left succeeded so there is no non-zero of its
+    own to prefer."""
+    left = _stub("import sys; sys.stdout.write('all-good'); sys.exit(0)")
+    right = _stub(
+        "import sys; sys.stdin.buffer.read(); "
+        "sys.stderr.write('dd: write error\\n'); sys.exit(7)"
+    )
+    outcome = flash_cmd._spawn_pipeline(left, right, capture=True, timeout=10.0)
+    assert outcome.success is False
+    assert outcome.returncode == 7
+    assert "dd: write error" in outcome.stderr
+
+
+def test_spawn_pipeline_both_stages_succeeding_is_a_clean_outcome():
+    left = _stub("import sys; sys.stdout.write('data'); sys.exit(0)")
+    right = _stub("import sys; sys.stdin.buffer.read(); sys.exit(0)")
+    outcome = flash_cmd._spawn_pipeline(left, right, capture=True, timeout=10.0)
+    assert outcome.success is True
+    assert outcome.returncode == 0
+
+
+def test_spawn_pipeline_drains_more_than_one_pipe_buffer_without_hanging():
+    """The anti-hang property this background thread exists for (unchanged by
+    tan-cli#401): a decompressor that writes more to stderr than the OS pipe
+    buffer holds must not deadlock the pipeline -- its `write()` blocking
+    forever because nobody is reading, `dd` then blocked on a stdin that never
+    reaches EOF, and `wait()` never returning."""
+    left = _stub(
+        "import sys; sys.stderr.write('e' * (1 << 20)); "
+        "sys.stdout.write('data'); sys.exit(0)"
+    )
+    right = _stub("import sys; sys.stdin.buffer.read(); sys.exit(0)")
+    outcome = flash_cmd._spawn_pipeline(left, right, capture=True, timeout=15.0)
+    assert outcome.success is True
+
+
 def test_a_deleted_working_directory_still_produces_an_envelope(monkeypatch, capsys):
     """The double fault. `project` is resolved OUTSIDE the exception guard,
     because the guard's own recovery path reports it -- so anything on that path
@@ -688,6 +762,57 @@ def test_jlink_commander_script_leaves_an_unspaced_path_unquoted():
     script = flash_plan.jlink_commander_script("/build/zephyr.bin", "0x08000000", True)
     assert "loadbin /build/zephyr.bin, 0x08000000" in script
     assert '"' not in script
+
+
+# ── swd_probe device/target reporting (tan-cli#402) ─────────────────────────
+
+
+def _swd_inputs(**flash_args):
+    return FlashInputs(artefact="/build/zephyr.bin", flash_args=flash_args, core_id="cm7", sku="S")
+
+
+def test_swd_probe_jlink_message_names_the_resolved_device_not_gd32g553():
+    """tan-cli#402, the test that would have caught it. The J-Link success
+    message used to hardcode `GD32G553` regardless of what `jlink_device`
+    resolved to -- a customer flashing an STM32H747XI_M7 was told GD32G553
+    was flashed."""
+    inp = _swd_inputs(jlink_device="STM32H747XI_M7", base="0x00000000")
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert "STM32H747XI_M7" in plan.ok_message
+    assert "GD32G553" not in plan.ok_message
+    assert "STM32H747XI_M7" in plan.argv
+
+
+def test_swd_probe_jlink_refuses_a_target_only_som_instead_of_defaulting_to_gd32():
+    """tan-cli#402: `flash_args.target` used to be read only on the
+    openocd/pyocd branch, AFTER the J-Link branch's own early `return` -- a
+    SoM that declared `interface`/`target` but no `jlink_device` silently got
+    the compiled-in `GD32G553MEY7TR` `-device`, with no diagnostic. A J-Link
+    device name and an OpenOCD/pyOCD target name are different namespaces, so
+    this refuses rather than guessing one from the other."""
+    inp = _swd_inputs(interface="cmsis-dap", target="stm32h7x")
+    with pytest.raises(FlashPlanError) as raised:
+        flash_plan.plan_swd_probe(inp, lambda name: name == "JLinkExe")
+    assert "jlink_device" in str(raised.value)
+    assert "target" in str(raised.value)
+
+
+def test_swd_probe_still_defaults_to_gd32_when_neither_device_nor_target_is_set():
+    """The unaffected case (tan-cli#402): a SoM naming NEITHER key -- the
+    shipped state for boards that flash the GD32 bridge itself -- still gets
+    the inherited `_DEFAULT_JLINK_DEVICE`, unchanged."""
+    plan = flash_plan.plan_swd_probe(_swd_inputs(), lambda name: name == "JLinkExe")
+    assert "GD32G553MEY7TR" in plan.ok_message
+    assert "GD32G553MEY7TR" in plan.argv
+
+
+def test_swd_probe_openocd_message_names_the_resolved_target_not_gd32g553():
+    """tan-cli#402: the openocd/pyocd success message was worse than the
+    J-Link one -- it named `GD32G553` and echoed no device at all."""
+    inp = _swd_inputs(interface="cmsis-dap", target="stm32h7x", base="0x00000000")
+    plan = flash_plan.plan_swd_probe(inp, lambda name: name == "openocd")
+    assert "stm32h7x" in plan.ok_message
+    assert "GD32G553" not in plan.ok_message
 
 
 # ── Flow D: no oracle counterpart, so it is pinned entirely here ────────────
