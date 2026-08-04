@@ -263,39 +263,19 @@ try {
 	Write-Host "install.ps1: sha256 OK ($got)"
 
 	# -------------------------------------------------------------------------
-	# Put it in place. Two layouts (tan-cli#356), and the two names SHADOW each
-	# other on PATH, so whichever one is not being installed must be removed --
-	# not merely left alone. cmd.exe/PowerShell resolve a bare `tan` by walking
-	# PATHEXT in order (.COM;.EXE;.BAT;.CMD by default), so a leftover tan.exe
-	# always beats a tan.cmd sitting beside it. A stale tan.exe next to a fresh
-	# launcher would silently keep running the previous release forever; a stale
-	# tan.cmd next to a fresh tan.exe is the harmless direction on PATH but
-	# still points at a tan-cli-lib\ that is about to be deleted, so it goes too.
+	# Stage the payload on disk, unprivileged, without touching $Dir at all.
 	#
 	# archive (v0.5.0+, tan-cli#349): $tmp is a verified .zip of a --onedir
-	# freeze, not an executable -- expand it into a private staging dir first
-	# (no admin needed for that either), THEN move the unpacked tree into place
-	# and write the launcher last, mirroring install.sh's shape (staging dir,
-	# unwrap, move into place, launcher last) rather than inventing a second
-	# approach. The archive's one top-level entry is `tan\`, matching
-	# build_binary.sh's `shutil.make_archive(..., base_dir="tan")`, containing
-	# `tan.exe` (the real executable) plus `_internal\` (its runtime).
+	# freeze, not an executable -- expand it into a private staging dir. The
+	# archive's one top-level entry is `tan\`, matching build_binary.sh's
+	# `shutil.make_archive(..., base_dir="tan")`, containing `tan.exe` (the real
+	# executable) plus `_internal\` (its runtime).
 	#
-	# raw (every tag before v0.5.0): $tmp already IS tan.exe and becomes
-	# $Dir\tan.exe directly -- no launcher, no tan-cli-lib\.
+	# raw (every tag before v0.5.0): $tmp already IS tan.exe.
 	# -------------------------------------------------------------------------
 	$destCmd = Join-Path $Dir "tan.cmd"
 	$destExe = Join-Path $Dir "tan.exe"
 	$dest = if ($layout -eq "archive") { $destCmd } else { $destExe }
-	foreach ($stale in @($destCmd, $destExe)) {
-		if ($stale -ne $dest -and (Test-Path -LiteralPath $stale)) {
-			Write-Host "install.ps1: removing $stale left by a previous install (it would otherwise shadow $dest on PATH)."
-			Remove-Item -LiteralPath $stale -Force -ErrorAction SilentlyContinue
-		}
-	}
-	# Unconditional: on the raw path there is no $LibDir to create, and leaving
-	# a previous install's ~14 MB runtime behind orphans it.
-	if (Test-Path -LiteralPath $LibDir) { Remove-Item -LiteralPath $LibDir -Recurse -Force }
 
 	if ($layout -eq "archive") {
 		Expand-Archive -LiteralPath $tmp -DestinationPath $stage -Force
@@ -304,28 +284,144 @@ try {
 			Write-Error "install.ps1: $asset did not contain tan\tan.exe after extraction -- archive layout changed?"
 			exit 1
 		}
-		Move-Item -LiteralPath (Join-Path $stage "tan") -Destination $LibDir -Force
+	} else {
+		$stagedExe = $tmp
+	}
 
-		# A thin launcher, not a symlink (symlinks need elevation/Developer Mode
-		# on Windows by default and would not survive `-System` cleanly either):
-		# a .cmd, because PATHEXT resolves `tan` to it the same way it would an
-		# .exe, and it gives a future reader somewhere obvious to add a wrapper
-		# concern without editing the generated tree in place. `%~dp0` (the
-		# launcher's own directory) rather than a baked-in absolute path, so the
-		# launcher keeps working if $Dir is ever relocated as a unit.
-		$launcherContent = @'
+	# -------------------------------------------------------------------------
+	# Health-check BEFORE anything under $Dir is touched (tan-cli#434). The
+	# sha256 check above proves the downloaded BYTES are the ones the release
+	# published; it says nothing about whether THIS host can execute them (e.g.
+	# a missing runtime dependency, or security software that altered the
+	# file). `& $stagedExe --version` with its exit code unchecked would not
+	# fail the script even when the binary cannot run -- PowerShell does not
+	# turn a non-zero native exit code into a terminating error on its own,
+	# $ErrorActionPreference or not -- so the output is captured and
+	# $LASTEXITCODE is checked explicitly. Running this against the STAGED copy,
+	# before $Dir is touched, means a verified-but-unrunnable release never
+	# costs the user their previous working install.
+	# -------------------------------------------------------------------------
+	try {
+		$verifyOut = (& $stagedExe --version 2>&1 | Out-String).Trim()
+		$verifyExit = $LASTEXITCODE
+	} catch {
+		$verifyOut = $_.Exception.Message
+		$verifyExit = 1
+	}
+	if ($verifyExit -eq 0) {
+		Write-Host "install.ps1: staged binary verified: $verifyOut"
+	} else {
+		Write-Host "install.ps1: newly downloaded binary failed to run: $verifyOut" -ForegroundColor Red
+		if ((Test-Path -LiteralPath $destCmd) -or (Test-Path -LiteralPath $destExe) -or (Test-Path -LiteralPath $LibDir)) {
+			Write-Host "install.ps1: your existing installation in $Dir was never touched."
+		} else {
+			Write-Host "install.ps1: no previous installation existed, so there is nothing to fall back to."
+		}
+		Write-Error "install.ps1: refusing to install. The Path was not modified. This host may be missing a runtime dependency the binary needs, or security software may have altered it. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
+		exit 1
+	}
+
+	# -------------------------------------------------------------------------
+	# Commit: back up whatever is already at $destCmd/$destExe/$LibDir, swap the
+	# verified payload into place, and if any step fails, put the backup right
+	# back -- a failed upgrade must leave the user exactly where they started,
+	# never with neither binary (tan-cli#434). This also folds in the old
+	# "stale shadow" removal: the two names SHADOW each other on PATH
+	# (cmd.exe/PowerShell resolve a bare `tan` by walking PATHEXT in order,
+	# .COM;.EXE;.BAT;.CMD by default, so a leftover tan.exe always beats a
+	# tan.cmd sitting beside it) -- whichever one is not being installed is
+	# backed up and only discarded once the new install is proven in place,
+	# never deleted up front.
+	# -------------------------------------------------------------------------
+	$destCmdBak = "$destCmd.bak"
+	$destExeBak = "$destExe.bak"
+	$libDirBak = "$LibDir.bak"
+	$hadDestCmdBackup = $false
+	$hadDestExeBackup = $false
+	$hadLibBackup = $false
+	if (Test-Path -LiteralPath $destCmd) {
+		Remove-Item -LiteralPath $destCmdBak -Force -ErrorAction SilentlyContinue
+		Move-Item -LiteralPath $destCmd -Destination $destCmdBak -Force
+		$hadDestCmdBackup = $true
+	}
+	if (Test-Path -LiteralPath $destExe) {
+		Remove-Item -LiteralPath $destExeBak -Force -ErrorAction SilentlyContinue
+		Move-Item -LiteralPath $destExe -Destination $destExeBak -Force
+		$hadDestExeBackup = $true
+	}
+	if (Test-Path -LiteralPath $LibDir) {
+		Remove-Item -LiteralPath $libDirBak -Recurse -Force -ErrorAction SilentlyContinue
+		Move-Item -LiteralPath $LibDir -Destination $libDirBak -Force
+		$hadLibBackup = $true
+	}
+
+	function Restore-Previous {
+		# Restores every backup taken above; returns whether it fully succeeded.
+		$ok = $true
+		Remove-Item -LiteralPath $destCmd -Force -ErrorAction SilentlyContinue
+		Remove-Item -LiteralPath $destExe -Force -ErrorAction SilentlyContinue
+		Remove-Item -LiteralPath $LibDir -Recurse -Force -ErrorAction SilentlyContinue
+		if ($hadDestCmdBackup) {
+			try { Move-Item -LiteralPath $destCmdBak -Destination $destCmd -Force } catch { $ok = $false }
+		}
+		if ($hadDestExeBackup) {
+			try { Move-Item -LiteralPath $destExeBak -Destination $destExe -Force } catch { $ok = $false }
+		}
+		if ($hadLibBackup) {
+			try { Move-Item -LiteralPath $libDirBak -Destination $LibDir -Force } catch { $ok = $false }
+		}
+		return $ok
+	}
+
+	$commitError = $null
+	try {
+		if ($layout -eq "archive") {
+			Move-Item -LiteralPath (Join-Path $stage "tan") -Destination $LibDir -Force
+
+			# A thin launcher, not a symlink (symlinks need elevation/Developer Mode
+			# on Windows by default and would not survive `-System` cleanly either):
+			# a .cmd, because PATHEXT resolves `tan` to it the same way it would an
+			# .exe, and it gives a future reader somewhere obvious to add a wrapper
+			# concern without editing the generated tree in place. `%~dp0` (the
+			# launcher's own directory) rather than a baked-in absolute path, so the
+			# launcher keeps working if $Dir is ever relocated as a unit.
+			$launcherContent = @'
 @echo off
 rem Generated by tan install.ps1 (tan-cli#349) -- do not edit by hand.
 rem Re-run install.ps1 to update both this launcher and %~dp0tan-cli-lib.
 "%~dp0tan-cli-lib\tan.exe" %*
 exit /b %ERRORLEVEL%
 '@
-		# ASCII, no BOM: a BOM ahead of `@echo off` corrupts cmd.exe's parse of
-		# the first line on some Windows builds.
-		Set-Content -LiteralPath $dest -Value $launcherContent -Encoding ascii -NoNewline
-	} else {
-		Move-Item -LiteralPath $tmp -Destination $dest -Force
+			# ASCII, no BOM: a BOM ahead of `@echo off` corrupts cmd.exe's parse of
+			# the first line on some Windows builds.
+			Set-Content -LiteralPath $dest -Value $launcherContent -Encoding ascii -NoNewline
+		} else {
+			Move-Item -LiteralPath $tmp -Destination $dest -Force
+		}
+	} catch {
+		$commitError = $_.Exception.Message
 	}
+
+	if ($commitError) {
+		Write-Host "install.ps1: failed to place the new install under $Dir -- rolling back: $commitError" -ForegroundColor Red
+		$restored = Restore-Previous
+		if (-not ($hadDestCmdBackup -or $hadDestExeBackup -or $hadLibBackup)) {
+			Write-Host "install.ps1: no previous installation existed; nothing to restore. Install failed." -ForegroundColor Red
+		} elseif ($restored) {
+			Write-Host "install.ps1: previous installation restored -- 'tan' still works as before. Install failed." -ForegroundColor Red
+		} else {
+			Write-Host "install.ps1: WARNING -- could not fully restore the previous installation. Backups remain at $destCmdBak / $destExeBak / $libDirBak (whichever existed) -- move them back by hand." -ForegroundColor Red
+		}
+		Write-Error "install.ps1: the Path was not modified."
+		exit 1
+	}
+
+	# Commit succeeded -- backups (including any stale other-layout dest, which
+	# would otherwise shadow $dest on PATH per PATHEXT order) are no longer
+	# needed.
+	Remove-Item -LiteralPath $destCmdBak -Force -ErrorAction SilentlyContinue
+	Remove-Item -LiteralPath $destExeBak -Force -ErrorAction SilentlyContinue
+	Remove-Item -LiteralPath $libDirBak -Recurse -Force -ErrorAction SilentlyContinue
 } finally {
 	# One wildcard over the shared GUID stem: $tmp/$sumsTmp/$stage all hang off
 	# $tmpBase, and $tmp may not even be assigned yet if the selection above
@@ -336,6 +432,8 @@ exit /b %ERRORLEVEL%
 
 # Add $Dir to the chosen PATH scope if absent. Machine scope requires admin;
 # SetEnvironmentVariable throws a clear permission error if not elevated.
+# Reached only after the commit above succeeded, so a failed install never
+# leaves a Path edit behind (tan-cli#434).
 $curPath = [Environment]::GetEnvironmentVariable("Path", $scope)
 if (-not ($curPath -split ';' | Where-Object { $_ -eq $Dir })) {
 	if ($NoModifyPath) {
@@ -351,35 +449,4 @@ if ($layout -eq "archive") {
 	Write-Host "install.ps1: installed tan -> $dest (runtime: $LibDir)"
 } else {
 	Write-Host "install.ps1: installed tan -> $dest"
-}
-# The sha256 check above proves the BYTES are the ones the release published;
-# it says nothing about whether THIS host can execute them. `& $dest --version`
-# with its exit code unchecked does not fail the script even when the binary
-# cannot run (e.g. a missing runtime dependency) -- PowerShell does not turn a
-# non-zero native exit code into a terminating error on its own, $ErrorAction-
-# Preference or not, so this would report success regardless. Capture the
-# output and check $LASTEXITCODE instead. A verified-but-unrunnable install is
-# removed rather than left at $dest/$LibDir and on the $scope Path: it is the
-# correct bytes for a host this is NOT, and leaving it in place turns every
-# later `tan` invocation into this same opaque failure instead of a clear
-# "not found".
-try {
-	$verifyOut = (& $dest --version 2>&1 | Out-String).Trim()
-	$verifyExit = $LASTEXITCODE
-} catch {
-	$verifyOut = $_.Exception.Message
-	$verifyExit = 1
-}
-if ($verifyExit -eq 0) {
-	Write-Host "install.ps1: verified: $verifyOut"
-} else {
-	Write-Host "install.ps1: installed binary failed to run: $verifyOut" -ForegroundColor Red
-	Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue
-	Remove-Item -LiteralPath $LibDir -Recurse -Force -ErrorAction SilentlyContinue
-	# Names only what actually existed: on the raw layout there is no $LibDir,
-	# and telling a user a path was removed that was never there sends them
-	# looking for it.
-	$removed = if ($layout -eq "archive") { "$dest and $LibDir" } else { $dest }
-	Write-Error "install.ps1: removed $removed -- install failed. This host may be missing a runtime dependency the binary needs, or security software may have altered it. Install from a checkout instead: git clone https://github.com/$repo && pip install ./tan-cli/python"
-	exit 1
 }
