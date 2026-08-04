@@ -97,7 +97,21 @@ def test_only_oracle_py_resolves_the_oracle_binary(pattern, what):
 
 
 def _stub_tan(path: Path, version: str) -> None:
-    """A runnable `tan` stand-in that answers `--version` and nothing else."""
+    """A `tan`-shaped file for the RESOLVER to find. Runnable on POSIX only.
+
+    Resolution is what this module gates, and `rust_binary()` resolves by name
+    and mtime without ever spawning -- so a plain file is the right fixture and
+    is enough on every platform.
+
+    It is NOT a runnable image on Windows. `rust_binary()` looks for `tan.exe`,
+    and batch text written to a `.exe` is not a valid PE, so `CreateProcess`
+    refuses it with `OSError: [WinError 193] %1 is not a valid Win32
+    application` -- measured on windows-latest against the near-identical helper
+    in `tests/parity/test_oracle_provenance.py` (tan-cli#414), which could name
+    its stub `.cmd` because nothing there resolves it by name. This one cannot.
+    The single test below that spawns the stub is therefore POSIX-only; every
+    other case here exercises resolution and runs everywhere.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform == "win32":
         path.write_text(f"@echo off\r\necho {version}\r\n", encoding="utf-8")
@@ -163,6 +177,14 @@ def test_a_missing_named_oracle_raises_rather_than_skipping(staged_target, tmp_p
         rust_binary()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason=(
+        "spawns the stub for its `--version`; a `tan.exe` carrying batch text is "
+        "not a runnable Win32 image (see `_stub_tan`). The behaviour asserted is "
+        "platform-independent and the resolution cases above still run here."
+    ),
+)
 def test_a_resolved_but_wrong_binary_fails_naming_the_oracle(staged_target):
     """The acceptance criterion of tan-cli#393: the stale binary must fail
     with the PIN message, not with a `project.boardYaml` envelope diff that

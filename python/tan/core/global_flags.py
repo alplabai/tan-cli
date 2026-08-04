@@ -33,15 +33,34 @@ before this module existed -- see its own comment there: "the shared fix
 surface." This is that decorator, generalised and applied to the rest of the
 surface.
 
-`--format` is deliberately NOT one of `_GLOBAL_FLAG_SPECS`, matching
-`cli.py`'s own `_HONOURS_ROOT_FORMAT`: unlike every flag here, a command that
-merely ACCEPTED `--format json` without reading it would silently run in text
-mode for a caller who asked for JSON -- exactly the defect
-`_HONOURS_ROOT_FORMAT` exists to prevent by refusing until a command is
-actually taught to read `ctx.obj["format"]`. None of the ten flags below have
-that failure mode: an accepted-and-ignored `--verbose` changes nothing about
-which channel a caller reads, so silently dropping it is safe where silently
-dropping `--format json` would not be.
+`--format` is deliberately NOT one of the specs below, matching `cli.py`'s own
+`_HONOURS_ROOT_FORMAT`: a command that merely ACCEPTED `--format json`
+without reading it would silently run in text mode for a caller who asked for
+JSON -- exactly the defect `_HONOURS_ROOT_FORMAT` exists to prevent by
+refusing until a command is actually taught to read `ctx.obj["format"]`.
+
+**Six of the ten flags below have no such failure mode; FOUR do**
+(tan-cli#398, correcting what this paragraph asserted before it): an
+accepted-and-ignored `--verbose` changes nothing about which channel a caller
+reads, so dropping it is safe -- but `--project`, `--board-yaml`,
+`--sdk-root` and `--target` each carry a VALUE, and dropping one does not
+lose a no-op, it substitutes the command's own default for the file or target
+the caller named. Measured on this port before the split: `tan model build
+--board-yaml ../other/board.yaml` packaged `./board.yaml`'s `som.sku`
+(`E1M-AEN801` where the named file said `E1M-V2N101`) at `exitCode: 0` with
+`issues: []`, so `build_model` compiled `.alpmodel` artefacts for the wrong
+silicon and nothing refused or warned. The leading form
+(`tan --board-yaml <path> model build`) was swallowed identically --
+`cli.py`'s `_reorder_global_flags` relocates the flag across the subcommand
+boundary and straight into the drop.
+
+So the specs are split (`_VALUE_FLAG_SPECS` / `_BOOL_FLAG_SPECS`): the
+arity-0 half is still accepted-and-dropped, and an INJECTED value-carrying
+flag that a caller actually supplies is REFUSED -- a Click usage error (exit
+2), the same treatment `--format` gets from `_HONOURS_ROOT_FORMAT`, which
+`cli.main` folds into the registered `cli.parse-error` envelope under
+`--format json`. A flag a command declares for real is untouched either way;
+this only ever refuses one it was about to ignore.
 """
 from __future__ import annotations
 
@@ -51,24 +70,46 @@ from collections.abc import Callable
 
 import typer
 
-#: One entry per oracle `GlobalArgs` field this port must be able to PARSE on
-#: every command (`crates/tan-cli/src/cli.rs:24-73`), as
-#: `(flag, python_name, is_bool, metavar)`. `metavar` is `None` for a bool
-#: flag (arity 0). `--project`/`--sdk-root` are included even though every
-#: command touched by tan-cli#261 already declares them (measured) -- the
-#: NEXT command to be added is exactly who this guards.
-_GLOBAL_FLAG_SPECS: tuple[tuple[str, str, bool, str | None], ...] = (
-    ("--project", "project", False, "PATH"),
-    ("--board-yaml", "board_yaml", False, "PATH"),
-    ("--sdk-root", "sdk_root", False, "PATH"),
-    ("--target", "target", False, "EMIT"),
-    ("--all", "all_", True, None),
-    ("--verbose", "verbose", True, None),
-    ("--quiet", "quiet", True, None),
-    ("--no-color", "no_color", True, None),
-    ("--non-interactive", "non_interactive", True, None),
-    ("--ci", "ci", True, None),
+#: The VALUE-carrying oracle `GlobalArgs` fields (`crates/tan-cli/src/
+#: cli.rs:24-73`), as `(flag, python_name, metavar)`. Kept apart from the
+#: arity-0 half below because the two need opposite handling once INJECTED:
+#: one of these accepted-and-dropped is a wrong answer, not a lost no-op
+#: (tan-cli#398 -- see the module docstring for the measured `tan model build
+#: --board-yaml` run). `--project`/`--sdk-root` are inert on no command today
+#: (measured across all 32 registrations); they are listed because the NEXT
+#: command to be added is exactly who this guards.
+_VALUE_FLAG_SPECS: tuple[tuple[str, str, str], ...] = (
+    ("--project", "project", "PATH"),
+    ("--board-yaml", "board_yaml", "PATH"),
+    ("--sdk-root", "sdk_root", "PATH"),
+    ("--target", "target", "EMIT"),
 )
+
+#: The arity-0 oracle `GlobalArgs` fields, as `(flag, python_name)`. Safe to
+#: accept and drop: a caller cannot read back whether an ignored `--verbose`
+#: was honoured, so nothing downstream can be wrong about it.
+_BOOL_FLAG_SPECS: tuple[tuple[str, str], ...] = (
+    ("--all", "all_"),
+    ("--verbose", "verbose"),
+    ("--quiet", "quiet"),
+    ("--no-color", "no_color"),
+    ("--non-interactive", "non_interactive"),
+    ("--ci", "ci"),
+)
+
+#: The two halves rejoined, in the oracle's own field order, as
+#: `(flag, python_name, is_bool, metavar)` -- `metavar` is `None` for a bool
+#: flag. Derived, never hand-listed a third time: the injection loop, the
+#: arity table and the gate's flag list must all be the SAME fact.
+_GLOBAL_FLAG_SPECS: tuple[tuple[str, str, bool, str | None], ...] = (
+    *((flag, name, False, metavar) for flag, name, metavar in _VALUE_FLAG_SPECS),
+    *((flag, name, True, None) for flag, name in _BOOL_FLAG_SPECS),
+)
+
+#: The value-carrying flags alone -- what a caller (the port-wide gate at
+#: `tests/gates/test_global_flags_gate.py`, in particular) needs to know
+#: WHICH flags must be honoured-or-refused rather than merely parsed.
+VALUE_GLOBAL_FLAGS: tuple[str, ...] = tuple(flag for flag, *_rest in _VALUE_FLAG_SPECS)
 
 #: `{flag: arity}` -- `cli.py`'s `_reorder_global_flags` reads this (arity 1
 #: = takes a value, 0 = boolean) to relocate a leading global flag across the
@@ -90,6 +131,23 @@ GLOBAL_FLAGS: tuple[str, ...] = tuple(flag for flag, *_rest in _GLOBAL_FLAG_SPEC
 #: `None`.
 _ACCEPTED_NOT_READ_HELP = "Accepted for oracle parity (tan-cli#261); not read by this command."
 
+#: The same, for an injected VALUE-carrying flag, which is parsed for oracle
+#: parity and then refused rather than dropped (tan-cli#398).
+_ACCEPTED_THEN_REFUSED_HELP = (
+    "Parsed for oracle parity (tan-cli#261); refused by this command, "
+    "which does not implement it (tan-cli#398)."
+)
+
+#: What a caller sees when they pass an injected value-carrying flag. Names
+#: the remedy, not just the refusal: the flag is real everywhere else on the
+#: surface, so "no such option" would be a lie and silence was the bug.
+_REFUSAL = (
+    "accepted for oracle parity (tan-cli#261) but not implemented by this "
+    "command. Honouring it is impossible here and dropping it would silently "
+    "substitute this command's own default for the value you named "
+    "(tan-cli#398) -- pass the flag this command really reads, or drop this one."
+)
+
 
 def _declared_flags(func: Callable[..., object]) -> set[str]:
     """Every CLI flag string `func` already declares, keyed by the flag
@@ -107,8 +165,14 @@ def _declared_flags(func: Callable[..., object]) -> set[str]:
 
 def accept_global_flags(func: Callable[..., object]) -> Callable[..., object]:
     """Return a callable Typer can register whose declared options are
-    `func`'s own plus whichever of `_GLOBAL_FLAG_SPECS` it was missing, each
-    of the added ones accepted and then dropped before `func` ever runs.
+    `func`'s own plus whichever of `_GLOBAL_FLAG_SPECS` it was missing.
+
+    An added ARITY-0 flag is accepted and then dropped before `func` ever
+    runs. An added VALUE-carrying flag is accepted, and then refused with a
+    Click usage error the moment a caller actually supplies one -- never
+    dropped (tan-cli#398; see the module docstring for what dropping cost).
+    `func` does not run at all in that case: half-running on the wrong inputs
+    IS the defect.
 
     A command that already declares the full set is returned UNCHANGED
     (`func` itself, not a wrapper) -- the common case once every command in
@@ -150,15 +214,19 @@ def accept_global_flags(func: Callable[..., object]) -> Callable[..., object]:
     ]
 
     injected: list[str] = []
+    #: `(python_name, flag)` for the injected VALUE-carrying flags only --
+    #: what `wrapper` checks before it drops anything.
+    injected_values: list[tuple[str, str]] = []
     for flag, name, is_bool, metavar in to_add:
         if is_bool:
             option = typer.Option(False, flag, hidden=True, help=_ACCEPTED_NOT_READ_HELP)
             annotation: type = bool
         else:
             option = typer.Option(
-                None, flag, metavar=metavar, hidden=True, help=_ACCEPTED_NOT_READ_HELP
+                None, flag, metavar=metavar, hidden=True, help=_ACCEPTED_THEN_REFUSED_HELP
             )
             annotation = str
+            injected_values.append((name, flag))
         params.append(
             inspect.Parameter(
                 name, inspect.Parameter.KEYWORD_ONLY, default=option, annotation=annotation
@@ -167,9 +235,21 @@ def accept_global_flags(func: Callable[..., object]) -> Callable[..., object]:
         injected.append(name)
 
     def wrapper(*args: object, **kwargs: object) -> object:
-        for name in injected:
-            kwargs.pop(name, None)
-        return func(*args, **kwargs)
+        # `is not None` is the whole test: every injected value-carrying
+        # option defaults to `None`, so anything else came off the command
+        # line. Refused BEFORE the drop, and before `func` is called at all.
+        supplied = [flag for name, flag in injected_values if kwargs.get(name) is not None]
+        if supplied:
+            # `typer.BadParameter` -> Click's own usage error, exit 2, which
+            # `cli.main` turns into the registered `cli.parse-error` envelope
+            # under `--format json`. Deliberately NOT a bespoke envelope here:
+            # this module knows nothing about a given command's `data` payload
+            # or its project/sdk blocks, and inventing a second refusal shape
+            # for the one case `_HONOURS_ROOT_FORMAT` already has an answer for
+            # is how two divergent contracts start.
+            raise typer.BadParameter(_REFUSAL, param_hint=supplied[0])
+        forwarded = {key: value for key, value in kwargs.items() if key not in injected}
+        return func(*args, **forwarded)
 
     wrapper.__doc__ = func.__doc__
     wrapper.__name__ = getattr(func, "__name__", "wrapper")

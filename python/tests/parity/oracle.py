@@ -87,7 +87,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import oracle_fixtures
+from . import oracle_fixtures, oracle_provenance
 
 #: ``python/`` -- pinned onto the subprocess ``PYTHONPATH`` so ``python -m tan``
 #: resolves from a scratch cwd without a ``pip install``, mirroring the
@@ -218,6 +218,77 @@ class ParityResult:
 #: define it alone.
 PINNED_ORACLE_VERSION = "tan 0.4.1"
 
+#: The `crates/` commit the oracle must have been built from -- the HALF of the
+#: pin `--version` cannot express (tan-cli#406).
+#:
+#: `tan --version` is a pure function of `Cargo.toml`'s `[workspace.package]`
+#: version, which moves only at release time, so it is BLIND to every change
+#: within a release: measured, 15 commits changed the binary's build inputs
+#: between `c5dedc1` ("release: v0.4.1") and `ac79d4c` without touching that
+#: line, two of them envelope-visible (`bb13283` `project.boardYaml`,
+#: `a30adaf` the flash TBD placeholder), and binaries built from both ends
+#: printed the IDENTICAL `tan 0.4.1` while comparing DIFFERENT. Measured
+#: consequence: the stale end fails three cases with a `project.boardYaml`
+#: assertion diff that reads as a port regression -- the apparent fix being to
+#: re-introduce the exact bug `bb13283` removed -- and the converse, an
+#: envelope regression certified against a baseline that already contains it,
+#: is the one that ships.
+#:
+#: Spelled as the newest commit touching a BUILD INPUT (see
+#: :data:`oracle_provenance.BUILD_INPUT_PATHSPEC`), not `git log -1 --
+#: crates/`: the last commit over the whole directory is `8a71310`, which
+#: edited two crate-level `README.md` files and cannot change a byte of the
+#: binary. Recompute with ``git log -1 --format=%H -- 'crates/*/src/*'
+#: 'crates/*/Cargo.toml' Cargo.toml Cargo.lock``.
+PINNED_ORACLE_CRATES_COMMIT = "ac79d4c7ffe00e43f26f3b7c6265436afbff5b0e"
+
+#: The CONTENT of the build inputs the frozen fixtures were captured against,
+#: as `sha256(git ls-files -s -- <BUILD_INPUT_PATHSPEC>)`. This is the pin the
+#: freshness gate asserts on; :data:`PINNED_ORACLE_CRATES_COMMIT` above stays
+#: as the human-readable "which commit was that" and backs the sidecar /
+#: `$TAN_ORACLE_COMMIT` declaration path. Content, not a SHA, because a SHA
+#: cannot survive a PR merge ref, a rebase, a cherry-pick or a squash --
+#: none of which change a byte the compiler reads (tan-cli#414).
+PINNED_ORACLE_BUILD_INPUT_DIGEST = (
+    "d3dc3b8bbb24d2cd05ab5944e0438ac7490828f57de11288366260d45c99f6a0"
+)
+
+
+def build_output_root() -> Path:
+    """``<repo>/target`` -- cargo's output tree, and the only place a binary
+    can be assumed to have come from THIS checkout. Read through
+    :data:`REPO_ROOT` at call time so a test that repoints the root moves this
+    with it."""
+    return REPO_ROOT / "target"
+
+
+def oracle_provenance_drift(binary: str) -> str | None:
+    """Why *binary* cannot be certified as the pinned oracle, or ``None``.
+
+    The checker itself lives in :mod:`oracle_provenance` and takes every root
+    and pin as an argument; this is where THIS checkout's values are bound to
+    it, which is the one thing that has to stay here -- ``oracle.py`` owns the
+    pins, and a test that repoints :data:`REPO_ROOT` must move the check with
+    it.
+    """
+    return oracle_provenance.drift(
+        binary,
+        repo_root=REPO_ROOT,
+        build_output=build_output_root(),
+        pinned_commit=PINNED_ORACLE_CRATES_COMMIT,
+        pinned_version=PINNED_ORACLE_VERSION,
+    )
+
+
+def _certified(binary: str) -> str:
+    """*binary*, or a raise naming the drift. The raise is what turns a
+    stale-oracle run from three `project.boardYaml` assertion diffs into one
+    message that says "rebuild the oracle"."""
+    drift = oracle_provenance_drift(binary)
+    if drift is not None:
+        raise RuntimeError(drift)
+    return binary
+
 
 def rust_binary() -> str | None:
     """``TAN_RUST_BINARY`` if set, else the MOST RECENTLY BUILT of
@@ -246,6 +317,14 @@ def rust_binary() -> str | None:
     other regardless of freshness should set ``TAN_RUST_BINARY`` explicitly
     rather than rely on this default.
 
+    Whatever is resolved is then run past :func:`oracle_provenance_drift`,
+    which RAISES on a binary that cannot be tied to
+    :data:`PINNED_ORACLE_CRATES_COMMIT` (tan-cli#406). mtime ranks BUILD time
+    and says nothing about the SOURCE TREE a build came from, so the rule
+    above -- correct as far as it goes -- happily elects a freshly rebuilt
+    binary from a months-old checkout, and ``--version`` then certifies it,
+    because that string cannot change within a release.
+
     A TIE (identical ``st_mtime`` on both profiles) is refused outright rather
     than resolved silently -- silently is what this function used to do, and
     it always broke to ``target/release``, which is exactly the stale-pick bug
@@ -264,9 +343,9 @@ def rust_binary() -> str | None:
                 "a named-but-missing oracle would make this suite pass vacuously. "
                 "Fix the path, or unset it to fall back to target/{release,debug}."
             )
-        return override
+        return _certified(override)
     candidates = [
-        REPO_ROOT / "target" / profile / f"tan{_EXE}" for profile in ("release", "debug")
+        build_output_root() / profile / f"tan{_EXE}" for profile in ("release", "debug")
     ]
     existing = [c for c in candidates if c.exists()]
     if not existing:
@@ -283,7 +362,7 @@ def rust_binary() -> str | None:
             "replace. Rebuild one of the two profiles to break the tie, or "
             "set TAN_RUST_BINARY=<path> to the one you mean."
         )
-    return str(tied[0])
+    return _certified(str(tied[0]))
 
 
 def resolve_oracle_for_skipif() -> str | None:
@@ -291,8 +370,10 @@ def resolve_oracle_for_skipif() -> str | None:
 
     Test modules outside ``tests/parity/`` bind their oracle at import
     (``_ORACLE = ...`` feeding a ``pytest.mark.skipif``), and ``rust_binary``
-    deliberately RAISES on two conditions -- an mtime TIE between
-    ``target/{release,debug}`` and a set-but-missing ``TAN_RUST_BINARY``. A
+    deliberately RAISES on three conditions -- an mtime TIE between
+    ``target/{release,debug}``, a set-but-missing ``TAN_RUST_BINARY``, and an
+    oracle that cannot be tied to :data:`PINNED_ORACLE_CRATES_COMMIT`
+    (:func:`oracle_provenance_drift`, tan-cli#406). A
     raise while a test module is being imported is a COLLECTION error, which
     aborts the entire pytest session rather than the file that asked; that is
     exactly why ``pinned_oracle`` resolves inside its fixture body and not at

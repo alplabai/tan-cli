@@ -238,7 +238,27 @@ def test_west_forward_matches_rust(verb, work_dir, tmp_path):
         home=tmp_path / "home",
         python_env_overrides={"PATH": empty_tool_inventory(tmp_path)},
     )
-    assert result.matches, "\n".join(result.diffs)
+    # A BOUNDED divergence, introduced deliberately by tan-cli#395 and asserted
+    # here rather than waived: the port's `data` carries three keys the oracle
+    # does not -- `westExitCode`, `stdout`, `stderr`.
+    #
+    # The oracle spawns the `alp-*` child with `capture_output` and then reads
+    # NEITHER stream on either branch, so `alp-quality`'s report,
+    # `alp-migrate --preview`'s diff and `alp-lock`'s resolved manifest are all
+    # unreachable through `--format json`, and every non-zero child exit
+    # collapses to 1. A consumer whose only channel is JSON -- alp-sdk-vscode --
+    # could obtain none of them, and on failure was told to "re-run without
+    # --format json to see the log", i.e. to use a mode it does not have.
+    # Reproducing that faithfully would be parity with a defect.
+    #
+    # Bounded the way `test_flash_oracle_parity.py`'s shape-error case bounds
+    # its own: the diff may fail on `data` and on NOTHING else, so the exit
+    # code, `issues`, `project` and `ok` stay under full byte-parity and a
+    # divergence that wandered into any other field still fails here. The
+    # per-key shape of the addition is pinned separately, on this port's own
+    # terms, by `test_west_forward_command.py`.
+    offending = {d.split(":", 1)[0] for d in result.diffs}
+    assert offending <= {"data"}, f"{verb}: unexpected divergence: {result.diffs}"
 
 
 @LIVE_GATE

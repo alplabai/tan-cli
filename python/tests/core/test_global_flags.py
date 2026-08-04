@@ -9,11 +9,17 @@ __future__ import annotations`, measured before the fix below existed).
 """
 from __future__ import annotations
 
+import pytest
 import typer
 from typer.main import get_command
 from typer.testing import CliRunner
 
-from tan.core.global_flags import GLOBAL_FLAG_ARITY, GLOBAL_FLAGS, accept_global_flags
+from tan.core.global_flags import (
+    GLOBAL_FLAG_ARITY,
+    GLOBAL_FLAGS,
+    VALUE_GLOBAL_FLAGS,
+    accept_global_flags,
+)
 
 runner = CliRunner()
 
@@ -40,7 +46,18 @@ def test_global_flags_and_arity_stay_in_lockstep():
         assert GLOBAL_FLAG_ARITY[flag] in (0, 1)
 
 
-def test_injects_every_missing_flag_and_drops_them_before_the_command_runs():
+def test_the_value_carrying_half_is_exactly_the_arity_one_half():
+    """tan-cli#398 split `_GLOBAL_FLAG_SPECS` in two because the two halves
+    need OPPOSITE handling when injected. A flag that drifts into the wrong
+    half silently gets the wrong one, so pin that the split and the arity
+    table are the same fact twice."""
+    assert set(VALUE_GLOBAL_FLAGS) == {f for f in GLOBAL_FLAGS if GLOBAL_FLAG_ARITY[f] == 1}
+    assert set(VALUE_GLOBAL_FLAGS) == {"--project", "--board-yaml", "--sdk-root", "--target"}
+
+
+def test_injects_every_arity0_flag_and_drops_them_before_the_command_runs():
+    """An accepted-and-ignored `--verbose` changes nothing a caller can read
+    back, so the arity-0 half stays exactly as tan-cli#261 shipped it."""
     seen: dict[str, object] = {}
 
     def probe() -> None:
@@ -51,11 +68,70 @@ def test_injects_every_missing_flag_and_drops_them_before_the_command_runs():
 
     argv = ["probe"]
     for flag in GLOBAL_FLAGS:
-        argv.append(flag)
-        if GLOBAL_FLAG_ARITY[flag] == 1:
-            argv.append("some-value")
+        if GLOBAL_FLAG_ARITY[flag] == 0:
+            argv.append(flag)
 
     result = runner.invoke(app, argv)
+    assert result.exit_code == 0, result.output
+    assert seen.get("ran") is True
+
+
+@pytest.mark.parametrize("flag", VALUE_GLOBAL_FLAGS)
+def test_an_injected_value_carrying_flag_is_refused_not_silently_dropped(flag: str):
+    """tan-cli#398: dropping a flag that carries a VALUE does not lose a
+    no-op, it substitutes the command's own default for the file/target the
+    caller named -- measured on `tan model build --board-yaml
+    ../other/board.yaml`, which packaged `./board.yaml`'s SKU at
+    `exitCode: 0` with `issues: []`, so the `.alpmodel` artefacts were
+    compiled for the wrong silicon and nothing refused or warned.
+
+    Refused the same way `cli.py`'s `_HONOURS_ROOT_FORMAT` already refuses a
+    `--format` a command cannot honour: a Click usage error (exit 2), which
+    `cli.main` folds into the registered `cli.parse-error` envelope under
+    `--format json`. The command body must NOT run -- half-running on the
+    wrong inputs is the defect, not the reporting."""
+    seen: dict[str, object] = {}
+
+    def probe() -> None:
+        seen["ran"] = True
+
+    app = _make_app(accept_global_flags(probe))
+
+    result = runner.invoke(app, ["probe", flag, "some-value"])
+    assert result.exit_code == 2, result.output
+    assert flag in result.output
+    assert seen.get("ran") is None
+
+
+def test_a_value_carrying_flag_a_command_really_implements_is_untouched():
+    """The refusal above must key off "this command does not implement it",
+    never off the flag string alone -- 28 of 32 commands implement
+    `--board-yaml` for real and every one of them must keep reading it."""
+    seen: dict[str, object] = {}
+
+    def probe(
+        board_yaml: str = typer.Option(None, "--board-yaml", metavar="PATH"),
+    ) -> None:
+        seen["board_yaml"] = board_yaml
+
+    app = _make_app(accept_global_flags(probe))
+
+    result = runner.invoke(app, ["probe", "--board-yaml", "other/board.yaml"])
+    assert result.exit_code == 0, result.output
+    assert seen["board_yaml"] == "other/board.yaml"
+
+
+def test_an_injected_value_carrying_flag_left_unpassed_does_not_refuse():
+    """Only a SUPPLIED value is refused. Injecting the option must not make
+    every ordinary run of the command exit 2."""
+    seen: dict[str, object] = {}
+
+    def probe() -> None:
+        seen["ran"] = True
+
+    app = _make_app(accept_global_flags(probe))
+
+    result = runner.invoke(app, ["probe"])
     assert result.exit_code == 0, result.output
     assert seen.get("ran") is True
 

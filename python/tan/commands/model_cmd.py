@@ -147,6 +147,21 @@ def _load_board(path: Path) -> dict[str, Any]:
             f"board.yaml not found at {path}: {err}",
             ExitCode.VALIDATION_FAILURE,
         ) from err
+    except UnicodeDecodeError as err:
+        # tan-cli#396: `UnicodeDecodeError` is a `ValueError`, NOT an
+        # `OSError`, so the clause above could never catch it and the
+        # "bad encoding" this docstring promises to code fell through to
+        # `model`'s outer catch-all instead -- measured `exitCode: 5` /
+        # `model.internal-failure` on a board.yaml carrying one 0xff byte,
+        # which tells a script "tan broke" rather than "your board.yaml has a
+        # bad byte". The file opened and read fine, so `board-yaml-missing`
+        # would be the wrong remedy; this is the same unusable-input class a
+        # YAML syntax error already lands on.
+        raise ModelError(
+            "model.board-yaml-invalid",
+            f"{path}: not valid UTF-8: {err}",
+            ExitCode.VALIDATION_FAILURE,
+        ) from err
     try:
         import yaml  # noqa: PLC0415 (declared dependency, guarded anyway)
     except ImportError as err:
@@ -405,7 +420,16 @@ def _run_build(
 def model(
     subcommand: str = typer.Argument(None, metavar="SUBCOMMAND", help="build."),
     board: str = typer.Option(
-        "board.yaml", "--board", metavar="PATH", help="Path to board.yaml."
+        # tan-cli#398: `--board-yaml` is a REAL second spelling of this one
+        # option, not a second option -- it is what `build`, `run`, `kconfig`,
+        # `validate`, `generate` and `inspect` all call the board file, and
+        # what `docs/CLI.md`'s "Common flags" tells a caller every command
+        # supports. Declared here so `accept_global_flags` sees it as already
+        # covered and stops injecting an inert twin behind this one: a caller
+        # who used the surface-wide spelling was served `./board.yaml`'s
+        # `som.sku` instead of the file they named, and `som.sku` is what
+        # picks the silicon `build_model` compiles for.
+        "board.yaml", "--board", "--board-yaml", metavar="PATH", help="Path to board.yaml."
     ),
     out: str = typer.Option(
         "build/models", "--out", metavar="PATH", help="Output directory."
@@ -507,10 +531,19 @@ def model(
     finish(project_, sdk, data, issues, exit_code)
 
 
-# tan-cli#261: adds the eight oracle `GlobalArgs` flags this command was
-# missing entirely (`--all`/`--board-yaml`/`--ci`/`--no-color`/
-# `--non-interactive`/`--quiet`/`--target`/`--verbose`); see
-# `tan.core.global_flags`. All inert here: `model`'s own `--board` already
-# plays `--board-yaml`'s role for real (see `_run_build`'s comment), so the
-# newly-accepted `--board-yaml` is never consulted.
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command is
+# missing entirely (`--all`/`--ci`/`--no-color`/`--non-interactive`/
+# `--quiet`/`--target`/`--verbose`); see `tan.core.global_flags`.
+#
+# `--board-yaml` is NOT among them any more (tan-cli#398). It used to be, and
+# the note here claimed that was harmless because "`model`'s own `--board`
+# already plays `--board-yaml`'s role for real" -- but the two spellings were
+# never wired together, so the injected one was accepted, dropped, and the
+# default `./board.yaml` packaged instead of the file the caller named, at
+# `exitCode: 0` with `issues: []`. It is now a second decl on `--board`
+# itself (above), so both spellings are one option and read one file.
+#
+# The six arity-0 flags above stay accepted-and-dropped; the injected
+# `--target` is now REFUSED when supplied rather than ignored, per the same
+# issue -- `model` has no emit target to honour it with.
 model = accept_global_flags(model)

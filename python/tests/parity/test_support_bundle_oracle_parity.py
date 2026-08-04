@@ -52,6 +52,30 @@ docstring permits precisely here: one identical override applied twice,
 symmetrically, is not the one-side-pinned trap tan-cli#313/#324 closed. It is
 what makes "this host is missing its prerequisites" true on a developer laptop
 that has all of them.
+
+**Both cases here are LIVE-ONLY, and that is a hole in the freeze**
+(tan-cli#409). They are gated on binary PRESENCE (`_ORACLE_REQUIRED`), not on
+fixture availability like `oracle.missing_for_live`, so the moment
+tan-cli#269 deletes `crates/` they become passing SKIPS -- a green run that
+measures nothing, on the one comparison that pins doctor's check NAMES and
+POSITIONS. Both are named in `oracle_fixtures/PARITY-COVERAGE.txt`, the
+committed ledger of what this package does not measure, along with the other
+thirteen.
+
+They are not frozen HERE because a fixture would be wrong everywhere but the
+capture host: what these compare is `doctor.checks` and the whole
+`inspect.context`, and the check list itself is platform-shaped (`longPaths`
+exists on Windows and nowhere else) while the statuses read this machine's
+tool inventory and, on Windows, its registry. `empty_tool_inventory` pins the
+PATH for the first case and cannot pin the platform; the second deliberately
+runs on the real PATH. Replaying one OS's capture against another OS's live
+port diffs two platforms' genuinely different -- and both correct -- behaviour
+(`oracle_fixtures.CAPTURE_PLATFORM` exists for exactly that hazard). A real
+freeze means capturing on that platform with the inventory
+`oracle_fixtures/PROVENANCE.txt` records and gating the replay on it, i.e.
+trading a binary-absence skip for a declared PLATFORM skip. The ledger states
+that; nothing here should be read as saying these two are covered once
+`crates/` is gone.
 """
 import json
 from pathlib import Path

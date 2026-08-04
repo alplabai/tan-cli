@@ -6,31 +6,86 @@ retired; `tan build` is native now -- see `build_cmd.py`'s module doc). Port of
 now-narrowed, "legacy west forward" entry) and its `west_argv`/
 `west_workspace_dir`/`west_program` helpers.
 
-Every flag NOT declared on the command below (`--core`, `--sequential`, `-b
-<board>`, `--port COM7`, `--cfsr 0x...`, ...) belongs to the underlying `west
+Every flag NOT declared on the command below (`--check`, `--preview`,
+`--profile quick`, `--no-verify`, ...) belongs to the underlying `west
 alp-<verb>` extension command, not to `tan` -- it is forwarded verbatim,
 mirroring the oracle's own `[ARGS]...` catch-all
 (`crates/tan-cli/src/cli.rs`'s `WestForwardArgs`). `ignore_unknown_options` in
 each command's `context_settings` is what lets an unrecognised flag fall
 through to that catch-all instead of Click rejecting it outright.
 
+Three defects this module shipped with, and what each fix costs:
+
+**tan-cli#391 -- no child takes a positional.** `_run_forward` used to insert
+the resolved app path as `argv[1]` whenever every forwarded token began with a
+dash. `west alp-build` was the only `alp-*` command that ever declared an
+app-path positional, and ADR-0020 Phase 4 retired it; the injection outlived
+its target. The three surviving children declare flags only -- `alp_lock.py`:
+`--check`, `--workspace`, `--board`; `alp_migrate.py`: `--check`, `--preview`,
+`--apply`, `--all`, `--board`, `--no-verify`; `alp_quality.py`: `--profile`,
+`--json`, `--junit`, `--sarif` -- so every realistic `tan migrate` / `tan lock`
+run died on `west alp-migrate: error: unexpected arguments: ['<project>']`
+before doing any work. `tan quality --profile quick` survived only by
+accident (`quick` is a non-dash token, so the guard suppressed the injection);
+`--profile=quick` is one token and did not. Deleting the injection alone is
+NOT the whole fix: `run_cwd` is the west TOPDIR, so a child left to its own
+`Path("board.yaml")` fallback resolves the WORKSPACE ROOT's board.yaml rather
+than the project's. `_target_args` below names the project through the
+`--board` flag `alp-migrate`/`alp-lock` really declare. `alp-quality` declares
+no target flag at all and is therefore left cwd-targeted, exactly as before.
+
+**tan-cli#395 -- the child's output was captured and discarded.** JSON mode
+already spawned the child with `capture_output=True` and then read neither
+stream; the previous version of this docstring defended that as "never the
+child's own stdout, which for an interactive tool cannot be captured without
+breaking it", but the capture had already happened one line above -- the only
+decision actually being made was to throw the result away. `alp-quality`
+exists to produce a report, `alp-migrate --preview` a diff, `alp-lock` a
+resolved manifest, and a JSON-only caller could obtain none of them. `data`
+now carries `stdout`, `stderr` and `westExitCode`, and the `<verb>.failed`
+message is derived from the child's own stderr instead of a fixed sentence
+telling the caller to re-run in a mode it does not have. The envelope's own
+`exitCode` deliberately does NOT propagate the child's: `tan/exit_codes.py`
+fixes tan's vocabulary (0/1/2/3/4/5), so a child's `2` would arrive
+indistinguishable from tan's own `VALIDATION_FAILURE`. `data.westExitCode` is
+what makes a lock conflict (`7`) distinguishable from west's own usage error.
+This is a DELIBERATE divergence from the oracle, which calls `cmd.output()`
+and never reads `out.stdout`/`out.stderr` either
+(`crates/tan-cli/src/commands/build/workspace.rs`).
+
+**tan-cli#405 -- tan's own globals leaked into the child.** These were the
+only three commands registered with `ignore_unknown_options` AND the only
+three that never called `accept_global_flags`, so seven of the ten flags in
+`tan.core.global_flags._GLOBAL_FLAG_SPECS` were unknown here -- and an unknown
+flag under `ignore_unknown_options` is not rejected, it is dropped into the
+`ARGS...` catch-all and handed to a child that declares none of them.
+`tan --ci quality --profile quick` became `west alp-quality --ci --profile
+quick`; `tan --target cm33 quality` leaked the VALUE `cm33`, which then read
+as a caller-supplied positional and silently changed the argv shape. All three
+now call `accept_global_flags`. `--all` is the one collision: it is both a tan
+global and a real `alp-migrate` flag, so `migrate` declares it for real and
+forwards it back to the child after consuming it -- a bare
+`accept_global_flags(migrate)` would swallow it, which is what the v0.4.1
+oracle does.
+
 Text mode inherits stdio -- `alp-migrate`/`alp-lock`/`alp-quality` may prompt
 or stream their own progress, exactly like the oracle's `west`-delegating path
-(its own module doc: "Text mode inherits stdio so the build streams live").
-JSON mode captures the child's output and reports ONE envelope; per the
-oracle's own `BuildData`, `data` names the `west` command run, its cwd, and the
-forwarded args -- never the child's own stdout, which for an interactive tool
-cannot be captured without breaking it.
+(its own module doc: "Text mode inherits stdio so the build streams live"), so
+there is nothing to capture there and nothing to report but the child's exit
+code. JSON mode captures and reports ONE envelope.
 """
 from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 import typer
 
-from tan.commands.build_output import resolve_project_context, to_posix
+from tan.commands.build_output import ProjectContext, resolve_project_context, to_posix
+from tan.core.global_flags import accept_global_flags
 from tan.core.venv import west_program, west_workspace_dir, with_venv_on_path
 from tan.envelope import Envelope, Issue, emit
 from tan.exit_codes import ExitCode
@@ -46,6 +101,18 @@ FORWARD_CONTEXT_SETTINGS = {"ignore_unknown_options": True}
 #: private name across modules.
 _west_workspace_dir = west_workspace_dir
 
+#: The verbs whose child declares `--board` (tan-cli#391). `quality` is absent
+#: on purpose: `alp_quality.py`'s surface is `--profile`/`--json`/`--junit`/
+#: `--sarif` and nothing else, so there is no flag through which tan could name
+#: a project and inventing one would be a usage error, not targeting.
+_BOARD_TARGETED = frozenset({"migrate", "lock"})
+
+#: How much of the child's stderr the `<verb>.failed` message may quote
+#: (tan-cli#395). `data.stderr` keeps the stream VERBATIM and uncapped -- it is
+#: the payload; this caps only the one-line summary, so a child that dumps a
+#: megabyte on one line cannot turn a single issue into an unreadable envelope.
+_MAX_MESSAGE_DETAIL = 500
+
 
 def _west_argv(subcommand: str, passthrough: list[str]) -> list[str]:
     """Port of `workspace.rs::west_argv`: `alp-<subcommand>` followed by the
@@ -60,24 +127,113 @@ def _launch_error(err: OSError) -> str:
     return f"failed to launch west: {err}"
 
 
-def _run_forward(
-    subcommand: str,
-    passthrough: list[str],
-    project: str | None,
-    board_yaml: str | None,
-    sdk_root: str | None,
-    output_format: str,
-) -> None:
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
-    json_mode = output_format == "json"
+def _has_flag(args: Sequence[str], flag: str) -> bool:
+    """Whether the caller already spelled `flag` themselves, in either form
+    argparse accepts for a value-taking option (`--board X`, `--board=X`).
 
-    context = resolve_project_context(project, board_yaml, sdk_root)
+    argparse's prefix ABBREVIATION (`--boa X`) is deliberately not detected:
+    tan's own `--board` is prepended AHEAD of the forwarded tokens, so a
+    caller's later spelling -- abbreviated or not -- is the one argparse keeps.
+    The one case where that "last wins" safety net does not apply is
+    `alp-migrate`'s `--all`, which is MUTUALLY EXCLUSIVE with `--board` rather
+    than merely overridden by it; `--all` takes no value, and `migrate`
+    declares it for real below, so the exact-match check is what actually runs
+    for it.
+    """
+    prefix = f"{flag}="
+    return any(arg == flag or arg.startswith(prefix) for arg in args)
+
+
+def _target_args(subcommand: str, child_args: Sequence[str], board_yaml: str) -> list[str]:
+    """The flags that tell the child WHICH project to act on (tan-cli#391).
+
+    Empty for `quality` (no such flag exists), empty when the caller already
+    named a board themselves, and empty for `migrate --all` -- the child's
+    usage line is `[--all | --board BOARD]`, so adding `--board` behind a
+    caller's `--all` would trade one usage error for another.
+    """
+    if subcommand not in _BOARD_TARGETED:
+        return []
+    if _has_flag(child_args, "--board"):
+        return []
+    if subcommand == "migrate" and _has_flag(child_args, "--all"):
+        return []
+    return ["--board", board_yaml]
+
+
+def _last_meaningful_line(stderr: str) -> str:
+    """The child's own last word. Both shapes tan-cli#395 measured put the
+    actionable line LAST -- argparse prints its usage block and then `west
+    alp-migrate: error: ...`, and west prints its own usage and then `west:
+    unknown command "alp-lock"; ...` -- so the last non-blank line is the one
+    a caller needs. The full stream is in `data.stderr` regardless, which is
+    what makes this a summary rather than a lossy substitute."""
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    detail = lines[-1]
+    return detail if len(detail) <= _MAX_MESSAGE_DETAIL else f"{detail[:_MAX_MESSAGE_DETAIL]}..."
+
+
+def _child_failure_message(west_command: str, returncode: int, stderr: str) -> str:
+    """tan-cli#395: the fixed "re-run without --format json to see the log"
+    told a JSON-only caller to use a channel it does not have, and named
+    neither the child's exit code nor its diagnostic. The fallback survives for
+    a child that fails silently -- there is genuinely nothing else to say
+    then."""
+    detail = _last_meaningful_line(stderr)
+    if not detail:
+        return (
+            f"`west {west_command}` failed with exit code {returncode}; the child "
+            "wrote nothing to stderr -- re-run without --format json to see the log."
+        )
+    return f"`west {west_command}` failed with exit code {returncode}: {detail}"
+
+
+@dataclass(frozen=True)
+class _Forward:
+    """One resolved `west alp-*` invocation, computed once and shared by both
+    output modes so text and JSON can never spawn different argv."""
+
+    subcommand: str
+    west_bin: str
+    #: The `alp-<verb>` argv -- `argv[0]` is the verb, the `west` binary is NOT
+    #: part of it (see `full_argv`).
+    argv: tuple[str, ...]
+    run_cwd: str
+    env: dict[str, str]
+
+    @property
+    def west_command(self) -> str:
+        return self.argv[0]
+
+    @property
+    def full_argv(self) -> list[str]:
+        return [self.west_bin, *self.argv]
+
+    def data(self) -> dict[str, object]:
+        """`data.args` is every argument handed to the `alp-<verb>` command --
+        tan's own `--board` included, tan's globals excluded (tan-cli#391/#405).
+        It used to echo the caller's tokens only, so the envelope could not
+        name the injected argument the child actually died on. `westCommand`
+        carries `argv[0]`, so `west <westCommand> <args...>` reconstructs the
+        exact child command line."""
+        return {
+            "schemaVersion": "1",
+            "westCommand": self.west_command,
+            "westCwd": self.run_cwd,
+            "args": list(self.argv[1:]),
+        }
+
+
+def _plan(
+    subcommand: str,
+    passthrough: Sequence[str],
+    extra_args: Sequence[str],
+    context: ProjectContext,
+) -> _Forward:
     west_cwd = context.workspace_root or "."
     sdk_path = Path(context.sdk.root) if context.sdk is not None else None
-
     west_bin = west_program(west_cwd, str(sdk_path) if sdk_path is not None else None)
     workspace = _west_workspace_dir(west_cwd, sdk_path)
     # `to_posix`: `str(PurePath)` renders with the platform separator (backslash
@@ -88,71 +244,119 @@ def _run_forward(
     # (`tan_core::project::to_posix`) the very first time a workspace resolves.
     run_cwd = to_posix(str(workspace)) if workspace is not None else to_posix(west_cwd)
 
-    argv = _west_argv(subcommand, passthrough)
-    # Mirrors the oracle: when a workspace resolved and the caller gave no
-    # positional of their own (every forwarded token starts with `-`), insert
-    # the resolved app path as the `alp-*` command's required positional.
-    if workspace is not None and not any(not a.startswith("-") for a in passthrough):
-        app_path = str(Path(west_cwd).resolve())
-        argv.insert(1, app_path)
+    child_args = [*passthrough, *extra_args]
+    argv = _west_argv(
+        subcommand, [*_target_args(subcommand, child_args, context.board_yaml), *child_args]
+    )
+    return _Forward(
+        subcommand=subcommand,
+        west_bin=west_bin,
+        argv=tuple(argv),
+        run_cwd=run_cwd,
+        env=with_venv_on_path(dict(os.environ), west_bin),
+    )
 
-    west_command = argv[0]
-    data = {
-        "schemaVersion": "1",
-        "westCommand": west_command,
-        "westCwd": run_cwd,
-        "args": list(passthrough),
-    }
-    project_ = context.project()
-    env = with_venv_on_path(dict(os.environ), west_bin)
-    full_argv = [west_bin, *argv]
 
-    if json_mode:
-        try:
-            out = subprocess.run(
-                full_argv,
-                cwd=run_cwd,
-                env=env,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=False,
-            )
-        except OSError as err:
-            exit_code = ExitCode.RUNTIME_FAILURE
-            issues = [Issue(f"{subcommand}.failed", "error", _launch_error(err))]
-        else:
-            if out.returncode == 0:
-                exit_code = ExitCode.SUCCESS
-                issues = []
-            else:
-                exit_code = ExitCode.RUNTIME_FAILURE
-                issues = [
-                    Issue(
-                        f"{subcommand}.failed",
-                        "error",
-                        f"`west {west_command}` failed; re-run without --format json "
-                        "to see the log.",
-                    )
-                ]
-        emit(Envelope(subcommand, project_, data, issues, exit_code, sdk=context.sdk))
-        raise typer.Exit(int(exit_code))
+def _spawn_captured(plan: _Forward) -> subprocess.CompletedProcess[str]:
+    """JSON mode's child. `capture_output=True` was always here -- tan-cli#395
+    is that neither stream was ever READ afterwards, not that the capture was
+    missing. Raises `OSError` when `west` itself cannot be launched."""
+    return subprocess.run(
+        plan.full_argv,
+        cwd=plan.run_cwd,
+        env=plan.env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
 
+
+def _run_text(plan: _Forward) -> None:
+    """Inherit stdio: the child streams its own progress and may prompt."""
     try:
-        result = subprocess.run(full_argv, cwd=run_cwd, env=env, check=False)
+        result = subprocess.run(plan.full_argv, cwd=plan.run_cwd, env=plan.env, check=False)
     except OSError as err:
-        typer.echo(f"{subcommand}: {_launch_error(err)}", err=True)
+        typer.echo(f"{plan.subcommand}: {_launch_error(err)}", err=True)
         raise typer.Exit(int(ExitCode.RUNTIME_FAILURE)) from err
     if result.returncode == 0:
-        typer.echo(f"{subcommand}: complete.", err=True)
+        typer.echo(f"{plan.subcommand}: complete.", err=True)
         raise typer.Exit(0)
-    typer.echo(f"{subcommand}: `west {west_command}` failed (see log above).", err=True)
+    # The log IS above, but the code the child chose is not in it -- tan's own
+    # exit stays 1 on this path too (tan-cli#395), so naming the child's code is
+    # the only way a text-mode caller can tell a `7` from a `2`.
+    typer.echo(
+        f"{plan.subcommand}: `west {plan.west_command}` failed with exit code "
+        f"{result.returncode} (see log above).",
+        err=True,
+    )
     raise typer.Exit(int(ExitCode.RUNTIME_FAILURE))
 
 
+def _run_forward(
+    subcommand: str,
+    passthrough: list[str],
+    project: str | None,
+    board_yaml: str | None,
+    sdk_root: str | None,
+    output_format: str,
+    extra_args: Sequence[str] = (),
+) -> None:
+    """`extra_args` is what tan CONSUMED and hands back to the child --
+    `migrate`'s `--all` and nothing else today (tan-cli#405). The JSON branch
+    stays inline rather than moving to its own helper: both `<verb>.failed`
+    sites have to be reachable from one function for
+    `tests/gates/test_every_issue_code_is_registered.py`'s prefix-template scan
+    to resolve them."""
+    if output_format not in ("text", "json"):
+        raise typer.BadParameter(
+            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
+        )
+
+    context = resolve_project_context(project, board_yaml, sdk_root)
+    plan = _plan(subcommand, passthrough, extra_args, context)
+    if output_format != "json":
+        _run_text(plan)
+        return
+    try:
+        out = _spawn_captured(plan)
+    except OSError as err:
+        # No child ran, so there is no code to report -- `null`, not a
+        # fabricated 1. The keys stay present so a consumer sees ONE shape on
+        # every branch (tan-cli#395).
+        data = {**plan.data(), "westExitCode": None, "stdout": "", "stderr": ""}
+        exit_code = ExitCode.RUNTIME_FAILURE
+        issues = [Issue(f"{subcommand}.failed", "error", _launch_error(err))]
+    else:
+        # `or ""`: this is the boundary where another process's output enters
+        # the envelope, and a `None` would serialise as `null` for a field a
+        # consumer reads as text.
+        stdout, stderr = out.stdout or "", out.stderr or ""
+        data = {**plan.data(), "westExitCode": out.returncode, "stdout": stdout, "stderr": stderr}
+        if out.returncode == 0:
+            exit_code, issues = ExitCode.SUCCESS, []
+        else:
+            exit_code = ExitCode.RUNTIME_FAILURE
+            message = _child_failure_message(plan.west_command, out.returncode, stderr)
+            issues = [Issue(f"{subcommand}.failed", "error", message)]
+    emit(Envelope(subcommand, context.project(), data, issues, exit_code, sdk=context.sdk))
+    raise typer.Exit(int(exit_code))
+
+
+#: Why the catch-all parameter is `west_args` and not the obvious `args`
+#: (tan-cli#405): `accept_global_flags` returns a `def wrapper(*args, **kwargs)`
+#: carrying a synthesised `__signature__`, but Typer resolves each parameter's
+#: type through `typing.get_type_hints(callback)`, which reads the WRAPPER's own
+#: `__annotations__` -- where the name `args` already means the varargs tuple.
+#: A parameter named `args` therefore came back annotated `object` instead of
+#: `list[str]`, and Typer aborted with `RuntimeError: Type not yet supported`
+#: for every one of these three commands. The metavar is pinned to `ARGS...`
+#: so nothing about the CLI surface or the help text moves with the rename.
+
+
 def migrate(
-    args: list[str] = typer.Argument(None, metavar="ARGS..."),
+    west_args: list[str] = typer.Argument(None, metavar="ARGS..."),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
     ),
@@ -165,13 +369,31 @@ def migrate(
     output_format: str = typer.Option(
         "text", "--format", metavar="FORMAT", help="Output format: text or json."
     ),
+    all_boards: bool = typer.Option(
+        False,
+        "--all",
+        help="Migrate every board in the workspace (`west alp-migrate --all`).",
+    ),
 ) -> None:
     """Migrate board.yaml to the current schema (`west alp-migrate`)."""
-    _run_forward("migrate", list(args or []), project, board_yaml, sdk_root, output_format)
+    # `--all` is declared here for real -- it is BOTH a tan global and an
+    # `alp-migrate` flag (tan-cli#405). Declaring it stops `accept_global_flags`
+    # from injecting a second, silently-dropped `--all` behind it (that
+    # function keys on the flag STRING), and forwarding it back through
+    # `extra_args` is what keeps the child's own meaning.
+    _run_forward(
+        "migrate",
+        list(west_args or []),
+        project,
+        board_yaml,
+        sdk_root,
+        output_format,
+        extra_args=["--all"] if all_boards else [],
+    )
 
 
 def lock(
-    args: list[str] = typer.Argument(None, metavar="ARGS..."),
+    west_args: list[str] = typer.Argument(None, metavar="ARGS..."),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
     ),
@@ -186,11 +408,11 @@ def lock(
     ),
 ) -> None:
     """Pin/lock library dependencies (`west alp-lock`)."""
-    _run_forward("lock", list(args or []), project, board_yaml, sdk_root, output_format)
+    _run_forward("lock", list(west_args or []), project, board_yaml, sdk_root, output_format)
 
 
 def quality(
-    args: list[str] = typer.Argument(None, metavar="ARGS..."),
+    west_args: list[str] = typer.Argument(None, metavar="ARGS..."),
     project: str = typer.Option(
         None, "--project", metavar="PATH", help="Project root (defaults to '.')."
     ),
@@ -205,4 +427,16 @@ def quality(
     ),
 ) -> None:
     """Run the board.yaml quality checks (`west alp-quality`)."""
-    _run_forward("quality", list(args or []), project, board_yaml, sdk_root, output_format)
+    _run_forward("quality", list(west_args or []), project, board_yaml, sdk_root, output_format)
+
+
+# tan-cli#405: these were the last three commands not to accept the oracle's
+# global set, and the only three where NOT accepting a flag meant handing it to
+# a different program rather than refusing it -- `ignore_unknown_options` routes
+# an unknown flag into the `ARGS...` catch-all, and that catch-all is the
+# child's argv. Applied here, at the definition, for the reason
+# `accept_global_flags` documents: by the time `cli.py` registers the command,
+# the Click `Command` Typer built is already final.
+migrate = accept_global_flags(migrate)
+lock = accept_global_flags(lock)
+quality = accept_global_flags(quality)
