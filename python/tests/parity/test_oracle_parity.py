@@ -737,33 +737,51 @@ def test_sdk_switch_unresolvable_version_is_a_known_divergence_from_the_oracle(w
 # frozen fixture to fall back to -- measured itself against a binary that
 # predates half the commands it runs: 7 of these failed, with no signal that
 # the oracle, not the port, was wrong. Turning that into a SKIP (e.g.
-# widening `_ORACLE_REQUIRED`'s condition to also skip on a version mismatch)
 # would reopen exactly the hole `missing_for_live`'s own docstring refuses --
 # "a quiet skip here would hide exactly the gap that function exists to
-# surface" (tan-cli#272) -- so `pinned_oracle`, now a session-scoped, autouse
+# surface" (tan-cli#272) -- so `pinned_oracle`, a session-scoped, autouse
 # fixture in `conftest.py` that every module under `tests/parity/` inherits
-# (not just this section), FAILS the run instead, loudly, naming the
-# mismatch. `_ORACLE_REQUIRED` below composes only the presence skip: the
-# content check no longer needs opting into per case.
+# (not just this section), FAILS the run instead, loudly, naming the mismatch.
+#
+# tan-cli#409 removed the `_ORACLE_REQUIRED` decorator this section used to
+# carry, and with it the last of this module's binary-PRESENCE skips. It
+# composed one `skipif(RUST is None, ...)`, which is a hole rather than a
+# gate: the seven cases wearing it had no frozen fixture to fall back on, so
+# the day tan-cli#269 deletes `crates/` every one would have turned into a
+# passing skip with the run still exiting 0 -- the precise outcome the freeze
+# exists to prevent. They now go through `_both_sides` (or, where the
+# assertions read no path at all, `rust_run(..., scrub_roots=())`, the
+# spelling `test_new_som_matches_the_oracle_on_command_and_issue_code`
+# already uses). `tests/parity/test_parity_freeze_completeness.py` is what
+# stops the decorator's shape being reintroduced by hand.
 
 
-def _oracle_required(fn):
-    """`@_ORACLE_REQUIRED`'s actual decorator: skips on binary ABSENCE only.
-    The version-WRONGNESS check (`pinned_oracle`) is a session-scoped,
-    autouse fixture in `conftest.py` now, so every case tagged
-    `@_ORACLE_REQUIRED` gets it for free the same way every OTHER module
-    under `tests/parity/` does -- nothing here opts it in by hand any more."""
-    fn = pytest.mark.skipif(
-        RUST is None,
-        reason="needs a built Rust tan; run `cargo build --bin tan` (or set TAN_RUST_BINARY)",
-    )(fn)
-    return fn
+def _both_sides(argv, work_dir, home):
+    """`(r_code, r_out, p_code, p_out)` for a pinned-DIVERGENCE case whose
+    assertions read a PATH -- with the oracle side frozen (tan-cli#409).
+
+    Three normalisations, each load-bearing:
+
+    * `rust_run` returns its side already scrubbed of `work_dir`/`home`, so
+      the PORT side needs the identical substitution or `project.root` diffs
+      a live scratch path against the placeholder the fixture recorded.
+    * `force=True` on the separator normalisation, because these keys were
+      captured on **darwin**, not on `oracle_fixtures.CAPTURE_PLATFORM`
+      (`win32`). The automatic rule reads the store as single-platform and
+      disables itself on win32 -- right for the win32-captured majority and
+      exactly backwards here, where the fixture records `/` and a Windows
+      replay's live port answers a backslash. See `PROVENANCE.txt`.
+    * Applied to BOTH sides: idempotent on a path that already uses `/`, and
+      doing only one leaves a win32 replay diffing a normalised string
+      against an un-normalised one.
+    """
+    r_code, r_out = rust_run(argv, work_dir, home)
+    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    p_out = oracle_fixtures.scrub(p_out, work_dir, home)
+    normalise = oracle_fixtures.normalise_scrubbed_path_separators
+    return r_code, normalise(r_out, force=True), p_code, normalise(p_out, force=True)
 
 
-_ORACLE_REQUIRED = _oracle_required
-
-
-@_ORACLE_REQUIRED
 @pytest.mark.parametrize(
     "argv,exit_code",
     [
@@ -789,8 +807,7 @@ def test_explain_matches_the_oracle(argv, exit_code, work_dir, tmp_path):
     all. The explicit non-empty, non-``__raw__`` envelope check below closes
     that the rest of the way."""
     home = tmp_path / "home"
-    r_code, r_out = _run([RUST], argv, work_dir, home)
-    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    r_code, r_out, p_code, p_out = _both_sides(argv, work_dir, home)
     assert r_code == p_code == exit_code
     assert r_out and "__raw__" not in r_out, r_out
     assert p_out and "__raw__" not in p_out, p_out
@@ -833,20 +850,22 @@ def test_explain_matches_the_oracle(argv, exit_code, work_dir, tmp_path):
 # file already confirmed byte-identical under `--build-root br`, adding
 # coverage of the harness's own plumbing, not of `image` itself.
 
-@_ORACLE_REQUIRED
 def test_renode_no_sdk_matches_the_oracle(work_dir, tmp_path):
     """tan-cli#77. ``renode`` with no alp-sdk resolvable and no manifest is
     byte-identical -- the whole ``data`` placeholder shape (empty sku/repl/
     resc/elf, the derived ``logPath``) included."""
     home = tmp_path / "home"
     argv = ["renode", "--format", "json"]
-    r_code, r_out = _run([RUST], argv, work_dir, home)
-    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    # `data.logPath` is `<work_dir>/build/renode.log` in the HOST's native
+    # style (this command deliberately does not POSIX-normalise -- see
+    # `renode_cmd`'s module docstring), so both the scrub and the forced
+    # separator normalisation are what let one darwin capture replay against
+    # a Windows run of the port.
+    r_code, r_out, p_code, p_out = _both_sides(argv, work_dir, home)
     assert r_code == p_code == 1
     assert r_out == p_out
 
 
-@_ORACLE_REQUIRED
 def test_size_missing_manifest_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     """tan-cli#257 (the introspection set). Exit code and issue CODE match;
     the message's trailing OS-error text does not, and permanently cannot --
@@ -871,8 +890,7 @@ def test_size_missing_manifest_is_a_known_divergence_from_the_oracle(work_dir, t
     default and only spawns the oracle under `TAN_PARITY_LIVE=1`."""
     home = tmp_path / "home"
     argv = ["size", "--format", "json"]
-    r_code, r_out = _run([RUST], argv, work_dir, home)
-    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    r_code, r_out, p_code, p_out = _both_sides(argv, work_dir, home)
     assert r_code == p_code == 1
     assert [i["code"] for i in r_out["issues"]] == ["size.manifest-unavailable"]
     assert [i["code"] for i in p_out["issues"]] == ["size.manifest-unavailable"]
@@ -888,6 +906,17 @@ def test_size_missing_manifest_is_a_known_divergence_from_the_oracle(work_dir, t
     prefix = f"no system-manifest.yaml at {manifest_path}; run `tan build` first ("
     r_message = r_out["issues"][0]["message"]
     p_message = p_out["issues"][0]["message"]
+    # Both sides came back through `_both_sides`, so `work_dir` is redacted to
+    # `<ORACLE-ROOT-0>` and the tail's separators are forced to `/`. The
+    # EXPECTATION has to take the identical round trip or it diffs a live
+    # scratch path against the placeholder the fixture recorded -- and, on
+    # Windows, an `os.path.join` backslash against the normalised form
+    # (tan-cli#409).
+    _redact = oracle_fixtures.normalise_scrubbed_path_separators
+    prefix = _redact(oracle_fixtures.scrub(prefix, work_dir, home), force=True)
+    quoted_manifest = _redact(
+        oracle_fixtures.scrub(repr(manifest_path), work_dir, home), force=True
+    )
     # The Rust tail is PLATFORM-dependent, and pinning only the POSIX
     # rendering made this a Linux-only pass -- it reddens on Windows against
     # a completely healthy tree. The missing component here is the `build`
@@ -901,9 +930,18 @@ def test_size_missing_manifest_is_a_known_divergence_from_the_oracle(work_dir, t
     # itself part of the divergence this test exists to pin, so the Python
     # side stays one literal. Both tails are still pinned exactly; this
     # widens the expectation by PLATFORM, never to "exit code only".
+    #
+    # tan-cli#409: the condition is now `os.name == "nt" AND live`, not
+    # `os.name == "nt"` alone. The Rust side is a FROZEN fixture by default,
+    # captured on darwin, so a Windows replay reads back the POSIX tail the
+    # capture host recorded -- the platform that decides this string is the
+    # CAPTURE host, not the replay host. Keying on `os.name` alone would
+    # therefore redden every Windows run against a perfectly good fixture.
+    # Under `TAN_PARITY_LIVE=1` the oracle really is spawned and the replay
+    # host IS the deciding one, which is what the `LIVE` term restores.
     rust_tail = (
         "The system cannot find the path specified. (os error 3))."
-        if os.name == "nt"
+        if os.name == "nt" and oracle_fixtures.LIVE
         else "No such file or directory (os error 2))."
     )
     assert r_message == prefix + rust_tail
@@ -912,13 +950,12 @@ def test_size_missing_manifest_is_a_known_divergence_from_the_oracle(work_dir, t
     # (`...\\build\\system-manifest.yaml`). Hand-quoting reproduced the POSIX
     # rendering only. `!r` is what the runtime itself does, so it is right on
     # both platforms and cannot drift from it.
-    assert p_message == prefix + f"[Errno 2] No such file or directory: {manifest_path!r})."
+    assert p_message == prefix + f"[Errno 2] No such file or directory: {quoted_manifest})."
     # Everything OUTSIDE the message -- exit code, `data`, the issue code --
     # is a real match, not just coincidentally unchecked here.
     assert {**r_out, "issues": []} == {**p_out, "issues": []}
 
 
-@_ORACLE_REQUIRED
 def test_run_no_sdk_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     """tan-cli#257 (the introspection set). Exit code and issue CODE match
     (``build.plan-unavailable``, 1); the message's wording does not -- the
@@ -934,8 +971,7 @@ def test_run_no_sdk_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     one function above, measured true for ``run`` the same way."""
     home = tmp_path / "home"
     argv = ["run", "--format", "json"]
-    r_code, r_out = _run([RUST], argv, work_dir, home)
-    p_code, p_out = _run(python_command(), argv, work_dir, home)
+    r_code, r_out, p_code, p_out = _both_sides(argv, work_dir, home)
     assert r_code == p_code == 1
     assert [i["code"] for i in r_out["issues"]] == ["build.plan-unavailable"]
     assert [i["code"] for i in p_out["issues"]] == ["build.plan-unavailable"]
@@ -956,7 +992,6 @@ def test_run_no_sdk_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     assert {**r_out, "issues": []} == {**p_out, "issues": []}
 
 
-@_ORACLE_REQUIRED
 def test_model_bare_invocation_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     """tan-cli#253. The oracle's ``model`` is a generic ARGS-forwarding
     wrapper (``[ARGS]...`` in its own ``--help``, shared machinery with
@@ -972,7 +1007,9 @@ def test_model_bare_invocation_is_a_known_divergence_from_the_oracle(work_dir, t
     envelope shape)."""
     home = tmp_path / "home"
     argv = ["model", "--format", "json"]
-    r_code, r_out = _run([RUST], argv, work_dir, home)
+    # `scrub_roots=()`: every assertion below reads a `command` string, an
+    # exit code or an issue code, none of which can contain a scratch path.
+    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=())
     p_code, p_out = _run(python_command(), argv, work_dir, home)
     assert r_out["command"] == p_out["command"] == "model"
     assert (r_code, [i["code"] for i in r_out["issues"]]) == (2, ["model.failed"])
@@ -1017,7 +1054,6 @@ def test_new_som_matches_the_oracle_on_command_and_issue_code(work_dir, tmp_path
         assert [i["code"] for i in p_out["issues"]] == ["new-som.failed"], (argv, p_out)
 
 
-@_ORACLE_REQUIRED
 def test_monitor_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     """tan-cli#255. The oracle's ``monitor`` shares the same SDK-resolving
     forwarder as ``model``/``new-som``/``faultdecode`` and refuses
@@ -1045,7 +1081,7 @@ def test_monitor_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     configurations, not a hypothetical."""
     home = tmp_path / "home"
     argv = ["monitor", "--format", "json"]
-    r_code, r_out = _run([RUST], argv, work_dir, home)
+    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=())
     p_code, p_out = _run(python_command(), argv, work_dir, home)
     assert (r_code, [i["code"] for i in r_out["issues"]]) == (2, ["monitor.failed"])
     assert p_code == 1
@@ -1053,7 +1089,6 @@ def test_monitor_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     assert p_codes in (["monitor.pyserial-missing"], ["monitor.no-port"]), p_codes
 
 
-@_ORACLE_REQUIRED
 def test_faultdecode_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     """tan-cli#256. Exit codes COINCIDE at 2 here -- which is exactly why
     this case exists: pinned on the issue code and ``command`` field too, so
@@ -1066,7 +1101,7 @@ def test_faultdecode_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     because no fault register was supplied on the command line."""
     home = tmp_path / "home"
     argv = ["faultdecode", "--format", "json"]
-    r_code, r_out = _run([RUST], argv, work_dir, home)
+    r_code, r_out = rust_run(argv, work_dir, home, scrub_roots=())
     p_code, p_out = _run(python_command(), argv, work_dir, home)
     assert r_code == p_code == 2
     assert r_out["command"] == "faultdecode"
