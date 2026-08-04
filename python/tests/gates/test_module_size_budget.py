@@ -91,7 +91,13 @@ _MODULE_BUDGET: dict[str, int] = {
     "tan/commands/init_cmd.py": 974,
     "tan/core/debug_launch.py": 923,
     "tan/commands/build/execute.py": 941,
-    "tan/planner/zephyr_board.py": 848,
+    # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
+    # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
+    # delta in scripts/gen_zephyr_board.py line for line). Raised rather
+    # than extracted because this file mirrors an upstream generator --
+    # splitting it here would make the next port a hand-merge instead of
+    # a diff.
+    "tan/planner/zephyr_board.py": 970,
     "tan/commands/support_bundle_cmd.py": 834,
     "tan/cli.py": 831,
 }
@@ -115,7 +121,11 @@ _MIRRORED = ("tan/planner/",)
 # and `tan/envelope.py:_with_sdk_divergence`, each of which now emits the
 # shared `sdk.discovery-divergent` warning. Measured: 198 over 50 lines at
 # f3208e1, 200 now.
-_FUNCTION_COUNT_BUDGET = 200
+# 201 as of tan-cli#432: `tan/planner/zephyr_board.py:_aen_flash_partitions`
+# crossed 50 lines carrying the alp-sdk#1069 disjoint-slot0 branch. It is a
+# line-for-line port of alp-sdk's own function, which is the same size --
+# extracting here would make the next port a hand-merge instead of a diff.
+_FUNCTION_COUNT_BUDGET = 201
 _FUNCTION_WORST_BUDGET = 679
 
 
