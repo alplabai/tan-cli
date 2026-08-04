@@ -404,9 +404,23 @@ if ! have_prereqs && [ "$CAN_APT" -ne 1 ]; then
   note "B: NOT RUN -- host lacks cmake/ninja/xz/wget and cannot self-provision (no root apt-get)"
 else
   if [ "$CAN_APT" -eq 1 ]; then
-    note "B: installing cmake ninja-build xz-utils wget python3-venv"
+    # `file` is NOT one tan names, and it is required anyway: the Zephyr SDK's
+    # host-tools installer (`setup.sh -t <target> -h`, which `west sdk install`
+    # invokes) needs file(1). Isolated to that single variable in a container --
+    # identical bootstrapped workspace, identical HOME, `file` the only
+    # difference:
+    #
+    #   WITH    file -> west rc=0, "All done."
+    #   WITHOUT file -> west rc=1, "ERROR: Host tools installation failed"
+    #                             "FATAL ERROR: command
+    #                              `<sdk>/setup.sh -t arm-zephyr-eabi -h` failed"
+    #
+    # Installed here so scenario B can reach a real ARM ELF. That tan's own
+    # prerequisite list omits it -- and that the SDK's failure never names it --
+    # is a separate customer-facing gap, filed as tan-cli#424.
+    note "B: installing cmake ninja-build xz-utils wget python3-venv file"
     apt-get install -y -qq --no-install-recommends \
-      cmake ninja-build xz-utils wget python3-venv >"$WORK/apt-b.log" 2>&1
+      cmake ninja-build xz-utils wget python3-venv file >"$WORK/apt-b.log" 2>&1
   fi
 
   hdr "B: bootstrap succeeds on a provisioned host"
