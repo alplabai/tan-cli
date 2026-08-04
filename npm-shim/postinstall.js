@@ -99,12 +99,19 @@ function resolveTarget() {
   if (!target) {
     throw new Error(
       `@alplabai/tan: no prebuilt binary for ${key}. Supported: ${Object.keys(targets).join(", ")}. ` +
-        // `pip install alp-tan`, NOT `cargo install`: from 0.5.0 the released
-        // binaries are PyInstaller freezes of the Python package (`alp-tan` on
-        // PyPI), so there is no crate at this version to build from source. The
-        // pip path needs no prebuilt asset for this platform at all -- it is the
-        // real answer for a host this release's four-asset matrix does not cover.
-        `Install from PyPI instead: pip install alp-tan (needs Python 3.12+; see https://github.com/${REPO}).`,
+        // A CHECKOUT install, not `pip install alp-tan` (tan-cli#436): that was
+        // the advice here, and the package does not exist -- `alp-tan` is a
+        // RESERVED name with no PyPI publish job, so the command 404s
+        // (`README.md`'s "Package managers" section and `python/README.md` both
+        // say so). Handing a user a failing command at the exact moment their
+        // platform is unsupported is worse than the unsupported platform.
+        //
+        // Not `cargo install alp-tan-cli` either: it still resolves from the
+        // v0.4.1 era, but the crates.io publish job was deleted at v0.5.0, so
+        // it would install a DIFFERENT, stale program under the same `tan`
+        // name (docs/release-contract.md).
+        `Install from a checkout instead: git clone https://github.com/${REPO} && python3 -m pip install ./tan-cli/python ` +
+        `(needs Python 3.12+; see https://github.com/${REPO}).`,
     );
   }
   return target;
