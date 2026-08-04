@@ -101,9 +101,13 @@
 #   both report 2.14 there while the real floors are 2.30 and 2.38) — a
 #   constant that cannot detect the image regressing to a newer glibc, which
 #   is the entire point of measuring. The real floor lives in the collected
-#   onedir payload: libpython plus the extension modules, enumerated from
-#   .build/tan/PKG-00.toc (unchanged by --onedir vs --onefile — PyInstaller
-#   writes this TOC before the final packaging step either way).
+#   onedir payload: libpython plus the extension modules, enumerated by walking
+#   `dist/tan/` (the launcher plus `_internal/`) and probing every file as an
+#   ELF. An earlier revision enumerated `.build/tan/PKG-00.toc` and claimed it
+#   was "unchanged by --onedir vs --onefile"; that was false and it cost the
+#   v0.5.0 tag — under --onedir the natives are collected into `_internal/`
+#   rather than appended, so the TOC listed 2 entries, the floor step refused
+#   to guess, `build` failed, and `release` was skipped under a pushed tag.
 #
 #   service.ts:34-46 still maps linux/x64 to the MUSL triple, so the extension
 #   cannot download this asset. Deliberate, for this tag: SUPPORTED_CLI_VERSION
@@ -369,12 +373,30 @@ jobs:
       # Node works, and the image needs no git.
       #
       # The floor is measured HERE, in the image that produced the binary, over
-      # the PAYLOAD rather than the outer ELF: `.build/tan/PKG-00.toc` is a
-      # plain Python literal listing every file PyInstaller appended, so its
-      # BINARY/EXTENSION entries are exactly libpython + the extension modules
-      # + their .so dependencies. `readelf -V dist/tan` would report the
-      # bootloader's own GLIBC_2.14 under any image and is a lower bound only.
-      # It refuses (exit non-zero) rather than guessing if the TOC yields
+      # the PAYLOAD rather than the outer ELF: `readelf -V dist/tan/tan` reads
+      # only PyInstaller's vendored bootloader, whose own floor is GLIBC_2.14
+      # under any build image, so it is a lower bound and cannot detect the
+      # image regressing to a newer glibc — which is the entire point of
+      # measuring.
+      #
+      # The scan walks the COLLECTED ONEDIR TREE (`dist/tan/`, i.e. the
+      # launcher plus `_internal/`), not `.build/tan/PKG-00.toc`. An earlier
+      # revision of this step read that TOC, and the comment here asserted it
+      # was "unchanged by --onedir vs --onefile — PyInstaller writes this TOC
+      # before the final packaging step either way". That is FALSE, and it cost
+      # the v0.5.0 tag: under --onedir (tan-cli#349) PyInstaller collects the
+      # natives into `_internal/` instead of appending them, so the TOC listed
+      # `2` BINARY/EXTENSION entries where --onefile listed dozens, and this
+      # step correctly refused with "payload scan found 2 native files / 3
+      # GLIBC_ versions -- refusing to guess a floor". `build` failed, `release`
+      # (needs: build) was skipped, and the tag was left spent with no Release
+      # behind it.
+      #
+      # Walking `dist/tan/` is also strictly better than any build intermediate:
+      # it measures the bytes that actually ship. Every file is probed as an ELF
+      # and non-ELF files (the .pyc payload, data files) are skipped.
+      #
+      # It refuses (exit non-zero) rather than guessing if the scan yields
       # implausibly few native files or no GLIBC_ version at all — a wrong
       # number here becomes a compatibility promise in the release notes.
       - name: freeze tan (PyInstaller in ${{ matrix.container }}) + measure the glibc floor
@@ -400,24 +422,39 @@ jobs:
             /tmp/venv/bin/pip install --quiet pytest pyelftools
             /tmp/venv/bin/python -m pytest tests/conformance/test_packaged_binary.py -q
             /tmp/venv/bin/python - <<"PY"
-          import ast, sys
+          import pathlib, sys
+          from elftools.common.exceptions import ELFError
           from elftools.elf.elffile import ELFFile
           from elftools.elf.gnuversions import GNUVerNeedSection
 
-          data = ast.literal_eval(open(".build/tan/PKG-00.toc", encoding="utf-8").read())
-          toc = [e for x in data if isinstance(x, list)
-                 for e in x if isinstance(e, tuple) and len(e) == 3]
-          paths = [p for _, p, t in toc if t in ("BINARY", "EXTENSION")]
-          vers = set()
-          for p in paths:
-              with open(p, "rb") as f:
-                  for sec in ELFFile(f).iter_sections():
-                      if isinstance(sec, GNUVerNeedSection):
-                          for _, auxes in sec.iter_versions():
-                              vers.update(a.name for a in auxes if a.name.startswith("GLIBC_"))
+          # The shipped onedir tree, not a build intermediate: dist/tan/tan plus
+          # everything under dist/tan/_internal/ (libpython, the extension
+          # modules, and their .so dependencies).
+          root = pathlib.Path("dist/tan")
+          if not root.is_dir():
+              sys.exit("dist/tan/ is missing -- the onedir freeze did not produce "
+                       "the tree this floor scan measures")
+          paths, vers = [], set()
+          for p in sorted(root.rglob("*")):
+              if not p.is_file():
+                  continue
+              try:
+                  with open(p, "rb") as f:
+                      if f.read(4) != b"\x7fELF":
+                          continue
+                      f.seek(0)
+                      elf = ELFFile(f)
+                      paths.append(str(p))
+                      for sec in elf.iter_sections():
+                          if isinstance(sec, GNUVerNeedSection):
+                              for _, auxes in sec.iter_versions():
+                                  vers.update(a.name for a in auxes
+                                              if a.name.startswith("GLIBC_"))
+              except (ELFError, OSError):
+                  continue
           if len(paths) < 5 or not vers:
-              sys.exit("payload scan found %d native files / %d GLIBC_ versions -- "
-                       "refusing to guess a floor" % (len(paths), len(vers)))
+              sys.exit("payload scan found %d native files / %d GLIBC_ versions under "
+                       "dist/tan/ -- refusing to guess a floor" % (len(paths), len(vers)))
           floor = max(vers, key=lambda v: tuple(int(n) for n in v.split("_")[1].split(".")))
           open("dist/glibc-floor.txt", "w").write(floor + "\n")
           print("payload floor over %d native files: %s (saw: %s)"
