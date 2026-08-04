@@ -13,11 +13,19 @@ oracle source:  crates/ at 204c3a0b8dcb165e10ac3d14f3e9bfa699e45b59
                 "fix: close five RC follow-ups -- flake, TBD sentinel, repr
                 parity, CI coverage, prog name" -- the last commit that
                 touched crates/ as of the capture, per `git log -1 -- crates/`.
-                crates/ is frozen (docs/ROADMAP.md's Standing Rule), so this
-                is the SHA that actually determines the binary's behaviour;
-                it is what a future re-capture must diff against to know
-                whether anything really changed, not whichever commit HEAD
-                happened to be at when `cargo build` ran.
+                That SHA, not whichever commit HEAD happened to be at when
+                `cargo build` ran, is what determines the binary's behaviour
+                and what a future re-capture must diff against.
+
+                Both lines below are MACHINE-READ, by
+                tests/parity/test_oracle_provenance.py -- do not reword them
+                without changing that test (tan-cli#409). The claim they
+                encode used to be prose only, and it had silently gone stale
+                by three commits; see the drift section at the end of this
+                file.
+
+captured-from-crates-commit: 204c3a0b8dcb165e10ac3d14f3e9bfa699e45b59
+verified-against-crates-commit: c0e45f955c2f4b3d40e9193dcb89b7ca1d3a5f76
 worktree HEAD:  b40109b46aefdd42d82ff30f89c8bf8d5061d72d (unrelated python/
                 commits on top; does not affect the oracle binary)
 captured:       2026-08-01 (tan-cli#272)
@@ -31,9 +39,13 @@ See tests/parity/oracle_fixtures.py's own module docstring for the replay
 mechanics (TAN_PARITY_LIVE / TAN_PARITY_CAPTURE, the PYTEST_CURRENT_TEST-
 keyed store, and why a missing key is a loud KeyError rather than a skip).
 
-Re-capturing: crates/ is frozen and will not change again for this reason,
-so there should be no reason to re-run the capture recipe above UNLESS a
-NEW case is added to one of the five files it lists (a new argv, a new tree
+Re-capturing: this file used to say "crates/ is frozen and will not change
+again for this reason, so there should be no reason to re-run the capture
+recipe above". That was false when it was written and nothing checked it --
+see the drift section at the end. What holds is the weaker, checkable claim:
+re-run the capture recipe above when crates/ MOVES past
+`verified-against-crates-commit`, or when a NEW case is added to one of the
+five files it lists (a new argv, a new tree
 shape). Capturing is additive -- `oracle_fixtures.resolve()` only ever adds
 or overwrites the keys the run you did touch, so a partial capture (e.g.
 `pytest tests/parity/test_flash_oracle_parity.py -k some_new_case`) is safe
@@ -220,3 +232,95 @@ drop the pin for that run. Capturing on a host with `west` installed and the
 pin dropped would freeze a different answer entirely -- one that then only
 replays on hosts that also have `west`, reintroducing exactly the bug
 tan-cli#324 closed.
+
+--------------------------------------------------------------------------
+
+THE FROZEN-crates/ CLAIM WENT STALE, AND NOTHING NOTICED (tan-cli#409)
+
+This file used to state, as the reason no re-capture could be needed, that
+"crates/ is frozen and will not change again for this reason". By the time
+that was read again, crates/ had moved four commits past the recorded capture
+SHA -- three of them real `src/` changes, i.e. changes that CAN change the
+binary these fixtures were captured from:
+
+  8a71310  docs: align the repository with the Python port (#386)
+             crates/tan-cli/README.md, crates/tan-core/README.md -- docs only
+  ac79d4c  feat: close the v0.6 issue wave (#352)
+             crates/tan-cli/src/commands/debug_config.rs (4654 lines),
+             crates/tan-cli/src/commands/build/preflight.rs
+  4b7d2c4  fix(test): guard doctor's westResolved fixture (#333) (#340)
+             crates/tan-cli/src/commands/bootstrap/steps.rs,
+             crates/tan-cli/src/commands/doctor.rs
+  909ba02  fix(test): route ensure_venv through exit_code_shim (#318)
+             crates/tan-cli/src/commands/bootstrap/steps.rs
+
+The recorded SHA appeared nowhere but in this file's own prose, so nothing
+could compare it against anything. It is machine-read now
+(`verified-against-crates-commit`, checked by
+tests/parity/test_oracle_provenance.py, which FAILS when
+`git log <that sha>..HEAD -- crates` is non-empty), and the same drift can no
+longer go quiet.
+
+Why `verified-against-crates-commit` was advanced to 8a71310 with NO
+re-capture. Measured on this tree, darwin, both runs minutes apart over the
+five modules the capture recipe at the top of this file names:
+
+  frozen replay (port vs these fixtures)
+    3 failed, 222 passed, 13 skipped, 4 xfailed
+  TAN_PARITY_LIVE=1 (port vs an oracle built from THIS checkout, tan 0.4.1)
+    8 failed, 219 passed, 11 skipped, 4 xfailed
+
+Every case that ran in BOTH modes passed in both. Port == fixture and
+port == current binary over the same cases means fixture == current binary on
+every surface those cases compare -- including
+`test_debug_config_resolution_matches_rust` and
+`test_debug_config_native_host_preview_global_format_matches_rust`, which are
+the two frozen cases ac79d4c's 4654-line `debug_config.rs` rewrite could have
+moved and did not.
+
+What that measurement does NOT cover, stated so nobody reads it as more than
+it is:
+
+  * the eight tool-probe-pinned cases (the section above). They are the
+    live run's 8 failures, every one of them the documented
+    `compare() got python_env_overrides under TAN_PARITY_LIVE=1` refusal --
+    structurally unable to run live, so unable to be cross-checked this way.
+  * anything win32-gated. This was run on darwin, where those cells skip in
+    BOTH modes; the platform line above still governs.
+  * the one alp-sdk-CONTENT-bound case, which needs ALP_SDK_PARITY_ROOT at
+    v0.15.0-rc1 and skipped here.
+  * the fifteen cases that have no fixture at all -- see PARITY-COVERAGE.txt
+    in this directory, which is where that hole is now recorded.
+
+A capture, not a re-verification, is still what a change to a compared
+surface demands. This one earns its SHA bump by measurement, not by the
+assertion that crates/ cannot move.
+
+--------------------------------------------------------------------------
+
+2026-08-04, fix/v06-followups: verified-against-crates-commit ADVANCED TO
+c0e45f955c2f4b3d40e9193dcb89b7ca1d3a5f76 WITH NO RE-CAPTURE.
+
+`git log 8a71310..c0e45f9 -- crates` names two commits:
+
+  ea1c535  fix(gates): detect a skipped delegate, and stop requiring a
+           literal nobody reads (#372)
+             crates/tan-cli/tests/contract.rs -- gate-test-only
+  c0e45f9  Merge origin/dev into fix/v06-followups, reconciling the
+           divergent fixes by hand
+             crates/tan-cli/README.md, crates/tan-cli/tests/contract.rs --
+             doc + gate-test-only (the merge's own conflict resolution
+             touched nothing else under crates/)
+
+Unlike every prior entry in this file, this one needs no live-vs-frozen
+measurement to justify the bump: both commits touch only
+`crates/tan-cli/tests/contract.rs` (a `cargo test` integration-test file
+under `tests/`, never compiled into the `tan`/`tan.exe` binary product) and
+`crates/tan-cli/README.md` (docs). Neither is reachable from
+`target/debug/tan.exe`'s own build graph, so no change under either path can
+move what that binary answers -- there is no "behaviour" here to
+re-diff, only a stronger Rust-side gate (`python_delegate_skip_reason`,
+`issue_code_registry_tests_are_not_ignored`) and a corrected README. Verified
+by inspection (`git diff 8a71310 HEAD -- crates` above), not by running
+`TAN_PARITY_LIVE=1`, precisely because the diff is scoped away from anything
+that measurement could have caught moving.

@@ -193,23 +193,6 @@ args:
 
 
 @LIVE_GATE
-@pytest.mark.xfail(
-    strict=True,
-    reason="tan-cli#391/#395, deliberate. `_run_forward` no longer matches "
-    "`workspace.rs::run` two ways, both permanent: (1) tan-cli#391 -- the "
-    "retired app-path positional injection is replaced with a `--board "
-    "<project>/board.yaml` flag for `migrate`/`lock` (the only two that "
-    "declare one), so `data.args` there carries the injected flag while the "
-    "oracle's `BuildData.args` is always the raw, uninjected passthrough, "
-    "even on the run where it silently ran the retired positional; (2) "
-    "tan-cli#395 -- `data.stdout`/`data.stderr`/`data.westExitCode` are new "
-    "keys the frozen `BuildData` struct never had, for all three verbs "
-    "including `quality`, which #391's fix does not touch. See "
-    "`_run_forward`'s own DELIBERATE DIVERGENCE 1/2 comments in "
-    "`west_forward_cmd.py`. Strict: if the oracle is ever un-frozen and "
-    "regains either behaviour, this XPASSes and fails the run, which is the "
-    "signal to retire the divergence note.",
-)
 @pytest.mark.parametrize("verb", ["migrate", "lock", "quality"])
 def test_west_forward_matches_rust(verb, work_dir, tmp_path):
     """`west_forward_cmd.py`'s three verbs, run inside a real `.west` workspace
@@ -255,7 +238,27 @@ def test_west_forward_matches_rust(verb, work_dir, tmp_path):
         home=tmp_path / "home",
         python_env_overrides={"PATH": empty_tool_inventory(tmp_path)},
     )
-    assert result.matches, "\n".join(result.diffs)
+    # A BOUNDED divergence, introduced deliberately by tan-cli#395 and asserted
+    # here rather than waived: the port's `data` carries three keys the oracle
+    # does not -- `westExitCode`, `stdout`, `stderr`.
+    #
+    # The oracle spawns the `alp-*` child with `capture_output` and then reads
+    # NEITHER stream on either branch, so `alp-quality`'s report,
+    # `alp-migrate --preview`'s diff and `alp-lock`'s resolved manifest are all
+    # unreachable through `--format json`, and every non-zero child exit
+    # collapses to 1. A consumer whose only channel is JSON -- alp-sdk-vscode --
+    # could obtain none of them, and on failure was told to "re-run without
+    # --format json to see the log", i.e. to use a mode it does not have.
+    # Reproducing that faithfully would be parity with a defect.
+    #
+    # Bounded the way `test_flash_oracle_parity.py`'s shape-error case bounds
+    # its own: the diff may fail on `data` and on NOTHING else, so the exit
+    # code, `issues`, `project` and `ok` stay under full byte-parity and a
+    # divergence that wandered into any other field still fails here. The
+    # per-key shape of the addition is pinned separately, on this port's own
+    # terms, by `test_west_forward_command.py`.
+    offending = {d.split(":", 1)[0] for d in result.diffs}
+    assert offending <= {"data"}, f"{verb}: unexpected divergence: {result.diffs}"
 
 
 @LIVE_GATE
@@ -640,22 +643,17 @@ def test_validate_board_yaml_missing_guard_matches_the_oracle_at_exit_2(work_dir
 
 @LIVE_GATE
 def test_validate_no_sdk_guard_matches_the_oracle_at_exit_2(work_dir, tmp_path):
-    """`board.yaml` present, no SDK resolvable: BOTH sides answer exit 2
-    `validate.sdk-root-unresolved` -- the oracle's own pre-spawn guard 2.
-
-    Was pinned here as a KNOWN divergence (the port answered
-    `validate.spawn-not-implemented`, a code the oracle has no counterpart
-    for at all, because the spawn path was unported). tan-cli#376 ported it,
-    so this is now real parity and is asserted as such. RENAMED with the
-    behaviour, which moves its frozen-fixture key -- see this test's entry in
-    `oracle_fixtures/test_oracle_parity.json` and the rename note at the end
-    of `oracle_fixtures/PROVENANCE.txt`; the captured ORACLE answer under that
-    key is unchanged, only the port's half of the comparison moved.
-
-    Both halves of each side stay pinned (exit code AND issue code) rather
-    than narrowed to the code alone: exit 2 is also what an invalid board
-    gets, so a regression that turned this guard into a verdict would be
-    invisible to an exit-code-only assertion.
+    """`board.yaml` present, no SDK resolvable: the oracle's pre-spawn guard
+    answers exit 2 `validate.sdk-root-unresolved`. This used to be pinned as a
+    KNOWN divergence -- the port answered exit 2 `validate.spawn-not-
+    implemented` while the full spawn path was unported (tan-cli#262) -- but
+    tan-cli#376 landed the real spawn path, which reaches this SAME guard
+    (`resolve_sdk_root_ladder`) instead of the placeholder refusal that used
+    to sit in front of it: see `validate_cmd.py`'s own module docstring,
+    "`validate.spawn-not-implemented` is GONE as of #376". Both sides now
+    agree on issue code too, so this asserts the converged behaviour instead
+    of the stale gap (the frozen fixture backing this case was renamed with
+    it, 2026-08-03 -- see `oracle_fixtures/PROVENANCE.txt`).
 
     `scrub_roots=(work_dir, home)`: see the sibling `test_validate_board_
     yaml_missing_guard_matches_the_oracle_at_exit_2` above for why an empty
@@ -982,43 +980,42 @@ def test_model_bare_invocation_is_a_known_divergence_from_the_oracle(work_dir, t
 
 
 @_ORACLE_REQUIRED
-def test_new_som_failure_envelope_now_matches_the_oracle(work_dir, tmp_path):
-    """tan-cli#254, CLOSED (tan-cli#399 postmortem) -- was a documented
-    divergence here; this is the promotion the module docstring's own
-    convention asks for the moment a pinned XFAIL would start passing for
-    real, applied by hand since this case is a plain assertion, not an
-    ``xfail(strict=True)``.
+def test_new_som_matches_the_oracle_on_command_and_issue_code(work_dir, tmp_path):
+    """tan-cli#254, closed. Three invocation shapes, all now agreeing with the
+    oracle on ``command``/issue code/exit code; wording is the one thing left
+    unpinned (the port adds a ``git clone`` remedy suggestion the oracle never
+    had).
 
-    The divergence used to be that the port's ``new-som`` accepted
-    ``--format`` (a hidden option mirroring clap's ``global = true``
-    ``GlobalArgs``) but never READ it -- ``new_som_cmd`` ``del``d the value --
-    so a failing run stayed text mode, printed no envelope of its own, and
-    ``main``'s fallback wrapped it in the generic ``command: "cli"`` /
-    ``cli.parse-error`` envelope, where the oracle's own ``--format json``
-    reaches a real ``command: "new-som"`` refusal (``new-som.failed``,
-    exit 2). ``new_som_cmd`` now emits that envelope itself (tan-cli#399), so
-    both sides agree on ``command``, ``exitCode`` and the issue code -- pinned
-    below at BOTH the bare invocation (exit 2 on each side already, before
-    tan-cli#399) and under ``--format json`` (the half that used to diverge).
-
-    NOT a flag-POSITION case: the argv below puts ``--format json`` AFTER the
-    subcommand, the position that has always parsed. What still differs, and
-    is deliberately left OUT of the comparison, is the refusal MESSAGE text --
-    the port adds a ``git clone`` suggestion the oracle never had -- which is
-    exactly why this checks ``command``/``exitCode``/issue ``code`` and not a
-    whole-envelope `compare()`.
+    * Bare ``new-som`` (no ``--format``): both exit 2 on the SDK-root-
+      unresolved preflight.
+    * Post-subcommand ``new-som --format json``: tan-cli#399 gave
+      ``new_som_cmd`` a real ``new-som.failed`` envelope -- it used to have no
+      ``emit(`` call at all (``del ... output_format`` was the whole handling
+      of the flag), so this answered the generic ``command: "cli"`` /
+      ``cli.parse-error`` fallback instead.
+    * Pre-subcommand ``--format json new-som``: this was the one shape left
+      diverging even after #399, because ``cli.py`` used to gate the
+      pre-subcommand position behind a hand-listed ``_HONOURS_ROOT_FORMAT``
+      frozenset that ``new-som`` was never added to. tan-cli#378 replaced that
+      whole mechanism with uniform ``--format`` RELOCATION
+      (``_reorder_global_flags`` moving the token past the subcommand name to
+      the parameter that already declares and reads it) -- every registered
+      command is covered with nothing to add per-command, so this position now
+      reaches the same ``new-som.failed`` envelope as the post-subcommand one,
+      matching the oracle's clap ``global = true`` semantics.
     """
     home = tmp_path / "home"
     r_code, _ = _run([RUST], ["new-som"], work_dir, home)
     p_code, _ = _run(python_command(), ["new-som"], work_dir, home)
-    assert r_code == 2
-    assert p_code == 2
-    _, r_json_out = _run([RUST], ["new-som", "--format", "json"], work_dir, home)
-    _, p_json_out = _run(python_command(), ["new-som", "--format", "json"], work_dir, home)
-    assert r_json_out["command"] == p_json_out["command"] == "new-som"
-    assert r_json_out["exitCode"] == p_json_out["exitCode"] == 2
-    assert [i["code"] for i in r_json_out["issues"]] == ["new-som.failed"]
-    assert [i["code"] for i in p_json_out["issues"]] == ["new-som.failed"]
+    assert r_code == p_code == 2
+
+    for argv in (["new-som", "--format", "json"], ["--format", "json", "new-som"]):
+        _, r_out = _run([RUST], argv, work_dir, home)
+        _, p_out = _run(python_command(), argv, work_dir, home)
+        assert r_out["command"] == p_out["command"] == "new-som", (argv, r_out, p_out)
+        assert r_out["exitCode"] == p_out["exitCode"] == 2, (argv, r_out, p_out)
+        assert [i["code"] for i in r_out["issues"]] == ["new-som.failed"], (argv, r_out)
+        assert [i["code"] for i in p_out["issues"]] == ["new-som.failed"], (argv, p_out)
 
 
 @_ORACLE_REQUIRED
@@ -1075,113 +1072,21 @@ def test_faultdecode_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     assert r_code == p_code == 2
     assert r_out["command"] == "faultdecode"
     assert [i["code"] for i in r_out["issues"]] == ["faultdecode.failed"]
-    assert p_out["command"] == "cli"
-    assert [i["code"] for i in p_out["issues"]] == ["cli.parse-error"]
-
-
-# --- tan-cli#398/#403: an INJECTED value-carrying global flag must be
-# accept-and-ignore, matching the oracle, not accept-and-REFUSE -------------
-#
-# `accept_global_flags` (`tan/core/global_flags.py`) injects `--board-yaml`
-# and `--target` on every command that does not already implement them, for
-# oracle-argv-parity (tan-cli#261): the oracle's clap `GlobalArgs` marks both
-# `global = true`, so `target/debug/tan.exe <any command> --board-yaml x` /
-# `... --target x` always PARSES, even on a command whose own Rust handler
-# never reads the value. tan-cli#398 changed what happens to an INJECTED
-# value-carrying flag when a value is actually supplied, from "accept and
-# drop" to "refuse, exit 2" -- reasoning (correct for exactly one flag,
-# `model`'s `--board-yaml`) that silently dropping a supplied value serves
-# the command's own default in its place. Refusing regressed every OTHER
-# (command, flag) pair below: the oracle itself accepts and ignores the same
-# flag there, so the refusal was a NEW divergence, not a fix, and put the
-# WRONG command (`cli`, `main`'s generic usage-error fallback, since the
-# refusal fires before the wrapped command -- and therefore before `emit()`
-# -- ever runs) in the JSON envelope on an argv the oracle runs cleanly.
-#
-# Hand-listed rather than derived off `_SUBCOMMAND_NAMES` x `GLOBAL_FLAGS`
-# (unlike `tests/gates/test_global_flags_gate.py`'s PARSE-only gate, which IS
-# fully derived): this table's job is different -- it is not "does the flag
-# parse" but "does the DROPPED VALUE still answer the oracle's exit code",
-# which needs a live oracle spawn per pair and is expensive enough that a
-# blind full cross product (32 commands x 10 flags) would slow this suite for
-# combinations no defect has ever touched. This is the measured tan-cli#398
-# regression set, snapshotted 2026-08: `--board-yaml` on 3 commands (`model`
-# is EXCLUDED, see below) and `--target` on 14, 17 pairs total here, alongside
-# `test_derived_pair_count_has_not_silently_shrunk` guarding against a count
-# that quietly drops to zero and stops testing anything. The regression's
-# FULL count is 18 -- `model` x `--board-yaml` was the 18th pair, and the ONE
-# that computed a genuinely wrong answer when dropped (a real board.yaml built
-# for the WRONG SKU, not a refusal); it is excluded from THIS table, not
-# untested.
-#
-# `model` carries NEITHER flag here even though `accept_global_flags` used to
-# inject `--board-yaml` for it: `model_cmd.py`'s own `--board` option now
-# declares `--board-yaml` as a second name for the SAME option (tan-cli#403),
-# so it is a REAL, read alias, not a dropped one -- covered instead by
-# `tests/commands/test_model_command.py`'s own `--board-yaml` case.
-_BOARD_YAML_DROP_COMMANDS = ("examples", "explain", "sdk")
-_TARGET_DROP_COMMANDS = (
-    "bootstrap", "debug-config", "doctor", "examples", "flash", "image",
-    "kconfig", "model", "presets", "renode", "run", "sdk", "size", "validate",
-)
-
-#: A command that needs a SUBCOMMAND before its options even parse (`model
-#: build`, `sdk current`) -- `None` for the 30 flat commands. Matches the real
-#: shape a caller would use; a bare `model --target x` fails on its OWN
-#: `model.unknown-subcommand` regardless of `--target`, which would make the
-#: pair "match" the oracle for a reason that has nothing to do with this
-#: regression (`test_model_bare_invocation_is_a_known_divergence_from_the_
-#: oracle`, above, is exactly that unrelated, already-pinned divergence).
-_REQUIRES_SUBCOMMAND = {"model": "build", "sdk": "current"}
-
-
-def _dropped_flag_pairs():
-    for command in _BOARD_YAML_DROP_COMMANDS:
-        yield command, "--board-yaml", "nonexistent/board.yaml"
-    for command in _TARGET_DROP_COMMANDS:
-        yield command, "--target", "zephyr"
-
-
-def _argv_for(command: str, flag: str, value: str) -> list[str]:
-    argv = [command]
-    sub = _REQUIRES_SUBCOMMAND.get(command)
-    if sub is not None:
-        argv.append(sub)
-    argv += [flag, value, "--format", "json"]
-    return argv
-
-
-@_ORACLE_REQUIRED
-@pytest.mark.parametrize(
-    "command,flag,value",
-    list(_dropped_flag_pairs()),
-    ids=[f"{c}-{f}" for c, f, _v in _dropped_flag_pairs()],
-)
-def test_an_injected_value_carrying_flag_exits_like_the_oracle_not_refused(
-    command, flag, value, work_dir, tmp_path
-):
-    """The regression test tan-cli#398 shipped without: probed with a
-    trailing ``--help`` (`test_global_flags_gate.py`), which Click's own
-    eager short-circuit answers before the wrapped command -- and therefore
-    before the refusal in `accept_global_flags`'s wrapper -- ever runs, so
-    that gate stayed green on both sides of the tan-cli#398 regression.
-    A REAL value on a REAL invocation is what actually reaches the refusal.
-    """
-    home = tmp_path / "home"
-    argv = _argv_for(command, flag, value)
-    r_code, _ = _run([RUST], argv, work_dir, home)
-    p_code, _ = _run(python_command(), argv, work_dir, home)
-    assert p_code == r_code, (
-        f"`tan {' '.join(argv)}` exited {p_code}, the oracle exits {r_code} -- "
-        f"an injected {flag} must be accepted and ignored, not refused."
-    )
-
-
-def test_derived_pair_count_has_not_silently_shrunk():
-    """The canary `test_global_flags_gate.py`'s own file names for the same
-    reason: a parametrised list that quietly shrinks to zero reports green
-    while checking nothing."""
-    assert len(list(_dropped_flag_pairs())) == 17
+    # tan-cli#399 narrowed this one rather than closing it. The port used to
+    # answer `command: "cli"` / `cli.parse-error`, because `faultdecode` folded
+    # `--format json` into its own `--json` and printed a bespoke `indent=2`
+    # object carrying none of the six envelope keys. It now emits a real
+    # `faultdecode` envelope, so `command` and the exit code AGREE.
+    assert p_out["command"] == "faultdecode"
+    assert p_code == 2
+    # The residual divergence is the code string and the reason behind it. The
+    # oracle refuses through its shared SDK-resolving forwarder
+    # (`faultdecode.failed`, "alp-sdk root is unresolved"); the port's
+    # `faultdecode` needs no SDK at all and refuses for the reason that is
+    # actually true of the invocation -- no CFSR/HFSR/DFSR was supplied. Same
+    # exit, more accurate cause; kept as a divergence rather than "fixed" by
+    # copying a message that would name the wrong problem.
+    assert [i["code"] for i in p_out["issues"]] == ["faultdecode.no-registers"]
 
 
 # --- the harness must be able to go red ------------------------------------

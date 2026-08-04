@@ -144,15 +144,17 @@ def test_missing_board_yaml_refuses(tmp_path):
     assert doc["issues"][0]["code"] == "model.board-yaml-missing"
 
 
-def test_non_utf8_board_yaml_is_a_coded_envelope_not_a_traceback(tmp_path):
-    """tan-cli#415: `_load_board` caught `OSError` only, so a non-UTF-8
-    board.yaml escaped as a raw `UnicodeDecodeError` (a `ValueError`, not an
-    `OSError`) rather than the SAME `model.board-yaml-missing` refusal an
-    unreadable board.yaml already gets -- folded into `model.internal-failure`
-    by `model()`'s own generic backstop before this fix, not a traceback, but
-    still the WRONG code/exit for "this file cannot be read"."""
+def test_non_utf8_board_yaml_is_a_coded_validation_refusal_not_internal_failure(tmp_path):
+    """tan-cli#396: `_load_board`'s docstring promises "a `ModelError` for
+    every way that can fail -- missing file, bad encoding, not YAML, not a
+    mapping", but `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so
+    the bad-encoding half fell through to `model`'s outer catch-all instead:
+    measured `exitCode: 5` / `model.internal-failure` / "model build failed
+    unexpectedly: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xff in
+    position 32: invalid start byte". A script cannot tell "your board.yaml
+    has a bad byte" from "tan broke" at exit 5."""
     sdk = make_sdk(tmp_path / "sdk")
-    (tmp_path / "board.yaml").write_bytes(b"som:\n  sku: E1M-TEST\n# \xff\n")
+    (tmp_path / "board.yaml").write_bytes(b"som:\n  sku: E1M-TEST\n# \xff\xfe\xfd\n")
     result = runner.invoke(
         app,
         [
@@ -164,8 +166,8 @@ def test_non_utf8_board_yaml_is_a_coded_envelope_not_a_traceback(tmp_path):
     )
     assert result.exit_code == 2
     doc = envelope(result)
-    assert doc["ok"] is False
-    assert doc["issues"][0]["code"] == "model.board-yaml-missing"
+    assert doc["issues"][0]["code"] == "model.board-yaml-invalid"
+    assert doc["issues"][0]["severity"] == "error"
 
 
 def test_no_models_declared_is_a_success_no_op(tmp_path):
@@ -398,3 +400,103 @@ def build_model(*, sku, name, source, out_dir, metadata_root, compile_opts=None)
     assert opts["sku"] == "E1M-TEST"
     assert opts["metadataRoot"] == str(sdk / "metadata")
     assert opts["compileOpts"]["ethos_u"]["config"] == str((tmp_path / "vela.ini").resolve())
+
+
+# --------------------------------------------------------------------------
+# tan-cli#398 -- `--board-yaml` is the spelling `build`/`run`/`kconfig`/
+# `validate`/`generate`/`inspect` all use for the board file, and the vscode
+# extension's own CLI contract (`docs/CLI.md`, "Common flags") lists it among
+# the flags "All commands should support". `model` declared only `--board` and
+# took `--board-yaml` as one of `accept_global_flags`' INJECTED options, which
+# are accepted and then dropped -- harmless for an arity-0 `--verbose`, a
+# wrong answer for a flag that carries a value. Measured before the fix: the
+# same file named two ways gave two different SKUs, BOTH at `exitCode: 0` with
+# `issues: []`, so `build_model` compiled `.alpmodel` artefacts for the wrong
+# silicon and nothing refused or warned.
+# --------------------------------------------------------------------------
+
+
+def _two_boards(tmp_path):
+    """`<project>/board.yaml` (the DEFAULT `model` falls back to) and
+    `<other>/board.yaml` (the one the caller names), with different
+    `som.sku` -- `som.sku` is what selects which silicon `build_model`
+    compiles for, so the SKU in the envelope names the file actually read."""
+    project = tmp_path / "project"
+    other = tmp_path / "other"
+    write(project / "board.yaml", "som:\n  sku: E1M-AEN801\n")
+    write(other / "board.yaml", "som:\n  sku: E1M-V2N101\n")
+    return project, other / "board.yaml"
+
+
+def test_board_yaml_spelling_reads_the_file_it_names_trailing_form(tmp_path):
+    sdk = make_sdk(tmp_path / "sdk")
+    project, other_board = _two_boards(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--project", str(project),
+            "--sdk-root", str(sdk),
+            "--board-yaml", str(other_board),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    doc = envelope(result)
+    assert doc["data"]["sku"] == "E1M-V2N101", (
+        "`--board-yaml` was accepted and dropped, so the default "
+        "`<project>/board.yaml` was packaged instead of the file named"
+    )
+    # `.as_posix()`, not `str()`: `project.boardYaml` is POSIX-normalised
+    # before it is emitted, so `str()` matches on a POSIX host only and this
+    # assertion was green on macOS/ubuntu and red on windows-latest alone
+    # (tan-cli#414). Normalise the filesystem side; the envelope is the
+    # contract.
+    assert doc["project"]["boardYaml"] == other_board.as_posix()
+
+
+def test_board_yaml_spelling_reads_the_file_it_names_leading_form(tmp_path):
+    """The canonical leading-global form the extension's own `withSdkRoot`
+    produces (`tan --board-yaml <path> model build`). It goes through
+    `cli._reorder_global_flags`, which relocates the flag across the
+    subcommand boundary -- and, pre-fix, straight into the same drop. Driven
+    through the REAL `tan.cli.app` registration plus that real rewrite, not
+    this module's throwaway one-command app, because the rewrite is the half
+    under test."""
+    from tan.cli import _reorder_global_flags
+    from tan.cli import app as real_app
+
+    sdk = make_sdk(tmp_path / "sdk")
+    project, other_board = _two_boards(tmp_path)
+    argv = _reorder_global_flags(
+        [
+            "--board-yaml", str(other_board),
+            "model", "build",
+            "--project", str(project),
+            "--sdk-root", str(sdk),
+            "--format", "json",
+        ]
+    )
+    result = runner.invoke(real_app, argv)
+    assert result.exit_code == 0, result.stdout
+    doc = envelope(result)
+    assert doc["data"]["sku"] == "E1M-V2N101"
+    # `.as_posix()`, not `str()`: `project.boardYaml` is POSIX-normalised
+    # before it is emitted, so `str()` matches on a POSIX host only and this
+    # assertion was green on macOS/ubuntu and red on windows-latest alone
+    # (tan-cli#414). Normalise the filesystem side; the envelope is the
+    # contract.
+    assert doc["project"]["boardYaml"] == other_board.as_posix()
+
+
+def test_board_and_board_yaml_are_the_same_option(tmp_path):
+    """Both spellings must land on ONE parameter -- two independent options
+    would put the port right back where tan-cli#398 found it the first time a
+    caller passed the other one."""
+    sdk = make_sdk(tmp_path / "sdk")
+    project, other_board = _two_boards(tmp_path)
+    common = ["--project", str(project), "--sdk-root", str(sdk), "--format", "json"]
+    via_board = runner.invoke(app, ["build", "--board", str(other_board), *common])
+    via_board_yaml = runner.invoke(app, ["build", "--board-yaml", str(other_board), *common])
+    assert via_board.exit_code == via_board_yaml.exit_code == 0
+    assert envelope(via_board) == envelope(via_board_yaml)

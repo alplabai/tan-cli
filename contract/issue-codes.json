@@ -981,6 +981,14 @@
       "note": "Registered by tan-cli#224, which added the Python-side emit-site gate (python/tests/gates/test_every_issue_code_is_registered.py): every issue code python/tan emits -- literal or assembled by a prefixing helper -- must appear in this registry at some status. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "kconfig.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/kconfig_cmd.py",
+      "note": "Catch-all backstop mirroring `presets_cmd.py`'s own, added by tan-cli#396. Before it, a board.yaml that is not valid UTF-8 raised `UnicodeDecodeError` out of a guard that only caught `OSError` (UnicodeDecodeError is a ValueError), so `tan kconfig --format json` exited 1 with ZERO bytes on stdout and a PyInstaller traceback on stderr -- and `contract/README.md` records that the vscode prj.conf symbol feed fails OPEN on an unparseable answer, so the menu rendered stale or empty with no error on either side. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` the moment a consumer binds to it."
+    },
+    {
       "code": "kconfig.no-sdk-root",
       "status": "reserved",
       "severity": "error",
@@ -2368,9 +2376,28 @@
       "code": "new-som.failed",
       "status": "reserved",
       "severity": "error",
-      "consumer": "none",
+      "consumer": "none -- no consumer matches this code with `===` yet; registered so the scaffold panel has a stable spelling to bind to instead of inventing one",
+      "consumerEffect": "Marks a `new-som` run as refused. Until tan-cli#399 the SAME refusals reached the consumer as `cli.parse-error` on a `command: \"cli\"` envelope, so a panel branching on `command` could not tell a rejected scaffold from a CLI usage error, and a successful scaffold was not JSON at all -- the two paths of one verb disagreed about whether stdout was an envelope.",
       "emittedBy": "python/tan/commands/new_som_cmd.py",
-      "note": "Every `tan new-som --format json` refusal: the SDK-root preflight, every argument the scaffold rejects (SKU/soc-ref/family/cores/board/hw-rev shape, an existing preset without --force), a write failure, and the two INTERNAL ERROR paths where a rendered skeleton fails its own schema self-check. One code for all of them because that is the ORACLE's own shape, measured not read: `target/debug/tan.exe new-som --format json` with no SDK resolvable answers command \"new-som\", data {\"subcommand\":\"new-som\"}, issues [{code \"new-som.failed\"}], exit 2 -- its `new-som` is a forwarder whose every failure reports this one spelling with the specifics in `message`. Added by tan-cli#399, which closes the gap where `new-som` emitted NO envelope and cli.py's generic fallback reported command \"cli\" / cli.parse-error for a refusal that really happened. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "ONE code for every `new-som` refusal (unresolved SDK root, bad SKU/soc-ref/family/core id, unknown board, unresolvable hw rev, preset exists without --force, unwritable output root, missing flags where prompts are unavailable), matching the spelling the frozen v0.4.1 oracle's forwarder emits for the same class. The EXIT CODE, not the code string, distinguishes them: 2 for the SDK-root preflight (mirroring crates/tan-cli/src/commands/sdk_cli.rs::run), 1 for every other refusal. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "new-som.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code with `===` yet",
+      "consumerEffect": "Reserved to let a consumer separate 'tan is broken' from 'your input was rejected': a generated skeleton that fails its own schema self-check is a tan bug, never bad user input, and nothing the porting engineer can fix by re-running with different flags.",
+      "emittedBy": "python/tan/commands/new_som_cmd.py",
+      "note": "Both in-memory self-checks (`som-preset-v1`, `soc-spec-v1`) run BEFORE anything touches the filesystem, so this code always means nothing was written. Exit 1 (RuntimeFailure), matching the sibling `*.internal-failure` codes. Added by tan-cli#399 with the rest of new-som's envelope: before it, this path exited 1 with prose on stderr and left `cli.main`'s generic fallback to invent a `cli.parse-error` envelope for it."
+    },
+    {
+      "code": "faultdecode.no-registers",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code with `===` yet; registered so a fault-decode panel has a stable spelling to bind to",
+      "consumerEffect": "Distinguishes 'nothing to analyse' from a tan crash on the one refusal `faultdecode` has. Reachable only under `--format json`: the command's own `--json` is the unwrapped SDK report surface (see faultdecode_cmd.py's module docstring) and keeps writing the human error line to stderr, envelope-free, exactly as the forwarded child did.",
+      "emittedBy": "python/tan/commands/faultdecode_cmd.py",
+      "note": "Exit 2 (ValidationFailure), matching the `click.UsageError` the alp_cli original raised for the same input. Added by tan-cli#399, which made `--format json` emit tan's envelope with the decode report as `data`; without this the refusal path went out as `command: \"cli\"` / `cli.parse-error` while the success path emitted `command: \"faultdecode\"`. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
     }
   ]
 }

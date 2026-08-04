@@ -20,8 +20,8 @@ against a committed golden fixture, unconditionally).
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -33,10 +33,6 @@ from typer.testing import CliRunner
 
 from tan.commands.faultdecode_cmd import faultdecode
 from tests.conftest import REAL_ENVIRON
-
-#: `python/` -- `python -m tan` resolves the package off `os.getcwd()`, so the
-#: real-subprocess case below needs this on the child's `PYTHONPATH`.
-PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 app = typer.Typer()
 app.command("faultdecode")(faultdecode)
@@ -248,31 +244,72 @@ def test_full_global_flag_set_is_accepted_even_when_meaningless():
     assert result.exit_code == 0, result.output
 
 
-def test_format_json_after_subcommand_is_equivalent_to_json_flag():
-    """`--format json`, declared after the subcommand name (Typer's own
-    option), must behave exactly like `--json`: the oracle maps the global
-    `--format json` onto the child's `--json`
-    (`crates/tan-cli/src/commands/sdk_cli.rs:56-58`) -- confirmed live against
-    the built `tan.exe`: `tan faultdecode --format json --cfsr 0x8200` prints
-    the same unwrapped SDK report shape as `--json`, rc=0."""
+def test_format_json_after_subcommand_wraps_the_report_in_the_envelope():
+    """tan-cli#399. `--format json` is the EXTENSION's spelling, and the
+    extension's `isEnvelope` guard (`alp-sdk-vscode
+    src/alpCli/service.ts:705-716`) requires `command`/`ok`/`exitCode`/
+    `issues[]`; the unwrapped SDK report carries none of them, so the whole
+    decode used to land as `Command completed.` with `data` unreachable.
+
+    This is a DELIBERATE divergence from the v0.4.1 oracle, which maps the
+    global `--format json` onto the forwarded child's `--json`
+    (`crates/tan-cli/src/commands/sdk_cli.rs:56-58`) and therefore prints the
+    unwrapped report for both spellings. The raw shape did not go away -- it
+    is what `--json` still prints (`test_json_flag_stays_the_unwrapped_sdk_
+    report`), which is the flag every saved script and the forwarder itself
+    used."""
     result = runner.invoke(app, ["--cfsr", "0x8200", "--format", "json"])
     assert result.exit_code == 0
     payload = json.loads(result.output)
+    assert payload["command"] == "faultdecode"
+    assert payload["ok"] is True
+    assert payload["exitCode"] == 0
+    assert payload["project"] == {"root": None, "boardYaml": None}
+    assert payload["issues"] == []
+    assert payload["data"]["fault_detected"] is True
+    assert payload["data"]["flags"][0]["name"] == "PRECISERR"
+    assert payload["data"]["root_cause"]
+
+
+def test_json_flag_stays_the_unwrapped_sdk_report_even_beside_format_json():
+    """The command's OWN `--json` is the compatibility surface (see the module
+    docstring): it prints exactly what `python -m alp_cli faultdecode --json`
+    printed through `sdk_cli.rs`'s stdio forward, envelope-free. It wins when
+    both spellings are given, so a caller that already passes `--json` cannot
+    have its output shape changed out from under it by a `--format json` that
+    something else in the argv chain added (tan-cli#399)."""
+    result = runner.invoke(app, ["--cfsr", "0x8200", "--json", "--format", "json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
     assert payload["fault_detected"] is True
-    assert payload["flags"][0]["name"] == "PRECISERR"
-    assert payload["root_cause"]
+    assert "command" not in payload
+
+
+def test_format_json_with_no_registers_emits_a_faultdecode_envelope():
+    """The refusal path must agree with the success path about whether stdout
+    is an envelope (tan-cli#399). Before this, `--format json` with no
+    registers wrote the human error line to stderr and left `cli.main`'s
+    generic fallback to invent a `command: "cli"` / `cli.parse-error`
+    envelope for it -- a consumer that parsed stdout got a different
+    `command` depending on whether the decode had worked."""
+    result = runner.invoke(app, ["--format", "json"])
+    assert result.exit_code == 2
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "faultdecode"
+    assert payload["ok"] is False
+    assert payload["exitCode"] == 2
+    assert payload["data"] is None
+    assert [i["code"] for i in payload["issues"]] == ["faultdecode.no-registers"]
+    assert "no fault registers supplied" in payload["issues"][0]["message"]
 
 
 def test_format_json_before_subcommand_reads_off_ctx_obj():
     """Mirrors `debug-config`'s pre-subcommand plumbing (`cli.py`'s `root`
-    callback stashes `--format` on `ctx.obj`, and this command reads it back;
-    since tan-cli#378 the real `cli.py` relocates the token past the
-    subcommand name instead, and the `ctx.obj` seam this exercises is the
-    fallback that keeps the two positions interchangeable). Confirmed live
-    against the built
-    `tan.exe`: `tan --format json faultdecode --cfsr 0x8200` and `tan
-    faultdecode --format json --cfsr 0x8200` print byte-identical unwrapped
-    JSON at rc=0, because the oracle's clap `--format` is `global = true`."""
+    callback stashes `--format` on `ctx.obj`; a command in
+    `_HONOURS_ROOT_FORMAT` reads it back). Both positions must land on the
+    SAME shape -- the envelope, since tan-cli#399 -- or `tan --format json
+    faultdecode ...` and `tan faultdecode --format json ...` disagree about
+    the wire for no reason a caller can see."""
     root_app = typer.Typer()
 
     @root_app.callback(invoke_without_command=True)
@@ -285,9 +322,10 @@ def test_format_json_before_subcommand_reads_off_ctx_obj():
     )
     assert result.exit_code == 0
     payload = json.loads(result.output)
-    assert payload["fault_detected"] is True
-    assert payload["flags"][0]["name"] == "PRECISERR"
-    assert payload["root_cause"]
+    assert payload["command"] == "faultdecode"
+    assert payload["data"]["fault_detected"] is True
+    assert payload["data"]["flags"][0]["name"] == "PRECISERR"
+    assert payload["data"]["root_cause"]
 
 
 def test_format_bad_value_is_rejected():
@@ -305,70 +343,6 @@ def test_stdin_dump_is_auto_consumed_when_piped():
     result = runner.invoke(app, [], input="CFSR: 0x8200\n")
     assert result.exit_code == 0
     assert "PRECISERR" in result.output
-
-
-@pytest.mark.parametrize(
-    "argv",
-    [
-        ["--cfsr", "0x8200", "--json"],
-        ["--mmfsr", "0x02", "--bfsr", "0x82", "--json"],
-    ],
-    ids=["cfsr", "sub-registers"],
-)
-def test_registers_on_the_command_line_do_not_wait_on_a_held_open_stdin(argv):
-    """tan-cli#388. `sys.stdin.read()` returns at EOF, and a pipe reaches EOF
-    only when the last writer CLOSES it -- not when it merely stops writing.
-    `_read_dump` ran unconditionally for any non-tty stdin, and BEFORE the
-    register flags were parsed, so a parent that spawns `tan` with
-    `stdin=PIPE` and holds the write end open blocked the child forever, with
-    zero bytes on stdout and stderr and no exit code. Measured against a
-    held-open FIFO: `rc=124` under a 12 s `timeout(1)`, where `tan presets`
-    on the SAME FIFO returned in 0.33 s. The affected invocation is the
-    PRIMARY documented one -- registers pasted straight off a HardFault.
-
-    A real subprocess with `stdin=PIPE` LEFT OPEN is the only shape that can
-    catch this: `CliRunner(input=...)` hands the command an already-complete,
-    already-closed buffer, which is why this module was fully green with the
-    defect live. Re-verified in reverse before landing -- with `_read_dump`
-    restored to its pre-fix shape the same probe hangs for the full timeout
-    and produces 0 bytes.
-    """
-    proc = subprocess.Popen(
-        [sys.executable, "-m", "tan", "faultdecode", *argv],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        encoding="utf-8",
-        env={
-            **os.environ,
-            "PYTHONPATH": os.pathsep.join(
-                [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
-            ),
-        },
-    )
-    try:
-        # Deliberately NOT `communicate()`: that closes stdin, handing the
-        # child the EOF whose absence is the whole defect.
-        stdout = ""
-        try:
-            proc.wait(timeout=30)
-            stdout = proc.stdout.read()
-        except subprocess.TimeoutExpired:  # pragma: no cover - the defect
-            proc.kill()
-            raise AssertionError(
-                "tan faultdecode blocked on a held-open stdin pipe for 30s with "
-                "every register already supplied on the command line (tan-cli#388)"
-            ) from None
-    finally:
-        proc.stdin.close()
-        proc.stdout.close()
-        proc.stderr.close()
-
-    assert proc.returncode == 0, stdout
-    report = json.loads(stdout)
-    assert report["fault_detected"] is True
-    assert report["root_cause"]
 
 
 def test_explicit_flag_wins_over_a_parsed_dump():
@@ -415,3 +389,185 @@ def test_no_color_env_var_suppresses_color_without_crashing(monkeypatch, value):
     monkeypatch.setattr("sys.stdout.isatty", lambda: True)
     monkeypatch.setenv("NO_COLOR", value)
     assert _use_color(no_color=False) is False
+
+
+# --------------------------------------------------------------------------
+# An OPEN stdin pipe must not hold the command hostage (tan-cli#388)
+# --------------------------------------------------------------------------
+#
+# `CliRunner(input=...)` structurally cannot catch this: it hands the command
+# an already-complete, already-CLOSED buffer, so `sys.stdin.read()` returns at
+# once and every test above stayed green while `... | tan faultdecode` blocked
+# forever in the field. The defect only exists across a real process boundary,
+# where the PARENT owns the write end -- the default shape of
+# `subprocess.Popen(..., stdin=PIPE)`, which is how alp-sdk-vscode, CI steps
+# and wrapper scripts spawn `tan`. So these spawn the real CLI and, crucially,
+# never close (nor write to) the pipe: `Popen.communicate()` is deliberately
+# NOT used, because it closes stdin and would hide exactly the bug under test.
+
+#: Generous enough that a cold interpreter start on a loaded CI box is never
+#: mistaken for the hang, small enough that the hang is not mistaken for
+#: slowness: the defect was unbounded (rc=124 at 12 s and at 25 s alike),
+#: while the same argv with a closed stdin answered in 0.32 s.
+_OPEN_STDIN_TIMEOUT_S = 20.0
+
+
+def _run_with_stdin_held_open(args: list[str]) -> tuple[int, str, str]:
+    """Spawn `python -m tan faultdecode <args>` with a stdin pipe that stays
+    OPEN for the child's whole life, and return `(rc, stdout, stderr)`.
+
+    Fails the test rather than hanging the suite if the child does not exit:
+    an unbounded `wait()` here would turn this regression into a CI timeout
+    with no attributable test name."""
+    proc = subprocess.Popen(  # noqa: S603 -- fixed argv, no shell
+        [sys.executable, "-m", "tan", "faultdecode", *args],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        rc = proc.wait(timeout=_OPEN_STDIN_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        pytest.fail(
+            f"tan faultdecode {' '.join(args)} did not exit within "
+            f"{_OPEN_STDIN_TIMEOUT_S}s with stdin held open (tan-cli#388)"
+        )
+    finally:
+        # Order matters: read what the child produced BEFORE closing the pipes,
+        # and close stdin last so nothing here can be mistaken for the EOF the
+        # child was supposed not to need.
+        out = proc.stdout.read()
+        err = proc.stderr.read()
+        proc.stdout.close()
+        proc.stderr.close()
+        proc.stdin.close()
+    return rc, out, err
+
+
+def test_registers_on_the_command_line_never_wait_for_an_open_stdin_pipe():
+    """tan-cli#388, the primary documented invocation: a firmware engineer
+    passes the registers a HardFault printed, wants no dump and supplied none.
+    The read used to happen BEFORE the register flags were even parsed, so a
+    parent holding the write end open blocked the child indefinitely with zero
+    bytes on both streams -- no partial output, no error string, no exit code,
+    nothing for the caller to classify."""
+    rc, out, err = _run_with_stdin_held_open(["--cfsr", "0x8200", "--format", "json"])
+    assert rc == 0, err
+    payload = json.loads(out)
+    assert payload["command"] == "faultdecode"
+    assert payload["data"]["fault_detected"] is True
+    assert payload["data"]["root_cause"]
+
+
+def test_an_idle_open_stdin_pipe_falls_through_to_the_no_dump_refusal():
+    """With NO registers and no `--file`, an open-but-idle pipe has nothing to
+    read and never will until its writer decides otherwise. The auto-consume
+    is gated on readiness so this lands on the ordinary "no fault registers"
+    refusal -- exit 2 with a message naming the flags -- instead of blocking.
+
+    The bytes assertion is the one tan-cli#388 closes with: `faultdecode` must
+    never fail to terminate, and must never terminate, having written nothing
+    at all."""
+    rc, out, err = _run_with_stdin_held_open([])
+    assert rc == 2
+    assert "no fault registers supplied" in err
+    assert (out + err) != ""
+
+
+# --------------------------------------------------------------------------
+# Every `--format json` command must have an envelope to emit (tan-cli#399)
+# --------------------------------------------------------------------------
+
+#: Registered commands whose `--format json` deliberately writes something
+#: other than `{command, ok, exitCode, project, data, issues}`. EMPTY, and the
+#: emptiness is the point: `contract/README.md`'s "Deliberately not covered"
+#: rows list what the conformance fixtures do not exercise (`sdk list`,
+#: `build --materialise`'s `data.written`, `kconfig`) -- every one of which
+#: still EMITS an envelope, it is just not pinned by a golden. An exemption
+#: here is a stronger claim than a missing fixture: "this verb answers
+#: `--format json` with a non-envelope document". `faultdecode` was the only
+#: such verb, argued for in its own module docstring and recorded nowhere a
+#: consumer could read it, and tan-cli#399 closed it by enveloping the report
+#: rather than by adding a row here. Adding an entry means updating
+#: `contract/README.md` in the same commit, or the exemption is once again
+#: only in the heads of the people who wrote it.
+_NON_ENVELOPE_FORMAT_JSON_COMMANDS: dict[str, str] = {}
+
+
+def _command_source(command) -> Path:
+    """The `*_cmd.py` a registered click command's callback really lives in.
+
+    Not `inspect.getsourcefile(command.callback)`: Typer registers a generated
+    shim, and `inspect.unwrap` lands on `tan.core.global_flags`'s own wrapper
+    for the ~half of the table that goes through `accept_global_flags` (which
+    returns a bare closure, deliberately not `functools.wraps`-ed -- see its
+    docstring on why the signature is rebuilt by hand). Nor a
+    `name -> tan/commands/<name>_cmd.py` convention: `lock`, `migrate` and
+    `quality` all live in `west_forward_cmd.py`, so that mapping would silently
+    exempt three commands.
+
+    Raises rather than returning a fallback if neither hop finds a
+    `tan.commands.*` function: a gate that cannot locate its subject must go
+    red, not quietly pass it."""
+    func = inspect.unwrap(command.callback)
+    if not (func.__module__ or "").startswith("tan.commands."):
+        func = next(
+            cell.cell_contents
+            for cell in func.__closure__ or ()
+            if callable(cell.cell_contents)
+            and getattr(cell.cell_contents, "__module__", "").startswith("tan.commands.")
+        )
+    return Path(inspect.getsourcefile(func))
+
+
+def test_every_registered_format_json_command_can_emit_an_envelope():
+    """tan-cli#399, derived from the REGISTRATION SURFACE rather than a
+    hand-kept list, so a command added to `cli.py` tomorrow is covered the day
+    it lands.
+
+    `new-som` accepted `--format json`, threw the value away
+    (`del ... output_format`) and contained zero `emit(` calls, so its success
+    path wrote 1238 bytes of plain text where the extension expected an
+    envelope and its failure path emitted `cli.main`'s generic
+    `command: "cli"` fallback -- the two paths of one command disagreeing
+    about whether stdout is JSON. A command with no envelope path AT ALL is
+    the shape this catches; the VALUES on the wire are pinned per command by
+    `tests/conformance/test_contract_envelopes.py`'s goldens and by each
+    command's own tests (`test_format_json_after_subcommand_wraps_the_report_
+    in_the_envelope` above, `test_format_json_dry_run_emits_a_new_som_envelope`
+    in `test_new_som_command.py`).
+
+    Lives in this module because it is the always-collected one of the two
+    tan-cli#399 touched -- `test_new_som_command.py`'s oracle-parity cases
+    skip without an alp-sdk checkout, and a cross-command gate that can skip
+    itself into vacuity is the failure mode `contract/README.md` calls out."""
+    from typer.main import get_command
+
+    from tan.cli import app as real_app
+
+    click_app = get_command(real_app)
+    accepts_format = {
+        name: command
+        for name, command in click_app.commands.items()
+        if any("--format" in (param.opts or []) for param in command.params)
+    }
+    # Non-vacuity: `--format` is the extension's only output switch and most of
+    # the table declares it. A scan that suddenly matched a handful of commands
+    # would pass while checking almost nothing.
+    assert len(accepts_format) >= 20, sorted(accepts_format)
+
+    offenders = sorted(
+        name
+        for name, command in accepts_format.items()
+        if name not in _NON_ENVELOPE_FORMAT_JSON_COMMANDS
+        and "emit(" not in _command_source(command).read_text(encoding="utf-8")
+    )
+    assert offenders == [], (
+        "command(s) accepting `--format json` with no `emit(` call anywhere in "
+        "their module -- they cannot produce the envelope "
+        "`{command, ok, exitCode, project, data, issues}` the extension's "
+        f"`isEnvelope` guard requires: {offenders}"
+    )

@@ -52,4 +52,4 @@ CLAUDE.md
 # checkout (a container run with the repo bind-mounted does exactly that).
 # Binary response bodies, machine-local and worthless to anyone else -- they
 # were staged once by a `git add -A` and caught before the commit.
-/pip/
+pip/

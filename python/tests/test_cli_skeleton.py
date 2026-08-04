@@ -294,33 +294,26 @@ def test_a_help_used_as_an_option_value_does_not_swap_the_envelope(
 # #399 asked for a test that "enumerates the registered command table" and
 # asserts every command's `--format json` emits a real
 # `{command,ok,exitCode,project,data,issues}` envelope, with a NAMED exemption
-# list -- rather than leaving the one known exemption (`faultdecode`) as prose
-# in `contract/README.md` with nothing in the test suite tying it to the code
-# that actually does it. This is that gate; before it, nothing walked the
-# registration table and asked "does the SHAPE hold", only "does the flag
-# PARSE" (`tests/gates/test_global_flags_gate.py`) -- a `--help`-suffixed
-# probe that never reaches a command's own success/failure envelope at all
-# (Click's eager `--help` short-circuits before ANY command body runs, so a
-# `--help` probe cannot distinguish a wrapped command from an unwrapped one;
-# `faultdecode --format json --help` answers the SAME generic help envelope
-# every other command does).
+# list -- rather than leaving an exemption as prose in `contract/README.md`
+# with nothing in the test suite tying it to the code that actually does it.
+# This is that gate; before it, nothing walked the registration table and
+# asked "does the SHAPE hold", only "does the flag PARSE"
+# (`tests/gates/test_global_flags_gate.py`) -- a `--help`-suffixed probe that
+# never reaches a command's own success/failure envelope at all (Click's eager
+# `--help` short-circuits before ANY command body runs, so a `--help` probe
+# cannot distinguish a wrapped command from an unwrapped one; `faultdecode
+# --format json --help` answers the SAME generic help envelope every other
+# command does).
 #
-# Exempted commands are the FAULTDECODE case only, matching
-# `contract/README.md`'s own "Deliberately outside the envelope" row -- update
-# BOTH together, or this gate and that doc drift back apart the way #399 was
-# filed about.
-_ENVELOPE_SHAPE_EXEMPT = {
-    "faultdecode": (
-        "its `--format json` is a second spelling of its own `--json`, and "
-        "prints the SDK's unwrapped fault report "
-        "(fault_detected/inputs/flags/addresses/root_cause/symbols) verbatim -- "
-        "the output contract it inherited from the retired `python -m alp_cli "
-        "faultdecode` forward. Wrapping it would change bytes a caller (a saved "
-        "script, a pipe) already receives. `contract/README.md`'s "
-        "\"Deliberately outside the envelope\" row is the doc half of this "
-        "same exemption."
-    ),
-}
+# EMPTY as of #399's own close-out: `faultdecode` was the one exemption this
+# set ever carried, and `faultdecode_cmd.py` now gives `--format json` a real
+# envelope too (its OWN `--json` stays the unwrapped SDK-report compatibility
+# surface -- see that module's docstring -- but `--format json` is a second,
+# distinct spelling that wraps the same report). If a future command needs an
+# exemption, name it here AND in `contract/README.md`'s "Deliberately outside
+# the envelope" section together, or this gate and that doc drift apart the
+# way #399 was filed about.
+_ENVELOPE_SHAPE_EXEMPT: dict[str, str] = {}
 
 _ENVELOPE_SHAPE_KEYS = {"command", "ok", "exitCode", "project", "data", "issues"}
 
@@ -390,34 +383,6 @@ def test_every_non_exempt_command_emits_the_real_envelope_shape(command, tmp_pat
         f"AND in `contract/README.md`'s \"Deliberately outside the envelope\" "
         f"section -- never one without the other."
     )
-
-
-def test_faultdecode_is_still_the_one_exempt_command(tmp_path):
-    """Ties `contract/README.md`'s prose exemption to running code -- a
-    hermetic SUCCESS invocation (`--cfsr`, pure ARMv8-M arithmetic, no SDK/
-    board.yaml/network involved), not the no-registers refusal, because the
-    refusal happens to fall through `main`'s generic `cli.parse-error`
-    fallback and WOULD look shape-complete by accident (measured) -- the
-    exemption is specifically about the SUCCESS path, where this command
-    prints the SDK's raw, un-enveloped fault report instead. If this ever
-    starts asserting the shape IS present, that is #399's exemption closing
-    for real -- delete `faultdecode` from `_ENVELOPE_SHAPE_EXEMPT` and this
-    doc row together, in the same change, rather than leaving one stale."""
-    cwd = tmp_path / "cwd"
-    home = tmp_path / "home"
-    cwd.mkdir()
-    home.mkdir()
-    proc = _run_isolated("faultdecode", "--format", "json", "--cfsr", "0x8200", cwd=cwd, home=home)
-    assert proc.returncode == 0, proc.stderr
-    doc = json.loads(proc.stdout)
-    assert isinstance(doc, dict), doc
-    assert not _ENVELOPE_SHAPE_KEYS & doc.keys(), (
-        f"faultdecode's success output now carries envelope key(s) "
-        f"{_ENVELOPE_SHAPE_KEYS & doc.keys()} -- the tan-cli#399 exemption may "
-        f"have closed; update `_ENVELOPE_SHAPE_EXEMPT` and `contract/README.md` "
-        f"together: {doc}"
-    )
-    assert "fault_detected" in doc, doc
 
 
 def test_envelope_shape_gate_still_covers_the_full_registered_surface():
