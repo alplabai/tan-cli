@@ -58,7 +58,16 @@ _MODULE_CAP = 800
 _FUNCTION_CAP = 50
 
 #: Every module over `_MODULE_CAP` as of 2026-08-04, with its measured line
-#: count as its ceiling. Recorded per file rather than as a single "worst
+#: count as its ceiling.
+#:
+#: Four entries were re-measured when this branch caught up with `dev`: the
+#: ratchet was calibrated before tan-cli#426 merged, and that PR grew exactly
+#: these four. Each still pins the file's EXACT current size, so the next
+#: unnoticed growth still fails -- the baseline moved, the gate did not
+#: loosen. `build/execute.py` 902 -> 941 (#419's Zephyr-SDK message),
+#: `generate_cmd.py` 1101 -> 1147 (#420's refused-emit cleanup),
+#: `build_cmd.py` 1555 -> 1559 (#407's ladder-divergence helper),
+#: `validate_cmd.py` 1092 -> 1093 (a corrected #262 docstring). Recorded per file rather than as a single "worst
 #: module" number so a split that shrinks one file cannot be spent widening
 #: another.
 _MODULE_BUDGET: dict[str, int] = {
@@ -68,20 +77,20 @@ _MODULE_BUDGET: dict[str, int] = {
     "tan/core/flash_plan.py": 1808,
     "tan/commands/flash_cmd.py": 1781,
     "tan/planner/kconfig.py": 1639,
-    "tan/commands/build_cmd.py": 1555,
+    "tan/commands/build_cmd.py": 1559,
     "tan/commands/renode_cmd.py": 1440,
     "tan/commands/debug_config_cmd.py": 1296,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
-    "tan/commands/generate_cmd.py": 1101,
+    "tan/commands/generate_cmd.py": 1147,
     "tan/commands/sdk_cmd.py": 1096,
-    "tan/commands/validate_cmd.py": 1092,
+    "tan/commands/validate_cmd.py": 1093,
     "tan/commands/new_som_cmd.py": 1047,
     "tan/commands/clean_cmd.py": 1000,
     "tan/planner/loader.py": 996,
     "tan/commands/init_cmd.py": 974,
     "tan/core/debug_launch.py": 923,
-    "tan/commands/build/execute.py": 902,
+    "tan/commands/build/execute.py": 941,
     "tan/planner/zephyr_board.py": 848,
     "tan/commands/support_bundle_cmd.py": 834,
     "tan/cli.py": 831,
@@ -100,7 +109,13 @@ _MIRRORED = ("tan/planner/",)
 #: too many to enumerate readably. Two numbers ratchet them instead -- the
 #: COUNT (a new long function pushes it up) and the WORST (an existing one
 #: growing pushes it up). Neither can move without this file moving.
-_FUNCTION_COUNT_BUDGET = 199
+# 200, not 199, for the same reason as the four module entries above: both
+# functions that crossed 50 lines came from the tan-cli#407 fixes that landed
+# after this ratchet was calibrated -- `tan/commands/sdk_cmd.py:_run_current`
+# and `tan/envelope.py:_with_sdk_divergence`, each of which now emits the
+# shared `sdk.discovery-divergent` warning. Measured: 198 over 50 lines at
+# f3208e1, 200 now.
+_FUNCTION_COUNT_BUDGET = 200
 _FUNCTION_WORST_BUDGET = 679
 
 
