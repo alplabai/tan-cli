@@ -707,11 +707,21 @@ else
 fi
 
 # The human surface, not just the wire.
+#
+# Keyed on what the READER sees -- the sentence naming the other checkout --
+# not on a check NAME. This first asserted `sdkDiscoveryDivergent`, a
+# separate check that a later reconciliation deleted in favour of tan-cli#428's
+# treatment (the `sdk` check itself moves pass -> warn and carries the code).
+# The behaviour never regressed; the assertion had simply outlived the
+# internal name it was written against, and reported a silent doctor while
+# doctor was in fact naming both roots. An e2e assertion has to survive that.
 "$TAN" doctor >"$WORK/div-doctor.txt" 2>&1
-if grep -q "sdkDiscoveryDivergent" "$WORK/div-doctor.txt"; then
+if grep -q "resolve a DIFFERENT checkout" "$WORK/div-doctor.txt"    && grep -q "$D407/ws/alp-sdk" "$WORK/div-doctor.txt"; then
   ok "#407: doctor's text report names the second checkout"
+  note "$(grep -o "warn\] sdk: .*resolve a DIFFERENT checkout" "$WORK/div-doctor.txt" | head -1)"
 else
   bad "#407: doctor's text report is silent about the second checkout"
+  note "$(grep -E "^\[.*\] sdk:" "$WORK/div-doctor.txt" | head -1)"
 fi
 
 # Negative control. A warning that also fires on the ordinary single-checkout
