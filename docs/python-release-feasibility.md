@@ -1,19 +1,28 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
-# Historical audit: can the Python `tan` ship as release assets?
+# Can the Python `tan` ship as the eight release assets? (HISTORICAL)
 
-> **Historical measurement record — not the current release contract.** This
-> document captures the investigation that enabled the Python release and keeps
-> intermediate failures/results verbatim. It therefore mentions an eight-asset
-> experiment, `--onefile`, open blockers, and requested fixes that were later
-> resolved. Current releases build four `--onedir` archives; use
-> [`docs/release-contract.md`](release-contract.md), the root README, and
-> `.github/workflows/release.yml` for current instructions.
+> **HISTORICAL — this is a feasibility study, not the release contract.** It
+> answers a question that was open in July 2026 and it is preserved for the
+> measurements and the reasoning, not as instructions. The plan it describes was
+> superseded before any of it shipped:
 >
-> Current state: `python/pyproject.toml` installs correctly, `monitor_cmd.py` is
-> committed, the planner omits unset `firmware_path`, release CI runs with
-> `sdk_parity: true`, and neither `alp-tan` on PyPI nor `@alplabai/tan` on npm is
-> published. Apparent contradictions below are chronology within the audit, not
-> current work items.
+> | This report says | What actually ships |
+> |---|---|
+> | eight assets, from eight native hosts | **four**, one per build runner (no arm64 Linux/Windows, no `-musl`) |
+> | a dedicated `python-binaries.yml`, `workflow_dispatch` only | `release.yml`'s own `build` matrix, on a `v*` tag |
+> | PyInstaller `--onefile`, a raw binary per target | `--onedir`, published as a `.tar.gz`/`.zip` archive (tan-cli#349) |
+> | `sdk_parity: false` on the release gate | `sdk_parity: true` — the divergence it was off for is closed |
+> | blocker 1b OPEN (`pyproject.toml` unparseable) | closed; §0.0 in this same file already records the fix |
+> | `pip install alp-tan` as "a working distribution path" | `alp-tan` has never been published to PyPI, and there is no PyPI job |
+>
+> **The live contract is [`docs/release-contract.md`](release-contract.md)**,
+> and the executable truth is `.github/workflows/release.yml`. Read those.
+> Nothing below is checked against either any more — that is what
+> `python/tests/gates/test_release_docs_match_the_workflow.py` exempts a
+> HISTORICAL document from, so do not update this file to keep it current:
+> either the fact belongs in the contract, or it stays here as history.
+
+The original report follows, unedited.
 
 **Yes — all eight assets now exist, built and verified in CI.** Run
 [30555358227](https://github.com/alplabai/tan-cli/actions/runs/30555358227):

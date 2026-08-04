@@ -112,9 +112,23 @@ def _read_verbatim(path: Path) -> str:
 
     `open(newline="")`, not `Path.read_text(newline=...)`: that keyword landed in
     3.13 and this package's floor is 3.12.
+
+    Raises `OSError` for a non-UTF-8 file too (tan-cli#415): `UnicodeDecodeError`
+    is a `ValueError`, not an `OSError`, so a bare `except OSError` around a
+    call to this function -- both call sites below use exactly that -- would
+    otherwise let a corrupt vendored tree escape as an unhandled traceback
+    instead of the `TemplateDataError` they already raise for every other way
+    the read can fail. Folded in here, once, rather than duplicated at each
+    call site: mirrors Rust's own `read_to_string`, which returns an
+    `io::Error` (kind `InvalidData`) for invalid UTF-8 rather than a distinct
+    error type (the same equivalence `kconfig_cmd.py`'s `_resolve_core`
+    documents for the identical reason).
     """
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        return handle.read()
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return handle.read()
+    except UnicodeDecodeError as err:
+        raise OSError(str(err)) from err
 
 
 def _write_verbatim(path: Path, content: str) -> None:
@@ -585,11 +599,16 @@ def plan_template_files(template_id: str, sku: str) -> list[PlannedFile]:
 def _vendored_files(tree: str, template_id: str, sku: str) -> list[PlannedFile]:
     """Read a vendored scaffold tree and retarget its `board.yaml` onto `sku`.
 
-    Files come back sorted by their relative POSIX path, which is byte-for-byte
-    the order the Rust `vendored_tree!` macro lists them in for every tree
-    (`CMakeLists.txt`, `README.md`, `board.yaml`, ... -- uppercase first) -- so
-    `data.fileChanges[]` matches the shipped binary's without a hand-kept list
-    here to drift out of step with it.
+    Files come back sorted by their relative POSIX path (`CMakeLists.txt`,
+    `README.md`, `board.yaml`, ... -- uppercase first), the order the Rust
+    `vendored_tree!` macro lists them in, so `data.fileChanges[]` matches the
+    shipped binary's without a hand-kept list here to drift out of step with
+    it. `iot` is the one tree where the two LISTS differ, not just their order:
+    it carries a `native_sim.conf` the frozen Rust tree never got (tan-cli#379,
+    declared in `tests/parity/test_scaffold_content_oracle_parity.py`'s
+    `FILE_SET_DIVERGENCE`), so `tan init --template iot-starter --format json`
+    returns one `fileChanges[]` entry more than the oracle does. Sorting is
+    what keeps every file the two trees DO share in the same relative order.
 
     Sorted on that STRING, never on the `Path`: `PurePath.__lt__` compares a
     case-FOLDED key on Windows, so sorting paths ordered `board.yaml` before

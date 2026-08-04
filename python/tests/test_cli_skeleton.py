@@ -3,6 +3,10 @@ import json, os, subprocess, sys
 from pathlib import Path
 
 import pytest
+from typer.main import get_command
+
+from tan.cli import app
+from tests.parity.oracle import empty_tool_inventory
 
 #: `python/` -- `python -m tan` resolves the package off `os.getcwd()` (`-m`
 #: prepends the CURRENT WORKING DIRECTORY to `sys.path`, not the script's own
@@ -210,13 +214,185 @@ def test_pre_subcommand_global_flags_reach_the_real_command(argv, expected_comma
 def test_format_before_another_global_flag_no_longer_aborts_the_whole_reorder(tmp_path):
     """`tan --format json --sdk-root X debug-config --preview`: a leading
     `--format` used to abort `_reorder_global_flags` entirely (it was not in
-    `_GLOBAL_FLAG_ARITY`, and every other unrecognised token aborts the
-    rewrite), stranding `--sdk-root` in the unrecognised pre-subcommand
-    position. `debug-config` is one of the commands that already honours a
-    pre-subcommand `--format` (`cli._HONOURS_ROOT_FORMAT`), so this argv
-    isolates the reorder fix from that separate, unrelated refusal --
-    `--preview` so the command never writes `launch.json` anywhere."""
+    `cli._RELOCATABLE_FLAG_ARITY`, and every other unrecognised token aborts
+    the rewrite), stranding `--sdk-root` in the unrecognised pre-subcommand
+    position. `debug-config` was already one of the commands that honoured a
+    pre-subcommand `--format` back when a hand-written allowlist in `cli.py`
+    decided that (deleted by tan-cli#378), so this argv isolates the reorder
+    fix from that separate, unrelated refusal -- `--preview` so the command
+    never writes `launch.json` anywhere."""
     p = run("--format", "json", "--sdk-root", "X", "debug-config", "--preview", cwd=tmp_path)
     env = json.loads(p.stdout)
     assert env["command"] == "debug-config", env
     assert p.returncode == 0, (p.returncode, env)
+
+
+# --------------------------------------------------------------------------
+# tan-cli#394: `--help` in an OPTION position vs as an option's VALUE
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (["scaffold", "--help"], True),
+        (["scaffold", "--name", "--help"], False),
+        (["explain", "--template", "--help"], False),
+        (["init", "--format", "json", "--name", "--help", "--destination", "d"], False),
+        (["--format", "json", "badcmd", "--help"], True),
+        (["validate", "--format", "json", "--help"], True),
+    ],
+    ids=["bare", "scaffold-name", "explain-template", "init-name", "badcmd", "trailing"],
+)
+def test_wants_help_is_positional_not_a_substring_scan(argv, expected):
+    """`_wants_help` was literally `"--help" in argv`. Click's parser takes the
+    next token as a value-carrying option's argument WITHOUT checking whether
+    it looks like an option, so a `--help` consumed that way never reaches the
+    eager help callback -- the pre-scan believed it had, and `main()` routed
+    the whole argv through `_emit_help_envelope`, which RUNS the command under
+    `CliRunner` and reports its output as one `command: "cli"` envelope.
+    The unit half of the fix; the observable half is below."""
+    from tan.cli import _wants_help
+
+    assert _wants_help(list(argv)) is expected
+
+
+@pytest.mark.parametrize(
+    "argv, expected_command",
+    [
+        (["explain", "--format", "json", "--template", "--help"], "explain"),
+        (["scaffold", "--format", "json", "--name", "--help", "--destination", "out"], "scaffold"),
+        (["init", "--format", "json", "--name", "--help", "--destination", "dst"], "init"),
+    ],
+    ids=["explain", "scaffold", "init"],
+)
+def test_a_help_used_as_an_option_value_does_not_swap_the_envelope(
+    argv, expected_command, tmp_path
+):
+    """tan-cli#394, end to end. Measured before the fix, all three answered
+    `command: "cli"` while the command ran to completion: `scaffold` wrote
+    three real files and `init` created a directory literally named `--help`,
+    both reported as `{"command":"cli","ok":true,...,"data":{"message":"<the
+    escaped inner envelope>"}}` -- so a consumer reading `data.written` saw
+    `[]` for a run that wrote, and `explain`'s real `explain.template-unknown`
+    refusal was re-labelled `cli.parse-error`, a code
+    `contract/issue-codes.json` records as `consumer: "none"`.
+
+    The assertion is on `command`, not on the files: `contract/README.md`
+    states the extension dispatches on it, and #394's own acceptance says no
+    argv that causes files to be written may return `command: "cli"`. Text
+    mode always reported the truth; this is the JSON channel catching up."""
+    p = run(*argv, cwd=tmp_path)
+    env = json.loads(p.stdout)
+    assert env["command"] == expected_command, env
+
+
+# --------------------------------------------------------------------------
+# tan-cli#399: the derived envelope-SHAPE gate over the whole command table
+# --------------------------------------------------------------------------
+#
+# #399 asked for a test that "enumerates the registered command table" and
+# asserts every command's `--format json` emits a real
+# `{command,ok,exitCode,project,data,issues}` envelope, with a NAMED exemption
+# list -- rather than leaving an exemption as prose in `contract/README.md`
+# with nothing in the test suite tying it to the code that actually does it.
+# This is that gate; before it, nothing walked the registration table and
+# asked "does the SHAPE hold", only "does the flag PARSE"
+# (`tests/gates/test_global_flags_gate.py`) -- a `--help`-suffixed probe that
+# never reaches a command's own success/failure envelope at all (Click's eager
+# `--help` short-circuits before ANY command body runs, so a `--help` probe
+# cannot distinguish a wrapped command from an unwrapped one; `faultdecode
+# --format json --help` answers the SAME generic help envelope every other
+# command does).
+#
+# EMPTY as of #399's own close-out: `faultdecode` was the one exemption this
+# set ever carried, and `faultdecode_cmd.py` now gives `--format json` a real
+# envelope too (its OWN `--json` stays the unwrapped SDK-report compatibility
+# surface -- see that module's docstring -- but `--format json` is a second,
+# distinct spelling that wraps the same report). If a future command needs an
+# exemption, name it here AND in `contract/README.md`'s "Deliberately outside
+# the envelope" section together, or this gate and that doc drift apart the
+# way #399 was filed about.
+_ENVELOPE_SHAPE_EXEMPT: dict[str, str] = {}
+
+_ENVELOPE_SHAPE_KEYS = {"command", "ok", "exitCode", "project", "data", "issues"}
+
+_ALL_COMMANDS = sorted(get_command(app).commands)
+
+
+def _run_isolated(*argv, cwd: Path, home: Path) -> subprocess.CompletedProcess:
+    """Like `run()` above, but with `HOME`/`USERPROFILE` redirected at a
+    scratch directory (so a developer's real `~/.alp/sdk-default` cannot make
+    a command resolve an SDK it otherwise would not, the same isolation
+    `tests/parity/oracle.py`'s own `_env` applies) and `PATH` pinned to
+    `empty_tool_inventory` (so a `west`-forwarding command -- `lock`/
+    `migrate`/`quality` -- cannot spawn a REAL `west` this replay host happens
+    to have installed; every other command's PATH probes, e.g. `doctor`'s
+    toolchain checks, are meant to see "nothing found" here too, which is
+    still a valid, shape-complete envelope)."""
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join(
+            [str(PACKAGE_ROOT), *([p] if (p := os.environ.get("PYTHONPATH")) else [])]
+        ),
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "PATH": empty_tool_inventory(home),
+    }
+    return subprocess.run(
+        [sys.executable, "-m", "tan", *argv],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=str(cwd),
+        env=env,
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize("command", [c for c in _ALL_COMMANDS if c not in _ENVELOPE_SHAPE_EXEMPT])
+def test_every_non_exempt_command_emits_the_real_envelope_shape(command, tmp_path):
+    """A BARE `<command> --format json` (no other flags), run for real -- not
+    `--help`, which never reaches the command's own envelope at all (see the
+    section docstring above). Every one of these 31 commands is cheap and
+    side-effect-contained to run this way: with no board.yaml/SDK/`.west`
+    workspace resolvable in an isolated cwd and an isolated `HOME`, each
+    either refuses fast on its own first guard clause or (`init`/`pinmux`/...)
+    does real, but purely LOCAL, work inside `tmp_path` -- never a real
+    device, network call, or build. Only the top-level KEY SET is asserted
+    (tan-cli#399's own ask): the values are host facts (PATH contents, cwd)
+    this gate does not try to pin, that job belongs to the oracle-parity
+    cases and the per-command test files."""
+    cwd = tmp_path / "cwd"
+    home = tmp_path / "home"
+    cwd.mkdir()
+    home.mkdir()
+    proc = _run_isolated(command, "--format", "json", cwd=cwd, home=home)
+    assert proc.stdout.strip(), (
+        f"`tan {command} --format json` printed nothing on stdout "
+        f"(rc={proc.returncode}):\n{proc.stderr}"
+    )
+    doc = json.loads(proc.stdout)
+    assert isinstance(doc, dict), doc
+    missing = _ENVELOPE_SHAPE_KEYS - doc.keys()
+    assert not missing, (
+        f"`tan {command} --format json` is missing envelope key(s) {missing}: {doc}\n"
+        f"If this command's `--format json` is DELIBERATELY not tan's envelope "
+        f"(faultdecode's own reason, above), name it in `_ENVELOPE_SHAPE_EXEMPT` "
+        f"AND in `contract/README.md`'s \"Deliberately outside the envelope\" "
+        f"section -- never one without the other."
+    )
+
+
+def test_envelope_shape_gate_still_covers_the_full_registered_surface():
+    """The canary every derived gate in this suite carries: a parametrised
+    list that silently shrinks to zero reports green while checking nothing."""
+    assert len(_ALL_COMMANDS) >= 30, (
+        f"only {len(_ALL_COMMANDS)} commands registered; expected the full "
+        "~32-command surface."
+    )
+    assert set(_ENVELOPE_SHAPE_EXEMPT) <= set(_ALL_COMMANDS), (
+        f"{set(_ENVELOPE_SHAPE_EXEMPT) - set(_ALL_COMMANDS)} is exempted but no "
+        "longer a registered command -- stale entry."
+    )

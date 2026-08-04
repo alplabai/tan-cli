@@ -10,9 +10,18 @@
 # `tan-cli` was also free; `alp-tan` is preferred because the other Alp Lab
 # artefacts are `alp-`prefixed.
 name = "alp-tan"
-version = "0.5.0rc4"
+# The PEP 440 RENDERING of `python/tan/version.py`'s TAN_VERSION, which is the
+# source of truth -- never edited alone. `0.5.0-rc5.dev0` -> `0.5.0rc5.dev0`
+# (the two spellings are not interchangeable and cannot be string-compared);
+# `python/scripts/version_check.py` owns that mapping and CI runs it.
+version = "0.5.0"
 description = "The Alp Lab build CLI: one board.yaml to firmware, across MCU and MPU cores."
 readme = "README.md"
+# PEP 639 SPDX-expression form, NOT the `{ text = ... }` table -- and it is
+# COUPLED to the `setuptools>=77.0.1` floor in `[build-system]` below, which
+# exists solely to parse this line (tan-cli#382). Changing either without the
+# other is the bug: the table form is what setuptools <77 accepts and what
+# setuptools >=77 deprecates, so there is no spelling that satisfies both.
 license = "Apache-2.0"
 authors = [{ name = "Alp Lab AB" }]
 keywords = ["embedded", "firmware", "zephyr", "yocto", "som", "build"]
@@ -159,7 +168,31 @@ Issues = "https://github.com/alplabai/tan-cli/issues"
 tan = "tan.__main__:main"
 
 [build-system]
-requires = ["setuptools>=68"]
+# 77.0.1, measured, not guessed (tan-cli#382). `>=68` was a bound nobody had
+# ever built at: PEP 639 support -- the `license = "Apache-2.0"` string form at
+# the top of this file -- landed in the setuptools 77 line, so every version
+# `>=68` admitted below that REJECTS this file's own metadata:
+#
+#     pip install setuptools==76.1.0
+#     pip wheel --no-deps --no-build-isolation ./python
+#     configuration error: `project.license` must be valid exactly by one
+#     definition (2 matches found)  <- expected `file` or `text`
+#
+# Measured on py3.12.10: 68.1.2 FAIL, 76.1.0 FAIL (the release immediately
+# below the floor), 77.0.1 PASS. Build ISOLATION is what hid it for two years
+# -- pip then downloads the newest setuptools regardless of this line, so every
+# other install path in this repo (`pip install -e ./python` in ci.yml, the
+# venvs in release.yml / python-binaries.yml / clean-host.yml) passes no matter
+# what number is written here. Only a downstream packager pinned to a valid
+# `>=68` environment ever saw it, and they cannot build the distribution at all.
+#
+# 77.0.1 and not `>=77`: setuptools 77.0.0 and 77.0.2 have NO files on PyPI, so
+# `==77` (which PEP 440 zero-pads to 77.0.0) resolves to nothing. 77.0.1 is the
+# first release of that line a resolver can actually install, which makes this
+# bound an exact version the `wheel-floor` job in .github/workflows/ci.yml can
+# pin and build at -- that job derives its pin FROM this string, so a future
+# change here is tested at its own floor with nothing else to update.
+requires = ["setuptools>=77.0.1"]
 build-backend = "setuptools.build_meta"
 
 # Explicit, so `tests/` can never be shipped by an auto-discovery change and a

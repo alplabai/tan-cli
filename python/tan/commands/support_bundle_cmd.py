@@ -77,6 +77,7 @@ from tan.commands.inspect_cmd import (
     collect_resolved_values,
     resolve_debug_project_context,
 )
+from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.commands.trace_cmd import (
     TraceTargetError,
     build_trace_decisions,
@@ -395,7 +396,12 @@ def _debug_doctor_report(
             context.sdk_root or "No alp-sdk checkout resolved.",
             None
             if context.sdk_root
-            else "Run `tan sdk switch <path>` or pass `--sdk-root <path>`.",
+            # tan-cli#381: the `fix` said "Run `tan sdk switch <path>`", which
+            # refuses in this build (`sdk_cmd._run_not_ported`) -- and a support
+            # bundle is read by whoever is already stuck, so a fix line naming a
+            # command that exits 1 is the worst place for the #305 dead end to
+            # come back. `doctor_cmd.sdk_check`'s own wording, shared verbatim.
+            else f"Resolve an alp-sdk checkout: {NO_SDK_NEXT_STEPS}.",
         ),
         _board_yaml_check(context, project_selected),
         *_target_checks(target, server),

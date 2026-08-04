@@ -2705,3 +2705,41 @@ def test_doctor_fix_format_json_is_no_longer_a_silent_no_op(monkeypatch, tmp_pat
     suppressed = [i for i in fixed_envelope["issues"] if i["code"] == "doctor.fix-suppressed"]
     assert len(suppressed) == 1, fixed_envelope["issues"]
     assert "--format json" in suppressed[0]["message"]
+
+
+def test_doctor_fix_suppressed_notice_reaches_text_mode_not_just_json(monkeypatch, tmp_path):
+    """tan-cli#375: `--fix` suppressed by the consent gate used to explain
+    itself ONLY in `--format json` -- text mode printed exactly the same
+    report as plain `tan doctor`, with nothing saying `--fix` had even been
+    requested. The customer typed `--fix`, got a report, and had no way to
+    tell "nothing needed fixing" from "tan declined to fix anything".
+
+    No `--ci`/`--non-interactive`/`--format json` passed -- text mode, and
+    the ONLY thing suppressing `--fix` is `can_prompt`'s own `isatty()` pair
+    (`tan.core.consent`), which `CliRunner`'s captured pipes always fail.
+    That is deliberately the exact shape tan-cli#91's own postmortem
+    measured: a run that redirected its stdio without ever passing `--ci`.
+
+    Fails red against the pre-#375 `else:` branch (`doctor()`'s text-mode
+    rendering), which printed the per-check lines then jumped straight to
+    the summary -- `issues` was read only in the `data is None` (exception)
+    branch, so an issues-only entry like `fix_suppressed_issue` never
+    reached stderr at all outside `--format json`."""
+    missing = [{"tool": "ninja", "command": "winget install -e --id Ninja-build.Ninja"}]
+    stub_checks = [doctor_cmd.Check("hostPrerequisites", "fail", "ninja missing", missing=missing)]
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: stub_checks)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["doctor", "--fix"])
+
+    # The plain sentence, and the SPECIFIC condition that tripped -- naming
+    # "not interactive" alone is useless to someone who never realised their
+    # CI runner has no TTY (the issue's own wording).
+    assert "`--fix` was requested but not run" in result.stderr, result.stderr
+    assert "no interactive terminal (stdin/stderr not a tty" in result.stderr, result.stderr
+    # Findable, not buried mid-report: after every check line, and the report
+    # still ends on the summary line, not the notice.
+    notice_at = result.stderr.index("`--fix` was requested but not run")
+    summary_at = result.stderr.rindex("passed,")
+    assert notice_at < summary_at, result.stderr
+    assert result.stderr.strip().endswith("failed.")

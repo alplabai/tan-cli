@@ -25,7 +25,7 @@ oracle source:  crates/ at 204c3a0b8dcb165e10ac3d14f3e9bfa699e45b59
                 file.
 
 captured-from-crates-commit: 204c3a0b8dcb165e10ac3d14f3e9bfa699e45b59
-verified-against-crates-commit: 8a71310ece3f7bee91b0bdc7ffb150c62c58c409
+verified-against-crates-commit: c0e45f955c2f4b3d40e9193dcb89b7ca1d3a5f76
 worktree HEAD:  b40109b46aefdd42d82ff30f89c8bf8d5061d72d (unrelated python/
                 commits on top; does not affect the oracle binary)
 captured:       2026-08-01 (tan-cli#272)
@@ -174,6 +174,23 @@ returns nothing, `tests/gates/test_no_leaked_host_paths.py` passes with every
 file in this directory (and this file's own new `test_oracle_fixtures.py`)
 tracked, and the other four fixture files in this directory are byte-
 identical to before this pass (`git diff --stat` on each is empty).
+
+--------------------------------------------------------------------------
+
+2026-08-03, tan-cli#376: ONE KEY RENAMED, NOTHING RE-CAPTURED.
+
+  test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle#0
+    -> test_validate_no_sdk_guard_matches_the_oracle_at_exit_2#0
+
+#376 ported the SDK-validator spawn path, so the port now answers that case
+with the oracle's own `validate.sdk-root-unresolved` instead of the unported-
+path stub `validate.spawn-not-implemented` -- the divergence the old test name
+recorded is gone, and the test was renamed with it. Keys here are pytest node
+ids (`oracle_fixtures._current_key`), so the rename moves the key; the stored
+ORACLE answer under it is byte-identical and was NOT re-captured (nothing
+about the Rust binary changed). The re-capture recipe in the 2026-08-01 pass
+above still names the OLD spelling, deliberately -- it is a record of what was
+run that day; use the new name if re-running it.
 
 --------------------------------------------------------------------------
 
@@ -360,3 +377,30 @@ scratch destination under the system temp root carries no `/Users/<name>`
 shape), so the guard would have written it. The reason to refuse is the
 platform, and it has to be a decision, not a hope that the leak guard
 notices.
+
+2026-08-04, fix/v06-followups: verified-against-crates-commit ADVANCED TO
+c0e45f955c2f4b3d40e9193dcb89b7ca1d3a5f76 WITH NO RE-CAPTURE.
+
+`git log 8a71310..c0e45f9 -- crates` names two commits:
+
+  ea1c535  fix(gates): detect a skipped delegate, and stop requiring a
+           literal nobody reads (#372)
+             crates/tan-cli/tests/contract.rs -- gate-test-only
+  c0e45f9  Merge origin/dev into fix/v06-followups, reconciling the
+           divergent fixes by hand
+             crates/tan-cli/README.md, crates/tan-cli/tests/contract.rs --
+             doc + gate-test-only (the merge's own conflict resolution
+             touched nothing else under crates/)
+
+Unlike every prior entry in this file, this one needs no live-vs-frozen
+measurement to justify the bump: both commits touch only
+`crates/tan-cli/tests/contract.rs` (a `cargo test` integration-test file
+under `tests/`, never compiled into the `tan`/`tan.exe` binary product) and
+`crates/tan-cli/README.md` (docs). Neither is reachable from
+`target/debug/tan.exe`'s own build graph, so no change under either path can
+move what that binary answers -- there is no "behaviour" here to
+re-diff, only a stronger Rust-side gate (`python_delegate_skip_reason`,
+`issue_code_registry_tests_are_not_ignored`) and a corrected README. Verified
+by inspection (`git diff 8a71310 HEAD -- crates` above), not by running
+`TAN_PARITY_LIVE=1`, precisely because the diff is scoped away from anything
+that measurement could have caught moving.

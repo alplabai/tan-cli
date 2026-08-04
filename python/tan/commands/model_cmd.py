@@ -150,14 +150,24 @@ def _load_board(path: Path) -> dict[str, Any]:
         ) from err
     except UnicodeDecodeError as err:
         # tan-cli#396: `UnicodeDecodeError` is a `ValueError`, NOT an
-        # `OSError`, so the clause above could never catch it and the
-        # "bad encoding" this docstring promises to code fell through to
-        # `model`'s outer catch-all instead -- measured `exitCode: 5` /
-        # `model.internal-failure` on a board.yaml carrying one 0xff byte,
-        # which tells a script "tan broke" rather than "your board.yaml has a
-        # bad byte". The file opened and read fine, so `board-yaml-missing`
-        # would be the wrong remedy; this is the same unusable-input class a
-        # YAML syntax error already lands on.
+        # `OSError`, so `except OSError` alone could never catch it -- one
+        # undecodable byte in the customer's own board.yaml escaped this
+        # whole command as a traceback: measured `exitCode: 5` /
+        # `model.internal-failure` / "model build failed unexpectedly:
+        # UnicodeDecodeError: ...", which tells a script "tan broke" rather
+        # than "your board.yaml has a bad byte". The file opened and read
+        # fine, so `board-yaml-missing` would send the customer looking for
+        # the wrong problem -- this is the same unusable-input class the
+        # YAML-syntax and not-a-mapping arms below already land on.
+        #
+        # `model` has no Rust oracle to defer to here (unlike `kconfig`,
+        # which folds this same byte-for-byte case into `board-yaml-missing`
+        # to mirror `read_to_string`'s single `io::Error` arm) -- a merge
+        # briefly folded this arm into the OSError one above on that other
+        # command's precedent (tan-cli#415), which made this whole `except`
+        # unreachable dead code and silently reverted the tan-cli#396 fix.
+        # Restored as its own arm: this file's own established
+        # classification, not an oracle's.
         raise ModelError(
             "model.board-yaml-invalid",
             f"{path}: not valid UTF-8: {err}",

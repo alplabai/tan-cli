@@ -30,6 +30,16 @@
 # The harness is BIND-MOUNTED from this checkout rather than copied in, so the
 # container runs the same file CI and the developer host run -- tan-cli#358 was
 # partly a second, drifted copy of it.
+#
+# e2e-full.sh itself runs TWO scenarios against this same bare image, in
+# order: Scenario A asserts tan REFUSES precisely (the named issue code, the
+# named missing tools) before anything beyond ca-certificates/git/python3 is
+# installed; then the SAME container self-provisions incrementally --
+# cmake/ninja-build/xz-utils/wget, then python3-venv, then the Zephyr SDK via
+# `west sdk install` -- so Scenario B can assert a real ARM `zephyr.elf` comes
+# out the other end. This script owns only the container shape and the two
+# env vars below that tune that second half; the assertions live in
+# e2e-full.sh.
 set -uo pipefail
 
 FROZEN="${1:?usage: e2e-container.sh <frozen-onedir-tree-or-tarball> [image]}"
@@ -82,6 +92,8 @@ $DOCKER run --rm \
   $MOUNT_ARGS \
   -v "$HARNESS:/e2e-full.sh:ro" \
   -e "ALP_SDK_REF=${ALP_SDK_REF:-dev}" \
+  -e "ZEPHYR_SDK_VERSION=${ZEPHYR_SDK_VERSION:-1.0.1}" \
+  -e "ZEPHYR_SDK_INSTALL_TIMEOUT=${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}" \
   "$IMAGE" bash -c '
 set -uo pipefail
 export DEBIAN_FRONTEND=noninteractive

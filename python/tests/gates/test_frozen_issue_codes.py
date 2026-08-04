@@ -34,6 +34,17 @@ ever reported the first because `assert!` panics. Formatting had become part of
 the wire contract. An `ast` parse cannot be broken by a line wrap, a named
 argument, or a comment.
 
+tan-cli#372: `contract/issue-codes.json`'s own `literal` field -- the JSON-side
+needle the old regime checked -- outlived that rewrite for a while, still
+REQUIRED on every entry (this file's `FROZEN_LOCATIONS` above had already
+dropped it) and read by nothing: `check_or_delegate` in `contract.rs` returns
+before ever touching it for a `python/` entry. Mandatory-to-supply and
+verified-by-nobody is exactly how those same 42 values went stale in the first
+place, just one field over. It is gone now -- a python-side entry must not
+carry `literal` at all, enforced from the Rust side (`check_or_delegate`) and
+mirrored here by `test_python_side_entries_carry_no_literal_field` below, so
+it cannot quietly grow back.
+
 WHAT THIS DOES NOT PROVE, stated plainly (inherited from the Rust gate's own
 wording): that the code still REACHES the wire. It proves the spelling still
 exists at the emission site. A refactor that deletes the whole refusal branch
@@ -315,6 +326,24 @@ def test_the_pin_set_matches_the_registrys_frozen_codes():
         "FROZEN_LOCATIONS has drifted from contract/issue-codes.json's frozen set.\n"
         f"  pinned here but not frozen in the registry: {sorted(pinned - registry_frozen)}\n"
         f"  frozen in the registry but not pinned here: {sorted(registry_frozen - pinned)}"
+    )
+
+
+def test_python_side_entries_carry_no_literal_field():
+    """tan-cli#372's mirror of `contract.rs::check_or_delegate`'s own
+    assertion, checked from this side too: a JSON-only edit (no Rust file
+    touched) should still be caught by SOME gate before it reaches a
+    `cargo test` run that might not happen the same day. `literal` is
+    required-and-checked for a `crates/` entry; for a `python/` entry nothing
+    anywhere reads it (see this file's module docstring), so its mere
+    presence is the same "reads as a verified fact and is not one" rot #372
+    was filed about, regardless of what value it holds.
+    """
+    offenders = [e["code"] for e in _python_side_entries(_registry()["issueCodes"]) if "literal" in e]
+    assert not offenders, (
+        "python-side registry entr(ies) carry a `literal` field nothing reads (tan-cli#372): "
+        + ", ".join(offenders)
+        + ". Delete the field -- see contract/issue-codes.json's own `_comment`."
     )
 
 

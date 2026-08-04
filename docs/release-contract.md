@@ -32,14 +32,34 @@ v<major>.<minor>.<patch>-<pre>        e.g. v0.4.0-rc1 pre-release
 ```
 
 - SemVer, `v`-prefixed.
-- The tag (minus the `v`) MUST equal `TAN_VERSION` in
-  `python/tan/version.py`, the SemVer string the shipped binary prints.
-  `python/scripts/version_check.py` also requires
-  `python/pyproject.toml` to carry its PEP 440 rendering and
-  `npm-shim/package.json` to match it exactly. The `verify-version` job fails
-  before assets are built if any value disagrees.
-- `Cargo.toml` is deliberately not read by the release version gate. It versions
-  the frozen Rust oracle, not the Python release assets.
+- The tag (minus the `v`) MUST equal `TAN_VERSION` in `python/tan/version.py`.
+  That is the string the shipped binary PRINTS and the one alp-sdk-vscode
+  compares against its `SUPPORTED_CLI_VERSION`, which is why it — and not any
+  other file — is the source of truth. This holds for a pre-release too:
+  `v0.4.0-rc1` requires `TAN_VERSION = "0.4.0-rc1"`.
+- Two more files are reconciled against it in the same gate, and a release
+  engineer has to move all three together:
+  - `python/pyproject.toml`'s `version` must be the **PEP 440 rendering** of it
+    (`0.5.0-dev` → `0.5.0.dev0`). The two spellings are not string-equal, which
+    is exactly why the check is a script and not a `grep`.
+  - `npm-shim/package.json`'s `version` must equal `TAN_VERSION` **exactly**
+    (npm ships SemVer, so nothing is translated here): `postinstall.js` derives
+    its download tag as `` v${pkg.version} ``, so a stale shim fetches a tag
+    that does not exist.
+  - `CHANGELOG.md` must already carry the `## [<version>]` section the release
+    body is sliced from — checked here, at PR time, because `release.yml` only
+    discovers it missing after four freezes, under a tag that is already
+    immutable.
+- **`Cargo.toml` is deliberately NOT read.** It versions the frozen Rust
+  crates on their own cadence and no release asset comes from them. Bumping it
+  for a release achieves nothing; leaving it behind breaks nothing. It used to
+  be the gate (`grep -m1 '^version = ' Cargo.toml`), and that is precisely how
+  a correct `v0.5.0` tag failed before a single asset was built.
+- The whole reconciliation lives in `python/scripts/version_check.py`, which
+  `release.yml`'s `verify-version` job runs as
+  `python python/scripts/version_check.py --selftest --tag "$GITHUB_REF_NAME"`.
+  `ci.yml` runs the same script with `--self` on every push, so drift is a PR
+  failure rather than a re-tag.
 
 ### Pre-releases
 
@@ -51,12 +71,18 @@ they cannot disagree with each other or with the tag:
 | `v0.4.0` | `false` | `true` |
 | `v0.4.0-rc1` | `true` | `false` |
 
-The crates.io job is deleted (the assets no longer come from `crates/`, so
-publishing `alp-tan-cli` would ship a different program under the same name),
-and there is no PyPI job. npm is final-tag-only and opt-in: the job always pack
-smokes a final tag, but publishes only when the repository variable
-`TAN_NPM_PUBLISH` is `true`. It is off by default while the configured token
-still produces `EOTP`; pre-release tags skip the npm job entirely.
+`publish_crates` is deleted for every tag (the assets no longer come from
+`crates/`, so publishing `alp-tan-cli` would ship a different program under the
+same name). `publish_npm` is a **real job** and runs only on a FINAL tag — its
+own `if` is `startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name,
+'-')`, so a pre-release skips it entirely, the same way it skips `make_latest`.
+Even on a final tag the publish itself is **opt-in and off**: the job reads
+`NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}` and, unless that
+repository *variable* is `true`, records `published=false` and says so in the
+run summary — a loud no-op rather than a silent skip. Arming it needs the
+variable AND a replacement `NPM_TOKEN`: the configured one is a classic token on
+a 2FA account, so `npm publish` answers `EOTP`. See
+[`npm-shim/README.md`](../npm-shim/README.md) for the operator's half.
 
 This is load-bearing rather than cosmetic. Both [`install.sh`](../install.sh)
 and [`install.ps1`](../install.ps1) resolve what `latest` means through GitHub,
@@ -331,14 +357,13 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
   creation.
 - **The GitHub release needs no secrets** — archives, `checksums.txt`,
   `envelope-contract.json` and the provenance attestation all run on the default
-  `GITHUB_TOKEN`. crates.io is gone, PyPI is not configured, and npm is outside
-  the default path unless explicitly armed:
+  `GITHUB_TOKEN`. `CARGO_REGISTRY_TOKEN` is gone with its job; `NPM_TOKEN` is
+  read only by a channel that is off until someone arms it:
 
   | Job | State | Consequence |
   |---|---|---|
   | `publish · crates.io` | **deleted** | `cargo install alp-tan-cli` resolves only to the stale Rust program under that name. Do not advertise it. |
-  | `publish · PyPI` | **not configured** | `pip install alp-tan` does not resolve (`E404` at every version). |
-  | `publish · npm shim` | final tags; `TAN_NPM_PUBLISH == true` to publish | Disarmed by default; pack smoke still runs and records `published=false`. `npm i -g @alplabai/tan` does not resolve until a publish succeeds. |
+  | `publish · npm shim` | **live, opt-in** — final tags only, and then only when the repository variable `TAN_NPM_PUBLISH` is `true` | Unarmed, `npm i -g @alplabai/tan` does not resolve (`E404` at every version) and the job says so in the run summary. Armed, it publishes and `release_gate` fails the tag if it did not. |
 
   **Present is not the same as usable.** `NPM_TOKEN` was configured for v0.4.1
   and the job still failed — `npm error code EOTP`, because a classic/publish
@@ -353,6 +378,7 @@ workflow-level `contents: write` (or, for `gates`, `contents: read`).
   read `publish · crates.io  success` while crates.io answered
   `crate 'alp-tan-cli' does not exist` — what shipped for v0.4.0 (#151). The
   lesson survives the deletion: a publish channel that cannot work must fail or
-  be switched off, never report success. Any doc that still offers `cargo
-  install alp-tan-cli` or `npm i -g @alplabai/tan` as an install path is wrong
-  until those jobs come back.
+  be switched off, never report success. Any doc that offers `cargo install
+  alp-tan-cli` or `npm i -g @alplabai/tan` as an install path is wrong until
+  crates.io comes back and `TAN_NPM_PUBLISH` has actually put a version on the
+  registry — a job existing is not a package existing.

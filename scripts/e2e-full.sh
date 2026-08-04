@@ -216,8 +216,10 @@ jrun() {
     bad "$label: $why"
     note "$(head -c 300 "$o")"
     [ "$esz" -eq 0 ] || note "$(head -c 200 "$e")"
+    return 1
   else
     ok "$label: one envelope, 0-byte stderr, ok/exitCode agree (exit $RC)"
+    return 0
   fi
 }
 
@@ -296,21 +298,159 @@ hdr "#323 --dry-run MUTATES NOTHING"
 [ ! -e "$HOME/.alp" ]  && ok "#323: no ~/.alp written"         || bad "#323: dry run wrote the global pointer"
 grep -q "would move\|would set" "$WORK/bsdry.out" && ok "#323: conditional wording (\"would\")" || note "no 'would' verb (no relocation planned)"
 
-hdr "real bootstrap"
-"$TAN" bootstrap --sdk-root ./alp-sdk --non-interactive --format json >"$WORK/bs.out" 2>"$WORK/bs.err"; RC=$?
-note "exit=$RC stderr=$(wc -c <"$WORK/bs.err"|tr -d ' ')B"
-[ "$RC" -eq 0 ] && ok "bootstrap: exit 0" || { bad "bootstrap: exit $RC"; note "$(head -c 400 "$WORK/bs.out")"; }
-WS=$(jget "$WORK/bs.out" data.workspaceDir); note "workspace=$WS"
+hdr "prerequisite scan (cmake, ninja, xz, wget)"
+have_prereqs() {
+  command -v cmake >/dev/null 2>&1 && command -v ninja >/dev/null 2>&1 \
+    && command -v xz >/dev/null 2>&1 && command -v wget >/dev/null 2>&1
+}
+CAN_APT=0
+if [ "$(id -u 2>/dev/null || echo 1)" = "0" ] && command -v apt-get >/dev/null 2>&1; then
+  CAN_APT=1
+fi
+have_prereqs && note "cmake/ninja/xz/wget already present" || note "cmake/ninja/xz/wget NOT present"
+note "root + apt-get available (can self-provision): $CAN_APT"
 
-hdr "#299 doctor AFTER bootstrap: west must not be the reason it is unhappy"
-jrun doc3 any doctor --format json
-# #299 is NOT "exit 4 never happens after bootstrap". Exit 4 is CORRECT when a
-# genuinely required toolchain is absent -- e.g. zephyrSdk fail with
-# ZEPHYR_SDK_INSTALL_DIR unset, which is the honest state of an isolated HOME.
-# #299 was specifically that `west`/`westResolved` were misreported for a host
-# where west lives in the workspace venv and off bare PATH. Assert THAT, or the
-# check reports a false regression on any host missing an unrelated tool.
-WESTBAD=$(python3 - "$WORK/doc3.out" <<'PY'
+# What follows used to be one unconditional "real bootstrap -> #299 doctor ->
+# init + build" block that ASSUMED a toolchain and scored a correct refusal on
+# a bare host as five failures, while counting checks that never ran as part
+# of "N passed". That is the exact defect class this repo keeps re-filing: a
+# skip inflating the pass count. Two scenarios instead, each with its own
+# tally and its own POSITIVE assertion of what SHOULD happen on that host
+# shape; a scenario that cannot run says so and scores nothing.
+PASS_A=0; FAIL_A=0
+oka()  { PASS_A=$((PASS_A+1)); ok "$1"; }
+bada() { FAIL_A=$((FAIL_A+1)); bad "$1"; }
+PASS_B=0; FAIL_B=0
+okb()  { PASS_B=$((PASS_B+1)); ok "$1"; }
+badb() { FAIL_B=$((FAIL_B+1)); bad "$1"; }
+
+# One bootstrap attempt, checked for a PRECISE refusal: non-zero exit, 0-byte
+# stderr, envelope.exitCode/ok self-consistent with the process exit, and the
+# named issue code's message naming every tool passed after it. A non-zero
+# exit alone is not enough -- a wrong-but-non-zero exit must fail this.
+check_bootstrap_refusal() {
+  local label="$1" issue_code="$2"; shift 2
+  local out="$WORK/$label.out" err="$WORK/$label.err"
+  "$TAN" bootstrap --sdk-root ./alp-sdk --non-interactive --format json >"$out" 2>"$err"
+  local rc=$?
+  local esz; esz=$(wc -c <"$err" | tr -d ' ')
+  note "$label: exit=$rc stderr=${esz}B"
+  if [ "$rc" -eq 0 ]; then
+    bada "$label: bootstrap unexpectedly exited 0"
+    note "$(head -c 300 "$out")"
+    return
+  fi
+  [ "$esz" -eq 0 ] && oka "$label: 0-byte stderr" || bada "$label: stderr not empty (${esz}B)"
+  local verdict
+  verdict=$(python3 - "$out" "$rc" "bootstrap.$issue_code" "$@" <<'PY'
+import json, sys
+path, rc, code = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+tools = sys.argv[4:]
+try:
+    d = json.load(open(path))
+except Exception as e:
+    print("PARSEFAIL:" + str(e)); raise SystemExit
+if d.get("exitCode") != rc:
+    print(f"EXITMISMATCH:{d.get('exitCode')}"); raise SystemExit
+if d.get("ok") is not False:
+    print(f"OKMISMATCH:{d.get('ok')}"); raise SystemExit
+matches = [i for i in (d.get("issues") or []) if i.get("code") == code]
+if not matches:
+    print("NOCODE"); raise SystemExit
+msg = matches[0].get("message", "")
+missing = [t for t in tools if t not in msg]
+print("OK" if not missing else "MISSING:" + ",".join(missing))
+PY
+)
+  if [ "$verdict" = "OK" ]; then
+    oka "$label: envelope carries bootstrap.$issue_code naming $*"
+  else
+    case "$verdict" in
+      PARSEFAIL:*)    bada "$label: stdout is not a single JSON envelope" ;;
+      EXITMISMATCH:*) bada "$label: envelope.exitCode=${verdict#EXITMISMATCH:} but process exited $rc" ;;
+      OKMISMATCH:*)   bada "$label: exit $rc but envelope ok=${verdict#OKMISMATCH:}" ;;
+      NOCODE)         bada "$label: envelope missing issue bootstrap.$issue_code" ;;
+      MISSING:*)      bada "$label: bootstrap.$issue_code message did not name: ${verdict#MISSING:}" ;;
+      *)              bada "$label: unrecognised verdict '$verdict'" ;;
+    esac
+    note "$(head -c 300 "$out")"
+  fi
+}
+
+########################  SCENARIO A: bare host refuses precisely  ########################
+echo; echo "############ SCENARIO A: bare host (no build toolchain) ############"
+if have_prereqs; then
+  note "A: not applicable -- host already has cmake/ninja/xz/wget, nothing to refuse"
+else
+  check_bootstrap_refusal bsA1 prerequisites-missing cmake ninja xz wget
+  if [ "$CAN_APT" -eq 1 ]; then
+    note "A: installing exactly what tan named: cmake ninja-build xz-utils wget"
+    apt-get install -y -qq --no-install-recommends cmake ninja-build xz-utils wget \
+      >"$WORK/apt-a.log" 2>&1
+    check_bootstrap_refusal bsA2 venv-unusable python3-venv
+  else
+    note "A: no root apt-get in this environment -- cannot install the four named"
+    note "   tools to progress to the venv-unusable stage; that half of Scenario A"
+    note "   is NOT RUN (not scored as a pass)."
+  fi
+fi
+echo "--- scenario A: $PASS_A passed, $FAIL_A failed ---"
+
+########################  SCENARIO B: provisioned host, real ARM ELF  ########################
+echo; echo "############ SCENARIO B: provisioned host ############"
+HAVE_PROJECT=0
+SDK_OK=0
+if ! have_prereqs && [ "$CAN_APT" -ne 1 ]; then
+  note "B: NOT RUN -- host lacks cmake/ninja/xz/wget and cannot self-provision (no root apt-get)"
+else
+  if [ "$CAN_APT" -eq 1 ]; then
+    # `file` is NOT one tan names, and it is required anyway: the Zephyr SDK's
+    # host-tools installer (`setup.sh -t <target> -h`, which `west sdk install`
+    # invokes) needs file(1). Isolated to that single variable in a container --
+    # identical bootstrapped workspace, identical HOME, `file` the only
+    # difference:
+    #
+    #   WITH    file -> west rc=0, "All done."
+    #   WITHOUT file -> west rc=1, "ERROR: Host tools installation failed"
+    #                             "FATAL ERROR: command
+    #                              `<sdk>/setup.sh -t arm-zephyr-eabi -h` failed"
+    #
+    # Installed here so scenario B can reach a real ARM ELF. That tan's own
+    # prerequisite list omits it -- and that the SDK's failure never names it --
+    # is a separate customer-facing gap, filed as tan-cli#424.
+    note "B: installing cmake ninja-build xz-utils wget python3-venv file"
+    apt-get install -y -qq --no-install-recommends \
+      cmake ninja-build xz-utils wget python3-venv file >"$WORK/apt-b.log" 2>&1
+  fi
+
+  hdr "B: bootstrap succeeds on a provisioned host"
+  T0=$(date +%s)
+  "$TAN" bootstrap --sdk-root ./alp-sdk --non-interactive --format json \
+    >"$WORK/bsB.out" 2>"$WORK/bsB.err"; RC=$?
+  T1=$(date +%s)
+  ESZ=$(wc -c <"$WORK/bsB.err" | tr -d ' ')
+  OKVAL=$(jget "$WORK/bsB.out" ok)
+  note "bootstrap: exit=$RC ok=$OKVAL stderr=${ESZ}B took $((T1-T0))s"
+  if [ "$RC" -eq 0 ] && [ "$OKVAL" = "True" ] && [ "$ESZ" -eq 0 ]; then
+    okb "B: bootstrap ok:true, exit 0, 0-byte stderr"
+  else
+    badb "B: bootstrap failed (exit $RC ok=$OKVAL stderr=${ESZ}B)"
+    note "$(head -c 400 "$WORK/bsB.out")"
+  fi
+  WS=$(jget "$WORK/bsB.out" data.workspaceDir); note "workspace=$WS"
+  WEST_BIN="$WS/.venv/bin/west"
+  if [ "$WS" != "NONE" ] && [ -x "$WEST_BIN" ]; then
+    okb "B: west exists at \$workspaceDir/.venv/bin/west"
+  else
+    badb "B: no west at $WEST_BIN"
+  fi
+
+  if [ "$RC" -eq 0 ]; then
+    hdr "B: #299 doctor AFTER a successful bootstrap: west must not be the reason it is unhappy"
+    # jrun already prints+scores the PASS/FAIL line via the global ok()/bad();
+    # only the scenario tally is added here, not a second assertion.
+    if jrun doc3 any doctor --format json; then PASS_B=$((PASS_B+1)); else FAIL_B=$((FAIL_B+1)); fi
+    WESTBAD=$(python3 - "$WORK/doc3.out" <<'PY'
 import json,sys
 d=json.load(open(sys.argv[1]))
 bad=[c["name"] for c in d["data"]["checks"]
@@ -318,50 +458,122 @@ bad=[c["name"] for c in d["data"]["checks"]
 print(",".join(bad) if bad else "NONE")
 PY
 )
-[ "$WESTBAD" = "NONE" ] && ok "#299: no west* check fails after bootstrap (exit $RC)" \
-                        || bad "#299: west check(s) failing after a successful bootstrap: $WESTBAD"
-FAILING=$(python3 - "$WORK/doc3.out" <<'PY'
+    [ "$WESTBAD" = "NONE" ] && okb "B: #299 no west* check fails after bootstrap" \
+                            || badb "B: #299 west check(s) failing after a successful bootstrap: $WESTBAD"
+  else
+    note "B: #299 skipped -- bootstrap did not succeed, nothing to check it against"
+  fi
+
+  hdr "B: init"
+  "$TAN" init --from-example peripheral-io/hello-world --name blinky-e2e --destination . \
+    --format json >"$WORK/initB.out" 2>"$WORK/initB.err"; RC=$?
+  ESZ=$(wc -c <"$WORK/initB.err" | tr -d ' ')
+  if [ "$RC" -eq 0 ] && [ "$ESZ" -eq 0 ]; then
+    okb "B: init exit 0, 0-byte stderr"; HAVE_PROJECT=1
+  else
+    badb "B: init failed (exit $RC, stderr ${ESZ}B)"
+    note "$(head -c 300 "$WORK/initB.out")"
+  fi
+
+  hdr "B: Zephyr SDK (west sdk install --version $ZEPHYR_SDK_VERSION -t arm-zephyr-eabi)"
+  if [ "$HAVE_PROJECT" -eq 1 ] && [ -x "$WEST_BIN" ]; then
+    "$TAN" doctor --build --format json >"$WORK/doctorPre.out" 2>/dev/null
+    PRE=$(python3 - "$WORK/doctorPre.out" <<'PY'
 import json,sys
-d=json.load(open(sys.argv[1]))
-print(",".join(c["name"] for c in d["data"]["checks"] if c["status"]=="fail") or "none")
+try: d=json.load(open(sys.argv[1]))
+except Exception: print("fail"); raise SystemExit
+z=[c for c in (d.get("data") or {}).get("checks") or [] if c.get("name")=="zephyrSdk"]
+print(z[0]["status"] if z else "fail")
 PY
 )
-note "failing checks: $FAILING"
+    if [ "$PRE" = "pass" ]; then
+      SDK_OK=1
+      note "B: Zephyr SDK already present -- no download needed"
+    else
+      SDK_TIMEOUT="${ZEPHYR_SDK_INSTALL_TIMEOUT:-1200}"
+      T0=$(date +%s)
+      if ( cd "$WS" && timeout "$SDK_TIMEOUT" "$WEST_BIN" sdk install \
+             --version "$ZEPHYR_SDK_VERSION" -t arm-zephyr-eabi \
+             >"$WORK/sdkinstall.out" 2>"$WORK/sdkinstall.err" ); then
+        SDK_OK=1
+      fi
+      T1=$(date +%s)
+      note "west sdk install: $((T1-T0))s (timeout ${SDK_TIMEOUT}s), exit-ok=$SDK_OK"
+      [ "$SDK_OK" -eq 1 ] || note "$(tail -c 400 "$WORK/sdkinstall.err" 2>/dev/null)"
+    fi
+  else
+    note "B: no west / no project -- cannot attempt the SDK install"
+  fi
 
-hdr "init + build to a real ARM ELF"
-# `tan init` takes OPTIONS ONLY -- no positional name. --name is the
-# subdirectory, --destination the parent. Passing a positional gives a usage
-# envelope with exit 2, which is tan behaving correctly and the caller being
-# wrong; do not read that as a product defect.
-"$TAN" init --from-example peripheral-io/hello-world --name blinky-e2e --destination . --format json >"$WORK/init.out" 2>"$WORK/init.err"; RC=$?
-[ "$RC" -eq 0 ] && ok "init: exit 0" || { bad "init: exit $RC"; note "$(head -c 300 "$WORK/init.out")"; }
-"$TAN" build --project blinky-e2e --format json >"$WORK/build.out" 2>"$WORK/build.err"; RC=$?
-[ "$RC" -eq 0 ] && ok "build: exit 0" || { bad "build: exit $RC"; note "$(head -c 500 "$WORK/build.out")"; }
-ELF=$(find . -name "zephyr.elf" 2>/dev/null | head -1)
-if [ -n "$ELF" ]; then
-  DESC=$(file "$ELF" 2>/dev/null || echo "file(1) unavailable")
-  note "$ELF: $DESC"
-  echo "$DESC" | grep -qi "ELF.*ARM" && ok "build produced a real ARM ELF" || bad "artefact is not an ARM ELF"
-else bad "no zephyr.elf produced"; fi
+  hdr "B: build"
+  if [ "$HAVE_PROJECT" -ne 1 ]; then
+    badb "B: build not attempted -- init did not produce a project"
+  else
+    "$TAN" build --project blinky-e2e --format json >"$WORK/buildB.out" 2>"$WORK/buildB.err"; RC=$?
+    if [ "$SDK_OK" -eq 1 ]; then
+      [ "$RC" -eq 0 ] && okb "B: build exit 0" || { badb "B: build exit $RC"; note "$(head -c 500 "$WORK/buildB.out")"; }
+      ELF=$(find . -name "zephyr.elf" 2>/dev/null | head -1)
+      if [ -n "$ELF" ]; then
+        DESC=$(file "$ELF" 2>/dev/null || echo "file(1) unavailable")
+        note "$ELF: $DESC"
+        echo "$DESC" | grep -qi "ELF.*ARM" && okb "B: build produced a real ARM ELF" \
+                                            || badb "B: artefact is not an ARM ELF"
+      else
+        badb "B: no zephyr.elf produced despite a working Zephyr SDK"
+      fi
+    else
+      # SDK install failed or was impractical (measured above, not assumed):
+      # the build is EXPECTED to fail, and must name the missing Zephyr SDK --
+      # an unnamed failure, or a build that unexpectedly succeeds anyway, is
+      # itself a finding.
+      if [ "$RC" -eq 0 ]; then
+        badb "B: build unexpectedly succeeded with no Zephyr SDK installed"
+      else
+        NAMED_BUILD=no
+        grep -qi "zephyr-sdk\|zephyr sdk" "$WORK/buildB.out" "$WORK/buildB.err" 2>/dev/null && NAMED_BUILD=yes
+        "$TAN" doctor --build --format json >"$WORK/doctorB.out" 2>/dev/null
+        NAMED_DOCTOR=$(python3 - "$WORK/doctorB.out" <<'PY'
+import json,sys
+try: d=json.load(open(sys.argv[1]))
+except Exception: print("no"); raise SystemExit
+z=[c for c in (d.get("data") or {}).get("checks") or [] if c.get("name")=="zephyrSdk"]
+ok = bool(z) and z[0].get("status")=="fail" and "west sdk install" in (z[0].get("fix") or "")
+print("yes" if ok else "no")
+PY
+)
+        if [ "$NAMED_BUILD" = "yes" ] || [ "$NAMED_DOCTOR" = "yes" ]; then
+          okb "B: build failed (exit $RC) and the Zephyr SDK is named as the cause (build:$NAMED_BUILD doctor:$NAMED_DOCTOR)"
+        else
+          badb "B: build failed (exit $RC) but nothing names the missing Zephyr SDK (build:$NAMED_BUILD doctor:$NAMED_DOCTOR)"
+        fi
+        note "NO ARM ELF produced -- no Zephyr SDK toolchain in this container"
+        note "(tan-cli#419: the build envelope itself doesn't name the gap; 'tan doctor --build' does -- not this task's fix)"
+      fi
+    fi
+  fi
 
-hdr "flash --dry-run"
-# tan-cli#358: this ran from the PARENT directory with no `--project`, so it
-# planned against `$WORK/proj` -- which has no board.yaml -- and returned
-# ok:false / exitCode 1 / `flash.manifest-not-found`. The old jrun scored that
-# PASS. It has to target the project that was actually built, or it measures
-# nothing about flash.
-jrun flash any flash --project blinky-e2e --dry-run --format json
-# The exit code here legitimately depends on whether the build leg above
-# produced an artefact, so `any` is right -- but WHICH PROJECT it planned
-# against does not depend on the host at all, and that was the defect. Assert
-# it directly.
-FP=$(jget "$WORK/flash.out" project.root); FB=$(jget "$WORK/flash.out" project.boardYaml)
-case "$FP" in
-  */blinky-e2e) ok "flash: planned against the project that was built ($FP)" ;;
-  *)            bad "flash: planned against '$FP', not the built blinky-e2e" ;;
-esac
-[ "$FB" != "NONE" ] && ok "flash: resolved the project's board.yaml" \
-  || bad "flash: no board.yaml resolved -- it is not looking at the built project"
+  hdr "B: flash --dry-run"
+  if [ "$HAVE_PROJECT" -ne 1 ]; then
+    note "B: flash --dry-run NOT RUN -- no project (init did not succeed)"
+  else
+    # tan-cli#358: this ran from the PARENT directory with no `--project`, so it
+    # planned against `$WORK/proj` -- which has no board.yaml -- and returned
+    # ok:false / exitCode 1 / `flash.manifest-not-found`. The old jrun scored
+    # that PASS. It has to target the project that was actually built, or it
+    # measures nothing about flash.
+    # Same as the #299 doc3 call above: jrun already prints+scores the line.
+    if jrun flash any flash --project blinky-e2e --dry-run --format json
+    then PASS_B=$((PASS_B+1)); else FAIL_B=$((FAIL_B+1)); fi
+    FP=$(jget "$WORK/flash.out" project.root); FB=$(jget "$WORK/flash.out" project.boardYaml)
+    case "$FP" in
+      */blinky-e2e) okb "B: flash planned against the project that was built ($FP)" ;;
+      *)            badb "B: flash planned against '$FP', not the built blinky-e2e" ;;
+    esac
+    [ "$FB" != "NONE" ] && okb "B: flash resolved the project's board.yaml" \
+      || badb "B: flash resolved no board.yaml -- it is not looking at the built project"
+  fi
+fi
+echo "--- scenario B: $PASS_B passed, $FAIL_B failed ---"
 
 ########################  DIRTY HOST  ########################
 echo; echo "############ DIRTY HOST ############"
@@ -391,13 +603,16 @@ fi
 # The remedy not naming the stale pointer is tracked as #344 (v0.6.0), not
 # asserted here: it is a message-quality gap, not a behavioural one.
 
-hdr "#336 a dangling ZEPHYR_BASE must not change ANY slice's outcome"
-# The control that found #336. Asserting only the exit code is too weak: the
-# bug dropped ONE slice (m55_hp) while the other still built, so a run can be
-# non-zero for unrelated reasons and still hide it. Compare slice-by-slice
-# against the same build with ZEPHYR_BASE unset.
-"$TAN" build --project blinky-e2e --format json >"$WORK/dbuild.out" 2>"$WORK/dbuild.err"; RC=$?
-slices_of() { python3 - "$1" <<'PY'
+if [ "$HAVE_PROJECT" -ne 1 ]; then
+  note "#336 slice comparison NOT RUN -- no project was built in Scenario B"
+else
+  hdr "#336 a dangling ZEPHYR_BASE must not change ANY slice's outcome"
+  # The control that found #336. Asserting only the exit code is too weak: the
+  # bug dropped ONE slice (m55_hp) while the other still built, so a run can be
+  # non-zero for unrelated reasons and still hide it. Compare slice-by-slice
+  # against the same build with ZEPHYR_BASE unset.
+  "$TAN" build --project blinky-e2e --format json >"$WORK/dbuild.out" 2>"$WORK/dbuild.err"; RC=$?
+  slices_of() { python3 - "$1" <<'PY'
 import json,sys
 try: d=json.load(open(sys.argv[1]))
 except Exception: print("UNREADABLE"); raise SystemExit
@@ -406,26 +621,38 @@ print(",".join(f"{s.get('coreId')}={s.get('status')}"
                                 key=lambda x: x.get("coreId") or "")))
 PY
 }
-DIRTY_SLICES=$(slices_of "$WORK/dbuild.out")
-( unset ZEPHYR_BASE; "$TAN" build --project blinky-e2e --format json >"$WORK/cleanbuild.out" 2>/dev/null )
-CLEAN_SLICES=$(slices_of "$WORK/cleanbuild.out")
-note "with dangling ZEPHYR_BASE: $DIRTY_SLICES"
-note "with ZEPHYR_BASE unset:    $CLEAN_SLICES"
-# Equality alone is NOT sufficient, and this assertion already reported a false
-# PASS on exactly that: after the tan-cli#349 onedir change broke the launcher,
-# BOTH runs produced UNREADABLE, compared equal, and this printed PASS while
-# nothing had built at all. Two runs being equally broken is not the property
-# under test. Require a real, parseable slice list on both sides first.
-if [ "$DIRTY_SLICES" = "UNREADABLE" ] || [ "$CLEAN_SLICES" = "UNREADABLE" ]; then
-  bad "#336: slice outcomes UNREADABLE on at least one side -- nothing was compared"
-elif [ "$DIRTY_SLICES" = "$CLEAN_SLICES" ]; then
-  ok "#336: slice outcomes identical with and without a dangling ZEPHYR_BASE"
-else
-  bad "#336: a dangling ZEPHYR_BASE changed slice outcomes"
+  DIRTY_SLICES=$(slices_of "$WORK/dbuild.out")
+  ( unset ZEPHYR_BASE; "$TAN" build --project blinky-e2e --format json >"$WORK/cleanbuild.out" 2>/dev/null )
+  CLEAN_SLICES=$(slices_of "$WORK/cleanbuild.out")
+  note "with dangling ZEPHYR_BASE: $DIRTY_SLICES"
+  note "with ZEPHYR_BASE unset:    $CLEAN_SLICES"
+  # Equality alone is NOT sufficient, and this assertion already reported a
+  # false PASS on exactly that: after the tan-cli#349 onedir change broke the
+  # launcher, BOTH runs produced UNREADABLE, compared equal, and this printed
+  # PASS while nothing had built at all. Two runs being equally broken is not
+  # the property under test. Require a real, parseable slice list on both
+  # sides first.
+  if [ "$DIRTY_SLICES" = "UNREADABLE" ] || [ "$CLEAN_SLICES" = "UNREADABLE" ]; then
+    bad "#336: slice outcomes UNREADABLE on at least one side -- nothing was compared"
+  elif [ "$DIRTY_SLICES" = "$CLEAN_SLICES" ]; then
+    ok "#336: slice outcomes identical with and without a dangling ZEPHYR_BASE"
+  else
+    bad "#336: a dangling ZEPHYR_BASE changed slice outcomes"
+  fi
+  # A Zephyr-SDK-less container legitimately fails this build (no toolchain)
+  # -- that is Scenario B's own already-scored finding, not a NEW defect here.
+  # Only assert exit 0 when the SDK was actually usable, mirroring the same
+  # fix applied to the main build leg above.
+  if [ "$SDK_OK" -eq 1 ]; then
+    [ "$RC" -eq 0 ] && ok "dirty build: exit 0" || { bad "dirty build: exit $RC"; note "$(head -c 400 "$WORK/dbuild.out")"; }
+  else
+    note "dirty build: exit $RC (no Zephyr SDK in this container -- consistent with Scenario B, not scored again)"
+  fi
 fi
-[ "$RC" -eq 0 ] && ok "dirty build: exit 0" || { bad "dirty build: exit $RC"; note "$(head -c 400 "$WORK/dbuild.out")"; }
 
 echo
 echo "=== $(uname -s): $PASS passed, $FAIL failed ==="
+echo "    scenario A (bare host prerequisite refusal): $PASS_A passed, $FAIL_A failed"
+echo "    scenario B (provisioned host, real ARM ELF):  $PASS_B passed, $FAIL_B failed"
 [ "$FAIL" -gt 0 ] && { echo "failed:"; echo "$FAILED_NAMES" | tr '|' '\n' | grep -v '^$' | sed 's/^/  - /'; }
 [ "$FAIL" -eq 0 ]

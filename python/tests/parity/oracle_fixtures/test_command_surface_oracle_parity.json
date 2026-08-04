@@ -228,5 +228,32 @@
     "root": null
    }
   }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_trace_without_an_sdk_matches_the_oracle_except_its_dead_end_advice#0": [
+  2,
+  {
+   "command": "trace",
+   "data": {
+    "decisions": [],
+    "focusPath": null,
+    "generatedAt": "1970-01-01T00:00:00.000Z",
+    "schemaVersion": "1",
+    "target": null,
+    "workflow": "cli.trace"
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "trace.sdk-root-unresolved",
+     "message": "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk switch <version|path>`, or place the project near an alp-sdk checkout.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
  ]
 }

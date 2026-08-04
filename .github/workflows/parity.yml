@@ -184,6 +184,23 @@ env:
   #   `tests/parity/bootstrap_manifest_parity.py` itself survives as a
   #   manual diagnostic tool (see its module doc), not run in CI.
   #
+  # HELD at f4d87a1f (tan-cli#425). The pin IS 7 contract-surface commits
+  # behind alp-sdk dev and the freshness warning is correct -- but bumping it
+  # to `2bc6b400` was tried and REVERTED: it reds 77 SDK-bound tests on all
+  # three OS legs, e.g.
+  #
+  #   test_planner_emit_parity.py::test_the_breadth_layer_still_covers_every_board
+  #     AssertionError: only 2194 artefacts were compared byte for byte
+  #     assert 2194 >= 2900
+  #
+  # The four contract-gate SCRIPTS (scaffold byte-parity, kconfig golden,
+  # toolchain lock, seam1) all pass against `2bc6b400` -- which is what made
+  # the bump look safe -- but they are not the whole gate. `python -- pytest
+  # across python/` binds ALP_SDK_ROOT to this tag and runs the emit-parity
+  # breadth layer against it, and THAT is what the bump breaks. Bumping needs
+  # that breadth layer re-measured and its fixtures re-captured first; it is
+  # not a one-line refresh. See tan-cli#425.
+  #
   # v0.15.0-rc1 -> f4d87a1f (tan-cli#320): `python/tests/gates/
   # test_planner_relocation_freshness.py`'s own PINNED_SDK_COMMIT moved to
   # this exact commit when `tan/planner/` was re-synced against
@@ -1320,9 +1337,32 @@ jobs:
       - name: build the Rust tan (parity oracle)
         run: cargo build --locked --bin tan
 
+      # THE context worth adding to branch protection for the Python suite --
+      # see .github/workflows/ci.yml's header for the full tan-cli#392 note and
+      # the exact three strings this matrix produces. Nothing in this file can
+      # change branch protection; it can only make sure the job is worth
+      # requiring, which is what the guard below is for.
+      #
+      # The binding is ASSERTED before pytest runs, against the variable
+      # actually exported rather than a re-derived path. This job's whole value
+      # over ci.yml's `python` job is that it runs the suite with an alp-sdk
+      # bound, and `tests/conftest.py`'s `sdk_root()` accepts the root ONLY when
+      # `scripts/alp_project.py` is a file under it -- for every other outcome
+      # (a renamed variable, a checkout that landed at a different path, a
+      # partial clone) it returns `None`, which is a per-module SKIP: exit 0,
+      # green, and invisible unless someone reads the skip count. That is the
+      # exact "reports green having checked nothing -- worse than no job"
+      # failure this job's own header above argues against but nothing
+      # enforced. Same shape as seam1's node-id PASSED assertion (tan-cli#308).
       - name: pytest (python/tests, excluding tests/gates -- see seam1 above)
         shell: bash
         working-directory: python
         env:
           ALP_SDK_ROOT: ${{ github.workspace }}/alp-sdk
-        run: python -m pytest -q --ignore=tests/gates
+        run: |
+          set -euo pipefail
+          if [ ! -f "${ALP_SDK_ROOT}/scripts/alp_project.py" ]; then
+            echo "::error::ALP_SDK_ROOT is bound to ${ALP_SDK_ROOT}, which has no scripts/alp_project.py -- tests/conftest.py::sdk_root() would return None and every SDK-gated module would SKIP while this job still reported green. Fix the 'clone alp-sdk' step above."
+            exit 1
+          fi
+          python -m pytest -q --ignore=tests/gates

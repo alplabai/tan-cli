@@ -631,6 +631,112 @@ def test_interactive_prompts_ask_same_questions_in_order(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# tan-cli#399: `--format json` is the standard envelope, on BOTH paths
+# ---------------------------------------------------------------------------
+
+
+def _json_argv(tmp_path, *extra):
+    """A THROWAWAY marker checkout (`_marker_sdk`), never `_SDK_ROOT`: these
+    envelope-shape cases run unconditionally (no `@needs_oracle_sdk`, see the
+    module docstring), so pointing at `_SDK_ROOT` -- `None` on a machine with
+    no `ALP_SDK_ROOT` -- resolved `--sdk-root None`, an unresolvable path, and
+    every caller of this helper hit the SDK-root-unresolved refusal instead of
+    the success envelope it meant to exercise."""
+    sdk = _marker_sdk(tmp_path / "sdk")
+    return [
+        "--dry-run",
+        "--format", "json",
+        "--sdk-root", str(sdk),
+        "--output-root", str(tmp_path),
+        "--sku", "E1M-ZZ9999",
+        "--soc-ref", "nxp:imx9:imx95",
+        "--family", "nxp-imx9",
+        *extra,
+    ]
+
+
+def test_format_json_success_emits_the_standard_envelope_with_the_planned_files(tmp_path):
+    """`contract/README.md` states alp-sdk-vscode drives `tan <cmd> --format
+    json` and hard-depends on `{command,ok,exitCode,project,data,issues}`.
+    `new-som` accepted the flag and printed the same 1238 bytes of human text
+    either way -- `json.load(stdout)` threw `JSONDecodeError: Expecting value:
+    line 1 column 1`, the extension's `isEnvelope` guard failed OPEN, and the
+    panel that should list the two planned files rendered `Command completed.`
+
+    The file lists are the assertion, not just the envelope shape: `data`
+    being unreachable is the whole reported impact."""
+    result = runner.invoke(app, _json_argv(tmp_path))
+    assert result.exit_code == 0, result.output
+
+    env = json.loads(result.output)
+    assert env["command"] == "new-som"
+    assert env["ok"] is True and env["exitCode"] == 0
+    assert set(env) >= {"command", "ok", "exitCode", "project", "data", "issues"}
+    assert env["data"]["dryRun"] is True
+    assert [Path(p).name for p in env["data"]["planned"]] == ["E1M-ZZ9999.yaml", "imx95.json"]
+    assert env["data"]["nextSteps"], env["data"]
+
+
+def test_format_json_failure_emits_a_new_som_code_not_cli_parse_error(tmp_path):
+    """The failure path DID produce parseable JSON before the fix -- from
+    `cli.py`'s generic usage-error fallback, as `command: "cli"` with
+    `cli.parse-error`, a code `contract/issue-codes.json` records as
+    `status: "reserved"`, `consumer: "none"`. So a consumer dispatching on the
+    command name had nothing to dispatch on for a refusal that really
+    happened.
+
+    `new-som.failed` is the ORACLE's own spelling, measured not read:
+    `target/debug/tan.exe new-som --format json --sdk-root <bad>` answers
+    `command: "new-som"`, `data: {"subcommand":"new-som"}`,
+    `issues: [{"code":"new-som.failed",...}]`, exit 2. This pins the whole
+    shape against it, message excluded (the port's wording adds a `git clone`
+    suggestion the oracle never had -- a separate, pre-existing divergence)."""
+    empty = tmp_path / "not-an-sdk"
+    empty.mkdir()
+    result = runner.invoke(
+        app,
+        ["--dry-run", "--format", "json", "--sdk-root", str(empty),
+         "--sku", "E1M-ZZ9999", "--soc-ref", "nxp:imx9:imx95", "--family", "nxp-imx9"],
+    )
+    assert result.exit_code == 2, result.output
+
+    env = json.loads(result.output)
+    assert env["command"] == "new-som", env
+    assert env["ok"] is False and env["exitCode"] == 2
+    assert env["data"] == {"subcommand": "new-som"}
+    assert [i["code"] for i in env["issues"]] == ["new-som.failed"], env
+    assert "alp-sdk root is unresolved" in env["issues"][0]["message"]
+
+
+def test_the_success_and_failure_paths_agree_on_whether_stdout_is_json(tmp_path):
+    """The exact disagreement #399 reports: one path parseable, the other not,
+    on the same command with the same flag. Asserted as a PAIR so a fix to
+    either half alone cannot pass."""
+    empty = tmp_path / "not-an-sdk"
+    empty.mkdir()
+    ok = runner.invoke(app, _json_argv(tmp_path / "out"))
+    bad = runner.invoke(
+        app,
+        ["--dry-run", "--format", "json", "--sdk-root", str(empty),
+         "--sku", "E1M-ZZ9999", "--soc-ref", "nxp:imx9:imx95", "--family", "nxp-imx9"],
+    )
+    for label, result in (("success", ok), ("failure", bad)):
+        env = json.loads(result.output)  # a raise here IS the failure
+        assert env["command"] == "new-som", (label, env)
+        assert env["exitCode"] == result.exit_code, (label, env, result.exit_code)
+
+
+def test_text_mode_is_untouched_and_carries_no_envelope(tmp_path):
+    """The other side of the same fix: `--format json` gaining an envelope must
+    not put one on the DEFAULT path. Text mode is byte-compared against the
+    alp_cli original elsewhere in this file; this is the cheap direct guard."""
+    result = runner.invoke(app, [a for a in _json_argv(tmp_path) if a not in ("--format", "json")])
+    assert result.exit_code == 0, result.output
+    assert result.output.lstrip().startswith("Preset skeleton validates"), result.output
+    assert '"command"' not in result.output, result.output
+
+
+# ---------------------------------------------------------------------------
 # Oracle parity (skipped when the SDK sibling is absent)
 # ---------------------------------------------------------------------------
 
@@ -840,7 +946,13 @@ def test_format_json_failure_path_carries_a_new_som_code(tmp_path):
     generic fallback -- `command: "cli"`, `cli.parse-error` -- so a consumer
     branching on `command` got a different answer depending on whether the
     scaffold had worked. There was no `new-som` entry in
-    `contract/issue-codes.json` at all."""
+    `contract/issue-codes.json` at all.
+
+    `data` is `{"subcommand": "new-som"}`, not `null` -- measured live against
+    `target/debug/tan.exe new-som --format json --sdk-root <bad>`, which
+    answers the identical shape for this identical refusal (see
+    `test_format_json_failure_emits_a_new_som_code_not_cli_parse_error`'s own
+    oracle measurement)."""
     result = runner.invoke(
         app,
         _dry_run_argv(tmp_path / "nope", tmp_path / "out", "--format", "json"),
@@ -850,7 +962,7 @@ def test_format_json_failure_path_carries_a_new_som_code(tmp_path):
     assert payload["command"] == "new-som"
     assert payload["ok"] is False
     assert payload["exitCode"] == 2
-    assert payload["data"] is None
+    assert payload["data"] == {"subcommand": "new-som"}
     assert [i["code"] for i in payload["issues"]] == ["new-som.failed"]
     assert "alp-sdk root is unresolved" in payload["issues"][0]["message"]
 

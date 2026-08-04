@@ -14,12 +14,7 @@ import typer
 from typer.main import get_command
 from typer.testing import CliRunner
 
-from tan.core.global_flags import (
-    GLOBAL_FLAG_ARITY,
-    GLOBAL_FLAGS,
-    VALUE_GLOBAL_FLAGS,
-    accept_global_flags,
-)
+from tan.core.global_flags import GLOBAL_FLAG_ARITY, GLOBAL_FLAGS, accept_global_flags
 
 runner = CliRunner()
 
@@ -46,18 +41,9 @@ def test_global_flags_and_arity_stay_in_lockstep():
         assert GLOBAL_FLAG_ARITY[flag] in (0, 1)
 
 
-def test_the_value_carrying_half_is_exactly_the_arity_one_half():
-    """tan-cli#398 split `_GLOBAL_FLAG_SPECS` in two because the two halves
-    need OPPOSITE handling when injected. A flag that drifts into the wrong
-    half silently gets the wrong one, so pin that the split and the arity
-    table are the same fact twice."""
-    assert set(VALUE_GLOBAL_FLAGS) == {f for f in GLOBAL_FLAGS if GLOBAL_FLAG_ARITY[f] == 1}
-    assert set(VALUE_GLOBAL_FLAGS) == {"--project", "--board-yaml", "--sdk-root", "--target"}
-
-
-def test_injects_every_arity0_flag_and_drops_them_before_the_command_runs():
-    """An accepted-and-ignored `--verbose` changes nothing a caller can read
-    back, so the arity-0 half stays exactly as tan-cli#261 shipped it."""
+def test_injects_every_missing_boolean_flag_and_drops_it_before_the_command_runs():
+    """The arity-0 half: an injected `--verbose`/`--ci`/... is accepted and
+    dropped, and the command runs."""
     seen: dict[str, object] = {}
 
     def probe() -> None:
@@ -66,74 +52,72 @@ def test_injects_every_arity0_flag_and_drops_them_before_the_command_runs():
     wrapped = accept_global_flags(probe)
     app = _make_app(wrapped)
 
-    argv = ["probe"]
-    for flag in GLOBAL_FLAGS:
-        if GLOBAL_FLAG_ARITY[flag] == 0:
-            argv.append(flag)
+    argv = ["probe", *(flag for flag in GLOBAL_FLAGS if GLOBAL_FLAG_ARITY[flag] == 0)]
 
     result = runner.invoke(app, argv)
     assert result.exit_code == 0, result.output
     assert seen.get("ran") is True
 
 
-@pytest.mark.parametrize("flag", VALUE_GLOBAL_FLAGS)
-def test_an_injected_value_carrying_flag_is_refused_not_silently_dropped(flag: str):
-    """tan-cli#398: dropping a flag that carries a VALUE does not lose a
-    no-op, it substitutes the command's own default for the file/target the
-    caller named -- measured on `tan model build --board-yaml
-    ../other/board.yaml`, which packaged `./board.yaml`'s SKU at
-    `exitCode: 0` with `issues: []`, so the `.alpmodel` artefacts were
-    compiled for the wrong silicon and nothing refused or warned.
+@pytest.mark.parametrize(
+    "flag", [flag for flag in GLOBAL_FLAGS if GLOBAL_FLAG_ARITY[flag] == 1]
+)
+def test_an_injected_value_carrying_flag_is_accepted_and_dropped_too(flag):
+    """tan-cli#398 tried refusing an injected value-carrying flag the moment a
+    value was supplied, reasoning that silently dropping it serves the
+    command's own default in its place. Measured against the oracle
+    (tan-cli#403 postmortem), that refusal was wrong for every one of these
+    flags except `model`'s `--board-yaml` -- `target/debug/tan.exe` itself
+    ACCEPTS AND IGNORES a value-carrying `GlobalArgs` field a given command's
+    own handler never reads, so refusing it here was a NEW divergence, not a
+    fix: `tan doctor --target zephyr` went from the oracle's exit 4 to a
+    `typer.BadParameter` exit 2, with the wrong command (`cli`, from `main`'s
+    generic usage-error fallback) in the JSON envelope, on 17 of the 18
+    (command, flag) pairs this mechanism used to refuse.
 
-    Refused the same way `cli.py`'s `_HONOURS_ROOT_FORMAT` already refuses a
-    `--format` a command cannot honour: a Click usage error (exit 2), which
-    `cli.main` folds into the registered `cli.parse-error` envelope under
-    `--format json`. The command body must NOT run -- half-running on the
-    wrong inputs is the defect, not the reporting."""
-    seen: dict[str, object] = {}
+    A command that genuinely computes a wrong answer from a dropped value
+    (only `model`+`--board-yaml`, measured) is fixed by reading the real flag
+    under its own oracle-parity spelling -- `model_cmd.py`'s `--board` now
+    declares `--board-yaml` as a second name for itself, so it is no longer
+    one of the flags this module injects for `model` at all
+    (`test_a_value_carrying_flag_a_command_really_implements_is_untouched`,
+    below, covers exactly that shape). This module's job for every OTHER
+    command stays what it always was for a boolean: accept, drop, run."""
+    ran: list[str | None] = []
 
-    def probe() -> None:
-        seen["ran"] = True
+    def probe(existing: str | None = None) -> None:
+        ran.append(existing)
 
     app = _make_app(accept_global_flags(probe))
 
-    result = runner.invoke(app, ["probe", flag, "some-value"])
-    assert result.exit_code == 2, result.output
-    assert flag in result.output
-    assert seen.get("ran") is None
+    result = runner.invoke(app, ["probe", flag, "some/path"])
+    assert result.exit_code == 0, result.output
+    assert ran == [None], (
+        f"{flag}=some/path must be dropped before the command runs, not refused: "
+        f"{result.output}"
+    )
+
+    # And the flag stays free when not supplied at all.
+    result = runner.invoke(app, ["probe"])
+    assert result.exit_code == 0, result.output
+    assert ran == [None, None]
 
 
 def test_a_value_carrying_flag_a_command_really_implements_is_untouched():
-    """The refusal above must key off "this command does not implement it",
-    never off the flag string alone -- 28 of 32 commands implement
-    `--board-yaml` for real and every one of them must keep reading it."""
-    seen: dict[str, object] = {}
+    """The refusal above is about INJECTED flags only. A command that declares
+    `--board-yaml` itself keeps reading it -- `accept_global_flags` never
+    touches an existing parameter, and 28 of the 32 registered commands
+    implement this one for real."""
+    seen: list[str | None] = []
 
-    def probe(
-        board_yaml: str = typer.Option(None, "--board-yaml", metavar="PATH"),
-    ) -> None:
-        seen["board_yaml"] = board_yaml
-
-    app = _make_app(accept_global_flags(probe))
-
-    result = runner.invoke(app, ["probe", "--board-yaml", "other/board.yaml"])
-    assert result.exit_code == 0, result.output
-    assert seen["board_yaml"] == "other/board.yaml"
-
-
-def test_an_injected_value_carrying_flag_left_unpassed_does_not_refuse():
-    """Only a SUPPLIED value is refused. Injecting the option must not make
-    every ordinary run of the command exit 2."""
-    seen: dict[str, object] = {}
-
-    def probe() -> None:
-        seen["ran"] = True
+    def probe(board_yaml: str = typer.Option(None, "--board-yaml")) -> None:
+        seen.append(board_yaml)
 
     app = _make_app(accept_global_flags(probe))
 
-    result = runner.invoke(app, ["probe"])
+    result = runner.invoke(app, ["probe", "--board-yaml", "real/board.yaml"])
     assert result.exit_code == 0, result.output
-    assert seen.get("ran") is True
+    assert seen == ["real/board.yaml"]
 
 
 def test_a_flag_already_declared_under_a_different_python_name_is_not_duplicated():
