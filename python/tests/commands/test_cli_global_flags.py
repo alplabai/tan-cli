@@ -134,31 +134,62 @@ def _run_main(argv: list[str], monkeypatch, capsys) -> tuple[int | None, str]:
     return exit_info.value.code, capsys.readouterr().out
 
 
-#: Values the oracle's global `--format` does NOT have. Measured against
-#: `target/debug/tan.exe`: each answers `error: invalid value '<x>' for
-#: '--format <FORMAT>'  [possible values: text, json]` at exit 2, in BOTH argv
-#: positions, having run nothing.
-#:
-#: `sarif`/`diagnostic-v1` are not arbitrary stand-ins for "a bad value":
-#: `validate` really does implement both AFTER its own name, a deliberate port
-#: extension past the oracle. That makes them exactly the values a
-#: relocate-unconditionally rule promotes to GLOBAL by accident -- measured on
-#: the first cut of tan-cli#378, `tan --format sarif validate` printed a full
-#: SARIF 2.1.0 document where the oracle printed a usage error. `bogus` is the
-#: same rule seen from the plain side, and is the one that matters for a
-#: command like `new-som` that WRITES: reaching a command body at all means the
-#: value was accepted, and `new-som` then ran on to creating metadata files.
-_NON_GLOBAL_FORMAT_VALUES = ("sarif", "diagnostic-v1", "bogus")
+#: The relocatable domain: every value ANY registered command declares for
+#: its own `--format` (tan-cli#403's union), not just the oracle's bare
+#: `text`/`json` pair. `root`'s own eager `_format_callback` already accepts
+#: this whole set (`cli._every_declared_format()`); `_reorder_global_flags`
+#: has to relocate the identical set, or a value only SOME commands accept
+#: (`diagnostic-v1`/`sarif`, `validate`'s two extensions past the oracle) is
+#: treated as not-the-global-flag-at-all and collapses the rewrite -- dropping
+#: the subcommand and everything after it. That regression is tan-cli#433:
+#: `tan --format diagnostic-v1 validate --offline` lost `validate` and
+#: answered "a command is required" instead of the diagnostic-v1 document
+#: `tan validate --offline --format diagnostic-v1` produces.
+_GLOBAL_FORMAT_VALUES = ("text", "json", "diagnostic-v1", "sarif")
+
+#: A value NO registered command declares. Measured against
+#: `target/debug/tan.exe`: answers `error: invalid value 'bogus' for
+#: '--format <FORMAT>' [possible values: text, json]` at exit 2, in BOTH argv
+#: positions, having run nothing -- and the one that matters for a command
+#: like `new-som` that WRITES: reaching a command body at all means the value
+#: was accepted, and `new-som` then ran on to creating metadata files.
+_GLOBALLY_INVALID_FORMAT_VALUES = ("bogus",)
 
 
-@pytest.mark.parametrize("value", _NON_GLOBAL_FORMAT_VALUES)
+@pytest.mark.parametrize("value", _GLOBAL_FORMAT_VALUES)
+@pytest.mark.parametrize("command", _COMMANDS)
+def test_a_globally_declared_format_value_always_relocates(command: str, value: str):
+    """tan-cli#433: relocation cannot know which command follows -- only
+    whether `value` is in the union `_format_callback` accepts -- so every
+    value in `_GLOBAL_FORMAT_VALUES` relocates past EVERY command's name, even
+    one that does not itself declare it (e.g. `diagnostic-v1` past `build`,
+    which only has `text`/`json`). The per-command Click parser is what
+    narrows to that command's own, possibly narrower domain once the token has
+    landed after its name -- refusing a value only some commands accept
+    belongs there, not in the rewrite; see
+    `test_a_format_value_only_some_commands_accept_is_still_refused_pre_body`
+    below for that other half.
+
+    A regression here reintroduces #433 itself: `_reorder_global_flags`
+    silently narrowing back to the oracle's bare `text`/`json` pair collapses
+    `tan --format diagnostic-v1 validate --offline` and drops `validate`
+    entirely, the exact defect this issue is about.
+    """
+    rewritten = _reorder_global_flags(["--format", value, command])
+    assert rewritten == [command, "--format", value], (
+        f"`tan --format {value} {command}` must relocate `--format {value}` "
+        f"past `{command}`, not collapse the rewrite. Got {rewritten}"
+    )
+
+
+@pytest.mark.parametrize("value", _GLOBALLY_INVALID_FORMAT_VALUES)
 @pytest.mark.parametrize("command", _COMMANDS)
 def test_a_format_value_the_oracle_rejects_is_never_relocated(command: str, value: str):
     """The other half of relocation, per registered command: `--format` is
-    global only for the values the oracle's `--format` actually HAS. Anything
-    else must be left sitting in front of the subcommand name, where `root`'s
-    own `_format_callback` refuses it during PARSING -- before the command
-    body, and so before any command's writes.
+    global only for the values SOME registered command actually declares.
+    Anything else must be left sitting in front of the subcommand name, where
+    `root`'s own `_format_callback` refuses it during PARSING -- before the
+    command body, and so before any command's writes.
 
     The rewrite COLLAPSES to the offending `--format <value>` alone rather
     than returning argv untouched (tan-cli#378 residual): leaving the rest in
@@ -175,14 +206,32 @@ def test_a_format_value_the_oracle_rejects_is_never_relocated(command: str, valu
     spaced = _reorder_global_flags(["--format", value, command])
     assert spaced == ["--format", value], (
         f"`tan --format {value} {command}` must collapse to the refusal argv; "
-        f"the oracle rejects '{value}' at parse in both positions, so `{command}` "
-        f"must not survive the rewrite. Got {spaced}"
+        f"no command declares '{value}' at parse in either position, so "
+        f"`{command}` must not survive the rewrite. Got {spaced}"
     )
     joined = _reorder_global_flags([f"--format={value}", command])
     assert joined == [f"--format={value}"], (
         f"`tan --format={value} {command}` -- the `=` spelling is the same flag "
         f"and must collapse identically. Got {joined}"
     )
+
+
+def test_a_format_value_only_some_commands_accept_is_still_refused_pre_body(tmp_path):
+    """tan-cli#433 acceptance criterion: relocating a value past a command
+    that does not itself declare it must not let that command's BODY run.
+    `build` only declares `text`/`json` (`OutputFormat`, not `validate`'s
+    wider `ValidateOutputFormat`), so `diagnostic-v1` -- globally relocatable
+    because `validate` DOES declare it -- still has nowhere to land once
+    Click parses `build`'s own, narrower `--format` choice list: Click's own
+    parameter-type coercion refuses an out-of-choice value during PARSING,
+    before `build`'s function body (which would otherwise start resolving an
+    SDK root and a Zephyr workspace) ever runs.
+    """
+    proc = _run_tan(["--format", "diagnostic-v1", "build"], tmp_path)
+    assert proc.returncode == 2, (proc.returncode, proc.stdout, proc.stderr)
+    assert "diagnostic-v1" in proc.stderr, proc.stderr
+    assert "not one of 'text', 'json'" in proc.stderr, proc.stderr
+    assert proc.stdout == "", f"a usage error must leave stdout empty: {proc.stdout!r}"
 
 
 @pytest.mark.parametrize(
@@ -340,6 +389,45 @@ def test_a_bad_format_value_stops_new_som_before_it_can_write(argv: list[str], t
     )
     assert "bogus" in proc.stderr, proc.stderr
     assert proc.stdout == "", f"a usage error must leave stdout empty: {proc.stdout!r}"
+
+
+@pytest.mark.parametrize("value", ("diagnostic-v1", "sarif"))
+def test_a_wide_format_value_leading_and_trailing_produce_the_same_document(
+    value: str, tmp_path
+):
+    """tan-cli#433's own repro, end to end through the real process
+    entrypoint -- "testing `_reorder_global_flags` alone is insufficient" is
+    the issue's own acceptance criterion, because a parse-level assertion on
+    the rewrite alone cannot see the defect this guards against: it was never
+    about WHERE `--format` lands so much as whether `validate` survives
+    having been in front of it, which only `main()`'s real dispatch proves.
+
+    An empty `tmp_path` (no board.yaml) reproduces the issue's own repro
+    directly. Both spellings must exit 2 with a real `validate-board-yaml-
+    missing` document on stdout -- never the generic "a command is required"
+    usage error the pre-fix leading form answered instead of running
+    `validate` at all.
+    """
+    leading = _run_tan(["--format", value, "validate", "--offline"], tmp_path)
+    trailing = _run_tan(["validate", "--offline", "--format", value], tmp_path)
+
+    assert leading.returncode == 2, (leading.returncode, leading.stdout, leading.stderr)
+    assert trailing.returncode == 2, (trailing.returncode, trailing.stdout, trailing.stderr)
+    assert leading.stdout == trailing.stdout, (
+        f"leading `--format {value}` diverged from the trailing spelling:\n"
+        f"leading:\n{leading.stdout}\ntrailing:\n{trailing.stdout}"
+    )
+    assert leading.stderr == trailing.stderr
+    assert leading.stdout.strip() != "", "must carry the document, not an empty stdout"
+    assert "a command is required" not in leading.stderr, (
+        "the pre-fix defect: a leading wide `--format` value dropped `validate` "
+        f"entirely.\n{leading.stderr}"
+    )
+    doc = json.loads(leading.stdout)
+    if value == "diagnostic-v1":
+        assert doc["diagnostics"][0]["code"] == "validate-board-yaml-missing", doc
+    else:
+        assert doc["runs"][0]["results"][0]["ruleId"] == "validate-board-yaml-missing", doc
 
 
 def test_the_derived_case_list_still_covers_the_whole_command_surface():
