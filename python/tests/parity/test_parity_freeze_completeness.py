@@ -319,3 +319,36 @@ def test_the_detector_sees_a_gate_reached_through_a_decorator_function(tmp_path)
         newline="\n",
     )
     assert _live_only_tests(module) == {"test_reached_through_the_alias"}
+
+
+def test_every_scaffold_template_has_a_committed_tree():
+    """The scaffold store's own completeness (tan-cli#409).
+
+    `test_scaffold_content_oracle_parity.py` parametrizes off
+    `TEMPLATE_IDS`, and its oracle side now REPLAYS. A template added without
+    a capture would therefore not skip and not fail structurally -- it would
+    raise `KeyError` deep inside a parametrized case, which reads as a broken
+    harness rather than as "nobody captured this". Answered from the STORE,
+    not from a hand-kept list, so the two cannot drift apart.
+
+    This is also what makes `scaffold_fixtures.frozen_template_ids` true: it
+    was written claiming the gate read it, and for one commit nothing did.
+    """
+    from tan.core.scaffold import TEMPLATE_IDS
+
+    from . import scaffold_fixtures
+
+    frozen = scaffold_fixtures.frozen_template_ids()
+    missing = sorted(set(TEMPLATE_IDS) - frozen)
+    assert missing == [], (
+        f"{missing} have no committed scaffold tree in "
+        f"{scaffold_fixtures.FIXTURE_PATH.name}. Capture against a built "
+        f"oracle before `crates/` is deleted (tan-cli#269), after which no "
+        f"capture is possible at all."
+    )
+
+    stale = sorted(frozen - set(TEMPLATE_IDS))
+    assert stale == [], (
+        f"{stale} are frozen but are no longer in TEMPLATE_IDS -- drop them, "
+        f"so the store keeps describing the tree it guards."
+    )
