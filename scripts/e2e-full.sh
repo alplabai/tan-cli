@@ -650,6 +650,112 @@ PY
   fi
 fi
 
+
+############ AMBIGUOUS AND REFUSED-WRITE SURFACES ############
+#
+# Two behaviours that only a FROZEN binary can really answer, and that no
+# scenario above touches.
+#
+# tan-cli#407's warning is attached in `envelope.py` behind a LAZY import of
+# `build_cmd`, inside a `try/except Exception` that deliberately swallows
+# failures so an advisory can never break a command's real result. In a
+# PyInstaller freeze that is exactly the shape that hides an ImportError: the
+# warning would silently never fire and every unit test would still pass,
+# because they import from source. This is the check that says otherwise.
+#
+# tan-cli#420 is a filesystem effect -- the writability probe's own empty file
+# being taken back off disk when the emit is refused -- so it is only observable
+# by looking at the disk after a real refused run.
+echo
+echo "############ AMBIGUOUS SDK LAYOUT + REFUSED WRITES ############"
+
+D407="$WORK/two-checkouts"
+mkdir -p "$D407/alp-sdk/scripts" "$D407/ws/alp-sdk/scripts"
+: > "$D407/alp-sdk/scripts/alp_project.py"
+: > "$D407/ws/alp-sdk/scripts/alp_project.py"
+
+# `doctor` takes the narrow ladder (the lateral checkout), `examples` the wide
+# one (the child). Both must SAY so; before #407 both reported `discovery` and
+# named only their own root.
+# cd FIRST: these commands answer from the cwd, and running the loop before
+# the cd measured a directory with no checkouts at all (`root=-`,
+# `divergent=False`) -- a green-looking probe of the wrong place.
+cd "$D407/ws" || { bad "#407: cannot cd into the two-checkout workspace"; }
+
+DIV_MISSING=""
+for C in doctor examples; do
+  "$TAN" $C --format json >"$WORK/div-$C.json" 2>/dev/null
+  HAS=$(tail -1 "$WORK/div-$C.json" | python3 -c "
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print('UNREADABLE'); raise SystemExit
+print('sdk.discovery-divergent' in [i.get('code') for i in d.get('issues',[])])
+" 2>/dev/null)
+  ROOT=$(tail -1 "$WORK/div-$C.json" | python3 -c "
+import json,sys
+try: d=json.load(sys.stdin)
+except Exception: print('UNREADABLE'); raise SystemExit
+print((d.get('sdk') or {}).get('root','-'))
+" 2>/dev/null)
+  note "$C: root=$ROOT divergent=$HAS"
+  [ "$HAS" = "True" ] || DIV_MISSING="$DIV_MISSING $C"
+done
+if [ -z "$DIV_MISSING" ]; then
+  ok "#407: both ladders report sdk.discovery-divergent from one directory"
+else
+  bad "#407: no divergence warning from:$DIV_MISSING (a lazy import swallowed in the freeze?)"
+fi
+
+# The human surface, not just the wire.
+"$TAN" doctor >"$WORK/div-doctor.txt" 2>&1
+if grep -q "sdkDiscoveryDivergent" "$WORK/div-doctor.txt"; then
+  ok "#407: doctor's text report names the second checkout"
+else
+  bad "#407: doctor's text report is silent about the second checkout"
+fi
+
+# Negative control. A warning that also fires on the ordinary single-checkout
+# host is worse than none -- it trains the reader to ignore the real case.
+D407B="$WORK/one-checkout"
+mkdir -p "$D407B/alp-sdk/scripts" "$D407B/ws"
+: > "$D407B/alp-sdk/scripts/alp_project.py"
+cd "$D407B/ws" >/dev/null 2>&1 || true
+"$TAN" doctor >"$WORK/div-single.txt" 2>&1
+if grep -q "sdkDiscoveryDivergent" "$WORK/div-single.txt"; then
+  bad "#407: divergence reported on a host with ONE checkout"
+else
+  ok "#407: silent on a host with one checkout"
+fi
+
+# tan-cli#420. `--sdk-root` names nothing, so the emit is refused after the
+# writability probe has already created the destination.
+D420="$WORK/refused-emit"
+mkdir -p "$D420" && cd "$D420" >/dev/null 2>&1 || true
+DEST="$D420/build/generated/alp.conf"
+"$TAN" generate --emit zephyr-conf --output "$DEST" --sdk-root "$WORK/no-such-sdk" \
+  --format json >"$WORK/gen420.json" 2>/dev/null
+if [ -e "$DEST" ]; then
+  SZ=$(wc -c <"$DEST" | tr -d ' ')
+  if [ "$SZ" -eq 0 ]; then
+    bad "#420: a zero-byte $DEST survived a refused emit -- Zephyr would take it as an empty EXTRA_CONF_FILE"
+  else
+    ok "#420: a non-empty artefact is kept ($SZ B)"
+  fi
+else
+  ok "#420: no stray destination file after a refused emit"
+fi
+
+# The other half: a file the user ALREADY had must never be removed. Empty on
+# purpose -- that is the one case size alone cannot distinguish.
+mkdir -p "$D420/keep/generated" && : > "$D420/keep/generated/alp.conf"
+"$TAN" generate --emit zephyr-conf --output "$D420/keep/generated/alp.conf" \
+  --sdk-root "$WORK/no-such-sdk" --format json >/dev/null 2>&1
+if [ -e "$D420/keep/generated/alp.conf" ]; then
+  ok "#420: a pre-existing destination is never deleted"
+else
+  bad "#420: DELETED a destination file the user already had"
+fi
+
 echo
 echo "=== $(uname -s): $PASS passed, $FAIL failed ==="
 echo "    scenario A (bare host prerequisite refusal): $PASS_A passed, $FAIL_A failed"
