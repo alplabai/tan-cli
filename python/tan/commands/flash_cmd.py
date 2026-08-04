@@ -100,6 +100,7 @@ from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspa
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
+from tan.core.shapes import is_sdk_root
 
 #: `data.schemaVersion` -- the STRING "1", not the integer. Rust serializes it
 #: as `&'static str` and the extension compares it as one.
@@ -265,14 +266,11 @@ def _resolve_sdk(
     return found, tier, broken_pin
 
 
-def _is_sdk_root(path: str) -> bool:
-    """`util.rs::has_loader_script`. `os.path.isfile` swallows its own
-    `OSError`/`ValueError`, so a path with an embedded NUL or a permission-denied
-    parent reads as "not an SDK root" rather than raising out of the guard."""
-    try:
-        return os.path.isfile(os.path.join(path, "scripts", "alp_project.py"))
-    except (OSError, ValueError):
-        return False
+#: tan-cli#408: one implementation, in `tan.core.shapes`, imported under the
+#: private name this module's call site already uses. The guard against
+#: `OSError`/`ValueError` that lived here moved with it, deliberately -- see
+#: `is_sdk_root`'s own docstring for why a pre-flight probe must not raise.
+_is_sdk_root = is_sdk_root
 
 
 def resolve_sdk_root_ladder_safe(
