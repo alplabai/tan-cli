@@ -84,6 +84,7 @@ from tan.core.system_manifest import (
 from tan.env import no_color_requested
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 #: Size tools probed on PATH, most-specific first. The Zephyr SDK ships
 #: `arm-zephyr-eabi-size`; an LLVM toolchain ships `llvm-size`; host binutils
@@ -577,18 +578,12 @@ def size(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     no_color: bool = typer.Option(False, "--no-color", help="Disable ANSI colour."),
     ci: bool = typer.Option(False, "--ci", help="Non-interactive CI mode."),
 ) -> None:
     """Report per-slice firmware footprint vs the SoM memory budget."""
-    resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     try:

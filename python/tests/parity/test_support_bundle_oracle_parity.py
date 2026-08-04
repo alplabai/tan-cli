@@ -59,8 +59,10 @@ fixture availability like `oracle.missing_for_live`, so the moment
 tan-cli#269 deletes `crates/` they become passing SKIPS -- a green run that
 measures nothing, on the one comparison that pins doctor's check NAMES and
 POSITIONS. Both are named in `oracle_fixtures/PARITY-COVERAGE.txt`, the
-committed ledger of what this package does not measure, along with the other
-thirteen.
+committed ledger of what this package does not measure, and both are declared
+in `test_parity_freeze_completeness.py`'s `_PLATFORM_BOUND` register, which is
+the machine-checked half: adding a THIRD live-only case here without declaring
+it fails that check rather than passing quietly.
 
 They are not frozen HERE because a fixture would be wrong everywhere but the
 capture host: what these compare is `doctor.checks` and the whole

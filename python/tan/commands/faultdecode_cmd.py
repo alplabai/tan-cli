@@ -65,6 +65,7 @@ from tan.core.faultdecode import (
 from tan.env import no_color_requested
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 _ADDR2LINE_TOOLS = ("arm-zephyr-eabi-addr2line", "llvm-addr2line", "addr2line")
 
@@ -305,9 +306,7 @@ def faultdecode(
     sdk_root: str = typer.Option(  # accepted, not read; see below
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root (unused; see below)."
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
     target: str = typer.Option(None, "--target", hidden=True),
     all_targets: bool = typer.Option(False, "--all", hidden=True),
@@ -347,11 +346,7 @@ def faultdecode(
     also wins when both are given.
     """
     del board_yaml, target, all_targets, verbose, quiet, non_interactive, ci
-    resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     # `--json` wins over `--format json`: it is the older, unwrapped surface
     # every saved script and the Rust forwarder use (tan-cli#399).
     envelope_mode = resolved_format == "json" and not as_json

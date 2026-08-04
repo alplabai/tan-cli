@@ -152,6 +152,7 @@ from tan.core.renode_sim import (
 )
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: The `SystemManifestError` message prefix `parse_system_manifest` raises
 #: for a `schema_version` mismatch -- distinguishing it from every other
@@ -1344,16 +1345,10 @@ def renode(
         "and serve the control + UART sockets named by the bundle's "
         "sim-descriptor.json. Requires --image-bundle; --expect is ignored.",
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Boot the built system manifest's single Zephyr slice in headless Renode as a
     no-hardware smoke test (native)."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     try:

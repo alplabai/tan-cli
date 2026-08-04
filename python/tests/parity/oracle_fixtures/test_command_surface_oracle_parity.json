@@ -1,0 +1,232 @@
+{
+ "tests/parity/test_command_surface_oracle_parity.py::test_bootstrap_without_an_sdk_is_a_known_divergence_from_the_oracle#0": [
+  2,
+  {
+   "command": "bootstrap",
+   "data": {
+    "factsFromManifest": false,
+    "missingPrerequisites": null,
+    "noPip": false,
+    "noWest": false,
+    "printEnv": false,
+    "schemaVersion": "2",
+    "sdkRoot": "",
+    "venvDir": "",
+    "workspaceDir": "",
+    "zephyrBase": "",
+    "zephyrPin": ""
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "bootstrap.sdk-root-unresolved",
+     "message": "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk switch <version|path>`, or run `tan sdk install <version>` first.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_completion_format_values_are_a_declared_divergence[bash]#0": [
+  0,
+  {
+   "__raw__": "# tan CLI bash completion\n_tan_complete() {\n  local cur prev words cword\n\n  COMPREPLY=()\n  cur=\"${COMP_WORDS[COMP_CWORD]}\"\n  prev=\"${COMP_WORDS[COMP_CWORD-1]}\"\n  cword=${COMP_CWORD}\n\n  local commands=\"validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode\"\n  local global_flags=\"--project --board-yaml --sdk-root --target --all --format --verbose --quiet --no-color --non-interactive --ci --help --version\"\n\n  if [[ \"$prev\" == \"--format\" ]]; then\n    COMPREPLY=( $(compgen -W \"text json\" -- \"$cur\") )\n    return\n  fi\n\n  if [[ \"$prev\" == \"--shell\" ]]; then\n    COMPREPLY=( $(compgen -W \"bash zsh fish\" -- \"$cur\") )\n    return\n  fi\n\n  if [[ $cword -eq 1 ]]; then\n    COMPREPLY=( $(compgen -W \"$commands $global_flags\" -- \"$cur\") )\n    return\n  fi\n\n  case \"${COMP_WORDS[1]}\" in\n    validate)\n      COMPREPLY=( $(compgen -W \"$global_flags --offline\" -- \"$cur\") )\n      ;;\n    generate)\n      COMPREPLY=( $(compgen -W \"$global_flags --force --core\" -- \"$cur\") )\n      ;;\n    explain)\n      COMPREPLY=( $(compgen -W \"$global_flags --template\" -- \"$cur\") )\n      ;;\n    init)\n      COMPREPLY=( $(compgen -W \"$global_flags --template --from-example --name --destination --som --cores --preview --force\" -- \"$cur\") )\n      ;;\n    scaffold)\n      COMPREPLY=( $(compgen -W \"$global_flags --template --name --destination --preview --force\" -- \"$cur\") )\n      ;;\n    diff|presets)\n      COMPREPLY=( $(compgen -W \"$global_flags\" -- \"$cur\") )\n      ;;\n    examples)\n      COMPREPLY=( $(compgen -W \"$global_flags --filter\" -- \"$cur\") )\n      ;;\n    completion)\n      COMPREPLY=( $(compgen -W \"$global_flags --shell\" -- \"$cur\") )\n      ;;\n    pinmux)\n      COMPREPLY=( $(compgen -W \"$global_flags --sku --family\" -- \"$cur\") )\n      ;;\n    doctor)\n      COMPREPLY=( $(compgen -W \"$global_flags --target-kind --server --build --fix\" -- \"$cur\") )\n      ;;\n    inspect)\n      COMPREPLY=( $(compgen -W \"$global_flags --path --show-origin\" -- \"$cur\") )\n      ;;\n    trace)\n      COMPREPLY=( $(compgen -W \"$global_flags --path\" -- \"$cur\") )\n      ;;\n    debug-config)\n      COMPREPLY=( $(compgen -W \"$global_flags --target-kind --server --core --pre-launch-task --svd --preview\" -- \"$cur\") )\n      ;;\n    support-bundle)\n      COMPREPLY=( $(compgen -W \"$global_flags --destination --target-kind --server --path\" -- \"$cur\") )\n      ;;\n    sdk)\n      COMPREPLY=( $(compgen -W \"$global_flags list install current switch --destination --global\" -- \"$cur\") )\n      ;;\n    bootstrap)\n      COMPREPLY=( $(compgen -W \"$global_flags --no-pip --no-west --print-env --allow-partial --workspace\" -- \"$cur\") )\n      ;;\n    build)\n      COMPREPLY=( $(compgen -W \"$global_flags --plan --plan-from --materialise --native --manifest --manifest-from --no-auto-bootstrap --pristine\" -- \"$cur\") )\n      ;;\n    kconfig)\n      COMPREPLY=( $(compgen -W \"$global_flags --core\" -- \"$cur\") )\n      ;;\n    image)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root\" -- \"$cur\") )\n      ;;\n    flash)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root --dry-run --core --helper --skip-missing-tools\" -- \"$cur\") )\n      ;;\n    run)\n      COMPREPLY=( $(compgen -W \"$global_flags --flash --core\" -- \"$cur\") )\n      ;;\n    clean)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root --dry-run\" -- \"$cur\") )\n      ;;\n    renode)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root --board --core --image-bundle --log --timeout --expect --sim-mode\" -- \"$cur\") )\n      ;;\n    size)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root --board --fail-over-budget\" -- \"$cur\") )\n      ;;\n    *)\n      COMPREPLY=( $(compgen -W \"$global_flags\" -- \"$cur\") )\n      ;;\n  esac\n}\n\ncomplete -F _tan_complete tan"
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_completion_format_values_are_a_declared_divergence[fish]#0": [
+  0,
+  {
+   "__raw__": "complete -c tan -f\ncomplete -c tan -n '__fish_use_subcommand' -a 'validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode'\ncomplete -c tan -l project -d 'Project root'\ncomplete -c tan -l board-yaml -d 'board.yaml path'\ncomplete -c tan -l sdk-root -d 'SDK root path'\ncomplete -c tan -l target -d 'Generation target' -a 'zephyr-conf dts-overlay native-sim-overlay cmake-args yocto-conf carrier-netlist west-libraries zephyr-board hw-info-h'\ncomplete -c tan -l all -d 'Generate all targets'\ncomplete -c tan -l format -d 'Output format' -a 'text json'\ncomplete -c tan -l verbose -d 'Verbose output'\ncomplete -c tan -l quiet -d 'Quiet output'\ncomplete -c tan -l no-color -d 'Disable color output'\ncomplete -c tan -l non-interactive -d 'Disable prompts'\ncomplete -c tan -l ci -d 'CI mode'\ncomplete -c tan -l help -d 'Show help'\ncomplete -c tan -l version -d 'Show version'\ncomplete -c tan -n '__fish_seen_subcommand_from validate' -l offline -d 'Offline structural validation only'\ncomplete -c tan -n '__fish_seen_subcommand_from generate' -l force -d 'Overwrite existing files'\ncomplete -c tan -n '__fish_seen_subcommand_from generate' -l core -d 'Core id (zephyr-board target)'\ncomplete -c tan -n '__fish_seen_subcommand_from explain' -l template -d 'Template id'\ncomplete -c tan -n '__fish_seen_subcommand_from examples' -l filter -d 'Substring match on id/title'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l template -d 'Template id'\ncomplete -c tan -n '__fish_seen_subcommand_from init' -l from-example -d 'Example source dir'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l name -d 'Name value'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l destination -d 'Destination path'\ncomplete -c tan -n '__fish_seen_subcommand_from init' -l som -d 'SoM SKU'\ncomplete -c tan -n '__fish_seen_subcommand_from init' -l cores -d 'Cores list'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l preview -d 'Preview only'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l force -d 'Overwrite existing files'\ncomplete -c tan -n '__fish_seen_subcommand_from pinmux' -l sku -d 'SoM SKU'\ncomplete -c tan -n '__fish_seen_subcommand_from pinmux' -l family -d 'Pinmux family'\ncomplete -c tan -n '__fish_seen_subcommand_from doctor' -l target-kind -d 'Debug target kind' -a 'zephyr-mcu baremetal-mcu yocto-userspace native-host'\ncomplete -c tan -n '__fish_seen_subcommand_from doctor' -l server -d 'Debug server' -a 'jlink openocd pyocd gdbserver none'\ncomplete -c tan -n '__fish_seen_subcommand_from doctor' -l build -d 'Build readiness preflight'\ncomplete -c tan -n '__fish_seen_subcommand_from doctor' -l fix -d 'Auto-repair a fixable blocker'\ncomplete -c tan -n '__fish_seen_subcommand_from inspect trace support-bundle' -l path -d 'Field path'\ncomplete -c tan -n '__fish_seen_subcommand_from inspect' -l show-origin -d 'Include source metadata'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l target-kind -d 'Debug target kind' -a 'zephyr-mcu baremetal-mcu yocto-userspace native-host'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l server -d 'Debug server' -a 'jlink openocd pyocd gdbserver none'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l core -d 'Build slice core id'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l pre-launch-task -d 'VS Code task to run before launching'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l svd -r -d 'Path to a user-supplied SVD for the peripheral view'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l preview -d 'Preview only'\ncomplete -c tan -n '__fish_seen_subcommand_from support-bundle' -l destination -d 'Destination path'\ncomplete -c tan -n '__fish_seen_subcommand_from support-bundle' -l target-kind -d 'Debug target kind' -a 'zephyr-mcu baremetal-mcu yocto-userspace native-host'\ncomplete -c tan -n '__fish_seen_subcommand_from support-bundle' -l server -d 'Debug server' -a 'jlink openocd pyocd gdbserver none'\ncomplete -c tan -n '__fish_seen_subcommand_from completion' -l shell -d 'Shell type' -a 'bash zsh fish'\ncomplete -c tan -n '__fish_seen_subcommand_from sdk' -a 'list install current switch'\ncomplete -c tan -n '__fish_seen_subcommand_from sdk' -l destination -d 'Cache root'\ncomplete -c tan -n '__fish_seen_subcommand_from sdk' -l global -d 'Pin the machine-global default'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l no-pip -d 'Skip pip install'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l no-west -d 'Skip west init/update'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l print-env -d 'Print environment lines only'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l allow-partial -d 'Report success despite a failed dependency install'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l workspace -d 'Build the workspace at this path'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l plan -d 'Show the build plan'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l plan-from -d 'Read build plan from file'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l materialise -d 'Materialise plan files'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l native -d 'Build natively'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l manifest -d 'Show the system manifest'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l manifest-from -d 'Read manifest from file'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l no-auto-bootstrap -d 'Never bootstrap implicitly'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l pristine -d 'Force-wipe build dirs before dispatch'\ncomplete -c tan -n '__fish_seen_subcommand_from kconfig' -l core -d 'Core id to scope the menu to'\ncomplete -c tan -n '__fish_seen_subcommand_from image flash clean renode size' -l build-root -d 'Override build root'\ncomplete -c tan -n '__fish_seen_subcommand_from flash' -l dry-run -d 'Print planned commands only'\ncomplete -c tan -n '__fish_seen_subcommand_from flash' -l core -d 'Flash only this core'\ncomplete -c tan -n '__fish_seen_subcommand_from flash' -l helper -d 'Flash only this helper MCU'\ncomplete -c tan -n '__fish_seen_subcommand_from flash' -l skip-missing-tools -d 'Skip entries with no tool on PATH'\ncomplete -c tan -n '__fish_seen_subcommand_from run' -l flash -d 'Flash the board after building'\ncomplete -c tan -n '__fish_seen_subcommand_from run' -l core -d 'Flash only this core'\ncomplete -c tan -n '__fish_seen_subcommand_from clean' -l dry-run -d 'List targets without removing'\ncomplete -c tan -n '__fish_seen_subcommand_from renode size' -l board -d 'Override SoM SKU'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l core -d 'Zephyr slice core id'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l image-bundle -d 'Pre-built artefacts dir'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l log -d 'Console log file'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l timeout -d 'Wall-clock cap in seconds'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l expect -d 'Stop early on this substring'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l sim-mode -d 'Studio hardware-simulator mode'\ncomplete -c tan -n '__fish_seen_subcommand_from size' -l fail-over-budget -d 'Exit non-zero over budget'"
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_completion_format_values_are_a_declared_divergence[zsh]#0": [
+  0,
+  {
+   "__raw__": "#compdef tan\n\n_tan() {\n  local -a commands\n  commands=(\n    'validate:Validate board.yaml config'\n    'generate:Generate derived artifacts'\n    'init:Initialize a starter project'\n    'scaffold:Scaffold module files'\n    'examples:List SDK example projects'\n    'doctor:Run debug and environment checks'\n    'completion:Generate shell completion script'\n    'diff:Show board normalization diff'\n    'presets:List SDK presets'\n    'pinmux:Show pinmux capability table'\n    'explain:Explain templates and targets'\n    'inspect:Inspect effective resolved values'\n    'trace:Trace generation decisions'\n    'debug-config:Generate a launch.json debug configuration'\n    'support-bundle:Export support bundle payload'\n    'sdk:Manage local SDK installs'\n    'bootstrap:Set up the SDK build environment'\n    'build:Build the project natively'\n    'kconfig:Show the board-scoped Kconfig symbol menu'\n    'image:Assemble a flashable image bundle'\n    'flash:Flash slices and helper MCUs onto the device'\n    'run:Build then run the project'\n    'clean:Remove the build dir and state cache'\n    'renode:Boot the built manifest in headless Renode'\n    'size:Report per-slice firmware footprint'\n    'migrate:Migrate board.yaml to the current schema'\n    'lock:Pin/lock library dependencies'\n    'quality:Run board.yaml quality checks'\n    'model:Compile and package board.yaml models'\n    'monitor:Open a serial console to the board'\n    'new-som:Scaffold a new SoM metadata skeleton'\n    'faultdecode:Decode an ARM Cortex-M fault dump'\n  )\n\n  # Every flag `GlobalArgs` marks `global = true` (cli.rs) is accepted by\n  # clap on EVERY subcommand \u2014 AND on the root command itself, before any\n  # subcommand word is even typed \u2014 so every arm below splices this in, and\n  # so does the root `_arguments -C` call a few lines down. Unlike bash's\n  # single `$global_flags` string var, zsh's per-arm `_arguments` has no\n  # inheritance of its own (issue #92 MAJOR 2) \u2014 a flag left out of an arm\n  # here is simply not completable for that subcommand (or, left out of the\n  # root call, not completable at `tan --<TAB>` before a subcommand: issue\n  # #92 round-3 FINDING 1).\n  local -a global_args\n  global_args=(\n    '--project[Project root]:path:_files -/'\n    '--board-yaml[board.yaml path]:path:_files'\n    '--sdk-root[SDK root]:path:_files -/'\n    '--target[Generation target]'\n    '--all[Generate all targets]'\n    '--format[Output format]:format:(text json)'\n    '--verbose[Verbose output]'\n    '--quiet[Quiet output]'\n    '--no-color[Disable color output]'\n    '--non-interactive[Disable prompts]'\n    '--ci[CI mode]'\n    '--help[Show help]'\n    '--version[Show version]'\n  )\n\n  _arguments -C     '1:command:->command'     '*::arg:->args'     \"${global_args[@]}\"\n\n  case $state in\n    command)\n      _describe 'command' commands\n      ;;\n    args)\n      case $words[2] in\n        validate)\n          _arguments '--offline[Offline structural validation only]' \"${global_args[@]}\"\n          ;;\n        completion)\n          _arguments '--shell[Shell type]:shell:(bash zsh fish)' \"${global_args[@]}\"\n          ;;\n        generate)\n          _arguments '--force[Overwrite existing files]' '--core[Core id (zephyr-board target)]' \"${global_args[@]}\"\n          ;;\n        explain)\n          _arguments '--template[Template id]' \"${global_args[@]}\"\n          ;;\n        examples)\n          _arguments '--filter[Substring match on id/title]' \"${global_args[@]}\"\n          ;;\n        init)\n          _arguments '--template[Template id]' '--from-example[Example source dir]' '--name[Name value]' '--destination[Output directory]:path:_files -/' '--som[SoM SKU]' '--cores[Cores list]' '--preview[Preview only]' '--force[Overwrite existing files]' \"${global_args[@]}\"\n          ;;\n        scaffold)\n          _arguments '--template[Template id]' '--name[Name value]' '--destination[Output directory]:path:_files -/' '--preview[Preview only]' '--force[Overwrite existing files]' \"${global_args[@]}\"\n          ;;\n        pinmux)\n          _arguments '--sku[SoM SKU]' '--family[Pinmux family]' \"${global_args[@]}\"\n          ;;\n        doctor)\n          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--build[Build readiness preflight]' '--fix[Auto-repair a fixable blocker]' \"${global_args[@]}\"\n          ;;\n        inspect)\n          _arguments '--path[Field path]' '--show-origin[Include source metadata]' \"${global_args[@]}\"\n          ;;\n        trace)\n          _arguments '--path[Field path]' \"${global_args[@]}\"\n          ;;\n        debug-config)\n          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--core[Build slice core id]' '--pre-launch-task[VS Code task to run before launching]' '--svd[Path to a user-supplied SVD for the peripheral view]:svd:_files -g \"*.svd\"' '--preview[Preview only]' \"${global_args[@]}\"\n          ;;\n        support-bundle)\n          _arguments '--destination[Output directory]:path:_files -/' '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--path[Field path]' \"${global_args[@]}\"\n          ;;\n        sdk)\n          _arguments '1:subcommand:(list install current switch)' '--destination[Cache root]:path:_files -/' '--global[Pin the machine-global default]' \"${global_args[@]}\"\n          ;;\n        bootstrap)\n          _arguments '--no-pip[Skip pip install]' '--no-west[Skip west init/update]' '--print-env[Print environment lines only]' '--allow-partial[Report success despite a failed dependency install]' '--workspace[Build the workspace at this path]:path:_files -/' \"${global_args[@]}\"\n          ;;\n        build)\n          _arguments '--plan[Show the build plan]' '--plan-from[Read build plan from file]:path:_files' '--materialise[Materialise plan files]' '--native[Build natively]' '--manifest[Show the system manifest]' '--manifest-from[Read manifest from file]:path:_files' '--no-auto-bootstrap[Never bootstrap implicitly]' '--pristine[Force-wipe build dirs before dispatch]' \"${global_args[@]}\"\n          ;;\n        kconfig)\n          _arguments '--core[Core id to scope the menu to]' \"${global_args[@]}\"\n          ;;\n        image)\n          _arguments '--build-root[Override build root]:path:_files -/' \"${global_args[@]}\"\n          ;;\n        flash)\n          _arguments '--build-root[Override build root]:path:_files -/' '--dry-run[Print planned commands only]' '--core[Flash only this core]' '--helper[Flash only this helper MCU]' '--skip-missing-tools[Skip entries with no tool on PATH]' \"${global_args[@]}\"\n          ;;\n        run)\n          _arguments '--flash[Flash the board after building]' '--core[Flash only this core]' \"${global_args[@]}\"\n          ;;\n        clean)\n          _arguments '--build-root[Override build root]:path:_files -/' '--dry-run[List targets without removing]' \"${global_args[@]}\"\n          ;;\n        renode)\n          _arguments '--build-root[Override build root]:path:_files -/' '--board[Override SoM SKU]' '--core[Zephyr slice core id]' '--image-bundle[Pre-built artefacts dir]:path:_files -/' '--log[Console log file]:path:_files' '--timeout[Wall-clock cap in seconds]' '--expect[Stop early on this substring]' '--sim-mode[Studio hardware-simulator mode]' \"${global_args[@]}\"\n          ;;\n        size)\n          _arguments '--build-root[Override build root]:path:_files -/' '--board[Override SoM SKU]' '--fail-over-budget[Exit non-zero over budget]' \"${global_args[@]}\"\n          ;;\n        *)\n          _arguments \"${global_args[@]}\"\n          ;;\n      esac\n      ;;\n  esac\n}\n\ncompdef _tan tan"
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_completion_offers_the_same_verbs_as_the_oracle[bash]#0": [
+  0,
+  {
+   "__raw__": "# tan CLI bash completion\n_tan_complete() {\n  local cur prev words cword\n\n  COMPREPLY=()\n  cur=\"${COMP_WORDS[COMP_CWORD]}\"\n  prev=\"${COMP_WORDS[COMP_CWORD-1]}\"\n  cword=${COMP_CWORD}\n\n  local commands=\"validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode\"\n  local global_flags=\"--project --board-yaml --sdk-root --target --all --format --verbose --quiet --no-color --non-interactive --ci --help --version\"\n\n  if [[ \"$prev\" == \"--format\" ]]; then\n    COMPREPLY=( $(compgen -W \"text json\" -- \"$cur\") )\n    return\n  fi\n\n  if [[ \"$prev\" == \"--shell\" ]]; then\n    COMPREPLY=( $(compgen -W \"bash zsh fish\" -- \"$cur\") )\n    return\n  fi\n\n  if [[ $cword -eq 1 ]]; then\n    COMPREPLY=( $(compgen -W \"$commands $global_flags\" -- \"$cur\") )\n    return\n  fi\n\n  case \"${COMP_WORDS[1]}\" in\n    validate)\n      COMPREPLY=( $(compgen -W \"$global_flags --offline\" -- \"$cur\") )\n      ;;\n    generate)\n      COMPREPLY=( $(compgen -W \"$global_flags --force --core\" -- \"$cur\") )\n      ;;\n    explain)\n      COMPREPLY=( $(compgen -W \"$global_flags --template\" -- \"$cur\") )\n      ;;\n    init)\n      COMPREPLY=( $(compgen -W \"$global_flags --template --from-example --name --destination --som --cores --preview --force\" -- \"$cur\") )\n      ;;\n    scaffold)\n      COMPREPLY=( $(compgen -W \"$global_flags --template --name --destination --preview --force\" -- \"$cur\") )\n      ;;\n    diff|presets)\n      COMPREPLY=( $(compgen -W \"$global_flags\" -- \"$cur\") )\n      ;;\n    examples)\n      COMPREPLY=( $(compgen -W \"$global_flags --filter\" -- \"$cur\") )\n      ;;\n    completion)\n      COMPREPLY=( $(compgen -W \"$global_flags --shell\" -- \"$cur\") )\n      ;;\n    pinmux)\n      COMPREPLY=( $(compgen -W \"$global_flags --sku --family\" -- \"$cur\") )\n      ;;\n    doctor)\n      COMPREPLY=( $(compgen -W \"$global_flags --target-kind --server --build --fix\" -- \"$cur\") )\n      ;;\n    inspect)\n      COMPREPLY=( $(compgen -W \"$global_flags --path --show-origin\" -- \"$cur\") )\n      ;;\n    trace)\n      COMPREPLY=( $(compgen -W \"$global_flags --path\" -- \"$cur\") )\n      ;;\n    debug-config)\n      COMPREPLY=( $(compgen -W \"$global_flags --target-kind --server --core --pre-launch-task --svd --preview\" -- \"$cur\") )\n      ;;\n    support-bundle)\n      COMPREPLY=( $(compgen -W \"$global_flags --destination --target-kind --server --path\" -- \"$cur\") )\n      ;;\n    sdk)\n      COMPREPLY=( $(compgen -W \"$global_flags list install current switch --destination --global\" -- \"$cur\") )\n      ;;\n    bootstrap)\n      COMPREPLY=( $(compgen -W \"$global_flags --no-pip --no-west --print-env --allow-partial --workspace\" -- \"$cur\") )\n      ;;\n    build)\n      COMPREPLY=( $(compgen -W \"$global_flags --plan --plan-from --materialise --native --manifest --manifest-from --no-auto-bootstrap --pristine\" -- \"$cur\") )\n      ;;\n    kconfig)\n      COMPREPLY=( $(compgen -W \"$global_flags --core\" -- \"$cur\") )\n      ;;\n    image)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root\" -- \"$cur\") )\n      ;;\n    flash)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root --dry-run --core --helper --skip-missing-tools\" -- \"$cur\") )\n      ;;\n    run)\n      COMPREPLY=( $(compgen -W \"$global_flags --flash --core\" -- \"$cur\") )\n      ;;\n    clean)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root --dry-run\" -- \"$cur\") )\n      ;;\n    renode)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root --board --core --image-bundle --log --timeout --expect --sim-mode\" -- \"$cur\") )\n      ;;\n    size)\n      COMPREPLY=( $(compgen -W \"$global_flags --build-root --board --fail-over-budget\" -- \"$cur\") )\n      ;;\n    *)\n      COMPREPLY=( $(compgen -W \"$global_flags\" -- \"$cur\") )\n      ;;\n  esac\n}\n\ncomplete -F _tan_complete tan"
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_completion_offers_the_same_verbs_as_the_oracle[fish]#0": [
+  0,
+  {
+   "__raw__": "complete -c tan -f\ncomplete -c tan -n '__fish_use_subcommand' -a 'validate generate init scaffold examples doctor completion diff presets pinmux explain inspect trace debug-config support-bundle sdk bootstrap build kconfig image flash run clean renode size migrate lock quality model monitor new-som faultdecode'\ncomplete -c tan -l project -d 'Project root'\ncomplete -c tan -l board-yaml -d 'board.yaml path'\ncomplete -c tan -l sdk-root -d 'SDK root path'\ncomplete -c tan -l target -d 'Generation target' -a 'zephyr-conf dts-overlay native-sim-overlay cmake-args yocto-conf carrier-netlist west-libraries zephyr-board hw-info-h'\ncomplete -c tan -l all -d 'Generate all targets'\ncomplete -c tan -l format -d 'Output format' -a 'text json'\ncomplete -c tan -l verbose -d 'Verbose output'\ncomplete -c tan -l quiet -d 'Quiet output'\ncomplete -c tan -l no-color -d 'Disable color output'\ncomplete -c tan -l non-interactive -d 'Disable prompts'\ncomplete -c tan -l ci -d 'CI mode'\ncomplete -c tan -l help -d 'Show help'\ncomplete -c tan -l version -d 'Show version'\ncomplete -c tan -n '__fish_seen_subcommand_from validate' -l offline -d 'Offline structural validation only'\ncomplete -c tan -n '__fish_seen_subcommand_from generate' -l force -d 'Overwrite existing files'\ncomplete -c tan -n '__fish_seen_subcommand_from generate' -l core -d 'Core id (zephyr-board target)'\ncomplete -c tan -n '__fish_seen_subcommand_from explain' -l template -d 'Template id'\ncomplete -c tan -n '__fish_seen_subcommand_from examples' -l filter -d 'Substring match on id/title'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l template -d 'Template id'\ncomplete -c tan -n '__fish_seen_subcommand_from init' -l from-example -d 'Example source dir'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l name -d 'Name value'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l destination -d 'Destination path'\ncomplete -c tan -n '__fish_seen_subcommand_from init' -l som -d 'SoM SKU'\ncomplete -c tan -n '__fish_seen_subcommand_from init' -l cores -d 'Cores list'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l preview -d 'Preview only'\ncomplete -c tan -n '__fish_seen_subcommand_from init scaffold' -l force -d 'Overwrite existing files'\ncomplete -c tan -n '__fish_seen_subcommand_from pinmux' -l sku -d 'SoM SKU'\ncomplete -c tan -n '__fish_seen_subcommand_from pinmux' -l family -d 'Pinmux family'\ncomplete -c tan -n '__fish_seen_subcommand_from doctor' -l target-kind -d 'Debug target kind' -a 'zephyr-mcu baremetal-mcu yocto-userspace native-host'\ncomplete -c tan -n '__fish_seen_subcommand_from doctor' -l server -d 'Debug server' -a 'jlink openocd pyocd gdbserver none'\ncomplete -c tan -n '__fish_seen_subcommand_from doctor' -l build -d 'Build readiness preflight'\ncomplete -c tan -n '__fish_seen_subcommand_from doctor' -l fix -d 'Auto-repair a fixable blocker'\ncomplete -c tan -n '__fish_seen_subcommand_from inspect trace support-bundle' -l path -d 'Field path'\ncomplete -c tan -n '__fish_seen_subcommand_from inspect' -l show-origin -d 'Include source metadata'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l target-kind -d 'Debug target kind' -a 'zephyr-mcu baremetal-mcu yocto-userspace native-host'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l server -d 'Debug server' -a 'jlink openocd pyocd gdbserver none'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l core -d 'Build slice core id'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l pre-launch-task -d 'VS Code task to run before launching'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l svd -r -d 'Path to a user-supplied SVD for the peripheral view'\ncomplete -c tan -n '__fish_seen_subcommand_from debug-config' -l preview -d 'Preview only'\ncomplete -c tan -n '__fish_seen_subcommand_from support-bundle' -l destination -d 'Destination path'\ncomplete -c tan -n '__fish_seen_subcommand_from support-bundle' -l target-kind -d 'Debug target kind' -a 'zephyr-mcu baremetal-mcu yocto-userspace native-host'\ncomplete -c tan -n '__fish_seen_subcommand_from support-bundle' -l server -d 'Debug server' -a 'jlink openocd pyocd gdbserver none'\ncomplete -c tan -n '__fish_seen_subcommand_from completion' -l shell -d 'Shell type' -a 'bash zsh fish'\ncomplete -c tan -n '__fish_seen_subcommand_from sdk' -a 'list install current switch'\ncomplete -c tan -n '__fish_seen_subcommand_from sdk' -l destination -d 'Cache root'\ncomplete -c tan -n '__fish_seen_subcommand_from sdk' -l global -d 'Pin the machine-global default'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l no-pip -d 'Skip pip install'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l no-west -d 'Skip west init/update'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l print-env -d 'Print environment lines only'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l allow-partial -d 'Report success despite a failed dependency install'\ncomplete -c tan -n '__fish_seen_subcommand_from bootstrap' -l workspace -d 'Build the workspace at this path'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l plan -d 'Show the build plan'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l plan-from -d 'Read build plan from file'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l materialise -d 'Materialise plan files'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l native -d 'Build natively'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l manifest -d 'Show the system manifest'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l manifest-from -d 'Read manifest from file'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l no-auto-bootstrap -d 'Never bootstrap implicitly'\ncomplete -c tan -n '__fish_seen_subcommand_from build' -l pristine -d 'Force-wipe build dirs before dispatch'\ncomplete -c tan -n '__fish_seen_subcommand_from kconfig' -l core -d 'Core id to scope the menu to'\ncomplete -c tan -n '__fish_seen_subcommand_from image flash clean renode size' -l build-root -d 'Override build root'\ncomplete -c tan -n '__fish_seen_subcommand_from flash' -l dry-run -d 'Print planned commands only'\ncomplete -c tan -n '__fish_seen_subcommand_from flash' -l core -d 'Flash only this core'\ncomplete -c tan -n '__fish_seen_subcommand_from flash' -l helper -d 'Flash only this helper MCU'\ncomplete -c tan -n '__fish_seen_subcommand_from flash' -l skip-missing-tools -d 'Skip entries with no tool on PATH'\ncomplete -c tan -n '__fish_seen_subcommand_from run' -l flash -d 'Flash the board after building'\ncomplete -c tan -n '__fish_seen_subcommand_from run' -l core -d 'Flash only this core'\ncomplete -c tan -n '__fish_seen_subcommand_from clean' -l dry-run -d 'List targets without removing'\ncomplete -c tan -n '__fish_seen_subcommand_from renode size' -l board -d 'Override SoM SKU'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l core -d 'Zephyr slice core id'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l image-bundle -d 'Pre-built artefacts dir'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l log -d 'Console log file'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l timeout -d 'Wall-clock cap in seconds'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l expect -d 'Stop early on this substring'\ncomplete -c tan -n '__fish_seen_subcommand_from renode' -l sim-mode -d 'Studio hardware-simulator mode'\ncomplete -c tan -n '__fish_seen_subcommand_from size' -l fail-over-budget -d 'Exit non-zero over budget'"
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_completion_offers_the_same_verbs_as_the_oracle[zsh]#0": [
+  0,
+  {
+   "__raw__": "#compdef tan\n\n_tan() {\n  local -a commands\n  commands=(\n    'validate:Validate board.yaml config'\n    'generate:Generate derived artifacts'\n    'init:Initialize a starter project'\n    'scaffold:Scaffold module files'\n    'examples:List SDK example projects'\n    'doctor:Run debug and environment checks'\n    'completion:Generate shell completion script'\n    'diff:Show board normalization diff'\n    'presets:List SDK presets'\n    'pinmux:Show pinmux capability table'\n    'explain:Explain templates and targets'\n    'inspect:Inspect effective resolved values'\n    'trace:Trace generation decisions'\n    'debug-config:Generate a launch.json debug configuration'\n    'support-bundle:Export support bundle payload'\n    'sdk:Manage local SDK installs'\n    'bootstrap:Set up the SDK build environment'\n    'build:Build the project natively'\n    'kconfig:Show the board-scoped Kconfig symbol menu'\n    'image:Assemble a flashable image bundle'\n    'flash:Flash slices and helper MCUs onto the device'\n    'run:Build then run the project'\n    'clean:Remove the build dir and state cache'\n    'renode:Boot the built manifest in headless Renode'\n    'size:Report per-slice firmware footprint'\n    'migrate:Migrate board.yaml to the current schema'\n    'lock:Pin/lock library dependencies'\n    'quality:Run board.yaml quality checks'\n    'model:Compile and package board.yaml models'\n    'monitor:Open a serial console to the board'\n    'new-som:Scaffold a new SoM metadata skeleton'\n    'faultdecode:Decode an ARM Cortex-M fault dump'\n  )\n\n  # Every flag `GlobalArgs` marks `global = true` (cli.rs) is accepted by\n  # clap on EVERY subcommand \u2014 AND on the root command itself, before any\n  # subcommand word is even typed \u2014 so every arm below splices this in, and\n  # so does the root `_arguments -C` call a few lines down. Unlike bash's\n  # single `$global_flags` string var, zsh's per-arm `_arguments` has no\n  # inheritance of its own (issue #92 MAJOR 2) \u2014 a flag left out of an arm\n  # here is simply not completable for that subcommand (or, left out of the\n  # root call, not completable at `tan --<TAB>` before a subcommand: issue\n  # #92 round-3 FINDING 1).\n  local -a global_args\n  global_args=(\n    '--project[Project root]:path:_files -/'\n    '--board-yaml[board.yaml path]:path:_files'\n    '--sdk-root[SDK root]:path:_files -/'\n    '--target[Generation target]'\n    '--all[Generate all targets]'\n    '--format[Output format]:format:(text json)'\n    '--verbose[Verbose output]'\n    '--quiet[Quiet output]'\n    '--no-color[Disable color output]'\n    '--non-interactive[Disable prompts]'\n    '--ci[CI mode]'\n    '--help[Show help]'\n    '--version[Show version]'\n  )\n\n  _arguments -C     '1:command:->command'     '*::arg:->args'     \"${global_args[@]}\"\n\n  case $state in\n    command)\n      _describe 'command' commands\n      ;;\n    args)\n      case $words[2] in\n        validate)\n          _arguments '--offline[Offline structural validation only]' \"${global_args[@]}\"\n          ;;\n        completion)\n          _arguments '--shell[Shell type]:shell:(bash zsh fish)' \"${global_args[@]}\"\n          ;;\n        generate)\n          _arguments '--force[Overwrite existing files]' '--core[Core id (zephyr-board target)]' \"${global_args[@]}\"\n          ;;\n        explain)\n          _arguments '--template[Template id]' \"${global_args[@]}\"\n          ;;\n        examples)\n          _arguments '--filter[Substring match on id/title]' \"${global_args[@]}\"\n          ;;\n        init)\n          _arguments '--template[Template id]' '--from-example[Example source dir]' '--name[Name value]' '--destination[Output directory]:path:_files -/' '--som[SoM SKU]' '--cores[Cores list]' '--preview[Preview only]' '--force[Overwrite existing files]' \"${global_args[@]}\"\n          ;;\n        scaffold)\n          _arguments '--template[Template id]' '--name[Name value]' '--destination[Output directory]:path:_files -/' '--preview[Preview only]' '--force[Overwrite existing files]' \"${global_args[@]}\"\n          ;;\n        pinmux)\n          _arguments '--sku[SoM SKU]' '--family[Pinmux family]' \"${global_args[@]}\"\n          ;;\n        doctor)\n          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--build[Build readiness preflight]' '--fix[Auto-repair a fixable blocker]' \"${global_args[@]}\"\n          ;;\n        inspect)\n          _arguments '--path[Field path]' '--show-origin[Include source metadata]' \"${global_args[@]}\"\n          ;;\n        trace)\n          _arguments '--path[Field path]' \"${global_args[@]}\"\n          ;;\n        debug-config)\n          _arguments '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--core[Build slice core id]' '--pre-launch-task[VS Code task to run before launching]' '--svd[Path to a user-supplied SVD for the peripheral view]:svd:_files -g \"*.svd\"' '--preview[Preview only]' \"${global_args[@]}\"\n          ;;\n        support-bundle)\n          _arguments '--destination[Output directory]:path:_files -/' '--target-kind[Debug target]:target:(zephyr-mcu baremetal-mcu yocto-userspace native-host)' '--server[Debug server]:server:(jlink openocd pyocd gdbserver none)' '--path[Field path]' \"${global_args[@]}\"\n          ;;\n        sdk)\n          _arguments '1:subcommand:(list install current switch)' '--destination[Cache root]:path:_files -/' '--global[Pin the machine-global default]' \"${global_args[@]}\"\n          ;;\n        bootstrap)\n          _arguments '--no-pip[Skip pip install]' '--no-west[Skip west init/update]' '--print-env[Print environment lines only]' '--allow-partial[Report success despite a failed dependency install]' '--workspace[Build the workspace at this path]:path:_files -/' \"${global_args[@]}\"\n          ;;\n        build)\n          _arguments '--plan[Show the build plan]' '--plan-from[Read build plan from file]:path:_files' '--materialise[Materialise plan files]' '--native[Build natively]' '--manifest[Show the system manifest]' '--manifest-from[Read manifest from file]:path:_files' '--no-auto-bootstrap[Never bootstrap implicitly]' '--pristine[Force-wipe build dirs before dispatch]' \"${global_args[@]}\"\n          ;;\n        kconfig)\n          _arguments '--core[Core id to scope the menu to]' \"${global_args[@]}\"\n          ;;\n        image)\n          _arguments '--build-root[Override build root]:path:_files -/' \"${global_args[@]}\"\n          ;;\n        flash)\n          _arguments '--build-root[Override build root]:path:_files -/' '--dry-run[Print planned commands only]' '--core[Flash only this core]' '--helper[Flash only this helper MCU]' '--skip-missing-tools[Skip entries with no tool on PATH]' \"${global_args[@]}\"\n          ;;\n        run)\n          _arguments '--flash[Flash the board after building]' '--core[Flash only this core]' \"${global_args[@]}\"\n          ;;\n        clean)\n          _arguments '--build-root[Override build root]:path:_files -/' '--dry-run[List targets without removing]' \"${global_args[@]}\"\n          ;;\n        renode)\n          _arguments '--build-root[Override build root]:path:_files -/' '--board[Override SoM SKU]' '--core[Zephyr slice core id]' '--image-bundle[Pre-built artefacts dir]:path:_files -/' '--log[Console log file]:path:_files' '--timeout[Wall-clock cap in seconds]' '--expect[Stop early on this substring]' '--sim-mode[Studio hardware-simulator mode]' \"${global_args[@]}\"\n          ;;\n        size)\n          _arguments '--build-root[Override build root]:path:_files -/' '--board[Override SoM SKU]' '--fail-over-budget[Exit non-zero over budget]' \"${global_args[@]}\"\n          ;;\n        *)\n          _arguments \"${global_args[@]}\"\n          ;;\n      esac\n      ;;\n  esac\n}\n\ncompdef _tan tan"
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_examples_without_an_sdk_is_a_known_divergence_from_the_oracle#0": [
+  0,
+  {
+   "command": "examples",
+   "data": {
+    "examples": [],
+    "schemaVersion": "1"
+   },
+   "exitCode": 0,
+   "issues": [],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_inspect_matches_the_oracle#0": [
+  0,
+  {
+   "command": "inspect",
+   "data": {
+    "focusPath": null,
+    "generatedAt": "1970-01-01T00:00:00.000Z",
+    "resolvedValues": [
+     {
+      "detail": "Resolved project directory (cwd, or --project <dir>).",
+      "key": "workspaceRoot",
+      "source": "workspace",
+      "value": "<ORACLE-ROOT-0>"
+     },
+     {
+      "detail": "Set with --sdk-root <path> or `tan sdk switch <path>` when automatic discovery is ambiguous.",
+      "key": "sdkRoot",
+      "source": "unresolved",
+      "value": null
+     },
+     {
+      "detail": "Resolved board.yaml path (default location, or --board-yaml <path>).",
+      "key": "boardYamlPath",
+      "source": "setting",
+      "value": "<ORACLE-ROOT-0>/board.yaml"
+     },
+     {
+      "detail": "board.yaml is missing at the resolved path.",
+      "key": "boardYamlExists",
+      "source": "runtime",
+      "value": false
+     },
+     {
+      "detail": "Working directory used for west commands.",
+      "key": "westCwd",
+      "source": "setting",
+      "value": "<ORACLE-ROOT-0>"
+     },
+     {
+      "detail": "Interpreter used for loader and validation scripts.",
+      "key": "pythonBinary",
+      "source": "default",
+      "value": "python3"
+     }
+    ],
+    "schemaVersion": "1",
+    "showOrigin": false
+   },
+   "exitCode": 0,
+   "issues": [
+    {
+     "code": "inspect.board-yaml-missing",
+     "message": "board.yaml path could not be resolved or the file does not exist.",
+     "severity": "warning"
+    }
+   ],
+   "ok": true,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_kconfig_without_an_sdk_is_a_known_divergence_from_the_oracle#0": [
+  2,
+  {
+   "command": "kconfig",
+   "data": {
+    "board": "",
+    "core": "",
+    "schemaVersion": 1,
+    "symbols": []
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "kconfig.no-sdk-root",
+     "message": "no alp-sdk checkout found \u2014 pass `--sdk-root <PATH>`, pin one with `tan sdk switch <version|path>`, or run `tan bootstrap` first.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_scaffold_without_a_name_matches_the_oracle#0": [
+  2,
+  {
+   "command": "scaffold",
+   "data": {
+    "destination": "",
+    "fileChanges": [],
+    "moduleName": "",
+    "normalizedModuleName": "",
+    "preview": false,
+    "schemaVersion": "1",
+    "templateId": "",
+    "unchanged": [],
+    "written": []
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "scaffold.name-required",
+     "message": "Module name is required. Use --name <name> or run interactively.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ],
+ "tests/parity/test_command_surface_oracle_parity.py::test_trace_without_an_sdk_matches_the_oracle#0": [
+  2,
+  {
+   "command": "trace",
+   "data": {
+    "decisions": [],
+    "focusPath": null,
+    "generatedAt": "1970-01-01T00:00:00.000Z",
+    "schemaVersion": "1",
+    "target": null,
+    "workflow": "cli.trace"
+   },
+   "exitCode": 2,
+   "issues": [
+    {
+     "code": "trace.sdk-root-unresolved",
+     "message": "alp-sdk root is unresolved. Use --sdk-root, pin one with `tan sdk switch <version|path>`, or place the project near an alp-sdk checkout.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": null
+   }
+  }
+ ]
+}

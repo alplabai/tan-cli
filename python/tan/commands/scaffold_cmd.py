@@ -63,6 +63,7 @@ from tan.core.scaffold import scaffold_tree_preview as _tree_preview
 from tan.core.scaffold import write_files
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -335,9 +336,7 @@ def scaffold(
     all_targets: bool = typer.Option(
         False, "--all", help="Run command against all relevant targets."
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     verbose: bool = typer.Option(False, "--verbose", help="Emit additional diagnostic detail."),
     quiet: bool = typer.Option(False, "--quiet", help="Suppress non-essential output."),
     no_color: bool = typer.Option(
@@ -363,13 +362,7 @@ def scaffold(
     # identical block for its own five ignored globals.
     del board_yaml, sdk_root, target, all_targets, verbose, quiet, no_color
 
-    resolved_format = output_format if output_format is not None else (ctx.obj or {}).get(
-        "format"
-    ) or "text"
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
     interactive = can_prompt(non_interactive=non_interactive, ci=ci, json_mode=json_mode)
 

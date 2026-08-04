@@ -99,6 +99,7 @@ from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -855,9 +856,7 @@ def generate(
     non_interactive: bool = typer.Option(
         False, "--non-interactive", hidden=True
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     verbose: bool = typer.Option(
         False, "--verbose", help="List each target in text output."
     ),
@@ -868,10 +867,6 @@ def generate(
     # (as it does to every `tan` invocation), and an unknown flag there is a
     # Click usage error that fails the whole CMake configure.
     del non_interactive
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     # The as-GIVEN strings, never the resolved absolute paths: the envelope

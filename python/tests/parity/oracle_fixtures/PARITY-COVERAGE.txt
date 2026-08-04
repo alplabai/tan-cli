@@ -21,6 +21,25 @@ believes it.
 Keep it current. It is the only record of what the parity suite is NOT
 measuring, and a green suite is not evidence against anything listed here.
 
+Since 2026-08-04 it is no longer the ONLY record, and no longer the only
+thing keeping itself current: `tests/parity/test_parity_freeze_completeness.
+py` is the machine-checked half. It FAILS on any case gated on `RUST is None`
+that has no committed fixture and is not named in one of its three registers,
+and it fails again on a register entry that has gone stale -- so this file and
+that module have to move together. Prose alone is what let the last claim in
+this directory rot (see PROVENANCE.txt's own drift section).
+
+FIRST PASS DONE, same day, measured the same way on the same tree (the counts
+moved because the suite grew, not because the gate did):
+
+  oracle binary present:  296 passed,  95 skipped, 4 xfailed
+  no target/ at all:      282 passed, 109 skipped, 4 xfailed   (exit 0)
+
+Fourteen still move, down from seventeen. Three of section A's freezable
+cases are now frozen (marked FROZEN below), and twelve first-ever comparisons
+landed for section C's verbs -- those twelve pass in BOTH columns, which is
+the property the whole freeze is for.
+
 
 A. LIVE-ONLY CASES -- gated on BINARY PRESENCE, with no frozen fixture
 ---------------------------------------------------------------------
@@ -41,7 +60,7 @@ entry for a brand-new case is a separate, deliberate act with its own capture
 recipe -- out of scope for this change".
 
   tests/parity/test_build_sdk_root_oracle_parity.py
-    test_build_sdk_root_invalid_matches_the_oracle
+    test_build_sdk_root_invalid_matches_the_oracle          FROZEN 2026-08-04
   tests/parity/test_oracle_parity.py
     test_explain_matches_the_oracle[overview]
     test_explain_matches_the_oracle[unknown-template]
@@ -54,8 +73,21 @@ recipe -- out of scope for this change".
     test_monitor_is_a_known_divergence_from_the_oracle
     test_faultdecode_is_a_known_divergence_from_the_oracle
   tests/parity/test_run_oracle_parity.py
-    test_run_no_sdk_is_a_known_divergence_from_the_oracle
-    test_run_sdk_root_invalid_now_matches_the_oracle
+    test_run_no_sdk_is_a_known_divergence_from_the_oracle   FROZEN 2026-08-04
+    test_run_sdk_root_invalid_now_matches_the_oracle        FROZEN 2026-08-04
+
+The three FROZEN rows above are done: each now takes its rust side through
+`oracle.rust_run` and replays a committed key, and each passes with no
+target/ present. Their modules' own docstrings record why the original
+"live so a regression cannot hide behind a stale fixture" reasoning inverted
+-- a skip does not go stale, it stops measuring, and staleness is caught by
+PINNED_ORACLE_BUILD_INPUT_DIGEST instead (tan-cli#414).
+
+The eight remaining rows are in test_oracle_parity.py, which tan-cli#408 is
+restructuring in parallel; editing it from the same change would clobber that
+work. They are declared in `test_parity_freeze_completeness.py`'s `_UNFROZEN`
+register, which is DEBT, not design: that register has to reach empty before
+tan-cli#269 lands, because after the deletion these can never be captured.
 
 LIVE-ONLY BY CONSTRUCTION -- a frozen answer would be WRONG on any host but
 the capture host, so freezing these two as they stand trades a skip for a
@@ -104,35 +136,81 @@ coverage:
 C. REGISTERED SUBCOMMANDS WITH NO ORACLE COMPARISON AT ALL
 -----------------------------------------------------------
 
-Eight of the 32 verbs. No test in any module that resolves an oracle ever
-hands these to it, so nothing measures their envelopes against Rust -- before
-tan-cli#269 or after it.
+Eight of the 32 verbs had none. Seven now have one --
+`tests/parity/test_command_surface_oracle_parity.py`, frozen, 12 keys -- and
+each entry below records what that comparison reaches and what it still does
+not. `doctor` is the one with nothing, and the reason is measured, not
+assumed.
 
-  bootstrap   Mutates the machine (creates a venv, clones/updates a west
-              workspace, pip-installs). No hermetic surface to compare
-              without a network and a scratch workspace on both sides; its
-              REFUSAL paths (no SDK, no project) are comparable and are the
-              tractable subset.
-  completion  Emits a static shell script per --shell. Byte-comparable, and
-              the most tractable of the eight; uncovered only because nobody
-              wrote it. tests/commands/test_completion_command.py asserts
-              against the port alone.
-  doctor      Compared only INDIRECTLY, as a section of the support-bundle
-              payload -- and both of those cases are the live-only pair in
-              section A, so the indirect coverage disappears with them.
-  examples    Reads the bound SDK's example registry; the answer is a
-              function of alp-sdk CONTENT, so a comparison must pin the SDK
-              ref the way PROVENANCE.txt's one SDK-bound fixture does.
-  inspect     Same as doctor: only as a support-bundle section.
-  kconfig     Needs a bootstrapped Zephyr workspace to answer at all ("Needs
-              a bootstrapped Zephyr workspace", per its own --help), so a
-              comparison costs a real workspace; its no-workspace refusal is
-              comparable.
-  scaffold    Writes files into a project tree. Comparable by diffing two
+  bootstrap   COVERED (refusal only): the `bootstrap.sdk-root-unresolved`
+              envelope, whole. exit 2, `ok`, the entire `data` skeleton and
+              the issue's code/severity all AGREE; only the remedy wording
+              differs, pinned literally on both sides.
+              STILL UNCOVERED: everything that mutates the machine -- venv
+              creation, the west clone/update, pip. No hermetic surface
+              without a network and a scratch workspace on both sides.
+  completion  COVERED: the verb list, per shell (bash/zsh/fish), extracted
+              from each script and compared exactly -- 32 verbs, in order.
+              DECLARED DIVERGENCE, not a gap: the port completes two extra
+              `--format` values after `validate` (`diagnostic-v1`, `sarif`,
+              tan-cli#403) which the oracle does not offer for any command.
+              Pinned in both directions, so either side changing is seen.
+              This is why the scripts are not compared byte-for-byte.
+  doctor      STILL UNCOVERED, and not merely unwritten. Its envelope is
+              decided by the HOST: measured on darwin, the oracle's own
+              check list carries `zephyrSdkAvailableForHost ... macos-
+              aarch64` plus `codeLLDBExtension`/`lldb` rows that a Windows
+              run does not have, and Windows carries `longPaths`, which
+              exists nowhere else. A fixture captured on one OS is a false
+              red on another, and no scrub reaches a host architecture
+              written into a check's `detail`. Freezing it means capturing
+              on CAPTURE_PLATFORM and gating the replay there -- the same
+              deal section A's support-bundle pair needs.
+              ALSO MEASURED, and worth a decision of its own: the two sides
+              disagree STRUCTURALLY on this verb today. The oracle emits
+              `data.targetKind` and `data.server`; the port emits neither.
+              They spell `data.generatedAt` differently --
+              `1970-01-01T00:00:00.000Z` against `1970-01-01T00:00:00Z` --
+              under an identical SOURCE_DATE_EPOCH=0. Recorded here rather
+              than pinned as expected, because pinning would make it look
+              decided; the extension reads this section out of the support
+              bundle.
+  examples    COVERED (empty-catalogue path): exit 0, `ok: true` and
+              `data: {schemaVersion: "1", examples: []}` on both sides.
+              DECLARED DIVERGENCE: the port also emits
+              `examples.sdk-root-unresolved` (warning) where the oracle
+              emits no issue at all -- machine-visible, unlike a wording
+              difference, so it is pinned rather than narrowed away.
+              STILL UNCOVERED: a POPULATED catalogue, which is a function of
+              alp-sdk CONTENT and so must pin the SDK ref the way
+              PROVENANCE.txt's one SDK-bound fixture does.
+  inspect     COVERED: the whole `resolvedValues` table -- keys, order,
+              values, `source` and `detail` -- on an empty project. This is
+              the surface the extension's diagnostics view reads, and it was
+              previously reachable only as a nested section of the
+              support-bundle payload, i.e. only on the two cases that vanish
+              with crates/.
+              STILL UNCOVERED: a resolved-SDK context (`--sdk-root` bound,
+              `--focus-path`, `--show-origin`).
+  kconfig     COVERED (refusal only): the `kconfig.no-sdk-root` envelope,
+              whole, including `data.schemaVersion` being the integer 1 on
+              both sides where other verbs use the string "1".
+              STILL UNCOVERED: the symbol menu itself -- the live feed for
+              alp-sdk-vscode's prj.conf LSP -- which needs a bootstrapped
+              Zephyr workspace to answer at all ("Needs a bootstrapped
+              Zephyr workspace", per its own --help).
+  scaffold    COVERED (refusal only): the `scaffold.name-required` envelope
+              under --non-interactive, including the empty `data` skeleton
+              (`fileChanges`, `written`, `unchanged`) a real scaffold fills.
+              STILL UNCOVERED: an actual write. Comparable by diffing two
               scratch trees (the shape test_clean_parity.py already uses),
               which nobody has written.
-  trace       The third support-bundle section, and not compared at all --
-              not even indirectly.
+  trace       COVERED (refusal only): the `trace.sdk-root-unresolved`
+              envelope, whole -- `workflow: cli.trace`, empty `decisions`,
+              and the same message on both sides. Previously the support
+              bundle's third section and compared NOWHERE, not even
+              indirectly.
+              STILL UNCOVERED: a real decision list, which needs a bound SDK.
 
 Not coverage, but not a gap either -- declared xfail(strict=True) with
 recorded reasons, listed here so they are not mistaken for either:
@@ -153,11 +231,33 @@ After the deletion none of the fixtures in this directory can be captured at
 all, and nothing in section A or C can be measured again:
 
   1. Capture the thirteen FREEZABLE cases in section A.
+     PARTLY DONE 2026-08-04: three of the thirteen are frozen (marked FROZEN
+     in section A). The other eight are in test_oracle_parity.py and are the
+     one item on this list that is still pure debt -- they are declared in
+     `test_parity_freeze_completeness.py`'s `_UNFROZEN` register so they
+     cannot be forgotten, but a register is bookkeeping, not coverage.
   2. Decide the support-bundle pair: capture on win32 with a declared
      platform gate, or record the loss.
+     STILL OPEN. Recorded, and now measured: PROVENANCE.txt's 2026-08-04
+     section names the exact host-shaped rows a darwin capture would freeze,
+     and notes that the capture-time leak guard does NOT refuse it -- so this
+     has to be a decision by whoever holds a Windows host, not something the
+     tooling will stop by itself.
   3. Add comparisons for as many of section C's eight as have a stable
      oracle surface -- `completion` first, it is nearly free.
+     DONE 2026-08-04 for seven of the eight; see section C for what each
+     reaches and what it does not. `doctor` is the eighth and needs item 2's
+     win32 capture for the same reason the support-bundle pair does.
   4. A gate that FAILS when a parity case is gated on `RUST is None` and has
      no fixture key, exempting section B by name. tan-cli#409 places it under
      python/tests/gates/; it is the check that would have caught both holes,
      and it fails today on all fifteen.
+     DONE 2026-08-04, as `tests/parity/test_parity_freeze_completeness.py`
+     -- in this package rather than under python/tests/gates/, which is the
+     one place this ledger's own instructions were not followed. Nothing in
+     its logic depends on where the file sits (it finds the parity package
+     through the imported module, not through its own path), so relocating it
+     is the move plus one import line: `from . import oracle_fixtures` has to
+     become `from tests.parity import oracle_fixtures`, since python/tests/
+     has no __init__.py and a relative import does not resolve from there.
+     Verified before its registers were filled in: it named all fifteen.

@@ -86,6 +86,7 @@ from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.sdk_cmd import SDK_MARKER, project_pin_issue
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: The orchestrator state cache removed alongside the build root -- verbatim
 #: `alp_clean.py`'s `targets[1]`. The orchestrator actually writes its cache at
@@ -920,9 +921,7 @@ def clean(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     quiet: bool = typer.Option(
         False, "--quiet", help="Suppress the non-essential manifest notice."
     ),
@@ -947,10 +946,6 @@ def clean(
     # have been removed was not; the shared fix (one decorator for every command)
     # belongs with whoever owns the global-flag surface.
     del verbose, no_color, non_interactive, ci, target, all_cores
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     try:

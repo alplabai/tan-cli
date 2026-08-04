@@ -1,0 +1,22 @@
+{
+ "tests/parity/test_build_sdk_root_oracle_parity.py::test_build_sdk_root_invalid_matches_the_oracle#0": [
+  1,
+  {
+   "command": "build",
+   "data": null,
+   "exitCode": 1,
+   "issues": [
+    {
+     "code": "build.plan-unavailable",
+     "message": "no alp-sdk checkout found \u2014 pass `--sdk-root <PATH>`, pin one with `tan sdk switch <version|path>`, set it in settings, or run `tan bootstrap`. The build-plan comes from the SDK's `alp_orchestrate --emit build-plan`.",
+     "severity": "error"
+    }
+   ],
+   "ok": false,
+   "project": {
+    "boardYaml": null,
+    "root": "<ORACLE-ROOT-0>"
+   }
+  }
+ ]
+}

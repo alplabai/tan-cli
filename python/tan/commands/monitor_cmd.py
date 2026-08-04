@@ -65,6 +65,7 @@ import typer
 from tan.commands.build_cmd import _planner_python
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: The SDK-wide console default, matching `monitor.py::DEFAULT_BAUD`.
 DEFAULT_BAUD = 115200
@@ -212,9 +213,7 @@ def monitor(
     baud: int = typer.Option(
         DEFAULT_BAUD, "--baud", show_default=True, help="Baud rate."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     project: str = typer.Option(None, "--project", hidden=True),
     board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
     sdk_root: str = typer.Option(None, "--sdk-root", hidden=True),
@@ -243,10 +242,6 @@ def monitor(
     # `clean_cmd.clean`/`new_som_cmd.new_som`.
     del project, board_yaml, sdk_root, target, all_targets
     del verbose, quiet, no_color, non_interactive, ci
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     def finish(data: dict, issues: list[Issue], exit_code: ExitCode) -> None:
