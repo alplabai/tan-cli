@@ -122,6 +122,27 @@ _WIRE_STATUS = {"succeeded": "ok", "skipped": "skipped"}
 #: "FATAL ERROR: ".
 _WEST_NO_WORKSPACE_MSG = "Could not find a west workspace"
 
+#: The Zephyr SDK cross toolchain is absent -- watched for on the same stdout,
+#: for the same reason (tan-cli#419). Zephyr's own CMake says
+#:
+#:     CMake Error at <zephyr>/cmake/modules/FindZephyr-sdk.cmake:160
+#:       (find_package): Could not find a package configuration file provided
+#:       by "Zephyr-sdk" (requested version 1.0)
+#:
+#: and the slice then exits 1, so without this the whole diagnosis is a bare
+#: `terminated with exit code: 1` plus 4 KB of pass-through CMake text the
+#: envelope never names. tan ALREADY HOLDS the answer -- `doctor`'s `zephyrSdk`
+#: check reports it with the exact remedy -- so this is not a missing
+#: capability, it is one the failing command does not surface. Measured on the
+#: same host at the same moment: `doctor --build` said `zephyrSdk -> fail` with
+#: the install command, while `build`'s envelope contained neither
+#: "zephyr sdk" nor "sdk install".
+#:
+#: Matched on the package name rather than the `FindZephyr-sdk.cmake` path,
+#: which carries the workspace's absolute location and a line number that
+#: moves with upstream Zephyr.
+_ZEPHYR_SDK_MISSING_MSG = 'provided by "Zephyr-sdk"'
+
 
 @dataclass(frozen=True)
 class SliceOutcome:
@@ -705,11 +726,14 @@ def execute_slices(
         # inside the loop, not hoisted above it), so a later slice's closure
         # never reads a previous one's leftover.
         saw_no_workspace = False
+        saw_no_zephyr_sdk = False
 
         def _watch_for_no_workspace(line: str) -> None:
-            nonlocal saw_no_workspace
+            nonlocal saw_no_workspace, saw_no_zephyr_sdk
             if _WEST_NO_WORKSPACE_MSG in line:
                 saw_no_workspace = True
+            if _ZEPHYR_SDK_MISSING_MSG in line:
+                saw_no_zephyr_sdk = True
             on_output(line)
 
         try:
@@ -775,6 +799,21 @@ def execute_slices(
                 f"slice `{sl.core_id}` terminated with exit code: {code} -- west could not "
                 f"find a workspace; tan resolved `{workspace_dir}`, but the spawned process "
                 f"saw ZEPHYR_BASE={seen_zephyr_base}"
+            )
+        elif saw_no_zephyr_sdk:
+            # tan-cli#419: name the cause and the remedy tan already knows.
+            # `doctor`'s `zephyrSdk` check assembles the same command from the
+            # same pin, so the two cannot drift into naming different SDK
+            # versions -- imported rather than re-spelled here for exactly the
+            # reason `zephyr_sdk_install_command`'s own docstring gives.
+            from tan.commands.doctor_cmd import zephyr_sdk_install_command
+
+            message = (
+                f"slice `{sl.core_id}` terminated with exit code: {code} -- the Zephyr "
+                f"SDK cross toolchain is not installed (CMake could not find the "
+                f"`Zephyr-sdk` package). From an initialised west workspace, run "
+                f"`{zephyr_sdk_install_command()}`, then re-run the build; "
+                f"`tan doctor --build` reports this as `zephyrSdk` with the same fix."
             )
         else:
             message = f"slice `{sl.core_id}` terminated with exit code: {code}"
