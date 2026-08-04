@@ -31,6 +31,28 @@ five the same way as the original three: against the shared
 `assert_no_refused_subcommand_named` invariant, not a pin on the exact
 replacement wording.
 
+Third follow-up (tan-cli#381): the defect came back a FOURTH time, from a
+direction the two sweeps above could not see -- `trace_cmd`,
+`support_bundle_cmd` and `inspect_cmd` were PORTED AFTER #305 landed, and
+each hardcoded `tan sdk switch` fresh from the oracle's own (honest, there)
+wording instead of reading `NO_SDK_NEXT_STEPS`. A sweep only fixes the sites
+that exist when it runs; what stops the next port is this file growing a case
+per site, plus `test_readme_*` below, which pins the DOCUMENTATION -- #381's
+own headline was that `README.md`'s primary quickstart told a new customer to
+run `tan sdk install <version> && tan sdk switch <version>`, two hard
+refusals, as the very first thing they type.
+
+Fourth round, and the reason `test_no_shipped_string_literal_names_a_refused_
+subcommand` now exists: the #381 sweep diagnosed the mechanism correctly
+("a sweep only fixes the sites that exist when it runs") and then did not
+build the guard that follows from it, because the guard "would go red
+immediately" on a FIFTH live site (`validate_cmd`'s
+`validate.sdk-root-unresolved`, written by tan-cli#376 while #381 was cleaning
+the other four). That is the guard catching a real unfixed instance -- the
+outcome it exists for -- so it is here, and the site it caught is fixed. A
+case per site is a record of what already went wrong; the AST sweep is the
+only thing in this file that can fail for a site nobody has written yet.
+
 Second follow-up: three more sites in `bootstrap_cmd.py`'s workspace-
 relocation and rollback-failure messages named `tan sdk switch --global` as
 the way to repoint/undo the global default-SDK pointer (`~/.alp/sdk-
@@ -42,6 +64,7 @@ subprocess) rather than re-deriving that harness here -- the same
 cross-module import `test_build_streaming.py` already uses against
 `test_build_command.py`.
 """
+import ast
 import json
 import os
 import subprocess
@@ -55,7 +78,11 @@ from typer.testing import CliRunner
 from tan.commands import bootstrap_cmd, doctor_cmd, generate_cmd, kconfig_cmd, model_cmd, new_som_cmd, sdk_cmd
 from tan.commands.bootstrap_cmd import HostPython
 from tan.commands.build.token_substitution import TokenSubstitutionError, apply_plan_token_substitution
+from tan.commands.inspect_cmd import collect_resolved_values
 from tan.core.build_plan import parse_build_plan
+from tests.commands import test_inspect_command as inspect_mod
+from tests.commands import test_support_bundle_command as support_mod
+from tests.commands import test_trace_command as trace_mod
 from tests.commands.test_bootstrap_command import PRESENT_TOOL, codes, envelope, make_sdk, run_tan
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -210,6 +237,288 @@ def test_token_substitution_sdk_root_unresolved_never_recommends_a_refused_subco
         )
     assert excinfo.value.code == "build.sdk-root-unresolved"
     assert_no_refused_subcommand_named(excinfo.value.message)
+
+
+# ── tan-cli#381: the three debug-family ports written after the #305 sweep ──
+
+
+def test_trace_sdk_root_unresolved_never_recommends_a_refused_subcommand(tmp_path, monkeypatch):
+    """`trace_cmd.py`'s `trace.sdk-root-unresolved` message. Reuses
+    `test_trace_command.py`'s own local Typer app rather than `tan.cli.app`:
+    `trace`/`inspect`/`support-bundle` are not registered there yet (see
+    `test_inspect_command.py`'s module docstring), so a real subprocess would
+    reach the deferred stub instead of the ported command."""
+    monkeypatch.chdir(tmp_path)
+    trace_mod.write(tmp_path / "board.yaml", "x")
+    result = trace_mod.runner.invoke(trace_mod.app, ["trace", "--format", "json"])
+    assert result.exit_code == 2
+    issue = json.loads(result.stdout)["issues"][0]
+    assert issue["code"] == "trace.sdk-root-unresolved"
+    assert_no_refused_subcommand_named(issue["message"])
+    assert sdk_cmd.NO_SDK_NEXT_STEPS in issue["message"]
+
+
+def test_support_bundle_sdk_root_fix_never_recommends_a_refused_subcommand(
+    tmp_path, monkeypatch
+):
+    """The `sdkRoot` check's `fix` inside the WRITTEN BUNDLE, not the stdout
+    envelope -- `_debug_doctor_report` puts the remediation there, so an
+    assertion against stdout alone would have passed while the bundle a stuck
+    user actually reads kept naming the refused command."""
+    monkeypatch.chdir(tmp_path)
+    support_mod.write(tmp_path / "board.yaml", "x")
+    monkeypatch.setattr(doctor_cmd, "_collect", lambda *a, **k: support_mod._clean_checks())
+    result = support_mod.runner.invoke(
+        support_mod.app, ["support-bundle", "--format", "json"]
+    )
+    assert result.exit_code == 4  # unresolved SDK is a hard doctor failure
+    bundle_path = json.loads(result.stdout)["data"]["outputPath"]
+    bundle = json.loads(Path(bundle_path).read_text(encoding="utf-8"))
+    sdk_check = next(c for c in bundle["doctor"]["checks"] if c["name"] == "sdkRoot")
+    assert sdk_check["status"] == "fail"
+    assert_no_refused_subcommand_named(sdk_check["fix"])
+    assert sdk_cmd.NO_SDK_NEXT_STEPS in sdk_check["fix"]
+
+
+def test_inspect_unresolved_sdk_row_never_recommends_a_refused_subcommand():
+    """`inspect`'s `sdkRoot` resolved-value row. A pure function call --
+    `collect_resolved_values` builds the row from the context alone."""
+    row = next(
+        v
+        for v in collect_resolved_values(inspect_mod._context())
+        if v["key"] == "sdkRoot"
+    )
+    assert row["source"] == "unresolved"
+    assert_no_refused_subcommand_named(row["detail"])
+    assert sdk_cmd.NO_SDK_NEXT_STEPS in row["detail"]
+
+
+# ── tan-cli#381: the recurrence guard, not another sweep ────────────────────
+#
+# Four rounds of this defect, each fixed by enumerating the sites that existed
+# when someone looked: #305 found three, its own follow-up found five more,
+# #381 found three ported after #305 landed, and #376 wrote a fifth WHILE #381
+# was sweeping. Every per-site test above is a record of one round. None of
+# them can fail for a site nobody has written yet, which is the only failure
+# mode this defect has ever had.
+#
+# So: walk the source. One assertion over every string literal `python/tan`
+# ships, in place of one test per site added after the fact.
+
+SOURCE_ROOT = PACKAGE_ROOT / "tan"
+
+#: `Module`/`FunctionDef`/`AsyncFunctionDef`/`ClassDef` -- the four nodes whose
+#: first statement can be a docstring.
+_DOCSTRING_OWNERS = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _docstring_ids(tree: ast.AST) -> set[int]:
+    """`id()` of every docstring Constant, so the sweep can skip them.
+
+    Docstrings and `#` comments are EXEMPT, deliberately and for the same
+    reason the README's prose is: half this codebase's docstrings exist to
+    explain that `install`/`switch` refuse and why (`sdk_cmd`'s module
+    docstring, `doctor_cmd.sdk_check`'s, `build_cmd`'s normalisation note).
+    Forbidding the phrase there would delete the explanation and keep the
+    defect. Comments never reach the AST at all, so they need no exemption.
+    What is left after the exemption is every string that can reach a USER --
+    an issue message, a `Check.fix`, a `detail`, a help string -- which is
+    exactly the surface all four rounds of this defect landed on.
+    """
+    out: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, _DOCSTRING_OWNERS):
+            continue
+        body = getattr(node, "body", None)
+        if not body or not isinstance(body[0], ast.Expr):
+            continue
+        first = body[0].value
+        if isinstance(first, ast.Constant) and isinstance(first.value, str):
+            out.add(id(first))
+    return out
+
+
+def test_no_shipped_string_literal_names_a_refused_subcommand():
+    """The guard the #381 sweep identified and then skipped, because it "would
+    go red immediately on the concurrent agent's in-flight `validate_cmd.py`
+    line". That line WAS the fifth live site -- a guard going red on a real
+    unfixed instance is the guard working, and skipping it is how the instance
+    shipped.
+
+    AST, not `grep`, for a reason this exact site demonstrates: the offending
+    text was `"... pin one with "` `"\\`tan sdk switch <version|path>\\`, ..."`,
+    split across two implicitly-concatenated source lines, so no line-oriented
+    search for the phrase could match it. The parser folds implicit
+    concatenation into ONE `Constant`, and reaches f-string literal parts
+    (`JoinedStr`) too, which is where `NO_SDK_NEXT_STEPS`' siblings live.
+    """
+    offenders = []
+    for path in sorted(SOURCE_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        skip = _docstring_ids(tree)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+                continue
+            if id(node) in skip:
+                continue
+            for verb in sdk_cmd.NOT_PORTED_SDK_SUBCOMMANDS:
+                if f"tan sdk {verb}" in node.value:
+                    offenders.append(
+                        f"{path.relative_to(PACKAGE_ROOT)}:{node.lineno} -> {node.value!r}"
+                    )
+    assert not offenders, (
+        "these shipped string literals name a subcommand this build refuses; "
+        "route the remediation through `sdk_cmd.NO_SDK_NEXT_STEPS` instead:\n"
+        + "\n".join(offenders)
+    )
+
+
+# ── tan-cli#381: the README is a surface too ────────────────────────────────
+
+README = PACKAGE_ROOT.parent / "README.md"
+
+
+def _fenced_blocks(markdown: str) -> list[str]:
+    """EVERY fenced block body, whatever the info string says. What a customer
+    COPIES, as opposed to prose about a command -- the README must stay free
+    to say in words that `install`/`switch` refuse (it does, and should, in
+    its own `> [!WARNING]`), while never handing anyone a line to paste that
+    exits 1.
+
+    tan-cli#381 follow-up: this used to whitelist ```sh / ```bash / ```console
+    / ```shell, which skipped this README's two ```powershell blocks and its
+    four unlabeled ones -- and the powershell blocks are the WINDOWS install
+    sections, i.e. exactly where per-platform SDK advice would reappear.
+    Proved by injecting `tan sdk switch 0.13.0` into a ```powershell block:
+    the extractor returned it in no block and the guard stayed green. There is
+    no language whose fenced content is safe to hand over unread, so the
+    language filter is gone rather than extended -- an extended one is a list
+    that needs the next language added to it by someone who remembers this."""
+    blocks, current = [], None
+    for raw in markdown.splitlines():
+        # Strip the blockquote marker BEFORE anything else, opening and closing
+        # fence alike: this README's npm section is a `> [!WARNING]` quote with
+        # a fenced block inside it, and matching `>```` only on the way in left
+        # the block permanently open -- every later line, prose included,
+        # counted as shell.
+        line = raw.lstrip()
+        if line.startswith(">"):
+            line = line[1:].lstrip()
+        if line.startswith("```"):
+            if current is not None:
+                blocks.append("\n".join(current))
+                current = None
+            else:
+                current = []
+            continue
+        if current is not None:
+            current.append(line)
+    return blocks
+
+
+def test_the_fence_extractor_does_not_skip_powershell_or_unlabeled_blocks():
+    """The drift-stopper's own drift-stopper. `_fenced_blocks` is the thing
+    standing between the README and a pasteable dead end, so a silent hole in
+    it disables the guard above without failing anything -- which is what a
+    ```sh-only whitelist was. Synthetic input, not the real README: this must
+    keep failing if the filter comes back even once the README happens to be
+    clean."""
+    markdown = "\n".join(
+        [
+            "```powershell",
+            "tan sdk switch 0.13.0",
+            "```",
+            "",
+            "```",
+            "tan sdk install 0.13.0",
+            "```",
+            "",
+            "```sh",
+            "tan build",
+            "```",
+        ]
+    )
+    blocks = _fenced_blocks(markdown)
+    assert blocks == ["tan sdk switch 0.13.0", "tan sdk install 0.13.0", "tan build"]
+    for block in blocks[:2]:
+        with pytest.raises(AssertionError):
+            assert_no_refused_subcommand_named(block)
+
+
+def test_readme_shell_blocks_never_tell_a_customer_to_run_a_refused_subcommand():
+    """tan-cli#381's headline defect: the quickstart's own opening comment was
+    "clone one, or `tan sdk install <version> && tan sdk switch <version>`" --
+    two commands that exit 1 with `sdk.not-ported`, presented as THE primary
+    way to get an SDK. Every ported refusal message had been cleaned by #305;
+    the document a new customer actually starts from had not.
+
+    Deliberately scans comment lines too. `# ... tan sdk install ...` inside a
+    fenced block is read as an instruction, and that is exactly the form the
+    defect took.
+    """
+    blocks = _fenced_blocks(README.read_text(encoding="utf-8"))
+    assert blocks, "no fenced blocks found -- the extractor is broken"
+    for block in blocks:
+        assert_no_refused_subcommand_named(block)
+
+
+def test_readme_quickstart_opens_on_a_mechanism_that_resolves_an_sdk():
+    """The other half: removing the refused commands must not leave the
+    quickstart with NO answer to "where does the alp-sdk checkout come from".
+    Pins the two things that work -- a plain `git clone`, and `--sdk-root`."""
+    text = README.read_text(encoding="utf-8")
+    quickstart = text.split("## Quickstart", 1)[1].split("\n## ", 1)[0]
+    assert "git clone https://github.com/alplabai/alp-sdk" in quickstart
+    assert "--sdk-root" in quickstart
+
+
+def test_the_readme_quickstart_opening_sequence_runs_on_a_clean_host(tmp_path):
+    """The documentation smoke test #381 asks for: the quickstart's first two
+    `tan` commands, taken FROM the README (not a copy that can drift out of
+    sync with it), executed as real subprocesses on a host with no `~/.alp`,
+    no pointer file and no SDK anywhere but the freshly-cloned checkout.
+
+    Two deliberate divergences from the literal text, both additive:
+
+    * `--no-west --no-pip` -- the documented `tan bootstrap --sdk-root
+      ./alp-sdk` runs `west init`/`west update` and a pip install, i.e. the
+      network. This test is about SDK RESOLUTION reaching bootstrap at all,
+      which is the half #381 broke; the west/pip phases keep their coverage in
+      `test_bootstrap_command.py`.
+    * `--format json` on `init`, to read the outcome rather than scrape text.
+
+    `make_sdk` stands in for `git clone` -- same marker file (`scripts/
+    alp_project.py`, I-31) and same `metadata/bootstrap.json` the resolver and
+    the prerequisite gate read, without a network.
+    """
+    quickstart = (
+        README.read_text(encoding="utf-8").split("## Quickstart", 1)[1].split("\n## ", 1)[0]
+    )
+    commands = [
+        line.split("#")[0].strip()
+        for line in quickstart.splitlines()
+        if line.startswith("tan ")
+    ]
+    # If the README reorders its opening, this test must be updated with it
+    # rather than silently drifting onto a sequence nobody documents.
+    assert commands[:2] == ["tan bootstrap --sdk-root ./alp-sdk", "tan init --name my-app"]
+
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])  # ends up at <tmp>/ws/alp-sdk
+    workspace = sdk.parent
+    bootstrap = run_tan(
+        "bootstrap", "--sdk-root", "./alp-sdk", "--no-west", "--no-pip",
+        "--format", "json", cwd=workspace,
+    )
+    assert bootstrap.returncode == 0, bootstrap.stdout + bootstrap.stderr
+    assert envelope(bootstrap)["ok"] is True
+
+    init = run_tan("init", "--name", "my-app", "--format", "json", cwd=workspace)
+    assert init.returncode == 0, init.stdout + init.stderr
+    assert (workspace / "my-app" / "board.yaml").is_file()
+    # The quickstart's `cd my-app  # sibling ../alp-sdk resolves automatically`
+    # claim, checked rather than assumed: the pointer `init` wrote is what
+    # makes the refused `tan sdk switch` unnecessary in the first place.
+    assert (workspace / "my-app" / ".alp" / "sdk-path").is_file()
 
 
 # ── bootstrap: workspace-relocation + rollback-failure messages ─────────────
