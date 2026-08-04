@@ -38,6 +38,7 @@ committed fixture (`oracle_fixtures.resolve`), so these keep discriminating
 after tan-cli#269. `TAN_PARITY_LIVE=1` re-runs both binaries for real.
 """
 import re
+import sys
 
 import pytest
 
@@ -188,7 +189,38 @@ def test_inspect_matches_the_oracle(work_dir, tmp_path):
     then diff `/` against a Windows replay's `\\`. The value being normalised
     is a redacted scratch root this harness itself created, so the separator in
     it is the recording host's and never a behaviour of either binary.
+
+    Gated on the CAPTURE PLATFORM, and separators are not why. `resolvedValues`
+    carries genuinely host-shaped values -- `pythonBinary` resolves to
+    `python3` on the POSIX host this fixture was captured on and to something
+    else on Windows, which is a fact about the runner, not a divergence between
+    the two binaries. Measured on windows-latest (tan-cli#422):
+
+        Differing items:
+        {'key': 'pythonBinary', 'source': 'default', 'value': 'python3'} != ...
+
+    Normalisation cannot fix that and must not try: rewriting a host fact to
+    match a fixture would make this case pass by asserting the wrong thing. The
+    repo already has the right answer for host-shaped data -- compare only on
+    the platform the fixture was recorded on, the same rule
+    `_HOST_ANCHORED_ABSOLUTE_CASES` (`test_flash_oracle_parity.py`) and
+    `_HOST_ANCHORED_ROOT_CASES` (`test_clean_parity.py`) already apply.
+
+    Freezing a win32 capture would restore cross-platform cover; that needs a
+    Windows host and is tracked on tan-cli#409 alongside the two
+    `support-bundle` cases with the same requirement.
     """
+    if sys.platform == "win32":
+        pytest.skip(
+            "inspect's resolvedValues carries host-shaped values: pythonBinary is "
+            "`python3` on POSIX and something else on Windows, so this compares a "
+            "fact about the runner rather than the two binaries. Gated on win32 "
+            "specifically, NOT on REPLAY_IS_CAPTURE_PLATFORM -- that keys off the "
+            "store-wide CAPTURE_PLATFORM ('win32'), and gating on it here would "
+            "skip the POSIX legs too, where this case really does compare and "
+            "really does pass. Restoring Windows cover needs a win32 capture "
+            "(tan-cli#409)"
+        )
     r_code, r_out, p_code, p_out = _both_sides(["inspect", "--format", "json"], work_dir, tmp_path)
     r_out = oracle_fixtures.normalise_scrubbed_path_separators(r_out, force=True)
     p_out = oracle_fixtures.normalise_scrubbed_path_separators(p_out, force=True)
