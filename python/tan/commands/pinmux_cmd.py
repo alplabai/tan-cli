@@ -73,6 +73,7 @@ from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -444,9 +445,7 @@ def pinmux(
     all_targets: bool = typer.Option(  # accepted, not read
         False, "--all", help="Run command against all relevant targets."
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     verbose: bool = typer.Option(  # accepted, not read
         False, "--verbose", help="Emit additional diagnostic detail."
     ),
@@ -473,13 +472,7 @@ def pinmux(
     clap `GlobalArgs` are `global = true`, so every verb accepts all of them.
     """
     del target, all_targets, verbose, quiet, no_color, non_interactive, ci
-    resolved_format = (
-        output_format if output_format is not None else (ctx.obj or {}).get("format") or "text"
-    )
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     root, board_path = resolve_project_paths(project, board_yaml)

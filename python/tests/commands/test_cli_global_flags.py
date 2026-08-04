@@ -189,9 +189,20 @@ def test_a_format_value_the_oracle_rejects_is_never_relocated(command: str, valu
     "argv, rejected",
     [
         (["--format", "bogus", "--format", "json", "new-som", "--sku", "FOO"], "bogus"),
-        (["--format", "sarif", "--format", "json", "validate", "--offline"], "sarif"),
+        # `bogus`, not `sarif`, since tan-cli#403: root's `--format` domain is
+        # now the UNION over every registered command, so `sarif` -- which
+        # `validate` really implements -- is legitimately ACCEPTED before the
+        # subcommand and is no longer a rejected value. The oracle has neither
+        # `sarif` nor `diagnostic-v1` in ANY position (measured: `invalid value
+        # 'sarif'` for both `tan validate --format sarif --offline` and `tan
+        # --format sarif validate --offline`), so parity cannot arbitrate a
+        # tan-only extension and #403's union is a deliberate design choice.
+        # This case therefore needs a value invalid EVERYWHERE to keep testing
+        # what it was written for: a rejected value must not be smuggled past
+        # root by a second `--format`.
+        (["--format", "bogus", "--format", "json", "validate", "--offline"], "bogus"),
     ],
-    ids=["bogus", "sarif"],
+    ids=["bogus-new-som", "bogus-validate"],
 )
 def test_a_second_format_cannot_smuggle_a_rejected_value_past_root(argv, rejected, tmp_path):
     """The tan-cli#378 RESIDUAL, and a regression against the pre-#378 tree.
@@ -257,13 +268,18 @@ def test_a_second_format_cannot_smuggle_a_rejected_value_past_root(argv, rejecte
 def test_a_rejected_format_value_does_not_strand_the_global_flags_ahead_of_it(tmp_path):
     """The other half of the residual: aborting the rewrite also left every
     global flag already scanned in the pre-subcommand position `root` does not
-    declare, so `tan --verbose --format sarif validate` answered `No such
+    declare, so `tan --verbose --format <bad> validate` answered `No such
     option: --verbose` -- naming a flag this port fully supports, for an argv
-    whose actual fault is the `--format` value. The oracle refuses the VALUE."""
-    proc = _run_tan(["--verbose", "--format", "sarif", "validate"], tmp_path)
+    whose actual fault is the `--format` value. The oracle refuses the VALUE.
+
+    Spelled with `bogus` rather than `sarif` since tan-cli#403 widened root's
+    `--format` domain to the union over every command: `sarif` is one
+    `validate` really implements, so it is now accepted here and would no
+    longer exercise the rejection path this test exists for."""
+    proc = _run_tan(["--verbose", "--format", "bogus", "validate"], tmp_path)
 
     assert proc.returncode == 2, (proc.returncode, proc.stderr)
-    assert "sarif" in proc.stderr, proc.stderr
+    assert "bogus" in proc.stderr, proc.stderr
     assert "--verbose" not in proc.stderr, (
         f"the refusal blamed a supported global flag instead of the value:\n{proc.stderr}"
     )

@@ -298,6 +298,86 @@ assertion that crates/ cannot move.
 
 --------------------------------------------------------------------------
 
+2026-08-04: THIS STORE IS NO LONGER SINGLE-PLATFORM (tan-cli#409)
+
+Fifteen new keys were captured on darwin, not on the `platform:` line's
+win32. They close part of the live-only hole PARITY-COVERAGE.txt records --
+three cases that used to spawn the oracle behind `skipif(RUST is None, ...)`
+and would have become passing SKIPS the day tan-cli#269 deletes crates/, plus
+twelve first-ever comparisons for verbs nothing compared at all:
+
+  test_build_sdk_root_oracle_parity.json   1 key   (was live-only)
+  test_run_oracle_parity.json              2 keys  (were live-only)
+  test_command_surface_oracle_parity.json  12 keys (new module: completion,
+                                                    trace, scaffold, inspect,
+                                                    bootstrap, kconfig,
+                                                    examples)
+
+  cargo build --bin tan
+  TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 python -m pytest \
+    tests/parity/test_build_sdk_root_oracle_parity.py \
+    tests/parity/test_run_oracle_parity.py \
+    tests/parity/test_command_surface_oracle_parity.py
+
+oracle binary:  tan 0.4.1, target/debug/tan built from THIS checkout --
+                certified by oracle_provenance.drift() against
+                PINNED_ORACLE_BUILD_INPUT_DIGEST, which is the check that
+                makes "built from the pinned crates/ state" a measurement
+                rather than a claim (tan-cli#414).
+oracle source:  crates/ at 8a71310, i.e. unchanged from
+                verified-against-crates-commit above.
+platform:       darwin (macOS 26.5.2)
+
+The four pre-existing `test_run_oracle_parity.json` help-text keys were NOT
+re-captured. A capture run rewrites every key the run touches, and this one
+did rewrite them -- `Usage: tan.exe run` became `Usage: tan run`, the prog
+name being the one thing in that text the capture PLATFORM decides. They were
+restored to their win32 originals afterwards, so those four keep the
+provenance this file records for them. Nothing else in this directory
+changed.
+
+Why capturing these on darwin is safe, key by key -- the question the
+`platform:` line exists to force. A frozen answer is only a valid oracle for
+a replay whose separator style matches, so each of the fifteen was checked
+for host-shaped content before it was committed:
+
+  * fourteen carry no filesystem path at all beyond a bare `<ORACLE-ROOT-N>`
+    token (`project.root`), or no path whatsoever (the completion scripts,
+    the empty `data` skeletons). A bare token has no separator in it, so
+    there is nothing for a platform to render differently.
+  * the fifteenth, `test_inspect_matches_the_oracle`, carries
+    `<ORACLE-ROOT-0>/board.yaml`. That case -- and only that case -- forces
+    `oracle_fixtures.normalise_scrubbed_path_separators(..., force=True)` on
+    BOTH sides. The automatic rule keys off CAPTURE_PLATFORM and so disables
+    itself on win32, which is right for the win32-captured majority and
+    exactly backwards for a POSIX-captured key: without the override, a
+    Windows replay would diff this fixture's `/` against its own live port's
+    `\` and report a platform difference as a port defect.
+
+What could NOT be captured here, and must be captured on win32 by whoever
+takes it on: the two `test_support_bundle_oracle_parity.py` cases. They are
+not merely separator-sensitive -- their whole compared surface (doctor's
+check list and statuses, the whole inspect.context) is decided by the host,
+and no scrub reaches that. Measured on this machine, the oracle's own bundle
+under `empty_tool_inventory` froze these rows, among others:
+
+  codeLLDBExtension  unknown  vadimcn.vscode-lldb: unknown ...
+  lldb               pass     vadimcn.vscode-lldb ships its own LLDB ...
+  zephyrSdkAvailableForHost   pass  The Zephyr SDK publishes a host build
+                                    for macos-aarch64.
+
+`macos-aarch64` is this host's architecture written into the frozen answer,
+and the two LLDB rows are the macOS debug stack; a Windows bundle carries
+`longPaths` (which exists nowhere else) and no LLDB rows at all. Freezing
+this on darwin and replaying it against a live port on any other OS diffs two
+platforms' genuinely different -- and both correct -- behaviour, which is the
+false red `CAPTURE_PLATFORM` exists to warn about. Note what does NOT save
+it: `_refuse_if_leaking_a_real_host_path` does not fire on this capture (a
+scratch destination under the system temp root carries no `/Users/<name>`
+shape), so the guard would have written it. The reason to refuse is the
+platform, and it has to be a decision, not a hope that the leak guard
+notices.
+
 2026-08-04, fix/v06-followups: verified-against-crates-commit ADVANCED TO
 c0e45f955c2f4b3d40e9193dcb89b7ca1d3a5f76 WITH NO RE-CAPTURE.
 

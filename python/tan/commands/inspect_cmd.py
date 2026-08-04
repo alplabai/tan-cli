@@ -64,6 +64,7 @@ from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -268,9 +269,7 @@ def inspect(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     quiet: bool = typer.Option(False, "--quiet", help="Suppress non-essential output."),
     verbose: bool = typer.Option(False, "--verbose", hidden=True),
     no_color: bool = typer.Option(False, "--no-color", hidden=True),
@@ -287,13 +286,7 @@ def inspect(
     though `inspect.rs` never reads any of them.
     """
     del verbose, no_color, non_interactive, ci, target, all_targets
-    resolved_format = (
-        output_format if output_format is not None else (ctx.obj or {}).get("format") or "text"
-    )
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     generated_at = generated_at_iso(millis=True)

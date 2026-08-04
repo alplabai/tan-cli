@@ -93,6 +93,7 @@ from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.net import default_ssl_context
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: GitHub Releases API endpoint for `alplabai/alp-sdk`, from
 #: `tan_core::sdk::GITHUB_RELEASES_URL`.
@@ -1009,15 +1010,9 @@ def sdk(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="Explicit alp-sdk checkout to report."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Manage local Alp SDK installs."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     try:

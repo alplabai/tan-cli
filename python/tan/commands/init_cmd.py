@@ -123,6 +123,7 @@ from tan.core.scaffold import (
 )
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -835,9 +836,7 @@ def init(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     verbose: bool = typer.Option(
         False, "--verbose", help="Emit additional diagnostic detail."
     ),
@@ -865,10 +864,6 @@ def init(
     # code reads them. Hiding them here would parse identically but make
     # `tan init --help`'s TEXT diverge from the oracle's.
     del verbose, quiet, no_color, target, all_targets
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     try:

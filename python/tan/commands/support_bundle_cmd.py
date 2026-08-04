@@ -101,6 +101,7 @@ from tan.core.debug_launch import (
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 #: `data.schemaVersion` for this command's stdout payload, and the bundle
 #: file's own top-level + per-section schema versions (all "1", like the
@@ -770,9 +771,7 @@ def support_bundle(
         metavar="EMIT",
         help="Generation target (e.g. zephyr-conf, dts-overlay, cmake-args, yocto-conf).",
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     verbose: bool = typer.Option(
         False, "--verbose", help="Emit additional diagnostic detail."
     ),
@@ -789,13 +788,7 @@ def support_bundle(
     `support_bundle.rs` never reads.
     """
     del quiet, no_color, non_interactive, ci, all_targets
-    resolved_format = (
-        output_format if output_format is not None else (ctx.obj or {}).get("format") or "text"
-    )
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     try:

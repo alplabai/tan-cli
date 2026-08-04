@@ -58,6 +58,7 @@ from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `tan.planner.kconfig_symbols.SCHEMA_VERSION`, verbatim -- not imported
 #: directly: every `tan.planner.*` submodule import runs the package's own
@@ -573,16 +574,10 @@ def kconfig(
     ),
     sdk_root: str = typer.Option(None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."),
     verbose: bool = typer.Option(False, "--verbose", help="Emit additional diagnostic detail."),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Show the board-scoped Kconfig symbol menu for one core (the vscode
     `prj.conf` LSP's live feed). Needs a bootstrapped Zephyr workspace."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     # The same backstop `presets_cmd.py` has had all along and this command

@@ -93,6 +93,7 @@ from tan.core.system_manifest import (
 )
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit, json_safe_floats
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 #: Streaming read size for the SHA-256, matching the oracle's 65536-byte buffer.
 _HASH_CHUNK = 65536
@@ -492,16 +493,10 @@ def image(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
 ) -> None:
     """Assemble a flashable-image bundle from build/system-manifest.yaml."""
-    resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     try:

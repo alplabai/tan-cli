@@ -76,6 +76,7 @@ from tan.core.run import RunAction, decide_run_action, native_sim_exe_beside, na
 from tan.core.system_manifest import SystemManifestError, parse_system_manifest
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.exec` skip reason JSON mode reports when a `native_sim` binary was
 #: found but not executed (never spawned under `--format json`: a process
@@ -345,16 +346,10 @@ def run(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Build the project, then run it: execute the produced native_sim binary
     for a host target, or (with --flash) program a hardware target."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     # Same resolution `build_cmd.build` performs (`run` builds via the same

@@ -78,6 +78,7 @@ from tan.core.size import resolve_variant
 from tan.core.timestamp import generated_at_iso
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -1217,9 +1218,7 @@ def debug_config(
     sdk_root: str = typer.Option(  # read for the alp-sdk#1026 metadata fallback; see below
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
     quiet: bool = typer.Option(False, "--quiet", help="Suppress non-essential output."),
 ) -> None:
     """Generate (or preview) a VS Code launch.json debug configuration.
@@ -1238,11 +1237,7 @@ def debug_config(
     # debug-config ...`, which is what the committed goldens invoke and what
     # clap's `global = true` gives the Rust); the root callback records it and
     # this option overrides it when repeated after the command name.
-    resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     try:

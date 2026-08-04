@@ -265,6 +265,7 @@ from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, ValidateOutputFormat
 from tan.version import TAN_VERSION
 
 #: `data.schemaVersion` for this command's payload -- the envelope payload's own
@@ -286,38 +287,36 @@ VALIDATOR_TIMEOUT_S = 300
 #: while a script path puts its own directory on `sys.path[0]` for free.
 VALIDATOR_SCRIPT = ("scripts", "validate_board_yaml.py")
 
-#: The `--format` values this command accepts. `diagnostic-v1` and `sarif` are
-#: NOT part of the shared `Format::Text`/`Format::Json` enum every other
-#: command mirrors from `crates/tan-cli/src/cli.rs` -- there is no Rust
-#: precedent for them yet. They exist so alp-sdk's quality gate
-#: (`scripts/check_diagnostic_schema.py`) can point at `tan` instead of
-#: spawning `python -m alp_cli.main validate --format json`.
-#:
-#: WARNING -- `--format json` does NOT mean the same thing in the two CLIs.
-#: In alp-sdk (`scripts/alp_cli/validate.py:20,34`), `--format json` IS the
-#: diagnostic-v1 document. In tan, `--format json` is the envelope
-#: (`{command,ok,exitCode,project,data,issues}`; see `_emit` below) and the
-#: diagnostic-v1 document moved to its own `--format diagnostic-v1`. The
-#: obvious find-and-replace swap -- pointing the gate's argv at `tan` while
-#: keeping `"--format", "json"` -- validates the envelope against
-#: `diagnostic-v1.schema.json` (whose root is `additionalProperties: false`)
-#: and fails with something like "Additional properties are not allowed
-#: ('command', 'ok', 'exitCode', ...)", which names nothing about the real
-#: cause. The gate-side edit `check_diagnostic_schema.py` needs is therefore
-#: NOT a repoint of the same argv -- it must spawn
-#: `tan validate --offline --format diagnostic-v1`, not
-#: `tan validate --offline --format json`. `--format sarif` keeps its name
-#: unchanged in both CLIs, so only the `json` case silently diverges.
-#:
-#: `diagnostic-v1` is alp-sdk's `metadata/schemas/diagnostic-v1.schema.json`
-#: (mirroring `scripts/alp_cli/diagnostic_format.py:to_machine_json`'s shape --
-#: `schemaVersion`/`tool`/`diagnostics[]`, zero-based LSP ranges), `sarif` is
-#: its SARIF 2.1.0 sibling (`to_sarif`). `text` is unchanged by this addition.
-FORMAT_TEXT = "text"
-FORMAT_JSON = "json"
-FORMAT_DIAGNOSTIC_V1 = "diagnostic-v1"
-FORMAT_SARIF = "sarif"
-_FORMATS = (FORMAT_TEXT, FORMAT_JSON, FORMAT_DIAGNOSTIC_V1, FORMAT_SARIF)
+# The `--format` values this command accepts are declared ONCE, as
+# `tan.output_format.ValidateOutputFormat` (tan-cli#403) -- not as a literal
+# tuple here plus a hand-written membership check in [`validate`]'s body,
+# which is how `--help`, `cli.py`'s root callback and all three
+# shell-completion scripts came to name only `text` and `json` while this
+# command really accepted four: nothing connected them to the list, so the two
+# IDE-oriented formats stayed reachable but undiscoverable.
+#
+# `diagnostic-v1` and `sarif` are NOT part of the shared
+# `Format::Text`/`Format::Json` enum every other command mirrors from
+# `crates/tan-cli/src/cli.rs` -- there is no Rust precedent for them yet. They
+# exist so alp-sdk's quality gate (`scripts/check_diagnostic_schema.py`) can
+# point at `tan` instead of spawning
+# `python -m alp_cli.main validate --format json`.
+#
+# WARNING -- `--format json` does NOT mean the same thing in the two CLIs.
+# In alp-sdk (`scripts/alp_cli/validate.py:20,34`), `--format json` IS the
+# diagnostic-v1 document. In tan, `--format json` is the envelope
+# (`{command,ok,exitCode,project,data,issues}`; see `_emit` below) and the
+# diagnostic-v1 document moved to its own `--format diagnostic-v1`. The
+# obvious find-and-replace swap -- pointing the gate's argv at `tan` while
+# keeping `"--format", "json"` -- validates the envelope against
+# `diagnostic-v1.schema.json` (whose root is `additionalProperties: false`)
+# and fails with something like "Additional properties are not allowed
+# ('command', 'ok', 'exitCode', ...)", which names nothing about the real
+# cause. The gate-side edit `check_diagnostic_schema.py` needs is therefore
+# NOT a repoint of the same argv -- it must spawn
+# `tan validate --offline --format diagnostic-v1`, not
+# `tan validate --offline --format json`. `--format sarif` keeps its name
+# unchanged in both CLIs, so only the `json` case silently diverges.
 
 #: `diagnostic-v1.schema.json`'s own `schemaVersion` -- an integer `const: 1`,
 #: unrelated to `DATA_SCHEMA_VERSION` above (a different document, a different
@@ -739,7 +738,7 @@ def _sarif_document(issues: list[Issue], board_path: str) -> dict[str, Any]:
 
 def _emit(
     *,
-    output_format: str,
+    output_format: ValidateOutputFormat,
     root: str,
     board_path: str,
     outcome: str,
@@ -748,7 +747,7 @@ def _emit(
     command_line: str = "",
     sdk: SdkInfo | None = None,
 ) -> None:
-    if output_format == FORMAT_JSON:
+    if output_format == ValidateOutputFormat.JSON:
         data = {
             "schemaVersion": DATA_SCHEMA_VERSION,
             "outcome": outcome,
@@ -777,13 +776,13 @@ def _emit(
                 sdk=sdk,
             )
         )
-    elif output_format == FORMAT_DIAGNOSTIC_V1:
+    elif output_format == ValidateOutputFormat.DIAGNOSTIC_V1:
         # indent=2, matching scripts/alp_cli/validate.py:34's
         # `json.dumps(to_machine_json(collector), indent=2)` -- these two
         # formats are ported documents, not the envelope (which is
         # deliberately compact; see `tan.envelope.emit`'s `separators`).
         typer.echo(json.dumps(_diagnostic_v1_document(issues, board_path), indent=2))
-    elif output_format == FORMAT_SARIF:
+    elif output_format == ValidateOutputFormat.SARIF:
         # indent=2, matching scripts/alp_cli/validate.py:36.
         typer.echo(json.dumps(_sarif_document(issues, board_path), indent=2))
     else:
@@ -831,11 +830,8 @@ def validate(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text",
-        "--format",
-        metavar="FORMAT",
-        help="Output format: text, json, diagnostic-v1, or sarif.",
+    output_format: ValidateOutputFormat = typer.Option(
+        ValidateOutputFormat.TEXT, "--format", help=FORMAT_HELP
     ),
 ) -> None:
     """Validate a board.yaml.
@@ -851,11 +847,6 @@ def validate(
     the spawn path's own SDK guard; `--offline` still ignores it entirely,
     having no subprocess to point anywhere, and reports no `sdk` block.
     """
-    if output_format not in _FORMATS:
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json', 'diagnostic-v1', 'sarif')",
-            param_hint="--format",
-        )
     root, board_path = _resolve_board_path(project, board_yaml)
 
     # Resolved BEFORE the board.yaml guard, though it is guard 2, because the

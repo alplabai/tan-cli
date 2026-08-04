@@ -136,6 +136,7 @@ from tan.core.timestamp import generated_at_iso
 from tan.core.venv import find_workspace_venv, west_program, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: Zephyr's own floor, from `<zephyr>/cmake/modules/python.cmake`'s
 #: `set(PYTHON_MINIMUM_REQUIRED 3.12)`. Only the FALLBACK -- `zephyr_python_floor`
@@ -2841,9 +2842,7 @@ def doctor(
         "(--non-interactive/--ci/--format json all disable it): a repair a "
         "human did not watch happen is not consent.",
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     non_interactive: bool = typer.Option(
         False,
         "--non-interactive",
@@ -2854,10 +2853,6 @@ def doctor(
     ),
 ) -> None:
     """Diagnose whether this host can build and flash."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     # Snapshot the RAW `--project` value before `project` is reassigned below

@@ -979,7 +979,6 @@ def test_model_bare_invocation_is_a_known_divergence_from_the_oracle(work_dir, t
     assert (p_code, [i["code"] for i in p_out["issues"]]) == (1, ["model.unknown-subcommand"])
 
 
-@_ORACLE_REQUIRED
 def test_new_som_matches_the_oracle_on_command_and_issue_code(work_dir, tmp_path):
     """tan-cli#254, closed. Three invocation shapes, all now agreeing with the
     oracle on ``command``/issue code/exit code; wording is the one thing left
@@ -1005,12 +1004,12 @@ def test_new_som_matches_the_oracle_on_command_and_issue_code(work_dir, tmp_path
       matching the oracle's clap ``global = true`` semantics.
     """
     home = tmp_path / "home"
-    r_code, _ = _run([RUST], ["new-som"], work_dir, home)
+    r_code, _ = rust_run(["new-som"], work_dir, home, scrub_roots=())
     p_code, _ = _run(python_command(), ["new-som"], work_dir, home)
     assert r_code == p_code == 2
 
     for argv in (["new-som", "--format", "json"], ["--format", "json", "new-som"]):
-        _, r_out = _run([RUST], argv, work_dir, home)
+        _, r_out = rust_run(argv, work_dir, home, scrub_roots=())
         _, p_out = _run(python_command(), argv, work_dir, home)
         assert r_out["command"] == p_out["command"] == "new-som", (argv, r_out, p_out)
         assert r_out["exitCode"] == p_out["exitCode"] == 2, (argv, r_out, p_out)
