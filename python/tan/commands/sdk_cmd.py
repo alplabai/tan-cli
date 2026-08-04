@@ -836,6 +836,19 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
             *text,
         ]
         issues.append(pin_issue)
+    # tan-cli#407 names THIS command in particular: `sdk current` is what a
+    # user runs to ask "which SDK am I on?", and in a workspace holding both a
+    # child `<ws>/alp-sdk` and a lateral `../alp-sdk` it answers with the
+    # narrow one only -- reporting the readiness and VERSION of the checkout
+    # `tan generate` did not use. Function-level import because `build_cmd`
+    # imports THIS module at line 97; the same one-way dependency
+    # `build/manifest.py` works around the same way.
+    from tan.commands.build_cmd import sdk_ladder_divergence_issue
+
+    divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=False)
+    if divergence is not None:
+        text = [*text, divergence.message]
+        issues.append(divergence)
     _emit(
         json_mode=json_mode,
         data={

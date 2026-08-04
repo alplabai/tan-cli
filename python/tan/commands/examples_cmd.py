@@ -58,7 +58,7 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_wide
+from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
 from tan.commands.sdk_cmd import project_pin_issue
 from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
@@ -398,6 +398,16 @@ def examples(
             pin_issue = project_pin_issue(sdk[3], sdk[2])
             if pin_issue is not None:
                 issues.append(pin_issue)
+            # tan-cli#407: the catalogue this command just listed can come from
+            # a different checkout than `tan build` plans against, with both
+            # envelopes reporting `sourceTier: "discovery"`. `sdk_root` is the
+            # RAW flag, not `sdk[1]`'s resolved text -- naming a root
+            # explicitly puts both ladders on the same terminal tier, and the
+            # helper returns `None` there rather than warning about a collision
+            # the user never reached.
+            divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=True)
+            if divergence is not None:
+                issues.append(divergence)
         else:
             # tan-cli#400. NOT an error: `examples: []` from no checkout is a
             # renderable answer the New Project flow is built on, so this stays

@@ -92,7 +92,11 @@ import typer
 # which interpreter name the SDK's own scripts run under -- a PATH name, never
 # `sys.executable`, which is `tan` itself once PyInstaller has frozen it.
 from tan import planner_emit
-from tan.commands.build_cmd import _planner_python, resolve_sdk_root_wide
+from tan.commands.build_cmd import (
+    _planner_python,
+    resolve_sdk_root_wide,
+    sdk_ladder_divergence_issue,
+)
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS, project_pin_issue
 from tan.commands.doctor_cmd import probe, resolve_manifest_python_floor
 from tan.core.fs_confine import PathEscapeError, resolve_confined
@@ -1053,6 +1057,17 @@ def generate(
         pin_issue = project_pin_issue(sdk_broken_pin, sdk_tier)
         if pin_issue is not None:
             issues.append(pin_issue)
+        # tan-cli#407: this command just wrote `build/generated/alp.conf`, the
+        # DTS overlays and `alp_hw_info_build.h` out of one checkout's
+        # `metadata/`, and `tan build` may plan the very same tree against
+        # another -- both reporting `sourceTier: "discovery"`. Of the four wide
+        # commands this is the one where the split becomes FILES on disk, so
+        # the warning ships beside them. `sdk_root` is the RAW flag (never
+        # reassigned in this function): an explicit root puts both ladders on
+        # the terminal `sdkRootFlag` tier and the helper returns `None`.
+        divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=True)
+        if divergence is not None:
+            issues.append(divergence)
     except GenerateError as err:
         refuse(err)
         return
