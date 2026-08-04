@@ -153,6 +153,7 @@ from tan.core.renode_sim import (
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
+from tan.core.shapes import is_sdk_root
 
 #: The `SystemManifestError` message prefix `parse_system_manifest` raises
 #: for a `schema_version` mismatch -- distinguishing it from every other
@@ -180,14 +181,9 @@ def _resolve_root_arg(raw: str | None, cwd: str, default: str) -> str:
     return _normalize_join(cwd, raw)
 
 
-def _is_sdk_root(path: str) -> bool:
-    """`util.rs::has_loader_script`, string-based and incapable of raising --
-    a path with an embedded NUL or a permission-denied parent reads as "not
-    an SDK root" rather than throwing out of the pre-flight guard."""
-    try:
-        return os.path.isfile(os.path.join(path, "scripts", "alp_project.py"))
-    except (OSError, ValueError):
-        return False
+#: tan-cli#408: one implementation, in `tan.core.shapes`, imported under the
+#: private name this module's call site already uses.
+_is_sdk_root = is_sdk_root
 
 
 def _resolve_sdk_root_and_tier(

@@ -97,6 +97,7 @@ from tan.commands.deferred_cmd import DEFERRED_ISSUE_CODE, DEFERRED_ISSUE_URL
 from tan.commands.sdk_cmd import project_pin_issue, resolve_sdk_tiered
 from tan.core.build_plan import BuildPlan, PlanParseError, parse_build_plan
 from tan.core.plan_exec import PolicyAction, normalize_path, resolve_action
+from tan.core.shapes import SDK_MARKER, is_sdk_root
 from tan.core.venv import venv_python
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
@@ -104,8 +105,9 @@ from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `scripts/alp_project.py` is THE marker for an alp-sdk checkout -- the same
 #: literal `tan_core::project` hardcodes (I-31). Renaming or relocating it
-#: breaks every `--sdk-root` resolution in the CLI, so it is spelled once.
-SDK_MARKER = ("scripts", "alp_project.py")
+#: breaks every `--sdk-root` resolution in the CLI, so it is spelled once --
+#: in `tan.core.shapes` since tan-cli#408. The import below re-exports it
+#: here because a dozen modules already reach it through this one.
 
 #: Envelope `data.slices[].status`, from `SliceOutcome.status`. The wire
 #: vocabulary is the Rust one (`ok` / `skipped` / `failed`), NOT the executor's
@@ -340,8 +342,11 @@ def _abs_posix(path: str) -> str:
     return os.path.abspath(path).replace("\\", "/")
 
 
-def _is_sdk_root(path: Path) -> bool:
-    return path.joinpath(*SDK_MARKER).is_file()
+#: tan-cli#408: one implementation, in `tan.core.shapes`. Three modules
+#: carried a private copy of this and they had already drifted in TYPE --
+#: this one took a `Path`, `flash_cmd`'s and `renode_cmd`'s took a `str`.
+#: Imported under the same private name so no call site here moves.
+_is_sdk_root = is_sdk_root
 
 
 def discover_sdk_root(workspace_root: Path) -> Path | None:

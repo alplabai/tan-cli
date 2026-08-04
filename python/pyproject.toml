@@ -210,3 +210,28 @@ include = ["tan*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+# tan-cli#408. ADVISORY ONLY -- read this before believing it enforces
+# anything. No workflow under `.github/workflows/` runs ruff, so this section
+# changes exactly one thing: an editor with ruff wired in now surfaces the
+# three complexity rules while you type, instead of nothing at all.
+#
+# What actually ENFORCES the size guideline is
+# `tests/gates/test_module_size_budget.py`, a ratchet that runs inside
+# `python -- pytest across python/` -- already a required context on `main`
+# and `dev`, so it gates merges today with no branch-protection change. A new
+# required CI job would have to be added to that list to matter, and adding a
+# required context blocks every open PR until it has run on each of them.
+#
+# `ruff check python/` is red on this tree, deliberately and honestly: 23
+# modules are over 800 lines and 199 functions over 50. The gate records that
+# as a baseline and fails on GROWTH; ruff here reports the standing debt.
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# PLR0911 too-many-return-statements, PLR0912 too-many-branches,
+# PLR0915 too-many-statements -- the three `bootstrap_cmd._run`'s lone
+# `# noqa` names, and the only `noqa: PLR` anywhere under `tan/`.
+extend-select = ["PLR0911", "PLR0912", "PLR0915"]
