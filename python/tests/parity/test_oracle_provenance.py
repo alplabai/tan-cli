@@ -69,6 +69,18 @@ def _stub_tan(path: Path, version: str) -> Path:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     if sys.platform == "win32":
+        # `.cmd`, not the caller's bare name. Windows `CreateProcess` dispatches
+        # a batch file by EXTENSION, so a batch script written to an extensionless
+        # path -- or worse, to `<name>.exe` -- is not a runnable image and every
+        # spawn of it dies `OSError: [WinError 193] %1 is not a valid Win32
+        # application`. Measured on windows-latest (tan-cli#414) as two failures
+        # here, one of which then reported the resulting `None` as a missing
+        # provenance message rather than as a broken stub.
+        #
+        # Callers must use the RETURNED path, never the one they passed. The two
+        # sites that stub a resolver-visible `target/<profile>/tan` are unaffected:
+        # they only ever `os.utime` and resolve it, never spawn it.
+        path = path.with_suffix(".cmd")
         path.write_text(f"@echo off\r\necho {version}\r\n", encoding="utf-8")
     else:
         path.write_text(f"#!/bin/sh\necho '{version}'\n", encoding="utf-8")
