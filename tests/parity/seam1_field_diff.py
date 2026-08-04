@@ -403,12 +403,22 @@ def _tan_reconciled_refusal(sdk_root: Path, board_yaml: str) -> tuple[bool, str]
 
     import tan as _tan_pkg
 
-    resolved = Path(_tan_pkg.__file__).resolve()
-    if repo_python not in str(resolved.parent.parent):
-        raise ComparatorError(
-            f"refusing to compare against a tan from another tree: resolved "
-            f"`{resolved}`, expected one under `{repo_python}` (tan-cli#423)"
-        )
+    # Only a REAL, file-backed `tan` can be checked for provenance -- and only
+    # a real one can be from the wrong tree, which is the whole risk. This
+    # module's own self-test (`test_seam1_tan_reconciliation.py`) injects a
+    # `types.SimpleNamespace` into `sys.modules` to drive both the refused and
+    # the not-refused branch without a planner; that stub has no `__file__`
+    # and is the harness deliberately substituting itself, not an accident to
+    # guard against. `getattr` rather than `hasattr` + attribute access so a
+    # namespace package (`__file__ is None`) takes the same path.
+    origin = getattr(_tan_pkg, "__file__", None)
+    if origin is not None:
+        resolved = Path(origin).resolve()
+        if repo_python not in str(resolved.parent.parent):
+            raise ComparatorError(
+                f"refusing to compare against a tan from another tree: resolved "
+                f"`{resolved}`, expected one under `{repo_python}` (tan-cli#423)"
+            )
 
     try:
         tan_emit("build-plan", root=sdk_root, board_yaml=sdk_root / board_yaml)
