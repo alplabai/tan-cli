@@ -99,7 +99,14 @@ _MODULE_BUDGET: dict[str, int] = {
     # a diff.
     "tan/planner/zephyr_board.py": 970,
     "tan/commands/support_bundle_cmd.py": 834,
-    "tan/cli.py": 831,
+    # 842, not 831, as of tan-cli#433: `_reorder_global_flags` now consults
+    # `_every_declared_format()` -- the same single source `_format_callback`
+    # reads -- instead of a second, driftable tuple, and the docstring
+    # records why (the old rule silently DROPPED the subcommand for any
+    # leading `--format` outside `text`/`json`). Raised rather than
+    # extracted: the growth is the explanation of a shipped regression,
+    # which is the last thing to move out of the file it explains.
+    "tan/cli.py": 842,
 }
 
 #: Some of these are `tan/planner/**`, which is a hash-audited MIRROR of

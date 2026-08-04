@@ -147,13 +147,19 @@ _SUBCOMMAND_NAMES = frozenset(
 #: there for why the two must stay separate.
 _RELOCATABLE_FLAG_ARITY: dict[str, int] = RELOCATABLE_FLAG_ARITY
 
-#: The only values the ORACLE's global `--format` has -- measured, not read:
+#: The oracle's global `--format` only ever had two values (measured:
 #: `target/debug/tan.exe --format sarif validate` and `... --format bogus
 #: new-som --sku FOO` both answer `error: invalid value '<x>' for '--format
-#: <FORMAT>' [possible values: text, json]` at exit 2, in BOTH argv positions.
-#: Shared by `_reorder_global_flags` (which values are the global flag at all)
-#: and `_format_callback` (what `root` accepts), so the two cannot drift.
-_ROOT_FORMAT_VALUES = ("text", "json")
+#: <FORMAT>' [possible values: text, json]` at exit 2, in BOTH argv
+#: positions) -- but this port's global `--format` is wider than that
+#: (tan-cli#403): `_format_callback` accepts `_every_declared_format()`, the
+#: union over every registered command's own `--format`, not a hard-coded
+#: pair. `_reorder_global_flags` has to relocate that SAME domain, via the
+#: SAME function, or a value outside the oracle's two but inside a real
+#: command's own domain (`diagnostic-v1`/`sarif`, `validate`'s) collapses the
+#: rewrite and drops the subcommand entirely instead of relocating past it
+#: (tan-cli#433) -- a second, hand-kept copy of this set is exactly the drift
+#: that produced #433 in the first place.
 
 
 def _reorder_global_flags(argv: list[str]) -> list[str]:
@@ -197,13 +203,17 @@ def _reorder_global_flags(argv: list[str]) -> list[str]:
     `tests/commands/test_cli_global_flags.py`, which derives its cases from
     that same registration table.
 
-    Only `--format text` / `--format json` relocate, though: those are the
-    oracle's whole global `--format` vocabulary. A value outside it is not the
-    global flag at all, and the rewrite collapses to just that `--format
-    <value>` pair so `root` refuses it at parse time, before any command
-    resolves -- see the `--format` branch below for the two measured
-    divergences that pins, and for why leaving the rest of argv in place did
-    not reach the refusal.
+    `--format`'s relocatable domain is `_every_declared_format()` -- the union
+    over every registered command's own `--format`, not just the oracle's
+    `text`/`json` pair (tan-cli#403) -- because `root`'s own eager
+    `_format_callback` accepts that identical union; the two have to read the
+    SAME set or a value `_format_callback` would happily accept gets treated
+    here as not-the-flag-at-all and collapses the rewrite instead of
+    relocating past the subcommand name (tan-cli#433). A value outside even
+    that union -- `bogus` -- still is not this flag, and the rewrite still
+    collapses to just that `--format <value>` pair so `root` refuses it at
+    parse time, before any command resolves -- see the `--format` branch below
+    for why leaving the rest of argv in place does not reach the refusal.
 
     Deliberately conservative otherwise: any OTHER token before the first
     subcommand name that is not a recognised global flag (or that flag's
@@ -225,32 +235,33 @@ def _reorder_global_flags(argv: list[str]) -> list[str]:
         if arity is None:
             return argv  # not a recognised global flag and not the subcommand
         if name == "--format":
-            # Only `text`/`json` are the GLOBAL `--format`; any other value is
-            # not this flag at all, and the oracle refuses the VALUE at PARSE
-            # time, before the command body runs. The rewrite therefore
-            # collapses to exactly the two tokens that reproduce that refusal
-            # through `root`'s own `_format_callback`, dropping the rest of
-            # argv -- see the `return` below for why leaving argv alone does
-            # not work.
+            # The relocatable domain is `_every_declared_format()`, not a
+            # hard-coded `text`/`json` pair (tan-cli#433, a regression of
+            # tan-cli#403): `_format_callback` already accepts the union over
+            # every registered command's `--format`, including `validate`'s
+            # `diagnostic-v1`/`sarif`, so this rewrite has to relocate that
+            # SAME set or it refuses a value `root` itself would have
+            # accepted, collapsing the argv and dropping the subcommand along
+            # with it -- exactly #433's `tan --format diagnostic-v1 validate
+            # --offline`, which lost `validate` entirely and answered "a
+            # command is required" instead of the diagnostic-v1 document `tan
+            # validate --offline --format diagnostic-v1` produces.
             #
-            # Two divergences this closes, both measured against
-            # `target/debug/tan.exe`. (1) `tan --format sarif validate`: the
-            # oracle exits 2 with `invalid value 'sarif'`, but relocating sent
-            # it to `validate`'s own parser, whose `sarif`/`diagnostic-v1` are
-            # a deliberate POST-subcommand port extension -- so the port
-            # printed a full SARIF 2.1.0 document on stdout. Extending the
-            # oracle's surface after the subcommand name is a choice this port
-            # made; extending its GLOBAL surface was an accident of
-            # relocation. (2) `tan --format bogus new-som --sku FOO`: the
-            # oracle rejects the value and does NO work, while relocation made
-            # it a value only the command body validates -- and `new-som`
-            # writes metadata files, so an argv the oracle refuses at parse
-            # was reaching real writes.
+            # A value outside even that union is not this flag at all, and the
+            # oracle refuses such a VALUE at PARSE time, before the command
+            # body runs -- measured: `tan --format bogus new-som --sku FOO`
+            # rejects the value and does no work, while a rewrite that let the
+            # value through made it something only `new-som`'s own body
+            # validates, and `new-som` WRITES metadata files. The rewrite
+            # therefore collapses to exactly the two tokens that reproduce
+            # that refusal through `root`'s own `_format_callback`, dropping
+            # the rest of argv -- see the `return` below for why leaving argv
+            # alone does not work.
             if "=" in token:
                 value = token.split("=", 1)[1]
             else:
                 value = argv[i + 1] if i + 1 < n else None
-            if value not in _ROOT_FORMAT_VALUES:
+            if value not in _every_declared_format():
                 # Just returning `argv` here (the first cut of tan-cli#378)
                 # does NOT reach that refusal, for two measured reasons.
                 #
@@ -268,7 +279,7 @@ def _reorder_global_flags(argv: list[str]) -> list[str]:
                 # (2) Returning the untouched argv also strands every global
                 # flag already scanned ahead of this one back in the
                 # pre-subcommand position `root` does not declare: `tan
-                # --verbose --format sarif validate` answered `No such option:
+                # --verbose --format bogus validate` answered `No such option:
                 # --verbose` -- naming a flag this port supports, for an argv
                 # whose actual fault is the `--format` value.
                 #
