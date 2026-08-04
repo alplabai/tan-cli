@@ -144,6 +144,30 @@ def test_missing_board_yaml_refuses(tmp_path):
     assert doc["issues"][0]["code"] == "model.board-yaml-missing"
 
 
+def test_non_utf8_board_yaml_is_a_coded_envelope_not_a_traceback(tmp_path):
+    """tan-cli#415: `_load_board` caught `OSError` only, so a non-UTF-8
+    board.yaml escaped as a raw `UnicodeDecodeError` (a `ValueError`, not an
+    `OSError`) rather than the SAME `model.board-yaml-missing` refusal an
+    unreadable board.yaml already gets -- folded into `model.internal-failure`
+    by `model()`'s own generic backstop before this fix, not a traceback, but
+    still the WRONG code/exit for "this file cannot be read"."""
+    sdk = make_sdk(tmp_path / "sdk")
+    (tmp_path / "board.yaml").write_bytes(b"som:\n  sku: E1M-TEST\n# \xff\n")
+    result = runner.invoke(
+        app,
+        [
+            "build",
+            "--project", str(tmp_path),
+            "--sdk-root", str(sdk),
+            "--format", "json",
+        ],
+    )
+    assert result.exit_code == 2
+    doc = envelope(result)
+    assert doc["ok"] is False
+    assert doc["issues"][0]["code"] == "model.board-yaml-missing"
+
+
 def test_no_models_declared_is_a_success_no_op(tmp_path):
     sdk = make_sdk(tmp_path / "sdk")
     board_yaml(tmp_path)

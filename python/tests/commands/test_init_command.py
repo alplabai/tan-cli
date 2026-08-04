@@ -528,6 +528,53 @@ def test_unreadable_template_data_is_a_coded_internal_failure(tmp_path, monkeypa
     assert exit_info.value.exit_code == 5
 
 
+def test_non_utf8_vendored_template_byte_is_a_coded_envelope_not_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    """tan-cli#415: `scaffold._read_verbatim`'s two callers each caught
+    `OSError` only, so one corrupt byte in tan's OWN vendored tree escaped as
+    a raw `UnicodeDecodeError` (a `ValueError`, not an `OSError`) -- caught
+    only by `init()`'s generic backstop before this fix (`init.internal-
+    failure`), not the SAME `init.template-unreadable` a missing tree already
+    gets. A real (copied) vendored tree with exactly one corrupted byte, not a
+    synthetic replacement, so this exercises the actual read path
+    `test_unreadable_template_data_is_a_coded_internal_failure` above cannot
+    (a missing directory never reaches `_read_verbatim` at all).
+    """
+    import shutil
+
+    from tan.commands import init_cmd
+    from tan.core import scaffold
+
+    corrupt_root = tmp_path / "vendored-corrupt"
+    shutil.copytree(scaffold.VENDORED_ROOT / "minimal", corrupt_root / "minimal")
+    board_yaml = corrupt_root / "minimal" / "E1M-AEN801" / "board.yaml"
+    board_yaml.write_bytes(board_yaml.read_bytes() + b"\n# \xff\n")
+    monkeypatch.setattr(scaffold, "VENDORED_ROOT", corrupt_root)
+
+    with pytest.raises(typer.Exit) as exit_info:
+        init_cmd.init(
+            template="zephyr-app",
+            from_example=None,
+            name=None,
+            destination=str(tmp_path / "out"),
+            som=None,
+            preview=True,
+            force=False,
+            project=None,
+            sdk_root=None,
+            output_format="json",
+        )
+    assert exit_info.value.exit_code == 5
+
+    stdout = capsys.readouterr().out
+    assert stdout.count("\n") == 1, stdout  # one JSON document, not a traceback
+    doc = json.loads(stdout)
+    assert doc["ok"] is False
+    assert doc["exitCode"] == 5
+    assert doc["issues"][0]["code"] == "init.template-unreadable"
+
+
 def test_from_example_without_an_sdk_checkout_is_a_coded_issue(tmp_path):
     """The ONE init path that genuinely needs an alp-sdk checkout: it copies a
     directory out of one. Templates never do (I-32)."""

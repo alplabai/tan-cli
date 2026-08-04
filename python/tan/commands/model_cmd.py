@@ -141,7 +141,13 @@ def _load_board(path: Path) -> dict[str, Any]:
     core-schema loader, there is no serde_yaml parity requirement here)."""
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as err:
+    except (OSError, UnicodeDecodeError) as err:
+        # tan-cli#415: `UnicodeDecodeError` is a `ValueError`, not an
+        # `OSError`, so `except OSError` alone let a non-UTF-8 board.yaml
+        # escape as an unhandled traceback -- ZERO bytes on stdout for a
+        # `--format json` caller. Folded into the SAME code/message an
+        # unreadable file already gets, since both are "this board.yaml
+        # cannot be read", not two different problems.
         raise ModelError(
             "model.board-yaml-missing",
             f"board.yaml not found at {path}: {err}",

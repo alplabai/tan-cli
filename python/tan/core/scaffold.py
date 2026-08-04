@@ -112,9 +112,23 @@ def _read_verbatim(path: Path) -> str:
 
     `open(newline="")`, not `Path.read_text(newline=...)`: that keyword landed in
     3.13 and this package's floor is 3.12.
+
+    Raises `OSError` for a non-UTF-8 file too (tan-cli#415): `UnicodeDecodeError`
+    is a `ValueError`, not an `OSError`, so a bare `except OSError` around a
+    call to this function -- both call sites below use exactly that -- would
+    otherwise let a corrupt vendored tree escape as an unhandled traceback
+    instead of the `TemplateDataError` they already raise for every other way
+    the read can fail. Folded in here, once, rather than duplicated at each
+    call site: mirrors Rust's own `read_to_string`, which returns an
+    `io::Error` (kind `InvalidData`) for invalid UTF-8 rather than a distinct
+    error type (the same equivalence `kconfig_cmd.py`'s `_resolve_core`
+    documents for the identical reason).
     """
-    with path.open("r", encoding="utf-8", newline="") as handle:
-        return handle.read()
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            return handle.read()
+    except UnicodeDecodeError as err:
+        raise OSError(str(err)) from err
 
 
 def _write_verbatim(path: Path, content: str) -> None:

@@ -273,7 +273,11 @@ def _known_board_names(sdk_root: Path) -> set[str] | None:
     for path in sorted(boards_dir.glob("*.yaml")):
         try:
             doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        except yaml.YAMLError:
+        except (yaml.YAMLError, UnicodeDecodeError):
+            # tan-cli#415: `UnicodeDecodeError` is a `ValueError`, not a
+            # `yaml.YAMLError`, so a non-UTF-8 board file previously escaped
+            # this best-effort scan as an unhandled traceback instead of
+            # being skipped the same way an unparseable one already is.
             continue
         if isinstance(doc, dict) and isinstance(doc.get("name"), str):
             names.add(doc["name"])
@@ -324,7 +328,11 @@ def _family_hw_revisions(
         if path.is_file():
             try:
                 doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            except yaml.YAMLError:
+            except (yaml.YAMLError, UnicodeDecodeError):
+                # tan-cli#415: same widening as `_known_board_names` above --
+                # `UnicodeDecodeError` is a `ValueError`, not a
+                # `yaml.YAMLError`, and previously escaped this function
+                # uncaught rather than resolving to "not resolvable".
                 return None
             revs = doc.get("hw_revisions")
             if isinstance(revs, dict):
@@ -917,10 +925,24 @@ def new_som(
 
     som_schema_path = _som_schema_path(resolved_sdk)
     soc_schema_path = _soc_schema_path(resolved_sdk)
-    sku_needs_pattern = re.match(_current_sku_pattern(som_schema_path), sku) is None
+    try:
+        sku_pattern = _current_sku_pattern(som_schema_path)
+    except (OSError, UnicodeDecodeError) as exc:
+        # tan-cli#415: `som-preset-v1.schema.json` is SDK-supplied, not
+        # user-supplied, but an unreadable/non-UTF-8 copy must still reach a
+        # coded envelope -- never a bare traceback with zero bytes on stdout
+        # -- the same way this command already reports a write failure below
+        # (`except OSError as exc: fail(f"could not write ... ({exc})")`).
+        fail(f"could not read {som_schema_path} ({exc})")
+        return
+    sku_needs_pattern = re.match(sku_pattern, sku) is None
     preset_doc = yaml.safe_load(preset_text)
     if preset_doc is not None:
-        errors = _schema_errors(preset_doc, som_schema_path)
+        try:
+            errors = _schema_errors(preset_doc, som_schema_path)
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"could not read {som_schema_path} ({exc})")
+            return
         if sku_needs_pattern:
             errors = [e for e in errors if not e.startswith("sku:")]
         if errors:
@@ -942,7 +964,11 @@ def new_som(
             + (" (except the sku pattern -- see step below)" if sku_needs_pattern else "")
         )
     if soc_doc is not None:
-        errors = _schema_errors(soc_doc, soc_schema_path)
+        try:
+            errors = _schema_errors(soc_doc, soc_schema_path)
+        except (OSError, UnicodeDecodeError) as exc:
+            fail(f"could not read {soc_schema_path} ({exc})")
+            return
         if errors:
             typer.echo(
                 "new-som: INTERNAL ERROR -- generated SoC spec does not "
