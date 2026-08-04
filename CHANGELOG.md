@@ -706,10 +706,10 @@ else installs by hand.
 
   An earlier revision of this entry claimed the opposite, and was wrong in both
   halves: that the oracle returns 1 for these cases, and that moving to 2 would
-  be a considered BREAK for v0.6.0 (#262). Neither was ever measured. For the
-  guard cases 2 is what the oracle already does, so matching it is a
+  be a considered BREAK for the next minor (#262). Neither was ever measured.
+  For the guard cases 2 is what the oracle already does, so matching it is a
   compatibility fix. #262 is re-scoped to the one case that is a genuine
-  v0.6.0 decision: `validate.failed` after a real spawn.
+  release decision: `validate.failed` after a real spawn.
 
   **Corrected 2026-08 (v0.5.0): the paragraph this replaced claimed
   `validate.spawn-not-implemented` was still exit 1 at this port's rc1 tag.

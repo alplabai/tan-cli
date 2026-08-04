@@ -600,7 +600,7 @@ if [ "$DR" = "$WORK/ghost-sdk" ]; then
 else
   ok "dirty: dangling pointer not resolved (tier=$DT) -- fell through cleanly"
 fi
-# The remedy not naming the stale pointer is tracked as #344 (v0.6.0), not
+# The remedy not naming the stale pointer is tracked as #344, not
 # asserted here: it is a message-quality gap, not a behavioural one.
 
 if [ "$HAVE_PROJECT" -ne 1 ]; then
