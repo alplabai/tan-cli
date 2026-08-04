@@ -60,18 +60,27 @@ in `parity.yml`'s `python-tests` job (`cargo build --locked --bin tan` is
 that job's own first step) and in any local `python -m pytest tests/parity`
 run against an already-built `target/{release,debug}/tan`.
 """
+import json
 from pathlib import Path
 
 import pytest
 
 from tan.core.scaffold import DEFAULT_SOM_SKU, TEMPLATE_IDS, plan_template_files
 
+from . import oracle, oracle_fixtures
 from .oracle import _run, python_command, rust_binary
 
 RUST = rust_binary()
+#: tan-cli#409. Gated on `missing_for_live`, NOT on `RUST is None`: frozen
+#: replay needs no binary at all, so these must keep running (and keep
+#: discriminating) once tan-cli#269 deletes `crates/`. Only an explicit
+#: `TAN_PARITY_LIVE=1` run asked to spawn a binary that is not there skips.
+#: With the old gate, 47 of this module's cases became passing SKIPS the
+#: moment the oracle stopped building -- a green run measuring nothing.
 _SKIP_NO_ORACLE = pytest.mark.skipif(
-    RUST is None,
-    reason="needs a built Rust tan; run `cargo build --bin tan` (or set TAN_RUST_BINARY)",
+    oracle.missing_for_live(RUST),
+    reason="TAN_PARITY_LIVE=1 was asked for but no Rust tan is built; run "
+    "`cargo build --bin tan` (or set TAN_RUST_BINARY)",
 )
 
 #: `(template_id, relative_path) -> reason`, the SAME shape and the SAME
@@ -198,6 +207,78 @@ def _read_tree(root: Path) -> dict[str, bytes]:
     return {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
+#: The frozen ORACLE trees, one entry per template id (tan-cli#409). Its own
+#: file rather than an entry in the node-keyed `oracle_fixtures` store,
+#: because the natural key here is the template, not the test case -- see
+#: `_scaffold_trees`.
+_TREE_FIXTURE = Path(__file__).parent / "oracle_fixtures" / "scaffold_trees.json"
+
+
+def _frozen_rust_tree(template_id: str, root: Path, argv: list[str]) -> dict[str, bytes]:
+    """The oracle's scaffolded tree for `template_id`, replayed from the
+    committed fixture -- or captured from a real oracle spawn under
+    `TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1`.
+
+    Stored as UTF-8 TEXT keyed by relative path, not base64: every file all
+    six templates scaffold is text (measured -- zero binary files across 40
+    files), and readable JSON means a fixture diff shows what actually
+    changed in the oracle's output instead of an opaque blob. A binary file
+    appearing later is REFUSED at capture time rather than silently mangled,
+    so the assumption cannot rot quietly.
+
+    Newlines are preserved exactly. `_read_tree` reads bytes on purpose --
+    "no text-mode newline translation to launder a real divergence" -- and
+    `json.dumps` round-trips `
+` verbatim, so a CRLF/LF divergence
+    between the two sides still fails the comparison after a freeze.
+    """
+    if oracle_fixtures.LIVE:
+        work = root / "rust" / "root"
+        home = root / "rust" / "home"
+        work.mkdir(parents=True)
+        home.mkdir(parents=True)
+        code, out = _run([RUST], argv, work, home)
+        assert code == 0, f"rust tan init --template {template_id} failed: {out}"
+        tree = _read_tree(work)
+        if oracle_fixtures.CAPTURE:
+            encoded = {}
+            for relpath, blob in sorted(tree.items()):
+                try:
+                    encoded[relpath] = blob.decode("utf-8")
+                except UnicodeDecodeError as err:
+                    raise AssertionError(
+                        f"--template {template_id} scaffolded a NON-UTF-8 file "
+                        f"({relpath}); this fixture stores text. Add a base64 "
+                        f"branch here and to the replay below rather than "
+                        f"letting it be mangled (tan-cli#409)."
+                    ) from err
+            data = {}
+            if _TREE_FIXTURE.is_file():
+                data = json.loads(_TREE_FIXTURE.read_text(encoding="utf-8"))
+            data[template_id] = encoded
+            _TREE_FIXTURE.write_text(
+                json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+                newline="\n",
+            )
+        return tree
+
+    if not _TREE_FIXTURE.is_file():
+        raise AssertionError(
+            f"no frozen oracle scaffold trees at {_TREE_FIXTURE}. Capture them "
+            f"against a built oracle: TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 "
+            f"TAN_RUST_BINARY=<path> pytest {Path(__file__).name} (tan-cli#409)."
+        )
+    data = json.loads(_TREE_FIXTURE.read_text(encoding="utf-8"))
+    if template_id not in data:
+        raise AssertionError(
+            f"no frozen oracle scaffold tree for --template {template_id!r} in "
+            f"{_TREE_FIXTURE}. A NEW template must be captured before it can be "
+            f"compared, or its parity is unmeasured (tan-cli#409)."
+        )
+    return {relpath: text.encode("utf-8") for relpath, text in data[template_id].items()}
+
+
 def _scaffold_trees(template_id: str, tmp_path_factory) -> tuple[dict[str, bytes], dict[str, bytes]]:
     """`tan init --template <template_id>` (`DEFAULT_SOM_SKU`) through both
     binaries, each into its own fresh scratch dir, as {relative_path: bytes}.
@@ -214,7 +295,16 @@ def _scaffold_trees(template_id: str, tmp_path_factory) -> tuple[dict[str, bytes
     root = tmp_path_factory.mktemp(f"scaffold-oracle-{template_id.replace('-', '_')}")
     argv = ["init", "--template", template_id, "--format", "json"]
     trees: list[dict[str, bytes]] = []
-    for side, command in (("rust", [RUST]), ("python", python_command())):
+    # The RUST side is frozen per TEMPLATE (tan-cli#409). The PYTHON side is
+    # always spawned live -- it is the thing under test, and a frozen copy of
+    # it would compare the port against itself.
+    #
+    # Keyed by template rather than by pytest node id, unlike
+    # `oracle_fixtures.resolve`: the several-dozen relative-path cases below
+    # all read ONE tree per template, and a node-keyed store would commit 47
+    # copies of the same six trees.
+    rust_tree = _frozen_rust_tree(template_id, root, argv)
+    for side, command in (("python", python_command()),):
         # Nested `<side>/root` -- not `root / side` bare -- so `discover_
         # workspace_sdk`'s parent-of-cwd probe (`oracle.py`'s `work_dir`
         # fixture carries the identical shape, same reason) can never see a
@@ -226,7 +316,7 @@ def _scaffold_trees(template_id: str, tmp_path_factory) -> tuple[dict[str, bytes
         code, out = _run(command, argv, work, home)
         assert code == 0, f"{side} tan init --template {template_id} failed: {out}"
         trees.append(_read_tree(work))
-    result = (trees[0], trees[1])
+    result = (rust_tree, trees[0])
     _TREE_CACHE[template_id] = result
     return result
 
