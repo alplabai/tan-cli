@@ -1533,14 +1533,28 @@ def sdk_check(
                 )
             detail += ")"
         if divergent_candidate is not None:
+            # BOTH roots re-rendered POSIX here, unlike the `pass` branch's
+            # `alp-sdk at {sdk_root}` above, which keeps this host's native
+            # separators and is left byte-identical. The reason is the CODE:
+            # this branch's detail becomes an `issues[].message` under
+            # `sdk.discovery-divergent`, which five other commands also emit
+            # -- and all five build it from `_abs_posix`. A consumer
+            # correlating two envelopes would otherwise match a code across a
+            # message spelled `C:/...` on one side and `C:\...` on the other.
+            # The envelope is the contract; normalise the filesystem side to
+            # meet it, never the other way round (caught by
+            # windows-latest on tan-cli#428, green everywhere else).
+            posix_root = f"alp-sdk at {_abs_posix(sdk_root)}"
+            if tier is not None:
+                posix_root += f" ({tier})"
             return Check(
                 "sdk",
                 "warn",
-                f"{detail}; `tan init`, `tan generate`, `tan examples` and "
-                f"`tan renode` resolve a DIFFERENT checkout from this "
-                f"directory ({divergent_candidate}) and report the same "
-                f'sourceTier "discovery", so generated files and the build '
-                f"plan can come from different SDK versions.",
+                f"{posix_root}; `tan init`, `tan generate`, `tan examples` "
+                f"and `tan renode` resolve a DIFFERENT checkout from this "
+                f"directory ({_abs_posix(divergent_candidate)}) and report "
+                f'the same sourceTier "discovery", so generated files and '
+                f"the build plan can come from different SDK versions.",
                 f"--sdk-root <path> to pin the one you mean for a single run, "
                 f"or `tan init --sdk-root <path>` to write it into "
                 f".alp/sdk-path, which outranks both discovery tiers.",
