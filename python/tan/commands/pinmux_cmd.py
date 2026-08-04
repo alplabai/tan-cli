@@ -74,6 +74,7 @@ from tan.core.fs_confine import PathEscapeError, resolve_confined
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
+from tan.core.shapes import yaml_kind
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -158,20 +159,9 @@ class PinmuxParseError(Exception):
     dropped row (see the module docstring)."""
 
 
-def _yaml_kind(value: Any) -> str:
-    if value is None:
-        return "null"
-    if isinstance(value, bool):
-        return "a boolean"
-    if isinstance(value, (int, float)):
-        return "a number"
-    if isinstance(value, str):
-        return "a string"
-    if isinstance(value, list):
-        return "a sequence"
-    if isinstance(value, dict):
-        return "a mapping"
-    return type(value).__name__
+#: tan-cli#408: one implementation, in `tan.core.shapes` -- `diff_cmd.py`
+#: carried the same body with a docstring this copy had lost.
+_yaml_kind = yaml_kind
 
 
 def _pad_field(row: dict, field: str) -> str | None:
