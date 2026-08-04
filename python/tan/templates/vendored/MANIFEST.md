@@ -37,11 +37,11 @@ from an un-revendored SDK change.
     by its LF-only unit test and by `tests/parity/scaffold_byte_parity.py`
     against the live pinned SDK instead.
   - **The vendor ref and `parity.yml`'s `PINNED_SDK_TAG` are NOT the same ref,
-    and that is deliberate.** The pin is `f4d87a1f` (tan-cli#320, a commit past
-    `v0.15.0-rc1` — see that variable's own comment for why), while this tree
+    and that is deliberate.** The pin is `2bc6b400` (tan-cli#425, alp-sdk dev tip; it was `f4d87a1f`
+    until that bump — see that variable's own comment), while this tree
     stays captured at the `v0.15.0-rc1` TAG, because the links below have to
     name a ref a customer can open in a browser and `v0.15.0` does not exist
-    (tan-cli#384). Re-measured at `f4d87a1f`: `--emit scaffold` is
+    (tan-cli#384). Re-measured at `2bc6b400`: `--emit scaffold` is
     byte-identical to this tree across all 9 (template, sku) pairs except the
     two deliberate edits below — no `board.yaml`, `prj.conf`, `src/` or
     `CMakeLists.txt` content moved in that range. That is what makes the split

@@ -377,10 +377,39 @@ def _tan_reconciled_refusal(sdk_root: Path, board_yaml: str) -> tuple[bool, str]
     codebases raise different exception classes for the same fact);
     `detail` is tan's own error text for the PASS/FAIL message.
     """
+    # tan-cli#423: `import tan` resolves through `sys.path`, and from THIS
+    # repo's root that finds whatever `tan` is installed -- on a developer box
+    # with an editable install pointing at another checkout, a completely
+    # different tree. Measured: run from the repo root this imported
+    # `<another tan-cli worktree>/python/tan`, whose planner answered without
+    # refusing, and the comparator reported
+    #
+    #   FAIL multicore_rpmsg-imx93: alp-sdk refuses but tan does not
+    #
+    # -- a FALSE parity divergence, for a `status: tbd` hw_rev the tan under
+    # test refuses correctly in every emit mode. With `python/` on the path
+    # first the same run is `PASS ... (alp-sdk and tan both refuse this board)`
+    # and seam1 is rc 0. A comparator that does not pin WHICH tan it measures
+    # is a check reporting a verdict without its evidence.
+    #
+    # Prepended, not appended: an installed `tan` would otherwise still win.
+    repo_python = str(Path(__file__).resolve().parents[2] / "python")
+    if repo_python not in sys.path:
+        sys.path.insert(0, repo_python)
     try:
         from tan.planner_root import emit as tan_emit
     except ImportError:
         return None
+
+    import tan as _tan_pkg
+
+    resolved = Path(_tan_pkg.__file__).resolve()
+    if repo_python not in str(resolved.parent.parent):
+        raise ComparatorError(
+            f"refusing to compare against a tan from another tree: resolved "
+            f"`{resolved}`, expected one under `{repo_python}` (tan-cli#423)"
+        )
+
     try:
         tan_emit("build-plan", root=sdk_root, board_yaml=sdk_root / board_yaml)
     except Exception as e:  # noqa: BLE001 -- any refusal is the signal we want
