@@ -106,6 +106,31 @@ jobs:
               sys.exit(f"::error::nothing was captured for sys.platform={sys.platform!r}")
           PY
 
+      # Filter to THIS runner's own keys before uploading. A runner starts
+      # from the committed store, so without this its artifact also carries
+      # the other platforms' already-committed keys -- and merging several
+      # such artifacts becomes ORDER-DEPENDENT, letting one runner's stale
+      # copy of `darwin` overwrite the fresh capture `macos-latest` just
+      # made. Measured, not hypothetical: that is exactly what happened on
+      # the first collection, and `platform_fixtures.merge_from` now refuses
+      # a multi-platform artifact outright.
+      - name: keep only this platform's keys
+        shell: bash
+        working-directory: python
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib, sys
+          store = pathlib.Path("tests/parity/oracle_fixtures/platform_bound.json")
+          data = json.loads(store.read_text(encoding="utf-8"))
+          mine = {k: v for k, v in data.items() if k.endswith(f"::{sys.platform}")}
+          store.write_text(
+              json.dumps(mine, indent=2, sort_keys=True, ensure_ascii=False) + "\n",
+              encoding="utf-8",
+          )
+          print(f"uploading {sorted(mine)}")
+          PY
+
       - name: upload this platform's store
         uses: actions/upload-artifact@v4
         with:

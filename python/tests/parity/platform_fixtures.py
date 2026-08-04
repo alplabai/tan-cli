@@ -159,15 +159,30 @@ def merge_from(directory: Path) -> int:
     """Fold every `platform_bound*.json` under `directory` into the committed
     store, returning how many keys were added or changed.
 
-    This is how three CI runners' artifacts become one file: each uploads the
-    store as IT saw it (its own platform's keys plus whatever was already
-    committed), and merging BY KEY keeps all three without any runner having
-    to see the others' output. Used by the capture workflow's collect step.
+    Each artifact must contain EXACTLY ONE platform's keys, and that is
+    enforced rather than assumed. The first version of this function merged
+    every key it found and was ORDER-DEPENDENT: a runner starts from the
+    committed store, so `platform-bound-ubuntu-latest` also carries whatever
+    `darwin` keys were already committed, and `sorted()` put it after
+    `platform-bound-macos-latest` -- so the stale committed `darwin` key
+    silently overwrote the one `macos-latest` had just captured. Caught by
+    diffing the two darwin captures before merging, not by a test, which is
+    why the capture workflow now filters to its own `sys.platform` before
+    uploading and this refuses anything else.
     """
     data = _load()
     added = 0
     for path in sorted(directory.rglob("platform_bound*.json")):
-        for key, value in json.loads(path.read_text(encoding="utf-8")).items():
+        incoming = json.loads(path.read_text(encoding="utf-8"))
+        platforms = {key.rsplit("::", 1)[-1] for key in incoming}
+        if len(platforms) > 1:
+            raise ValueError(
+                f"{path} carries keys for {sorted(platforms)}. An artifact must "
+                f"hold exactly one platform's keys, or merging becomes "
+                f"order-dependent and one runner's fresh capture can be "
+                f"overwritten by another's stale copy of it."
+            )
+        for key, value in incoming.items():
             if data.get(key) != value:
                 data[key] = value
                 added += 1
