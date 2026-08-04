@@ -16,21 +16,29 @@ skeleton is either a caller-supplied argument or an explicit `TBD`.
 
 Differences from the alp_cli original, and why:
 
-* **No `--format json` OUTPUT.** The original has no `--format`/`--json`
-  flag. The Rust forwarder's clap `GlobalArgs` DOES parse `--format` for
-  this verb too (`global = true` -- confirmed live: `tan.exe new-som
-  --format json --sdk-root <bad>` reaches the SDK-root-unresolved failure,
-  not a parse error), but `new-som` never gets a synthesised `--json`
-  forwarded to the child the way `faultdecode`'s does
-  (`sdk_cli.rs::build_argv`), so a SUCCESSFUL run's stdout is plain text
-  either way. This file matches that split: `--format` is accepted (see the
-  hidden-option block in `new_som`'s signature, tan-cli#254/#256) so the
-  argv SURFACE agrees with the oracle, but it stays a plain
-  interactive/flag-driven text tool -- stdout carries the same
+* **`--format json` emits the envelope; the default text mode is the
+  original's, verbatim.** The original has no `--format`/`--json` flag, and
+  the Rust forwarder parses `--format` for this verb (clap `GlobalArgs`,
+  `global = true` -- confirmed live: `tan.exe new-som --format json
+  --sdk-root <bad>` reaches the SDK-root-unresolved failure, not a parse
+  error) without ever synthesising a `--json` for the child the way
+  `faultdecode`'s does (`sdk_cli.rs::build_argv`), so a successful run on
+  the oracle is plain text either way. This file used to match that split
+  exactly -- `--format` accepted and thrown away (`del ... output_format`),
+  zero `emit(` calls in the module. tan-cli#399 ends it: `contract/README.md`
+  states that the vscode extension drives `tan <cmd> --format json` and
+  hard-depends on `{command, ok, exitCode, project, data, issues}`, and a
+  verb that answers that flag with 1238 bytes of prose fails the consumer's
+  `isEnvelope` guard, which then reports the whole scaffold as the literal
+  string `Command completed.` with the planned file list unreachable. So
+  `--format json` now emits one envelope carrying the planned/written paths
+  and the porting checklist as `data`, and every refusal carries a
+  `new-som.failed` code instead of `cli.main`'s generic `cli.parse-error`.
+  WITHOUT `--format json` nothing changed: stdout carries the same
   human-readable lines the original wrote there (skeleton validation notes,
   `Created <path>`, the checklist), stderr the same error lines, matching
-  `click.echo(..., err=...)` verbatim rather than folding either into an
-  envelope that never existed.
+  `click.echo(..., err=...)` verbatim -- which is what the oracle-parity
+  tests byte-compare.
 
 * **`--sdk-root`/`--project` are new, and required.** The original ran
   FROM WITHIN an alp-sdk checkout (`REPO_ROOT =
@@ -103,6 +111,7 @@ from tan.commands.sdk_cmd import (
     project_pin_issue,
     resolve_sdk_tiered,
 )
+from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
 
 _SKU_RE = re.compile(r"^E1M-[A-Z0-9-]+$")
@@ -114,6 +123,11 @@ _CORE_ID_RE = re.compile(r"^[a-z][a-z0-9_]+$")
 #: schema-legal lowercase `tbd` placeholder -- verbatim from the original.
 INFERENCE_BACKENDS = ("ethos_u", "drpai", "deepx_dxm1", "tbd")
 ETHOS_U_VARIANTS = ("u55", "u65", "u85")
+
+#: `data.schemaVersion` for `--format json` (tan-cli#399). 1 because this is
+#: the first shape `new-som` has ever put on the wire -- there is no earlier
+#: one to be compatible with.
+DATA_SCHEMA_VERSION = 1
 
 DEFAULT_CORES = ("tbd_core0",)
 #: UI default only -- see the module docstring and the gate allowlist entry.
@@ -152,22 +166,66 @@ def _check_output_root(_ctx: click.Context, _param: click.Parameter, value: str 
     return value
 
 
-def _fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE) -> None:
-    """Print an error to stderr and exit -- 1 by default, the flat exit code
-    the alp_cli original's `_fail` always used (`raise SystemExit(1)`) for
-    every validation failure it can raise (bad SKU, unknown board, ...);
-    prefix reworded from `alp new-som:` to `new-som:` (RFC #837: the binary
-    is `tan`). `exit_code` overrides this for the one failure this port adds
-    that the original never had to: the `--sdk-root`/`--project` resolution
-    preflight below (the original always ran FROM WITHIN a checkout). That
-    check mirrors the Rust forwarder's own preflight
-    (`crates/tan-cli/src/commands/sdk_cli.rs::run`), which exits
+def _envelope(data, issues: list[Issue], exit_code: ExitCode) -> None:
+    """THE `new-som` envelope. `project` is hardcoded null/null on purpose:
+    this command scaffolds metadata INTO an alp-sdk checkout and never reads a
+    `board.yaml` -- `--project` is only one input tier to the SDK-root ladder,
+    so reporting a project root here would claim a resolution that never
+    happened (`envelope.Project.resolved`'s own "reporting is the seam" note).
+    The checkout that was actually scaffolded is `data.sdkRoot`."""
+    emit(Envelope("new-som", Project(root=None, board_yaml=None), data, issues, exit_code))
+
+
+def _fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE, *,
+          json_mode: bool = False) -> None:
+    """Refuse: one error to stderr (or one envelope under `--format json`) and
+    exit -- 1 by default, the flat exit code the alp_cli original's `_fail`
+    always used (`raise SystemExit(1)`) for every validation failure it can
+    raise (bad SKU, unknown board, ...); prefix reworded from `alp new-som:`
+    to `new-som:` (RFC #837: the binary is `tan`). `exit_code` overrides this
+    for the one failure this port adds that the original never had to: the
+    `--sdk-root`/`--project` resolution preflight below (the original always
+    ran FROM WITHIN a checkout). That check mirrors the Rust forwarder's own
+    preflight (`crates/tan-cli/src/commands/sdk_cli.rs::run`), which exits
     `ExitCode::ValidationFailure` (2) for it specifically -- confirmed live:
     `tan.exe new-som --sdk-root <bad>` exits 2, not 1 (every OTHER new-som
     failure, including a bad-exit from the forwarded child, is RuntimeFailure
-    (1) there too, matching this default)."""
-    typer.echo(f"new-som: {message}", err=True)
+    (1) there too, matching this default).
+
+    ONE code for every refusal, `new-som.failed`, matching the spelling the
+    v0.4.1 oracle's own forwarder emits for the identical class of refusal --
+    the alternative was a family of codes no consumer asked for, each of which
+    would then be a frozen wire string (tan-cli#399). Before this, a
+    `--format json` refusal reached `cli.main`'s generic fallback and went out
+    as `command: "cli"` / `cli.parse-error`, so the two paths of one command
+    disagreed about whose envelope a consumer was reading."""
+    if json_mode:
+        _envelope(None, [Issue("new-som.failed", "error", message)], exit_code)
+    else:
+        typer.echo(f"new-som: {message}", err=True)
     raise typer.Exit(int(exit_code))
+
+
+def _internal_error(subject: str, schema: str, errors: list[str], json_mode: bool) -> None:
+    """A generated skeleton that does not validate against its own schema is a
+    `tan` BUG, never bad user input -- reported as one, and never left to
+    `cli.main`'s parse-error fallback under `--format json` (tan-cli#399).
+    Shared by the preset and SoC-spec self-checks, which differ only in the
+    two names."""
+    message = (
+        f"INTERNAL ERROR -- generated {subject} does not validate against {schema}:"
+    )
+    if json_mode:
+        _envelope(
+            None,
+            [Issue("new-som.internal-failure", "error", " ".join([message, *errors]))],
+            ExitCode.RUNTIME_FAILURE,
+        )
+    else:
+        typer.echo(f"new-som: {message}", err=True)
+        for err in errors:
+            typer.echo(f"  - {err}", err=True)
+    raise typer.Exit(int(ExitCode.RUNTIME_FAILURE))
 
 
 def _yaml_dquote(value: str) -> str:
@@ -610,7 +668,9 @@ def new_som(
     board_yaml: str = typer.Option(None, "--board-yaml", hidden=True),
     target: str = typer.Option(None, "--target", hidden=True),
     all_targets: bool = typer.Option(False, "--all", hidden=True),
-    output_format: str = typer.Option(None, "--format", hidden=True),
+    output_format: str = typer.Option(
+        None, "--format", metavar="FORMAT", help="Output format: text or json."
+    ),
     verbose: bool = typer.Option(False, "--verbose", hidden=True),
     quiet: bool = typer.Option(False, "--quiet", hidden=True),
     no_color: bool = typer.Option(False, "--no-color", hidden=True),
@@ -623,16 +683,35 @@ def new_som(
     # reads for this one -- declared here purely so the argv SURFACE matches:
     # `tan new-som --ci ...` exits the same as the same invocation without
     # `--ci` on the oracle; without this, it was a Click "No such option"
-    # usage error (exit 2) instead. This is a DIFFERENT claim from the
-    # docstring's "No --format json" bullet above -- confirmed live
-    # (`tan.exe new-som --format json --sdk-root <bad>` still reaches the
-    # SDK-root-unresolved failure rather than a parse error): `--format` IS a
-    # legal flag on the oracle's `new-som`, it just never gets forwarded as a
-    # synthesised `--json` (unlike `faultdecode`'s), and a SUCCESSFUL run
-    # stays plain text on this port either way -- see `clean_cmd.clean`'s
-    # identical fix for the same port-wide gap.
-    del board_yaml, target, all_targets, output_format
+    # usage error (exit 2) instead. `--format` is no longer one of them: it
+    # was accepted-and-deleted here until tan-cli#399, which is what made a
+    # `--format json` scaffold print prose at the one consumer that parses
+    # this flag -- see the docstring bullet above.
+    del board_yaml, target, all_targets
     del verbose, quiet, no_color, non_interactive, ci
+    resolved_format = output_format or "text"
+    if resolved_format not in ("text", "json"):
+        raise typer.BadParameter(
+            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
+        )
+    json_mode = resolved_format == "json"
+
+    report_lines: list[str] = []
+
+    def say(line: str = "") -> None:
+        """One line of the human report. Suppressed under `--format json`,
+        where stdout carries the ONE envelope and nothing else -- the same
+        lines survive there as `data.report`."""
+        report_lines.append(line)
+        if not json_mode:
+            typer.echo(line)
+
+    def fail(message: str, exit_code: ExitCode = ExitCode.RUNTIME_FAILURE) -> None:
+        """`_fail` with this run's output mode bound, so no refusal site has to
+        remember to pass it -- a forgotten one would silently print prose to
+        stdout under `--format json` and leave the envelope to `cli.main`."""
+        _fail(message, exit_code, json_mode=json_mode)
+
     # Mirrors the original's `type=click.Choice(...)` flag-level validation --
     # a Click-usage error (exit 2) BEFORE anything else runs, same as the
     # original raised it during argument parsing itself. Written as an
@@ -657,30 +736,43 @@ def new_som(
     workspace_root = Path.cwd() / project if project else Path.cwd()
     active = resolve_sdk_tiered(sdk_root, workspace_root)
     if active.path is None or not Path(active.path).joinpath(*SDK_MARKER).exists():
-        _fail(_SDK_ROOT_UNRESOLVED, ExitCode.VALIDATION_FAILURE)
+        fail(_SDK_ROOT_UNRESOLVED, ExitCode.VALIDATION_FAILURE)
         return
     resolved_sdk = Path(active.path)
     # tan-cli#263 review: this command WRITES metadata skeletons into
     # `resolved_sdk` -- a silently-missed `.alp/sdk-path` pin means porting a
-    # new SoM into the wrong checkout. Text-only warning, matching the rest of
-    # this file (no `--format json` here to carry an `Issue`).
+    # new SoM into the wrong checkout. Under `--format json` it rides the
+    # envelope's `issues` as the already-frozen `sdk.project-pin-unresolved`
+    # (tan-cli#399); in text mode it stays the stderr line it always was.
     pin_issue = project_pin_issue(active.broken_project_pin, active.tier)
-    if pin_issue is not None:
+    issues: list[Issue] = [] if pin_issue is None else [pin_issue]
+    if pin_issue is not None and not json_mode:
         typer.echo(f"new-som: warning: {pin_issue.message}", err=True)
 
     # -- 1. Gather inputs.  Interactive prompts need a real terminal; in a
     # pipe / CI, fail fast naming exactly what is missing instead of an
     # opaque prompt-library abort.
     if sku is None or soc_ref is None or family is None:
+        missing = [
+            flag
+            for flag, value in (("--sku", sku), ("--soc-ref", soc_ref), ("--family", family))
+            if value is None
+        ]
         if not sys.stdin.isatty():
-            missing = [
-                flag
-                for flag, value in (("--sku", sku), ("--soc-ref", soc_ref), ("--family", family))
-                if value is None
-            ]
-            _fail(
+            fail(
                 "stdin is not a terminal, so interactive prompts are "
                 "unavailable; pass the missing required flag(s): " + ", ".join(missing)
+            )
+            return
+        if json_mode:
+            # A prompt writes to stdout, which under `--format json` carries
+            # the one envelope -- prompting there would corrupt the very
+            # document the caller asked for, on a terminal that happens to be
+            # attached (tan-cli#399).
+            fail(
+                "--format json makes stdout the envelope channel, so "
+                "interactive prompts are unavailable; pass the missing "
+                "required flag(s): " + ", ".join(missing)
             )
             return
         (
@@ -721,33 +813,33 @@ def new_som(
     # -- 2. Validate EVERYTHING before touching the filesystem, so a
     # rejected invocation never leaves half-written skeletons behind.
     if not _SKU_RE.match(sku):
-        _fail(f"SKU '{sku}' must look like E1M-<UPPERCASE>")
+        fail(f"SKU '{sku}' must look like E1M-<UPPERCASE>")
         return
     if not _SOC_REF_RE.match(soc_ref):
-        _fail(f"soc-ref '{soc_ref}' must be <vendor>:<family>:<part> (lowercase slugs)")
+        fail(f"soc-ref '{soc_ref}' must be <vendor>:<family>:<part> (lowercase slugs)")
         return
     if not _FAMILY_RE.match(family):
-        _fail(f"family '{family}' must be a lowercase slug")
+        fail(f"family '{family}' must be a lowercase slug")
         return
     if not cores:
-        _fail(
+        fail(
             "--cores was given but contains no core ids "
             "(omit the flag for the tbd_core0 placeholder)"
         )
         return
     bad_cores = [c for c in cores if not _CORE_ID_RE.match(c)]
     if bad_cores:
-        _fail(f"core id(s) {bad_cores} must match ^[a-z][a-z0-9_]+$")
+        fail(f"core id(s) {bad_cores} must match ^[a-z][a-z0-9_]+$")
         return
     if inference_backend == "ethos_u" and ethos_u_variant is None:
-        _fail("--inference-backend ethos_u requires --ethos-u-variant (u55/u65/u85)")
+        fail("--inference-backend ethos_u requires --ethos-u-variant (u55/u65/u85)")
         return
     if vendor is None:
         vendor = soc_ref.split(":")[0]
     if display_name is None:
         display_name = f"{sku} ({vendor} -- scaffold, silicon facts TBD)"
     if any(ord(ch) < 0x20 for ch in display_name):
-        _fail("display name must not contain newlines or other control characters")
+        fail("display name must not contain newlines or other control characters")
         return
 
     # Resolve the cross-references the checklist used to defer: the stock
@@ -756,7 +848,7 @@ def new_som(
     # has none yet -- that stays a checklist step).
     board_names = _known_board_names(resolved_sdk)
     if board_names is not None and default_board not in board_names:
-        _fail(
+        fail(
             f"default board '{default_board}' does not match any `name:` "
             f"in metadata/boards/ (known: {', '.join(sorted(board_names))})"
         )
@@ -765,7 +857,7 @@ def new_som(
     if hw_revs is not None:
         hwrev_path, revs = hw_revs
         if default_hw_rev not in revs:
-            _fail(
+            fail(
                 f"default hw rev '{default_hw_rev}' does not resolve in "
                 f"{hwrev_path} (known: {', '.join(sorted(revs))})"
             )
@@ -778,7 +870,7 @@ def new_som(
     )
 
     if preset_path.exists() and not force:
-        _fail(f"{preset_path} already exists (pass --force to overwrite)")
+        fail(f"{preset_path} already exists (pass --force to overwrite)")
         return
 
     # -- 3. Render + self-check both skeletons in memory (still nothing on
@@ -807,40 +899,33 @@ def new_som(
         if sku_needs_pattern:
             errors = [e for e in errors if not e.startswith("sku:")]
         if errors:
-            typer.echo(
-                "new-som: INTERNAL ERROR -- generated preset does not "
-                "validate against som-preset-v1:",
-                err=True,
-            )
-            for e in errors:
-                typer.echo(f"  - {e}", err=True)
-            raise typer.Exit(int(ExitCode.RUNTIME_FAILURE))
-        typer.echo(
+            _internal_error("preset", "som-preset-v1", errors, json_mode)
+        say(
             "Preset skeleton validates against som-preset-v1"
             + (" (except the sku pattern -- see step below)" if sku_needs_pattern else "")
         )
     if soc_doc is not None:
         errors = _schema_errors(soc_doc, soc_schema_path)
         if errors:
-            typer.echo(
-                "new-som: INTERNAL ERROR -- generated SoC spec does not "
-                "validate against soc-spec-v1:",
-                err=True,
-            )
-            for e in errors:
-                typer.echo(f"  - {e}", err=True)
-            raise typer.Exit(int(ExitCode.RUNTIME_FAILURE))
-        typer.echo("SoC spec skeleton validates against soc-spec-v1")
+            _internal_error("SoC spec", "soc-spec-v1", errors, json_mode)
+        say("SoC spec skeleton validates against soc-spec-v1")
 
     # -- 4. Write (or, under --dry-run, only report) the skeletons.
+    #
+    # `planned` is every path this run creates or would create, and `existing`
+    # every one it deliberately left alone -- the two lists the extension's
+    # scaffold panel renders (tan-cli#399), built from the same values the
+    # human lines are built from so the two can never disagree.
+    planned: list[Path] = [preset_path] + ([soc_path] if soc_doc is not None else [])
+    existing: list[Path] = [] if soc_doc is not None else [soc_path]
+    written: list[Path] = []
     if dry_run:
-        typer.echo(f"Would create {preset_path}")
+        say(f"Would create {preset_path}")
         if soc_doc is None:
-            typer.echo(f"SoC spec already present: {soc_path} (not touched)")
+            say(f"SoC spec already present: {soc_path} (not touched)")
         else:
-            typer.echo(f"Would create {soc_path}")
+            say(f"Would create {soc_path}")
     else:
-        written: list[Path] = []
         try:
             preset_path.parent.mkdir(parents=True, exist_ok=True)
             preset_path.write_text(preset_text, encoding="utf-8", newline="\n")
@@ -857,13 +942,13 @@ def new_som(
             targets = [preset_path] + ([soc_path] if soc_doc is not None else [])
             for path in {*written, *targets}:
                 path.unlink(missing_ok=True)
-            _fail(f"could not write the skeletons ({exc}); removed any partial output")
+            fail(f"could not write the skeletons ({exc}); removed any partial output")
             return
-        typer.echo(f"Created {preset_path}")
+        say(f"Created {preset_path}")
         if soc_doc is None:
-            typer.echo(f"SoC spec already present: {soc_path} (not touched)")
+            say(f"SoC spec already present: {soc_path} (not touched)")
         else:
-            typer.echo(f"Created {soc_path}")
+            say(f"Created {soc_path}")
 
     # -- 5. Numbered next-steps checklist.
     soc_created = soc_doc is not None
@@ -900,10 +985,33 @@ def new_som(
         "Run the conformance suite: tests/zephyr/conformance via twister (native_sim).",
         "Full walkthrough: docs/porting-new-som.md",
     ]
-    typer.echo("")
-    typer.echo("Next steps:")
+    say("")
+    say("Next steps:")
     for i, step in enumerate(steps, start=1):
-        typer.echo(f"  {i}. {step}")
+        say(f"  {i}. {step}")
     if dry_run:
-        typer.echo("")
-        typer.echo("Dry run -- validated OK, nothing was written.")
+        say("")
+        say("Dry run -- validated OK, nothing was written.")
+
+    if json_mode:
+        # The success envelope, and the whole point of tan-cli#399: a consumer
+        # that parsed stdout on the failure path got 1238 bytes of prose here.
+        # Paths are the native spelling `data.sdkPath` uses elsewhere -- only
+        # the envelope's own `sdk.root` is normalised to forward slashes.
+        _envelope(
+            {
+                "schemaVersion": DATA_SCHEMA_VERSION,
+                "sku": sku,
+                "socRef": soc_ref,
+                "sdkRoot": str(resolved_sdk),
+                "outputRoot": str(output_root_path),
+                "dryRun": dry_run,
+                "planned": [str(p) for p in planned],
+                "written": [str(p) for p in written],
+                "existing": [str(p) for p in existing],
+                "nextSteps": steps,
+                "report": report_lines,
+            },
+            issues,
+            ExitCode.SUCCESS,
+        )

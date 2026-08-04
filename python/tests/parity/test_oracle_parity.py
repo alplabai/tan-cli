@@ -1003,8 +1003,25 @@ def test_new_som_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     _, p_json_out = _run(python_command(), ["new-som", "--format", "json"], work_dir, home)
     assert r_json_out["command"] == "new-som"
     assert [i["code"] for i in r_json_out["issues"]] == ["new-som.failed"]
-    assert p_json_out["command"] == "cli"
-    assert [i["code"] for i in p_json_out["issues"]] == ["cli.parse-error"]
+    # tan-cli#399 CLOSED this half: the port used to answer `command: "cli"` /
+    # `cli.parse-error` here, because `new_som_cmd` contained no `emit(` call
+    # at all -- `del ... output_format` was the whole handling of `--format`.
+    # Post-subcommand `--format json` now reaches a real `new-som` envelope and
+    # AGREES with the oracle on command, issue code and exit 2.
+    assert p_json_out["command"] == "new-som"
+    assert [i["code"] for i in p_json_out["issues"]] == ["new-som.failed"]
+    # What has NOT closed, and is what keeps this named a divergence: the
+    # PRE-subcommand spelling. `new-som` is still absent from `cli.py`'s
+    # `_HONOURS_ROOT_FORMAT`, so `tan --format json new-som` is still wrapped in
+    # the generic `cli` refusal while the oracle -- where `--format` is a clap
+    # `global = true` arg -- reaches the same `new-som.failed` from either
+    # position. Closing it needs the frozenset entry AND a `ctx: typer.Context`
+    # on `new_som` reading `ctx.obj["format"]`; neither half is useful alone.
+    _, r_root_out = _run([RUST], ["--format", "json", "new-som"], work_dir, home)
+    _, p_root_out = _run(python_command(), ["--format", "json", "new-som"], work_dir, home)
+    assert r_root_out["command"] == "new-som"
+    assert p_root_out["command"] == "cli"
+    assert [i["code"] for i in p_root_out["issues"]] == ["cli.parse-error"]
 
 
 @_ORACLE_REQUIRED
@@ -1061,8 +1078,21 @@ def test_faultdecode_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
     assert r_code == p_code == 2
     assert r_out["command"] == "faultdecode"
     assert [i["code"] for i in r_out["issues"]] == ["faultdecode.failed"]
-    assert p_out["command"] == "cli"
-    assert [i["code"] for i in p_out["issues"]] == ["cli.parse-error"]
+    # tan-cli#399 narrowed this one rather than closing it. The port used to
+    # answer `command: "cli"` / `cli.parse-error`, because `faultdecode` folded
+    # `--format json` into its own `--json` and printed a bespoke `indent=2`
+    # object carrying none of the six envelope keys. It now emits a real
+    # `faultdecode` envelope, so `command` and the exit code AGREE.
+    assert p_out["command"] == "faultdecode"
+    assert p_code == 2
+    # The residual divergence is the code string and the reason behind it. The
+    # oracle refuses through its shared SDK-resolving forwarder
+    # (`faultdecode.failed`, "alp-sdk root is unresolved"); the port's
+    # `faultdecode` needs no SDK at all and refuses for the reason that is
+    # actually true of the invocation -- no CFSR/HFSR/DFSR was supplied. Same
+    # exit, more accurate cause; kept as a divergence rather than "fixed" by
+    # copying a message that would name the wrong problem.
+    assert [i["code"] for i in p_out["issues"]] == ["faultdecode.no-registers"]
 
 
 # --- the harness must be able to go red ------------------------------------
