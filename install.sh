@@ -329,7 +329,7 @@ LIB_DIR="${INSTALL_DIR}/tan-cli-lib"
 
 # ---------------------------------------------------------------------------
 # Prepare $payload -- the one file that ends up at $dest -- per layout. Both
-# branches finish unprivileged, in temp space: the placement block below is the
+# branches finish unprivileged, in temp space: the commit block below is the
 # only thing that ever touches $INSTALL_DIR, so it is the only thing that ever
 # needs sudo.
 #
@@ -359,6 +359,7 @@ if [ "$layout" = "archive" ]; then
 	# runtime under /usr/local/bin that the launcher on PATH cannot read for any
 	# other user -- an install that only works for the account that ran sudo.
 	chmod -R a+rX "$stage/tan"
+	staged_bin="$stage/tan/tan"
 
 	# A thin POSIX launcher, not a symlink: a symlink straight to $LIB_DIR/tan
 	# would still put a plain, unshimmed binary on PATH, which is fine for `tan`
@@ -372,7 +373,33 @@ if [ "$layout" = "archive" ]; then
 exec "${LIB_DIR}/tan" "\$@"
 LAUNCHER
 else
+	chmod +x "$tmp"
+	staged_bin="$tmp"
 	payload="$tmp"
+fi
+
+# ---------------------------------------------------------------------------
+# Health-check BEFORE anything is committed (tan-cli#434). The sha256 check
+# above proves the downloaded BYTES are the ones the release published; it
+# says nothing about whether THIS host can execute them (e.g. a glibc floor
+# the host's libc is below -- the -gnu asset's dynamic loader then fails with
+# a message like `GLIBC_2.xx not found`, on stderr). Running it here, from its
+# staging location, means a verified-but-unrunnable release never gets near
+# $INSTALL_DIR or the shell rc file -- the only things at risk are $stage and
+# $tmp, which the EXIT trap reclaims either way, and whatever was already
+# installed is untouched because nothing below this point has run yet.
+# ---------------------------------------------------------------------------
+if verify_out="$("$staged_bin" --version 2>&1)"; then
+	echo "install.sh: staged binary verified: ${verify_out}"
+else
+	echo "install.sh: newly downloaded binary failed to run: ${verify_out}" >&2
+	if [ -e "$dest" ] || [ -e "$LIB_DIR" ]; then
+		echo "install.sh: refusing to install -- your existing installation at ${dest} was never touched." >&2
+	else
+		echo "install.sh: refusing to install -- no previous installation existed, so there is nothing to fall back to." >&2
+	fi
+	echo "install.sh: PATH was not modified. If the message above names a GLIBC symbol, this host's glibc is older than the release floor; install from a checkout instead: git clone https://github.com/${REPO} && pip install ./tan-cli/python" >&2
+	exit 1
 fi
 
 # User-local dir: create + move without sudo. A non-writable dir (e.g. the
@@ -387,18 +414,71 @@ else
 	as_root() { sudo "$@"; }
 	as_root mkdir -p "$INSTALL_DIR"
 fi
-# Wholesale, not a merge, so a re-install replaces the old freeze rather than
-# mixing two releases' files. Unconditional: a raw install over a previous
-# archive install must not leave ~14 MB of orphaned runtime behind either.
-as_root rm -rf "$LIB_DIR"
-if [ "$layout" = "archive" ]; then
-	as_root mv "$stage/tan" "$LIB_DIR"
+
+# ---------------------------------------------------------------------------
+# Commit: back up whatever is already at $dest/$LIB_DIR, swap the
+# already-verified payload into place, and if any step of the swap fails, put
+# the backup right back -- a failed upgrade must leave the user exactly where
+# they started, never with neither binary (tan-cli#434). $dest.bak/$LIB_DIR.bak
+# share a parent with $dest/$LIB_DIR, so the backup `mv` is a same-filesystem
+# rename, not a copy.
+# ---------------------------------------------------------------------------
+had_dest_backup=0
+had_lib_backup=0
+if [ -e "$dest" ]; then
+	as_root rm -rf "${dest}.bak"
+	as_root mv "$dest" "${dest}.bak"
+	had_dest_backup=1
 fi
-as_root mv "$payload" "$dest"
+if [ -e "$LIB_DIR" ]; then
+	as_root rm -rf "${LIB_DIR}.bak"
+	as_root mv "$LIB_DIR" "${LIB_DIR}.bak"
+	had_lib_backup=1
+fi
+
+restore_previous() { # sets $restore_ok; never lets its own exit status kill the script under set -e
+	restore_ok=1
+	as_root rm -rf "$dest" "$LIB_DIR"
+	if [ "$had_dest_backup" = "1" ]; then
+		as_root mv "${dest}.bak" "$dest" || restore_ok=0
+	fi
+	if [ "$had_lib_backup" = "1" ]; then
+		as_root mv "${LIB_DIR}.bak" "$LIB_DIR" || restore_ok=0
+	fi
+	return 0
+}
+
+# Wholesale, not a merge, so a re-install replaces the old freeze rather than
+# mixing two releases' files (an archive install over a previous raw install,
+# or vice versa, must not leave the other layout's files behind either).
+commit_failed=0
+if [ "$layout" = "archive" ]; then
+	as_root mv "$stage/tan" "$LIB_DIR" || commit_failed=1
+fi
+if [ "$commit_failed" = "0" ]; then
+	as_root mv "$payload" "$dest" || commit_failed=1
+fi
+if [ "$commit_failed" = "1" ]; then
+	echo "install.sh: failed to place the new install under ${INSTALL_DIR} -- rolling back." >&2
+	restore_previous
+	if [ "$had_dest_backup" = "0" ] && [ "$had_lib_backup" = "0" ]; then
+		echo "install.sh: no previous installation existed; nothing to restore. Install failed." >&2
+	elif [ "$restore_ok" = "1" ]; then
+		echo "install.sh: previous installation restored -- 'tan' still works as before. Install failed." >&2
+	else
+		echo "install.sh: WARNING -- could not fully restore the previous installation. A backup remains at ${dest}.bak (and ${LIB_DIR}.bak, if that existed) -- move it back by hand: mv \"${dest}.bak\" \"${dest}\"" >&2
+	fi
+	echo "install.sh: PATH was not modified." >&2
+	exit 1
+fi
 # 755, not `chmod +x`: both $payload sources are `mktemp` files, i.e. 0600, and
 # +x on 0600 is 0700 -- an owner-only binary, which is precisely what --system
 # into /usr/local/bin must not produce.
 as_root chmod 755 "$dest"
+# Commit succeeded -- the backup is no longer needed. rm -rf on an absent path
+# is a no-op, so this needs no had_*_backup guard.
+as_root rm -rf "${dest}.bak" "${LIB_DIR}.bak"
+
 # $payload and (on the archive path) $stage have been consumed by the moves
 # above; $sums and, on the archive path, $tmp have not, so clear the trap only
 # after removing them by hand -- otherwise a successful install is the one path
@@ -421,7 +501,9 @@ case ":${PATH}:" in
 		# Pick the login shell's rc file, append the PATH line (idempotent), and
 		# announce it -- never edit a dotfile silently. This is what makes a
 		# no-sudo user-local install usable globally (notably on macOS, where
-		# ~/.local/bin is not on the default PATH).
+		# ~/.local/bin is not on the default PATH). Reached only after the commit
+		# above succeeded, so a failed install never leaves this line behind
+		# (tan-cli#434).
 		case "$(basename "${SHELL:-/bin/sh}")" in
 		zsh) rc="$HOME/.zshrc" ;;
 		bash)
@@ -441,25 +523,3 @@ case ":${PATH}:" in
 	fi
 	;;
 esac
-# The sha256 check above proves the BYTES are the ones the release published;
-# it says nothing about whether THIS host can execute them (e.g. a glibc floor
-# the host's libc is below -- the -gnu asset's dynamic loader then fails with
-# a message like `GLIBC_2.xx not found`, on stderr). Capture stdout+stderr
-# rather than discarding it: that line is the single most useful diagnostic a
-# user in this situation can be handed, and reporting exit 0 anyway is a false
-# "installed" for a binary that cannot run. A verified-but-unrunnable binary is
-# removed rather than left at $dest: it is the correct bytes for a host this
-# is NOT, and leaving it on PATH turns every later `tan` invocation into this
-# same opaque failure instead of a clear "not installed".
-if verify_out="$("$dest" --version 2>&1)"; then
-	echo "install.sh: verified: ${verify_out}"
-else
-	echo "install.sh: installed binary failed to run: ${verify_out}" >&2
-	# as_root, not a bare rm: a --system install put these there with sudo, and
-	# a bare rm would fail silently, leaving the broken install on PATH under a
-	# message claiming it was removed.
-	as_root rm -f "$dest"
-	as_root rm -rf "$LIB_DIR"
-	echo "install.sh: removed ${dest} and ${LIB_DIR} -- install failed. If the message above names a GLIBC symbol, this host's glibc is older than the release floor; install from a checkout instead: git clone https://github.com/${REPO} && pip install ./tan-cli/python" >&2
-	exit 1
-fi
