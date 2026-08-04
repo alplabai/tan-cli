@@ -396,6 +396,11 @@ _FULL_CODE_CALLABLES: dict[tuple[str, str], int] = {
     ("tan/commands/image_cmd.py", "_Notice"): 0,
     ("tan/commands/size_cmd.py", "_error_outcome"): 2,
     ("tan/commands/scaffold_cmd.py", "ScaffoldError"): 0,
+    # tan-cli#454: `_refuse_required(subcommand, code, message, context,
+    # output_format)` -- `code` is its 2nd positional (index 1). Its two call
+    # sites (`quality`'s `quality.profile-required`, `migrate`'s
+    # `migrate.mode-required`) are what this index resolves.
+    ("tan/commands/west_forward_cmd.py", "_refuse_required"): 1,
 }
 
 #: `(file, exact unparsed expression)` -> declared as a KNOWN forward, never
@@ -444,6 +449,9 @@ _KNOWN_CODE_FORWARDS: frozenset[tuple[str, str]] = frozenset(
         ("tan/commands/renode_cmd.py", "code"),  # `_issue(code, ...)` inside `fail`/`fail_sdk`'s OWN
         # bodies, forwarding THEIR OWN `code` parameter -- `fail`/`fail_sdk`
         # are themselves in `_FULL_CODE_CALLABLES`, so their call sites carry it.
+        ("tan/commands/west_forward_cmd.py", "code"),  # `Issue(code, ...)` inside `_refuse_required`'s
+        # OWN body (tan-cli#454) -- `_refuse_required` is itself in
+        # `_FULL_CODE_CALLABLES`, so its two call sites carry the literal.
         ("tan/commands/scaffold_cmd.py", "err.code"),  # <- ScaffoldError
         ("tan/commands/diff_cmd.py", "failure.code"),  # <- ParseFailure. NOT a whole code (it is a
         # bare suffix, e.g. "schema-violation" -- ParseFailure is deliberately
@@ -950,11 +958,30 @@ _FORWARDER_SUFFIXES: dict[tuple[str, str], dict] = {
     # (see its docstring), not from a direct f-string occurrence
     # `_prefix_templates` finds -- `failure.code` never appears in an f-string
     # at all, it is a plain `code=` keyword value at one of `_emit_failure`'s
-    # 4 call sites. `sites=1` counts that one call site. The two suffixes are
-    # every literal `ParseFailure(...)` is raised with, read from source
-    # (diff_cmd.py's `_load_document`/`_parse_fields` raise sites).
+    # 4 call sites. `sites=1` counts that one call site. The suffixes are
+    # every literal (or, for `_reject_if_sdk_validator_disagrees`'s
+    # `ParseFailure(outcome, ...)`, every value `outcome` can hold)
+    # `ParseFailure(...)` is raised with, read from source: `pyyaml-
+    # unavailable`/`schema-violation` from `_load_document`/`_parse_fields`;
+    # `python-too-old`/`spawn-failed` from `_reject_if_sdk_validator_disagrees`'s
+    # own two direct refusals; `schema-violation`/`missing-preset`/
+    # `hardware-revision`/`failed` (the fifth, `clean`, never reaches a raise)
+    # from `_spawn_validator`'s outcome, the same `_STATUS_OUTCOME` +
+    # `OUTCOME_FAILED` vocabulary `validate_cmd`'s own `result.outcome` entry
+    # below declares (tan-cli#455 review round).
     ("tan/commands/diff_cmd.py", "failure.code"): dict(
-        suffixes=frozenset({"pyyaml-unavailable", "schema-violation"}), sites=1
+        suffixes=frozenset(
+            {
+                "pyyaml-unavailable",
+                "schema-violation",
+                "python-too-old",
+                "spawn-failed",
+                "failed",
+                "missing-preset",
+                "hardware-revision",
+            }
+        ),
+        sites=1,
     ),
     # `Issue(f"support-bundle.{doctor_cmd.kebab_check_name(c.name)}", ...)` in
     # `_doctor_issues()` -- tan-cli #374 findings 3/4 rewrote this entry. `checks` there is

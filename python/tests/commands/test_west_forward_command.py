@@ -133,7 +133,14 @@ def _stub_west_missing(monkeypatch):
 
 
 def test_json_mode_reports_a_launch_error_envelope(_stub_west_missing, tmp_path):
-    result = runner.invoke(app, ["migrate", "--project", str(tmp_path), "--format", "json"])
+    # `--check`: tan-cli#454 made `alp-migrate`'s mode REQUIRED on tan's own
+    # surface too, so a bare `migrate` no longer reaches `west` at all (see
+    # `test_missing_mode_refuses_before_west_is_ever_spawned` below) -- this
+    # test is about the LAUNCH failure, a different concern, and needs a real
+    # mode supplied to reach it.
+    result = runner.invoke(
+        app, ["migrate", "--project", str(tmp_path), "--check", "--format", "json"]
+    )
     assert result.exit_code == 1
     env = envelope(result)
     assert env["command"] == "migrate"
@@ -144,7 +151,11 @@ def test_json_mode_reports_a_launch_error_envelope(_stub_west_missing, tmp_path)
     # declares, and `data.args` reports the argv as handed to the child rather
     # than only the tokens the caller typed -- so a caller with no args of their
     # own still sees exactly what tan asked `west` to do.
-    assert env["data"]["args"] == ["--board", str(tmp_path / "board.yaml").replace("\\", "/")]
+    assert env["data"]["args"] == [
+        "--board",
+        str(tmp_path / "board.yaml").replace("\\", "/"),
+        "--check",
+    ]
     assert env["issues"][0]["code"] == "migrate.failed"
     assert "west not found on PATH" in env["issues"][0]["message"]
 
@@ -200,7 +211,9 @@ def test_json_mode_forwards_interspersed_unrecognised_flags_verbatim(_stub_west_
 def test_text_mode_reports_the_failure_on_stderr_and_writes_no_stdout(
     _stub_west_missing, tmp_path
 ):
-    result = runner.invoke(app, ["quality", "--project", str(tmp_path)])
+    # `--profile quick`: tan-cli#454 made this REQUIRED on tan's own surface --
+    # see `test_missing_profile_refuses_before_west_is_ever_spawned` below.
+    result = runner.invoke(app, ["quality", "--project", str(tmp_path), "--profile", "quick"])
     assert result.exit_code == 1
     assert result.stdout == ""
     assert "west not found on PATH" in result.output
@@ -213,7 +226,9 @@ def test_success_exits_zero_and_reports_ok(monkeypatch, tmp_path):
         stderr = ""
 
     monkeypatch.setattr(west_forward_cmd.subprocess, "run", lambda *a, **k: _Ok())
-    result = runner.invoke(app, ["migrate", "--project", str(tmp_path), "--format", "json"])
+    result = runner.invoke(
+        app, ["migrate", "--project", str(tmp_path), "--check", "--format", "json"]
+    )
     assert result.exit_code == 0
     env = envelope(result)
     assert env["ok"] is True
@@ -385,7 +400,9 @@ def test_board_targeted_verbs_pass_board_yaml_by_flag_and_no_positional(
 
 
 def test_quality_gets_no_positional_and_no_board_flag(west_argv, workspace_project):
-    """`alp_quality.py` declares neither, so tan adds neither (tan-cli#391)."""
+    """`alp_quality.py` declares no `--board`/positional, so tan adds neither
+    (tan-cli#391) -- `--profile` (tan-cli#454) is the one flag it DOES add,
+    since the child declares that one REQUIRED."""
     result = runner.invoke(
         app, ["quality", "--project", str(workspace_project), "--profile", "quick"]
     )
@@ -394,16 +411,22 @@ def test_quality_gets_no_positional_and_no_board_flag(west_argv, workspace_proje
     assert _child_accepts("quality", west_argv["child"]).profile == "quick"
 
 
-def test_quality_equals_form_profile_reaches_the_child(west_argv, workspace_project):
-    """`--profile=quick` is the shape that used to break while `--profile
-    quick` survived by accident: the old guard suppressed the injection only
-    when some forwarded token did NOT start with a dash, and `--profile=quick`
-    is one token (tan-cli#391)."""
+def test_quality_equals_form_profile_still_reaches_the_child(west_argv, workspace_project):
+    """`--profile=quick` and `--profile quick` are the same option to Click
+    once `--profile` is DECLARED (tan-cli#454) -- both spellings bind the same
+    parameter, and `_run_forward` always forwards it in the normalised
+    two-token form (matching how `--all`/`--board` are already forwarded
+    elsewhere in this file), not whichever spelling the caller happened to
+    type. Before tan-cli#454 declared `--profile` for real, this was the shape
+    that broke while `--profile quick` survived by accident -- see tan-cli#391
+    (superseded here, now that both spellings are handled identically by
+    construction rather than by an accident of which forwarded token started
+    with a dash)."""
     result = runner.invoke(
         app, ["quality", "--project", str(workspace_project), "--profile=quick"]
     )
     assert result.exit_code == 0, result.output
-    assert west_argv["west"] == ["alp-quality", "--profile=quick"]
+    assert west_argv["west"] == ["alp-quality", "--profile", "quick"]
     assert _child_accepts("quality", west_argv["child"]).profile == "quick"
 
 
@@ -579,6 +602,170 @@ def test_target_global_does_not_change_the_argv_shape(west_argv, workspace_proje
     assert west_argv["west"] == without
 
 
+# --- a required child flag with no sensible default (tan-cli#454) -----------
+#
+# `alp_quality.py` declares `--profile {quick,pr,full,release}` REQUIRED;
+# `alp_migrate.py` declares a REQUIRED mutually-exclusive `(--check | --preview
+# | --apply)` group. Neither was ever declared on tan's own Typer surface
+# before this fix, so `tan quality`/`tan migrate` reached `west` regardless and
+# died on the CHILD's own argparse usage error -- on a correctly bootstrapped
+# workspace, where every other west-backed command works, and with no flag
+# combination that avoided it (nothing in tan's own `--help` even named the
+# flag to supply). PRE-FIX, every test below fails: `_never_spawn_west`'s
+# `AssertionError` fires (the old code forwarded straight to `west` with an
+# incomplete argv), and the exit code observed on the unfixed tree is `1`
+# (`<verb>.failed`, from the child's own exit 2 folded into tan's
+# `RUNTIME_FAILURE`), never the `quality.profile-required` /
+# `migrate.mode-required` this fix adds.
+
+
+@pytest.fixture
+def _never_spawn_west(monkeypatch):
+    """The fix's whole point: neither refusal may spawn a child at all. A stub
+    that raises tells the two apart from a stub that just returns a stale
+    fixed exit code, which a `quality.failed`/`migrate.failed` fallback could
+    still coincidentally satisfy."""
+
+    def _forbidden(argv, **kwargs):
+        raise AssertionError(f"west must not be spawned for a missing required flag: {argv}")
+
+    monkeypatch.setattr(west_forward_cmd.subprocess, "run", _forbidden)
+
+
+def test_missing_profile_refuses_before_west_is_ever_spawned(_never_spawn_west, tmp_path):
+    result = runner.invoke(app, ["quality", "--project", str(tmp_path), "--format", "json"])
+    assert result.exit_code == 2
+    env = envelope(result)
+    assert env["command"] == "quality"
+    assert env["ok"] is False
+    assert env["exitCode"] == 2
+    assert env["issues"] == [
+        {
+            "code": "quality.profile-required",
+            "severity": "error",
+            "message": "`--profile` is required (`west alp-quality --profile "
+            "{quick,pr,full,release}`).",
+        }
+    ]
+
+
+def test_missing_profile_refuses_in_text_mode_too(_never_spawn_west, tmp_path):
+    result = runner.invoke(app, ["quality", "--project", str(tmp_path)])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "`--profile` is required" in result.output
+
+
+def test_missing_migrate_mode_refuses_before_west_is_ever_spawned(_never_spawn_west, tmp_path):
+    result = runner.invoke(app, ["migrate", "--project", str(tmp_path), "--format", "json"])
+    assert result.exit_code == 2
+    env = envelope(result)
+    assert env["command"] == "migrate"
+    assert env["ok"] is False
+    assert env["exitCode"] == 2
+    assert env["issues"] == [
+        {
+            "code": "migrate.mode-required",
+            "severity": "error",
+            "message": "one of `--check`, `--preview`, `--apply` is required "
+            "(`west alp-migrate`).",
+        }
+    ]
+
+
+def test_missing_migrate_mode_refuses_in_text_mode_too(_never_spawn_west, tmp_path):
+    result = runner.invoke(app, ["migrate", "--project", str(tmp_path)])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "one of `--check`, `--preview`, `--apply` is required" in result.output
+
+
+def test_escape_hatch_profile_is_not_falsely_refused(west_argv, workspace_project):
+    """A caller who spells `--profile` themselves past tan's own declared
+    option, through the documented `ARGS...` escape hatch
+    (`tan quality -- --profile quick`), already satisfies `alp_quality.py`'s
+    requirement -- pre-fix, `_resolve_quality_profile` only ever looked at its
+    OWN `--profile` parameter (bound by Typer, unset here) and refused a flag
+    that was already present, one token later, in `west_args`."""
+    result = runner.invoke(
+        app, ["quality", "--project", str(workspace_project), "--", "--profile", "quick"]
+    )
+    assert result.exit_code == 0, result.output
+    assert west_argv["west"] == ["alp-quality", "--profile", "quick"]
+
+
+def test_escape_hatch_migrate_mode_is_not_falsely_refused(west_argv, workspace_project):
+    """Same false refusal, `migrate`'s side: `tan migrate -- --check`."""
+    result = runner.invoke(app, ["migrate", "--project", str(workspace_project), "--", "--check"])
+    assert result.exit_code == 0, result.output
+    assert west_argv["west"] == [
+        "alp-migrate",
+        "--board",
+        _board_yaml_of(workspace_project),
+        "--check",
+    ]
+
+
+def test_migrate_two_modes_refuses_before_west_is_ever_spawned(_never_spawn_west, tmp_path):
+    """`tan migrate --check --preview` used to build the contradictory argv
+    itself, spawn `west`, and report the opaque `migrate.failed` the
+    REQUIRED-group refusal exists to remove -- for the mutual-exclusion
+    violation, not merely a missing mode."""
+    result = runner.invoke(
+        app, ["migrate", "--project", str(tmp_path), "--check", "--preview", "--format", "json"]
+    )
+    assert result.exit_code == 2
+    env = envelope(result)
+    assert env["command"] == "migrate"
+    assert env["ok"] is False
+    assert env["exitCode"] == 2
+    assert env["issues"] == [
+        {
+            "code": "migrate.mode-required",
+            "severity": "error",
+            "message": "only one of `--check`, `--preview`, `--apply` may be given "
+            "(`west alp-migrate`).",
+        }
+    ]
+
+
+def test_migrate_two_modes_refuses_in_text_mode_too(_never_spawn_west, tmp_path):
+    result = runner.invoke(app, ["migrate", "--project", str(tmp_path), "--check", "--preview"])
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "only one of `--check`, `--preview`, `--apply` may be given" in result.output
+
+
+def test_an_out_of_choice_profile_value_is_rejected_without_spawning_west(
+    _never_spawn_west, tmp_path
+):
+    """Absence (tan-cli#454's own bug) and an invalid VALUE are different
+    failures: the choice list is still enforced, just at tan's own CLI-parse
+    layer (`typer.BadParameter`, mirroring `new_som_cmd.py`'s established
+    pattern for a choice-shaped flag) rather than round-tripped through a
+    spawned `west` to find out."""
+    result = runner.invoke(
+        app, ["quality", "--project", str(tmp_path), "--profile", "bogus", "--format", "json"]
+    )
+    assert result.exit_code == 2
+    assert "not one of" in result.output
+
+
+def test_quality_help_names_the_required_profile_flag():
+    """The other half of tan-cli#454: `--profile` was undiscoverable from
+    `--help`, not only unenforced."""
+    result = runner.invoke(app, ["quality", "--help"])
+    assert result.exit_code == 0
+    assert "--profile" in result.output
+
+
+def test_migrate_help_names_the_required_mode_flags():
+    result = runner.invoke(app, ["migrate", "--help"])
+    assert result.exit_code == 0
+    for flag in ("--check", "--preview", "--apply"):
+        assert flag in result.output
+
+
 # --- the child's output and exit code reach the envelope (tan-cli#395) -------
 
 
@@ -638,7 +825,9 @@ def test_failure_message_falls_back_when_the_child_says_nothing(monkeypatch, tmp
     """A child that fails silently still has to produce a message a JSON-only
     caller can act on."""
     _stub_child(monkeypatch, _Child(3, "", ""))
-    result = runner.invoke(app, ["migrate", "--project", str(tmp_path), "--format", "json"])
+    result = runner.invoke(
+        app, ["migrate", "--project", str(tmp_path), "--check", "--format", "json"]
+    )
     env = envelope(result)
     assert env["issues"][0]["message"] == (
         "`west alp-migrate` failed with exit code 3; the child wrote nothing to "
@@ -654,7 +843,9 @@ def test_a_very_long_stderr_line_is_truncated_in_the_message_but_not_in_data(
     turn one issue into an unreadable envelope."""
     line = "x" * 4096
     _stub_child(monkeypatch, _Child(1, "", line))
-    result = runner.invoke(app, ["quality", "--project", str(tmp_path), "--format", "json"])
+    result = runner.invoke(
+        app, ["quality", "--project", str(tmp_path), "--profile", "quick", "--format", "json"]
+    )
     env = envelope(result)
     assert env["data"]["stderr"] == line
     assert env["issues"][0]["message"].endswith("...")
@@ -665,7 +856,9 @@ def test_success_branch_also_carries_the_child_output(monkeypatch, tmp_path):
     """`alp-quality` exists to produce a report; on the success branch that
     report was the one thing the envelope did not contain (tan-cli#395)."""
     _stub_child(monkeypatch, _Child(0, "alp-quality profile=quick: 0/0 passed\n", ""))
-    result = runner.invoke(app, ["quality", "--project", str(tmp_path), "--format", "json"])
+    result = runner.invoke(
+        app, ["quality", "--project", str(tmp_path), "--profile", "quick", "--format", "json"]
+    )
     assert result.exit_code == 0
     env = envelope(result)
     assert env["ok"] is True
@@ -678,7 +871,9 @@ def test_success_branch_also_carries_the_child_output(monkeypatch, tmp_path):
 def test_launch_error_reports_a_null_west_exit_code(_stub_west_missing, tmp_path):
     """No child ever ran, so there is no code to report -- `null`, not a
     fabricated 1, and the keys stay present so a consumer sees one shape."""
-    result = runner.invoke(app, ["migrate", "--project", str(tmp_path), "--format", "json"])
+    result = runner.invoke(
+        app, ["migrate", "--project", str(tmp_path), "--check", "--format", "json"]
+    )
     env = envelope(result)
     assert env["data"]["westExitCode"] is None
     assert env["data"]["stdout"] == ""

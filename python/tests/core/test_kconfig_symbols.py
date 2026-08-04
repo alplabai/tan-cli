@@ -101,6 +101,40 @@ def test_rendering_again_overwrites_rather_than_reusing_stale_content(tmp_path, 
 
 
 # ---------------------------------------------------------------------
+# tan-cli#453/#459 review: `west build` is spawned by an ABSOLUTE, venv-
+# resolved path, never a bare "west" that depends on PATH having it (which
+# `tan bootstrap` never puts there -- `west` lives only in the workspace
+# venv).
+# ---------------------------------------------------------------------
+
+
+def test_load_board_symbols_spawns_the_venvs_absolute_west_not_a_bare_name(
+    tmp_path, monkeypatch, ks
+):
+    zephyr_base = tmp_path / "zephyr"
+    zephyr_base.mkdir()
+    resolved = str(tmp_path / "ws" / ".venv" / "bin" / "west")
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(ks.subprocess, "run", fake_run)
+    monkeypatch.setattr(ks, "west_program", lambda start, sdk_root: resolved)
+
+    # Both spawns still fail past the mock (no real `output_json` was ever
+    # written), which is expected -- what this pins is what argv[0] BOTH used
+    # before that refusal.
+    with pytest.raises(ks.OrchestratorError):
+        ks._load_board_symbols(zephyr_base, "some_board")
+
+    assert len(calls) == 2
+    assert calls[0][0] == resolved
+    assert calls[1][0] == resolved
+
+
+# ---------------------------------------------------------------------
 # Behavioral equivalence: the inlined projection logic vs the planner's own.
 # ---------------------------------------------------------------------
 

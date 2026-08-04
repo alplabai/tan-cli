@@ -13,7 +13,10 @@ from pathlib import Path
 import pytest
 import typer
 
-from tan.commands.debug_config_cmd import _resolve_from_build, _select_slice
+from tan.commands.debug_config_cmd import (
+    _resolve_from_build,
+    _select_slice,
+)
 from tan.core.debug_launch import (
     GDBSERVER,
     JLINK,
@@ -25,6 +28,7 @@ from tan.core.debug_launch import (
     create_launch_draft,
     create_launch_json_write_plan,
     fill_debug_probe_identity_gaps,
+    infer_target_kind,
     strip_jsonc,
 )
 
@@ -987,3 +991,277 @@ def test_a_hand_typed_gdbserver_address_survives_a_rerun_and_is_not_re_nagged(tm
     assert "debug-config.gdbserver-address-unresolved" not in codes
     on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
     assert on_disk["configurations"][0]["miDebuggerServerAddress"] == "192.168.10.42:3333"
+
+
+# ---------------------------------------------------------------------------
+# tan-cli#456: an omitted --target-kind must not silently default to
+# native-host on a project whose build can never produce that binary.
+# ---------------------------------------------------------------------------
+
+#: The exact shape from the tan-cli#456 report: a real hardware SoM
+#: (`som.sku`) whose only built slices are Zephyr on `m55_hp` / `m55_he` --
+#: `native_sim` was never built. Before the fix, the omitted --target-kind
+#: still resolved `native-host`/`none` and wrote a launch.json `program`
+#: pointing at `build/native_sim/zephyr/zephyr.exe`, a binary this project
+#: never produces.
+MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM = """\
+schema_version: 1
+hw_info:
+  sku: E1M-AEN801
+slices:
+- core_id: m55_hp
+  os: zephyr
+  board: alp_e1m_aen801_m55_hp
+  status: ok
+  build_dir: {root}/build/m55_hp-zephyr/build
+  output_artefact: {root}/build/m55_hp-zephyr/build/zephyr/zephyr.elf
+- core_id: m55_he
+  os: zephyr
+  board: alp_e1m_aen801_m55_he
+  status: ok
+  build_dir: {root}/build/m55_he-zephyr/build
+  output_artefact: {root}/build/m55_he-zephyr/build/zephyr/zephyr.elf
+ipc: []
+helper_mcus: []
+boot_order: []
+"""
+
+MANIFEST_MIXED_ZEPHYR_AND_YOCTO = """\
+schema_version: 1
+slices:
+- core_id: m33_sm
+  os: zephyr
+  board: alp_e1m_v2n101_m33_sm
+  output_artefact: {root}/build/m33_sm-zephyr/build/zephyr/zephyr.elf
+- core_id: a55_cluster
+  os: yocto
+  image: core-image-minimal
+ipc: []
+helper_mcus: []
+boot_order: []
+"""
+
+
+def test_an_omitted_target_kind_infers_zephyr_mcu_from_the_built_manifest(tmp_path):
+    """tan-cli#456 reproduced verbatim: `som.sku: E1M-AEN801` + `m55_hp`/
+    `m55_he` Zephyr slices, no `native_sim` slice anywhere. Before the fix
+    this wrote `target=native-host server=none` and a `program` pointing at
+    `build/native_sim/zephyr/zephyr.exe`, a binary this project never
+    produces -- FAILS against the pre-fix code, which hardcodes
+    `parse_target_kind(None) == NATIVE_HOST` with no project inspection at
+    all."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n"
+        "  m55_he:\n    app: ./src_he\n",
+        encoding="utf-8",
+    )
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root))
+
+    env = envelope(run_cli(tmp_path, "--format", "json"))
+
+    assert env["exitCode"] == 0, env
+    assert env["data"]["targetKind"] == ZEPHYR_MCU
+    assert env["data"]["server"] == JLINK
+    assert env["data"]["configuration"]["type"] == "cortex-debug"
+    executable = env["data"]["configuration"]["executable"]
+    assert "native_sim" not in executable, (
+        f"must not point at a binary this project never builds: {executable}"
+    )
+    assert executable == "${workspaceFolder}/build/m55_hp-zephyr/build/zephyr/zephyr.elf"
+    on_disk = json.loads(launch_json(tmp_path).read_text(encoding="utf-8"))
+    assert on_disk["configurations"][0]["executable"] == executable
+    # tan-cli#456 review (minor): the inference is otherwise silent -- say so,
+    # the same "never a silent no-op" floor the --svd/--gdbserver-address
+    # notes already hold to.
+    assert any(
+        "inferred 'zephyr-mcu'" in n and "build/system-manifest.yaml" in n
+        for n in env["data"]["notes"]
+    ), env["data"]["notes"]
+
+
+def test_an_omitted_target_kind_still_defaults_to_native_host_with_no_project_signal(tmp_path):
+    """The regression-safety pairing: an empty scratch directory (no
+    board.yaml, no build) carries no evidence at all, so the historical
+    native-host default must survive untouched."""
+    env = envelope(run_cli(tmp_path, "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 0
+    assert env["data"]["targetKind"] == NATIVE_HOST
+    assert env["data"]["server"] == "none"
+
+
+def test_an_omitted_target_kind_refuses_rather_than_guess_pre_build(tmp_path):
+    """A real hardware project (`som.sku` set) with no build yet cannot say
+    which of zephyr/baremetal/yocto its core defaults to without shelling the
+    SDK -- tan-cli#456's own floor: refuse with a coded issue rather than
+    write a launch.json that cannot work."""
+    Path(tmp_path, "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n",
+        encoding="utf-8",
+    )
+
+    env = envelope(run_cli(tmp_path, "--format", "json"))
+
+    assert env["exitCode"] == 5
+    assert env["issues"][0]["code"] == "debug-config.internal-failure"
+    assert "som.sku: E1M-AEN801" in env["issues"][0]["message"]
+    assert not launch_json(tmp_path).exists()
+
+
+def test_an_omitted_target_kind_refuses_on_a_mixed_manifest(tmp_path):
+    """A board with slices in more than one target class (Cortex-A yocto +
+    Cortex-M zephyr) is genuinely ambiguous with no `--core` to pick one --
+    refuse rather than silently pick a winner.
+
+    Review round on tan-cli#456: asserts the mapped `--target-kind` SPELLINGS
+    (`yocto-userspace`/`zephyr-mcu`), not just the substrings `"yocto"`/
+    `"zephyr"` -- those substrings also match the OLD, wrong message (which
+    printed the raw manifest `os` values `yocto`/`zephyr`, not a value
+    `--target-kind` actually accepts), so the old assertion never would have
+    caught that bug."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-V2N101\n", encoding="utf-8")
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_MIXED_ZEPHYR_AND_YOCTO.format(root=root))
+
+    env = envelope(run_cli(tmp_path, "--format", "json"))
+
+    assert env["exitCode"] == 5
+    assert env["issues"][0]["code"] == "debug-config.internal-failure"
+    message = env["issues"][0]["message"]
+    assert "yocto-userspace" in message and "zephyr-mcu" in message, message
+    assert not launch_json(tmp_path).exists()
+
+
+def test_an_omitted_target_kind_refuses_with_its_own_message_for_a_single_unmapped_os(tmp_path):
+    """Review round on tan-cli#456: a lone slice whose `os` maps to no
+    `--target-kind` at all (e.g. `linux`) is NOT "more than one target
+    class" -- the shared ambiguous-manifest message said so anyway, which is
+    false with only one slice in play. This gets its own, honest message."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-UNKNOWN\n", encoding="utf-8")
+    write_manifest(
+        tmp_path,
+        "schema_version: 1\nslices:\n- core_id: a55_cluster\n  os: linux\n"
+        "ipc: []\nhelper_mcus: []\nboot_order: []\n",
+    )
+
+    env = envelope(run_cli(tmp_path, "--format", "json"))
+
+    assert env["exitCode"] == 5
+    message = env["issues"][0]["message"]
+    assert "no debuggable target class for os: linux" in message, message
+    assert "more than one" not in message, message
+
+
+def test_an_omitted_target_kind_with_core_disambiguates_a_mixed_manifest(tmp_path):
+    """`--core` alone, with no `--target-kind`, is enough to resolve the same
+    mixed manifest the previous test refuses on."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text("som:\n  sku: E1M-V2N101\n", encoding="utf-8")
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_MIXED_ZEPHYR_AND_YOCTO.format(root=root))
+
+    env = envelope(run_cli(tmp_path, "--core", "m33_sm", "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 0
+    assert env["data"]["targetKind"] == ZEPHYR_MCU
+    assert env["data"]["server"] == JLINK
+
+
+def test_an_omitted_target_kind_with_a_core_matching_nothing_refuses(tmp_path):
+    """Review round on tan-cli#456 blocker: `--core` naming NOTHING in the
+    manifest must refuse outright, never silently fall back to voting across
+    every OTHER core's class (the exact bug the next test pins the fix for).
+    Also pins tan-cli#456 review finding on `launchJsonPath`: this refusal
+    fires AFTER `launch_json_path` is resolved (unlike the parse_target_kind
+    catch-all below it), so it must report the PROJECT's own path, not one
+    built from wherever the shell happened to be."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n",
+        encoding="utf-8",
+    )
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM.format(root=root))
+
+    # `cwd` is the SESSION temp root, deliberately NOT `tmp_path` (the
+    # project) -- a cwd-based `launchJsonPath` and the project's own would
+    # otherwise be indistinguishable strings.
+    env = envelope(run_cli(tmp_path.parent, "--core", "bogus-core", "--project", str(tmp_path), "--format", "json"))
+
+    assert env["exitCode"] == 5
+    assert "does not match any slice" in env["issues"][0]["message"]
+    assert env["data"]["launchJsonPath"] == str(Path(tmp_path, ".vscode", "launch.json"))
+    assert not launch_json(tmp_path).exists()
+
+
+def test_an_omitted_target_kind_with_core_naming_the_native_sim_slice_infers_native_host(tmp_path):
+    """The exact wrong-config bug this review round caught: the original
+    tan-cli#456 fix filtered only the HARDWARE slices by `--core`, and fell
+    back to the UNFILTERED hardware list when `--core` matched none of THEM
+    -- so on a mixed native_sim+hardware manifest, `--core <the native_sim
+    slice's own core id>` silently voted on the co-built hardware slice
+    instead: inferred `zephyr-mcu`/`jlink` and wrote a J-Link session whose
+    `executable` pointed at the native_sim binary a J-Link probe can never
+    attach to. `--core` naming the native_sim slice must infer `native-host`,
+    the same target `_resolve_from_build`'s own NATIVE_HOST arm resolves it
+    against (`test_native_host_resolves_the_native_sim_slice_not_the_first_zephyr_one`,
+    above)."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN701\ncores:\n  m55_hp:\n    app: ./src\n",
+        encoding="utf-8",
+    )
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_MCU_THEN_NATIVE_SIM.format(root=root))
+
+    env = envelope(run_cli(tmp_path, "--core", "native_sim", "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 0, env
+    assert env["data"]["targetKind"] == NATIVE_HOST
+    assert env["data"]["server"] == "none"
+    assert env["data"]["configuration"]["type"] == "lldb"
+    program = env["data"]["configuration"]["program"]
+    assert program == "${workspaceFolder}/build/native_sim-zephyr/build/zephyr/zephyr.exe", program
+
+
+def test_an_omitted_target_kind_and_core_infers_hardware_over_a_co_built_native_sim_slice(tmp_path):
+    """tan-cli#456 review finding (minor): hardware outvotes a co-built
+    native_sim slice when `--core` is NOT given either -- the #83
+    `_select_slice` NATIVE_HOST arm is reachable only via an explicit
+    `--target-kind native-host` (or `--core` naming the native_sim slice, the
+    previous test) on a board that also built a real MCU image, never by the
+    plain no-flag default. Pinned so it cannot silently flip."""
+    pytest.importorskip("yaml")
+    Path(tmp_path, "board.yaml").write_text(
+        "som:\n  sku: E1M-AEN701\ncores:\n  m55_hp:\n    app: ./src\n",
+        encoding="utf-8",
+    )
+    root = str(tmp_path).replace("\\", "/")
+    write_manifest(tmp_path, MANIFEST_MCU_THEN_NATIVE_SIM.format(root=root))
+
+    env = envelope(run_cli(tmp_path, "--preview", "--format", "json"))
+
+    assert env["exitCode"] == 0, env
+    assert env["data"]["targetKind"] == ZEPHYR_MCU
+    assert env["data"]["server"] == JLINK
+    executable = env["data"]["configuration"]["executable"]
+    assert executable == "${workspaceFolder}/build/m55_hp-zephyr/build/zephyr/zephyr.elf", executable
+
+
+def test_inferred_target_kind_stays_native_host_for_a_pure_native_sim_manifest():
+    """A project whose build produced ONLY a `native_sim` slice really is a
+    host-simulation project -- the one case where `native-host` remains the
+    right default, not a guess. Pure -- `infer_target_kind` takes the
+    already-parsed manifest, no file IO."""
+    manifest = {
+        "schema_version": 1,
+        "slices": [{"core_id": "native_sim", "os": "zephyr", "board": "native_sim/native/64"}],
+    }
+
+    target, ambiguous = infer_target_kind(manifest, None, None)
+
+    assert target == NATIVE_HOST and ambiguous is None

@@ -19,21 +19,22 @@ which does the same single-file read) and picks the one `os: zephyr` core;
 zero or more than one is a named-candidates error, never a guess.
 `emit_kconfig` itself always requires an explicit core.
 
-**ZEPHYR_BASE resolution** mirrors
-`crates/tan-cli/src/commands/build/workspace.rs::resolve_zephyr_base` /
-`west_workspace_dir`'s three tiers: (1) the project tree walked upward for a
-`.west/` dir, (2) an already-exported `ZEPHYR_BASE` (the same check
-`kconfig_symbols._require_workspace` makes -- kept as-is here rather than
-re-derived with full manifest verification, since it already honours the
-oracle's tier 2 in practice), (3) the SDK-derived layouts (`<sdk_root>/..`
-and `<sdk_root>/../zephyrproject`). Tiers 1 and 3 close the gap that made
-`tan kconfig` unable to succeed after an ordinary `tan bootstrap`, which
-creates the workspace under the SDK's parent and does not export the
-variable into the caller's shell. `build_cmd.py`'s own `_dispatch` still
-carries a `NOT YET PORTED` note for the identical gap on the build path;
-this module does not share code with it (no third file to touch for a
-kconfig-scoped fix) but follows the exact same tier order so the two do not
-drift in behaviour, only in whether they are wired up yet.
+**ZEPHYR_BASE resolution** (tan-cli#453) delegates to `tan.core.venv.
+west_workspace_dir` -- the SAME shared resolver `build`/`flash`/
+`west_forward_cmd` already consult, not a second, private copy. It used to be
+one: a hand-rolled 3-tier ladder (upward `.west` walk, an already-exported
+`ZEPHYR_BASE`, the SDK-derived layouts) that skipped the MANIFEST
+verification (tan-cli#307) the shared resolver applies to tiers 1 and 2 --
+so on a host with an unrelated ancestor `.west` checkout, or an ambient
+`$ZEPHYR_BASE` naming a DIFFERENT Zephyr tree, this command picked that
+wrong workspace instead of the one an ordinary `tan bootstrap` had already
+built for THIS `--sdk-root`, or fell through to nothing. "Dead by default on
+any host that has another Zephyr checkout around" -- verbatim the bug
+report. `west_workspace_dir` returns the workspace TOPDIR; `zephyr_base` is
+then `<topdir>/zephyr`, filtered to a real directory, mirroring
+`build/execute.py`'s own tan-cli#308 derivation exactly (`workspace_dir /
+"zephyr"`, `None` if it is not a directory yet) so the two can no longer
+disagree about what counts as "bootstrapped".
 
 The resolved base is INJECTED into `os.environ["ZEPHYR_BASE"]` around the
 `_plan_emit` call (temporarily, restored after) rather than relied on
@@ -41,6 +42,22 @@ ambiently -- `tan.planner.kconfig_symbols` reads `os.environ["ZEPHYR_BASE"]`
 directly (it renders in-process, so there is no child env to set it on the
 way the Rust oracle sets it on a spawned command), so a tree- or
 SDK-derived workspace would otherwise never reach the planner at all.
+
+**The workspace `west` no longer depends on `PATH` at all** (tan-cli#453,
+other half; tan-cli#459 review). The in-process renderer's own
+workspace-dependent step (`kconfig_symbols._load_board_symbols`) used to
+shell a BARE `west build` with no explicit `env=` -- unlike every spawn in
+`build`/`flash`, it never resolved an absolute, venv-scoped `west` binary
+before invoking it, so it depended entirely on whatever `west` PATH already
+had, which is nothing: `tan bootstrap` installs `west` ONLY inside the
+workspace-local venv, never system- or user-wide. An earlier version of this
+fix prepended that venv's `bin`/`Scripts` dir onto `os.environ["PATH"]`
+around the call here, in this module -- a mitigation scoped to `tan kconfig`
+alone that left the same bare `"west"` in place one layer down. The real fix
+is IN `kconfig_symbols._load_board_symbols`: it now resolves
+`tan.core.venv.west_program` itself and spawns that absolute path, so
+neither this module nor any other future caller needs to touch `PATH` for
+it to work.
 """
 
 from __future__ import annotations
@@ -56,6 +73,7 @@ import yaml
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
 from tan.commands.sdk_cmd import NO_SDK_NEXT_STEPS
 from tan.core.global_flags import accept_global_flags
+from tan.core.venv import west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat
@@ -200,39 +218,19 @@ def _resolve_core(core_arg: str | None, board_yaml: str) -> str:
 
 
 def _resolve_zephyr_base(root: str, sdk_root: str | None) -> str | None:
-    """The bootstrapped `ZEPHYR_BASE`, or `None`. Port of the oracle's
-    `resolve_zephyr_base` / `west_workspace_dir` (see the module docstring):
-    tries, IN ORDER, (1) the project tree walked upward for a `.west/` dir,
-    (2) an already-exported `$ZEPHYR_BASE`, (3) the SDK-derived layouts. Per
-    the oracle, once a tier finds a *workspace* that is the end of the
-    search -- it does not fall through to a later tier just because that
-    workspace turns out to hold no `zephyr/` checkout.
+    """The bootstrapped `ZEPHYR_BASE`, or `None`. tan-cli#453: delegates to
+    `tan.core.venv.west_workspace_dir` -- the SAME manifest-verified resolver
+    `build`/`flash`/`west_forward_cmd` already share (see the module
+    docstring for why the private ladder this replaced was a real bug, not
+    just a duplicate) -- rather than a second, private tier ladder that could
+    drift from it again. `<topdir>/zephyr`, filtered to a real directory,
+    mirrors `build/execute.py`'s own tan-cli#308 derivation byte for byte.
     """
-
-    def workspace_zephyr(workspace: Path) -> str | None:
-        zephyr = workspace / "zephyr"
-        return str(zephyr) if zephyr.is_dir() else None
-
-    # Tier 1: the project tree, walked upward.
-    directory: Path | None = Path(root)
-    while directory is not None:
-        if (directory / ".west").is_dir():
-            return workspace_zephyr(directory)
-        parent = directory.parent
-        directory = parent if parent != directory else None
-
-    # Tier 2: an already-exported `$ZEPHYR_BASE`.
-    raw = os.environ.get("ZEPHYR_BASE")
-    if raw and Path(raw, "scripts", "kconfig", "kconfiglib.py").is_file():
-        return raw
-
-    # Tier 3: SDK-derived layouts.
-    if sdk_root:
-        parent = Path(sdk_root).parent
-        for workspace in (parent, parent / "zephyrproject"):
-            if (workspace / ".west").is_dir():
-                return workspace_zephyr(workspace)
-    return None
+    workspace = west_workspace_dir(root, Path(sdk_root) if sdk_root else None)
+    if workspace is None:
+        return None
+    zephyr = workspace / "zephyr"
+    return str(zephyr) if zephyr.is_dir() else None
 
 
 def _empty_data(core: str | None) -> dict:

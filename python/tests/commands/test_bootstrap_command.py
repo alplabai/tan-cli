@@ -749,6 +749,95 @@ def test_the_auto_relocation_target_refuses_when_it_already_holds_content(tmp_pa
     assert "interactively" not in message
 
 
+def test_print_env_agrees_with_dry_run_on_a_dirty_parent(tmp_path):
+    """tan-cli#459: `--print-env` used to answer BEFORE the workspace-parent
+    guard above ever ran, so on the exact dirty-parent host that guard
+    relocates off of (the fixture above -- tan's own binary beside a freshly
+    cloned alp-sdk, per the documented quickstart), it reported
+    `data.workspaceDir`/`sdkRoot`/`zephyrBase` as the checkout's raw,
+    unrelocated parent -- three exported paths a real `tan bootstrap` would
+    never create -- at `ok: true`, `issues: []`: silent success for advice
+    that cannot work. `--dry-run` over the IDENTICAL input already got this
+    right, so this pins agreement between the two rather than a hardcoded
+    path: a future change to `default_relocation_target`'s own choice must
+    move both together or this test catches the divergence."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])
+    (sdk.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+    target = sdk.parent / "alp-workspace"
+
+    print_env = envelope(
+        run_tan(
+            "bootstrap", "--print-env", "--format", "json", "--sdk-root", str(sdk),
+            cwd=sdk.parent,
+        )
+    )
+    dry_run = envelope(
+        run_tan(
+            "bootstrap", "--dry-run", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent,
+        )
+    )
+
+    assert print_env["data"]["workspaceDir"] == bootstrap_cmd._native(str(target))
+    assert print_env["data"]["sdkRoot"] == bootstrap_cmd._native(str(target / sdk.name))
+    assert print_env["data"]["zephyrBase"] == bootstrap_cmd._native(str(target / "zephyr"))
+    assert print_env["data"]["workspaceDir"] == dry_run["data"]["workspaceDir"]
+    assert print_env["data"]["sdkRoot"] == dry_run["data"]["sdkRoot"]
+    assert print_env["data"]["zephyrBase"] == dry_run["data"]["zephyrBase"]
+    assert "bootstrap.workspace-relocated" in codes(print_env)
+    # `--print-env`'s own contract (the --workspace conflict refusal's own
+    # wording): "prints what an already-resolved workspace exports and moves
+    # nothing". Nothing on disk may move just because the reported paths did.
+    assert sdk.exists()
+    assert not target.exists()
+    assert not (tmp_path / "fake-home" / ".alp" / "sdk-default").exists()
+
+
+def test_print_env_agrees_with_dry_run_on_an_adopted_zephyr_base(tmp_path):
+    """tan-cli#459 was only HALF fixed by projecting `--print-env` through the
+    relocation guard: on the ADOPTION branch (an ambient `$ZEPHYR_BASE` this
+    run would REUSE, `_select_workspace`'s own call) the guard never applies
+    at all -- `guard_applies` is False exactly when adoption applies -- so
+    nothing relocates, but `--print-env` still named the checkout's own,
+    unrelocated `ws`, a workspace a real run never builds; `--dry-run` over
+    the identical input already named the adopted `other` topdir."""
+    sdk = make_sdk(tmp_path, tools=[PRESENT_TOOL])  # <tmp_path>/ws/alp-sdk
+    other = tmp_path / "other"
+    zephyr = other / "zephyr"
+    zephyr.mkdir(parents=True)
+    (zephyr / "VERSION").write_text(
+        "VERSION_MAJOR = 4\nVERSION_MINOR = 4\nPATCHLEVEL = 1\nEXTRAVERSION =\n",
+        encoding="utf-8",
+    )
+    (other / ".west").mkdir()
+    (other / ".west" / "config").write_text(
+        "[manifest]\npath = ../ws/alp-sdk\nfile = west.yml\n", encoding="utf-8"
+    )
+
+    print_env = envelope(
+        run_tan(
+            "bootstrap", "--print-env", "--format", "json", "--sdk-root", str(sdk),
+            cwd=sdk.parent, env_extra={"ZEPHYR_BASE": str(zephyr)},
+        )
+    )
+    dry_run = envelope(
+        run_tan(
+            "bootstrap", "--dry-run", "--no-west", "--no-pip", "--format", "json",
+            "--sdk-root", str(sdk), cwd=sdk.parent, env_extra={"ZEPHYR_BASE": str(zephyr)},
+        )
+    )
+
+    assert print_env["data"]["workspaceDir"] == bootstrap_cmd._native(str(other))
+    assert print_env["data"]["workspaceDir"] == dry_run["data"]["workspaceDir"]
+    assert print_env["data"]["zephyrBase"] == dry_run["data"]["zephyrBase"]
+    assert print_env["data"]["sdkRoot"] == dry_run["data"]["sdkRoot"]
+    # Adoption never moves the checkout -- only `--print-env`'s reported
+    # `workspaceDir`/`zephyrBase` change; `sdkRoot` stays the checkout itself.
+    assert print_env["data"]["sdkRoot"] == bootstrap_cmd._native(str(sdk))
+    assert sdk.exists()
+    assert not (tmp_path / "fake-home" / ".alp" / "sdk-default").exists()
+
+
 # ---------------------------------------------------------------------------
 # tan-cli#389 / tan-cli#390: the two ways bootstrap destroyed something the
 # customer created. Both are gated end-to-end (a real `tan bootstrap`

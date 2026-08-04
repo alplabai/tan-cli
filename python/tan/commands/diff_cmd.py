@@ -89,19 +89,79 @@ against real Python semantics on YAML 1.1-vs-1.2 boolean/null resolution
 (`tan_core::validate` module docs); this module calls `repr()` on a value
 `_Yaml12BoolLoader` (YAML 1.2's narrower bool vocabulary, the same rules
 `serde_yaml` uses) actually parsed, so there is nothing left to approximate.
+
+**The SDK cross-check (tan-cli#455).** Everything above only asks whether
+`diff` can PARSE the document well enough to normalize it -- a real type at
+each field it reads. It has no notion of the SDK's own semantic rules (a SoM
+SKU pattern, whether a preset actually exists, the closed `peripherals:`
+enum) -- those live in `metadata/schemas/board.schema.json` and are enforced
+only by the SDK's own `scripts/validate_board_yaml.py`, which `validate`
+spawns and this module, until now, never did. That let a board.yaml
+`validate` refuses outright (e.g. an unknown SoM SKU, a nonexistent preset, an
+unlisted peripheral token -- four real `jsonschema` violations, measured)
+still reach `compute_diff_entries` and report a clean, meaningless
+`unchanged: true` -- the same file, the same project, two commands
+disagreeing about whether it is usable at all. Fixed by REUSING `validate`'s
+own spawn-and-analyze machinery (`analyze_validator_output`, the same
+`scripts/validate_board_yaml.py` argv, imported from `validate_cmd` rather
+than re-checked here) whenever an SDK has actually resolved: a non-clean
+verdict becomes a `ParseFailure("schema-violation", ...)`, flowing through
+the exact same failure path a structural mismatch already does. `diff` still
+never requires an SDK on its own -- with none resolved (or a stub checkout
+missing `validate_board_yaml.py` -- some of this module's own tests hand it
+exactly that) it falls back to the structural checks alone, exactly as
+before. This is a deliberate divergence from the oracle, not a port gap: the
+oracle's own `diff.exe` has the identical contradiction (measured against
+`target/debug/tan.exe`) -- `diff.rs` has never called into the SDK's
+validator either, so this fix does not chase parity, it changes behaviour.
+
+**Review round (tan-cli#455 follow-up).** The first cut of the cross-check
+above swallowed every reason the validator subprocess could fail to produce a
+verdict -- a timeout, an unrunnable interpreter -- as a silent no-op, which
+falls back to reporting a clean diff exactly as if no cross-check had ever
+run: the #455 bug, reopened for a narrower trigger. It also flattened every
+non-clean OUTCOME (`missing-preset`, `hardware-revision`, a crashed
+validator's `failed`) into `diff.schema-violation`, the same conflation
+`validate_cmd.analyze_validator_output` exists to prevent for `validate`
+itself. `_reject_if_sdk_validator_disagrees` now mirrors `validate_cmd`'s own
+split in full: guard 3 (`resolve_manifest_python_floor` + `_python_too_old`,
+refusing BEFORE the spawn that would otherwise crash), a `TimeoutExpired`
+that reclassifies to `failed` rather than a silent skip, an unstartable
+subprocess that refuses as `spawn-failed` (`RUNTIME_FAILURE`) rather than a
+silent skip, and `ParseFailure(result.outcome, ...)` instead of a hardcoded
+`"schema-violation"` -- so `diff.failed`/`diff.missing-preset`/
+`diff.hardware-revision`/`diff.spawn-failed`/`diff.python-too-old` are now
+real, registered outcomes alongside `diff.schema-violation`. The ONLY
+remaining silent no-op is the ORIGINAL one this section already documented:
+no `validate_board_yaml.py` at the resolved checkout at all -- there is
+nothing there to reuse, which is different in kind from a reuse attempt that
+started and failed.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import typer
 
+from tan.commands.build_cmd import _planner_python
+from tan.commands.doctor_cmd import resolve_manifest_python_floor
+from tan.commands.generate_cmd import _python_too_old
 from tan.commands.presets_cmd import resolve_project_paths, resolve_sdk
+from tan.commands.validate_cmd import (
+    OUTCOME_CLEAN,
+    OUTCOME_FAILED,
+    VALIDATOR_SCRIPT,
+    VALIDATOR_TIMEOUT_S,
+    _synthesised_finding,
+    analyze_validator_output,
+)
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
@@ -491,6 +551,89 @@ def _emit_failure(
     raise typer.Exit(int(exit_code))
 
 
+def _spawn_validator(python_binary: str, script: str, board_path: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+    """`(outcome, findings)` for one run of the SDK's own validator, or a
+    `ParseFailure("spawn-failed", ...)` when the subprocess could not even be
+    started -- `validate_cmd`'s own split (tan-cli#262/#455 review round),
+    reused rather than re-derived: a launch that never happened is not a
+    verdict, and must not be swallowed into a silent "nothing to report"."""
+    command_line = f"{python_binary} {script} --input {board_path}"
+    try:
+        out = subprocess.run(
+            [python_binary, script, "--input", board_path],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdin=subprocess.DEVNULL,
+            timeout=VALIDATOR_TIMEOUT_S,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        # The child STARTED, so this is a verdict that never arrived, not a
+        # launch failure -- mirrors validate_cmd's own tan-cli#262 shape.
+        return OUTCOME_FAILED, (
+            (
+                "error",
+                f"the SDK validator did not finish within {VALIDATOR_TIMEOUT_S}s "
+                f"and was killed: {command_line}",
+            ),
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as err:
+        raise ParseFailure(
+            "spawn-failed",
+            f"could not run the SDK validator ({command_line}): {err}",
+            ExitCode.RUNTIME_FAILURE,
+        ) from err
+    result = analyze_validator_output(out.returncode, out.stderr)
+    if result.outcome != OUTCOME_CLEAN and not result.findings:
+        # A non-clean run must never reach a consumer as "zero issues",
+        # which reads as no problem -- `to_cli_issues`' own synthesis.
+        return result.outcome, (_synthesised_finding(result.outcome, out.stderr),)
+    return result.outcome, result.findings
+
+
+def _reject_if_sdk_validator_disagrees(sdk_info: SdkInfo, root: str, board_path: str) -> None:
+    """Raise `ParseFailure(<outcome>, ...)` when the resolved SDK's own
+    `scripts/validate_board_yaml.py` -- the exact script/argv `validate`
+    spawns -- finds this board.yaml invalid, or its own environment cannot
+    even answer that question (tan-cli#455; see the module docstring's "SDK
+    cross-check" / "Review round" sections for the false-clean bug this
+    closes and why the outcome, not a hardcoded `"schema-violation"`, is what
+    reaches the wire).
+
+    A no-op ONLY when there is nothing to reuse at all: no
+    `validate_board_yaml.py` at the resolved checkout (a stub/incomplete SDK
+    -- this module's own `--sdk-root` tests hand it exactly that, and must
+    keep passing unmodified). Every attempt that STARTS and then fails to
+    reach a verdict -- guard 3's interpreter floor, an unstartable
+    subprocess, a timeout -- refuses instead.
+    """
+    script = os.path.join(sdk_info.root, *VALIDATOR_SCRIPT)
+    if not os.path.isfile(script):
+        return
+    python_binary = _planner_python(os.path.abspath(root), sdk_info.root)
+
+    # Guard 3 (validate_cmd.py:1013-1015's own): a spawned interpreter below
+    # the SDK's declared pythonMinVersion dies inside alp-sdk's
+    # `@dataclass(slots=True)` scripts with a traceback -- refuse with the
+    # actual defect before that traceback ever happens, rather than let
+    # `_spawn_validator` reclassify it to a generic `failed`.
+    floor, _floor_source = resolve_manifest_python_floor(sdk_info.root)
+    if (too_old := _python_too_old(python_binary, floor)) is not None:
+        raise ParseFailure("python-too-old", too_old)
+
+    outcome, findings = _spawn_validator(python_binary, script, board_path)
+    if outcome == OUTCOME_CLEAN:
+        return
+    detail = "; ".join(message for _severity, message in findings)
+    raise ParseFailure(
+        outcome,
+        "board.yaml is not valid: the SDK's own validator rejects it -- run "
+        f"`tan validate` for full diagnostics: {detail}",
+    )
+
+
 def diff(
     ctx: typer.Context,
     project: str = typer.Option(
@@ -583,6 +726,9 @@ def diff(
     try:
         doc = _load_document(text)
         effective_version, os_value, libraries, iot, inference = _parse_fields(doc)
+        if sdk_info is not None:
+            _reject_if_sdk_validator_disagrees(sdk_info, root, board_path)
+        entries = compute_diff_entries(effective_version, os_value, libraries, iot, inference)
     except ParseFailure as failure:
         header = (
             "diff: internal failure"
@@ -615,8 +761,6 @@ def diff(
             sdk=sdk_info,
         )
         return
-
-    entries = compute_diff_entries(effective_version, os_value, libraries, iot, inference)
 
     if json_mode:
         emit(

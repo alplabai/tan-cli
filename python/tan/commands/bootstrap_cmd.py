@@ -1847,6 +1847,58 @@ def _select_workspace(
     return WorkspacePlan(clear_zephyr_base=True)
 
 
+def _print_env_outcome(
+    *, paths: RunPaths, sdk_root: str, facts: BootstrapFacts, pin: str,
+    pin_issue: Issue | None, flags: dict[str, bool], is_windows: bool,
+    guard_applies: bool, target: Path | None, zephyr_base_adopts: bool,
+    root: str | None, board_path: str | None, reported_project: Project,
+    active_tier: str, sdk: SdkInfo | None,
+) -> tuple[Outcome, Project, SdkInfo | None]:
+    """`--print-env`'s short-circuit (tan-cli#459): project `paths` through
+    whichever write-time decision the caller already made -- the relocation
+    guard (`guard_applies`/`target`) or a `$ZEPHYR_BASE` adoption
+    (`zephyr_base_adopts`, mutually exclusive with the guard by construction)
+    -- so this can no longer disagree with `--dry-run` over identical input."""
+    print_paths = paths
+    print_sdk_root = sdk_root
+    print_env_issues = [pin_issue] if pin_issue is not None else []
+    if guard_applies and target is not None:
+        projected_root, _ = relocate_checkout(paths.repo_root, target, dry_run=True)
+        if projected_root is not None and str(projected_root) != str(paths.repo_root):
+            print_paths = RunPaths(projected_root, target, target / facts.venv_dir_name)
+            print_sdk_root = str(projected_root)
+            print_env_issues.append(Issue(
+                "bootstrap.workspace-relocated", "warning",
+                f"a real run would move the alp-sdk checkout from "
+                f"{_native(paths.repo_root)} to {_native(projected_root)} so the "
+                f"west workspace stays out of {_native(paths.workspace_dir)} -- the "
+                f"paths below already reflect that (tan-cli#185).",
+            ))
+    elif zephyr_base_adopts:
+        # Mirrors `_select_workspace`'s adopted topdir, read-only (that call
+        # also LOGS, which a short-circuit must not trigger).
+        zephyr_base = _env("ZEPHYR_BASE")
+        if zephyr_base is not None:
+            top = Path(zephyr_base).parent
+            print_paths = RunPaths(paths.repo_root, top, top / facts.venv_dir_name)
+    text = print_env_block(facts, print_paths.tokens(), facts.venv_bin_dir(is_windows), is_windows)
+    print_project = reported_project
+    if print_paths is not paths:
+        print_project = Project.resolved(
+            _rebase(root, str(paths.repo_root), print_sdk_root),
+            _rebase(board_path, str(paths.repo_root), print_sdk_root),
+        )
+    return (
+        Outcome(
+            ExitCode.SUCCESS,
+            _data(args=flags, sdk_root=print_sdk_root, paths=print_paths, facts=facts, pin=pin),
+            print_env_issues, text,
+        ),
+        print_project,
+        SdkInfo(print_sdk_root, active_tier) if print_paths is not paths else sdk,
+    )
+
+
 @dataclass(frozen=True)
 class RelocationUndo:
     """Everything `rollback_relocation_after` needs to put a checkout
@@ -2043,19 +2095,6 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 sdk,
             )
 
-    # `--print-env` short-circuits before any prerequisite check or venv work, so
-    # it answers on a machine that is still missing cmake or ninja.
-    if print_env:
-        text = print_env_block(
-            facts, paths.tokens(), facts.venv_bin_dir(is_windows), is_windows
-        )
-        print_env_issues = [pin_issue] if pin_issue is not None else []
-        return (
-            Outcome(ExitCode.SUCCESS, payload(), print_env_issues, text),
-            reported_project,
-            sdk,
-        )
-
     # Workspace-parent guard, BEFORE any write below, so a refusal -- the one
     # case that still is one, see below -- leaves nothing on disk. A
     # `$ZEPHYR_BASE` workspace about to be ADOPTED repoints the write target
@@ -2091,6 +2130,8 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
     # still no question asked. `--format json` says so explicitly; a piped or
     # redirected stdin says so just as loudly, and the oracle hung forever on
     # exactly that before the terminal term was added.
+    #
+    # Computed BEFORE `--print-env` below (tan-cli#459, `_print_env_outcome`).
     # Evaluated UNCONDITIONALLY, not short-circuited past (tan-cli#389). Python
     # skips the right operand of `or` once the left is true, so with
     # `--workspace` set the adoption probe never ran at all -- and the two
@@ -2175,10 +2216,12 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
         # Checked before the host and prerequisite gates below for the same
         # reason they sit before the relocation: a refusal knowable from
         # filesystem facts alone must not depend on having got that far.
+        # Gated on `target is not None`: with no relocation planned `target`
+        # stays `None` above, else an in-place re-run refuses with dest "None".
         source_topdir = paths.repo_root.parent
-        if _is_file(source_topdir / ".west" / "config") and _manifest_points_at(
-            source_topdir, paths.repo_root
-        ):
+        if target is not None and _is_file(
+            source_topdir / ".west" / "config"
+        ) and _manifest_points_at(source_topdir, paths.repo_root):
             return (
                 _refusal(
                     ExitCode.VALIDATION_FAILURE,
@@ -2198,6 +2241,15 @@ def _run(  # noqa: PLR0911, PLR0912, PLR0915 -- one linear refusal ladder; see b
                 reported_project,
                 sdk,
             )
+
+    # `--print-env` short-circuits here (tan-cli#459, `_print_env_outcome`).
+    if print_env:
+        return _print_env_outcome(
+            paths=paths, sdk_root=sdk_root, facts=facts, pin=pin, pin_issue=pin_issue,
+            flags=flags, is_windows=is_windows, guard_applies=guard_applies, target=target,
+            zephyr_base_adopts=zephyr_base_adopts, root=root, board_path=board_path,
+            reported_project=reported_project, active_tier=active_tier, sdk=sdk,
+        )
 
     # Host gate + prerequisite gate, AFTER the write-avoiding checks above
     # (whose relative order the existing test suite already pins) but BEFORE

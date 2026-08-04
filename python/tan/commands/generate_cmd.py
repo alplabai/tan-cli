@@ -61,7 +61,8 @@ subprocess and arrive as an exit code now propagates into this process, and
 Exit codes, verbatim from the oracle: missing board / unresolved SDK / bad
 target / unresolvable SKU are ValidationFailure (2); the overlay guard is
 WriteFailure (3), as is any target whose emit failed; a too-old interpreter is
-RuntimeFailure (1).
+RuntimeFailure (1). **A DELIBERATE divergence** (tan-cli#457): the oracle's
+overlay guard is existence-only and refuses a re-run forever; ours is content-aware.
 
 **`--output` exists because CMake, not tan, decides where a Zephyr build reads
 from.** alp-sdk's `cmake/alp.cmake` -- the one helper all 96 Zephyr examples
@@ -490,30 +491,32 @@ def _confine_default_outputs(
             ) from err
 
 
+_OVERLAY_BANNER = "--emit native-sim-overlay -- do not edit by hand."
+
+
 def _overlay_would_overwrite(
     workspace_root: Path,
     targets: tuple[str, ...],
     force: bool,
     output_override: Path | None = None,
 ) -> bool:
-    """True when this run would truncate an existing hand-edited
-    `boards/native_sim_native_64.overlay`.
-
-    `native-sim-overlay` is the only target writing into the app's own source
-    tree. Every other writer into a user tree (`init`, `scaffold`) diffs against
-    disk and refuses without `--force`; a bare `tan generate` used to truncate a
-    developer's tuned overlay with no check at all.
-
-    `output_override` is checked in place of the default path when `--output`
-    redirected the emit: the guard has to name the file this run would actually
-    truncate, not the one it would have without the flag.
+    """True when this run would truncate a HAND-EDITED
+    `boards/native_sim_native_64.overlay` -- content-aware (like `init`/`scaffold`'s
+    `collect_file_changes`): a file lacking `_OVERLAY_BANNER` (`native_sim.py:87-88`'s
+    own) refuses, in `--all` or an explicit `--target` alike (tan-cli#457).
+    `output_override` replaces the default path when `--output` redirected the emit.
     """
     if force or "native-sim-overlay" not in targets:
         return False
     destination = output_override or _output_path(
         workspace_root, "native-sim-overlay", None
     )
-    return destination.exists()
+    try:
+        return destination.exists() and _OVERLAY_BANNER not in destination.read_text(
+            encoding="utf-8"
+        )
+    except (OSError, UnicodeDecodeError):
+        return True
 
 
 def _python_too_old(python: str, floor: tuple[int, int]) -> str | None:

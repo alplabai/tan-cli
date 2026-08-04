@@ -61,6 +61,18 @@ All notable changes to `tan` are documented here. Format follows
   separately asserts the regex itself still rejects the 27 pre-fix
   camelCase spellings — non-vacuity, so this cannot regress to a gate that
   would have waved the original defect through.
+- **`tan generate` bare/`--all` refused every re-run once
+  `boards/native_sim_native_64.overlay` existed, even against its own prior
+  output.** `_overlay_would_overwrite`'s guard was existence-only, so a
+  routine edit-board.yaml / generate / build loop's second `generate --all`
+  refused the WHOLE run forever after the first (`data` empty, exit 3) purely
+  because the overlay was already there (tan-cli#457). The guard is now
+  content-aware: an existing overlay carrying the banner every
+  `native-sim-overlay` emit writes is tan's own prior output and is freely
+  rewritten, in `--all` or an explicit `--target native-sim-overlay` alike; one
+  that lacks it is a real hand edit and still refuses with
+  `generate.would-overwrite` (exit 3) unless `--force` is passed — the
+  truncation the guard exists for is unchanged.
 
 ## [0.5.0] — 2026-08-04
 

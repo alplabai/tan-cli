@@ -59,6 +59,20 @@ documented divergence. Only a genuine compound value (`owner: [a, b]`,
 `e1m_pad: {a: b}`) is a real type mismatch no `String` field can absorb, and
 that half stayed a document-level `PinmuxParseError` -- one malformed
 sequence/mapping field still fails the whole table, not just that row.
+
+**Text mode renders every issue, not just the summary line -- a DELIBERATE
+divergence from the oracle (tan-cli#458).** `crates/tan-cli/src/commands/
+pinmux.rs`'s own `text` build (its lines 151-159) is exactly
+`vec![format!("pinmux: family={} pads={}", ...)]` and nothing else -- an
+exit-2 `pinmux.table-empty`/`pinmux.family-invalid`/
+`pinmux.schema-version-unsupported` reaches an oracle terminal as a bare
+`pads=0`, with the reason visible only in `--format json`. This port instead
+follows the summary line with one `f"pinmux: {issue.message}"` line per issue
+on stderr, matching the text-mode convention `generate_cmd`/`monitor_cmd`/
+`build_cmd`/`doctor_cmd`/`examples_cmd` already use for THEIR issues (not
+every sibling command's: `size_cmd`/`image_cmd` build a separate text list
+that drops issues from it entirely, which is their own gap, not a pattern to
+match).
 """
 
 from __future__ import annotations
@@ -492,18 +506,40 @@ def pinmux(
         data["displayName"] = display_name
     data["pads"] = [p.as_dict() for p in pads]
 
+    # Built ONCE, for both formats: `Envelope.__init__` appends the
+    # tan-cli#407 `sdk.discovery-divergent` warning to a NEW issues list
+    # (`_with_sdk_divergence`) rather than mutating the one passed in, so a
+    # text branch that kept iterating the pre-envelope `issues` local (as
+    # this one used to) would build its summary+issues lines correctly for
+    # every issue `_resolve` raised, but silently never print a divergence
+    # warning appended at the envelope seam -- reproduced live: two alp-sdk
+    # checkouts resolving from one directory with no `--sku`/`--family` at
+    # all printed only `pinmux: family=- pads=0` in text mode while the JSON
+    # envelope carried `sdk.discovery-divergent` alongside `pinmux.no-target`.
+    envelope = Envelope(
+        "pinmux",
+        Project.resolved(root, board_path),
+        data,
+        issues,
+        exit_code,
+        sdk=SdkInfo(sdk[0], sdk[1]) if sdk is not None else None,
+    )
     if json_mode:
-        emit(
-            Envelope(
-                "pinmux",
-                Project.resolved(root, board_path),
-                data,
-                issues,
-                exit_code,
-                sdk=SdkInfo(sdk[0], sdk[1]) if sdk is not None else None,
-            )
-        )
+        emit(envelope)
     else:
         stream = typer.get_text_stream("stderr")
         stream.write(f"pinmux: family={resolved_family or '-'} pads={len(pads)}\n")
+        # tan-cli#458: the summary line above answers "what happened" but never
+        # "why" -- an exit-2 `pinmux.table-empty`/`pinmux.family-invalid`/
+        # `pinmux.schema-version-unsupported` used to print a plausible
+        # `pads=0` and nothing else, with the envelope's own issue never
+        # reaching a terminal. `generate_cmd`/`monitor_cmd`/`build_cmd`/
+        # `doctor_cmd`/`examples_cmd` already render issues in text mode this
+        # same way, one `f"{command}: {issue.message}"` line per issue on
+        # stderr -- pinmux was an outlier among THOSE that built a summary
+        # line and stopped (`size_cmd`/`image_cmd` are a separate, still-open
+        # gap: they build a distinct text list that drops issues from it
+        # entirely, out of scope here).
+        for issue in envelope.issues:
+            stream.write(f"pinmux: {issue.message}\n")
     raise typer.Exit(int(exit_code))

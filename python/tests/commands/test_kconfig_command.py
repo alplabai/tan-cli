@@ -41,6 +41,20 @@ def _sdk_root(tmp_path: Path) -> Path:
     return sdk
 
 
+def _nested_sdk_root(workspace: Path) -> Path:
+    """Same shape as `_sdk_root`, but the checkout lives NESTED under
+    `workspace` (`workspace/sdks/alp-sdk`) rather than being `workspace`'s own
+    child -- so `workspace` is not ALSO `west_workspace_dir`'s tier-3
+    `<sdk-root-parent>` candidate, which a topdir-is-sdk's-own-parent fixture
+    silently is (tan-cli#459 review): tier 3 finds `workspace` on its own even
+    with tier 1 (the upward walk these tests actually name) deleted entirely,
+    so that shape cannot tell the two tiers apart."""
+    sdk = workspace / "sdks" / "alp-sdk"
+    (sdk / "scripts").mkdir(parents=True)
+    (sdk / "scripts" / "alp_project.py").write_text("", encoding="utf-8")
+    return sdk
+
+
 def _project(tmp_path: Path, board_yaml_text: str | None) -> Path:
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -378,11 +392,23 @@ def test_zephyr_base_resolves_via_the_project_tree_walked_upward(
     """Finding 5, tier 1: an ordinary `tan bootstrap` creates the west
     workspace as an ancestor of the project dir and does not export
     `$ZEPHYR_BASE` into the caller's shell -- `tan kconfig` must still reach
-    the emit call."""
+    the emit call. tan-cli#453: the topdir is `sdk`'s own PARENT (the real
+    `west init -l` shape), with a `.west/config` naming `sdk` -- delegating
+    to `tan.core.venv.west_workspace_dir` means tier 1 is now
+    manifest-verified (tan-cli#307) and needs that to accept it at all.
+
+    `sdk` is NESTED under `workspace` (`_nested_sdk_root`), not `workspace`'s
+    own direct child (tan-cli#459 review): tier 3's `<sdk-root-parent>`
+    candidate would otherwise be `workspace` itself, the exact directory this
+    test's OWN `.west` already sits in -- silently passing even with tier 1
+    (the thing this test names) deleted outright."""
     monkeypatch.delenv("ZEPHYR_BASE", raising=False)
-    sdk = _sdk_root(tmp_path)
-    workspace = tmp_path / "workspace"
+    workspace = tmp_path / "ws"
+    sdk = _nested_sdk_root(workspace)
     (workspace / ".west").mkdir(parents=True)
+    (workspace / ".west" / "config").write_text(
+        "[manifest]\npath = sdks/alp-sdk\n", encoding="utf-8"
+    )
     (workspace / "zephyr").mkdir()
     proj = workspace / "app"
     proj.mkdir()
@@ -427,11 +453,24 @@ def test_the_resolved_base_not_the_ambient_one_reaches_the_emit_call(
     exported `$ZEPHYR_BASE` -- must be what's actually in the environment
     during the emit call, not a stale/wrong ambient value. Also confirms the
     injection is undone afterwards so it has no lasting effect on the
-    process env."""
+    process env. tan-cli#453: the workspace topdir is `sdk`'s own PARENT with
+    a matching `.west/config`, same reasoning as the tier-1 test above --
+    this is also the "another Zephyr checkout around" case the bug report
+    names: the ambient `$ZEPHYR_BASE` here points at a real, unrelated
+    directory that is NOT this sdk_root's workspace, and must lose to tier 1
+    regardless.
+
+    `sdk` NESTED under `workspace` for the same reason as the tier-1 test
+    above (tan-cli#459 review): otherwise tier 3 resolves `workspace` on its
+    own, and this test could no longer tell tier 1 winning from tier 3 doing
+    so behind it."""
     monkeypatch.setenv("ZEPHYR_BASE", str(tmp_path / "some-other-unrelated-zephyr"))
-    sdk = _sdk_root(tmp_path)
-    workspace = tmp_path / "workspace"
+    workspace = tmp_path / "ws"
+    sdk = _nested_sdk_root(workspace)
     (workspace / ".west").mkdir(parents=True)
+    (workspace / ".west" / "config").write_text(
+        "[manifest]\npath = sdks/alp-sdk\n", encoding="utf-8"
+    )
     (workspace / "zephyr").mkdir()
     proj = workspace / "app"
     proj.mkdir()
@@ -451,6 +490,47 @@ def test_the_resolved_base_not_the_ambient_one_reaches_the_emit_call(
     assert seen["ZEPHYR_BASE"] == str(workspace / "zephyr")
     # Restored, not left mutated for the next command/test in this process.
     assert os.environ.get("ZEPHYR_BASE") == str(tmp_path / "some-other-unrelated-zephyr")
+
+
+def test_ambient_zephyr_base_without_a_west_workspace_refuses_tan_cli_453(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """tan-cli#453's own framing: "dead by default on any host that has
+    another Zephyr checkout around". An ambient `$ZEPHYR_BASE` that LOOKS
+    bootstrapped (its own `scripts/kconfig/kconfiglib.py` is present) but
+    whose PARENT is not a west workspace at all (no `.west/`) is not a
+    workspace `tan bootstrap` could have created for this `--sdk-root` -- the
+    private tier ladder this replaced accepted it anyway (its tier 2 checked
+    only `kconfiglib.py`'s presence, never that a workspace was even there),
+    so it would have called the emit against someone else's Zephyr checkout
+    instead of refusing. Delegating to `tan.core.venv.west_workspace_dir`
+    requires the workspace shape tier 2 always should have needed, so this
+    now refuses loudly (`kconfig.no-workspace`) instead of silently resolving
+    the wrong tree -- and the emit call, which would have leaked which tree
+    won, is never reached at all."""
+    unrelated_zephyr = tmp_path / "unrelated" / "zephyr"
+    (unrelated_zephyr / "scripts" / "kconfig").mkdir(parents=True)
+    (unrelated_zephyr / "scripts" / "kconfig" / "kconfiglib.py").write_text(
+        "", encoding="utf-8"
+    )
+    monkeypatch.setenv("ZEPHYR_BASE", str(unrelated_zephyr))
+    sdk = _sdk_root(tmp_path)
+    proj = _project(tmp_path, "cores:\n  m55_he:\n    os: zephyr\n")
+
+    called = {"emit": False}
+
+    def fake_emit(*a, **kw):
+        called["emit"] = True
+        return json.dumps(_golden_emit_body())
+
+    monkeypatch.setattr("tan.planner_root.emit", fake_emit)
+    result = runner.invoke(
+        app, ["--project", str(proj), "--sdk-root", str(sdk), "--format", "json"]
+    )
+    assert result.exit_code == 2
+    envelope = json.loads(result.stdout)
+    assert envelope["issues"][0]["code"] == "kconfig.no-workspace"
+    assert called["emit"] is False
 
 
 # ---------------------------------------------------------------------------

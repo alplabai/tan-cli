@@ -76,7 +76,17 @@ _MODULE_BUDGET: dict[str, int] = {
     # becomes a kebab issue-code suffix, used by both `checks_to_issues()` here
     # and `support_bundle_cmd._doctor_issues()`.
     "tan/commands/doctor_cmd.py": 3127,
-    "tan/commands/bootstrap_cmd.py": 2781,
+    # 2833, not 2781, as of tan-cli#459: `--print-env` used to disagree with
+    # `--dry-run` about which workspace a real run would build, on both the
+    # workspace-parent-relocation branch AND a `$ZEPHYR_BASE` adoption branch
+    # -- fixing both moved real logic into a new module-level
+    # `_print_env_outcome` (extracted specifically to keep `_run` AT, not
+    # over, its own 679-line ceiling below -- extraction cannot shrink the
+    # MODULE total, only move lines off the worst function), plus the
+    # one-line `target is not None` gate on the tan-cli#389 orphan refusal
+    # (was refusing every in-place re-run of an already-bootstrapped
+    # workspace, naming its own non-existent relocation target "None").
+    "tan/commands/bootstrap_cmd.py": 2833,
     "tan/core/bootstrap.py": 1890,
     "tan/core/flash_plan.py": 1808,
     "tan/commands/flash_cmd.py": 1781,
@@ -86,14 +96,33 @@ _MODULE_BUDGET: dict[str, int] = {
     "tan/commands/debug_config_cmd.py": 1296,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
-    "tan/commands/generate_cmd.py": 1147,
+    # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
+    # `--all` re-run fix had to become content-aware -- reading the existing
+    # overlay and comparing it against the banner every tan-emitted one
+    # carries -- to tell tan's own prior output from a real hand edit, which
+    # the previous 1-line `destination.exists()` check could not. Raised
+    # rather than extracted: `_overlay_would_overwrite` is five body lines
+    # including its own read-error handling; there is nothing left to split.
+    "tan/commands/generate_cmd.py": 1150,
     "tan/commands/sdk_cmd.py": 1096,
     "tan/commands/validate_cmd.py": 1093,
     "tan/commands/new_som_cmd.py": 1047,
     "tan/commands/clean_cmd.py": 1000,
     "tan/planner/loader.py": 996,
     "tan/commands/init_cmd.py": 974,
-    "tan/core/debug_launch.py": 923,
+    # 1060, not 923, as of the tan-cli#456 review round: `_select_slice`'s
+    # `os`-vocabulary map, its `native_sim` board discriminator, its manifest
+    # slice reader, and the `--target-kind` inference decision itself
+    # (`infer_target_kind`, its message-building split into four small
+    # helpers to keep it under the FUNCTION ratchet too) all moved here from
+    # `debug_config_cmd.py`, which was over ITS OWN budget after the same
+    # review's bugfix -- "move the decision, don't just extract a helper" was
+    # the review's own suggested fix, since `support_bundle_cmd.py` needs the
+    # identical decision and both commands already import this module.
+    # Raised rather than split further: the alternative was leaving the
+    # shared decision duplicated per command, the exact drift this move
+    # exists to prevent.
+    "tan/core/debug_launch.py": 1060,
     "tan/commands/build/execute.py": 941,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own

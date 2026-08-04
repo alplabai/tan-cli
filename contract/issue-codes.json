@@ -331,10 +331,10 @@
       "status": "reserved",
       "severity": "error",
       "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
-      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal of an invalid `--target-kind`/`--server` combination, or a malformed existing `.vscode/launch.json` the merge could not parse -- exits `InternalFailure` (5) with a `zephyr-mcu`/`none` placeholder target rather than the resolved one.",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal of an invalid `--target-kind`/`--server` combination, a malformed existing `.vscode/launch.json` the merge could not parse, or (Python-only, tan-cli#456) an omitted `--target-kind` this project's own `build/system-manifest.yaml`/`board.yaml` cannot resolve to one target class -- exits `InternalFailure` (5) with a `zephyr-mcu`/`none` placeholder target rather than the resolved one.",
       "emittedBy": "crates/tan-cli/src/commands/debug_config.rs",
       "literal": "\"internal-failure\"",
-      "note": "tan-cli#111 registry audit: routed through the shared `failure_envelope` (the same `debug-config.<code>` formatting `write-failure` uses); its sibling reserved codes (`legacy-entry-migrated`, `legacy-entry-untouched`, `comments-dropped`) are all `info`-severity success-path notices, not failures -- this registry had no `error`-severity debug-config entry at all before this audit."
+      "note": "tan-cli#111 registry audit: routed through the shared `failure_envelope` (the same `debug-config.<code>` formatting `write-failure` uses); its sibling reserved codes (`legacy-entry-migrated`, `legacy-entry-untouched`, `comments-dropped`) are all `info`-severity success-path notices, not failures -- this registry had no `error`-severity debug-config entry at all before this audit. tan-cli#456 review: widened `consumerEffect` to cover the inference-refusal shapes `_run` added under this SAME code (`tan/commands/debug_config_cmd.py::_internal_failure`, still the shared `_failure` prefix site already counted below) rather than minting a new one -- both are still `--target-kind`-shaped refusals at the same exit code, and no consumer binds to this code yet to be broken by the wording change."
     },
     {
       "code": "debug-config.write-failure",
@@ -2021,6 +2021,22 @@
       "note": "The mirrored `f\"{subcommand}.failed\"` shape (family substituted, suffix fixed) at `python/tan/commands/west_forward_cmd.py`'s `_run_forward` -- the reverse of `bootstrap.`-style prefixing, and a second live call site of the exact defect tan-cli#224 reports (a code assembled by interpolation no literal scan can see) found while remediating that issue's own review. `subcommand` is closed to the three literal strings `tan quality`'s own Typer command passes (`migrate`/`lock`/`quality`, `cli.py`). Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
+      "code": "quality.profile-required",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/west_forward_cmd.py",
+      "note": "NEW, tan-cli#454: `scripts/west_commands/alp_quality.py` declares `--profile {quick,pr,full,release}` REQUIRED, with no default tan could pick on a caller's behalf, and this flag was never declared on tan's own Typer surface -- every realistic `tan quality` without it reached `west` and died on the CHILD's own argparse usage error, forwarded back opaquely as `quality.failed`, indistinguishable from `west` itself failing, and undiscoverable from `tan quality --help`. `_refuse_required` in `west_forward_cmd.py` now catches the omission BEFORE `west` is ever spawned and reports this code instead. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "migrate.mode-required",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/west_forward_cmd.py",
+      "note": "NEW, tan-cli#454: `scripts/west_commands/alp_migrate.py` declares a REQUIRED mutually-exclusive `(--check | --preview | --apply)` group, with no default tan could pick on a caller's behalf (reporting drift, previewing a diff and rewriting board.yaml are not interchangeable), and none of the three was ever declared on tan's own Typer surface -- every realistic `tan migrate` without one reached `west` and died on the CHILD's own argparse usage error, forwarded back opaquely as `migrate.failed`, indistinguishable from `west` itself failing, and undiscoverable from `tan migrate --help`. `_refuse_required` in `west_forward_cmd.py` now catches the omission BEFORE `west` is ever spawned and reports this code instead. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
       "code": "diff.board-yaml-missing",
       "status": "reserved",
       "severity": "error",
@@ -2050,7 +2066,47 @@
       "severity": "error",
       "consumer": "none",
       "emittedBy": "python/tan/commands/diff_cmd.py",
-      "note": "board.yaml is not valid YAML, or a field normalize_board_model needs is the wrong shape (a live false-refusal exists here for YAML-1.1-only bool spellings PyYAML's SafeLoader has already collapsed -- see the module docstring). Reaches the wire as `diff.schema-violation` via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+      "note": "board.yaml is not valid YAML, or a field normalize_board_model needs is the wrong shape (a live false-refusal exists here for YAML-1.1-only bool spellings PyYAML's SafeLoader has already collapsed -- see the module docstring). Also the outcome `_reject_if_sdk_validator_disagrees` (tan-cli#455) raises when the resolved SDK's own `validate_board_yaml.py` rejects the same board.yaml with a real schema violation -- see `diff.failed`/`diff.missing-preset`/`diff.hardware-revision` for that cross-check's other possible outcomes. Reaches the wire as `diff.schema-violation` via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.python-too-old",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: `_reject_if_sdk_validator_disagrees`'s own guard 3, ported from `validate_cmd`'s (`resolve_manifest_python_floor` + `_python_too_old`) -- refuses BEFORE spawning the SDK's `validate_board_yaml.py` when the resolved interpreter is below the SDK's declared `pythonMinVersion`, rather than let that spawn crash with a `dataclass() got an unexpected keyword argument 'slots'` traceback the outcome-mapping below would otherwise have to reclassify. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.spawn-failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: the SDK validator subprocess could not even be started (no interpreter on PATH, the script unreadable) -- nothing validated anything, so a clean diff must not be reported either. Mirrors `validate.spawn-failed`'s own RUNTIME_FAILURE (exit 1) split from every other outcome; this module used to swallow the same failure silently via a blanket `except (OSError, ValueError, subprocess.SubprocessError): return`. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: the SDK validator ran but produced no usable verdict -- a crash (exit 1 WITH a Python traceback, reclassified off `schema-violation` by `analyze_validator_output` so a broken validator ENVIRONMENT is never reported as a board defect) or a run past `VALIDATOR_TIMEOUT_S` (300s). This module used to flatten both into `diff.schema-violation`, misreporting an environment failure as an invalid board.yaml; `_reject_if_sdk_validator_disagrees` now raises `ParseFailure(result.outcome, ...)` so the real outcome reaches the wire. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.missing-preset",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: same outcome-vocabulary parity as `validate.missing-preset` (validator exit 2) -- today's `scripts/validate_board_yaml.py` only ever exits 0 or 1, so this is unreachable against a current SDK and kept only because `diff` now reuses the same `analyze_validator_output`/`_STATUS_OUTCOME` machinery `validate` does. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "diff.hardware-revision",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none",
+      "emittedBy": "python/tan/commands/diff_cmd.py",
+      "note": "tan-cli#455 review round: same outcome-vocabulary parity as `validate.hardware-revision` (validator exit 3) -- unreachable against today's `scripts/validate_board_yaml.py` (only ever exits 0 or 1), kept for the same shared-vocabulary reason `diff.missing-preset` is. Reaches the wire via ParseFailure.code forwarded through _emit_failure's `f\"diff.{code}\"` prefix template. Pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
     },
     {
       "code": "pinmux.internal-failure",
