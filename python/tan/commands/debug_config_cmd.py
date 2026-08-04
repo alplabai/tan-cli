@@ -5,7 +5,12 @@ Port of `crates/tan-cli/src/commands/debug_config.rs`. Build a launch draft for
 the target class + server, resolve what this project's own build already knows
 (#66), then either preview it (`--preview`) or merge it into
 `<workspace>/.vscode/launch.json`. Invalid kind / unsupported backend /
-malformed existing file -> exit 5; a failed write -> exit 3.
+malformed existing file -> exit 5; a failed write -> exit 3; an omitted
+`--target-kind` this project cannot yet resolve to one target class --
+pre-build, or an explicit `--core` matching no slice -- is the CALLER's own
+precondition to fix, not a tan crash, so it exits `VALIDATION_FAILURE` (2)
+instead (tan-cli#462, matching the distinction tan-cli#262 settled for
+`tan validate`).
 
 **The debug profile follows from the target CLASS; the customer never selects an
 OS or a backend.** `--target-kind` names one of four classes, each of which
@@ -777,6 +782,47 @@ def _internal_failure(
     )
 
 
+def _build_manifest_missing_failure(
+    generated_at: str, message: str, launch_json_path: str
+) -> _Outcome:
+    """tan-cli#462: a real hardware project (`som.sku` set) has not been built
+    yet, so `--target-kind` cannot be inferred from a `build/system-
+    manifest.yaml` that does not exist -- a precondition the CALLER can fix
+    (`tan build` first, or an explicit `--target-kind`), not a tan-side
+    crash. Exit 2, matching the sibling distinction tan-cli#262 settled for
+    `tan validate`: a verdict the command CAN produce about the caller's own
+    input is `VALIDATION_FAILURE`, never `INTERNAL_FAILURE` -- that exit
+    stays reserved for the `except Exception` backstop below and an
+    unreadable/malformed existing launch.json."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="build-manifest-missing",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
+def _core_unknown_failure(generated_at: str, message: str, launch_json_path: str) -> _Outcome:
+    """tan-cli#462: an explicit `--core` (with `--target-kind` omitted) names
+    no slice this project's own build produced -- the caller's own typo or a
+    stale flag, not a tan-side crash. Exit 2, same reasoning as
+    [`_build_manifest_missing_failure`] above."""
+    return _failure(
+        generated_at=generated_at,
+        target=ZEPHYR_MCU,
+        server=SERVER_NONE,
+        launch_json_path=launch_json_path,
+        exit_code=ExitCode.VALIDATION_FAILURE,
+        code="core-unknown",
+        message=message,
+        text_lines=["debug-config: validation failure"],
+    )
+
+
 def _write_failure(
     generated_at: str, target: str, server: str, launch_json_path: str, message: str
 ) -> _Outcome:
@@ -889,12 +935,22 @@ def _run(
         board = _load_yaml(Path(board_yaml))
         som = board.get("som") if isinstance(board, dict) else None
         sku = som.get("sku") if isinstance(som, dict) else None
-        inferred, ambiguous = infer_target_kind(manifest, core, sku)
+        inferred, reason_code, ambiguous = infer_target_kind(manifest, core, sku)
         if ambiguous is not None:
             # `launch_json_path` -- this project's own -- not `cwd_launch_path`:
             # unlike the pre-#456 catch-all below, it is already resolved by
             # this point, so a cwd-based path here would just name whatever
             # directory the shell happened to be in.
+            #
+            # tan-cli#462: `reason_code`, when set, names which of
+            # `infer_target_kind`'s refusals the caller can fix themselves --
+            # VALIDATION_FAILURE (2), not INTERNAL_FAILURE (5). Its two
+            # ambiguity shapes left unclassified (more than one target class,
+            # or none at all) keep the pre-#462 verdict.
+            if reason_code == "build-manifest-missing":
+                return _build_manifest_missing_failure(generated_at, ambiguous, launch_json_path)
+            if reason_code == "core-unknown":
+                return _core_unknown_failure(generated_at, ambiguous, launch_json_path)
             return _internal_failure(generated_at, ambiguous, launch_json_path)
         if inferred is not None:
             effective_target_kind = inferred

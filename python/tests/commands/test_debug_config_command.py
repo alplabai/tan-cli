@@ -1096,7 +1096,14 @@ def test_an_omitted_target_kind_refuses_rather_than_guess_pre_build(tmp_path):
     """A real hardware project (`som.sku` set) with no build yet cannot say
     which of zephyr/baremetal/yocto its core defaults to without shelling the
     SDK -- tan-cli#456's own floor: refuse with a coded issue rather than
-    write a launch.json that cannot work."""
+    write a launch.json that cannot work.
+
+    tan-cli#462: this is the CALLER's own precondition (run `tan build`
+    first, or pass `--target-kind` explicitly), not a tan-side crash --
+    `VALIDATION_FAILURE` (2), not `INTERNAL_FAILURE` (5), matching the
+    distinction tan-cli#262 settled for `tan validate`. FAILS against the
+    pre-#462 code, which reported this exact refusal at exit 5 with issue
+    code `debug-config.internal-failure`."""
     Path(tmp_path, "board.yaml").write_text(
         "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n",
         encoding="utf-8",
@@ -1104,8 +1111,8 @@ def test_an_omitted_target_kind_refuses_rather_than_guess_pre_build(tmp_path):
 
     env = envelope(run_cli(tmp_path, "--format", "json"))
 
-    assert env["exitCode"] == 5
-    assert env["issues"][0]["code"] == "debug-config.internal-failure"
+    assert env["exitCode"] == 2, env
+    assert env["issues"][0]["code"] == "debug-config.build-manifest-missing"
     assert "som.sku: E1M-AEN801" in env["issues"][0]["message"]
     assert not launch_json(tmp_path).exists()
 
@@ -1178,7 +1185,15 @@ def test_an_omitted_target_kind_with_a_core_matching_nothing_refuses(tmp_path):
     Also pins tan-cli#456 review finding on `launchJsonPath`: this refusal
     fires AFTER `launch_json_path` is resolved (unlike the parse_target_kind
     catch-all below it), so it must report the PROJECT's own path, not one
-    built from wherever the shell happened to be."""
+    built from wherever the shell happened to be.
+
+    tan-cli#462: a bad `--core` value is the caller's own typo, not a tan-side
+    crash -- `VALIDATION_FAILURE` (2), not `INTERNAL_FAILURE` (5), and the
+    message now NAMES the cores this build actually produced (`m55_hp`,
+    `m55_he`, from `MANIFEST_HARDWARE_ONLY_NO_NATIVE_SIM`) rather than only
+    saying `bogus-core` does not match. FAILS against the pre-#462 code, which
+    reported this refusal at exit 5 with issue code
+    `debug-config.internal-failure` and no core listing in the message."""
     pytest.importorskip("yaml")
     Path(tmp_path, "board.yaml").write_text(
         "som:\n  sku: E1M-AEN801\ncores:\n  m55_hp:\n    app: ./src\n",
@@ -1192,8 +1207,11 @@ def test_an_omitted_target_kind_with_a_core_matching_nothing_refuses(tmp_path):
     # otherwise be indistinguishable strings.
     env = envelope(run_cli(tmp_path.parent, "--core", "bogus-core", "--project", str(tmp_path), "--format", "json"))
 
-    assert env["exitCode"] == 5
-    assert "does not match any slice" in env["issues"][0]["message"]
+    assert env["exitCode"] == 2, env
+    assert env["issues"][0]["code"] == "debug-config.core-unknown"
+    message = env["issues"][0]["message"]
+    assert "does not match any slice" in message, message
+    assert "its cores: m55_hp, m55_he" in message, message
     assert env["data"]["launchJsonPath"] == str(Path(tmp_path, ".vscode", "launch.json"))
     assert not launch_json(tmp_path).exists()
 
@@ -1262,6 +1280,6 @@ def test_inferred_target_kind_stays_native_host_for_a_pure_native_sim_manifest()
         "slices": [{"core_id": "native_sim", "os": "zephyr", "board": "native_sim/native/64"}],
     }
 
-    target, ambiguous = infer_target_kind(manifest, None, None)
+    target, code, ambiguous = infer_target_kind(manifest, None, None)
 
-    assert target == NATIVE_HOST and ambiguous is None
+    assert target == NATIVE_HOST and code is None and ambiguous is None

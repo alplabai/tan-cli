@@ -774,7 +774,12 @@ _RESOLVABLE_HELPERS: dict[tuple[str, str], dict] = {
         expr="code",
         name="_failure",
         arg_keyword="code",
-        expected_calls=2,
+        # 4, not 2, as of tan-cli#462: `_build_manifest_missing_failure` and
+        # `_core_unknown_failure` each add their own literal `code=` call to
+        # `_failure`, splitting their two refusals off `_internal_failure`'s
+        # blanket `internal-failure` at `VALIDATION_FAILURE` (2). Both codes
+        # checked against the registry before the bump.
+        expected_calls=4,
         sites=1,
     ),
     ("tan/commands/sdk_cmd.py", "_fail"): dict(

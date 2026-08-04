@@ -73,6 +73,28 @@ All notable changes to `tan` are documented here. Format follows
   that lacks it is a real hand edit and still refuses with
   `generate.would-overwrite` (exit 3) unless `--force` is passed — the
   truncation the guard exists for is unchanged.
+- **`tan debug-config` reported two USER-ACTIONABLE preconditions as
+  `ExitCode.INTERNAL_FAILURE` (5)** — an omitted `--target-kind` on a real
+  hardware project (`som.sku` set) whose `build/system-manifest.yaml` does
+  not exist yet, and an explicit `--core` matching no slice in an existing
+  one — reporting a one-command-early user as a tan CRASH to any consumer
+  that classifies by exit code, alp-sdk-vscode included (tan-cli#462). Both
+  now exit `ExitCode.VALIDATION_FAILURE` (2), matching the distinction
+  tan-cli#262 already settled for `tan validate`: a verdict the command CAN
+  produce about the caller's own input is exit 2, and exit 5 stays reserved
+  for a genuine tan-side crash. Two new registry codes replace the shared
+  `debug-config.internal-failure` for these two cases —
+  `debug-config.build-manifest-missing` (message unchanged) and
+  `debug-config.core-unknown` (message now names the cores the build
+  actually produced, e.g. `its cores: m55_hp, m55_he`, instead of only
+  saying the passed one does not match). The `except Exception` catch-all
+  backstop is unaffected — that one is a genuine internal failure and exit 5
+  is still correct there. `infer_target_kind` now returns a
+  `(target, code, message)` 3-tuple instead of `(target, message)`; its two
+  still-ambiguous shapes (more than one target class, or none at all) are
+  unchanged and keep exit 5. Not a breaking wire change: every
+  `debug-config.*` code in the registry is still `"status": "reserved"`/
+  `"consumer": "none"`.
 
 ## [0.5.0] — 2026-08-04
 

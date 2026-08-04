@@ -153,11 +153,16 @@ def manifest_slices(manifest: Any) -> list[dict[str, Any]]:
     return slices
 
 
-def _core_not_in_manifest_message(core: str) -> str:
+def _core_not_in_manifest_message(core: str, slices: list[dict[str, Any]]) -> str:
+    """tan-cli#462 review: names the cores this build DID produce, the
+    obvious next question once told the one passed does not exist. `slices`
+    is the manifest's own core list at the point this fires (before `--core`
+    narrows it to nothing), so it is never empty here."""
+    cores = ", ".join(dict.fromkeys(s["core_id"] for s in slices))
     return (
         f"--target-kind was not given, and --core {core} does not match any "
-        "slice in this project's build/system-manifest.yaml; pass "
-        "--target-kind explicitly, or a --core value this project's build "
+        f"slice in this project's build/system-manifest.yaml (its cores: {cores}); "
+        "pass --target-kind explicitly, or a --core value this project's build "
         "actually produced."
     )
 
@@ -197,7 +202,7 @@ def _pre_build_hardware_message(som_sku: str) -> str:
 
 def infer_target_kind(
     manifest: Any, core: str | None, som_sku: str | None
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     """tan-cli#456: the default ``--target-kind`` when the flag is omitted, so
     a hardware project never silently gets a native-host draft its build
     cannot produce. Shared, not duplicated per command: ``debug_config_cmd``
@@ -205,10 +210,13 @@ def infer_target_kind(
     ``parse_target_kind(None)``) ``support_bundle_cmd`` face the identical
     question. Pure -- ``manifest``/``som_sku`` are already read; no file IO.
 
-    Returns ``(target, None)`` once confidently derived; ``(None, None)`` with
-    no signal at all (native-host survives, the pre-#456 default); ``(None,
-    reason)`` on more than one class, none at all, or a ``--core`` matching
-    nothing -- refuse rather than guess.
+    Returns ``(target, None, None)`` once confidently derived; ``(None, None,
+    None)`` with no signal at all (native-host survives, the pre-#456
+    default); ``(None, code, reason)`` on a refusal. ``code`` is a
+    `debug-config.<code>` suffix, tan-cli#462's split of the old blanket
+    ``internal-failure`` for a CALLER-fixable precondition (pre-build
+    hardware, or a bad ``--core``); or ``None`` on its two unclassified
+    shapes (more than one target class, or none at all).
 
     ``--core`` filters the WHOLE slice list first, before native_sim is
     excluded -- never only the hardware slices: that was the review-round bug,
@@ -223,7 +231,7 @@ def infer_target_kind(
     if core is not None and all_slices:
         matched = [s for s in all_slices if s.get("core_id") == core]
         if not matched:
-            return None, _core_not_in_manifest_message(core)
+            return None, "core-unknown", _core_not_in_manifest_message(core, all_slices)
         all_slices = matched
 
     hw_slices = [s for s in all_slices if not is_native_sim_board(s.get("board"))]
@@ -232,16 +240,16 @@ def infer_target_kind(
         oses = {s.get("os") for s in hw_slices}
         targets = {by_os[o] for o in oses if o in by_os}
         if len(targets) == 1:
-            return next(iter(targets)), None
+            return next(iter(targets)), None, None
         if targets:
-            return None, _ambiguous_target_classes_message(targets)
-        return None, _no_debuggable_class_message(oses)
+            return None, None, _ambiguous_target_classes_message(targets)
+        return None, None, _no_debuggable_class_message(oses)
     if all_slices:
-        return NATIVE_HOST, None  # every (matching) slice built is native_sim -- a real default.
+        return NATIVE_HOST, None, None  # every (matching) slice built is native_sim -- a real default.
 
     if isinstance(som_sku, str) and som_sku != "":
-        return None, _pre_build_hardware_message(som_sku)
-    return None, None
+        return None, "build-manifest-missing", _pre_build_hardware_message(som_sku)
+    return None, None, None
 
 
 #: The v0.3.1 default ``preLaunchTask``, restored per tan-cli#138. Keyed by

@@ -347,6 +347,24 @@
       "note": "tan-cli#111 registry audit: same shared `failure_envelope` path as `internal-failure`; the two are distinguished only by which exit code and text lines `debug_config.rs` passes in, matching the write-vs-internal split `crates/tan-cli/src/exit.rs` documents."
     },
     {
+      "code": "debug-config.build-manifest-missing",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--target-kind` is omitted, `board.yaml` declares a real SoM (`som.sku`), and `build/system-manifest.yaml` does not exist yet -- exits `ValidationFailure` (2): the caller's own precondition (run `tan build` first, or pass `--target-kind` explicitly), never a tan-side crash.",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the wrong verdict for a precondition the command can name and the caller can fix, the same distinction tan-cli#262 settled for `tan validate`. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
+    },
+    {
+      "code": "debug-config.core-unknown",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code yet; registered so a future one has a stable spelling to bind to rather than inventing its own",
+      "consumerEffect": "None today. Reserved for alp-sdk-vscode to recognise `tan debug-config`'s refusal when `--target-kind` is omitted and an explicit `--core` names no slice in this project's own `build/system-manifest.yaml` -- exits `ValidationFailure` (2), naming the cores the build actually produced.",
+      "emittedBy": "python/tan/commands/debug_config_cmd.py",
+      "note": "tan-cli#462: split off `debug-config.internal-failure`, which used to cover this case (Python-only, tan-cli#456) at exit `InternalFailure` (5) -- the caller's own typo or a stale `--core` value, not a tan-side crash. Not a breaking wire change: every `debug-config.*` code in this registry is still `\"status\": \"reserved\"`/`\"consumer\": \"none\"`, so nothing binds to the old spelling this splits off from."
+    },
+    {
       "code": "build.manifest-write-failed",
       "status": "reserved",
       "severity": "warning",

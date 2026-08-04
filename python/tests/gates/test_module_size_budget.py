@@ -93,7 +93,17 @@ _MODULE_BUDGET: dict[str, int] = {
     "tan/planner/kconfig.py": 1639,
     "tan/commands/build_cmd.py": 1559,
     "tan/commands/renode_cmd.py": 1440,
-    "tan/commands/debug_config_cmd.py": 1296,
+    # 1348, not 1296, as of tan-cli#462: two new `_failure` callers
+    # (`_build_manifest_missing_failure`/`_core_unknown_failure`) split
+    # `--target-kind` inference's two user-fixable refusals off the old
+    # blanket `internal-failure` verdict into their own `VALIDATION_FAILURE`
+    # (2) issue codes, plus the call-site branch that picks between them and
+    # the pre-#462 `internal-failure` fallback. Raised rather than extracted:
+    # both new functions are five-line mirrors of the existing
+    # `_internal_failure`/`_write_failure` pair right beside them: splitting
+    # them elsewhere would separate four near-identical siblings instead of
+    # keeping the shared shape visible in one place.
+    "tan/commands/debug_config_cmd.py": 1348,
     "tan/planner/template.py": 1199,
     "tan/core/scaffold.py": 1106,
     # 1150, not 1147, as of tan-cli#457's review round: the overlay guard's
@@ -122,7 +132,13 @@ _MODULE_BUDGET: dict[str, int] = {
     # Raised rather than split further: the alternative was leaving the
     # shared decision duplicated per command, the exact drift this move
     # exists to prevent.
-    "tan/core/debug_launch.py": 1060,
+    # 1068, not 1060, as of tan-cli#462: `infer_target_kind` now returns a
+    # `(target, code, message)` 3-tuple instead of `(target, message)`, so its
+    # two user-fixable refusals (a pre-build hardware project, a `--core`
+    # matching nothing) carry a bare reason code the caller maps to a new
+    # issue code -- and `_core_not_in_manifest_message` grew a `slices`
+    # parameter to name the cores the build actually produced.
+    "tan/core/debug_launch.py": 1068,
     "tan/commands/build/execute.py": 941,
     # 970, not 848, as of tan-cli#432: the alp-sdk#1069 port added the
     # disjoint per-core slot0 partition map (+168, matching alp-sdk's own
