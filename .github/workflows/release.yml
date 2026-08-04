@@ -140,7 +140,11 @@ on:
       - "v*"
 
 permissions:
-  contents: write # create the release + upload assets (default GITHUB_TOKEN only)
+  # Least privilege by default (tan-cli#435) -- only the `release` job (the
+  # one that actually creates the GitHub Release + uploads assets) overrides
+  # this to `write` via its own job-level `permissions:` block below. Every
+  # other job here only checks out, builds, or reads another job's outputs.
+  contents: read
 
 jobs:
   # Fail fast, before the matrix freezes anything: the tag must equal
@@ -153,8 +157,17 @@ jobs:
   # time the step below contradicts it the tag is already pushed and immutable.
   verify-version:
     runs-on: ubuntu-latest
+    # Read-only: this job only compares version strings across files/tag; it
+    # never writes to the repo. Explicit job-level block (tan-cli#435) so a
+    # future workflow-level default change can't silently grant it more.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing in this job pushes; don't leave a git credential helper
+          # configured with write-capable creds for a job that never uses it.
+          persist-credentials: false
       # THE SOURCE OF TRUTH IS `python/tan/version.py`'s `TAN_VERSION` — the
       # string the shipped binary PRINTS, and the one alp-sdk-vscode compares
       # against its SUPPORTED_CLI_VERSION. This step used to gate the tag on
@@ -254,6 +267,12 @@ jobs:
   # reason (it is a scope/plan decision, NOT the absence of arm64 runners).
   build:
     needs: [verify-version, gates, python-gates]
+    # Read-only: each leg freezes a binary and uploads it as a workflow
+    # artifact (actions/upload-artifact -- a run-scoped blob, not a
+    # repository write). None of these legs create commits, tags, or
+    # releases. Explicit job-level block (tan-cli#435).
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -286,6 +305,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Nothing in this job pushes; don't persist write-capable creds a
+          # PyInstaller build + its resolved deps never need (tan-cli#435).
+          persist-credentials: false
 
       # 3.12 is the floor python/pyproject.toml declares, and the floor is what
       # ships: `tan build` bakes the interpreter into every Zephyr slice and
@@ -435,6 +458,13 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # This job creates the Release/uploads assets through the GitHub
+          # API (softprops/action-gh-release, actions/attest-build-provenance
+          # -- both use the job's GITHUB_TOKEN, not a persisted git remote),
+          # not by `git push`ing from a later step, so it doesn't need a
+          # credential helper left configured either (tan-cli#435).
+          persist-credentials: false
       # `pattern: tan-*` and not "everything": assets/ is published verbatim
       # (`files: assets/*`), so anything else this workflow uploads must be
       # fetched separately or it becomes a release asset by accident.
@@ -696,6 +726,11 @@ jobs:
       NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # `npm publish` authenticates via NODE_AUTH_TOKEN (npm registry
+          # token), not a persisted git remote; nothing here pushes to the
+          # repo (tan-cli#435).
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -797,6 +832,14 @@ jobs:
     # makes the scope explicit rather than inherited.
     if: ${{ always() && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
+    # No checkout, no GitHub API call -- this job only reads the two upstream
+    # jobs' `needs.*.result`/`outputs` context and writes to
+    # $GITHUB_STEP_SUMMARY / $GITHUB_OUTPUT (local runner files, ungated by
+    # any permission). `contents: read` kept explicit anyway (tan-cli#435),
+    # matching every other job here rather than inheriting the workflow
+    # default.
+    permissions:
+      contents: read
     steps:
       - name: assert the release and every channel matched its declared intent
         shell: bash
