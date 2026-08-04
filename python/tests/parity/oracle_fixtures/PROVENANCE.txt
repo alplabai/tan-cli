@@ -13,11 +13,19 @@ oracle source:  crates/ at 204c3a0b8dcb165e10ac3d14f3e9bfa699e45b59
                 "fix: close five RC follow-ups -- flake, TBD sentinel, repr
                 parity, CI coverage, prog name" -- the last commit that
                 touched crates/ as of the capture, per `git log -1 -- crates/`.
-                crates/ is frozen (docs/ROADMAP.md's Standing Rule), so this
-                is the SHA that actually determines the binary's behaviour;
-                it is what a future re-capture must diff against to know
-                whether anything really changed, not whichever commit HEAD
-                happened to be at when `cargo build` ran.
+                That SHA, not whichever commit HEAD happened to be at when
+                `cargo build` ran, is what determines the binary's behaviour
+                and what a future re-capture must diff against.
+
+                Both lines below are MACHINE-READ, by
+                tests/parity/test_oracle_provenance.py -- do not reword them
+                without changing that test (tan-cli#409). The claim they
+                encode used to be prose only, and it had silently gone stale
+                by three commits; see the drift section at the end of this
+                file.
+
+captured-from-crates-commit: 204c3a0b8dcb165e10ac3d14f3e9bfa699e45b59
+verified-against-crates-commit: c0e45f955c2f4b3d40e9193dcb89b7ca1d3a5f76
 worktree HEAD:  b40109b46aefdd42d82ff30f89c8bf8d5061d72d (unrelated python/
                 commits on top; does not affect the oracle binary)
 captured:       2026-08-01 (tan-cli#272)
@@ -31,9 +39,13 @@ See tests/parity/oracle_fixtures.py's own module docstring for the replay
 mechanics (TAN_PARITY_LIVE / TAN_PARITY_CAPTURE, the PYTEST_CURRENT_TEST-
 keyed store, and why a missing key is a loud KeyError rather than a skip).
 
-Re-capturing: crates/ is frozen and will not change again for this reason,
-so there should be no reason to re-run the capture recipe above UNLESS a
-NEW case is added to one of the five files it lists (a new argv, a new tree
+Re-capturing: this file used to say "crates/ is frozen and will not change
+again for this reason, so there should be no reason to re-run the capture
+recipe above". That was false when it was written and nothing checked it --
+see the drift section at the end. What holds is the weaker, checkable claim:
+re-run the capture recipe above when crates/ MOVES past
+`verified-against-crates-commit`, or when a NEW case is added to one of the
+five files it lists (a new argv, a new tree
 shape). Capturing is additive -- `oracle_fixtures.resolve()` only ever adds
 or overwrites the keys the run you did touch, so a partial capture (e.g.
 `pytest tests/parity/test_flash_oracle_parity.py -k some_new_case`) is safe
@@ -162,3 +174,448 @@ returns nothing, `tests/gates/test_no_leaked_host_paths.py` passes with every
 file in this directory (and this file's own new `test_oracle_fixtures.py`)
 tracked, and the other four fixture files in this directory are byte-
 identical to before this pass (`git diff --stat` on each is empty).
+
+--------------------------------------------------------------------------
+
+2026-08-03, tan-cli#376: ONE KEY RENAMED, NOTHING RE-CAPTURED.
+
+  test_validate_no_sdk_guard_is_a_known_divergence_from_the_oracle#0
+    -> test_validate_no_sdk_guard_matches_the_oracle_at_exit_2#0
+
+#376 ported the SDK-validator spawn path, so the port now answers that case
+with the oracle's own `validate.sdk-root-unresolved` instead of the unported-
+path stub `validate.spawn-not-implemented` -- the divergence the old test name
+recorded is gone, and the test was renamed with it. Keys here are pytest node
+ids (`oracle_fixtures._current_key`), so the rename moves the key; the stored
+ORACLE answer under it is byte-identical and was NOT re-captured (nothing
+about the Rust binary changed). The re-capture recipe in the 2026-08-01 pass
+above still names the OLD spelling, deliberately -- it is a record of what was
+run that day; use the new name if re-running it.
+
+--------------------------------------------------------------------------
+
+THE CAPTURE HOST'S TOOL INVENTORY IS PART OF THE FROZEN ANSWER
+(tan-cli#313, tan-cli#324)
+
+Eight cases branch on a `which()` probe, so their frozen answers encode which
+tools the CAPTURE host had -- not just what the oracle computes. The capture
+host had:
+
+  west       ABSENT   -- the three west_forward cases froze the
+                         "west not found on PATH" launch error
+  dd         PRESENT  -- the yocto_wic cases froze "would run dd if=..."
+  bmaptool   ABSENT   -- else those cases would have frozen a bmaptool argv
+
+Replay pins the PYTHON side's PATH to match that inventory, so the comparison
+does not silently measure the replay host instead of the port. The pins:
+
+  test_flash_oracle_parity.py  `_TOOL_PROBE_PINNED_CASES` (5 cases) ->
+    `_pin_tool_inventory`, a scratch PATH holding a stand-in `dd` only
+  test_oracle_parity.py  `test_west_forward_matches_rust[migrate|lock|quality]`
+    (3 cases) -> `oracle.empty_tool_inventory`, a scratch PATH holding nothing
+
+CONSEQUENCE FOR RE-CAPTURE, and the reason this section exists: the recipe at
+the top of this file NO LONGER WORKS AS WRITTEN for these eight. Under
+TAN_PARITY_LIVE=1 both sides genuinely spawn, so `compare()` REFUSES a
+`python_env_overrides` rather than compare one pinned side against one
+unpinned side -- deliberately, since that would be a fresh divergence rather
+than a capture. Measured:
+
+  TAN_PARITY_LIVE=1 python -m pytest \
+    "tests/parity/test_oracle_parity.py::test_west_forward_matches_rust"
+  -> 3 failed, RuntimeError: compare() got python_env_overrides under
+     TAN_PARITY_LIVE=1
+
+To re-capture any of the eight, run the capture on a host whose tool
+inventory MATCHES the table above (no `west`, no `bmaptool`, a real `dd`) and
+drop the pin for that run. Capturing on a host with `west` installed and the
+pin dropped would freeze a different answer entirely -- one that then only
+replays on hosts that also have `west`, reintroducing exactly the bug
+tan-cli#324 closed.
+
+--------------------------------------------------------------------------
+
+THE FROZEN-crates/ CLAIM WENT STALE, AND NOTHING NOTICED (tan-cli#409)
+
+This file used to state, as the reason no re-capture could be needed, that
+"crates/ is frozen and will not change again for this reason". By the time
+that was read again, crates/ had moved four commits past the recorded capture
+SHA -- three of them real `src/` changes, i.e. changes that CAN change the
+binary these fixtures were captured from:
+
+  8a71310  docs: align the repository with the Python port (#386)
+             crates/tan-cli/README.md, crates/tan-core/README.md -- docs only
+  ac79d4c  feat: close the v0.6 issue wave (#352)
+             crates/tan-cli/src/commands/debug_config.rs (4654 lines),
+             crates/tan-cli/src/commands/build/preflight.rs
+  4b7d2c4  fix(test): guard doctor's westResolved fixture (#333) (#340)
+             crates/tan-cli/src/commands/bootstrap/steps.rs,
+             crates/tan-cli/src/commands/doctor.rs
+  909ba02  fix(test): route ensure_venv through exit_code_shim (#318)
+             crates/tan-cli/src/commands/bootstrap/steps.rs
+
+The recorded SHA appeared nowhere but in this file's own prose, so nothing
+could compare it against anything. It is machine-read now
+(`verified-against-crates-commit`, checked by
+tests/parity/test_oracle_provenance.py, which FAILS when
+`git log <that sha>..HEAD -- crates` is non-empty), and the same drift can no
+longer go quiet.
+
+Why `verified-against-crates-commit` was advanced to 8a71310 with NO
+re-capture. Measured on this tree, darwin, both runs minutes apart over the
+five modules the capture recipe at the top of this file names:
+
+  frozen replay (port vs these fixtures)
+    3 failed, 222 passed, 13 skipped, 4 xfailed
+  TAN_PARITY_LIVE=1 (port vs an oracle built from THIS checkout, tan 0.4.1)
+    8 failed, 219 passed, 11 skipped, 4 xfailed
+
+Every case that ran in BOTH modes passed in both. Port == fixture and
+port == current binary over the same cases means fixture == current binary on
+every surface those cases compare -- including
+`test_debug_config_resolution_matches_rust` and
+`test_debug_config_native_host_preview_global_format_matches_rust`, which are
+the two frozen cases ac79d4c's 4654-line `debug_config.rs` rewrite could have
+moved and did not.
+
+What that measurement does NOT cover, stated so nobody reads it as more than
+it is:
+
+  * the eight tool-probe-pinned cases (the section above). They are the
+    live run's 8 failures, every one of them the documented
+    `compare() got python_env_overrides under TAN_PARITY_LIVE=1` refusal --
+    structurally unable to run live, so unable to be cross-checked this way.
+  * anything win32-gated. This was run on darwin, where those cells skip in
+    BOTH modes; the platform line above still governs.
+  * the one alp-sdk-CONTENT-bound case, which needs ALP_SDK_PARITY_ROOT at
+    v0.15.0-rc1 and skipped here.
+  * the fifteen cases that have no fixture at all -- see PARITY-COVERAGE.txt
+    in this directory, which is where that hole is now recorded.
+
+A capture, not a re-verification, is still what a change to a compared
+surface demands. This one earns its SHA bump by measurement, not by the
+assertion that crates/ cannot move.
+
+--------------------------------------------------------------------------
+
+2026-08-04: THIS STORE IS NO LONGER SINGLE-PLATFORM (tan-cli#409)
+
+Fifteen new keys were captured on darwin, not on the `platform:` line's
+win32. They close part of the live-only hole PARITY-COVERAGE.txt records --
+three cases that used to spawn the oracle behind `skipif(RUST is None, ...)`
+and would have become passing SKIPS the day tan-cli#269 deletes crates/, plus
+twelve first-ever comparisons for verbs nothing compared at all:
+
+  test_build_sdk_root_oracle_parity.json   1 key   (was live-only)
+  test_run_oracle_parity.json              2 keys  (were live-only)
+  test_command_surface_oracle_parity.json  12 keys (new module: completion,
+                                                    trace, scaffold, inspect,
+                                                    bootstrap, kconfig,
+                                                    examples)
+
+  cargo build --bin tan
+  TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 python -m pytest \
+    tests/parity/test_build_sdk_root_oracle_parity.py \
+    tests/parity/test_run_oracle_parity.py \
+    tests/parity/test_command_surface_oracle_parity.py
+
+oracle binary:  tan 0.4.1, target/debug/tan built from THIS checkout --
+                certified by oracle_provenance.drift() against
+                PINNED_ORACLE_BUILD_INPUT_DIGEST, which is the check that
+                makes "built from the pinned crates/ state" a measurement
+                rather than a claim (tan-cli#414).
+oracle source:  crates/ at 8a71310, i.e. unchanged from
+                verified-against-crates-commit above.
+platform:       darwin (macOS 26.5.2)
+
+The four pre-existing `test_run_oracle_parity.json` help-text keys were NOT
+re-captured. A capture run rewrites every key the run touches, and this one
+did rewrite them -- `Usage: tan.exe run` became `Usage: tan run`, the prog
+name being the one thing in that text the capture PLATFORM decides. They were
+restored to their win32 originals afterwards, so those four keep the
+provenance this file records for them. Nothing else in this directory
+changed.
+
+Why capturing these on darwin is safe, key by key -- the question the
+`platform:` line exists to force. A frozen answer is only a valid oracle for
+a replay whose separator style matches, so each of the fifteen was checked
+for host-shaped content before it was committed:
+
+  * fourteen carry no filesystem path at all beyond a bare `<ORACLE-ROOT-N>`
+    token (`project.root`), or no path whatsoever (the completion scripts,
+    the empty `data` skeletons). A bare token has no separator in it, so
+    there is nothing for a platform to render differently.
+  * the fifteenth, `test_inspect_matches_the_oracle`, carries
+    `<ORACLE-ROOT-0>/board.yaml`. That case -- and only that case -- forces
+    `oracle_fixtures.normalise_scrubbed_path_separators(..., force=True)` on
+    BOTH sides. The automatic rule keys off CAPTURE_PLATFORM and so disables
+    itself on win32, which is right for the win32-captured majority and
+    exactly backwards for a POSIX-captured key: without the override, a
+    Windows replay would diff this fixture's `/` against its own live port's
+    `\` and report a platform difference as a port defect.
+
+What could NOT be captured here, and must be captured on win32 by whoever
+takes it on: the two `test_support_bundle_oracle_parity.py` cases. They are
+not merely separator-sensitive -- their whole compared surface (doctor's
+check list and statuses, the whole inspect.context) is decided by the host,
+and no scrub reaches that. Measured on this machine, the oracle's own bundle
+under `empty_tool_inventory` froze these rows, among others:
+
+  codeLLDBExtension  unknown  vadimcn.vscode-lldb: unknown ...
+  lldb               pass     vadimcn.vscode-lldb ships its own LLDB ...
+  zephyrSdkAvailableForHost   pass  The Zephyr SDK publishes a host build
+                                    for macos-aarch64.
+
+`macos-aarch64` is this host's architecture written into the frozen answer,
+and the two LLDB rows are the macOS debug stack; a Windows bundle carries
+`longPaths` (which exists nowhere else) and no LLDB rows at all. Freezing
+this on darwin and replaying it against a live port on any other OS diffs two
+platforms' genuinely different -- and both correct -- behaviour, which is the
+false red `CAPTURE_PLATFORM` exists to warn about. Note what does NOT save
+it: `_refuse_if_leaking_a_real_host_path` does not fire on this capture (a
+scratch destination under the system temp root carries no `/Users/<name>`
+shape), so the guard would have written it. The reason to refuse is the
+platform, and it has to be a decision, not a hope that the leak guard
+notices.
+
+2026-08-04, fix/v06-followups: verified-against-crates-commit ADVANCED TO
+c0e45f955c2f4b3d40e9193dcb89b7ca1d3a5f76 WITH NO RE-CAPTURE.
+
+`git log 8a71310..c0e45f9 -- crates` names two commits:
+
+  ea1c535  fix(gates): detect a skipped delegate, and stop requiring a
+           literal nobody reads (#372)
+             crates/tan-cli/tests/contract.rs -- gate-test-only
+  c0e45f9  Merge origin/dev into fix/v06-followups, reconciling the
+           divergent fixes by hand
+             crates/tan-cli/README.md, crates/tan-cli/tests/contract.rs --
+             doc + gate-test-only (the merge's own conflict resolution
+             touched nothing else under crates/)
+
+Unlike every prior entry in this file, this one needs no live-vs-frozen
+measurement to justify the bump: both commits touch only
+`crates/tan-cli/tests/contract.rs` (a `cargo test` integration-test file
+under `tests/`, never compiled into the `tan`/`tan.exe` binary product) and
+`crates/tan-cli/README.md` (docs). Neither is reachable from
+`target/debug/tan.exe`'s own build graph, so no change under either path can
+move what that binary answers -- there is no "behaviour" here to
+re-diff, only a stronger Rust-side gate (`python_delegate_skip_reason`,
+`issue_code_registry_tests_are_not_ignored`) and a corrected README. Verified
+by inspection (`git diff 8a71310 HEAD -- crates` above), not by running
+`TAN_PARITY_LIVE=1`, precisely because the diff is scoped away from anything
+that measurement could have caught moving.
+
+--------------------------------------------------------------------------
+
+2026-08-04, second darwin capture: the last live-only cases in
+test_oracle_parity.py (tan-cli#409)
+
+Nine new keys, again on darwin rather than the `platform:` line's win32.
+Seven tests (nine node ids -- `test_explain_matches_the_oracle` is
+parametrised three ways) that used to spawn the oracle behind
+`@_ORACLE_REQUIRED`, i.e. gated on binary PRESENCE with no fixture behind
+them. Every one would have become a passing SKIP the day tan-cli#269 deletes
+crates/, with the run still exiting 0. The decorator itself is gone: this
+module now has no binary-presence skip left except its own two harness
+self-tests.
+
+  test_oracle_parity.json   9 keys   (were live-only)
+
+    test_explain_matches_the_oracle[overview|unknown-template|unknown-target]
+    test_renode_no_sdk_matches_the_oracle
+    test_size_missing_manifest_is_a_known_divergence_from_the_oracle
+    test_run_no_sdk_is_a_known_divergence_from_the_oracle
+    test_model_bare_invocation_is_a_known_divergence_from_the_oracle
+    test_monitor_is_a_known_divergence_from_the_oracle
+    test_faultdecode_is_a_known_divergence_from_the_oracle
+
+  cargo build --bin tan
+  TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 \
+    TAN_RUST_BINARY=target/debug/tan python -m pytest \
+    tests/parity/test_oracle_parity.py -k "<the seven names above>"
+
+oracle binary:  tan 0.4.1, target/debug/tan built from THIS checkout --
+                certified by oracle_provenance.drift() against
+                PINNED_ORACLE_BUILD_INPUT_DIGEST.
+oracle source:  crates/ at 8a71310, i.e. unchanged from
+                verified-against-crates-commit above.
+tree:           f3208e1
+platform:       darwin (macOS 26.5.2)
+
+The `-k` selection is not cosmetic. A capture run REWRITES every key it
+touches, so running the whole module would have re-captured the 42
+pre-existing keys on darwin and silently replaced their provenance -- the
+same hazard the note above records for test_run_oracle_parity.json's four
+help-text keys, where the restore had to be done by hand afterwards.
+Selecting the seven names avoided it rather than repairing it. Verified by
+diffing the store before and after:
+
+  keys 42 -> 51,  ADDED 9,  CHANGED 0,  REMOVED 0
+
+Why capturing these on darwin is safe. Four go through
+`test_oracle_parity._both_sides`, which scrubs work_dir/home out of BOTH
+sides and then applies `normalise_scrubbed_path_separators(..., force=True)`
+to both -- `force` because the automatic rule keys off CAPTURE_PLATFORM and
+so disables itself on win32, which is exactly backwards for a POSIX-captured
+key. The other three (`model`, `monitor`, `faultdecode`) assert only a
+`command` string, an exit code and an issue code, so they take
+`rust_run(..., scrub_roots=())` -- the spelling
+`test_new_som_matches_the_oracle_on_command_and_issue_code` already uses.
+
+One case needed more than the shared helper, and it is worth naming:
+
+  test_size_missing_manifest_is_a_known_divergence_from_the_oracle
+
+pins the oracle's `io::Error` Display verbatim, and that string is
+PLATFORM-dependent -- POSIX reports ENOENT (2) "No such file or directory"
+where Windows distinguishes a missing DIRECTORY and reports
+ERROR_PATH_NOT_FOUND (3) "The system cannot find the path specified." The
+test branched on `os.name == "nt"`. Under a frozen replay that is now wrong:
+the string is decided by the CAPTURE host, so a Windows replay reads back the
+darwin tail and the `os.name` branch would redden it against a perfectly good
+fixture. The condition is now `os.name == "nt" and oracle_fixtures.LIVE` --
+the replay host decides only when the oracle is really being spawned.
+
+Measured on this tree with target/ moved aside, i.e. exactly the state
+tan-cli#269 produces:
+
+  with the binary present:  335 passed,  97 skipped, 13 xfailed
+  no target/ at all:        293 passed, 148 skipped,  4 xfailed
+
+`test_oracle_parity.py` contributes ZERO oracle-presence skips to that 148
+now. What remains, counted from the same run, is declared in
+`test_parity_freeze_completeness.py` and is NOT this capture's to close:
+
+   2  test_support_bundle_oracle_parity.py  -- needs a win32 host (see the
+                                               section above for why no scrub
+                                               reaches `macos-aarch64` or a
+                                               Windows-only `longPaths` row)
+  47  test_scaffold_content_oracle_parity.py -- compares a FILE TREE, which
+                                               no fixture store in this
+                                               package can hold yet
+
+--------------------------------------------------------------------------
+
+2026-08-04, third darwin capture: the scaffold TREES (tan-cli#409)
+
+A second store, `scaffold_trees.json`, and a second reader,
+`tests/parity/scaffold_fixtures.py`. Not keys in the file above, because what
+is frozen here is not an envelope: `test_scaffold_content_oracle_parity.py`
+diffs a whole scaffolded FILE TREE, and it does so from two tests sharing one
+memoised spawn per template -- so a key derived from `PYTEST_CURRENT_TEST`
+would have depended on which of the two ran first. Keyed by TEMPLATE ID
+instead.
+
+  scaffold_trees.json   6 templates, 40 files, 120522 bytes
+
+    board-diagnostics  6 files      minimal-app      8 files
+    edge-ai-starter    8 files      sensor-starter   6 files
+    iot-starter        6 files      zephyr-app       6 files
+
+  cargo build --bin tan
+  TAN_PARITY_LIVE=1 TAN_PARITY_CAPTURE=1 \
+    TAN_RUST_BINARY=target/debug/tan python -m pytest \
+    tests/parity/test_scaffold_content_oracle_parity.py
+
+oracle binary:  tan 0.4.1, target/debug/tan built from THIS checkout.
+oracle source:  crates/ at 8a71310, unchanged from
+                verified-against-crates-commit above.
+platform:       darwin (macOS 26.5.2)
+
+Stored as TEXT, not base64, and that is a measurement rather than a
+convenience. All six templates at DEFAULT_SOM_SKU (E1M-AEN801) were checked
+before the store was designed: 40 files, EVERY ONE valid UTF-8, and NOT ONE
+containing the scratch directory it was scaffolded into. So there is nothing
+to scrub -- unlike every key in the envelope store -- and nothing to encode,
+and a committed fixture whose values are the actual CMake/YAML/Markdown text
+is reviewable in a diff. `scaffold_fixtures._as_text` FAILS the capture on a
+non-UTF-8 byte sequence rather than laundering it through
+`errors="replace"`, so if a template ever vendors a binary asset the capture
+stops and the decision gets revisited.
+
+Newlines survive: json round-trips LF and CRLF distinctly and the reader does
+no translation, so a CRLF-vs-LF divergence between the two binaries still
+fails the comparison -- `_read_tree`'s own docstring reads raw bytes
+precisely so nothing launders a real divergence, and this store does not undo
+that.
+
+Measured with target/ moved aside, i.e. exactly the state tan-cli#269
+produces:
+
+  with the binary present:  335 passed,  97 skipped, 13 xfailed
+  no target/ at all:        331 passed, 101 skipped, 13 xfailed
+
+The gap is FOUR tests, and all four are declared by name in
+`test_parity_freeze_completeness.py`: the two harness self-tests, which take
+the binary as their SUBJECT and can never be frozen, and the two
+`test_support_bundle_oracle_parity.py` cases, which need a win32 host for the
+reason the earlier section gives in full. `_UNFROZEN` is now EMPTY.
+
+--------------------------------------------------------------------------
+
+2026-08-04, the PLATFORM-BOUND store: captured on three CI runners
+(tan-cli#409)
+
+A third store, `platform_bound.json`, read by
+`tests/parity/platform_fixtures.py`. Keyed `<case>::<sys.platform>`, because
+what `test_support_bundle_oracle_parity.py`'s two cases compare -- doctor's
+whole check list and statuses plus the whole `inspect.context` -- is decided
+by the HOST as much as by the binary. One frozen answer cannot serve three
+platforms, and the store NEVER falls back to another platform's key.
+
+  platform_bound.json   6 keys
+
+    failing-host::darwin   failing-host::linux   failing-host::win32
+    resolved-sdk::darwin   resolved-sdk::linux   resolved-sdk::win32
+
+Captured by `.github/workflows/capture-platform-fixtures.yml`, run
+30913698426, all three jobs `success`:
+
+    capture (ubuntu-latest)   -> linux
+    capture (windows-latest)  -> win32
+    capture (macos-latest)    -> darwin
+
+platform:       NOT one host. Each key was captured on the runner whose
+                `sys.platform` it names. This is the first store in this
+                directory for which the `platform:` line above is a
+                per-key fact rather than a file-wide one.
+
+The recorded blocker for these two was "needs a win32 host, and nobody has
+one". That was half right: a single-keyed store genuinely cannot hold them,
+but the win32 machine was never missing -- this repository runs
+`windows-latest` on every PR. What was missing was a job that captured on it.
+
+TWO THINGS MEASURED WHILE COLLECTING, both worth keeping:
+
+1. `resolved-sdk::darwin` from `macos-latest` DIFFERS from the same key
+   captured on this developer's own darwin box, in exactly one field:
+
+       .doctor.checks[4].detail   "lldb" (runner)  vs  "lldb-dap" (local)
+
+   Check NAMES and STATUSES are identical, and `_statuses` -- what
+   `_assert_doctor_sections_match` compares -- reads only `(name, status)`.
+   So the difference is inert for every assertion, and the CI-captured key
+   replays green on a local box whose `lldb` resolves differently. Verified
+   by replacing the local capture with the runner's and re-running with
+   `target/` moved aside. Recorded because a future reader diffing this
+   store against their own capture WILL see it and should not read it as
+   drift.
+
+2. Merging the three artifacts was ORDER-DEPENDENT, and silently wrong. A
+   runner starts from the committed store, so `platform-bound-ubuntu-latest`
+   also carried the `darwin` keys that were already committed -- and
+   `sorted()` put it after `platform-bound-macos-latest`, so a stale
+   `darwin` key overwrote the fresh one `macos-latest` had just captured.
+   Caught by diffing the two darwin captures before merging, NOT by a test.
+   Fixed on both sides: the workflow now filters to its own `sys.platform`
+   before uploading, and `platform_fixtures.merge_from` REFUSES a
+   multi-platform artifact outright rather than silently picking one.
+
+Measured with target/ moved aside, i.e. exactly the state tan-cli#269
+produces:
+
+  tests/parity, no target/ at all:  336 passed, ZERO oracle-presence skips
+
+`_UNFROZEN` and `_PLATFORM_BOUND` are both EMPTY. Every case in this package
+now replays without a Rust binary except the two harness self-tests, which
+take the binary as their SUBJECT and never could.

@@ -405,6 +405,76 @@ def work_dir(tmp_path_factory):
 _HOST_ANCHORED_ABSOLUTE_CASES = frozenset({"absolute-artefact-passes-through"})
 
 
+#: Case IDs whose expected message (or whose pass/fail shape) depends on a
+#: LIVE tool-presence probe against PATH -- either `plan_yocto_wic`'s own
+#: `which("bmaptool")`/`which("dd")` (`tan/core/flash_plan.py:1002-1056`), or
+#: the required-tool gate `tool_gate` (`flash_plan.py:1524-1545`, reached via
+#: `doctor_cmd.on_path` at `flash_cmd.py:879-882`). The frozen fixture
+#: recorded whichever tool inventory the CAPTURE host happened to have --
+#: `dd` present/`bmaptool` absent for the three yocto cases, `west` absent
+#: for the two `zephyr_west_flash` ones below -- so replaying on a host with
+#: a DIFFERENT inventory (this box, for one: real `dd`, no `bmaptool`, and a
+#: broken but PATH-resolvable `west` shim) makes the port pick/find a
+#: different tool and diffs on text that is not a port bug at all
+#: (tan-cli#313).
+#:
+#: `tool_gate` is bypassed ONLY under `--dry-run` or an empty `requires`
+#: (its own docstring) -- it is LIVE for every other case that reaches it.
+#: That is NOT every other case in `CASES`, though: three more non-dry-run
+#: cases never reach `tool_gate` at all, refused by an earlier check in
+#: `flash_cmd.py`'s dispatch order (traced directly, not inferred):
+#:   * `no-artefact-real-run-fails` -- fails the empty-artefact check
+#:     BEFORE `tool_gate` (`flash_cmd.py:856-860`).
+#:   * `flash-args-tbd-mapping` -- skips on `flash_args_has_tbd` BEFORE
+#:     `tool_gate` (`flash_cmd.py:811-817`).
+#:   * `sdk-root-invalid` -- refused at SDK-root resolution, before the
+#:     manifest is even read (`flash_cmd.py:1163-1175`), nowhere near a
+#:     backend or `tool_gate`.
+#: See `_pin_tool_inventory` for why the five pinned below DO need it.
+_TOOL_PROBE_PINNED_CASES = frozenset(
+    {
+        "empty-boot-order-sorts-and-helpers-last",
+        "yocto-unconfirmed-is-planned-not-ok",
+        "yocto-alias-method-resolves",
+        "missing-tool-fails",
+        "missing-tool-skips-with-flag",
+    }
+)
+
+
+def _pin_tool_inventory(work_dir) -> str:
+    """A scratch PATH holding exactly one stand-in tool, `dd` -- matching what
+    the fixture's capture host had (`dd`, no `bmaptool`, no `west`) -- for
+    `python_env_overrides` to hand to the PYTHON side alone (tan-cli#313).
+
+    Serves two different probes with the one stub dir: `plan_yocto_wic`'s
+    `which("bmaptool")`/`which("dd")` (the three yocto case IDs), where `dd`
+    being FOUND is the point, and `tool_gate`'s `west` probe (the two
+    `missing-tool-*` case IDs), where `dd`'s presence is irrelevant and
+    `west` simply not being anywhere on this replaced PATH is what the
+    frozen "none found" answer needs.
+
+    Replaces PATH outright rather than prepending: `doctor_cmd.on_path`
+    (what `plan_yocto_wic`'s and `tool_gate`'s `which` callables both
+    resolve to) walks every directory looking for a name match, so
+    prepending a `dd`-only directory ahead of the replay host's real PATH
+    would still let a REAL `bmaptool` or `west` further down it be found --
+    which is exactly the host-dependence this fixes. The stub's own content
+    is never read: every case that pins this is a `--dry-run` preview, an
+    unconfirmed "would run" plan, or the required-tool gate's own refusal/
+    skip message, so `dd` is only ever named in a message, never spawned.
+    `chmod` is a no-op on Windows (no execute bit there), where
+    `os.access(path, os.X_OK)` accepts any existing file -- covered by
+    `doctor_cmd.on_path`'s own docstring.
+    """
+    stub_dir = work_dir / "tool-stub"
+    stub_dir.mkdir()
+    dd_stub = stub_dir / "dd"
+    dd_stub.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    dd_stub.chmod(0o755)
+    return str(stub_dir)
+
+
 @pytest.mark.parametrize("case_id, manifest, extra", CASES, ids=[c[0] for c in CASES])
 def test_flash_matches_the_rust_oracle(case_id, manifest, extra, work_dir):
     if case_id in _HOST_ANCHORED_ABSOLUTE_CASES and not oracle_fixtures.REPLAY_IS_CAPTURE_PLATFORM:
@@ -417,7 +487,16 @@ def test_flash_matches_the_rust_oracle(case_id, manifest, extra, work_dir):
         (work_dir / "build" / "system-manifest.yaml").write_text(
             manifest, encoding="utf-8", newline=""
         )
-    result = compare(_argv(extra), work_dir, surface=ENVELOPE, home=work_dir)
+    python_env_overrides = (
+        {"PATH": _pin_tool_inventory(work_dir)} if case_id in _TOOL_PROBE_PINNED_CASES else None
+    )
+    result = compare(
+        _argv(extra),
+        work_dir,
+        surface=ENVELOPE,
+        home=work_dir,
+        python_env_overrides=python_env_overrides,
+    )
     assert result.matches, f"{case_id}: " + "; ".join(result.diffs)
 
 
@@ -470,6 +549,22 @@ def test_a_real_spawn_diffs_including_the_captured_failure_tail(work_dir):
 
     Also skipped where the local `dd` is not the implementation the fixture
     captured -- see `_dd_matches_the_captured_implementation`.
+
+    Also skipped where `bmaptool` IS present: `plan_yocto_wic`'s
+    `if bmaptool or (planning_only and not dd)` (`flash_plan.py:1023-1026`)
+    picks `bmaptool` whenever it is found on PATH, unconditionally --
+    `planning_only` narrows nothing here, since the check is a bare `or`.
+    This is an ordinary Yocto dev host (`apt install bmap-tools` is the
+    documented way to get the preferred tool), not an exotic one, and
+    unlike the yocto CASES above this test is not in `_TOOL_PROBE_PINNED_CASES`
+    and cannot be: it actually SPAWNS the resolved tool (that is the test's
+    whole subject, its captured stderr tail), and a `dd` stand-in that only
+    NAMES the tool would defeat that -- pinning would need a stub `dd`
+    faithful enough to reproduce the fixture's exact captured failure text,
+    which is just `_dd_matches_the_captured_implementation`'s own job
+    restated. Measured: with a `bmaptool` stub on PATH the python side spawns
+    it (exits `rc=1`, no captured tail) while the frozen fixture still names
+    `dd`'s tail -- tan-cli#313 at this call site too.
     """
     if shutil.which("dd") is None:
         pytest.skip("no `dd` on PATH; nothing to spawn")
@@ -479,6 +574,12 @@ def test_a_real_spawn_diffs_including_the_captured_failure_tail(work_dir):
             "fixture captured (BSD `dd: <path>: No such file` vs GNU `dd: failed "
             "to open '<path>': No such file`); the tail this test compares is the "
             "SPAWNED TOOL's text, not tan's, so that diff is not a port defect"
+        )
+    if shutil.which("bmaptool") is not None:
+        pytest.skip(
+            "a host with bmaptool on PATH plans that tool instead of dd "
+            "(flash_plan.py:1023-1026 prefers it unconditionally); this test's "
+            "subject is the SPAWNED dd's captured failure tail, not bmaptool's"
         )
     (work_dir / "build" / "system-manifest.yaml").write_text(
         _slice("yocto_wic", "{target: /dev/sdb}"), encoding="utf-8", newline=""

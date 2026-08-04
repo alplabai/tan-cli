@@ -57,9 +57,11 @@ from dataclasses import dataclass, field
 
 import typer
 
+from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import TemplateDataError, vendored_library_names_for
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -579,9 +581,7 @@ def explain(
     sdk_root: str = typer.Option(  # accepted, not read; see below
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Explain a project/module template or a generation target.
 
@@ -604,10 +604,6 @@ def explain(
     input class this port keeps re-introducing. Folded into `template` before
     `resolve()` so the rest of this function is unaware of it.
     """
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     if template_arg is not None and template is not None:
@@ -695,3 +691,13 @@ def _fail(json_mode: bool, err: ExplainError) -> None:
         [Issue(err.code, "error", err.message)],
         err.exit_code,
     )
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--board-yaml`/`--ci`/`--no-color`/
+# `--non-interactive`/`--quiet`/`--verbose`) on top of `--target`, already
+# declared and read above; see `tan.core.global_flags`. `--project`/
+# `--sdk-root` are ALSO declared already (accepted, not read -- see
+# `explain`'s own docstring); the decorator leaves both untouched the same
+# way it leaves `--target` untouched.
+explain = accept_global_flags(explain)

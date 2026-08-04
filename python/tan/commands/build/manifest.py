@@ -3,14 +3,14 @@
 manifest.yaml` the downstream `tan run`/`tan flash`/`tan size`/`tan image`
 contract reads, and resolve the real on-disk `zephyr.elf` a slice produced.
 
-Port of `crates/tan-cli/src/commands/build/execute/manifest.rs`, trimmed to
-this port's current scope the same way `tan.commands.build.execute` already
-is (see that module's docstring): no Zephyr-boilerplate-loaded guard. What IS
+Port of `crates/tan-cli/src/commands/build/execute/manifest.rs`. What's
 ported: the post-build `write_post_build_manifest` seam and its two in-memory
 signals (`write_failed_reason` / `native_sim_target`), `resolve_zephyr_artefact`'s
-default-nested-build-dir artefact resolution, and the SDK-identity stamp
+default-nested-build-dir artefact resolution, the SDK-identity stamp
 (`sdk_stamp_path`/`read_sdk_stamp`/`write_sdk_stamp`/`cmake_cache_configured`)
-the sdk-switch-pristine guard in `execute.py` reads and writes (issue #52).
+the sdk-switch-pristine guard in `execute.py` reads and writes (issue #52),
+and (tan-cli#309) the Zephyr-boilerplate-loaded guard (tan-cli #97 upstream)
+[`zephyr_boilerplate_loaded`] -- `execute.py`'s status assembly applies it.
 
 **Why `sdk_root`/`board_yaml` stay ACCEPTED overrides here rather than always
 required.** The Rust oracle's `write_post_build_manifest` takes a
@@ -51,6 +51,7 @@ __all__ = [
     "sdk_stamp_path",
     "write_post_build_manifest",
     "write_sdk_stamp",
+    "zephyr_boilerplate_loaded",
 ]
 
 
@@ -318,3 +319,59 @@ def cmake_cache_configured(slice_cwd: Path) -> bool:
     `sdk_stamp_action` needs before it treats a missing stamp as stale. Port
     of `manifest.rs::cmake_cache_configured`."""
     return (slice_cwd / "build" / "CMakeCache.txt").is_file()
+
+
+def _dir_shows_zephyr(directory: Path) -> bool:
+    """The two per-directory signals behind [`zephyr_boilerplate_loaded`]:
+    a `ZEPHYR_BASE:` entry in `directory`'s own `CMakeCache.txt` (the primary
+    signal -- what `find_package(Zephyr)` caches, verified against a real
+    `<slice>/build/CMakeCache.txt`; a plain host configure never writes one),
+    OR a `zephyr/` subdirectory (Zephyr's boilerplate binary dir, kept as an
+    OR fallback so the guard can only ever fail a build it is SURE about).
+    Port of `manifest.rs::dir_shows_zephyr`, whose `std::fs::read_to_string`
+    folds invalid-UTF-8 into the SAME `io::Error` a missing file raises
+    (`.is_ok_and(...)` then just falls through to the `zephyr/` fallback);
+    `UnicodeDecodeError` is a `ValueError`, not an `OSError`, so `except
+    OSError` alone let a non-UTF-8 `CMakeCache.txt` escape this function as
+    an uncaught exception -- the same lesson `read_sdk_stamp` above already
+    records for the sibling `.tan-sdk-root` read."""
+    try:
+        cache = (directory / "CMakeCache.txt").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        cache = ""
+    if any(line.startswith("ZEPHYR_BASE:") for line in cache.splitlines()):
+        return True
+    return (directory / "zephyr").is_dir()
+
+
+def zephyr_boilerplate_loaded(slice_cwd: Path) -> bool:
+    """tan-cli#309 (upstream tan-cli #97): whether this slice's build dir
+    shows that Zephyr's CMake boilerplate actually ran -- the signal behind
+    the `os: zephyr` guard `execute.py`'s status assembly applies.
+
+    The reported defect: a project whose `CMakeLists.txt` never calls
+    `find_package(Zephyr ...)` still configures and links fine under `west
+    build -b <board>` (CMake only emits a *dev* warning about the missing
+    `project()` call), so a core declared `os: zephyr` produced a host
+    binary and the executor reported it `[+] ok`. The board name is never
+    even validated, because nothing loaded the code that would validate it.
+
+    Checked one level down too (not just `<slice_cwd>/build` itself),
+    because `--sysbuild` nests the real per-image Zephyr builds one
+    directory deeper under its own superbuild -- Zephyr's own
+    `share/sysbuild/CMakeLists.txt` calls `find_package(Sysbuild ...)`, not
+    `find_package(Zephyr)`, so a sysbuild top level carries neither signal
+    and only the nested per-image build does. One level is enough (sysbuild
+    nests per-image, not recursively).
+
+    Callers must skip this check when [`build_dir_overridden`] -- west then
+    wrote somewhere this can't see, the same refusal [`resolve_zephyr_artefact`]
+    already makes. Port of `manifest.rs::zephyr_boilerplate_loaded`."""
+    build = slice_cwd / "build"
+    if _dir_shows_zephyr(build):
+        return True
+    try:
+        children = [p for p in build.iterdir() if p.is_dir()]
+    except OSError:
+        return False
+    return any(_dir_shows_zephyr(child) for child in children)

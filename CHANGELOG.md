@@ -5,14 +5,293 @@ All notable changes to `tan` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); versioning is
 [SemVer](https://semver.org/).
 
-## [0.5.0-rc4] — 2026-08-02
+## [0.5.0] — 2026-08-04
+
+*This section was headed `## [0.6.0]` until tan-cli#377. **0.5.0 has never been
+released** — only `v0.5.0-rc1`…`v0.5.0-rc4` — so everything here and everything
+in the rc sections below ships together as the first real 0.5.0. The BREAKING
+`tan validate` exit-code change is measured against **v0.4.1**, the last actual
+release, and a MINOR bump already covers it under this project's own pre-1.0
+rule. A `## [0.6.0]` heading also made the release-body slice unresolvable:
+release.yml extracts the notes by an exact `^## \[<tag minus v>\]` match, so a
+`v0.5.0` tag would have found no section and refused to publish.*
+
+### Added
+
+- **All seven formerly-deferred verbs are now real commands** (`scaffold`,
+  `completion`, `diff`, `pinmux`, `inspect`, `trace`, `support-bundle`
+  — tan-cli#260, CLOSED). Each used to be a uniform stub — exit 1, one shared
+  `cli.command-deferred` issue, naming this tracking issue — registered only
+  so the command resolved instead of falling through to Click's exit-2
+  unknown-command error. `tan/commands/deferred_cmd.py` keeps only the two
+  constants (`DEFERRED_ISSUE_CODE`, `DEFERRED_ISSUE_URL`) and the context
+  settings `tan build`'s own still-deferred *flags* (`--plan`, `--target`,
+  …) reuse; the stub factory and its `DEFERRED_VERBS` tuple are gone.
+  `tan/cli.py`'s `_HONOURS_ROOT_FORMAT` now spells the seven names directly
+  rather than deriving them from that removed tuple.
+- **`contract/issue-codes.json` gained 49 `"reserved"` entries** for codes
+  the seven newly-real verbs (and this wave's `doctor --fix` consent-gate
+  work) already emitted with nowhere registered to bind to:
+  `diff.board-yaml-missing`/`.internal-failure`/`.pyyaml-unavailable`/
+  `.schema-violation`; `pinmux.internal-failure`; `trace.sdk-root-unresolved`/
+  `.board-yaml-missing`/`.internal-failure`; `support-bundle.<checkName>`
+  (20 entries, mirroring the existing `doctor.<checkName>` family verbatim,
+  since `support-bundle`'s doctor section reuses `doctor_cmd`'s `Check`
+  objects unchanged); `doctor.fix-needs-sudo`/`.fix-installed`/
+  `.fix-spawn-failed`/`.fix-failed`/`.fix-timed-out`/`.fix-suppressed`;
+  `scaffold.name-required`/`.cancelled`/`.invalid-template`/`.invalid-name`/
+  `.internal-failure`; `debug-config.gdbserver-address-unresolved`; and 9
+  `renode.sim-*`/`renode.expect-ignored` codes from the `--sim-mode` gateway
+  (tan-cli#77) that had never been registered either. None of these were
+  reachable before this wave — `diff.*` had ZERO entries of any kind — so
+  none is a wire break; every one is `"reserved"`/`"consumer": "none"`,
+  costing nothing to rename later.
+- **`tan flash` can auto-sign an Alif Ensemble slot0 ATOC via SETOOLS**
+  (tan-cli#353, #365-#369, #373; `tan/core/setools.py`, new). Flow D
+  (`alif_mram_jlink`, J-Link straight over SWD, no SE-UART) needs a SIGNED
+  ATOC from Alif's own `app-gen-toc` step; a fresh AEN801 manifest's
+  `flash_args` carries only `jlink_flash_device` (measured on real silicon,
+  e1m-aen-evk-01/E8 AE822), so before this every customer had to sign by
+  hand outside `tan` and paste the result back in. `tan flash` now drives
+  `app-gen-toc` for you against a SETOOLS install you already have — three
+  precedence-ordered sources (new `--setools-dir` flag, `SETOOLS_DIR`, or
+  the least-durable `flash_args.setools_dir`, tan-cli#368), never a
+  filesystem search, and never under `--dry-run`. See
+  [`docs/setools.md`](docs/setools.md). SETOOLS itself is license-gated and
+  neither `tan` nor alp-sdk redistributes it.
+
+### Changed
+
+- **Development builds no longer claim a published release's version**
+  (tan-cli#377). Between releases `tan --version` now answers a development
+  identity (`0.5.0-rc5.dev0` today) instead of repeating the last tag's number:
+  `dev` reported `0.5.0-rc4` for this entire wave, so the published rc4 binary
+  and every build of the development line were indistinguishable in a bug
+  report despite substantial behaviour and contract differences between them.
+  `python/scripts/version_check.py` gained `--not-released`, which REFUSES a
+  tree whose `TAN_VERSION` is the version of an existing release tag that does
+  not point at HEAD — the bump alone would have repeated the defect next cycle.
+  It also now checks that `CHANGELOG.md` carries the section the tag will be
+  released under, moving #212's missing-section failure off the release job
+  (four freezes and an immutable tag too late) and onto the PR.
+- **BREAKING: `tan validate`'s not-yet-ported spawn path now exits 2
+  (`VALIDATION_FAILURE`), not 1 (`RUNTIME_FAILURE`)** (tan-cli#262, TAKEN).
+  Before this release, a `board.yaml` present with an unresolvable SDK (or,
+  once the real validator spawn path lands, any post-spawn verdict failure)
+  answered `validate.spawn-not-implemented` at exit 1 — indistinguishable
+  from a genuine tan crash. Measured against the oracle
+  (`target/debug/tan.exe`): every guard-level `validate` refusal already
+  exits 2, and exit 1 there is reserved for the ONE case a spawned validator
+  returns an unmappable status — this port had flattened that distinction.
+  "The validator could not produce a verdict" is now treated as the
+  validator's own verdict everywhere, at exit 2, matching the guard cases.
+  **Who must act:** any CI step that greps this exit code and branches on
+  `-eq 1` specifically (rather than "non-zero") now sees 2 instead and will
+  silently stop matching; `alp-sdk-vscode` renders exit 2 as severity
+  "warning" and exit 1 as "error", so a consumer keyed on the old code will
+  now show a genuine validation gap as a warning rather than an error until
+  it is updated to read exit 2. A real `tan`-side crash (an unreadable
+  `board.yaml`, an unexpected internal exception) is unaffected and keeps
+  exit 5.
+
+### Fixed
+
+- **The test suite did not necessarily test THIS repo's `tan`** (tan-cli#423).
+  26 test files spawn `[sys.executable, "-m", "tan", ...]`, which resolves to
+  whatever `tan` the interpreter finds first -- on one host an editable install
+  pointing at a different worktree entirely, so the suite's verdict depended on
+  the directory `pytest` was started from. It had already produced one FALSE
+  parity failure (`multicore_rpmsg-imx93: alp-sdk refuses but tan does not`),
+  filed as a real divergence before the cause was found; tan refuses that
+  `status: tbd` hw_rev correctly in every emit mode. `tests/conftest.py` gains
+  `tan_under_test`, a session-scoped autouse fixture modelled on the existing
+  `pinned_oracle`: it asserts the imported `tan` resolves inside this repo's
+  `python/` and prepends that directory to `PYTHONPATH` for the spawned
+  children. Measured: `test_faultdecode_command.py` went from 2 failed to 24
+  passed when run from the repo root.
+- **`build` reported a bare `terminated with exit code: 1` when the Zephyr SDK
+  cross toolchain was missing** (tan-cli#419), although `doctor`'s `zephyrSdk`
+  check already diagnosed exactly that with the exact remedy. CMake's refusal
+  (`Could not find a package configuration file provided by "Zephyr-sdk"`) sat
+  in the pass-through child output the envelope never named. The slice message
+  now names the cause and the `west sdk install --version 1.0.1 -t
+  arm-zephyr-eabi` remedy, importing the command string from `doctor_cmd`
+  rather than re-spelling it so the two cannot drift. A slice that fails for
+  any other reason keeps the bare message -- a conditional re-wording must not
+  mislabel unrelated failures.
+- **`generate` left its writability probe's empty file behind when the emit was
+  refused** (tan-cli#420). `_ensure_writable` proves the destination writable
+  with `open("ab")`, which CREATES it; nothing removed it again. The envelope
+  was always honest (exit 3, `data.written == []`, `generate.emit-failed`), but
+  the DISK was not: `cmake/alp.cmake` hands
+  `${CMAKE_BINARY_DIR}/generated/alp.conf` to Zephyr as `EXTRA_CONF_FILE`, and
+  Zephyr accepts an empty conf file silently -- no configuration applied,
+  nothing said. Inside tan's own flow the refusal stops the build, but a
+  standalone `west build` after a failed `tan generate` reaches that configure
+  with nothing re-running generate in between. The probe's file is now removed,
+  and only ever that file: only when the probe itself created it (`existed`
+  captured BEFORE the open), only while still zero-byte (re-checked at unlink
+  time, so a partial artefact from an emitter that died mid-write survives as
+  evidence), with cleanup failure swallowed so it cannot replace the real
+  refusal.
+- **`validate` reported `validation failure` when nothing had been validated**
+  (tan-cli#350). Two different situations produced one message -- no
+  `board.yaml` to check, and a `board.yaml` that genuinely failed its schema --
+  and the first is the state every new user is in before `tan init`. Now three
+  distinguishable verdicts: `validate.board-yaml-missing` naming the searched
+  path and both fixes; a clean pass; and a real failure that carries the
+  `validate.schema-violation` errors that produced it. The escalated case (the
+  message firing on a project tan itself scaffolded) is gone with the
+  not-ported path it came from, removed in tan-cli#376.
+- **The frozen binary took 13-19 s to run ANY command on macOS arm64**
+  (tan-cli#349) because the PyInstaller `--onefile` bundle re-extracted ~14 MB
+  of interpreter and shared libraries on every invocation, and on macOS each
+  extracted `.dylib` falls outside the parent's ad-hoc signature and is
+  inspected individually on load. `--onedir` moved that to install time. The
+  fix shipped verified on Linux and Windows only -- macOS was the one platform
+  it could not be measured on by hand -- so the `clean-host` matrix, which
+  already freezes and runs the binary on `macos-15` and `macos-15-intel`, now
+  times `--version` there: 5 runs, median against a 5 s ceiling. Measured on
+  macOS arm64: **0.342 s**, against 13.25 / 19.35 / 19.35 / 18.58 / 19.74 s
+  before.
+- **The oracle-provenance gate fired on commits that never touched the oracle.**
+  It compared reachability alone, so any commit after the recorded SHA counted
+  as drift. It now compares the `crates/` tree hash first and reports only when
+  the tree genuinely differs.
+- **`tan build`'s deferred flags pointed every refusal at a CLOSED issue.**
+  `DEFERRED_ISSUE_URL` named tan-cli#260, which tracked the seven verbs -- all
+  of which shipped in this release, closing it. A user following that link
+  landed on a closed issue about commands that work. The flags now point at
+  tan-cli#427, which tracks the flags themselves, and the message no longer
+  names a release at all: it said "deferred to v0.6.0" while the release it
+  meant was renumbered to 0.5.0, and a refusal that promises a version is a
+  claim this port cannot keep true.- **Two SDK discovery ladders answered different checkouts from one directory
+  and both reported `sourceTier: "discovery"`, so nothing on the wire said
+  which one had answered** (tan-cli#407). In a workspace holding both a child
+  `<ws>/alp-sdk` — what `tan bootstrap` clones — and a lateral `../alp-sdk`,
+  `tan generate` emitted `build/generated/alp.conf`, the DTS overlays and
+  `alp_hw_info_build.h` out of one checkout's `metadata/` while `tan build`,
+  `tan size`, `tan trace` and `tan doctor` planned and reported against the
+  other. Measured ten commands for ten under the identical tier string, and
+  `tan sdk current` — the one command a user runs to ask "which SDK am I
+  on?" — answered with the narrow one only, reporting the readiness and
+  `VERSION` of the checkout `tan generate` did not use. The envelope's
+  `sdk: {root, sourceTier}` key exists (tan-cli#110) precisely so
+  `alp-sdk-vscode` can tell which SDK produced a result instead of guessing;
+  one tier name for two answers is that key failing at its only job.
+
+  The divergence itself is deliberate and oracle-measured (see
+  `resolve_sdk_root_ladder`'s own docstring) and is **unchanged**. The tier
+  string cannot move either: `SdkSourceTier` is a closed five-value wire
+  contract no consumer expects to grow, and `test_build_manifest.py` pins the
+  exact `(path, "discovery", None)` tuple both ladders return because that is
+  the oracle's own answer. What changed is the silence. Six commands now emit
+  the shared `sdk.discovery-divergent` warning naming BOTH checkouts, so a
+  consumer holding one envelope from each side matches them on the code:
+  `tan build` and `tan sdk current` on the narrow ladder, `tan init`,
+  `tan generate`, `tan examples` and `tan renode` on the wide one.
+
+  `tan doctor` renders it as a check rather than reporting one of the two
+  roots as if it were the only one: its `sdk` check moves `pass` → `warn`,
+  carries `code: "sdk.discovery-divergent"` and names the checkout the four
+  wide commands resolve. The exit code does not move — `exit_code_for` keys
+  on `fail` alone, and a split workspace is a warning, not a broken host.
+
+  `tan renode` needed a second fix to benefit at all: both its `fail_sdk`
+  helpers built a single-issue list, so its six early refusals dropped this
+  warning *and* the pre-existing `sdk.project-pin-unresolved` one. Measured
+  before the fix, a divergent workspace refused with
+  `renode.manifest-unavailable` alone — the refusal that matters most,
+  because its own message says to run `tan build` first and `tan build` is
+  the ladder that disagrees. Both issues are now computed at resolution time
+  and ride on every envelope the command can still produce, with the refusal
+  itself kept as `issues[0]`.
+
+  A structural gate (`tests/commands/test_sdk_discovery_ladders.py`) now
+  fails if a module calls `resolve_sdk_root_wide` without emitting the code,
+  so a sixth wide caller cannot land silently unwired.
+
+  The ten narrowly-resolving commands this originally left silent (`size`,
+  `trace`, `clean`, `run`, `flash`, `inspect`, `presets`, `image`, `kconfig`,
+  `validate`) are now covered too, and not by wiring each of them: the
+  warning is attached at `Envelope.__init__`, the one seam every command's
+  envelope passes through. They each reach the ladder by a different seam,
+  which is exactly why per-command wiring left them out -- and a fix present
+  on six commands and missing on ten leaves the reported silence in place,
+  since `alp-sdk-vscode` branches on `sourceTier` from both groups. Gated on
+  `sourceTier == "discovery"` before anything touches the disk, so an
+  ordinary single-checkout host pays nothing: every higher tier
+  (`--sdk-root`, the project pin, the global default) is shared verbatim by
+  both ladders and cannot be the pair that differs. The seam skips a command
+  that already emitted the code, so the six wired above do not double-report.
+
+  Two defects surfaced only by measuring the seam against the real layout,
+  either of which would have shipped a warning that looked wired and was
+  not: `project.root` is `null` for `examples` and `sdk current` -- two of
+  the commands measured as divergent -- so an early bail on a null root left
+  the wide side unreported; and it is the relative `"."` for several others,
+  where `Path(".").parent` is `"."`, collapsing the ladders' lateral
+  candidate onto the child so a real divergence reads as agreement.
+  Measured: `doctor` warned while `validate`, from the same directory, did
+  not. Verified over the issue's own layout on the frozen binary: eleven
+  commands each carry the code, and a single-checkout layout stays silent.
+- **BLOCKER: the Flow D SETOOLS auto-sign's own soft-failure guard could
+  destroy a prior sign record instead of only detecting a fresh one**
+  (tan-cli#373, regression in #365's own fix). `app-package-map.txt` is
+  APPEND-mode — the accumulated sign record for the whole SETOOLS install,
+  including hand-runs done outside `tan`, per `flash-jlink.sh`/
+  `flash-jlink-mramxip.sh`/`flash-update-log-dual.sh` — but the guard
+  `os.remove`d it before every sign to detect an `app-gen-toc` exiting 0
+  without actually writing. On a manifest with two Flow D entries where one
+  pointed its own `flash_args.atoc_map` at that same file, the other
+  entry's auto-sign wiped it first: `app-gen-toc` recreated it holding only
+  the SECOND entry's block, and the first entry's `atoc_address` resolved
+  to the second entry's address — a mismatched ATOC burned into on-die
+  MRAM, recoverable only by re-provisioning over SE-UART. Replaced with a
+  size+mtime snapshot taken before the spawn: an append changes both, so an
+  unchanged snapshot after a zero exit is the same soft-failure signal,
+  without deleting anything.
+- **`tan flash --dry-run`'s SETOOLS preview still bypassed most of Flow D's
+  own validation** (tan-cli#373, #366 narrowed not closed). A `--dry-run`
+  whose `SETOOLS_DIR` resolved reported `ok:true` for a manifest with e.g. a
+  quoted `jlink_speed`, because that check lived only inside
+  `plan_alif_mram_jlink`, unreached from the preview's early return — and on
+  a REAL run the SETOOLS auto-sign (writing into the customer's install)
+  happened before that refusal was ever reached. `jlink_speed`/`confirm`
+  are now validated in `validate_flow_d_shape`, the one function both the
+  preview and the real plan-builder call before either can proceed.
+- **The wrong-DP-ID preflight remediation had replaced the wiring/
+  `jlink_serial` advice for three OTHER banners it does not apply to**
+  (tan-cli#369 regression). That fallback is shared by four cases — a
+  genuinely different SW-DP ID answering, an unrecognised banner, an
+  unplugged-SWD-ribbon `Cannot connect to target.`, and a refused
+  `jlink_serial`'s `Cannot connect to J-Link.` — but #369's rewrite gave all
+  four the cloned-serial explanation, silently deleting the original
+  "check the probe selection (jlink_serial) and the wiring" sentence
+  (tan-cli#353) for the three where `jlink_serial` genuinely IS the fix. Now
+  branched on whether a DP ID was actually read.
+- **`is_elf_artefact` only accepted `.elf`, narrowing #367(a)'s own
+  three-shape decision** (no extension, `.elf`, `.out`) with nothing
+  flagging it. `output_artefact: app` (no extension) or `app.out` now
+  resolves to its same-stem sibling `.bin` again, same as `zephyr.elf` does.
+
+### Shipped earlier in the 0.5.0 pre-releases
+
+0.5.0 has never been released — only `v0.5.0-rc1` through `v0.5.0-rc4`. The
+four sections below are those pre-releases, folded in unchanged so that this
+entry is the complete 0.5.0 delta against **v0.4.1**, the last real release.
+They are kept as separate dated subsections rather than merged topic-by-topic
+because several later entries supersede earlier ones within the same line, and
+that sequence is what a future reader archaeologising a regression needs.
+
+### [0.5.0-rc4] — 2026-08-02
 
 *Everything below was found by running the published `v0.5.0-rc3` binary as a
 customer would — on real Windows, macOS and Linux hosts, in isolated
 environments — not by testing the source. Two of them destroy or misplace a
 user's files; one silently drops a core from a multi-core build.*
 
-### Fixed
+#### Fixed
 
 - **`tan bootstrap --dry-run` moved the user's alp-sdk checkout and rewrote
   `~/.alp/sdk-default`.** One command on a clean directory left `alp-sdk/`
@@ -85,7 +364,7 @@ user's files; one silently drops a core from a multi-core build.*
   seam1's harness now **compares** a legitimate refusal on both sides instead of
   treating alp-sdk's non-zero emit as a harness abort (#320).
 
-### Internal
+#### Internal
 
 - Two test fixtures wrote an executable and immediately `exec`'d it with no
   guard, so a sibling test's still-open write handle could make the kernel
@@ -94,20 +373,20 @@ user's files; one silently drops a core from a multi-core build.*
   0 after the fix). The guard is hoisted so every fixture picks it up; the crate
   now has zero unguarded write-then-exec sites (#318, #333).
 
-### Known issues
+#### Known issues
 
 - `@alplabai/tan` has never published to npm: `NPM_TOKEN` is a classic token and
   `npm publish` demands an OTP. Needs an automation token (#233).
 - `SUPPORTED_CLI_VERSION` still lives in alp-sdk-vscode rather than being
   derived from the Python tan (#268).
 
-## [0.5.0-rc3] — 2026-08-01
+### [0.5.0-rc3] — 2026-08-01
 
 *Found by running the published `v0.5.0-rc2` binary end to end on a real
 Windows host -- fresh and dirty -- rather than testing the source or trusting a
 green CI run on a clean runner. Every defect below was invisible to both.*
 
-### Fixed
+#### Fixed
 
 - **`tan doctor` exited 4 on every fresh install.** `tan bootstrap` succeeds and
   deliberately leaves `west` off PATH (its own next-steps block says to activate
@@ -173,7 +452,7 @@ green CI run on a clean runner. Every defect below was invisible to both.*
   workspace or the user owns), so a fresh install gets past the failure
   outright rather than only being warned about it (#306, release-blocker).
 
-### Added
+#### Added
 
 - **`clean-host.yml` — the shipped-artefact gate on a genuinely clean host**
   (#278, escalated to a release-blocker). All six defects above were found by
@@ -205,13 +484,13 @@ green CI run on a clean runner. Every defect below was invisible to both.*
   CPython's `ssl` on win32 already falls back to the Windows certificate store
   where macOS and Linux have no equivalent.
 
-### Known
+#### Known
 
 - `tan bootstrap` still refuses the documented quickstart layout (`tan.exe` and
   `alp-sdk/` in one directory) with "holds more than this checkout", and the
   remedy it offers moves the user's checkout (#302).
 
-## [0.5.0-rc2] — 2026-08-01
+### [0.5.0-rc2] — 2026-08-01
 
 *Everything the maintainer's first real `v0.5.0-rc1` run turned up, plus what
 reviewing those fixes turned up in turn. Six release-blockers, and one theme:
@@ -224,7 +503,7 @@ this; the delivery mechanism is unchanged from rc1 (`alp-sdk-vscode` odd-minor
 pre-release channel, `prerelease: true` / `make_latest: false`, both installers
 resolving `latest` which excludes prereleases).
 
-### Fixed
+#### Fixed
 
 - **`tan build` and `tan flash` could not find `west` on a host that had
   bootstrapped successfully (#289, release-blocker).** `4d70bdc`/`eac6cbf`
@@ -370,7 +649,7 @@ resolving `latest` which excludes prereleases).
   `getting-started.yml` smoke-testing the **Rust** `tan` while the release ships
   a PyInstaller freeze (#278).
 
-### Changed
+#### Changed
 
 - **`doctor`'s `--build` is accepted and inert.** The check set is now
   unconditional, so there is no build-gated half left. `README.md` no longer
@@ -382,7 +661,7 @@ resolving `latest` which excludes prereleases).
   workspace; accepting the flag as a no-op would have given users a Fix button
   that reports success having repaired nothing.
 
-## [0.5.0-rc1] — 2026-07-31
+### [0.5.0-rc1] — 2026-07-31
 
 *The first release in which `tan` is a Python program: the planner relocated
 into it, so `tan` now plans AND executes, and the four assets are PyInstaller
@@ -399,7 +678,7 @@ both installers resolve `latest` through GitHub, which excludes prereleases, so
 `install.sh` and `install.ps1` still install the last stable release. Everyone
 else installs by hand.
 
-### Changed
+#### Changed
 - **The planner relocated into `tan`, so `tan` now plans AND executes.**
   alp-sdk's `scripts/alp_orchestrate/` (20 modules, ~6.2k lines) is now
   `python/tan/planner/`, and `tan build` renders the build plan **in-process**
@@ -482,7 +761,7 @@ else installs by hand.
   `metadata/schemas/board.schema.json` before it plans anything. The frozen
   one-file binary measures 12377580 B against the 15000000 B ceiling.
 
-### Added
+#### Added
 - **`tan build --execute` -- run a plan that came from `--plan-from`.** ADDED
   BY THIS PORT: v0.4.1 has no such flag, and there `--plan-from` implies
   `--plan` and outranks `--native`, so a file-supplied plan could not be
@@ -526,7 +805,7 @@ else installs by hand.
   generic "still needs resolution" note, which used to name `device` even for
   a server whose draft carries no such key.
 
-### Fixed
+#### Fixed
 - **A pending `TBD` placeholder can no longer reach a flasher** (#222). alp-sdk
   writes `TBD` into a manifest field it has not filled in yet, and every guard
   on the flash path used to test for EMPTY -- which is the one thing a `TBD`
@@ -566,17 +845,21 @@ else installs by hand.
 
   An earlier revision of this entry claimed the opposite, and was wrong in both
   halves: that the oracle returns 1 for these cases, and that moving to 2 would
-  be a considered BREAK for v0.6.0 (#262). Neither was ever measured. For the
-  guard cases 2 is what the oracle already does, so matching it is a
+  be a considered BREAK for the next minor (#262). Neither was ever measured.
+  For the guard cases 2 is what the oracle already does, so matching it is a
   compatibility fix. #262 is re-scoped to the one case that is a genuine
-  v0.6.0 decision: `validate.failed` after a real spawn.
+  release decision: `validate.failed` after a real spawn.
 
-  Still divergent, deliberately, and tracked in #262: `board.yaml` present but
-  no SDK root, where the oracle says 2 `validate.sdk-root-unresolved` and this
-  port says 1 `validate.spawn-not-implemented`. Closing it needs the real spawn
-  path. The two genuine internal failures in the same file (an unreadable
-  `board.yaml`, an unexpected exception inside the offline structural checker)
-  are unchanged at exit 5, matching the oracle's offline path exactly.
+  **Corrected 2026-08 (v0.5.0): the paragraph this replaced claimed
+  `validate.spawn-not-implemented` was still exit 1 at this port's rc1 tag.
+  That was true when written and is not true of the current tree — #262 was
+  decided and TAKEN in v0.5.0 (see that section above for the full BREAKING
+  change): `validate.spawn-not-implemented` now also emits exit 2
+  (`VALIDATION_FAILURE`), the same code the guard cases above already used,
+  closing the divergence this paragraph used to describe as open.** The two
+  genuine internal failures in the same file (an unreadable `board.yaml`, an
+  unexpected exception inside the offline structural checker) are unchanged
+  at exit 5, matching the oracle's offline path exactly.
 
 - **`tan sdk install` / `tan sdk switch` refused at exit 5 (`InternalFailure`),
   telling CI and the extension that tan had crashed.** Neither is ported; that

@@ -50,6 +50,16 @@ ALLOWED: dict[str, str] = {
         "tree by SKU FAMILY, which is the vendor branching I-26 forbids. Retires when "
         "the template catalogue declares its family mapping in metadata."
     ),
+    "renode_sim.py": (
+        "DEBT: WIRED_CONSOLE_SKUS hardcodes E1M-AEN801 -- the SKUs whose retired-Python "
+        "`_SIM_BOARD_PROFILES` console was a wired hardware UART rather than the "
+        "`ram_console_buf` RAM ring. Landed with the tan-cli#77 --sim-mode port. It is a "
+        "real vendor fact in tan and the gate is right to flag it; it is allowlisted "
+        "rather than dropped because deleting it would make the silent-UART warning "
+        "claim the firmware printed nothing, when the truth is that the wired-console "
+        "path is deferred. Retires when the sim descriptor's console kind is read from "
+        "the SoM preset instead of a SKU list -- the same fix `scaffold.py` below waits on."
+    ),
     "models.py": (
         "DEBT: a literal 7-bit I2C address -- the clearest breach in the tree. Rode "
         "along with the planner relocation; belongs in metadata."
@@ -85,6 +95,14 @@ ALLOWED: dict[str, str] = {
         "byte-identical from the alp-sdk original (scripts/alp_cli/new_som.py) so "
         "the generated output stays diffable against it; naming real examples is "
         "the point, the same category explain_cmd.py and bootstrap.py are OK for."
+    ),
+    "pinmux_cmd.py": (
+        "OK: `_FAMILY_PREFIX_TABLE` maps an E1M-* SKU prefix to its "
+        "metadata/pinmux/<family>.yaml stem (the family this command's own "
+        "table lookup is FOR), and the `--sku` option's help text names a real "
+        "example SKU -- the same 'naming real parts is the feature' category "
+        "explain_cmd.py/bootstrap.py are OK for, not a fact tan decides "
+        "anything from silently."
     ),
     "zephyr_board.py": (
         "DEBT: two `E1M-EVK` mentions inside EMITTED devicetree prose (the generated "

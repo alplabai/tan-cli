@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import functools
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -67,6 +68,7 @@ from tan.core.flash_plan import (
     FlashPlan,
     FlashPlanError,
     FlashTarget,
+    FlowDShape,
     ManifestError,
     backend_for,
     display_argv,
@@ -84,10 +86,21 @@ from tan.core.flash_plan import (
     select_flash_method,
     tool_gate,
     validate_flow_d_preflight_args,
+    validate_flow_d_shape,
+)
+from tan.core.global_flags import accept_global_flags
+from tan.core.setools import (
+    find_app_gen_toc,
+    missing_tool_message,
+    resolve_setools_dir,
+    sign_slot0,
+    unresolved_message,
 )
 from tan.core.venv import prepend_path, tool_in_venv, venv_bin_dir, west_workspace_dir
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat, resolve_format
+from tan.core.shapes import is_sdk_root
 
 #: `data.schemaVersion` -- the STRING "1", not the integer. Rust serializes it
 #: as `&'static str` and the extension compares it as one.
@@ -105,6 +118,13 @@ _FLASH_TIMEOUT_S = 900.0
 #: The read-only DPIDR preflight is a connect-and-quit; it must not inherit the
 #: write timeout.
 _PREFLIGHT_TIMEOUT_S = 60.0
+
+#: Seconds to wait for the pipeline's stderr reader after both children are gone
+#: (`_Drain`). Bounded, not indefinite: the reader is what carries the
+#: decompressor's diagnosis into the outcome (tan-cli#401), but a `tan` that
+#: hangs on a thread rather than reporting a flash result would be the worse
+#: trade -- both children have already exited by every path that joins it.
+_DRAIN_JOIN_S = 2.0
 
 
 @dataclass
@@ -246,14 +266,11 @@ def _resolve_sdk(
     return found, tier, broken_pin
 
 
-def _is_sdk_root(path: str) -> bool:
-    """`util.rs::has_loader_script`. `os.path.isfile` swallows its own
-    `OSError`/`ValueError`, so a path with an embedded NUL or a permission-denied
-    parent reads as "not an SDK root" rather than raising out of the guard."""
-    try:
-        return os.path.isfile(os.path.join(path, "scripts", "alp_project.py"))
-    except (OSError, ValueError):
-        return False
+#: tan-cli#408: one implementation, in `tan.core.shapes`, imported under the
+#: private name this module's call site already uses. The guard against
+#: `OSError`/`ValueError` that lived here moved with it, deliberately -- see
+#: `is_sdk_root`'s own docstring for why a pre-flight probe must not raise.
+_is_sdk_root = is_sdk_root
 
 
 def resolve_sdk_root_ladder_safe(
@@ -400,6 +417,123 @@ def _stderr_sink():
     return sys.stderr
 
 
+@dataclass(frozen=True)
+class _Half:
+    """One process of a two-process pipeline, once it is over: the program a
+    reader knows it by, the code it exited with (`None` when it was killed before
+    it reported one), and everything it said on stderr."""
+
+    program: str
+    returncode: int | None
+    stderr: str
+
+
+def _program_label(argv) -> str:
+    """The half's program as the reader knows it -- `gunzip`, not the absolute
+    path `_programs_resolved_in_venv` may have rewritten `argv[0]` into
+    (tan-cli#401/#289). A bare basename because this label goes into a failure
+    message that already has four lines to spend."""
+    argv = list(argv)
+    return os.path.basename(argv[0]) if argv else "?"
+
+
+def _half_lines(half: _Half) -> list[str]:
+    """One attributed section: an `<program> exited rc=<n>:` header over the
+    half's own non-empty stderr lines.
+
+    A half that both SUCCEEDED and said nothing contributes no section at all --
+    a header alone for a clean `dd` is noise in a four-line window. A half that
+    FAILED always gets its header even when it printed nothing, because "it
+    exited 9 and said nothing" is then the entire diagnosis available, and
+    dropping it would leave the message reading as if only the other half spoke
+    (tan-cli#401)."""
+    body = [line for line in half.stderr.splitlines() if line.strip()]
+    if not body and half.returncode == 0:
+        return []
+    rc = "unknown" if half.returncode is None else half.returncode
+    return [f"{half.program} exited rc={rc}:", *body]
+
+
+def _pipeline_stderr(left: _Half, right: _Half) -> str:
+    """Both halves' stderr, attributed, with the failing halves LAST.
+
+    Ordering is the whole point (tan-cli#401). `_capture_tail` keeps only the
+    last four non-empty lines of this text, and `dd status=progress` fills three
+    of them on every single run whether it wrote a good image or a truncated one
+    -- so folding the decompressor's stderr in anywhere but the end would still
+    leave `data.entries[].message` reading `0+61 records in | 0+1 records out |
+    3997696 bytes transferred`, which is what #401 measured. Among two failing
+    halves the LEFT one goes last: it is upstream, so it is the cause and the
+    right half's failure is its consequence. A healthy pipeline keeps the
+    natural left-to-right reading order."""
+    ok = [half for half in (left, right) if half.returncode == 0]
+    failed = [half for half in (right, left) if half.returncode != 0]
+    lines = [line for half in (*ok, *failed) for line in _half_lines(half)]
+    return "\n".join(lines) + "\n" if lines else ""
+
+
+def _pipeline_returncode(left_rc: int | None, right_rc: int | None) -> int:
+    """The code the entry reports for the pipeline: the FIRST non-zero of the two
+    halves, left first.
+
+    Reporting only the right half's code -- what this did until tan-cli#401 --
+    means a `.wic.gz` that died in `gunzip` is reported as `returncode=0`,
+    because `dd` happily exits 0 after writing whatever short stream it was fed.
+    `None` (a half killed before it reported a code) is not a zero and never
+    becomes one: with no honest code to report the pipeline reports `-1`, the
+    same sentinel `_Outcome` defaults to. Pure."""
+    for rc in (left_rc, right_rc):
+        if rc:
+            return rc
+    return 0 if left_rc is not None and right_rc is not None else -1
+
+
+class _Drain:
+    """The left half's stderr, read to EOF on a background thread for the
+    pipeline's lifetime.
+
+    Creating that pipe without reading it is a silent hang mid-write to a real
+    block device: once the decompressor writes more than the OS pipe buffer its
+    `write()` blocks forever, it never reaches EOF on stdout, dd's `read()`
+    blocks too, and the `wait()` never returns. So the read has to be concurrent
+    with the write, which is why it is a thread and not a `.read()` at the end.
+
+    `stream` is `None` in text mode, where the child's stderr is inherited and
+    streams straight to the terminal -- there is nothing here to drain, and
+    [`text`] answers `""`."""
+
+    def __init__(self, stream) -> None:
+        self._chunks: list[bytes] = []
+        self._stream = stream
+        started = threading.Thread(target=self._read, daemon=True) if stream is not None else None
+        self._thread = started
+        if started is not None:
+            started.start()
+
+    def _read(self) -> None:
+        try:
+            self._chunks.append(self._stream.read() or b"")
+        except (OSError, ValueError):
+            # A stream closed underneath the reader. Whatever it had already
+            # collected still gets reported; raising here would only kill a
+            # daemon thread nobody is watching.
+            pass
+
+    def join(self) -> None:
+        """Wait for the reader, briefly. Bounded because this also runs on the
+        pipeline's cleanup path, where the child may be unkillable (a `dd` in
+        uninterruptible IO) and `tan` must still return an outcome."""
+        if self._thread is not None:
+            self._thread.join(timeout=_DRAIN_JOIN_S)
+
+    def text(self) -> str:
+        """Everything the half said, decoded. Joins first: reading `_chunks`
+        while the thread may still be appending is exactly the read that made
+        the drained bytes look empty and invited dropping them (tan-cli#401)."""
+        self.join()
+        return _text(b"".join(self._chunks))
+
+
 def _spawn_pipeline(
     left,
     right,
@@ -409,13 +543,20 @@ def _spawn_pipeline(
     workspace: str | None = None,
 ) -> _Outcome:
     """A decompress -> dd pipeline: wire the decompressor's stdout into dd's
-    stdin. Fails when EITHER process fails, matching the Python rc folding.
+    stdin. Fails when EITHER process fails, and reports the first non-zero of
+    their two codes ([`_pipeline_returncode`]).
 
-    The decompressor's stderr is drained on a background thread for the
-    pipeline's lifetime. Creating the pipe without reading it is a silent hang
-    mid-write to a real block device: once the decompressor writes more than the
-    OS pipe buffer its `write()` blocks forever, it never reaches EOF on stdout,
-    dd's `read()` blocks too, and the `wait()` never returns.
+    BOTH halves' stderr reaches the outcome, each attributed to the program that
+    said it ([`_pipeline_stderr`]). Until tan-cli#401 the decompressor's stderr
+    was drained (it has to be, see [`_Drain`]) and then thrown away, and the
+    outcome carried `dd`'s stderr and `dd`'s rc alone: a `.wic.gz` truncated in
+    transit was reported to the extension as `0+61 records in | 0+1 records out |
+    3997696 bytes transferred in 0.003888 secs` with `returncode=0`, while
+    `gunzip: <image>.wic.gz: unexpected end of file` -- the one line that ends
+    the investigation -- had been read by `tan` and dropped. The entry status was
+    right and the cause was wrong, which is worse than useless here: the reader
+    blames the card or the target and re-runs the flash, writing a partial image
+    onto a real block device a second time.
 
     `venv_bin`/`workspace`: see [`_spawn`] -- the same PATH-prepend/cwd
     threading, applied to BOTH halves of the pipeline (tan-cli#289/#59/#61).
@@ -433,20 +574,8 @@ def _spawn_pipeline(
     except OSError as err:
         return _Outcome(success=False, stderr=f"could not spawn: {err}", captured=capture)
 
-    drained: list[bytes] = []
-    drain: threading.Thread | None = None
-    if first.stderr is not None:
-        stream = first.stderr
-
-        def _drain() -> None:
-            try:
-                drained.append(stream.read() or b"")
-            except (OSError, ValueError):
-                pass
-
-        drain = threading.Thread(target=_drain, daemon=True)
-        drain.start()
-
+    drain = _Drain(first.stderr)
+    left_label, right_label = _program_label(left), _program_label(right)
     try:
         try:
             second = subprocess.Popen(  # noqa: S603 -- as above
@@ -469,27 +598,44 @@ def _spawn_pipeline(
         except subprocess.TimeoutExpired:
             _terminate(second)
             _terminate(first)
+            killed = _Half(left_label, first.returncode, drain.text())
             return _Outcome(
                 success=False,
-                stderr=f"timed out after {timeout:.0f}s and was killed",
+                stderr=_timed_out_stderr(killed, timeout),
                 captured=capture,
             )
         try:
-            left_ok = first.wait(timeout=max(1.0, deadline - time.monotonic())) == 0
+            left_rc: int | None = first.wait(timeout=max(1.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             _terminate(first)
-            left_ok = False
+            left_rc = None
+        # The drain is joined HERE, before the outcome is built -- not only in
+        # the `finally` below, which runs too late to contribute anything to it.
+        left_half = _Half(left_label, left_rc, drain.text())
+        right_half = _Half(right_label, second.returncode, _text(err_text))
+        rc = _pipeline_returncode(left_rc, second.returncode)
         return _Outcome(
-            success=(second.returncode == 0) and left_ok,
+            success=rc == 0,
             stdout=_text(out),
-            stderr=_text(err_text),
-            returncode=second.returncode if second.returncode is not None else -1,
+            stderr=_pipeline_stderr(left_half, right_half),
+            returncode=rc,
             captured=capture,
         )
     finally:
         _terminate(first)
-        if drain is not None:
-            drain.join(timeout=2.0)
+        drain.join()
+
+
+def _timed_out_stderr(left: _Half, timeout: float) -> str:
+    """The timeout report, with whatever the decompressor managed to say BEFORE
+    it and the sentence itself LAST.
+
+    Last because `_capture_tail` keeps the final four non-empty lines and the
+    sentence is the one that names this failure mode; first-half output because
+    a `gunzip` that printed a diagnosis and then wedged is a different bench
+    problem from one that went quiet, and #401's lesson is that captured stderr
+    is never thrown away."""
+    return "\n".join([*_half_lines(left), f"timed out after {timeout:.0f}s and was killed"]) + "\n"
 
 
 def _terminate(proc) -> None:
@@ -660,6 +806,12 @@ class _Context:
     #: flash` can see alp-sdk's out-of-tree runners. `None` keeps the old
     #: app-dir cwd, matching the oracle exactly.
     workspace: str | None = None
+    #: `--setools-dir` (tan-cli#368) -- the HIGHEST-precedence SETOOLS
+    #: source, ahead of `SETOOLS_DIR` and `flash_args.setools_dir`; see
+    #: `tan.core.setools.resolve_setools_dir`. `None` when the flag was not
+    #: given, in which case resolution falls through to the other two exactly
+    #: as before.
+    setools_dir: str | None = None
 
 
 def _resolve_flow_d_atoc_address(flash_args: Any, build_root: str, sdk_root: str) -> Any:
@@ -758,6 +910,109 @@ def _resolve_flow_d_atoc_path(flash_args: Any, build_root: str, sdk_root: str) -
     merged = dict(flash_args)
     merged["atoc"] = resolve_artefact_path(atoc, build_root, sdk_root, _is_file)
     return merged
+
+
+def _resolve_flow_d_atoc_via_setools(
+    flash_args: Any, shape: FlowDShape, ctx: _Context, entry_id: str
+) -> tuple[Any, str | None]:
+    """tan-cli#353's remaining half: when Flow D still has no `atoc`/
+    `atoc_address` after the explicit-value and `atoc_map` resolutions above
+    (`_resolve_flow_d_atoc_address`/`_resolve_flow_d_atoc_path`), sign one via
+    SETOOLS instead of handing `plan_alif_mram_jlink`'s bare "both required"
+    refusal to a customer who has never heard of `app-gen-toc`. Measured on
+    real silicon (e1m-aen-evk-01, E8 AE822): that refusal is exactly what a
+    fresh AEN801 manifest hits today, since alp-sdk's own emit carries only
+    `flash_args.jlink_flash_device`.
+
+    `shape` is `validate_flow_d_shape`'s result -- the caller (`_flash_entry`,
+    tan-cli#366/#367) validates + resolves it BEFORE this function ever runs,
+    so `shape.artefact` is ALREADY the raw `.bin` to hand `app-gen-toc` (the
+    same ELF-only sibling resolution `plan_alif_mram_jlink` uses for the
+    eventual `loadbin`, from the ONE shared definition,
+    `flash_plan.resolve_slot0_binary`) and a manifest that would fail that
+    check has already failed BEFORE reaching this function, real run or
+    `--dry-run` alike -- this function no longer re-derives or re-checks
+    either.
+
+    Returns `(flash_args, note)`. `note` is `None` on the one path that never
+    touched SETOOLS at all -- an already-resolved no-op (an explicit `atoc`/
+    `atoc_map`, or `atoc_address` already present). Every path that DOES touch
+    SETOOLS returns a non-`None` `note` naming `setools.path`/`setools.source`
+    (tan-cli#373): under `--dry-run` it describes what WOULD be signed and
+    `flash_args` is left with `atoc`/`atoc_address` still absent (signing
+    writes real files into the customer's SETOOLS install and spawns a real
+    tool, which `--dry-run`'s "planning only" contract forbids regardless of
+    how harmless the ATOC step is next to the MRAM write it feeds); on a real
+    run it instead describes what WAS just signed, with `flash_args` fully
+    resolved for `plan_alif_mram_jlink` to consume. The caller (`_flash_entry`)
+    tells the two apart by `ctx.dry_run`, which it already has: the dry-run
+    note is the entry's own terminal message, the real-sign note is an EXTRA
+    line ahead of the real write's own ok/fail message -- previously
+    `setools.source` reached a customer only via a FAILURE
+    (`missing_tool_message`/`unresolved_message`), never on a run that
+    succeeded.
+
+    Raises `FlashPlanError` for: SETOOLS unresolved, resolved but not a real
+    install, no `flash_args.slot0_load_address` to give `app-gen-toc` as its
+    `mramAddress`, or the sign step itself failing -- the caller's existing
+    `except FlashPlanError` arm (mirroring `_resolve_flow_d_atoc_address`/
+    `_resolve_flow_d_atoc_path` above) reports it as the entry's
+    `flash.entry-failed` message.
+
+    **Only when the manifest points at NOTHING signing-related at all.** A
+    customer who already supplied an explicit `atoc` (a blob they signed
+    themselves) or `atoc_map` (pointing at their own `app-gen-toc` run) gets
+    NONE of this -- even if that path did not fully resolve (e.g. the map has
+    not materialised yet) `plan_alif_mram_jlink`'s own precise refusal is the
+    right one, not a fresh SETOOLS sign silently overriding what they already
+    pointed tan at.
+    """
+    if fa_str(flash_args, "atoc") is not None or fa_str(flash_args, "atoc_map") is not None:
+        return flash_args, None
+    if fa_str_checked(flash_args, "atoc_address", True) is not None:
+        return flash_args, None
+
+    setools = resolve_setools_dir(flash_args, os.environ, ctx.setools_dir)
+    if setools is None:
+        raise FlashPlanError(unresolved_message())
+    app_gen_toc = find_app_gen_toc(setools.path)
+    if app_gen_toc is None:
+        raise FlashPlanError(missing_tool_message(setools))
+
+    # `mramAddress` -- app-gen-toc's own placement for the app itself, distinct
+    # from `atoc_address` (the SIGNED PACKAGE's placement, derived below from
+    # its own build report). tan has no source for it besides this already-
+    # documented Flow D key (`plan_alif_mram_jlink`'s optional
+    # `slot0_load_address`, already extracted into `shape.app_address`) --
+    # there is nothing to guess it from, so a manifest that omits it refuses
+    # here rather than falling through to a confusing generic message.
+    if shape.app_address is None:
+        raise FlashPlanError(
+            f"{FLOW_D_METHOD}: flash_args.slot0_load_address is required to auto-sign "
+            "via SETOOLS (it becomes app-gen-toc's mramAddress) -- supply the app's "
+            "real MRAM slot0 address, or sign by hand and set flash_args.atoc / "
+            "flash_args.atoc_address yourself."
+        )
+
+    if ctx.dry_run:
+        # Planning only -- report what WOULD be signed without touching the
+        # customer's SETOOLS install or spawning a real tool.
+        return flash_args, (
+            f"would sign {shape.artefact} with SETOOLS at {setools.path} (via "
+            f"{setools.source}) -> build/config/{entry_id}-slot0.json, then run "
+            "app-gen-toc -- not run under --dry-run"
+        )
+
+    atoc_path, address = sign_slot0(
+        setools.path, app_gen_toc, shape.artefact, entry_id, shape.app_address
+    )
+    merged = dict(flash_args)
+    merged["atoc"] = atoc_path
+    merged["atoc_address"] = address
+    return merged, (
+        f"signed {shape.artefact} with SETOOLS at {setools.path} (via "
+        f"{setools.source}) -> {atoc_path} @ {address}"
+    )
 
 
 def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[str]]:
@@ -887,24 +1142,68 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         return 1, entry(method, "failed", 1, gate.message), lines
 
     flash_args = target.flash_args
+    # Set only on the Flow D SETOOLS-auto-sign path below, and only when THIS
+    # run's own sign actually ran -- carried past the `if` block so the
+    # eventual success message (tan-cli#373) can name which SETOOLS install
+    # signed it, the same way `setools_note is not None` decides the
+    # `--dry-run` early return just below.
+    setools_note: str | None = None
     if method == FLOW_D_METHOD:
-        # The two places `flash_args` is augmented before dispatch: the ATOC
-        # address is a build-time output, so it may need resolving from a
-        # build artefact rather than arriving on the manifest already (see
-        # `_resolve_flow_d_atoc_address`; a supplied-but-unusable `atoc_map`
-        # raises there rather than silently deferring to `plan_alif_mram_jlink`'s
-        # generic refusal, caught here the same way `meta.build`'s is below) --
-        # and the ATOC blob path itself is anchored on `build_root`/`sdk_root`
-        # (`_resolve_flow_d_atoc_path`) before it can reach the Commander
-        # script unresolved.
+        # FOUR things happen to `flash_args`/its shape before dispatch, in an
+        # order tan-cli#366/#367's review fixed: the ATOC address may need
+        # resolving from a build artefact rather than arriving on the
+        # manifest already (`_resolve_flow_d_atoc_address`; a
+        # supplied-but-unusable `atoc_map` raises there rather than silently
+        # deferring to `plan_alif_mram_jlink`'s generic refusal, caught here
+        # the same way); the ATOC blob path itself is anchored on
+        # `build_root`/`sdk_root` (`_resolve_flow_d_atoc_path`) before it can
+        # reach the Commander script unresolved; EVERYTHING ELSE about the
+        # entry's shape that does NOT depend on `atoc`/`atoc_address` --
+        # `jlink_flash_device`, and (when armed) the slot0 artefact's own
+        # ELF-sibling-`.bin` resolution -- is validated NOW, via
+        # `validate_flow_d_shape`, the SAME function `plan_alif_mram_jlink`
+        # itself calls, so there is exactly one definition of "does this
+        # artefact resolve" (#367); the DPIDR preflight args are validated
+        # now too, for the same plan-time-not-real-write-time reason `tan
+        # flash --dry-run` needs any of this validated at all; and only THEN,
+        # tan-cli#353's remaining half, does SETOOLS sign one from scratch
+        # (`_resolve_flow_d_atoc_via_setools`) when the first two leave
+        # `atoc`/`atoc_address` still absent.
+        #
+        # **#366: this order is the fix.** A malformed/half-armed manifest
+        # used to be caught only by `meta.build`/`validate_flow_d_preflight_
+        # args` FURTHER DOWN -- both unreachable from the `setools_note`
+        # early-return below, so a `--dry-run` whose `SETOOLS_DIR` happened to
+        # resolve reported `ok:true` for a manifest that would refuse a real
+        # (or SETOOLS-less) run outright. Validating first means that early
+        # return can only ever fire for an entry that has already passed
+        # everything checkable without `atoc`/`atoc_address`.
         try:
             flash_args = _resolve_flow_d_atoc_address(flash_args, ctx.build_root, ctx.sdk_root)
             flash_args = _resolve_flow_d_atoc_path(flash_args, ctx.build_root, ctx.sdk_root)
+            shape = validate_flow_d_shape(flash_args, artefact_path, _is_file)
+            validate_flow_d_preflight_args(flash_args)
+            flash_args, setools_note = _resolve_flow_d_atoc_via_setools(
+                flash_args, shape, ctx, entry_id
+            )
         except FlashPlanError as err:
             msg = str(err)
             lines.append(f"flash: {kind} '{entry_id}' -> {method}")
             lines.append(f"  FAIL: {msg}")
             return 1, entry(method, "failed", 1, msg), lines
+        if setools_note is not None and ctx.dry_run:
+            # `--dry-run` only (see the helper's own docstring): nothing was
+            # signed, so there is no `atoc`/`atoc_address` to hand
+            # `plan_alif_mram_jlink` -- report the preview directly rather
+            # than reaching its "both required" refusal over a field this
+            # entry was never asked to fill in by hand. A REAL sign (the
+            # `else` this `and ctx.dry_run` now excludes -- tan-cli#373)
+            # leaves `setools_note` set too, but must NOT return here: it
+            # falls through to `meta.build` like every other Flow D entry,
+            # carrying the note to the eventual ok message below instead.
+            lines.append(f"flash: {kind} '{entry_id}' -> {method}")
+            lines.append(f"  {setools_note}")
+            return 0, entry(method, "ok", 0, setools_note), lines
 
     inputs = FlashInputs(
         artefact=artefact_path,
@@ -923,23 +1222,6 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
         return 1, entry(method, "failed", 1, msg), lines
 
     lines.append(f"flash: {kind} '{entry_id}' -> {method}")
-
-    # Flow D's DPIDR preflight args (`expect_dpidr`/`jlink_device`) are
-    # validated here too -- PLAN-TIME, before the confirm/dry-run gate below --
-    # not only in `_flow_d_preflight` at real-write time. Without this, `tan
-    # flash --dry-run` (or any unconfirmed run) on a half-armed or malformed
-    # manifest reports `status: planned`/`ok` with no diagnostic, and the
-    # customer only learns their manifest is wrong once they actually confirm
-    # a write. This calls the same validate-only half `_flow_d_preflight`
-    # calls (via `flow_d_preflight_script`); it builds no script and touches
-    # no J-Link binary, so it is safe to run unconditionally here.
-    if method == FLOW_D_METHOD:
-        try:
-            validate_flow_d_preflight_args(flash_args)
-        except FlashPlanError as err:
-            msg = str(err)
-            lines.append(f"  FAIL: {msg}")
-            return 1, entry(method, "failed", 1, msg), lines
 
     if plan.planning_only or ctx.dry_run:
         shown = display_argv(plan)
@@ -972,8 +1254,15 @@ def _flash_entry(target: FlashTarget, ctx: _Context) -> tuple[int, _Entry, list[
 
     outcome = _execute(plan, ctx.capture, ctx.venv_bin, ctx.workspace)
     if outcome.success:
-        lines.append(f"  ok: {plan.ok_message}")
-        return 0, entry(method, "ok", 0, plan.ok_message), lines
+        # tan-cli#373: `setools_note` is set here only when THIS run's own
+        # SETOOLS auto-sign actually ran (the dry-run preview above always
+        # returns before reaching this line) -- prefixed onto the real
+        # write's own `ok_message` so `setools.source` reaches a customer on
+        # a SUCCESSFUL sign too, not only via `missing_tool_message`/
+        # `unresolved_message` on a failure.
+        ok_message = f"{setools_note}; {plan.ok_message}" if setools_note else plan.ok_message
+        lines.append(f"  ok: {ok_message}")
+        return 0, entry(method, "ok", 0, ok_message), lines
     msg = _execute_message(outcome, method, entry_id)
     lines.append(f"  FAIL: {msg}")
     return 1, entry(method, "failed", 1, msg), lines
@@ -1036,10 +1325,70 @@ def _flow_d_preflight(
             f"({outcome.stderr.strip() or 'probe silent'}); refusing to write MRAM "
             "without confirming which board is attached."
         )
+    # `expected` is confirmed absent (checked above) -- but "absent" covers two
+    # measurably different banners (tan-cli#312): a connect that DID reach a
+    # board and reported some OTHER SW-DP ID (a real wrong-board / wiring /
+    # probe-selection problem), and a connect that reported no ID at all
+    # (measured on the rc3 bench: the probe still re-enumerating a few seconds
+    # after a prior `JLinkExe` close -- same probe, same cable, same
+    # `jlink_serial`, and nothing wrong with either). Both used to get the
+    # SAME wiring-and-jlink_serial sentence, which sent a user re-checking
+    # cables that were never the problem.
+    #
+    # Conservative on purpose: the "no ID at all" message below asserts the
+    # wiring is FINE, so it is only used when BOTH signals agree -- no
+    # DP-ID-shaped token anywhere in the banner, AND the banner carries
+    # SEGGER's own "the probe itself refused" wording. Anything the detector
+    # cannot place that confidently keeps the original sentence rather than
+    # guessing the wiring is innocent.
+    if not _dp_id_reported(banner) and _connect_failed_outright(banner):
+        return (
+            f"{FLOW_D_METHOD}: the read-only DPIDR preflight's connect reported no "
+            f"SW-DP ID at all (expected {expected}) -- refusing to write MRAM to an "
+            "unidentified board. This looks like the J-Link probe still "
+            "re-enumerating after a previous JLinkExe session closed, not a wiring "
+            "or probe-selection problem -- wait a couple of seconds and retry."
+        )
+    # tan-cli#373 (regression in #369): this point is reached by FOUR distinct
+    # banners, and only ONE of them is the cloned-serial mismatch #369 was
+    # filed over -- a board DID answer, with a DIFFERENT SW-DP ID than
+    # expected. #369's rewrite gave all four this one sentence, silently
+    # deleting the original wiring/`jlink_serial` advice for the other three
+    # (an unrecognised banner shape, and the two `_CONNECT_FAILED_TARGET_RE`
+    # shapes -- an unplugged ribbon's "Cannot connect to target." and a
+    # refused `jlink_serial`'s "Cannot connect to J-Link.") even though #369
+    # scoped itself explicitly to the wrong-DP-ID case alone.
+    if _dp_id_reported(banner):
+        # A real board answered but with a DIFFERENT SW-DP ID than expected --
+        # the bench mismatch #369 actually measured. A USB serial can be
+        # CLONED across two separate physical probes (a real OEM J-Link clone
+        # measured sharing one with a GD32 bridge probe on a different board
+        # entirely), so `jlink_serial` alone cannot disambiguate them even
+        # when set -- `JLinkExe` selects by serial only, with no USB-port
+        # selector. The SW-DP ID this preflight already reads IS the true
+        # per-silicon discriminator; this remediation says so instead of
+        # pointing at the one field that cannot fix this.
+        return (
+            f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
+            "-- refusing to write MRAM to an unidentified board. Check the wiring and "
+            "which board is physically attached -- do NOT treat pinning "
+            "flash_args.jlink_serial alone as the fix: some OEM J-Link probes share a "
+            "CLONED serial across more than one physical unit, so jlink_serial cannot "
+            "disambiguate them even when set. The SW-DP ID is the real per-silicon "
+            "discriminator -- this preflight already checks it via "
+            "flash_args.expect_dpidr; if more than one board is reachable, confirm "
+            "which one answered by its own reported ID, not by serial alone."
+        )
+    # An unrecognised banner, or a genuine TARGET-level connect refusal (no DP
+    # ID was even read to compare against the cloned-serial case above) --
+    # `jlink_serial` pinning a probe IS the actual fix here when it is unset
+    # on a multi-probe host (tan-cli#353), so the original sentence survives.
     return (
         f"{FLOW_D_METHOD}: expected SW-DP IDR {expected} was not reported on connect "
         "-- refusing to write MRAM to an unidentified board. Check the probe "
-        "selection (flash_args.jlink_serial) and the wiring."
+        "selection (flash_args.jlink_serial) and the wiring. If jlink_serial is "
+        "unset the script selects NO probe, which on a host carrying more than "
+        "one J-Link cannot connect at all (tan-cli#353)."
     )
 
 
@@ -1052,6 +1401,52 @@ def _hex_in(expected: str, haystack: str) -> bool:
             needle = expected[len(prefix) :].lower()
             break
     return needle in haystack.lower().replace("0x", "")
+
+
+#: SEGGER's own wording for a successful SWD connect that read AN id, whatever
+#: it turned out to be -- "Found SW-DP with ID 0x........" / "DPIDR: 0x........".
+#: Matched loosely on purpose: what this distinguishes is "a real board
+#: answered with a different identity" from "nothing answered", not the exact
+#: firmware/DLL version's phrasing.
+_DP_ID_RE = re.compile(r"(?:with\s+ID|DPIDR)\s*:?\s*0x[0-9A-Fa-f]+", re.IGNORECASE)
+
+#: SEGGER's own wording for the PROBE itself refusing the connection outright
+#: -- measured verbatim on the rc3 bench run: "Connecting to J-Link ...FAILED:
+#: Cannot connect to the probe/programmer." (tan-cli#312). Deliberately NOT a
+#: bare `FAILED`/`Cannot connect` match (that was the tan-cli#312 review
+#: finding): JLinkExe prints "FAILED" in many contexts, and "Cannot connect"
+#: alone also fires on a TARGET-level refusal -- see `_CONNECT_FAILED_TARGET_RE`
+#: below -- which is a real wiring/probe-selection problem, not a re-enumerating
+#: probe.
+_CONNECT_FAILED_RE = re.compile(r"Cannot connect to the probe/programmer", re.IGNORECASE)
+
+#: SEGGER's own wording for a TARGET-level connect refusal -- "Cannot connect
+#: to target." (unplugged SWD ribbon, unpowered board) or "Cannot connect to
+#: J-Link." (a probe that IS reachable via USB but refuses the requested
+#: `jlink_serial`). Both are genuine wiring/probe-selection problems, so their
+#: presence forces `_connect_failed_outright` to False even alongside the
+#: probe-level phrase above -- asserting "wiring is fine" here would be the
+#: false negative tan-cli#312's review flagged (measured against a real
+#: unplugged-ribbon and a real unpowered-target banner).
+_CONNECT_FAILED_TARGET_RE = re.compile(r"Cannot connect to (?:target|J-Link)\b", re.IGNORECASE)
+
+
+def _dp_id_reported(banner: str) -> bool:
+    """Whether the banner names ANY SW-DP ID -- not whether it matches
+    `expected` (the caller already ruled that out via `_hex_in`), only whether
+    a connect got far enough to read one at all."""
+    return _DP_ID_RE.search(banner) is not None
+
+
+def _connect_failed_outright(banner: str) -> bool:
+    """Whether the banner carries SEGGER's own wording for the PROBE itself
+    refusing the connection (still re-enumerating, no board reachable at all),
+    as opposed to a TARGET-level refusal -- a real wiring/probe-selection
+    problem that must keep the original remediation, not the re-enumeration
+    one."""
+    if _CONNECT_FAILED_TARGET_RE.search(banner) is not None:
+        return False
+    return _CONNECT_FAILED_RE.search(banner) is not None
 
 
 def _is_file(path: str) -> bool:
@@ -1077,6 +1472,7 @@ def _run(
     skip_missing_tools: bool,
     capture: bool,
     cwd: str,
+    setools_dir_arg: str | None = None,
 ) -> tuple[ExitCode, dict[str, Any], list[Issue], list[str], SdkInfo | None]:
     """Everything between argument parsing and the envelope. Returns
     `(exit_code, data, issues, text_lines, sdk)`."""
@@ -1179,6 +1575,7 @@ def _run(
         capture=capture,
         venv_bin=venv_bin,
         workspace=workspace,
+        setools_dir=setools_dir_arg,
     )
     for target in plan.targets:
         rc, entry, lines = _flash_entry(target, ctx)
@@ -1314,9 +1711,17 @@ def flash(
         help="When a backend's required tools are all absent from PATH, warn + skip "
         "the entry instead of failing it. No effect under --dry-run.",
     ),
-    output_format: str = typer.Option(
-        None, "--format", metavar="FORMAT", help="Output format: text or json."
+    setools_dir: str = typer.Option(
+        None,
+        "--setools-dir",
+        metavar="PATH",
+        help="Alif SETOOLS install used to auto-sign a Flow D slot0 ATOC "
+        "(license-gated; obtained from Alif, never redistributed by tan). "
+        "Precedence: this flag, then the SETOOLS_DIR environment variable, "
+        "then flash_args.setools_dir in the manifest (lowest -- and rebuilt "
+        "over by the next `tan build`, see docs/setools.md).",
     ),
+    output_format: OutputFormat = typer.Option(None, "--format", help=FORMAT_HELP),
 ) -> None:
     """Program every slice + helper MCU in the project's system manifest."""
     # `--format` is accepted BEFORE the subcommand too (clap makes it
@@ -1326,11 +1731,7 @@ def flash(
     # `cli._HONOURS_ROOT_FORMAT` -- because refusing it here means a customer's
     # FLASH does not run, on the one command where the fallback (a text-mode run
     # with an empty stdout) would be indistinguishable from a broken device.
-    resolved_format = output_format or (ctx.obj or {}).get("format") or "text"
-    if resolved_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{resolved_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
+    resolved_format = resolve_format(output_format, ctx.obj, choices=OutputFormat)
     json_mode = resolved_format == "json"
 
     # Resolved OUTSIDE the guard: `project_obj` is reported on every path
@@ -1354,6 +1755,7 @@ def flash(
             skip_missing_tools=skip_missing_tools,
             capture=json_mode,
             cwd=cwd,
+            setools_dir_arg=setools_dir,
         )
     except Exception as err:  # noqa: BLE001 -- the whole point of this guard
         # Anything reaching here is a tan bug, and it is reported AS ONE, with an
@@ -1370,3 +1772,10 @@ def flash(
         for line in text_lines:
             print(line, file=sys.stderr)
     raise typer.Exit(int(exit_code))
+
+
+# tan-cli#261: adds the seven oracle `GlobalArgs` flags this command was
+# still missing (`--all`/`--ci`/`--no-color`/`--non-interactive`/`--quiet`/
+# `--target`/`--verbose`) on top of `--board-yaml`, already declared and read
+# above; see `tan.core.global_flags`.
+flash = accept_global_flags(flash)

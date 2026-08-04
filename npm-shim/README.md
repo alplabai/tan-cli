@@ -3,9 +3,11 @@
 # @alplabai/tan
 
 > **This package is not published.** `npm view @alplabai/tan` answers
-> `E404 Not Found` at every version, and `release.yml`'s `publish_npm` job is
-> switched off (it names the two reasons). Nothing below works until it is
-> turned back on — use the install scripts or a release asset instead.
+> `E404 Not Found` at every version. `release.yml`'s `publish_npm` job only
+> runs on a final (non-pre-release) tag, and even then is gated OFF by
+> default behind the `TAN_NPM_PUBLISH` repository variable — see
+> [Releasing](#releasing) for why. Nothing below works until it is armed —
+> use the install scripts or a release asset instead.
 
 npm distribution shim for the **`tan`** CLI (Alp Lab's standalone build CLI).
 Installing this package downloads the platform-specific binary from the
@@ -30,12 +32,38 @@ the [repo README](../README.md).
 ## How it works
 
 - `postinstall.js` maps the host platform/arch to a release target triple,
-  downloads the RAW `tan-<target>[.exe]` binary from
-  `https://github.com/alplabai/tan-cli/releases/download/v<version>/`, verifies
-  its SHA-256 against the release's `checksums.txt`, then writes it into
-  `binary/` and `chmod +x`s it. tan's release ships one uncompressed binary per
-  triple (not a `.tar.gz`), so there is no archive to extract.
-- `bin/tan.js` forwards `tan …` invocations to that native binary.
+  fetches the release's `checksums.txt` from
+  `https://github.com/alplabai/tan-cli/releases/download/v<version>/` and asks
+  it which asset this tag actually published for that triple — the archive
+  name (`tan-<target>.zip` / `.tar.gz`) first, the raw name
+  (`tan-<target>[.exe]`) as fallback — downloads whichever one it finds,
+  verifies its SHA-256 against the pinned digest, and only then installs it.
+- `bin/tan.js` forwards `tan …` invocations to `tan-cli-lib/tan[.exe]`.
+
+**From v0.5.0 — the transition tag, not cut yet — the asset becomes an
+archive of a PyInstaller `--onedir` freeze**, not a raw binary
+([#349](https://github.com/alplabai/tan-cli/issues/349)). Every tag published
+so far, including `v0.5.0-rc4`, still ships the raw binary this shim asks for
+as a fallback; asking for the archive name unconditionally was
+[#362](https://github.com/alplabai/tan-cli/issues/362) — a name no published
+tag carries yet, so it 404'd, including at this shim's own pinned version.
+`postinstall.js`'s `selectRelease` decides which shape a given tag actually
+published from its `checksums.txt` (the same rule `install.sh` /
+`install.ps1` follow, [#356](https://github.com/alplabai/tan-cli/issues/356)),
+never from the version number, so both shapes install correctly for as long as
+raw tags remain installable.
+
+The archive's one top-level entry is `tan/`, holding `tan` (`tan.exe` on
+Windows) plus `_internal/`, the runtime — **the executable does not run
+without that sibling**, which is why an archive installs as a directory and
+`tan` on `PATH` is a launcher, exactly as `install.sh` / `install.ps1` do it. A
+raw binary installs the same way — as a one-file `tan-cli-lib/` directory — so
+`bin/tan.js` never needs to know which shape this tag shipped. Unpacking an
+archive shells out to the system `tar` (bsdtar on Windows and macOS, GNU tar on
+Linux): node's stdlib reads neither `tar` nor `zip`, and a `postinstall`
+script is the last place to want a dependency. Entries are checked before
+extraction — an absolute path, a `..` component, or anything outside `tan/`
+aborts the install rather than being written.
 
 Prebuilt targets from v0.5.0: **Linux x64** (`-gnu`), **macOS x64/arm64**
 (Intel + Apple Silicon), **Windows x64** — four assets, not six.
@@ -49,12 +77,19 @@ without a prebuilt binary can install from a checkout instead:
 ## Checksum verification
 
 The `release` workflow publishes a `checksums.txt` (GNU `sha256sum` output)
-alongside the binaries. `postinstall.js` fetches it from the same release
-and verifies the downloaded binary's SHA-256 against the pinned digest
-**before** writing it to disk and `chmod +x`ing it. It **fails closed** — a
-missing `checksums.txt`, a missing entry for the target asset, or a digest
-mismatch aborts the install rather than running an unverified binary.
-(Resolves [alplabai/tan-cli#11](https://github.com/alplabai/tan-cli/issues/11).)
+alongside the assets. `postinstall.js` fetches it FIRST — before choosing an
+asset name at all, since `checksums.txt` also doubles as the manifest of which
+shape this tag published (see above) — and verifies the downloaded bytes'
+SHA-256 against the pinned digest **before installing anything** — extraction
+writes attacker-named paths to disk, so it belongs after the digest check, not
+before it. It **fails closed**: a missing `checksums.txt`, a missing entry for
+either candidate asset name, or a digest mismatch aborts the install rather
+than extracting, `chmod +x`ing or running an unverified binary. The verified
+bytes are then moved into place with renames, so `tan-cli-lib/` is either the
+previous install or the new one, never a half-written freeze — and a failed
+swap restores the previous install rather than losing it.
+(Resolves [alplabai/tan-cli#11](https://github.com/alplabai/tan-cli/issues/11),
+[#362](https://github.com/alplabai/tan-cli/issues/362).)
 
 ## Releasing
 
@@ -63,20 +98,39 @@ mismatch aborts the install rather than running an unverified binary.
    `version` to match it exactly. This is enforced, not just documented:
    `python/scripts/version_check.py --selftest --tag` (run by `release.yml`'s
    `verify-version` job) fails the tag if they disagree — `postinstall.js`
-   resolves its download tag from `package.json`'s version alone
-   (`npm-shim/postinstall.js:25`), so a stale shim version silently fetches the
-   wrong release's binaries. `Cargo.toml` is deliberately **not** part of this
-   check any more: it versions the retired Rust crates, not the release
-   assets.
+   resolves its download TAG from `package.json`'s version alone
+   (`npm-shim/postinstall.js:49`), so a stale shim version silently fetches
+   from the wrong release. Which ASSET SHAPE it asks for at that tag is not
+   version-derived, though — `selectRelease` decides that from the tag's own
+   `checksums.txt` (see [How it works](#how-it-works)), which is what lets this
+   shim install correctly at both a raw-asset tag and an archive tag without
+   caring which one `package.json`'s version happens to be. `Cargo.toml` is
+   deliberately **not** part of this check any more: it versions the retired
+   Rust crates, not the release assets.
 2. Tag `v<version>` and push. `release.yml`:
    - freezes the four target binaries and attaches them to the GitHub release
      (`build` + `release` jobs);
-   - does **not** publish this package: `publish_npm` is `if: ${{ false }}`.
-     The crates.io job is gone entirely — the assets are no longer built from
-     `crates/`, so publishing `alp-tan-cli` would ship a different program
-     under the same name.
+   - only even ATTEMPTS to publish this package on a final (non-pre-release)
+     tag: `publish_npm`'s job-level `if` is
+     `startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-')`
+     (`release.yml`), so a `-rc*`/`-preN` tag skips this job entirely, the same
+     way it skips `make_latest`. The crates.io job is gone entirely — the
+     assets are no longer built from `crates/`, so publishing `alp-tan-cli`
+     would ship a different program under the same name.
+   - even on a final tag, publishing is OPT-IN and OFF by default: the job
+     reads `NPM_PUBLISH_ENABLED: ${{ vars.TAN_NPM_PUBLISH == 'true' }}`
+     (`release.yml`) and, unless that repository *variable* is set to `true`,
+     records `published=false` and explains why in the run summary rather
+     than attempting a publish — a deliberately loud no-op, not a silent
+     skip.
 
-   Re-enabling `publish_npm` needs both: `postinstall.js`'s target map narrowed
-   to what the release actually publishes, and a working `NPM_TOKEN` (the
-   current one is a classic token on a 2FA account, so `npm publish` answers
-   `EOTP` and waits for an OTP that no unattended job can supply).
+   Arming it needs BOTH steps, not just one: set the repository variable
+   `TAN_NPM_PUBLISH` to `true`, **and** replace `NPM_TOKEN` — the current one
+   is a classic token on a 2FA account, so `npm publish` answers `EOTP` and
+   waits for an OTP that no unattended job can supply; an *automation* (or
+   granular) token is exempt. If `TAN_NPM_PUBLISH` is `true` but `NPM_TOKEN`
+   is still empty, the job fails loudly rather than reporting a publish that
+   did not happen. The other stated blocker is gone: `postinstall.js`'s
+   target map is narrowed to the four targets the release publishes, and from
+   [#362](https://github.com/alplabai/tan-cli/issues/362) it asks for the
+   shape (archive or, for a pre-v0.5.0 tag, raw) those targets actually ship.

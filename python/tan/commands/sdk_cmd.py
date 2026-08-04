@@ -28,12 +28,22 @@ network, no prompt. That is a property of the no-checkout golden, not an
 accident of it.
 
 **Network is opt-in.** `sdk list` is the one verb that talks to GitHub, and it
-only does so behind an explicit `--online`; without the flag it refuses with a
-coded issue rather than reaching out. The fetch itself carries an explicit
-timeout, because a `urlopen` with no timeout inherits the socket default of
-"forever" and a CI job driving `--format json` would hang until the runner
-killed it (I-23's failure mode, arrived at through a socket instead of a
-prompt).
+only does so behind an explicit `--online`. tan-cli#351: without the flag it
+answers OFFLINE, at exit 0 -- not a refusal. The oracle has no `--online` flag
+at all and reaches the network unconditionally on every `sdk list` call
+(measured: `--help` lists no such option; a live run with network reachable
+succeeds at exit 0 with no flag given), so gating the call is this port's OWN
+addition, for hermeticity (I-23) -- a command that silently opens a socket
+cannot be driven from a hermetic test, an air-gapped host, or a fixture. That
+gate is not a verdict on anything the caller did wrong, so it must not exit
+non-zero: the bare answer says plainly that the releases it reports are
+UPSTREAM and that `--online` is the switch that fetches them, the same way
+`sdk current` answers "nothing configured" at exit 0 instead of failing (see
+`_run_list`'s own docstring for the full reasoning). The fetch itself carries
+an explicit timeout, because a `urlopen` with no timeout inherits the socket
+default of "forever" and a CI job driving `--format json` would hang until the
+runner killed it (I-23's failure mode, arrived at through a socket instead of
+a prompt).
 
 **No SDK is ever shelled.** Nothing here runs `python -m alp_cli` or
 `alp_project.py`: readiness is a stat of `scripts/alp_project.py`,
@@ -79,9 +89,11 @@ from typing import Any
 
 import typer
 
+from tan.core.global_flags import accept_global_flags
 from tan.envelope import Envelope, Issue, Project, SdkInfo, emit
 from tan.exit_codes import ExitCode
 from tan.net import default_ssl_context
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: GitHub Releases API endpoint for `alplabai/alp-sdk`, from
 #: `tan_core::sdk::GITHUB_RELEASES_URL`.
@@ -824,6 +836,19 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
             *text,
         ]
         issues.append(pin_issue)
+    # tan-cli#407 names THIS command in particular: `sdk current` is what a
+    # user runs to ask "which SDK am I on?", and in a workspace holding both a
+    # child `<ws>/alp-sdk` and a lateral `../alp-sdk` it answers with the
+    # narrow one only -- reporting the readiness and VERSION of the checkout
+    # `tan generate` did not use. Function-level import because `build_cmd`
+    # imports THIS module at line 97; the same one-way dependency
+    # `build/manifest.py` works around the same way.
+    from tan.commands.build_cmd import sdk_ladder_divergence_issue
+
+    divergence = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=False)
+    if divergence is not None:
+        text = [*text, divergence.message]
+        issues.append(divergence)
     _emit(
         json_mode=json_mode,
         data={
@@ -847,23 +872,43 @@ def _run_current(*, json_mode: bool, sdk_root: str | None, workspace_root: Path)
 def _run_list(*, json_mode: bool, online: bool) -> None:
     """`tan sdk list` -- the published alp-sdk releases.
 
-    `--online` is required. The Rust reaches the network unconditionally here;
-    this port gates it because a command that silently opens a socket cannot be
-    driven from a hermetic test, an air-gapped host, or a fixture. The refusal
-    is a normal coded envelope, so a consumer sees a reason rather than a hang.
+    tan-cli#351: bare `sdk list` (no `--online`) answers OFFLINE, at exit 0.
+    Measured first, since this file already carries the reasoning for why the
+    port diverges from the oracle here: the oracle (`target/debug/tan.exe`,
+    tan 0.4.1) has no `--online` flag at all -- `sdk list --help` lists none --
+    and reaches the network unconditionally on every `sdk list` call (a live
+    run against a reachable network succeeds at exit 0 with no flag given).
+    Gating the fetch behind `--online` is this PORT's own addition, for
+    hermeticity (I-23): a command that silently opens a socket cannot be
+    driven from a hermetic test, an air-gapped host, or a fixture. That gate
+    is not, itself, a verdict on anything the caller did wrong -- there is no
+    "failure" here to report, only a question (`sdk list` answers what alp-sdk
+    has published upstream) that needs an explicit flag to actually reach the
+    network for. Exiting non-zero for it (as this used to) treated a normal,
+    everyday invocation the same as a real error, which is exactly the
+    asymmetry `sdk current` never had: "nothing configured" is exit 0 there,
+    and "list needs `--online`" now is here too. The message says plainly
+    what `sdk list` reports (UPSTREAM releases) and that `--online` is the
+    switch that fetches them, rather than reporting the missing flag as a
+    network requirement failure.
     """
     if not online:
-        _fail(
+        _emit(
             json_mode=json_mode,
             data=_list_data([]),
-            code="network-required",
-            message=(
-                "`sdk list` queries the GitHub releases API. Re-run with "
-                "`--online` to allow the network request."
-            ),
+            issues=[
+                Issue(
+                    "sdk.network-required",
+                    "warning",
+                    "`sdk list` reports the Alp SDK releases published upstream "
+                    "on GitHub -- there is no local/offline copy to answer from. "
+                    "Add --online to fetch them.",
+                )
+            ],
+            exit_code=ExitCode.SUCCESS,
             text_lines=[
-                "sdk list: this command needs network access.",
-                "Re-run as `tan sdk list --online`.",
+                "sdk list: reports Alp SDK releases published upstream on GitHub.",
+                "Add --online to fetch them: `tan sdk list --online`.",
             ],
         )
         return
@@ -978,15 +1023,9 @@ def sdk(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="Explicit alp-sdk checkout to report."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
 ) -> None:
     """Manage local Alp SDK installs."""
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     try:
@@ -1046,3 +1085,12 @@ def sdk(
             text_lines=[f"sdk: unexpected failure: {err}"],
             exit_code=ExitCode.INTERNAL_FAILURE,
         )
+
+
+# tan-cli#261: adds the eight oracle `GlobalArgs` flags this command was
+# missing entirely (`--all`/`--board-yaml`/`--ci`/`--no-color`/
+# `--non-interactive`/`--quiet`/`--target`/`--verbose`); see
+# `tan.core.global_flags`. All inert here: every envelope `sdk` emits reports
+# `Project(root=None, board_yaml=None)`, an SDK-wide fact with no project of
+# its own to anchor a `--board-yaml`/`--target` on.
+sdk = accept_global_flags(sdk)

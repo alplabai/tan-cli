@@ -1,10 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The packaged artifact must satisfy the extension's own probe: a single file
-whose ``--version`` first line matches /^tan \\d+\\.\\d+\\.\\d+/, answering inside
-the extension's 3 s budget (alp-sdk-vscode/src/alpCli/vscodeAdapter.ts:288-290).
+"""The packaged artifact must satisfy the extension's own probe: ``--version``
+first line matches /^tan \\d+\\.\\d+\\.\\d+/, answering inside the extension's
+3 s budget (alp-sdk-vscode/src/alpCli/vscodeAdapter.ts:288-290).
 
-Skips when ``dist/tan[.exe]`` is absent so the normal suite is unaffected; run
-``scripts/build_binary.sh`` to produce it.
+From tan-cli#349 the shipped shape is a PyInstaller --onedir freeze, archived
+for release, not a single raw binary: ``dist/tan/`` is the unpacked folder
+(``dist/tan/tan[.exe]`` + ``dist/tan/_internal/``) and ``dist/tan.zip`` /
+``dist/tan.tar.gz`` is the archive `scripts/build_binary.sh` actually ships.
+Running ``--version`` against the already-unpacked folder (rather than
+unpacking the archive first) is deliberate: it is what install.sh hands the
+launcher script it writes, and what the extension's own unpack step (a
+SEPARATE unit of #349, on the alp-sdk-vscode side) will hand the resolved
+binary path -- the archive itself is inert until something has unpacked it,
+and testing that unpack step is not this file's job.
+
+Skips when neither ``dist/tan/tan[.exe]`` nor a quarantined archive is present
+so the normal suite is unaffected; run ``scripts/build_binary.sh`` to produce
+them.
 """
 import json
 import re
@@ -17,10 +29,14 @@ from pathlib import Path
 import pytest
 
 PYTHON_ROOT = Path(__file__).resolve().parents[2]
-BINARY = PYTHON_ROOT / "dist" / ("tan.exe" if sys.platform == "win32" else "tan")
-#: Where `scripts/build_binary.sh` moves an artifact that broke its ceiling, so
-#: that no consumer can `cp` it -- `exit 1` alone is defeatable by a pipe.
-QUARANTINE = BINARY.with_name(BINARY.name + ".oversized")
+DIST_DIR = PYTHON_ROOT / "dist" / "tan"
+BINARY = DIST_DIR / ("tan.exe" if sys.platform == "win32" else "tan")
+ARCHIVE_EXT = "zip" if sys.platform == "win32" else "tar.gz"
+ARCHIVE = PYTHON_ROOT / "dist" / f"tan.{ARCHIVE_EXT}"
+#: Where `scripts/build_binary.sh` moves the ARCHIVE (not the onedir folder)
+#: when it breaks its ceiling, so that no consumer can `cp` it -- `exit 1`
+#: alone is defeatable by a pipe.
+QUARANTINE = ARCHIVE.with_name(ARCHIVE.name + ".oversized")
 
 pytestmark = pytest.mark.skipif(
     not BINARY.exists() and not QUARANTINE.exists(),
@@ -83,21 +99,28 @@ def _refuse_a_quarantined_build():
         )
 
 
-def test_artifact_is_a_single_file():
-    # --onedir would hand the extension a directory it has no unpack step for
-    # (alp-sdk-vscode/src/alpCli/download.ts:159-162 writes the body to ONE path).
-    assert BINARY.is_file(), "must be --onefile: the extension cannot unpack a directory"
+def test_artifact_ships_as_onedir_plus_one_archive():
+    # tan-cli#349: --onedir, not --onefile -- the folder IS the deliverable now,
+    # and the archive built from it (never the folder itself) is the one thing
+    # every downstream consumer (checksums.txt, install.sh, the extension's own
+    # unpack step) deals with as a single file.
+    assert DIST_DIR.is_dir(), f"{DIST_DIR} must be the --onedir folder"
+    assert BINARY.is_file(), f"{BINARY} missing from the onedir folder"
+    if not QUARANTINE.exists():
+        assert ARCHIVE.is_file(), f"{ARCHIVE} missing -- build_binary.sh archives dist/tan/ into one file"
 
 
 def test_artifact_was_built_from_a_clean_interpreter():
     # The 3 s probe below does NOT catch a dirty build: an artifact built off an
     # interpreter carrying numpy/Pillow/pywin32 measured 34349423 B and ~1.00 s
     # -- 3x the size and 2x the startup, still comfortably green. Size is the
-    # only signal separating the two.
-    size = BINARY.stat().st_size
+    # only signal separating the two. Measured over the ARCHIVE (what
+    # `scripts/build_binary.sh` ceiling-checks and what actually ships), not the
+    # unpacked folder -- see that script's own comment on why.
+    size = ARCHIVE.stat().st_size
     ceiling = _max_artifact_bytes()
     assert size < ceiling, (
-        f"{BINARY} is {size} B against a {ceiling} B ceiling -- likely built "
+        f"{ARCHIVE} is {size} B against a {ceiling} B ceiling -- likely built "
         f"from a dirty interpreter that pulled in modules tan never imports; "
         f"see scripts/build_binary.sh. If the venv is clean, measure and edit "
         f"scripts/artifact_ceilings.env (both readers share it)."
@@ -145,6 +168,59 @@ def test_version_probe_completes_within_the_3s_budget():
     elapsed = time.monotonic() - start
     assert elapsed < 3.0, f"--version took {elapsed:.2f}s; extension probe timeout is 3s"
     print(f"\nstartup: {elapsed:.3f}s")
+
+
+def test_version_probe_stays_within_the_onedir_budget():
+    """A dedicated, TIGHT regression gate for tan-cli#349 -- separate from the
+    3 s test above, which merely enforces the extension's actual probe
+    timeout and is loose enough that a --onefile-style regression could land
+    and still pass it silently: measured on THIS host, a --onefile build of
+    the same commit answers --version in 0.833-0.875 s (10 runs, mean
+    0.855 s) -- comfortably under the 3 s test, so that test alone would not
+    have caught the regression even on the machine sitting right here. (Only
+    macOS actually missed the 3 s budget outright, on the unsigned
+    re-extracted-dylib verification cost: 13.25-19.74 s, measured on the
+    published v0.5.0-rc4 asset -- this suite has no macOS runner to reproduce
+    that number with.)
+
+    Threshold is picked from THIS repo's own onedir measurement, checked
+    against the same host's --onefile build rather than inferred:
+
+      onedir  (this build):  10 runs, 0.274-0.340 s, mean 0.294 s
+      onefile (same commit): 10 runs, 0.833-0.875 s, mean 0.855 s
+
+    0.6 s sits in the ~0.49 s gap between them -- about 1.8x the onedir
+    ceiling above its own worst run (room for a slower/loaded CI box) while
+    staying a comfortable 0.23 s under the onefile floor, so a build that
+    silently reverts to --onefile fails THIS test on this very platform, not
+    only on macOS's much larger margin. Re-verified directly against a real
+    --onefile build of this binary before picking the number (the tan-cli#323
+    lesson: prove a regression gate against the known-bad build, don't infer
+    it would fail from a different platform's numbers). A future change that
+    reintroduces per-invocation extraction trips this gate long before it
+    would threaten the extension's own 3 s timeout, or even get near it --
+    which is the point: the 3 s test alone was not tight enough to have
+    caught the original regression, and the e2e harness (getting-started.yml)
+    asserts correctness only, never speed.
+    """
+    start = time.monotonic()
+    subprocess.run(
+        [str(BINARY), "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=5,
+    )
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.6, (
+        f"--version took {elapsed:.2f}s -- over the 0.6s onedir budget "
+        f"(measured local baseline: 0.27-0.34s over 10 runs; a --onefile "
+        f"build of the same commit measured 0.83-0.88s, well above this "
+        f"threshold). This is the tan-cli#349 regression gate: something in "
+        f"this build re-added per-invocation extraction cost -- check "
+        f"scripts/build_binary.sh is still building --onedir, not --onefile."
+    )
+    print(f"\nonedir startup: {elapsed:.3f}s")
 
 
 def test_the_artifact_carries_its_scaffold_templates(tmp_path):

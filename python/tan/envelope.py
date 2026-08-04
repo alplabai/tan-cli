@@ -1,11 +1,54 @@
 # SPDX-License-Identifier: Apache-2.0
 """Machine-readable result envelope. JSON mode writes exactly one to stdout."""
 import json
+import math
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from tan.exit_codes import ExitCode
+
+
+def json_safe_floats(value: Any) -> Any:
+    """`value` with every NON-FINITE float replaced by `None`, recursively --
+    `serde_json`'s own answer for an `f64` RFC 8259 cannot express (tan-cli#387).
+
+    Python's `json.dumps` defaults to `allow_nan=True` and writes the
+    non-standard literals `Infinity`, `-Infinity` and `NaN`. Those are not JSON.
+    `JSON.parse` throws on them, and the alp-sdk-vscode extension's only channel
+    is this envelope -- so a `build/system-manifest.yaml` carrying `.inf` in
+    `hw_info` (verbatim into `data` via `raw_passthrough`) used to hand the
+    consumer a parse throw at exit code 0 with `issues:[]`: no coded signal to
+    fall back on, and nothing to distinguish it from tan crashing. The oracle on
+    the identical input emits `null` and the consumer gets a field it can
+    inspect.
+
+    NOT solved with `allow_nan=False` at the `json.dumps` below. That raises,
+    which lands in `_serialise`'s `envelope.serialize-failed` / exit-5 fallback
+    where the oracle exits 0 -- one divergence traded for another. This projects
+    instead, so the exit code and `issues` stay exactly what the command decided.
+
+    Applied at SERIALISE time, mirroring where `serde_json` makes the same
+    substitution, so it holds for every command's `data` rather than for the one
+    payload the defect was found in.
+
+    Map KEYS are deliberately left alone: `json.dumps` renders a non-finite
+    float key as the *string* `"Infinity"`, which is already valid JSON, and
+    rewriting it would change a key a consumer may be matching on.
+
+    A new object always -- the caller's payload is never mutated, so a command
+    that inspects its own `data` after `emit()` still sees its own floats.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, dict):
+        return {k: json_safe_floats(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        # A tuple becomes a list: `json.dumps` writes both as a JSON array, so
+        # the wire bytes are unchanged.
+        return [json_safe_floats(v) for v in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -74,14 +117,85 @@ class SdkInfo:
         return {"root": self.root.replace("\\", "/"), "sourceTier": self.source_tier}
 
 
+#: The four commands resolving the SDK through `resolve_sdk_root_wide` rather
+#: than `resolve_sdk_root_ladder` (tan-cli#407). Only used to label WHICH side
+#: of a divergence the reader is holding; getting it wrong would swap two
+#: labels in a warning, never change which root a command uses.
+WIDE_LADDER_COMMANDS = frozenset({"init", "generate", "examples", "renode"})
+
+
 class Envelope:
     def __init__(self, command, project, data, issues, exit_code, sdk=None):
         self.command = command
         self.project = project
         self.data = data
-        self.issues = issues
+        self.issues = self._with_sdk_divergence(command, project, issues, sdk)
         self.exit_code = int(exit_code)
         self.sdk = sdk
+
+    @staticmethod
+    def _with_sdk_divergence(command, project, issues, sdk):
+        """Append the tan-cli#407 warning when the two SDK ladders would answer
+        DIFFERENT checkouts from this project root.
+
+        Done at the ONE seam every command's envelope passes through, not at
+        each of the 20 `SdkInfo(...)` construction sites: #407's whole
+        complaint is that the two ladders report the same `sourceTier`
+        ("discovery") for two roots, and a fix present on `build` but missing
+        on the other sixteen commands would leave exactly the silence the
+        issue is about -- the vscode extension branches on `sourceTier` from
+        `generate`/`examples` (wide) AND `build`/`doctor`/`sdk current`
+        (narrow), so partial coverage still gives it two roots it cannot tell
+        apart.
+
+        Gated on `sourceTier == "discovery"` before anything touches the disk,
+        which makes this free in every normal layout: any HIGHER tier
+        (`--sdk-root`, the project pin, the global default) is shared verbatim
+        by both ladders and cannot be the pair that differs, so there is
+        nothing to compare. That gate is also why passing `sdk_root_arg=None`
+        below is exact rather than approximate -- a `--sdk-root` run reports
+        `sdkRootFlag`, never `discovery`, so it never reaches here.
+
+        Appends to a NEW list. Mutating the caller's would be a side effect on
+        an argument, and several commands keep rendering their own text from
+        the list they passed in.
+
+        Import is local: `build_cmd` imports this module at module level, so a
+        top-level import here would be circular.
+        """
+        if sdk is None or getattr(sdk, "source_tier", None) != "discovery":
+            return issues
+        # `project.root` is None for the commands that are not project-scoped
+        # -- `examples` and `sdk current` both report `{"root": null}` -- and
+        # those are exactly two of the commands #407 measured as divergent, so
+        # bailing on a null root would have left the reported collision
+        # unreported on the wide side. They resolved the SDK from the cwd, so
+        # that is the workspace root to ask about.
+        root = getattr(project, "root", None)
+        try:
+            # RESOLVED, never the raw `project.root`. Several commands report
+            # it as the relative `"."` (`validate` does), and `Path(".").parent`
+            # is `"."` -- so the ladders' lateral `../alp-sdk` candidate
+            # collapses onto the child `./alp-sdk` and a real divergence reads
+            # as agreement. Measured: from a cwd where `doctor` warned,
+            # `validate` did not, purely because of that one character.
+            start = Path(root).resolve() if root else Path.cwd()
+
+            from tan.commands.build_cmd import sdk_ladder_divergence_issue
+
+            divergence = sdk_ladder_divergence_issue(
+                None, start, wide=command in WIDE_LADDER_COMMANDS
+            )
+        except Exception:  # noqa: BLE001
+            # A warning about ambiguity must never be the reason a command
+            # cannot report its actual result. Whatever the run was doing is
+            # more important than this advisory.
+            return issues
+        if divergence is None:
+            return issues
+        if any(getattr(i, "code", None) == divergence.code for i in issues):
+            return issues
+        return [*issues, divergence]
 
     def _as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -113,7 +227,26 @@ class Envelope:
         depends on that shape.
         """
         try:
-            return json.dumps(self._as_dict(), separators=(",", ":")), self.exit_code
+            # `ensure_ascii=False`: the default (True) escapes every non-ASCII
+            # codepoint as `\uXXXX`, which is valid JSON but not what the
+            # oracle emits -- `serde_json::to_string` writes raw UTF-8 bytes
+            # verbatim (measured: `scaffold --name "Sensör Ölçüm"` on the
+            # Rust CLI puts the literal `Sensör Ölçüm` on the wire, not
+            # `Sensör...`). A consumer that byte-compares tan's envelope
+            # against the oracle's, or that greps stdout for a raw non-ASCII
+            # string, saw a divergence stdout never had a reason to carry.
+            #
+            # `json_safe_floats`: `Infinity`/`-Infinity`/`NaN` are Python's
+            # non-standard extension literals, not JSON (tan-cli#387). See that
+            # function for why this is a projection and not `allow_nan=False`.
+            return (
+                json.dumps(
+                    json_safe_floats(self._as_dict()),
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                ),
+                self.exit_code,
+            )
         except Exception as err:  # noqa: BLE001 -- no payload may ever crash stdout
             fallback_code = int(ExitCode.INTERNAL_FAILURE)
             fallback = {
@@ -132,7 +265,10 @@ class Envelope:
                     f"failed to serialize command output: {err}",
                 ).as_dict()
             ]
-            return json.dumps(fallback, separators=(",", ":")), fallback_code
+            return (
+                json.dumps(fallback, separators=(",", ":"), ensure_ascii=False),
+                fallback_code,
+            )
 
 
 #: Whether this process has already written its one envelope to stdout.

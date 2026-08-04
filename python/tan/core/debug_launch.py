@@ -107,24 +107,83 @@ def is_server_supported_for_target(target: str, server: str) -> bool:
     return server in server_choices_for_target(target)
 
 
+#: The v0.3.1 default ``preLaunchTask``, restored per tan-cli#138. Keyed by
+#: TARGET ALONE, never by server: ``crates/tan-core/src/debug_launch.rs``
+#: hardcoded the identical literal in every one of ``ZephyrMcu``'s and
+#: ``BaremetalMcu``'s server-branched arms before tan-cli#85 made the key
+#: opt-in, so J-Link/OpenOCD/pyOCD all shared one string per target, not one
+#: each. ``--pre-launch-task`` overrides a target's default; an EXPLICIT empty
+#: string opts out of a ``preLaunchTask`` key entirely -- see
+#: :func:`create_launch_draft`.
+#:
+#: **``YOCTO_USERSPACE`` is deliberately absent** -- three of the four targets
+#: get a default, not four. v0.3.1 did hardcode
+#: ``"alp: deploy and start gdbserver"`` for it, but restoring THAT one would
+#: re-break what alp-sdk-vscode#406 deliberately fixed. That repo's
+#: ``preLaunchTaskFor`` (``src/tasks/service.ts``) maps only the three build
+#: kinds, and states why verbatim:
+#:
+#:     yocto-userspace deliberately gets NOTHING. The only task registered for
+#:     it is the "deploy and start gdbserver" placeholder, which exits 1 by
+#:     design (``vscodeAdapter.ts``) because the extension cannot deploy or
+#:     start a remote gdbserver. Naming it would put VS Code's "the
+#:     preLaunchTask terminated with exit code 1 -- Debug Anyway / Show
+#:     Errors" dialog in front of EVERY F5, including one where the customer
+#:     has already copied the binary across, started gdbserver by hand and
+#:     filled in ``miDebuggerServerAddress`` -- the setup that works.
+#:
+#: So tan-cli#138 and tan-cli#321 pull opposite ways here, and only three of
+#: the four labels are safe to restore. For the build kinds the extension DOES
+#: register a working task, and omitting the key is precisely what left its
+#: provider contribution dead. For yocto-userspace the only task that exists
+#: fails by design, so naming it would degrade the one workflow that currently
+#: succeeds. A user with their own deploy task still passes
+#: ``--pre-launch-task`` explicitly.
+DEFAULT_PRE_LAUNCH_TASK: dict[str, str] = {
+    ZEPHYR_MCU: "alp: build active target",
+    BAREMETAL_MCU: "alp: build baremetal target",
+    NATIVE_HOST: "alp: build native_sim target",
+}
+
+
 def create_launch_draft(
     target: str, server: str, pre_launch_task: str | None
 ) -> dict[str, Any]:
     """The VS Code launch configuration draft for a target/server (TS
     ``createDebugProfile`` -> ``debugProfileToLaunchDraft``).
 
-    ``pre_launch_task`` is emitted ONLY when the caller supplies one. Every
-    draft used to carry a hardcoded ``preLaunchTask`` that **nothing in any of
-    the three repos defines** -- no ``tasks.json``, no ``TaskProvider``
-    registration. VS Code resolves ``preLaunchTask`` before launching, fails to
-    find the task, and aborts pre-launch, so the session never starts: a
-    launch.json that reads perfectly and cannot run.
+    ``pre_launch_task`` has three states, not two (tan-cli#138):
+
+    * ``None`` -- the flag was not passed. Takes this target's restored
+      v0.3.1 default from :data:`DEFAULT_PRE_LAUNCH_TASK`. Every draft used to
+      carry this hardcoded string unconditionally; tan-cli#85 made the key
+      opt-in because **nothing in any of the three repos defined the task
+      it named** -- no ``tasks.json``, no ``TaskProvider`` registration --
+      and VS Code resolves ``preLaunchTask`` before launching, fails to find
+      the task, and aborts pre-launch, so the session never started: a
+      launch.json that reads perfectly and cannot run. alp-sdk-vscode has
+      since registered the THREE build labels as real, working tasks, so the
+      default is restored for those three targets. The fourth label exists
+      only as a placeholder that exits 1 by design, and
+      ``preLaunchTaskFor`` maps three of four kinds for that reason -- see
+      :data:`DEFAULT_PRE_LAUNCH_TASK` for the full quotation. A target with
+      no entry there behaves exactly as it did before this restoration.
+    * ``""`` (an explicitly empty string) -- opts OUT of a ``preLaunchTask``
+      key entirely, even though a default now exists for this target. The
+      only way left to reach the trailing ``del`` below.
+    * Anything else -- emitted verbatim, overriding the default. Unchanged
+      from before this restoration.
     """
     if not is_server_supported_for_target(target, server):
         raise DebugConfigError(
             f"Unsupported debug backend '{server}' for target '{target}'."
         )
     label = _SERVER_LABELS[server]
+
+    if pre_launch_task is None:
+        pre_launch_task = DEFAULT_PRE_LAUNCH_TASK.get(target)
+    elif pre_launch_task == "":
+        pre_launch_task = None
 
     if target == ZEPHYR_MCU:
         name = f"Alp: Zephyr Debug ({label})"
@@ -260,6 +319,13 @@ class LaunchResolution:
     #: SDK ships no SVD file, and alp-sdk#948's vendor-redistribution licence
     #: question may mean it never does.
     svd: str | None = None
+    #: `host:port` for a yocto-userspace draft's `miDebuggerServerAddress`.
+    #: Produced ONLY by `tan debug-config --gdbserver-address` (tan-cli#321):
+    #: this is a runtime property of the DEPLOYED board -- which host it is
+    #: reachable at and which port its gdbserver is listening on -- which no
+    #: build, and no SDK-published metadata, can ever resolve. `None` unless
+    #: the caller passed one.
+    gdbserver_address: str | None = None
 
 
 def fill_debug_probe_identity_gaps(
@@ -324,6 +390,11 @@ def apply_launch_resolution(draft: dict[str, Any], resolution: LaunchResolution)
         draft["targetId"] = resolution.target_id
     if resolution.config_files and "configFiles" in draft:
         draft["configFiles"] = list(resolution.config_files)
+    if resolution.gdbserver_address is not None and "miDebuggerServerAddress" in draft:
+        # tan-cli#321: the ONLY source of this field's resolution -- see
+        # `LaunchResolution.gdbserver_address`'s own docstring for why nothing
+        # else (build or SDK metadata) can ever fill it.
+        draft["miDebuggerServerAddress"] = resolution.gdbserver_address
     if resolution.gdb_path is not None:
         # cppdbg spells it `miDebuggerPath` and already carries the key;
         # cortex-debug's `gdbPath` is additive.

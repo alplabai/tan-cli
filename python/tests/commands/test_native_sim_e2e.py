@@ -91,7 +91,13 @@ SDK = sdk_root()
 
 
 def _zephyr_base() -> Path | None:
-    raw = os.environ.get("ZEPHYR_BASE")
+    # From `REAL_ENVIRON` (captured at collection time in `tests/conftest.py`),
+    # not `os.environ` read here -- the autouse `_scrub_sdk_discovery_env`
+    # fixture now deletes `ZEPHYR_BASE` from the process environment ahead of
+    # every test function, so an `os.environ` read from inside this module's
+    # test body/helpers (called after that fixture has run) would always see
+    # it gone, even on a host where a real Zephyr workspace is exported.
+    raw = REAL_ENVIRON.get("ZEPHYR_BASE")
     if not raw:
         return None
     base = Path(raw)

@@ -93,8 +93,9 @@ from pathlib import Path
 
 import typer
 
-from tan.commands.build_cmd import resolve_sdk_root_wide
+from tan.commands.build_cmd import resolve_sdk_root_wide, sdk_ladder_divergence_issue
 from tan.core.fs_confine import PathEscapeError, resolve_confined
+from tan.core.global_flags import accept_global_flags
 from tan.core.scaffold import (
     DEFAULT_SOM_SKU,
     DEFAULT_TEMPLATE_ID,
@@ -122,6 +123,7 @@ from tan.core.scaffold import (
 )
 from tan.envelope import Envelope, Issue, Project, emit
 from tan.exit_codes import ExitCode
+from tan.output_format import FORMAT_HELP, OutputFormat
 
 #: `data.schemaVersion` for this command's payload.
 DATA_SCHEMA_VERSION = "1"
@@ -834,9 +836,7 @@ def init(
     sdk_root: str = typer.Option(
         None, "--sdk-root", metavar="PATH", help="alp-sdk checkout root."
     ),
-    output_format: str = typer.Option(
-        "text", "--format", metavar="FORMAT", help="Output format: text or json."
-    ),
+    output_format: OutputFormat = typer.Option(OutputFormat.TEXT, "--format", help=FORMAT_HELP),
     verbose: bool = typer.Option(
         False, "--verbose", help="Emit additional diagnostic detail."
     ),
@@ -864,10 +864,6 @@ def init(
     # code reads them. Hiding them here would parse identically but make
     # `tan init --help`'s TEXT diverge from the oracle's.
     del verbose, quiet, no_color, target, all_targets
-    if output_format not in ("text", "json"):
-        raise typer.BadParameter(
-            f"'{output_format}' (choose from 'text', 'json')", param_hint="--format"
-        )
     json_mode = output_format == "json"
 
     try:
@@ -888,6 +884,18 @@ def init(
 
         workspace_root = Path(os.path.abspath(project)) if project else Path.cwd()
         resolved_sdk = _resolve_sdk_root(sdk_root, workspace_root)
+        # tan-cli#407, and this is the command where it matters most: `init`
+        # does not merely resolve an SDK, it WRITES the answer to
+        # `.alp/sdk-path` (`_record_sdk_pin`, below), and that pointer then
+        # outranks BOTH discovery tiers for every later command in the new
+        # project. So the collision is settled here, permanently, in the user's
+        # favour or against it -- and the wide ladder settles it on the CHILD
+        # `<ws>/alp-sdk` while thirteen commands would have taken the lateral
+        # `../alp-sdk`. Disclosing which one got bound is the whole point:
+        # after this run the divergence is genuinely GONE (both ladders read
+        # the pin), so this is the last moment the fact is observable at all.
+        # Computed BEFORE `_finish` for exactly that reason.
+        divergence_issue = sdk_ladder_divergence_issue(sdk_root, workspace_root, wide=True)
 
         if from_example is not None:
             template_id, files = _plan_from_example(from_example, som, resolved_sdk)
@@ -936,6 +944,8 @@ def init(
         )
         if missing_board_yaml_issue is not None:
             outcome.issues.append(missing_board_yaml_issue)
+        if divergence_issue is not None:
+            outcome.issues.append(divergence_issue)
     except InitError as err:
         _emit_error(json_mode, err)
         return
@@ -955,3 +965,10 @@ def init(
         return
 
     _emit_outcome(json_mode, outcome)
+
+
+# tan-cli#261: adds the two oracle `GlobalArgs` flags this command was still
+# missing (`--ci`/`--non-interactive`) on top of the five already declared
+# above (`--verbose`/`--quiet`/`--no-color`/`--target`/`--all`, all read for
+# real); see `tan.core.global_flags`.
+init = accept_global_flags(init)

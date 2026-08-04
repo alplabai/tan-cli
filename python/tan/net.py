@@ -37,15 +37,37 @@ def default_ssl_context() -> ssl.SSLContext:
     """An `ssl.SSLContext` that actually has trust anchors, in a frozen build
     or not. Pass as `urllib.request.urlopen(..., context=default_ssl_context())`.
     """
+    import certifi
+
     try:
         import truststore
 
-        return truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        # tan-cli#354: the floor has to be UNDER truststore, not an
+        # ALTERNATIVE to it. `truststore.SSLContext(...)` constructs perfectly
+        # well on a host with an EMPTY OS trust store -- it defers to the
+        # platform verifier, and that verifier simply has no anchors. The
+        # failure then happens at VERIFY time, inside `urlopen`, which no
+        # `except` around construction can ever observe. So on any minimal
+        # container (`ubuntu:24.04`, `debian:*-slim`, and most CI base images
+        # ship no `ca-certificates`) every HTTPS call died
+        # `CERTIFICATE_VERIFY_FAILED` while tan's own `certifi` sat unused
+        # inside the freeze. Measured in a pristine `ubuntu:24.04`, and
+        # reproduced identically on the published `v0.5.0-rc4` asset -- so it
+        # predates the `--onedir` change and had shipped in every RC.
+        #
+        # Loading certifi into the SAME context WIDENS the anchor set instead
+        # of replacing it: a populated OS store -- the corporate-CA case #304
+        # chose truststore for -- keeps working, and a host with no OS store
+        # can still verify public CAs. That is the "merge, never narrow"
+        # intent this module's docstring takes from
+        # `crates/tan-cli/src/http.rs`, which the original fall-back shape
+        # could not actually express.
+        context.load_verify_locations(cafile=certifi.where())
+        return context
     except Exception:
-        # ImportError if truststore is somehow absent; anything else is
-        # truststore failing to reach the platform verifier (unsupported OS,
-        # a broken OS store). Either way, certifi's bundled list is a trust
+        # `ImportError` if truststore is absent; anything else is truststore
+        # failing outright (an unsupported OS, a store it cannot open) or
+        # refusing the extra anchors. Either way certifi alone is a trust
         # anchor set that does not depend on the platform at all.
-        import certifi
-
         return ssl.create_default_context(cafile=certifi.where())

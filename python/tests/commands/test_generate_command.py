@@ -568,6 +568,8 @@ def test_ensure_writable_creates_the_missing_parent(tmp_path):
     assert target.parent.is_dir()
 
 
+
+
 def test_ensure_writable_does_not_truncate_an_existing_file(tmp_path):
     """The probe opens for APPEND, not write: a later guard can still refuse the
     run, and a destroyed destination would be unrecoverable by then."""
@@ -1004,6 +1006,103 @@ def test_a_fully_in_process_run_never_probes_the_path_interpreter(
 
 
 # --------------------------------------------------------------------------
+# tan-cli#397: a zero exit code is evidence the emitter RAN, never evidence of
+# what it produced. `written[]` is the only signal the extension has for what a
+# generate landed, so it must come from disk, not from a child's exit status.
+# --------------------------------------------------------------------------
+
+
+def _sdk_whose_emitter_writes_nothing(tmp_path):
+    """A checkout whose `alp_project.py` exits 0 and produces no file -- the
+    shape a partially cloned SDK, a differently configured emitter or a future
+    `--emit` path presents. `make_sdk`'s own empty script does exactly this;
+    spelled out here so the test reads as what it measures."""
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys\nsys.exit(0)\n", encoding="utf-8"
+    )
+    return sdk
+
+
+def _project_for(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    return project
+
+
+@pytest.mark.parametrize("how", ["pinned", "fallback"])
+def test_an_emitter_that_exits_0_without_writing_is_a_failed_target(
+    tmp_path, monkeypatch, capsys, how
+):
+    """Both ways the spawned engine is reached, because this was never confined
+    to the `TAN_GENERATE_EXECUTOR=subprocess` escape hatch: the default `auto`
+    engine falls back to the identical `_emit_one` whenever the checkout cannot
+    serve the in-process planner, and reported the same untrue `written[]`.
+
+    The FAILING case before the fix: `ok: true`, exit 0, `failed: []`, and
+    `written: ["build/generated/alp.conf"]` for a file that is not on disk.
+    """
+    project = _project_for(tmp_path)
+    sdk = _sdk_whose_emitter_writes_nothing(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    if how == "pinned":
+        _stub_in_process(monkeypatch)  # usable, and deliberately not used
+        monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+    else:
+        _stub_in_process(monkeypatch, available=False)  # `auto` falls back
+
+    code = _call_generate(
+        target="zephyr-conf", core="m55_hp", sdk_root=str(sdk), output_format="json"
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["ok"] is False
+    assert env["data"]["written"] == []
+    assert env["data"]["failed"] == ["zephyr-conf"]
+    assert env["data"]["engine"] == {"zephyr-conf": "subprocess"}
+    # The failure is the FIRST issue in both shapes: under `fallback` the
+    # `generate.in-process-unavailable` warning is appended behind it, and a
+    # warning is not what the user needs to read first here.
+    assert env["issues"][0]["code"] == "generate.emit-failed"
+    assert env["issues"][0]["severity"] == "error"
+    assert not (project / "build" / "generated" / "alp.conf").exists()
+
+
+
+
+def test_an_empty_board_directory_is_not_a_successful_zephyr_board_emit(
+    tmp_path, monkeypatch, capsys
+):
+    """The tree target needs its own rule: its `--output` IS a directory, and
+    `_ensure_writable` creates it, so "the path exists" is true before the
+    emitter runs. At least one file inside is the weakest honest check."""
+    project = _project_for(tmp_path)
+    sdk = _sdk_whose_emitter_writes_nothing(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+    destination = tmp_path / "build" / "boards" / "alp_e1m_aen801_m55_hp"
+
+    code = _call_generate(
+        target=ZEPHYR_BOARD,
+        core="m55_hp",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["written"] == []
+    assert env["data"]["failed"] == [ZEPHYR_BOARD]
+    assert env["issues"][0]["code"] == "generate.emit-failed"
+    assert destination.is_dir() and not any(destination.iterdir())
+
+
+# --------------------------------------------------------------------------
 # `tan.planner_emit.write`: the newline trap
 # --------------------------------------------------------------------------
 
@@ -1134,3 +1233,292 @@ def test_an_explicit_output_override_is_exempt_from_the_confinement_guard(
 
     assert code == 0
     assert outside.read_text(encoding="utf-8") == "generated\n"
+
+
+# --------------------------------------------------------------------------
+# tan-cli#397: a zero exit from the SPAWNED emitter is not proof a file landed
+#
+# `_emit_one` used to return `None` -- this command's spelling of "this target
+# succeeded" -- on `returncode == 0` alone, and `written[]` was built from that
+# `None`. Nothing ever looked at the destination. A checkout whose
+# `scripts/alp_project.py` exits 0 down a path tan did not expect (a partially
+# installed clone, a differently configured emitter, a future SDK version) then
+# produced `ok: true`, exit 0, `failed: []` and a `written[]` naming a file that
+# is not on disk -- and `cmake/alp.cmake` configures a whole Zephyr build from
+# that answer.
+#
+# The in-process engine was never affected: `_emit_one_in_process` performs the
+# write itself, so its `None` is earned.
+# --------------------------------------------------------------------------
+
+
+def _project_with_silent_sdk(tmp_path):
+    """A project plus a stand-in `alp_project.py` that exits 0 having written
+    nothing at all -- the partially installed checkout of tan-cli#397.
+
+    `_project_with_echo_sdk`'s stub always writes, which is precisely why the
+    existing coverage (`test_a_successful_emit_reports_the_relative_written_
+    path`) could not catch this.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "board.yaml").write_text("som:\n  sku: E1M-AEN801\n", encoding="utf-8")
+    sdk = make_sdk(tmp_path / "alp-sdk")
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys\nsys.exit(0)\n", encoding="utf-8"
+    )
+    return project, sdk
+
+
+def test_a_pinned_subprocess_emit_that_wrote_nothing_is_a_failed_target(
+    tmp_path, monkeypatch, capsys
+):
+    """The `TAN_GENERATE_EXECUTOR=subprocess` arm: the target lands in
+    `failed[]` with a `generate.emit-failed` error and exit 3, identical to
+    every other failed emit -- not `ok: true` with an imaginary `written[]`."""
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target="zephyr-conf", sdk_root=str(sdk), output_format="json"
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["ok"] is False
+    assert env["exitCode"] == 3
+    assert env["data"]["written"] == []
+    assert env["data"]["failed"] == ["zephyr-conf"]
+    assert env["issues"][0]["code"] == "generate.emit-failed"
+    assert env["issues"][0]["severity"] == "error"
+    # The filesystem outcome the envelope must agree with.
+    assert not (project / "build" / "generated" / "alp.conf").exists()
+
+
+def test_the_auto_fallback_to_spawning_gets_the_same_did_it_land_check(
+    tmp_path, monkeypatch, capsys
+):
+    """This is NOT confined to the escape hatch. With no environment variable
+    set, `auto` falls back to the same `_emit_one` whenever the checkout cannot
+    serve the in-process planner -- the second reproduction in tan-cli#397 --
+    and reported the identical untrue `written[]`.
+
+    The fallback warning stays a warning and stays LAST: it is context about
+    how the run went, and the emit failure is what the user asked about."""
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.delenv(generate_cmd.EXECUTOR_ENV, raising=False)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    _stub_in_process(monkeypatch, available=False)
+
+    code = _call_generate(
+        target="zephyr-conf", sdk_root=str(sdk), output_format="json"
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["ok"] is False
+    assert env["data"]["engine"] == {"zephyr-conf": "subprocess"}
+    assert env["data"]["written"] == []
+    assert env["data"]["failed"] == ["zephyr-conf"]
+    assert [(i["code"], i["severity"]) for i in env["issues"]] == [
+        ("generate.emit-failed", "error"),
+        ("generate.in-process-unavailable", "warning"),
+    ]
+
+
+def test_an_output_override_the_emitter_never_filled_is_not_reported_written(
+    tmp_path, monkeypatch, capsys
+):
+    """The `cmake/alp.cmake` shape, and the reason mere existence is not the
+    test: `_ensure_writable` opens the destination for APPEND before the spawn
+    to prove it is writable, which CREATES a zero-byte file. An existence-only
+    check would report tan's own probe as the emitter's artefact.
+
+    Also asserts the probe file is taken back off disk (tan-cli#420) -- the
+    zero-byte-survives assertion this used to carry is flipped on purpose, see
+    the comment on that assertion.
+    """
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target="zephyr-conf",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["written"] == []
+    assert env["data"]["failed"] == ["zephyr-conf"]
+    assert env["issues"][0]["code"] == "generate.emit-failed"
+    # tan-cli#420: the probe's own zero-byte file is REMOVED again.
+    #
+    # This read `destination.stat().st_size == 0` and that was a deliberate
+    # assertion, not an oversight -- the envelope is honest either way. It is
+    # flipped because the envelope was never the exposure. `cmake/alp.cmake`
+    # hands this exact path to Zephyr as `EXTRA_CONF_FILE`, and Zephyr accepts
+    # an empty conf file silently: no configuration applied, nothing said. A
+    # standalone `west build` after a failed `tan generate` reaches that
+    # configure with nothing re-running generate in between, and hand-written
+    # firmware bypassing the tan-driven flow is first-class in this SDK.
+    assert not destination.exists()
+    # The PARENT survives: `_ensure_writable` had to create it either way, an
+    # empty `generated/` misleads nobody, and removing directories a run did
+    # not necessarily create is a much worse trade than leaving one behind.
+    assert destination.parent.is_dir()
+
+
+def test_a_tree_target_that_left_no_board_directory_is_a_failed_target(
+    tmp_path, monkeypatch, capsys
+):
+    """`zephyr-board`'s `--output` IS a directory, so the same question has to
+    be asked of a directory rather than a file."""
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target=ZEPHYR_BOARD, core="m55_hp", sdk_root=str(sdk), output_format="json"
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["written"] == []
+    assert env["data"]["failed"] == [ZEPHYR_BOARD]
+    assert env["issues"][0]["code"] == "generate.emit-failed"
+    assert not (project / "build" / "boards" / "alp_e1m_aen801_m55_hp").exists()
+
+
+def test_an_empty_board_directory_is_not_a_generated_board_tree(
+    tmp_path, monkeypatch, capsys
+):
+    """The directory half of the pre-creation trap: `_ensure_writable` mkdirs
+    a tree target's `--output` before the spawn, so the directory exists no
+    matter what the emitter did. Only its CONTENTS prove an emit."""
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    destination = tmp_path / "board-root" / "alp_e1m_aen801_m55_hp"
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target=ZEPHYR_BOARD,
+        core="m55_hp",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["written"] == []
+    assert env["data"]["failed"] == [ZEPHYR_BOARD]
+    assert destination.is_dir()
+    assert not any(destination.iterdir())
+
+
+def test_a_tree_target_that_wrote_files_is_still_a_success(
+    tmp_path, monkeypatch, capsys
+):
+    """The guard against over-tightening: a board directory with files in it
+    is a produced artefact, reported at the directory path exactly as before."""
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    (sdk / "scripts" / "alp_project.py").write_text(
+        "import sys, pathlib\n"
+        "out = pathlib.Path(sys.argv[sys.argv.index('--output') + 1])\n"
+        "out.mkdir(parents=True, exist_ok=True)\n"
+        "(out / 'board.yml').write_text('identifier: alp_e1m_aen801_m55_hp\\n',"
+        " encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target=ZEPHYR_BOARD, core="m55_hp", sdk_root=str(sdk), output_format="json"
+    )
+
+    assert code == 0
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["failed"] == []
+    assert env["data"]["written"] == [
+        os.path.join("build", "boards", "alp_e1m_aen801_m55_hp")
+    ]
+
+
+def test_a_destination_that_already_existed_is_never_discarded(
+    tmp_path, monkeypatch, capsys
+):
+    """The tan-cli#420 cleanup must only take back the file the probe itself
+    created. A destination the user already had is theirs -- deleting it on a
+    failed emit would turn a refusal into data loss, which is far worse than
+    the stray it is cleaning up.
+
+    Empty on purpose: a zero-byte pre-existing file is the one case where the
+    unlink-time size check cannot tell the two apart, so the decision has to
+    rest on `existed`, captured before the probe opens it.
+    """
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+    destination.parent.mkdir(parents=True)
+    destination.touch()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    code = _call_generate(
+        target="zephyr-conf",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    env = json.loads(capsys.readouterr().out.strip())
+    assert env["data"]["failed"] == ["zephyr-conf"]
+    assert destination.exists(), "a pre-existing destination was deleted by the #420 cleanup"
+
+
+def test_a_partly_written_destination_survives_a_failed_emit(tmp_path, monkeypatch, capsys):
+    """The cleanup re-checks zero-byte at unlink time rather than trusting the
+    probe. An emitter that wrote something and then failed leaves evidence the
+    user needs to see -- that is a partial artefact, not litter."""
+    project, sdk = _project_with_silent_sdk(tmp_path)
+    destination = tmp_path / "cmake-binary-dir" / "generated" / "alp.conf"
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(generate_cmd, "_planner_python", lambda *_a, **_k: sys.executable)
+    monkeypatch.setenv(generate_cmd.EXECUTOR_ENV, "subprocess")
+
+    # Writes, then reports failure -- an emitter that died partway through.
+    # Deliberately NOT the real `_emit_one` after the write: the artefact
+    # guard's only refusal for `zephyr-conf` is missing-or-zero-byte, so a
+    # non-empty file would be reported as SUCCEEDED and this test would
+    # exercise nothing. Measured: the first version of it did exactly that
+    # (`ok:true`, `written:[...]`, exit 0).
+    def _emit_then_fail(python, script, board, mode, output, core):
+        Path(output).write_text("CONFIG_HALF_WRITTEN=y\n", encoding="utf-8")
+        return "the SDK emitter exited 1 partway through"
+
+    monkeypatch.setattr(generate_cmd, "_emit_one", _emit_then_fail)
+
+    code = _call_generate(
+        target="zephyr-conf",
+        sdk_root=str(sdk),
+        output=str(destination),
+        output_format="json",
+    )
+
+    assert code == int(ExitCode.WRITE_FAILURE)
+    capsys.readouterr()
+    assert destination.exists(), "a partially written artefact was deleted"
+    assert "CONFIG_HALF_WRITTEN=y" in destination.read_text(encoding="utf-8")
