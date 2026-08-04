@@ -62,6 +62,15 @@ FIRST_ARCHIVE_TAG = "v0.5.0"
 #: Every tag that exists today, all of which publish raw binaries.
 RAW_TAGS = ("v0.4.1", "v0.5.0-rc4")
 
+#: A made-up tag (never really published) whose raw asset for every platform is
+#: `_write_garbage_executable` output rather than a working payload -- tan-cli#434:
+#: the sha256 check passes (its checksums.txt entry is computed from these SAME
+#: garbage bytes, deliberately, so the mismatch refusal never fires), and the
+#: install.sh:381-403 / install.ps1:291-322 health check is the only thing left
+#: to catch it. Built directly in `release_server` below, not through
+#: `RELEASES`/`_build_release`, so those stay a pure mirror of real published tags.
+BAD_PAYLOAD_TAG = "v9.9.9-badpayload"
+
 #: tag -> the asset names that tag really publishes, verbatim. ``checksums.txt``
 #: and ``envelope-contract.json`` are omitted from the values: the first is
 #: generated below from these names, and the second is never fetched by either
@@ -159,6 +168,38 @@ def _build_asset(path: Path, staging: Path) -> None:
         _write_posix_executable(path)
 
 
+def _write_garbage_executable(path: Path) -> None:
+    """Bytes that are not a valid executable under any interpretation this
+    suite's hosts understand: no ELF/PE magic and no `#!` shebang -- but
+    ASCII (7-bit, no 0x80+ byte) on purpose, unlike a truly random corrupted
+    download, so a `sh`/`dash` ENOEXEC fallback that echoes the "command"
+    back into its "not found"/"Exec format error" message (measured: it does,
+    on the raw offending bytes) can never hand this suite's own subprocess
+    capture (`text=True`, strict UTF-8) something that is not valid UTF-8 --
+    that would fail the TEST HARNESS with a `UnicodeDecodeError`, not exercise
+    install.sh's health check. Stands in for a corrupted-or-tampered download
+    -- the shape tan-cli#434's health check exists to catch -- not for a
+    missing +x bit: both installers `chmod`/mark the staged file runnable
+    themselves right before running it, regardless of what permission bits
+    land on disk.
+    """
+    path.write_bytes(b"\x01\x02\x03NOT-A-VALID-EXECUTABLE\x04\x05\x06" * 8)
+    path.chmod(0o755)
+
+
+def _build_bad_release(tag_dir: Path, assets: tuple[str, ...]) -> None:
+    """Like `_build_release`, but every asset is `_write_garbage_executable`
+    output instead of a working payload -- see `BAD_PAYLOAD_TAG`."""
+    tag_dir.mkdir(parents=True)
+    lines = []
+    for name in assets:
+        asset = tag_dir / name
+        _write_garbage_executable(asset)
+        digest = hashlib.sha256(asset.read_bytes()).hexdigest()
+        lines.append(f"{digest}  {name}")
+    (tag_dir / "checksums.txt").write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
 def _build_release(tag_dir: Path, assets: tuple[str, ...], staging: Path) -> None:
     tag_dir.mkdir(parents=True)
     lines = []
@@ -191,6 +232,10 @@ def release_server(tmp_path_factory):
     staging = tmp_path_factory.mktemp("staging")
     for tag, assets in RELEASES.items():
         _build_release(root / tag, assets, staging)
+    # Same asset names v0.4.1 (a RAW_TAGS entry) really publishes, one per
+    # platform triple -- so BAD_PAYLOAD_TAG resolves on whichever host/arch
+    # this suite happens to run on -- but every one of them is garbage bytes.
+    _build_bad_release(root / BAD_PAYLOAD_TAG, RELEASES["v0.4.1"])
 
     handler = functools.partial(_QuietHandler, directory=str(root))
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
@@ -264,6 +309,22 @@ def _install_sh(base_url: str, dest: Path, home: Path, *args: str, extra_env: di
         home,
         extra_env,
     )
+
+
+def _install_sh_modify_path(
+    base_url: str, dest: Path, home: Path, *args: str, extra_env: dict[str, str | None] | None = None
+):
+    """Like `_install_sh`, but WITHOUT `--no-modify-path` -- used only by the
+    two tan-cli#434 rollback tests below, which are precisely about whether
+    the PATH-modifying rc-file write (install.sh:495-524) is ever reached.
+    `SHELL` is pinned to `/bin/sh` so the rc file install.sh:507-513 picks
+    (the `*)` default case -> `$HOME/.profile`) is deterministic regardless of
+    the host's own login shell.
+    """
+    env: dict[str, str | None] = {"SHELL": "/bin/sh"}
+    if extra_env:
+        env.update(extra_env)
+    return _run(["sh", str(INSTALL_SH), "--dir", str(dest), *args], base_url, home, env)
 
 
 def _fake_uname(tmp_path: Path, os_name: str, arch: str) -> Path:
@@ -472,6 +533,58 @@ def test_ps1_refuses_a_release_with_no_asset_for_this_platform(release_server, t
     assert "there is no prebuilt Windows arm64 asset from v0.5.0 onward" in combined
 
 
+@windows_only
+def test_ps1_bad_payload_on_fresh_host_leaves_nothing_behind(release_server, tmp_path):
+    """tan-cli#434 acceptance criterion 1, Windows half: `BAD_PAYLOAD_TAG`'s
+    asset verifies (its checksums.txt digest is computed from the same garbage
+    bytes) but cannot run, so the health check at install.ps1:291-322 has to
+    refuse before anything lands under `$Dir` -- there is no launcher, no
+    `tan.exe`, no `tan-cli-lib`. `-NoModifyPath` is used here exactly as every
+    other install.ps1 test in this file uses it (see `_install_ps1`), so this
+    run never touches the real User-Path registry key either way.
+    """
+    dest = tmp_path / "prog"
+    result = _install_ps1(release_server, dest, tmp_path, "-Version", BAD_PAYLOAD_TAG)
+
+    assert result.returncode != 0
+    assert not (dest / "tan.exe").exists()
+    assert not (dest / "tan.cmd").exists()
+    assert not (dest / "tan-cli-lib").exists()
+    combined = result.stdout + result.stderr
+    assert "newly downloaded binary failed to run" in combined
+    assert "no previous installation existed" in combined
+
+
+@windows_only
+def test_ps1_bad_payload_on_upgrade_leaves_previous_install_working(release_server, tmp_path):
+    """tan-cli#434 acceptance criterion 2, Windows half: a bad upgrade over a
+    GOOD install must leave the previous `tan.exe` byte-for-byte and still
+    runnable, and must not leave any `.bak` behind -- the health check
+    (install.ps1:291-322) refuses before the backup/commit block
+    (install.ps1:324-424) ever runs, so there is nothing to roll back FROM.
+    """
+    dest = tmp_path / "prog"
+    good = _install_ps1(release_server, dest, tmp_path, "-Version", "v0.4.1")
+    assert good.returncode == 0, f"{good.stdout}\n{good.stderr}"
+    exe = dest / "tan.exe"
+    before_hash = hashlib.sha256(exe.read_bytes()).hexdigest()
+    before_version = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=30).stdout
+
+    result = _install_ps1(release_server, dest, tmp_path, "-Version", BAD_PAYLOAD_TAG)
+
+    assert result.returncode != 0
+    assert exe.is_file()
+    assert hashlib.sha256(exe.read_bytes()).hexdigest() == before_hash
+    after_version = subprocess.run([str(exe), "--version"], capture_output=True, text=True, timeout=30).stdout
+    assert after_version == before_version
+    assert not (dest / "tan.exe.bak").exists()
+    assert not (dest / "tan.cmd.bak").exists()
+    assert not (dest / "tan-cli-lib.bak").exists()
+    combined = result.stdout + result.stderr
+    assert "your existing installation" in combined
+    assert "was never touched" in combined
+
+
 # ---------------------------------------------------------------------------
 # install.sh
 # ---------------------------------------------------------------------------
@@ -615,3 +728,65 @@ def test_sh_system_style_install_uses_sudo_when_the_dir_is_not_writable(release_
     assert launcher.is_file() and os.access(launcher, os.X_OK)
     payload = dest / "tan-cli-lib" / "tan"
     assert payload.is_file() and os.access(payload, os.X_OK)
+
+
+@posix_only
+def test_sh_bad_payload_on_fresh_host_leaves_nothing_behind(release_server, tmp_path):
+    """tan-cli#434 acceptance criterion 1, POSIX half: `BAD_PAYLOAD_TAG`'s
+    asset verifies (its checksums.txt digest is computed from the same garbage
+    bytes, so the mismatch refusal at install.sh:317-324 never fires) but
+    cannot run, so the health check at install.sh:381-403 has to refuse before
+    `$INSTALL_DIR` is even `mkdir -p`'d (that only happens afterwards, at
+    install.sh:410) -- and, since there is nothing to fall back to, before the
+    PATH-modifying rc-file write at install.sh:495-524 either.
+    `_install_sh_modify_path` is used here instead of `_install_sh`
+    (unlike every other install.sh test in this file) precisely because that
+    rc-file half is what would regress silently if the health check ran too
+    late or the early-exit skipped past it.
+    """
+    dest = tmp_path / "bin"
+    home = tmp_path
+    result = _install_sh_modify_path(release_server, dest, home, "--version", BAD_PAYLOAD_TAG)
+
+    assert result.returncode != 0
+    assert not dest.exists() or list(dest.iterdir()) == []
+    combined = result.stdout + result.stderr
+    assert "newly downloaded binary failed to run" in combined
+    assert "no previous installation existed" in combined
+    assert "PATH was not modified" in combined
+    for rc_name in (".zshrc", ".bashrc", ".bash_profile", ".profile"):
+        rc = home / rc_name
+        assert not rc.exists(), f"{rc} must not exist -- install.sh must not reach the rc-file write on a failed install"
+
+
+@posix_only
+def test_sh_bad_payload_on_upgrade_leaves_previous_install_working(release_server, tmp_path):
+    """tan-cli#434 acceptance criterion 2, POSIX half: a bad upgrade over a
+    GOOD install -- with the PATH-modifying rc-file write actually reached, via
+    `_install_sh_modify_path` -- must leave the previous `tan` byte-for-byte,
+    still runnable, and the rc file untouched, with no `.bak` left behind.
+    The health check (install.sh:381-403) refuses before the backup/commit
+    block (install.sh:418-480) ever runs, so there is nothing to roll back
+    FROM.
+    """
+    dest = tmp_path / "bin"
+    home = tmp_path
+    good = _install_sh_modify_path(release_server, dest, home, "--version", "v0.4.1")
+    assert good.returncode == 0, f"{good.stdout}\n{good.stderr}"
+    installed = dest / "tan"
+    before_hash = hashlib.sha256(installed.read_bytes()).hexdigest()
+    rc = home / ".profile"
+    assert rc.is_file(), "the good install above should have written the rc line -- nothing to compare the upgrade against otherwise"
+    before_rc = rc.read_bytes()
+
+    result = _install_sh_modify_path(release_server, dest, home, "--version", BAD_PAYLOAD_TAG)
+
+    assert result.returncode != 0
+    assert FIXTURE_VERSION_LINE in installed.read_text(encoding="utf-8")
+    assert hashlib.sha256(installed.read_bytes()).hexdigest() == before_hash
+    assert rc.read_bytes() == before_rc
+    assert not (dest / "tan.bak").exists()
+    assert not (dest / "tan-cli-lib.bak").exists()
+    combined = result.stdout + result.stderr
+    assert "your existing installation" in combined
+    assert "was never touched" in combined
