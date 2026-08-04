@@ -266,7 +266,41 @@ def test_inspect_matches_the_oracle(work_dir, tmp_path):
     r_out = oracle_fixtures.normalise_scrubbed_path_separators(r_out, force=True)
     p_out = oracle_fixtures.normalise_scrubbed_path_separators(p_out, force=True)
     assert (r_code, p_code) == (0, 0)
-    assert r_out == p_out
+
+    # `sdkRoot`'s UNRESOLVED remedy is a DELIBERATE divergence (tan-cli#381),
+    # the same one `trace` carries. The oracle's wording names `tan sdk switch
+    # <path>`, which this build refuses -- measured: `tan sdk switch v0.15.0
+    # --format json` answers `sdk.not-ported` at exit 1 -- so matching it
+    # byte-for-byte would ship a remedy that dead-ends the customer. That is
+    # what `sdk_cmd.NO_SDK_NEXT_STEPS` exists for and what this command now
+    # routes through.
+    #
+    # Compared everything-but, then the divergence is asserted in the
+    # direction that matters, rather than the whole case being excused.
+    def _without_sdk_root_remedy(env):
+        rows = [dict(r) for r in env["data"]["resolvedValues"]]
+        for row in rows:
+            if row.get("key") == "sdkRoot":
+                row.pop("detail", None)
+        return {**env, "data": {**env["data"], "resolvedValues": rows}}
+
+    assert _without_sdk_root_remedy(r_out) == _without_sdk_root_remedy(p_out)
+
+    def _sdk_root_detail(env):
+        return next(
+            (r.get("detail") or "" for r in env["data"]["resolvedValues"] if r.get("key") == "sdkRoot"),
+            "",
+        )
+
+    port_remedy, oracle_remedy = _sdk_root_detail(p_out), _sdk_root_detail(r_out)
+    assert "sdk switch" not in port_remedy, (
+        "the port is recommending a verb this build refuses with `sdk.not-ported`:\n"
+        f"{port_remedy}"
+    )
+    assert "sdk switch" in oracle_remedy, (
+        "the oracle no longer recommends `sdk switch`, so this divergence may be "
+        f"obsolete -- re-measure before keeping it. oracle said: {oracle_remedy}"
+    )
 
 
 def test_bootstrap_without_an_sdk_is_a_known_divergence_from_the_oracle(work_dir, tmp_path):
