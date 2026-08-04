@@ -2485,6 +2485,36 @@
       "emittedBy": "python/tan/commands/renode_cmd.py",
       "literal": "code=\"renode.sim-exited-early\"",
       "note": "Renode's process exited before the --timeout deadline while serving the sim sockets. Faithful port of crates/tan-cli/src/commands/renode/sim.rs (tan-cli#77), diff-verified live against the shipped oracle; pre-consumer -- nothing in alp-sdk-vscode matches this code yet, so renaming or dropping it is not a breaking wire change. Promote to `frozen` (filling in consumer/consumerEffect for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "new-som.failed",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code with `===` yet; registered so the scaffold panel has a stable spelling to bind to instead of inventing one",
+      "consumerEffect": "Marks a `new-som` run as refused. Until tan-cli#399 the SAME refusals reached the consumer as `cli.parse-error` on a `command: \"cli\"` envelope, so a panel branching on `command` could not tell a rejected scaffold from a CLI usage error, and a successful scaffold was not JSON at all -- the two paths of one verb disagreed about whether stdout was an envelope.",
+      "emittedBy": "python/tan/commands/new_som_cmd.py",
+      "literal": "\"new-som.failed\"",
+      "note": "ONE code for every `new-som` refusal (unresolved SDK root, bad SKU/soc-ref/family/core id, unknown board, unresolvable hw rev, preset exists without --force, unwritable output root, missing flags where prompts are unavailable), matching the spelling the frozen v0.4.1 oracle's forwarder emits for the same class. The EXIT CODE, not the code string, distinguishes them: 2 for the SDK-root preflight (mirroring crates/tan-cli/src/commands/sdk_cli.rs::run), 1 for every other refusal. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
+    },
+    {
+      "code": "new-som.internal-failure",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code with `===` yet",
+      "consumerEffect": "Reserved to let a consumer separate 'tan is broken' from 'your input was rejected': a generated skeleton that fails its own schema self-check is a tan bug, never bad user input, and nothing the porting engineer can fix by re-running with different flags.",
+      "emittedBy": "python/tan/commands/new_som_cmd.py",
+      "literal": "\"new-som.internal-failure\"",
+      "note": "Both in-memory self-checks (`som-preset-v1`, `soc-spec-v1`) run BEFORE anything touches the filesystem, so this code always means nothing was written. Exit 1 (RuntimeFailure), matching the sibling `*.internal-failure` codes. Added by tan-cli#399 with the rest of new-som's envelope: before it, this path exited 1 with prose on stderr and left `cli.main`'s generic fallback to invent a `cli.parse-error` envelope for it."
+    },
+    {
+      "code": "faultdecode.no-registers",
+      "status": "reserved",
+      "severity": "error",
+      "consumer": "none -- no consumer matches this code with `===` yet; registered so a fault-decode panel has a stable spelling to bind to",
+      "consumerEffect": "Distinguishes 'nothing to analyse' from a tan crash on the one refusal `faultdecode` has. Reachable only under `--format json`: the command's own `--json` is the unwrapped SDK report surface (see faultdecode_cmd.py's module docstring) and keeps writing the human error line to stderr, envelope-free, exactly as the forwarded child did.",
+      "emittedBy": "python/tan/commands/faultdecode_cmd.py",
+      "literal": "\"faultdecode.no-registers\"",
+      "note": "Exit 2 (ValidationFailure), matching the `click.UsageError` the alp_cli original raised for the same input. Added by tan-cli#399, which made `--format json` emit tan's envelope with the decode report as `data`; without this the refusal path went out as `command: \"cli\"` / `cli.parse-error` while the success path emitted `command: \"faultdecode\"`. Pre-consumer -- promote to `frozen` (filling in consumer for real) the moment a consumer binds to it."
     }
   ]
 }
