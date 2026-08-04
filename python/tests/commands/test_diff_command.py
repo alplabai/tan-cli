@@ -10,7 +10,12 @@ same situation.
 
 Every wire-shape assertion below (exit code, issue code, `data.unchanged`,
 the exact message text for `board-yaml-missing`/the `som:`-shape check) was
-measured directly against `target/debug/tan.exe` (tan 0.4.1-dev) -- see the
+measured directly against `target/debug/tan.exe` -- the ONE pinned oracle
+`oracle_resolver` resolves and now version-asserts on every call (`tan 0.4.1`;
+the `0.4.1-dev` this docstring used to claim is older prose for the same build
+and is not what the binary prints). Before tan-cli#393 this file resolved
+`target/release` ahead of `target/debug` with no version check, so a stale
+release build could stand in for the oracle and pass silently -- see the
 module docstring in `tan/commands/diff_cmd.py` for the one place this port
 knowingly diverges (a non-string `e1m_routes` mapping key: PyYAML raises a
 `ConstructorError` at parse time, which this port reports as
@@ -25,12 +30,9 @@ only pins THIS port's own (documented, self-consistent) behaviour.
 from __future__ import annotations
 
 import json
-import os
-import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 import typer
 from typer.testing import CliRunner
 
@@ -44,43 +46,13 @@ from tan.commands.diff_cmd import (
 )
 from tan.commands.diff_cmd import diff as diff_command
 
+from .oracle_resolver import ORACLE_REQUIRED as _ORACLE_REQUIRED
+from .oracle_resolver import run_oracle as _run_oracle
+
 app = typer.Typer()
 app.command("diff")(diff_command)
 
 runner = CliRunner()
-
-#: `target/{release,debug}/tan(.exe)` next to this checkout -- the same
-#: discovery `tests/parity/oracle.py`'s `rust_binary()` uses, kept
-#: independent here rather than imported so this file's only non-stdlib
-#: dependency stays `tan.commands.diff_cmd` (matching every other test file
-#: under `tests/commands/`). `TAN_RUST_BINARY` overrides, same env var.
-_EXE = ".exe" if sys.platform == "win32" else ""
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-def _oracle_binary() -> str | None:
-    override = os.environ.get("TAN_RUST_BINARY")
-    if override:
-        return override
-    for profile in ("release", "debug"):
-        candidate = _REPO_ROOT / "target" / profile / f"tan{_EXE}"
-        if candidate.exists():
-            return str(candidate)
-    return None
-
-
-_ORACLE = _oracle_binary()
-_ORACLE_REQUIRED = pytest.mark.skipif(
-    _ORACLE is None,
-    reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
-)
-
-
-def _run_oracle(argv: list[str], cwd: Path) -> tuple[int, dict]:
-    proc = subprocess.run(
-        [_ORACLE, *argv], capture_output=True, text=True, encoding="utf-8", cwd=cwd
-    )
-    return proc.returncode, json.loads(proc.stdout)
 
 
 def _project(tmp_path: Path, board_yaml_text: str) -> Path:

@@ -11,9 +11,16 @@ same situation.
 Every wire-shape assertion below (issue codes, `data`/`sdk` envelope shape,
 the `--family` overriding `--sku` without evaluating it, the "no
 `project-pin-unresolved` warning" behaviour) was measured directly against
-`target/debug/tan.exe` (tan 0.4.1-dev), including a full byte-for-byte diff of
-the real `metadata/pinmux/aen.yaml` (96 pads) table against a live alp-sdk
-checkout where one was reachable. The `metadata/pinmux/v2n.yaml` table in the
+`target/debug/tan.exe`, including a full byte-for-byte diff of the real
+`metadata/pinmux/aen.yaml` (96 pads) table against a live alp-sdk checkout
+where one was reachable. That binary is the ONE pinned oracle
+`oracle_resolver.PINNED_ORACLE_VERSION` names -- `tan 0.4.1`, not the
+`0.4.1-dev` this docstring used to claim, which is older prose for the same
+build and has never been anything the binary prints (`tests/parity/oracle.py`
+owns that spelling). `oracle_resolver.run_oracle` now asserts it on every
+call: before tan-cli#393 this file resolved `target/release` ahead of
+`target/debug` with no version check at all, so a stale release build stood
+in for the oracle silently. The `metadata/pinmux/v2n.yaml` table in the
 real checkout is (at the time of writing) entirely `e1m_pad: "TBD"` rows, so
 `pinmux.table-empty` is exercised here with a small SYNTHETIC table rather
 than depending on that fact staying true.
@@ -23,8 +30,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -38,43 +43,13 @@ from tan.commands.pinmux_cmd import (
 )
 from tan.commands.pinmux_cmd import pinmux as pinmux_command
 
+from .oracle_resolver import ORACLE_REQUIRED as _ORACLE_REQUIRED
+from .oracle_resolver import run_oracle as _run_oracle
+
 app = typer.Typer()
 app.command("pinmux")(pinmux_command)
 
 runner = CliRunner()
-
-#: `target/{release,debug}/tan(.exe)` next to this checkout -- the same
-#: discovery `tests/parity/oracle.py`'s `rust_binary()` uses, kept
-#: independent here rather than imported so this file's only non-stdlib
-#: dependency stays `tan.commands.pinmux_cmd` (matching every other test file
-#: under `tests/commands/`). `TAN_RUST_BINARY` overrides, same env var.
-_EXE = ".exe" if sys.platform == "win32" else ""
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-
-
-def _oracle_binary() -> str | None:
-    override = os.environ.get("TAN_RUST_BINARY")
-    if override:
-        return override
-    for profile in ("release", "debug"):
-        candidate = _REPO_ROOT / "target" / profile / f"tan{_EXE}"
-        if candidate.exists():
-            return str(candidate)
-    return None
-
-
-_ORACLE = _oracle_binary()
-_ORACLE_REQUIRED = pytest.mark.skipif(
-    _ORACLE is None,
-    reason="needs a built Rust tan (cargo build --bin tan) to measure the divergence",
-)
-
-
-def _run_oracle(argv: list[str], cwd: Path) -> tuple[int, dict]:
-    proc = subprocess.run(
-        [_ORACLE, *argv], capture_output=True, text=True, encoding="utf-8", cwd=cwd
-    )
-    return proc.returncode, json.loads(proc.stdout)
 
 _SAMPLE_TABLE = """\
 schemaVersion: pinmux-capability-v1

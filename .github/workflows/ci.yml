@@ -5,6 +5,48 @@
 # `sdk_parity`), the npm-shim platform-mapping check, plus the two promises
 # nothing else checks: that `tan` still builds and passes on every host
 # platform it ships a release asset for, and that the declared MSRV is real.
+#
+# WHICH OF THESE ARE ACTUALLY REQUIRED (tan-cli#392)
+# ==================================================
+# None of the Python ones. Measured 2026-08-02, `gh api
+# repos/alplabai/tan-cli/branches/<b>/protection` -- `main` and `dev` carry the
+# IDENTICAL six contexts (strict: true, enforce_admins: true):
+#
+#     lint | test (ubuntu-latest) | test (windows-latest)
+#     test (macos-latest) | msrv | seam1 -- plan-shape parity
+#
+# Five are cargo jobs on the crate #269 retires. The sixth, parity.yml's
+# `seam1-plan-shape`, does run Python -- eight invocations, not the three that
+# issue's text claims (two `tests/parity/test_seam1_*` pytest files, four
+# repo-root `tests/parity/*_parity.py` scripts, and two `python/tests/gates`
+# runs) -- but not one of them is the shipping `python/tests` suite the release
+# assets are frozen from. So every merge in this repo has been gated on the
+# retired crate plus a source-scanning gate suite.
+#
+# Branch protection is a repo SETTING, not a file, so it cannot be fixed from
+# here. What CAN live here is something worth requiring, and two jobs already
+# produce one. The exact context strings to add to protection:
+#
+#   `python`
+#       this file's own job below. One OS, whole suite INCLUDING tests/gates --
+#       but `sdk_parity` is false on a `pull_request`, so it runs with no
+#       alp-sdk bound and the SDK-gated modules are not even collected. Measure
+#       the gap rather than trusting a number written here: `python -m pytest
+#       --collect-only -q` from `python/`, with and without `ALP_SDK_ROOT`.
+#       Requiring this ALONE gates merges on the weaker half of the suite.
+#
+#   `python -- pytest across python/ (ubuntu-latest)`
+#   `python -- pytest across python/ (windows-latest)`
+#   `python -- pytest across python/ (macos-latest)`
+#       parity.yml's `python-tests` matrix. Binds `ALP_SDK_ROOT` on every run,
+#       on all three platforms tan ships assets for, and skips only
+#       `tests/gates` -- which `seam1 -- plan-shape parity`, already required,
+#       runs against the refs that make each gate's verdict mean something.
+#       This is the trio worth requiring.
+#
+# Those strings are each job's EVALUATED `name:`; `python` has none, so its
+# context is its job id. Renaming either job changes the required context and
+# blocks every merge until protection is edited to match -- treat both as API.
 name: ci
 on:
   push:
@@ -164,9 +206,27 @@ jobs:
           repository: alplabai/alp-sdk
           ref: f4d87a1f472dffe9fe7dffc247cc55bce71034ba
           path: alp-sdk
+      # The binding is ASSERTED, not assumed (tan-cli#392). `tests/conftest.py`
+      # `sdk_root()` accepts a root only when `scripts/alp_project.py` is a
+      # file under it, and returns `None` for every other outcome -- an
+      # unreachable path, a partial clone, a checkout that landed elsewhere.
+      # `None` is a per-module SKIP, which pytest reports as green: this whole
+      # `sdk_parity` input exists to stop the SDK-gated tests self-skipping,
+      # and without this line a broken checkout would silently restore exactly
+      # the state it was added to fix, on the release path, where it costs a
+      # tag. Same shape as parity.yml's own node-id PASSED assertion
+      # (tan-cli#308) -- a skip has to be a hard failure wherever the job is
+      # the one place arming the root.
       - name: enable the SDK-dependent tests
         if: ${{ inputs.sdk_parity }}
-        run: echo "ALP_SDK_ROOT=$PWD/alp-sdk" >> "$GITHUB_ENV"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "$PWD/alp-sdk/scripts/alp_project.py" ]; then
+            echo "::error::sdk_parity is on, but $PWD/alp-sdk has no scripts/alp_project.py -- tests/conftest.py::sdk_root() would return None and every SDK-gated test would SKIP while this job still reported green. Fix the alp-sdk checkout step above."
+            exit 1
+          fi
+          echo "ALP_SDK_ROOT=$PWD/alp-sdk" >> "$GITHUB_ENV"
       # The three files that carry a version must agree BEFORE a tag exists,
       # not at tag time -- a mismatch found by release.yml costs a re-tag.
       - name: versions agree
@@ -202,6 +262,73 @@ jobs:
       # would make this job's result depend on the runner image's node.
       - name: pin the platform -> asset mapping
         run: node --test npm-shim/test/libc-mapping.test.js
+
+  # `build-system.requires` is a promise to anyone building the sdist/wheel
+  # themselves -- a downstream packager, a distro, an offline mirror -- and
+  # until this job existed NOTHING in CI stood behind it. Every other Python
+  # step in every workflow here installs WITH build isolation, which makes pip
+  # fetch that day's newest setuptools and ignore the declared floor entirely,
+  # so `requires = ["setuptools>=68"]` sat green for two years while setuptools
+  # 68 could not parse this project's own `license = "Apache-2.0"` at all
+  # (tan-cli#382). Same shape as the `msrv` job below: read the declared floor,
+  # install exactly it, and prove the promise instead of hoping.
+  #
+  # `--no-build-isolation` is the whole point -- with isolation this job would
+  # measure PyPI's newest setuptools, which is what every other job already
+  # measures.
+  wheel-floor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12" # pyproject's requires-python floor
+      # Derived, never hardcoded: a pin written here would be a SECOND place to
+      # update, and the pair going stale is the same class of defect as the
+      # untested bound itself. tomllib rather than grep so reformatting
+      # `requires` across lines cannot silently stop matching.
+      - name: read the declared setuptools floor
+        id: floor
+        shell: bash
+        run: |
+          v="$(python -c 'import re,tomllib;r=tomllib.load(open("python/pyproject.toml","rb"))["build-system"]["requires"];s=next(x for x in r if x.startswith("setuptools"));m=re.search(r">=\s*([0-9][0-9.]*)",s);print(m.group(1) if m else "")')"
+          # A floor with no `>=` (an unpinned `"setuptools"`, or a `~=`/`>` form)
+          # would leave $v empty and `pip install setuptools==` would then be a
+          # syntax error blamed on pip. Fail here, where the cause is legible.
+          [ -n "$v" ] || { echo "::error::no >= bound for setuptools in python/pyproject.toml build-system.requires"; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "declared setuptools floor: $v"
+      - name: build the wheel at the declared floor
+        shell: bash
+        run: |
+          pip install "setuptools==${{ steps.floor.outputs.version }}" wheel
+          pip wheel --no-deps --no-build-isolation -w dist-floor ./python
+      # Anti-tautology guard. Without it the step above proves only "some
+      # setuptools works", and would stay green if `--no-build-isolation` were
+      # ever dropped, if the pin silently failed to downgrade, or if the license
+      # metadata were quietly reverted to the `{ text = ... }` form that needs no
+      # floor at all. 68.1.2 is the exact version tan-cli#382 was reported
+      # against; it predates PEP 639 permanently, so unlike a "floor minus one"
+      # pin it never needs re-deriving when the floor moves.
+      #
+      # The failure MESSAGE is asserted, not just the exit code: a missing
+      # `wheel` module or a network blip also exits non-zero, and a negative
+      # check that passes for the wrong reason is worse than no check.
+      - name: and that floor is not decorative
+        shell: bash
+        run: |
+          pip install "setuptools==68.1.2" wheel
+          if pip wheel --no-deps --no-build-isolation -w dist-below ./python >below.log 2>&1; then
+            cat below.log
+            echo "::error::setuptools 68.1.2 built the wheel -- the declared floor is higher than it needs to be, or the license metadata no longer needs one"
+            exit 1
+          fi
+          grep -q 'project.license' below.log || {
+            cat below.log
+            echo "::error::the below-floor build failed, but not on project.license -- this check is no longer measuring what it claims"
+            exit 1
+          }
+          echo "setuptools 68.1.2 rejects project.license, as it must"
 
   # `rust-version` in Cargo.toml is a promise to anyone building from source;
   # a dependency bump can silently break it. Check, don't hope.
